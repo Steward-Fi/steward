@@ -46,12 +46,21 @@ run_baseline() {
   return 1
 }
 
-# run_mutated: SINGLE shot, NO retry. A killed predicate must fail on its own
-# merit; retrying a mutated run would give a flaky (e.g. concurrency K01) mutation
-# multiple chances to pass and weaken the proof. If the single mutated run passes,
-# the predicate was NOT killed — that is a real invalid proof, not transient noise.
+# run_mutated: a predicate is "killed" if the mutated test FAILS on ANY of a few
+# runs (returns non-zero). We run up to 3x and return 0 ("not killed", still
+# passes) ONLY if ALL runs pass. This is the correct polarity for FLAKY mutations
+# (e.g. a concurrency mutation like K01 can occasionally yield the right outcome
+# by race luck; a single lucky pass must NOT be read as "predicate survived").
+# For deterministic mutations the first failing run returns immediately.
 run_mutated() {
-  _run_once "$1" "$2" "$3"
+  local i
+  for i in 1 2 3; do
+    if ! _run_once "$1" "$2" "$3"; then
+      return 1
+    fi
+    sleep 1
+  done
+  return 0
 }
 
 # proof <name> <pkg-dir> <test-file> <filter> <target> <sed-expr>
@@ -79,14 +88,24 @@ proof "M1 remove authority_mode gate (P01)" "packages/proxy" "$GOV_TEST" "P01" "
   's/if (authorityMode !== "legacy") {/if (false) {/'
 
 # M2: accept a governedExecutionClaim whose routeId does NOT match the selected
-#     route → P05 (a forged/mismatched claim must be ignored → 403).
+#     route → P05 (a forged/mismatched claim must be ignored → 403). The gate is
+#     now defense-in-depth (routeId + routeRevision + secretId + secretVersion), so
+#     P05's forged claim carries all OTHER fields correct and only routeId wrong,
+#     making the routeId equality the sole discriminator this mutation targets.
 proof "M2 accept mismatched claim routeId (P05)" "packages/proxy" "$GOV_TEST" "P05" "$PROXY" \
-  's/governedClaim.routeId === route.id;/true;/'
+  's/governedClaim.routeId === route.id \&\&/true \&\&/'
 
-# M3: drop status='active' from the claim predicate → K01 (double claim: two
-#     concurrent claims must still yield exactly one winner).
-proof "M3 drop status=active from claim (K01)" "packages/proxy" "$GOV_TEST" "K01" "$GOV" \
-  's/eq(executionAuthorizationNonces.status, "active"),//'
+# M3: single-winner under concurrency is enforced by TWO independent atomic
+#     predicates (defense in depth): the nonce claim's status='active' guard AND
+#     the binding execution_ready->executing transition gate (both in the same
+#     claim tx). Dropping EITHER alone still yields exactly one winner (the other
+#     compensates), so a single-predicate mutation cannot kill K01 — a genuine
+#     property, not a weak proof. To prove single-winner we neutralize BOTH atomic
+#     predicates at once; K01 must then admit two winners and fail. (Each guard is
+#     ALSO proven independently: the nonce status guard by M8/P26 terminal-replay,
+#     the binding transition gate by M14/P1a-race.)
+proof "M3 drop BOTH single-winner predicates from claim (K01)" "packages/proxy" "$GOV_TEST" "K01" "$GOV" \
+  's/eq(executionAuthorizationNonces.status, "active"),//; s/eq(providerActionBindings.status, "execution_ready"),//'
 
 # M4: change DB-time expiry from > now() to >= now()-ish by removing the guard →
 #     P24 (an expired authorization must never be dispatched). Removing the
@@ -195,6 +214,13 @@ proof "M18 accept claim missing secretVersion at gate (P33)" "packages/proxy" "$
 #      dispatch). Drop the governed exclusion from the approval-hold predicate.
 proof "M19 governed dispatch re-enters legacy approval hold (P34)" "packages/proxy" "$GOV_TEST" "P34" "$PROXY" \
   's/route.requiresApproval \&\& !approvalReleaseId \&\& !isVerifiedGovernedDispatch/route.requiresApproval \&\& !approvalReleaseId/'
+
+# M20: serialize the outbound body with JSON.stringify (insertion order) instead
+#      of the JCS serializer → P35 (the forwarded body must be byte-identical to
+#      the canonical action digest + v2 signature; JSON.stringify can reorder keys
+#      and send bytes that were never authorized). Swap jcsStringify for JSON.
+proof "M20 body via JSON.stringify not JCS (P35)" "packages/proxy" "$GOV_TEST" "P35" "$GOV" \
+  's/jcsStringify(loaded.canonicalAction.canonicalBody)/JSON.stringify(loaded.canonicalAction.canonicalBody)/'
 
 echo ""
 echo "==================================================="

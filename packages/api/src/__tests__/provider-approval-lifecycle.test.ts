@@ -16,6 +16,7 @@ import {
 import {
   approvalQueue,
   closeDb,
+  executionAuthorizationNonces,
   getDb,
   intents,
   providerAccounts,
@@ -207,6 +208,40 @@ describe("PR3 approval lifecycle", () => {
     expect(res2.resumeAttemptId).toBe(res.resumeAttemptId);
     const events2 = (await correlatedAudit(intentId)).length;
     expect(events2).toBe(events1);
+  });
+
+  test("resume idempotent path re-ensures the v2 authorization for an execution_ready row that has none (codex P2 pre-rollout repair)", async () => {
+    const { intentId, requestHash, actionDigest } = await createApprovalRequired();
+    await providerApprovalService.decide(decideInput(intentId, requestHash, actionDigest));
+    const first = await providerApprovalService.resume({ intentId, tenantId: F.TENANT });
+    expect(first.ok).toBe(true);
+    // A nonce was minted on the first resume.
+    const before = await getDb()
+      .select({ id: executionAuthorizationNonces.authorizationId })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.intentId, intentId));
+    expect(before.length).toBe(1);
+    // Simulate a pre-rollout execution_ready row: delete its authorization so the
+    // binding is execution_ready with NO v2 nonce (the governed dispatcher would
+    // be unable to dispatch it).
+    await getDb()
+      .delete(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.intentId, intentId));
+    const gone = await getDb()
+      .select({ id: executionAuthorizationNonces.authorizationId })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.intentId, intentId));
+    expect(gone.length).toBe(0);
+    // Resume again: the idempotent execution_ready branch must re-mint the nonce.
+    const second = await providerApprovalService.resume({ intentId, tenantId: F.TENANT });
+    expect(second.ok).toBe(true);
+    if (!second.ok) throw new Error("second resume failed");
+    expect(second.status).toBe("execution_ready");
+    const after = await getDb()
+      .select({ id: executionAuthorizationNonces.authorizationId })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.intentId, intentId));
+    expect(after.length).toBe(1);
   });
 
   test("resume of a non-approved (pending) action => RESUME_NOT_APPROVED", async () => {

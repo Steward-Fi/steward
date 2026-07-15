@@ -1375,8 +1375,47 @@ class ProviderApprovalService {
           return fail("SCOPE_RESOURCE_NOT_FOUND", 404);
         }
 
-        // Idempotent: already execution_ready returns same state.
+        // Idempotent: already execution_ready returns same state. BUT a row that
+        // reached execution_ready BEFORE this rollout (or via any path that did
+        // not mint) has no v2 authorization, and the governed dispatcher REQUIRES
+        // one (codex P2). So the idempotent path ALSO ensures the v2 nonce exists,
+        // minting it in this same audited tx if absent. The mint is idempotent via
+        // exec_auth_nonces_intent_uniq (K22/F01): a repeat resume that already has
+        // a nonce is a no-op insert. Fails closed if the secret is absent (X7).
         if (binding.status === "execution_ready") {
+          await this.hook("beforeMint");
+          await mintProviderExecutionAuthorizationWithinTx(
+            tx as unknown as Parameters<typeof mintProviderExecutionAuthorizationWithinTx>[0],
+            append as unknown as Parameters<typeof mintProviderExecutionAuthorizationWithinTx>[1],
+            {
+              intentId: binding.intentId,
+              tenantId: binding.tenantId,
+              workspaceId: binding.workspaceId,
+              actorAgentId: binding.actorAgentId,
+              providerAccountId: binding.providerAccountId,
+              operationId: binding.operationId,
+              operationRevision: binding.operationRevision,
+              requestHash: binding.requestHash,
+              actionDigest: binding.actionDigest,
+              approvalId: queue.id,
+              approvalCommitmentHash: queue.approvalCommitmentHash ?? "",
+              approvalCommitment:
+                queue.approvalCommitment as unknown as ProviderApprovalCommitmentV1,
+              canonicalActionBytes: new Uint8Array(binding.canonicalActionBytes as Uint8Array),
+              requestId: input.requestId ?? null,
+            },
+            {
+              now: new Date(),
+              ipAddress: input.ipAddress ?? null,
+              userAgent: input.userAgent ?? null,
+              requestId: input.requestId ?? null,
+              hooks: {
+                beforeInsert: () => this.hook("beforeMintInsert"),
+                beforeAudit: () => this.hook("beforeMintAudit"),
+              },
+            },
+          );
+          await this.hook("afterMint");
           return {
             ok: true,
             httpStatus: 200,
@@ -1513,8 +1552,7 @@ class ProviderApprovalService {
             actionDigest: binding.actionDigest,
             approvalId: queue.id,
             approvalCommitmentHash: queue.approvalCommitmentHash ?? "",
-            approvalCommitment:
-              queue.approvalCommitment as unknown as ProviderApprovalCommitmentV1,
+            approvalCommitment: queue.approvalCommitment as unknown as ProviderApprovalCommitmentV1,
             canonicalActionBytes: new Uint8Array(binding.canonicalActionBytes as Uint8Array),
             requestId: input.requestId ?? null,
           },
@@ -1548,8 +1586,7 @@ class ProviderApprovalService {
       // v2 mint fail-closed: absent HMAC key rolls back the whole resume tx so
       // no execution_ready lands without a mintable authorization (X7, P49/F06).
       if (e instanceof ProviderExecutionMintError) {
-        if (e.code === "EXEC_AUTH_KEY_UNAVAILABLE")
-          return fail("EXEC_AUTH_KEY_UNAVAILABLE", 503);
+        if (e.code === "EXEC_AUTH_KEY_UNAVAILABLE") return fail("EXEC_AUTH_KEY_UNAVAILABLE", 503);
         return fail("RESUME_PREPARATION_FAILED", 503);
       }
       return fail("RESUME_PREPARATION_FAILED", 503);

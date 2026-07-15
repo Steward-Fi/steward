@@ -51,6 +51,7 @@ import {
   computeActionDigest,
   computeProviderExecutionCommitmentHash,
   type GithubCanonicalActionV1,
+  jcsStringify,
   type ProviderApprovalCommitmentV1,
   providerExecutionSignatureInput,
   sha256HexPrefixed,
@@ -69,6 +70,7 @@ let dispatchGovernedExecution: typeof import("../handlers/governed-execution")["
 let handleProxy: typeof import("../handlers/proxy")["handleProxy"];
 
 let captured: { url: string; method: string } | null = null;
+let capturedBody: string | null = null;
 let forwarderMode: "ok" | "throw" | "500" = "ok";
 
 const IDS = {
@@ -428,8 +430,28 @@ beforeAll(async () => {
   dispatchGovernedExecution = dispatchMod.dispatchGovernedExecution;
 
   proxyMod.__setResolveProxyHostForTests(async () => [{ address: "140.82.112.6", family: 4 }]);
-  proxyMod.__setForwardProxyRequestForTests(async (url, method) => {
+  proxyMod.__setForwardProxyRequestForTests(async (url, method, _headers, body) => {
     captured = { url: url.toString(), method };
+    // Capture the exact outbound body bytes (JCS-serialized by the dispatcher) so
+    // tests can assert byte-fidelity of the forwarded request (codex P2).
+    capturedBody = null;
+    if (body) {
+      const reader = (body as ReadableStream<Uint8Array>).getReader();
+      const chunks: Uint8Array[] = [];
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) chunks.push(value);
+      }
+      const total = chunks.reduce((n, c) => n + c.length, 0);
+      const merged = new Uint8Array(total);
+      let off = 0;
+      for (const c of chunks) {
+        merged.set(c, off);
+        off += c.length;
+      }
+      capturedBody = new TextDecoder().decode(merged);
+    }
     if (forwarderMode === "throw") throw new Error("upstream connection reset");
     if (forwarderMode === "500") return new Response(JSON.stringify({ err: 1 }), { status: 500 });
     return new Response(JSON.stringify({ ok: true }), {
@@ -455,6 +477,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   captured = null;
+  capturedBody = null;
   forwarderMode = "ok";
   const db = getDb();
   // Clean per-test rows (order: children first).
@@ -523,11 +546,18 @@ describe("PR4 governed proxy authority gate (X1, §5.1)", () => {
 
   it("P05: a forged governedExecutionClaim with wrong routeId is ignored → 403", async () => {
     await seedExecutionReady();
+    // All other bound fields are correct so the routeId equality is the SOLE
+    // discriminator (proves the gate pins the selected route id even when the
+    // rest of the claim is otherwise valid). routeRevision/secretId/secretVersion
+    // are covered independently by P32/P33.
     const res = await handleProxy(
       fakeDirectContext("/proxy/api.github.com/repos/acme/widgets/issues", {
         authorizationId: "x",
         executionId: "y",
         routeId: "99999999-9999-9999-9999-999999999999",
+        routeRevision: 1,
+        secretId: IDS.secret,
+        secretVersion: 1,
       }),
     );
     expect(res.status).toBe(403);
@@ -962,6 +992,30 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     );
     expect(res.status).toBe(403);
     expect(captured).toBeNull();
+  });
+
+  it("P35: the forwarded body is JCS-serialized (byte-identical to the committed canonical action), NOT JSON.stringify insertion order (codex P2)", async () => {
+    const savedMethod = ACTION.method;
+    const savedBody = ACTION.canonicalBody;
+    // Keys deliberately in NON-lexicographic insertion order + an integer-like key
+    // so JSON.stringify (insertion order) and JCS (sorted) produce DIFFERENT bytes.
+    const body = { zeta: 1, alpha: 2, "10": 3, "2": 4 } as Record<string, unknown>;
+    (ACTION as { method: string }).method = "POST";
+    (ACTION as { canonicalBody: unknown }).canonicalBody = body;
+    try {
+      const { intentId } = await seedExecutionReady();
+      await dispatchGovernedExecution(intentId, IDS.tenant);
+      expect(captured).not.toBeNull();
+      // The forwarded bytes must equal the JCS serialization, and must NOT equal
+      // the (different) JSON.stringify insertion-order serialization.
+      const jcs = jcsStringify(body);
+      const insertion = JSON.stringify(body);
+      expect(capturedBody).toBe(jcs);
+      expect(jcs).not.toBe(insertion); // guard: the fixture actually differentiates
+    } finally {
+      (ACTION as { method: string }).method = savedMethod;
+      (ACTION as { canonicalBody: unknown }).canonicalBody = savedBody;
+    }
   });
 
   it("P34: a governed route that ALSO has requiresApproval does NOT re-enter the legacy proxy-approval hold; it forwards (codex P1)", async () => {

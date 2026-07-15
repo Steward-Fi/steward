@@ -46,6 +46,7 @@ import {
   decodeUtf8Strict,
   type GithubCanonicalActionV1,
   isExecutionAuthV2SecretConfigured,
+  jcsStringify,
   type ProviderApprovalCommitmentV1,
   serializeCanonicalOutboundQuery,
   strictParseJson,
@@ -704,10 +705,15 @@ async function dispatchOnce(
   const method = loaded.canonicalAction.method;
   const headers = new Headers();
   for (const [name, value] of loaded.canonicalAction.selectedHeaders) headers.set(name, value);
+  // Serialize the outbound body with the SAME JCS serializer that computed the
+  // canonical action digest + v2 signature (codex P2). JSON.stringify does NOT
+  // guarantee JCS key ordering (e.g. integer-like keys sort differently), so it
+  // could send bytes that were never authorized. jcsStringify(canonicalBody) is
+  // byte-identical to what canonicalActionBytes committed.
   const bodyBytes =
     loaded.canonicalAction.canonicalBody === null
       ? undefined
-      : new TextEncoder().encode(JSON.stringify(loaded.canonicalAction.canonicalBody));
+      : new TextEncoder().encode(jcsStringify(loaded.canonicalAction.canonicalBody));
   const request = new Request(url, {
     method,
     headers,
