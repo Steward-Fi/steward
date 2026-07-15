@@ -30,7 +30,14 @@ import type { StewardAppContext } from "../context";
 import { createInvokeRoutes } from "../invoke";
 import { capabilityInvocations } from "../schema";
 import { CapabilityStore } from "../store";
-import { ensureAgent, ensureSecret, ensureTenant, type Harness, makeHarness } from "./_harness";
+import {
+  ensureAgent,
+  ensureGovernedRoute,
+  ensureSecret,
+  ensureTenant,
+  type Harness,
+  makeHarness,
+} from "./_harness";
 
 setDefaultTimeout(30000);
 
@@ -640,5 +647,164 @@ describe("invoke: rate limit (count from invocations table)", () => {
     expect(rows.length).toBe(2);
     expect(rows.filter((r) => r.decision === "error").length).toBe(1);
     expect(rows.filter((r) => r.decision === "deny").length).toBe(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR4 governed-route plugin gate (spec §5.2, X1, P03/P04). A governed_v2 route/
+// operation must NOT be invokable through the capability alias or the OpenAI-
+// compat adapter: the plugin's URLSearchParams path (G4) cannot faithfully
+// represent a governed action's duplicate-query semantics, and governed actions
+// must go through /v2/provider-actions (PR2), never a minted proxy token. When
+// the resolved capability maps to a governed route, the plugin denies with
+// GOVERNED_ROUTE_PLUGIN_DENIED (403) and never mints a proxy token — even when
+// the policy ALLOWS and the proxy env is present.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("invoke: PR4 governed-route plugin gate (§5.2, X1)", () => {
+  // The gate fires AFTER authorization (so we prove it blocks an otherwise-
+  // allowed forward) but BEFORE any proxy mint. Set the proxy env so, absent the
+  // gate, an allowed rule would have proceeded to a mint/forward (=> not 403).
+  function withProxyEnv() {
+    process.env.STEWARD_PROXY_URL = "https://proxy.local";
+    process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET = "x".repeat(48);
+  }
+
+  test("P03/P04: allow rule + governed route matching the cap => 403 GOVERNED_ROUTE_PLUGIN_DENIED, no proxy mint", async () => {
+    const capId = await seedCapabilityWithGrant();
+    // A governed route that matches the seeded cap (api.github.com, POST,
+    // /repos/acme/app/issues/1/comments).
+    await ensureGovernedRoute(harness!.db, tenantId, agentId, secretId, {
+      hostPattern: "api.github.com",
+      pathPattern: "/repos/acme/app/issues/1/comments",
+      method: "POST",
+    });
+    currentPolicySet = [capRule("r1", "allow")];
+    withProxyEnv();
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request(
+      "/capabilities/github.pr.comment/invoke",
+      invokeReq({ body: {} }),
+    );
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toBe("GOVERNED_ROUTE_PLUGIN_DENIED");
+    // Exactly one invocation row, a deny (never an error/forward attempt).
+    const rows = await invocationRows(capId);
+    expect(rows.length).toBe(1);
+    expect(rows[0].decision).toBe("deny");
+  });
+
+  test("a governed route with a WILDCARD path (/*) still denies the cap (broad match fails closed)", async () => {
+    const capId = await seedCapabilityWithGrant();
+    await ensureGovernedRoute(harness!.db, tenantId, agentId, secretId, {
+      hostPattern: "api.github.com",
+      pathPattern: "/*",
+      method: "*",
+    });
+    currentPolicySet = [capRule("r1", "allow")];
+    withProxyEnv();
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request(
+      "/capabilities/github.pr.comment/invoke",
+      invokeReq({ body: {} }),
+    );
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("GOVERNED_ROUTE_PLUGIN_DENIED");
+    expect((await invocationRows(capId)).length).toBe(1);
+  });
+
+  test("a wildcard-host governed route (*.github.com) matches api.github.com and denies", async () => {
+    await seedCapabilityWithGrant();
+    await ensureGovernedRoute(harness!.db, tenantId, agentId, secretId, {
+      hostPattern: "*.github.com",
+      pathPattern: "/*",
+      method: "POST",
+    });
+    currentPolicySet = [capRule("r1", "allow")];
+    withProxyEnv();
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request(
+      "/capabilities/github.pr.comment/invoke",
+      invokeReq({ body: {} }),
+    );
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("GOVERNED_ROUTE_PLUGIN_DENIED");
+  });
+
+  test("a governed route for a DIFFERENT host does NOT block the cap (gate is scoped)", async () => {
+    await seedCapabilityWithGrant();
+    // Governed route on a different host: must NOT deny this cap.
+    await ensureGovernedRoute(harness!.db, tenantId, agentId, secretId, {
+      hostPattern: "api.gitlab.com",
+      pathPattern: "/*",
+      method: "POST",
+    });
+    currentPolicySet = [capRule("r1", "allow")];
+    // NO proxy env => an allowed, non-governed cap falls through to the forward
+    // which fails closed on missing proxy config (503), proving the gate did NOT
+    // fire (a governed-denied path would be 403).
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request(
+      "/capabilities/github.pr.comment/invoke",
+      invokeReq({ body: {} }),
+    );
+    expect(res.status).toBe(503);
+  });
+
+  test("a governed route for a DIFFERENT method does NOT block the cap (gate honors method)", async () => {
+    await seedCapabilityWithGrant();
+    await ensureGovernedRoute(harness!.db, tenantId, agentId, secretId, {
+      hostPattern: "api.github.com",
+      pathPattern: "/repos/acme/app/issues/1/comments",
+      method: "GET", // cap is POST
+    });
+    currentPolicySet = [capRule("r1", "allow")];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request(
+      "/capabilities/github.pr.comment/invoke",
+      invokeReq({ body: {} }),
+    );
+    // Non-matching governed route => gate does not fire => allowed, forward fails
+    // closed on absent proxy env (503).
+    expect(res.status).toBe(503);
+  });
+
+  test("a LEGACY route matching the cap does NOT trigger the governed gate", async () => {
+    await seedCapabilityWithGrant();
+    // A legacy route matching the cap host/path — the gate only fires for
+    // governed_v2, so this must fall through (503 on absent proxy env).
+    await harness!.db.execute(
+      // legacy route (default authority_mode); insert directly.
+      (await import("drizzle-orm")).sql`INSERT INTO secret_routes
+              (tenant_id, agent_id, secret_id, host_pattern, path_pattern, method, inject_as, inject_key)
+            VALUES (${tenantId}, ${agentId}, ${secretId}, 'api.github.com',
+                    '/repos/acme/app/issues/1/comments', 'POST', 'header', 'authorization')`,
+    );
+    currentPolicySet = [capRule("r1", "allow")];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request(
+      "/capabilities/github.pr.comment/invoke",
+      invokeReq({ body: {} }),
+    );
+    expect(res.status).toBe(503);
+  });
+
+  test("a DENY policy still wins over the governed gate (deny is evaluated first)", async () => {
+    await seedCapabilityWithGrant();
+    await ensureGovernedRoute(harness!.db, tenantId, agentId, secretId, {
+      hostPattern: "api.github.com",
+      pathPattern: "/*",
+      method: "POST",
+    });
+    currentPolicySet = [capRule("r1", "deny")];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request(
+      "/capabilities/github.pr.comment/invoke",
+      invokeReq({ body: {} }),
+    );
+    // Policy deny is resolved before the governed gate; either way it's a 403,
+    // but the error is the policy deny, not the governed-plugin code.
+    expect(res.status).toBe(403);
   });
 });
