@@ -211,6 +211,22 @@ async function handlePostExecute(c: RouteContext) {
   const intentId = c.req.param("id");
   if (!intentId) return err(c, "SCOPE_RESOURCE_NOT_FOUND", 404);
 
+  const authType = c.get("authType");
+  const executeCaller =
+    authType === "agent-token"
+      ? { agentId: c.get("agentScope") }
+      : authType === "session-jwt"
+        ? { userId: c.get("userId") }
+        : {};
+  const callerAuthorization = await providerApprovalService.authorizeExecuteCaller(
+    tenantId,
+    intentId,
+    executeCaller,
+  );
+  if (!callerAuthorization.ok) {
+    return err(c, callerAuthorization.code, callerAuthorization.httpStatus);
+  }
+
   // Reject any body that supplies actor/action fields (I4 / RESUME_ACTOR_SUBSTITUTION).
   const contentType = (c.req.header("content-type") ?? "").trim().toLowerCase();
   if (contentType && ALLOWED_MEDIA.has(contentType)) {
@@ -234,6 +250,7 @@ async function handlePostExecute(c: RouteContext) {
   const result = await providerApprovalService.resume({
     intentId,
     tenantId,
+    caller: executeCaller,
     ipAddress: c.req.header("x-forwarded-for") ?? null,
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
