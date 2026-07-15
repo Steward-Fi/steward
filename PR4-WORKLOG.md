@@ -19,6 +19,22 @@ Journal max = 0081 → my migration = 0082
 Prior attempt DID commit 3 units (128e054 schema+migration, 123c42a v2 signing, 1d49fdb move crypto to shared). Continue from commit plan step 4.
 NEXT: provider-execution.ts (mint-within-tx + commitment builder from approvalCommitment + dispatch orchestration) → proxy governed gate → plugin gate → compose wiring → negative/concurrency/mutation suites.
 
+## COMPLETION (lane pr4-13452, 2026-07-14 late)
+Continued in-place. Merged origin/develop (#193 execute-route scope) cleanly — mint-within-tx hook survived, all PR3/#193 suites still green (concurrency 12, negative 32, route 11). Journal stays 0082.
+
+FINISHED:
+- invoke.test.ts governed plugin-gate suite (7 cases, P03/P04) + ensureGovernedRoute harness helper.
+- static sensitive-surface inventory test (proxy, 5 cases, X1/X2 §11.1): decrypt module-private + gated, governedExecutionClaim never request-derived.
+- expanded proxy governed suite to 19 (added K13/K14 outcome_unknown, K15 upstream 500, P18 account disabled, P20 op drift, P23 wrong tenant, P25 revoked nonce, K20 legacy+governed concurrent); harness now seeds a REAL vault-encrypted secret so the forward path is actually exercised.
+- mutation proofs: packages/proxy/scripts/pr4-mutation-proofs.sh, 12 guards ALL KILLED, 0 invalid.
+
+TWO CODE FIXES (audit findings on inherited code):
+1. dispatchOnce X8: handleProxy collapses forward-failure into a 502 envelope; the inherited code classified that as definitive 'failed'. Fixed to detect the forward-failure envelope and record outcome_unknown (ambiguous, reconcile-not-retry).
+2. recordPreDispatchDenial: transitioned binding execution_ready->failed, but the claim already moved it to 'executing' → the WHERE matched nothing and left it stuck. Fixed to executing->failed.
+
+All PR4 suites green: shared 8, api-crypto 8, db-migration 11, proxy 24, plugin 38. Typecheck clean (shared/api/proxy/plugin/db). Biome clean on diff.
+Dockerfile: N/A — PR4 added NO new package (all touched packages already COPY'd in all 3 stages).
+
 ## Spec deltas from brief
 - 0082 carries: nonce v2 extension + secret_routes {authority_mode, provider_operation_id} + secret_route_authority_mode enum + governed CHECK. NOT authority_revision (in 0081).
 - 0082 bump trigger: EXTEND 0081's steward_bump_secret_route_authority_revision() predicate to include authority_mode + provider_operation_id.
