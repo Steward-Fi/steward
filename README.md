@@ -124,6 +124,7 @@ components: `StewardLogin`, `StewardAuthGuard`, `StewardUserButton`, `StewardTen
 | `@stwd/webhooks` | internal | HMAC-signed event delivery with retries. |
 | `@stwd/db` | internal | Drizzle ORM schema, migrations, PGLite adapter. |
 | `@stwd/shared` | internal | types, chain metadata, constants. |
+| `@stwd/plugin-wxmr` | internal | opt-in, bidirectional Monero-on-Solana bridge handoff through wxmr.io. |
 
 ---
 
@@ -201,13 +202,16 @@ full list in [`.env.example`](.env.example). see [deployment guide](docs/deploym
 
 ## supported chains
 
-Ethereum, Base, Polygon, Arbitrum, BSC, Base Sepolia, BSC Testnet, Solana
+Ethereum, Base, Polygon, Arbitrum, BSC, Base Sepolia, BSC Testnet, Solana. The
+opt-in wxmr integration adds a bridge route between Monero mainnet and Monero on
+Solana without adding native Monero key custody to Steward.
 
 ---
 
 ## integrations
 
 - [ElizaOS](https://elizaos.ai) (via [`@stwd/eliza-plugin`](https://www.npmjs.com/package/@stwd/eliza-plugin))
+- [Monero on Solana](https://wxmr.io) for policy-checked, interactive bridging in both directions ([guide](docs/guides/monero-on-solana.mdx))
 - wagmi v2 and v3, with a first-class MetaMask Connect (EVM) connector
 - Model Context Protocol (MCP) server for AI agents and IDEs
 

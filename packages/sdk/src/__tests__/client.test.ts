@@ -464,6 +464,100 @@ describe("StewardClient adapter helpers", () => {
     expect(lastCapture?.body).toMatchObject({ agentId: "agent-1", estimatedUsd: 10 });
   });
 
+  it("returns external bridge handoffs as a distinct non-transaction build result", async () => {
+    const quote = {
+      provider: "wxmr",
+      quoteId: "wxmr-quote-1",
+      fromChainId: 101,
+      toChainId: 301,
+      fromToken: { address: "WXMRyRZhsa19ety5erZhHg4N3xj3EVN92u94422teJp" },
+      toToken: { address: "native" },
+      amountIn: "1000000000000",
+      amountOut: "999000000000",
+      minAmountOut: "0",
+      feeAmount: "1000000000",
+      recipient:
+        "45AmZ2FRjuqZts5NGzb7ZXSNRuwS9MUqEeakpyEeSHsB5mywLwBzzq2cTsbJzTVUuLSHxtbfgKyZJVBqPffpP8fm79sjAcK",
+      route: [{ bridge: "wxmr", fromChainId: 101, toChainId: 301 }],
+      slippageBps: 0,
+      expiresAt: Date.now() + 60_000,
+      direction: "solana-to-monero",
+      executionMode: "external-handoff" as const,
+      handoffUrl: "https://wxmr.io/",
+    };
+    const handoff = {
+      kind: "external-handoff" as const,
+      category: "bridge" as const,
+      provider: "wxmr",
+      quoteId: quote.quoteId,
+      direction: quote.direction,
+      url: "https://wxmr.io/",
+      fromChainId: quote.fromChainId,
+      toChainId: quote.toChainId,
+      amountIn: quote.amountIn,
+      estimatedUsd: 325.5,
+      recipient: quote.recipient,
+      recipientSensitive: true,
+      expiresAt: quote.expiresAt,
+      feeBps: 10,
+      feeScope: "owner-observed" as const,
+      feeObservedSlot: 123_456,
+      feeObservedAt: Date.now(),
+      notices: ["Complete this bridge interactively at wxmr.io."],
+    };
+    installMockFetch({ ok: true, data: { handoff } });
+    const client = makeClient({ bearerToken: "user-token", tenantId: "tenant-1" });
+
+    const built = await client.buildBridgeIntent({
+      agentId: "agent-1",
+      quote,
+      owner: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgpat",
+      // The API must ignore this if it understates its trusted server valuation.
+      estimatedUsd: 1,
+    });
+
+    expect(built.kind).toBe("external-handoff");
+    if (built.kind !== "external-handoff") throw new Error("expected external handoff");
+    expect(built).toEqual(handoff);
+    expect(built.url).toBe("https://wxmr.io/");
+    expect(built.recipientSensitive).toBe(true);
+    expect(lastCapture?.url).toBe("https://api.steward.example/adapters/bridge/build");
+    expect(lastCapture?.body).toMatchObject({ agentId: "agent-1", estimatedUsd: 1 });
+  });
+
+  it("fails closed when a bridge build response contains neither an intent nor a handoff", async () => {
+    installMockFetch({ ok: true, data: {} });
+    const client = makeClient({ bearerToken: "user-token", tenantId: "tenant-1" });
+
+    await expect(
+      client.buildBridgeIntent({
+        agentId: "agent-1",
+        quote: {
+          provider: "wxmr",
+          quoteId: "wxmr-quote-empty",
+          fromChainId: 101,
+          toChainId: 301,
+          fromToken: { address: "WXMRyRZhsa19ety5erZhHg4N3xj3EVN92u94422teJp" },
+          toToken: { address: "native" },
+          amountIn: "1",
+          amountOut: "1",
+          minAmountOut: "1",
+          feeAmount: "0",
+          recipient:
+            "45AmZ2FRjuqZts5NGzb7ZXSNRuwS9MUqEeakpyEeSHsB5mywLwBzzq2cTsbJzTVUuLSHxtbfgKyZJVBqPffpP8fm79sjAcK",
+          route: [{ bridge: "wxmr", fromChainId: 101, toChainId: 301 }],
+          slippageBps: 0,
+          expiresAt: Date.now() + 60_000,
+        },
+        owner: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgpat",
+      }),
+    ).rejects.toMatchObject({
+      name: "StewardApiError",
+      message: "Bridge adapter returned no build result",
+      status: 502,
+    });
+  });
+
   it("wraps Spark BTC and Lightning adapter routes", async () => {
     const wallet = {
       id: "spark_wallet_1",

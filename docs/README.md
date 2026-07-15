@@ -67,6 +67,7 @@ docker compose up -d
 | `packages/sdk` | TypeScript client (`@stwd/sdk`) |
 | `packages/react` | Embeddable React components (`@stwd/react`) |
 | `packages/eliza-plugin` | ElizaOS plugin |
+| `packages/plugin-wxmr` | Opt-in Monero-on-Solana bridge provider |
 | `packages/proxy` | Credential injection proxy |
 | `packages/webhooks` | Signed webhook dispatcher with retry queue |
 | `packages/shared` | Shared types, chain constants, price oracle |
@@ -77,6 +78,7 @@ docker compose up -d
 - [**Architecture**](./architecture.md) — How the pieces fit together
 - [**Authentication**](./auth.md) — Passkeys, magic links, SIWE, JWT, API keys
 - [**Policy Engine**](./policies.md) — Spending limits, whitelists, rate limits, and more
+- [**Monero on Solana**](./guides/monero-on-solana.mdx) — Configure and use the bidirectional wxmr.io bridge handoff
 - [**SDK Reference**](./sdk.md) — `@stwd/sdk` TypeScript client
 - [**React Components**](./react.md) — `@stwd/react` embeddable UI
 - [**Deployment Guide**](./deployment.md) — Docker, environment variables, database setup

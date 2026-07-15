@@ -177,6 +177,8 @@ any other operator's instance.
 | `STEWARD_DEFAULT_TENANT_KEY` | API key hash/plain value field for the default tenant bootstrap path | empty string | Only useful for single/default tenant setups. Platform-created tenants return generated API keys. |
 | `RPC_URL` | Default EVM RPC URL | `https://sepolia.base.org` in API/vault code; Compose sets Base mainnet | Must be reachable for balance/broadcast operations. |
 | `CHAIN_ID` | Default EVM chain id | `84532` in auth/platform context, `8453` in some vault routes; Compose sets `8453` | Must parse as an integer. Prefer setting explicitly. |
+| `STEWARD_PLUGINS` | Comma-separated optional API plugins | none | Add `wxmr` to enable the Monero-on-Solana bridge provider, for example `wxmr` or `trading,wxmr`. Unknown names fail startup. |
+| `WXMR_SOLANA_RPC_URL` | Solana mainnet RPC used to verify the wxmr bridge's global and connected-wallet withdrawal fees | `SOLANA_RPC_URL`, then Solana's public mainnet endpoint | Optional; use a reliable operator-controlled HTTPS RPC in production. Plain HTTP is accepted only on loopback. Only used when the `wxmr` plugin is enabled. |
 | `REDIS_URL` | Redis for rate limiting, token/challenge stores, proxy spend tracking/cache | none | Optional, but recommended for production. Without it some stores are in-memory or Postgres-backed depending on startup state. |
 | `RESEND_API_KEY` | Email magic-link delivery | none | If absent, email auth logs/dev-returns tokens instead of sending mail. |
 | `EMAIL_FROM` | Magic-link sender | `login@steward.fi` | Must be accepted by Resend when email delivery is enabled. |

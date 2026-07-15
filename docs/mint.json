@@ -87,6 +87,7 @@
       "pages": [
         "guides/agent-setup",
         "guides/policies",
+        "guides/monero-on-solana",
         "guides/secrets",
         "guides/local-mode",
         "guides/wallet-external-id-migration",

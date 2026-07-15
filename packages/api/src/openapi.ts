@@ -4215,6 +4215,64 @@ function adapterPaths(prefix = ""): Record<string, unknown> {
       route: { type: "array", items: metadataSchema },
       slippageBps: { type: "integer" },
       expiresAt: { type: "integer" },
+      direction: stringSchema,
+      executionMode: {
+        type: "string",
+        enum: ["unsigned-transaction", "external-handoff"],
+      },
+      handoffUrl: { type: "string", format: "uri" },
+      feeBps: { type: "integer", minimum: 0, maximum: 10000 },
+      feeScope: {
+        type: "string",
+        enum: ["final", "global-estimate", "not-applicable"],
+      },
+      feeObservedSlot: { type: "integer", minimum: 0 },
+      feeObservedAt: { type: "integer", minimum: 0 },
+      notices: { type: "array", items: stringSchema },
+    },
+  };
+  const bridgeHandoffSchema = {
+    type: "object",
+    required: [
+      "kind",
+      "category",
+      "provider",
+      "quoteId",
+      "direction",
+      "url",
+      "fromChainId",
+      "toChainId",
+      "amountIn",
+      "estimatedUsd",
+      "recipient",
+      "expiresAt",
+      "notices",
+      "feeBps",
+      "feeScope",
+      "feeObservedAt",
+    ],
+    properties: {
+      kind: { type: "string", const: "external-handoff" },
+      category: { type: "string", const: "bridge" },
+      provider: stringSchema,
+      quoteId: stringSchema,
+      direction: stringSchema,
+      url: { type: "string", format: "uri" },
+      fromChainId: { type: "integer" },
+      toChainId: { type: "integer" },
+      amountIn: stringSchema,
+      estimatedUsd: { type: "number", exclusiveMinimum: 0 },
+      recipient: stringSchema,
+      recipientSensitive: { type: "boolean" },
+      expiresAt: { type: "integer" },
+      feeBps: { type: "integer", minimum: 0, maximum: 10000 },
+      feeScope: {
+        type: "string",
+        enum: ["global-estimate", "owner-observed", "not-applicable"],
+      },
+      feeObservedSlot: { type: "integer", minimum: 0 },
+      feeObservedAt: { type: "integer", minimum: 0 },
+      notices: { type: "array", items: stringSchema },
     },
   };
   const bridgeSessionSchema = {
@@ -4229,6 +4287,15 @@ function adapterPaths(prefix = ""): Record<string, unknown> {
       toChainId: { type: "integer" },
       recipient: stringSchema,
       createdAt: { type: "integer" },
+      direction: stringSchema,
+      executionMode: {
+        type: "string",
+        enum: ["unsigned-transaction", "external-handoff"],
+      },
+      handoffUrl: { type: "string", format: "uri" },
+      recipientSensitive: { type: "boolean" },
+      notices: { type: "array", items: stringSchema },
+      expiresAt: { type: "integer" },
     },
   };
   const sparkWalletSchema = {
@@ -4531,8 +4598,18 @@ function adapterPaths(prefix = ""): Record<string, unknown> {
         responses: {
           "200": jsonResponse(
             apiResponse({
-              type: "object",
-              properties: { unsignedIntent: adapterUnsignedIntentSchema },
+              oneOf: [
+                {
+                  type: "object",
+                  required: ["unsignedIntent"],
+                  properties: { unsignedIntent: adapterUnsignedIntentSchema },
+                },
+                {
+                  type: "object",
+                  required: ["handoff"],
+                  properties: { handoff: bridgeHandoffSchema },
+                },
+              ],
             }),
           ),
           ...errorResponses(),
