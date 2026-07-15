@@ -12,7 +12,7 @@
  */
 
 import { signAgentToken } from "@stwd/auth";
-import { secretRoutes } from "@stwd/db";
+import { secretRoutes, secrets } from "@stwd/db";
 import {
   CAPABILITY_INTENT_RULE_TYPE,
   composeCapabilityIntentDecision,
@@ -155,21 +155,35 @@ async function capabilityMapsToGovernedRoute(
   agentId: string,
   cap: Capability,
 ): Promise<boolean> {
-  const { and, eq } = await import("drizzle-orm");
-  const rows = await (db as unknown as {
-    select: (c: Record<string, unknown>) => {
-      from: (t: unknown) => {
-        where: (w: unknown) => Promise<
-          Array<{
-            hostPattern: string;
-            pathPattern: string | null;
-            method: string | null;
-            authorityMode: string | null;
-          }>
-        >;
+  const { and, eq, gt, isNull, or } = await import("drizzle-orm");
+  const now = new Date();
+  // Mirror the proxy's route SELECTION (codex P2): only ENABLED governed routes
+  // whose backing secret is currently active (not deleted, not expired) can ever
+  // be selected by the proxy, so only those should gate the plugin. A disabled
+  // governed route or one backed by a deleted/expired secret is unselectable and
+  // must NOT block an otherwise-valid plugin invocation (rollback/cutover leaves
+  // such stale rows). Join secrets exactly like findMatchingRoute.
+  const rows = await (
+    db as unknown as {
+      select: (c: Record<string, unknown>) => {
+        from: (t: unknown) => {
+          innerJoin: (
+            t: unknown,
+            on: unknown,
+          ) => {
+            where: (w: unknown) => Promise<
+              Array<{
+                hostPattern: string;
+                pathPattern: string | null;
+                method: string | null;
+                authorityMode: string | null;
+              }>
+            >;
+          };
+        };
       };
-    };
-  })
+    }
+  )
     .select({
       hostPattern: secretRoutes.hostPattern,
       pathPattern: secretRoutes.pathPattern,
@@ -177,11 +191,21 @@ async function capabilityMapsToGovernedRoute(
       authorityMode: secretRoutes.authorityMode,
     })
     .from(secretRoutes)
+    .innerJoin(
+      secrets,
+      and(
+        eq(secrets.id, secretRoutes.secretId),
+        eq(secrets.tenantId, tenantId),
+        isNull(secrets.deletedAt),
+        or(isNull(secrets.expiresAt), gt(secrets.expiresAt, now)),
+      ),
+    )
     .where(
       and(
         eq(secretRoutes.tenantId, tenantId),
         eq(secretRoutes.agentId, agentId),
         eq(secretRoutes.authorityMode, "governed_v2"),
+        eq(secretRoutes.enabled, true),
       ),
     );
   const capMethod = cap.method.toUpperCase();

@@ -807,4 +807,45 @@ describe("invoke: PR4 governed-route plugin gate (§5.2, X1)", () => {
     // but the error is the policy deny, not the governed-plugin code.
     expect(res.status).toBe(403);
   });
+
+  test("a DISABLED governed route does NOT block the cap (codex P2: unselectable route must not gate)", async () => {
+    await seedCapabilityWithGrant();
+    const routeId = await ensureGovernedRoute(harness!.db, tenantId, agentId, secretId, {
+      hostPattern: "api.github.com",
+      pathPattern: "/repos/acme/app/issues/1/comments",
+      method: "POST",
+    });
+    // Disable the route: the proxy would never select it, so the plugin gate must
+    // ignore it (falls through to the forward => 503 on absent proxy env, NOT a
+    // 403 governed denial).
+    const { sql } = await import("drizzle-orm");
+    await harness!.db.execute(sql`UPDATE secret_routes SET enabled = false WHERE id = ${routeId}`);
+    currentPolicySet = [capRule("r1", "allow")];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request(
+      "/capabilities/github.pr.comment/invoke",
+      invokeReq({ body: {} }),
+    );
+    expect(res.status).toBe(503);
+  });
+
+  test("a governed route backed by a DELETED secret does NOT block the cap (codex P2)", async () => {
+    await seedCapabilityWithGrant();
+    await ensureGovernedRoute(harness!.db, tenantId, agentId, secretId, {
+      hostPattern: "api.github.com",
+      pathPattern: "/repos/acme/app/issues/1/comments",
+      method: "POST",
+    });
+    // Soft-delete the backing secret: findMatchingRoute's active-secret join would
+    // drop this route, so the plugin gate must too (=> 503, not 403).
+    const { sql } = await import("drizzle-orm");
+    await harness!.db.execute(sql`UPDATE secrets SET deleted_at = now() WHERE id = ${secretId}`);
+    currentPolicySet = [capRule("r1", "allow")];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request(
+      "/capabilities/github.pr.comment/invoke",
+      invokeReq({ body: {} }),
+    );
+    expect(res.status).toBe(503);
+  });
 });

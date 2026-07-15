@@ -1217,7 +1217,14 @@ export async function handleProxy(c: Context): Promise<Response> {
     });
     return c.json({ ok: false, error: "Approved proxy route no longer matches" }, 409);
   }
-  if (route.requiresApproval && !approvalReleaseId) {
+  if (route.requiresApproval && !approvalReleaseId && !isVerifiedGovernedDispatch) {
+    // NOTE: a verified governed dispatch is EXCLUDED here (codex P1). A governed
+    // route's approval was already adjudicated by the v2 authority flow (the
+    // intent is approved + the binding is execution_ready before the nonce is
+    // minted); it must NOT re-enter the legacy proxy-approval hold, which would
+    // return a 202 hold that dispatchOnce would misread as a successful upstream
+    // dispatch and falsely consume the authorization / mark the action succeeded.
+    //
     // Fail closed on approval-gated routes that carry a query. The approval
     // hold/replay path reconstructs the request from the stored path only and
     // cannot yet round-trip the query, so executing it later would forward a

@@ -189,6 +189,13 @@ proof "M17 accept mismatched claim routeRevision at gate (P32)" "packages/proxy"
 proof "M18 accept claim missing secretVersion at gate (P33)" "packages/proxy" "$GOV_TEST" "P33" "$PROXY" \
   's/governedClaim.secretVersion !== undefined;/true;/'
 
+# M19: let a verified governed dispatch re-enter the legacy proxy-approval hold
+#      → P34 (a governed route that also carries requiresApproval must NOT be held
+#      for legacy approval; the hold's 202 would be misread as a successful
+#      dispatch). Drop the governed exclusion from the approval-hold predicate.
+proof "M19 governed dispatch re-enters legacy approval hold (P34)" "packages/proxy" "$GOV_TEST" "P34" "$PROXY" \
+  's/route.requiresApproval \&\& !approvalReleaseId \&\& !isVerifiedGovernedDispatch/route.requiresApproval \&\& !approvalReleaseId/'
+
 echo ""
 echo "==================================================="
 echo "PR4 MUTATION PROOFS: $pass_count killed, $fail_count invalid"

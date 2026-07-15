@@ -964,6 +964,27 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
+  it("P34: a governed route that ALSO has requiresApproval does NOT re-enter the legacy proxy-approval hold; it forwards (codex P1)", async () => {
+    const { intentId, authorizationId } = await seedExecutionReady();
+    // The route carries the legacy requiresApproval flag too. A verified governed
+    // dispatch already had its approval adjudicated by the v2 flow, so it must NOT
+    // be held for legacy proxy approval (which would 202 and be misread as a
+    // successful dispatch). It forwards instead.
+    await getDb()
+      .update(secretRoutes)
+      .set({ requiresApproval: true })
+      .where(eq(secretRoutes.id, IDS.route));
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    // The forward was actually reached (not held) and the nonce consumed once.
+    expect(captured).not.toBeNull();
+    const [n] = await getDb()
+      .select({ status: executionAuthorizationNonces.status })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(n.status).toBe("consumed");
+    void res;
+  });
+
   it("K20: a legacy proxy request and a governed dispatch for the same tenant do not corrupt each other", async () => {
     // Governed dispatch on the seeded governed route.
     const { intentId, authorizationId } = await seedExecutionReady();
