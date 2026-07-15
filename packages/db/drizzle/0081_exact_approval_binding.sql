@@ -147,23 +147,31 @@ ALTER TABLE "approval_queue" ADD CONSTRAINT "approval_queue_arm_chk" CHECK (
 
 -- Decision shape: pin the (status, decision, resolution, mfa, consumption)
 -- tuple for every provider lifecycle state. Legacy transaction rows are exempt.
+--
+-- NOTE: `status` is compared via `::text` because this CHECK references the
+-- enum values ('expired','stale','consumed') that are ADDed to
+-- approval_queue_status EARLIER in THIS migration. Postgres forbids using a
+-- newly-added enum value in the same transaction it was added ("unsafe use of
+-- new value"), and drizzle-orm's migrator wraps a migration file in one
+-- transaction. Casting the enum column to text sidesteps the enum-literal bind
+-- at constraint-creation time and is semantically identical.
 ALTER TABLE "approval_queue" ADD CONSTRAINT "approval_queue_decision_shape_chk" CHECK (
   ("approval_kind" = 'transaction') OR
-  ("status" = 'pending' AND "decision" IS NULL AND "resolved_at" IS NULL
+  ("status"::text = 'pending' AND "decision" IS NULL AND "resolved_at" IS NULL
     AND "resolved_by_type" IS NULL AND "resolved_by_id" IS NULL
     AND "mfa_verified_at" IS NULL AND "consumed_at" IS NULL)
   OR
-  ("status" = 'approved' AND "decision" = 'approve' AND "resolved_at" IS NOT NULL
+  ("status"::text = 'approved' AND "decision" = 'approve' AND "resolved_at" IS NOT NULL
     AND "resolved_by_type" = 'user' AND "resolved_by_id" IS NOT NULL
     AND "mfa_verified_at" IS NOT NULL AND "consumed_at" IS NULL)
   OR
-  ("status" = 'rejected' AND "decision" = 'deny' AND "resolved_at" IS NOT NULL
+  ("status"::text = 'rejected' AND "decision" = 'deny' AND "resolved_at" IS NOT NULL
     AND "resolved_by_type" = 'user' AND "resolved_by_id" IS NOT NULL
     AND "mfa_verified_at" IS NOT NULL AND "consumed_at" IS NULL)
   OR
-  ("status" IN ('expired','stale') AND "decision" IS NULL AND "consumed_at" IS NULL)
+  ("status"::text IN ('expired','stale') AND "decision" IS NULL AND "consumed_at" IS NULL)
   OR
-  ("status" = 'consumed' AND "decision" = 'approve' AND "resolved_at" IS NOT NULL
+  ("status"::text = 'consumed' AND "decision" = 'approve' AND "resolved_at" IS NOT NULL
     AND "resolved_by_type" = 'user' AND "resolved_by_id" IS NOT NULL
     AND "mfa_verified_at" IS NOT NULL AND "consumed_at" IS NOT NULL
     AND "consumed_by" = 'steward-system')
