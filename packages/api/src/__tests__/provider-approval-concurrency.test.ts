@@ -233,6 +233,29 @@ describe("PR3 concurrency + fault matrix", () => {
     expect((await bindingRow(intentId)).status).toBe("approval_stale");
   });
 
+  test("C13 (codex P2): concurrent stale attempts emit exactly one staled event, no double audit", async () => {
+    const { intentId, requestHash, actionDigest } = await createApprovalRequired();
+    await providerApprovalService.decide(decideBody(intentId, requestHash, actionDigest));
+    // Revoke a matched grant so both concurrent resume attempts detect a stale
+    // condition; the guarded CAS must let only ONE win + emit one staled event.
+    await getDb()
+      .update(providerGrants)
+      .set({ status: "revoked" })
+      .where(eq(providerGrants.id, F.GRANT));
+    const results = await Promise.all([
+      providerApprovalService.resume({ intentId, tenantId: F.TENANT }),
+      providerApprovalService.resume({ intentId, tenantId: F.TENANT }),
+      providerApprovalService.resume({ intentId, tenantId: F.TENANT }),
+    ]);
+    // All fail (stale); the binding is stale exactly once.
+    expect(results.every((r) => !r.ok)).toBe(true);
+    expect((await bindingRow(intentId)).status).toBe("approval_stale");
+    const staled = (await correlatedAudit(intentId)).filter(
+      (e) => e.action === "provider.approval.staled",
+    );
+    expect(staled.length).toBe(1);
+  });
+
   test("C09/C10/N49: audit append fault rolls back the WHOLE tuple (evidence before visibility)", async () => {
     const { intentId, requestHash, actionDigest } = await createApprovalRequired();
     const auditsBefore = await auditCount();

@@ -161,6 +161,18 @@ describe("PR3 negative matrix", () => {
     await expectFail(approve(intentId, requestHash, actionDigest), "APPROVAL_ROLE_REQUIRED");
   });
 
+  test("codex P1: an approver binding scoped to a DIFFERENT environment (staging) cannot approve a production action => APPROVAL_ROLE_REQUIRED", async () => {
+    const { intentId, requestHash, actionDigest } = await createApprovalRequired();
+    // The seeded action's workspace is production. Re-scope the approver binding
+    // to staging — it must no longer be eligible.
+    await getDb()
+      .update(providerRoleBindings)
+      .set({ environment: "staging" })
+      .where(eq(providerRoleBindings.id, F.APPROVER_BINDING));
+    await expectFail(approve(intentId, requestHash, actionDigest), "APPROVAL_ROLE_REQUIRED");
+    expect((await bindingRow(intentId)).status).toBe("pending_approval");
+  });
+
   // ── Requester separation (N09, N10) ──
   test("N09/N10: known agent owner attempts decision with separation => APPROVAL_REQUESTER_SEPARATION_REQUIRED", async () => {
     await wipe();

@@ -700,13 +700,20 @@ class ProviderApprovalService {
         : { ok: false, code: "APPROVAL_MEMBERSHIP_INACTIVE", httpStatus: 403 };
     }
 
-    // Active, in-window workspace_approver binding for THIS exact workspace.
+    // The action's environment is the committed workspace environment. An
+    // environment-scoped approver binding must match it (a NULL binding env =
+    // all environments). This mirrors the actor access checks which gate on
+    // workspace.environment (codex P1).
+    const [workspace] = await tx
+      .select({ environment: workspaces.environment })
+      .from(workspaces)
+      .where(and(eq(workspaces.tenantId, tenantId), eq(workspaces.id, binding.workspaceId)))
+      .limit(1);
+    const actionEnv = workspace?.environment;
+
+    // Active, in-window, in-environment workspace_approver binding for THIS exact
+    // workspace.
     const now = new Date();
-    const env = (queue.approvalCommitment as unknown as ProviderApprovalCommitmentV1 | null)
-      ?.operation
-      ? undefined
-      : undefined;
-    void env;
     const approverRows = await tx
       .select()
       .from(providerRoleBindings)
@@ -721,7 +728,10 @@ class ProviderApprovalService {
         ),
       );
     const eligible = approverRows.some(
-      (b) => (!b.notBefore || b.notBefore <= now) && (!b.expiresAt || b.expiresAt > now),
+      (b) =>
+        (!b.notBefore || b.notBefore <= now) &&
+        (!b.expiresAt || b.expiresAt > now) &&
+        (!b.environment || b.environment === actionEnv),
     );
     if (!eligible) {
       return atResume
@@ -794,7 +804,7 @@ class ProviderApprovalService {
     // queue decision fields; the immutable decision evidence is preserved on the
     // binding (approval_actor_user_id/approved_at) and in the signed
     // provider.approval.decided audit event (I3 evidence, I14).
-    await tx
+    const won = await tx
       .update(approvalQueue)
       .set({
         status: "expired",
@@ -807,7 +817,11 @@ class ProviderApprovalService {
       })
       .where(
         and(eq(approvalQueue.id, queue.id), sql`${approvalQueue.status} IN ('pending','approved')`),
-      );
+      )
+      .returning({ id: approvalQueue.id });
+    // Guarded CAS: if a concurrent winner already transitioned the row, do NOT
+    // update the intent or append a duplicate expired event (codex P2).
+    if (won.length === 0) return false;
     await tx
       .update(providerActionBindings)
       .set({
@@ -854,19 +868,21 @@ class ProviderApprovalService {
     return true;
   }
 
-  // ── Stale transition (spec §6.7). One tx moves pending/approved → stale. ──
+  // ── Stale transition (spec §6.7). One tx moves pending/approved → stale.
+  // Returns false if a concurrent winner already moved the row (guarded CAS lost)
+  // so the caller does NOT emit a duplicate transition or audit event (codex P2). ──
   private async staleTransition(
     tx: DbExecutor,
     append: (ev: { tenantId: string } & Record<string, unknown>) => Promise<void>,
     binding: BindingRow,
     queue: QueueRow,
     reasonCode: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const before = binding.bindingRevision;
     const after = before + 1;
     // See expireIfDue: stale rows must carry decision IS NULL per the shape CHECK;
     // the immutable decision evidence lives on the binding + audit chain.
-    await tx
+    const won = await tx
       .update(approvalQueue)
       .set({
         status: "stale",
@@ -879,7 +895,10 @@ class ProviderApprovalService {
       })
       .where(
         and(eq(approvalQueue.id, queue.id), sql`${approvalQueue.status} IN ('pending','approved')`),
-      );
+      )
+      .returning({ id: approvalQueue.id });
+    // Loser: another attempt already transitioned the row. Emit nothing.
+    if (won.length === 0) return false;
     await tx
       .update(providerActionBindings)
       .set({
@@ -924,6 +943,7 @@ class ProviderApprovalService {
       resourceId: binding.intentId,
       metadata: payload as unknown as Record<string, unknown>,
     });
+    return true;
   }
 
   // ── Terminal-state → outcome mapping for a loaded (non-transitioning) case. ──
