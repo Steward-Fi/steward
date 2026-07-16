@@ -74,14 +74,13 @@ bun run scripts/rotate-master-password.ts --dry-run
 bun run scripts/rotate-master-password.ts --confirm
 ```
 
-Do not use `--table` in write mode. It is intentionally rejected because partial inventory rotation is unsafe. After success, atomically replace the deployed master and KDF variables with the new values, remove all `*_NEW` values, restart every consumer, and run:
+Do not use `--table` in write mode. It is intentionally rejected because partial inventory rotation is unsafe. While the old and `*_NEW` variables are still present, run the no-write command one more time. It must report every encrypted row as already rotated and zero failures:
 
 ```sh
-steward doctor --strict
 bun run scripts/rotate-master-password.ts --dry-run
 ```
 
-Then perform non-value-bearing smoke tests: decrypt secret metadata through its normal consumer, sign with a test wallet, refresh a disposable OAuth account, verify request signing, complete a disposable proxy approval, and deliver a disposable webhook.
+Then atomically replace the deployed master and KDF variables with the new values, remove all `*_NEW` values, restart every consumer, and run `steward doctor --strict`. The rotation script cannot run after removing `*_NEW` because it deliberately requires both root generations. Perform non-value-bearing smoke tests: decrypt secret metadata through its normal consumer, sign with a test wallet, refresh a disposable OAuth account, verify request signing, complete a disposable proxy approval, and deliver a disposable webhook.
 
 ### Rollback
 
