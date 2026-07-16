@@ -28,7 +28,15 @@ import {
   wipeCase,
 } from "./provider-case-fixture";
 
-const VERIFIER = join(import.meta.dir, "..", "..", "..", "..", "scripts", "verify-evidence-bundle.mjs");
+const VERIFIER = join(
+  import.meta.dir,
+  "..",
+  "..",
+  "..",
+  "..",
+  "scripts",
+  "verify-evidence-bundle.mjs",
+);
 let tmpDir: string;
 let caseRoutesModule: Awaited<typeof import("../routes/provider-case")>;
 let expectedFp: string;
@@ -124,7 +132,9 @@ describe("PR5 /case + /evidence routes + offline verifier", () => {
 
   it("N17/N35: wrong fingerprint → verifier FAIL untrusted", async () => {
     const intentId = await createAllowedCase();
-    const envelope = await app().request(`/v2/provider-actions/${intentId}/evidence`).then((r) => r.json());
+    const envelope = await app()
+      .request(`/v2/provider-actions/${intentId}/evidence`)
+      .then((r) => r.json());
     const res = runVerifier(envelope, ["--fp", "deadbeef"]);
     expect(res.code).toBe(1);
     expect(res.stderr).toContain("untrusted signing key");

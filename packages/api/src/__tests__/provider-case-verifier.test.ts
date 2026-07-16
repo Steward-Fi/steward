@@ -7,12 +7,20 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { createHash, generateKeyPairSync, sign as edSign } from "node:crypto";
+import { createHash, sign as edSign, generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const VERIFIER = join(import.meta.dir, "..", "..", "..", "..", "scripts", "verify-evidence-bundle.mjs");
+const VERIFIER = join(
+  import.meta.dir,
+  "..",
+  "..",
+  "..",
+  "..",
+  "scripts",
+  "verify-evidence-bundle.mjs",
+);
 let tmpDir: string;
 let priv: import("node:crypto").KeyObject;
 let pubPem: string;
@@ -64,36 +72,36 @@ function checkpointBytes(payload: Record<string, unknown>): Buffer {
   return Buffer.from(JSON.stringify(o), "utf8");
 }
 
-function buildEnvelope(overrides: {
-  manifest?: Record<string, unknown>;
-  events?: Record<string, unknown>[];
-  payloadPatch?: Record<string, unknown>;
-} = {}) {
-  const events =
-    overrides.events ??
-    [
-      {
-        seq: 1,
-        prevHash: "00".repeat(32),
-        hmac: "11".repeat(32),
-        actorType: "agent",
-        actorId: "ag",
-        action: "provider.action.allowed",
-        resourceType: "provider_action",
-        resourceId: CASE,
-        metadata: {
-          intentId: CASE,
-          actionDigest: `sha256:${"a".repeat(64)}`,
-          requestHash: `sha256:${"b".repeat(64)}`,
-          accessDecisionHash: `sha256:${"c".repeat(64)}`,
-          policyDecisionHash: `sha256:${"d".repeat(64)}`,
-        },
-        ipAddress: null,
-        userAgent: null,
-        requestId: null,
-        createdAt: "2026-07-16T00:00:00.000Z",
+function buildEnvelope(
+  overrides: {
+    manifest?: Record<string, unknown>;
+    events?: Record<string, unknown>[];
+    payloadPatch?: Record<string, unknown>;
+  } = {},
+) {
+  const events = overrides.events ?? [
+    {
+      seq: 1,
+      prevHash: "00".repeat(32),
+      hmac: "11".repeat(32),
+      actorType: "agent",
+      actorId: "ag",
+      action: "provider.action.allowed",
+      resourceType: "provider_action",
+      resourceId: CASE,
+      metadata: {
+        intentId: CASE,
+        actionDigest: `sha256:${"a".repeat(64)}`,
+        requestHash: `sha256:${"b".repeat(64)}`,
+        accessDecisionHash: `sha256:${"c".repeat(64)}`,
+        policyDecisionHash: `sha256:${"d".repeat(64)}`,
       },
-    ];
+      ipAddress: null,
+      userAgent: null,
+      requestId: null,
+      createdAt: "2026-07-16T00:00:00.000Z",
+    },
+  ];
   const payload = {
     v: 1,
     tenantId: TENANT,
@@ -118,7 +126,13 @@ function buildEnvelope(overrides: {
     approvalActor: null,
     resumeActor: null,
     providerAccount: { id: "acc", revision: 1 },
-    operation: { id: "op", key: "github.issue.list", revision: 1, canonicalProfile: "github.provider-action.v1", riskClass: "read" },
+    operation: {
+      id: "op",
+      key: "github.issue.list",
+      revision: 1,
+      canonicalProfile: "github.provider-action.v1",
+      riskClass: "read",
+    },
     actionDigest: `sha256:${"a".repeat(64)}`,
     requestHash: `sha256:${"b".repeat(64)}`,
     idempotencyKeyHash: `sha256:${"e".repeat(64)}`,
@@ -126,7 +140,17 @@ function buildEnvelope(overrides: {
     policyDecision: { id: "pd", hash: `sha256:${"d".repeat(64)}`, effect: "allow" },
     approvalCommitmentHash: null,
     execution: null,
-    dependencyRevisions: { actor: 1, workspace: 1, providerAccount: 1, operation: 1, matchedGrants: [], matchedBindings: [], route: null, secret: null, policyRevisionHash: null },
+    dependencyRevisions: {
+      actor: 1,
+      workspace: 1,
+      providerAccount: 1,
+      operation: 1,
+      matchedGrants: [],
+      matchedBindings: [],
+      route: null,
+      secret: null,
+      policyRevisionHash: null,
+    },
     events: [{ seq: 1, action: "provider.action.allowed", role: "genesis", hmac: "11".repeat(32) }],
     eventSeqRange: { from: 1, to: 1 },
     terminalState: "denied_access",
@@ -170,7 +194,9 @@ describe("PR5 offline verifier (synthetic bundles)", () => {
     const { privateKey, publicKey } = generateKeyPairSync("ed25519");
     priv = privateKey;
     pubPem = publicKey.export({ format: "pem", type: "spki" }).toString();
-    fp = createHash("sha256").update(publicKey.export({ format: "der", type: "spki" })).digest("hex");
+    fp = createHash("sha256")
+      .update(publicKey.export({ format: "der", type: "spki" }))
+      .digest("hex");
   });
   afterAll(() => {
     if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
@@ -208,7 +234,8 @@ describe("PR5 offline verifier (synthetic bundles)", () => {
 
   it("N19: mutated event metadata (content digest) → FAIL", () => {
     const env = buildEnvelope();
-    (env.bundle.events[0] as { metadata: Record<string, unknown> }).metadata.actionDigest = `sha256:${"9".repeat(64)}`;
+    (env.bundle.events[0] as { metadata: Record<string, unknown> }).metadata.actionDigest =
+      `sha256:${"9".repeat(64)}`;
     const r = run(env);
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("content digest");

@@ -34,7 +34,6 @@ import {
   missingRoleReason,
   PROVIDER_CASE_MANIFEST_SCHEMA_VERSION,
   PROVIDER_CASE_REASON,
-  type ProviderCaseCompleteness,
   type ProviderCaseDispatchState,
   type ProviderCaseEventRole,
   type ProviderCaseEvidenceV1,
@@ -77,10 +76,7 @@ const MAX_CASE_SEGMENT_EVENTS = 10_000;
  * escalate to REPEATABLE READ READ ONLY for a true snapshot.
  */
 function isPGLiteRuntime(): boolean {
-  return (
-    process.env.STEWARD_DB_MODE === "pglite" ||
-    process.env.STEWARD_PGLITE_MEMORY === "true"
-  );
+  return process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true";
 }
 
 /** Sensitive-key set for the safe-summary re-validation (spec §3.3). Mirrors the
@@ -183,8 +179,7 @@ async function correlateCaseEvents(
     // metadata.intentId. A mismatch means a forged/misfiled event; drop it so it
     // can never be smuggled into a foreign case (N23).
     if (metadata.intentId !== caseId) continue;
-    const created =
-      row.created_at instanceof Date ? row.created_at : new Date(row.created_at);
+    const created = row.created_at instanceof Date ? row.created_at : new Date(row.created_at);
     out.push({
       seq: Number(row.seq),
       action: row.action,
@@ -575,7 +570,8 @@ function buildManifest(args: BuildManifestArgs): ProviderCaseAssembly {
       policyRevisionHash: binding.policyRevisionHash ?? null,
     },
     events,
-    eventSeqRange: segmentFrom != null && segmentTo != null ? { from: segmentFrom, to: segmentTo } : null,
+    eventSeqRange:
+      segmentFrom != null && segmentTo != null ? { from: segmentFrom, to: segmentTo } : null,
     terminalState,
     completeness: "incomplete",
     missingRequiredRoles: [],
@@ -689,12 +685,7 @@ function isApprovalPath(t: ProviderCaseTerminalState): boolean {
   );
 }
 function isExecutionPath(t: ProviderCaseTerminalState): boolean {
-  return (
-    t === "executing" ||
-    t === "succeeded" ||
-    t === "failed" ||
-    t === "outcome_unknown"
-  );
+  return t === "executing" || t === "succeeded" || t === "failed" || t === "outcome_unknown";
 }
 
 function extractUpstreamStatusCode(correlated: CorrelatedEvent[]): number | null {
@@ -752,7 +743,10 @@ async function loadBinding(
     .select()
     .from(providerActionBindings)
     .where(
-      and(eq(providerActionBindings.tenantId, tenantId), eq(providerActionBindings.intentId, caseId)),
+      and(
+        eq(providerActionBindings.tenantId, tenantId),
+        eq(providerActionBindings.intentId, caseId),
+      ),
     )
     .limit(1);
   return row ?? null;
@@ -851,4 +845,4 @@ async function runInSnapshot<T>(fn: (sdb: SnapshotDb) => Promise<T>): Promise<T>
 }
 
 export type { CorrelatedEvent };
-export { correlateCaseEvents, resolveTerminalState, dispatchStateOf, finalizeCompleteness };
+export { correlateCaseEvents, dispatchStateOf, finalizeCompleteness, resolveTerminalState };

@@ -13,8 +13,7 @@
  * every fact is checkable against a signed event (§2.3). See PR5 spec E1–E8.
  */
 
-export const PROVIDER_CASE_MANIFEST_SCHEMA_VERSION =
-  "steward.provider-case-manifest.v1" as const;
+export const PROVIDER_CASE_MANIFEST_SCHEMA_VERSION = "steward.provider-case-manifest.v1" as const;
 
 /**
  * Role of a correlated audit event within a case — classifies WHICH lifecycle
@@ -68,8 +67,7 @@ export const PROVIDER_CASE_REASON = {
   MANIFEST_SIZE_EXCEEDED: "manifest_size_exceeded",
   BINDING_ROW_ABSENT: "binding_row_absent",
   QUEUE_ROW_ABSENT_FOR_APPROVAL_PATH: "queue_row_absent_for_approval_path",
-  AUTHORIZATION_ROW_ABSENT_FOR_EXECUTION_PATH:
-    "authorization_row_absent_for_execution_path",
+  AUTHORIZATION_ROW_ABSENT_FOR_EXECUTION_PATH: "authorization_row_absent_for_execution_path",
   TERMINAL_STATE_UNRESOLVED: "terminal_state_unresolved",
 } as const;
 
@@ -208,9 +206,7 @@ export interface ProviderCaseEvidenceV1 {
  * keeps completeness mechanical against the code AS LANDED (spec anchor
  * re-verification protocol). See PR body contradiction C-DRIFT-1.
  */
-export function requiredRoles(
-  terminalState: ProviderCaseTerminalState,
-): ProviderCaseEventRole[] {
+export function requiredRoles(terminalState: ProviderCaseTerminalState): ProviderCaseEventRole[] {
   switch (terminalState) {
     case "denied_access":
       return ["genesis"];
@@ -232,32 +228,13 @@ export function requiredRoles(
       return ["genesis", "exec_authorized", "exec_claimed"];
     case "succeeded":
     case "failed":
-      return [
-        "genesis",
-        "exec_authorized",
-        "exec_claimed",
-        "exec_dispatched",
-        "exec_terminal",
-      ];
+      return ["genesis", "exec_authorized", "exec_claimed", "exec_dispatched", "exec_terminal"];
     case "outcome_unknown":
-      return [
-        "genesis",
-        "exec_authorized",
-        "exec_claimed",
-        "exec_dispatched",
-        "exec_terminal",
-      ];
-    // biome-ignore lint/complexity/noUselessSwitchCase: explicit for clarity
-    case "unknown":
+      return ["genesis", "exec_authorized", "exec_claimed", "exec_dispatched", "exec_terminal"];
     default:
-      // Conservatively require the full chain; always incomplete/unknown.
-      return [
-        "genesis",
-        "exec_authorized",
-        "exec_claimed",
-        "exec_dispatched",
-        "exec_terminal",
-      ];
+      // `unknown` and any future state: conservatively require the full chain;
+      // always resolves to incomplete/unknown.
+      return ["genesis", "exec_authorized", "exec_claimed", "exec_dispatched", "exec_terminal"];
   }
 }
 

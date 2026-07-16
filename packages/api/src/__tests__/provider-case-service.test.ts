@@ -125,7 +125,7 @@ describe("PR5 provider-case service", () => {
     const json = JSON.stringify(assembly!.manifest);
     // The allowed-stub path has no execution nonce, so execution is null; assert
     // the manifest carries no `providerIdempotencyKey` (raw) key at all.
-    expect(json).not.toContain("providerIdempotencyKey\":");
+    expect(json).not.toContain('providerIdempotencyKey":');
     expect(json.includes("providerIdempotencyKeyHash") ? true : true).toBe(true);
   });
 

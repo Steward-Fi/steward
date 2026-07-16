@@ -11,8 +11,8 @@ export type { PriceOracle } from "./price-oracle.js";
 export { createPriceOracle } from "./price-oracle.js";
 export * from "./provider-action.js";
 export * from "./provider-approval.js";
-export * from "./provider-case.js";
 export * from "./provider-authority.js";
+export * from "./provider-case.js";
 export * from "./provider-execution-auth.js";
 // ─── Non-throwing description of an arbitrary thrown value (fail-closed catches) ───
 export { describeThrown, UNPRINTABLE_THROWN_VALUE } from "./safe-error.js";

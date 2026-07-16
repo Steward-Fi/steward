@@ -24,10 +24,7 @@ import { getDb, workspaces } from "@stwd/db";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { auditOwnerAdminMfaGate } from "../middleware/audit-gate";
-import {
-  AuditSigningKeyError,
-  isCheckpointSigningConfigured,
-} from "../services/audit-checkpoint";
+import { AuditSigningKeyError, isCheckpointSigningConfigured } from "../services/audit-checkpoint";
 import { type ApiResponse, type AppVariables } from "../services/context";
 import { getProviderCase, getProviderCaseEvidence } from "../services/provider-case";
 

@@ -28,13 +28,13 @@ import {
   writeAuditEvent,
 } from "@stwd/db";
 import { sql } from "drizzle-orm";
-import { API_VERSION } from "./context";
 import {
   type CheckpointEventContent,
   type CheckpointPayload,
   eventsContentDigest,
   getCheckpointSigner,
 } from "./audit-checkpoint";
+import { API_VERSION } from "./context";
 
 /**
  * The canonicalization contract an offline verifier must reproduce per event.

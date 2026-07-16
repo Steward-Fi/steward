@@ -11,15 +11,11 @@ import { Hono } from "hono";
 import { auditOwnerAdminMfaGate } from "../middleware/audit-gate";
 import {
   type AuditBundleData,
-  BUNDLE_CANONICALIZATION_SPEC,
   readAuditBundleData,
   signAuditBundle,
   verifyAuditChain,
 } from "../services/audit";
-import {
-  AuditSigningKeyError,
-  isCheckpointSigningConfigured,
-} from "../services/audit-checkpoint";
+import { AuditSigningKeyError, isCheckpointSigningConfigured } from "../services/audit-checkpoint";
 import {
   type ApiResponse,
   type AppVariables,

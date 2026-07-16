@@ -7,7 +7,6 @@
 
 import {
   approvalQueue,
-  executionAuthorizationNonces,
   getDb,
   intents,
   providerAccounts,
@@ -18,8 +17,8 @@ import {
   secretRoutes,
   secrets,
   tenants,
-  userTenants,
   users,
+  userTenants,
   workspaces,
 } from "@stwd/db";
 import { buildGithubAction } from "@stwd/provider-github";
@@ -236,7 +235,13 @@ export async function denyCase(
 
 /** Read raw correlated audit rows for a case (for assertions). */
 export async function readCorrelated(intentId: string): Promise<
-  Array<{ seq: number; action: string; resource_type: string; resource_id: string; intentMeta: unknown }>
+  Array<{
+    seq: number;
+    action: string;
+    resource_type: string;
+    resource_id: string;
+    intentMeta: unknown;
+  }>
 > {
   const res = await getDb().execute(
     sql`SELECT seq, action, resource_type, resource_id, metadata->>'intentId' AS intent_meta
@@ -254,5 +259,5 @@ export async function readCorrelated(intentId: string): Promise<
   }));
 }
 
-export { F, principal };
 export type { ProviderPrincipalV1 };
+export { F, principal };

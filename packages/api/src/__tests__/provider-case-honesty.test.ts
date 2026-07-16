@@ -5,9 +5,8 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { getDb } from "@stwd/db";
+import { closeDb, getDb } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { closeDb } from "@stwd/db";
 import { sql } from "drizzle-orm";
 import { getProviderCase } from "../services/provider-case";
 import {
