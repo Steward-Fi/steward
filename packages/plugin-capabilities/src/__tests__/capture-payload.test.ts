@@ -23,6 +23,7 @@ import {
   MAX_CAPTURE_PAYLOAD_BYTES,
   MAX_COOKIE_COUNT,
   MAX_COOKIE_NAME_BYTES,
+  MAX_COOKIE_PAIR_BYTES,
   MAX_COOKIE_VALUE_BYTES,
   redactCapturePayload,
 } from "../capture-payload";
@@ -220,9 +221,15 @@ describe("(b) rejections", () => {
         .success,
     ).toBe(false);
     expect(
-      capturedCookieSchema.safeParse({ name: "n", value: "x".repeat(MAX_COOKIE_VALUE_BYTES) })
+      capturedCookieSchema.safeParse({ name: "n", value: "x".repeat(MAX_COOKIE_VALUE_BYTES - 1) })
         .success,
     ).toBe(true);
+    expect(
+      capturedCookieSchema.safeParse({
+        name: "nn",
+        value: "x".repeat(MAX_COOKIE_PAIR_BYTES - 1),
+      }).success,
+    ).toBe(false);
     expect(
       capturedCookieSchema.safeParse({
         name: "n",
@@ -243,7 +250,7 @@ describe("(b) rejections", () => {
     const tooLarge = realisticXComPayload();
     tooLarge.jar = Array.from({ length: 80 }, (_, i) => ({
       name: `c${i}`,
-      value: "x".repeat(MAX_COOKIE_VALUE_BYTES),
+      value: "x".repeat(4000),
     })) as typeof tooLarge.jar;
     tooLarge.metadata.cookieCount = tooLarge.jar.length;
     expect(new TextEncoder().encode(JSON.stringify(tooLarge)).byteLength).toBeGreaterThan(

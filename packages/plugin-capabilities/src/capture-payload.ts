@@ -42,6 +42,7 @@ import { z } from "zod";
  * JavaScript UTF-16 code-unit counts. */
 export const MAX_COOKIE_NAME_BYTES = 256;
 export const MAX_COOKIE_VALUE_BYTES = 4096;
+export const MAX_COOKIE_PAIR_BYTES = 4096;
 export const MAX_COOKIE_COUNT = 180;
 export const MAX_CAPTURE_PAYLOAD_BYTES = 256 * 1024;
 const MAX_DOMAIN_BYTES = 253;
@@ -128,6 +129,13 @@ const capturedCookieObjectSchema = z
   })
   .strict()
   .superRefine((cookie, ctx) => {
+    if (utf8ByteLength(cookie.name) + utf8ByteLength(cookie.value) > MAX_COOKIE_PAIR_BYTES) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["value"],
+        message: `cookie name + value exceeds ${MAX_COOKIE_PAIR_BYTES} UTF-8 bytes`,
+      });
+    }
     if (cookie.name.startsWith("__Secure-") && cookie.secure !== true) {
       ctx.addIssue({
         code: "custom",
