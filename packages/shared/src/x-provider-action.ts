@@ -26,13 +26,13 @@
  */
 
 import {
+  CanonError,
+  type CanonicalMethod,
   canonicalizeContentType,
   canonicalizeMethod,
   canonicalizeQueryPairs,
-  CanonError,
-  type CanonicalMethod,
-  jcsStringify,
   type JsonValue,
+  jcsStringify,
   normalizePath,
   type QueryPair,
   sha256HexPrefixed,
@@ -131,8 +131,7 @@ export function canonicalizeXOrigin(raw: string): string {
   if (/[^\x00-\x7f]/.test(host))
     throw new CanonError("CANON_ORIGIN_HOST_INVALID", "non-ASCII host");
   let h = host.toLowerCase();
-  if (h.endsWith(".."))
-    throw new CanonError("CANON_ORIGIN_HOST_INVALID", "multiple terminal dots");
+  if (h.endsWith("..")) throw new CanonError("CANON_ORIGIN_HOST_INVALID", "multiple terminal dots");
   if (h.endsWith(".")) h = h.slice(0, -1);
   if (h.startsWith("[")) throw new CanonError("CANON_ORIGIN_HOST_INVALID", "IP literal host");
   if (/^[0-9]+(\.[0-9]+)*$/.test(h))
@@ -318,13 +317,9 @@ export const X_GOLDEN_VECTORS: XGoldenVector[] = [
   {
     id: "XGV-02",
     description: "tweet.create basic text body",
-    action: xa(
-      "POST",
-      "/2/tweets",
-      [],
-      [["content-type", "application/json"]],
-      { text: "hello world" },
-    ),
+    action: xa("POST", "/2/tweets", [], [["content-type", "application/json"]], {
+      text: "hello world",
+    }),
     canonicalActionBytes:
       '{"canonicalBody":{"text":"hello world"},"method":"POST","normalizedPath":"/2/tweets","orderedQueryPairs":[],"origin":"https://api.x.com","profile":"x.provider-action.v1","selectedHeaders":[["content-type","application/json"]]}',
     actionDigest: "sha256:7a37b4b65790940602d89529ec31198810046eaaaeea5a14a83740595cabd1f6",
@@ -353,13 +348,9 @@ export const X_GOLDEN_VECTORS: XGoldenVector[] = [
   {
     id: "XGV-05",
     description: "tweet.create trims surrounding whitespace to authoritative body",
-    action: xa(
-      "POST",
-      "/2/tweets",
-      [],
-      [["content-type", "application/json"]],
-      { text: "spaced out" },
-    ),
+    action: xa("POST", "/2/tweets", [], [["content-type", "application/json"]], {
+      text: "spaced out",
+    }),
     canonicalActionBytes:
       '{"canonicalBody":{"text":"spaced out"},"method":"POST","normalizedPath":"/2/tweets","orderedQueryPairs":[],"origin":"https://api.x.com","profile":"x.provider-action.v1","selectedHeaders":[["content-type","application/json"]]}',
     actionDigest: "sha256:13cb864da52a15a468bf3945de99d00a36c09479a3b4678acdf0ae2d86852397",
