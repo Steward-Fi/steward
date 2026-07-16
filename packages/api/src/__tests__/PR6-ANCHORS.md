@@ -63,3 +63,15 @@ PR3/PR4/PR5 (§10). Verified against actual develop tip `d2bf7ce`.
   was not needed; PR3 retrofitted `resource_id` onto the genesis events (D2
   resolved the honest way), so PR5 needed no fallback index. PR6 accounts for
   migrations ending at 0082.
+
+## Codex review round 1 (resolved)
+
+Codex flagged 3 contract mismatches in the added CLI/dashboard surfaces (fixed):
+- **[P1]** dashboard approve/deny omitted the route-required `idempotencyKey`
+  (`APPROVAL_FIELD_INVALID`). Now derives a stable per-decision key matching the
+  route's `IDEM_KEY_RE` (`/^[\x21-\x7e]{8,255}$/`).
+- **[P2]** CLI `create` sent `{action, idempotencyKeyHash}`; the route's strict
+  top-level schema accepts `{workspaceId, providerAccountId, operationKey,
+  arguments, idempotencyKey}`. Fixed.
+- **[P2]** CLI `approve/deny` omitted `idempotencyKey`. Fixed (flag or derived).
+All three verified against the exact route validation code (not just the review).
