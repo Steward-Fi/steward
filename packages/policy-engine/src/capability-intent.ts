@@ -89,6 +89,50 @@ export function estimateXPostMicros(hasUrl: boolean): number {
 /** The effect a matching `capability-intent` rule applies. */
 export type CapabilityIntentEffect = "allow" | "deny" | "require-approval";
 
+// ─── Cumulative spend caps (#206, Privy aggregate-limit parity) ───────────────
+//
+// A `cumulativeSpend` constraint bounds the TOTAL money an agent may move through
+// a capability over a trailing time window — the canonical agentic-wallet
+// guardrail a call-count cap cannot express (10 calls moving $1M each pass
+// `maxCallsPerHour: 20`). It mirrors the permissioned-X spend cap already in this
+// file (accumulated window spend + this action's cost, integer micros, deny on
+// breach) but generalizes it to:
+//   - a CONFIGURABLE trailing window (ISO-8601 duration, not a hardcoded hour),
+//   - a declared CURRENCY (no FX — a currency mismatch denies),
+//   - a selectable AGGREGATION SCOPE (operation / agent / grant),
+//   - a per-operation spend value derived ONLY from validated `policyArgs` via a
+//     declared, typed field (never raw JSON; an operation without the declared
+//     field cannot pass a cumulativeSpend-constrained rule → deny, not skip).
+//
+// The trailing-window sum + the atomic reservation that makes concurrent invokes
+// single-winner live in the invoke layer (packages/redis + provider-action
+// service); this module is the fail-closed decision logic + config schema. Absent
+// aggregate context ⇒ DENY (same missing-signal discipline as maxCallsPerHour and
+// the permissioned-X inputs).
+
+/** The aggregation scope a cumulativeSpend cap sums over. */
+export type CumulativeSpendScope = "operation" | "agent" | "grant";
+
+/**
+ * A cumulative (aggregate) spend cap over a trailing window.
+ *   - `window`: ISO-8601 duration (e.g. `PT1H`, `PT24H`, `P1D`, `P7D`). Parsed
+ *     fail-closed to a positive integer number of seconds; a malformed or
+ *     zero/negative duration is a config error (deny at store AND at runtime).
+ *   - `currency`: opaque currency/asset tag (e.g. `USD`, `USDC`). Compared
+ *     verbatim against the operation's spend currency — NO FX conversion. A
+ *     mismatch denies with a stable code.
+ *   - `max`: the cap, an INTEGER in the currency's minor unit (micros/cents —
+ *     the caller's convention). No floats. Non-negative.
+ *   - `aggregateOver`: which trailing-window sum to compare against — the
+ *     per-operation sum, the whole-agent sum, or the per-grant sum.
+ */
+export interface CumulativeSpendConstraint {
+  readonly window: string;
+  readonly currency: string;
+  readonly max: number;
+  readonly aggregateOver: CumulativeSpendScope;
+}
+
 // ─── Permissioned-X constraint sub-block (X-only) ──────────────────────────
 //
 // This is the instance-level X policy vocabulary X's native OAuth2 scopes cannot
@@ -162,8 +206,34 @@ export interface CapabilityIntentConstraints {
    * `ctx.capabilityInvokeCount1h` (NOT the tx counter). If this is set but the
    * count is absent, the rule DENIES (fail closed) — the invoke layer (W-1c)
    * must wire the count.
+   *
+   * BACKWARD COMPAT (#206): this remains the hardcoded-1h count cap and keeps
+   * working unchanged. For a configurable window use {@link maxCalls} +
+   * {@link callWindow}. `maxCallsPerHour` and `maxCalls` are mutually exclusive
+   * (both set => config error) so there is exactly one count cap per rule.
    */
   readonly maxCallsPerHour?: number;
+  /**
+   * Configurable count cap (#206): max capability invokes over the trailing
+   * window {@link callWindow}. Evaluated against the invoke-count the invoke
+   * layer supplies for THAT window; absent count => DENY (fail closed, same as
+   * `maxCallsPerHour`). Requires {@link callWindow}. Mutually exclusive with
+   * `maxCallsPerHour`.
+   */
+  readonly maxCalls?: number;
+  /**
+   * ISO-8601 duration for {@link maxCalls} (e.g. `PT1H`, `PT30M`, `P1D`). Parsed
+   * fail-closed to a positive integer number of seconds. Required when `maxCalls`
+   * is set; invalid without `maxCalls`.
+   */
+  readonly callWindow?: string;
+  /**
+   * Cumulative (aggregate) spend cap over a trailing window (#206). Evaluated
+   * against the trailing-window spend sum the invoke layer supplies for the
+   * configured {@link CumulativeSpendConstraint.aggregateOver} scope; absent
+   * aggregate => DENY (fail closed). See {@link CumulativeSpendConstraint}.
+   */
+  readonly cumulativeSpend?: CumulativeSpendConstraint;
   /**
    * Every key must exist in `ctx.capability.args` and STRICTLY (===) equal the
    * configured string. A missing arg or a mismatch denies.
@@ -279,10 +349,74 @@ function recoverSelectorMatch(
 const ALLOWED_CONFIG_KEYS: ReadonlySet<string> = new Set(["capabilities", "effect", "constraints"]);
 const ALLOWED_CONSTRAINT_KEYS: ReadonlySet<string> = new Set([
   "maxCallsPerHour",
+  "maxCalls",
+  "callWindow",
+  "cumulativeSpend",
   "argEquals",
   "argMatches",
   "x",
 ]);
+const ALLOWED_CUMULATIVE_SPEND_KEYS: ReadonlySet<string> = new Set([
+  "window",
+  "currency",
+  "max",
+  "aggregateOver",
+]);
+const CUMULATIVE_SPEND_SCOPES: ReadonlySet<string> = new Set(["operation", "agent", "grant"]);
+
+/**
+ * Parse a restricted ISO-8601 duration into a positive integer number of
+ * seconds, or `null` on ANY malformed / zero / negative / non-integer input
+ * (fail closed).
+ *
+ * SUPPORTED SUBSET (deliberately restricted so the parse is total + auditable):
+ *   `P[nD]T[nH][nM][nS]` and the time-only `PT[nH][nM][nS]` — integer,
+ *   non-negative components; at least one component must be present and the
+ *   total must be > 0. Weeks (`PnW`) are also accepted as a standalone form.
+ *   Years/months (`PnY`, `PnM` in the DATE position) are REJECTED: their second
+ *   count is not fixed, so a spend WINDOW over them would be ambiguous (a money
+ *   gate must never rest on an ambiguous window length).
+ *
+ * Examples: `PT1H`->3600, `PT24H`->86400, `P1D`->86400, `P7D`->604800,
+ *           `PT30M`->1800, `P1W`->604800. `P0D`/`PT0S`/`P`/`PT`/`P1M` (month) -> null.
+ */
+function parseIso8601DurationSeconds(input: unknown): number | null {
+  if (typeof input !== "string" || input.length === 0) return null;
+  // Weeks form: PnW (standalone, no other components).
+  const weeks = /^P(\d+)W$/.exec(input);
+  if (weeks) {
+    const n = Number(weeks[1]);
+    if (!Number.isSafeInteger(n) || n <= 0) return null;
+    return n * 604800;
+  }
+  // Date(days-only) + time form. Reject Y/M (ambiguous length) by not matching
+  // them at all. Require the T section to be absent OR non-empty.
+  const m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(input);
+  if (!m) return null;
+  const [, dStr, hStr, mStr, sStr] = m;
+  // Must carry at least one component; a bare "P" or "PT" is meaningless.
+  if (
+    dStr === undefined &&
+    hStr === undefined &&
+    mStr === undefined &&
+    sStr === undefined
+  ) {
+    return null;
+  }
+  // If a `T` was written it must be followed by at least one time component: the
+  // regex allows "PT" (all time groups undefined) with a days component, but a
+  // bare "PT" (no days, no time) is caught by the all-undefined guard above.
+  const days = dStr === undefined ? 0 : Number(dStr);
+  const hours = hStr === undefined ? 0 : Number(hStr);
+  const mins = mStr === undefined ? 0 : Number(mStr);
+  const secs = sStr === undefined ? 0 : Number(sStr);
+  for (const n of [days, hours, mins, secs]) {
+    if (!Number.isSafeInteger(n) || n < 0) return null;
+  }
+  const total = days * 86400 + hours * 3600 + mins * 60 + secs;
+  if (!Number.isSafeInteger(total) || total <= 0) return null;
+  return total;
+}
 
 // Permissioned-X allowed keys (fail closed on any typo).
 const ALLOWED_X_KEYS: ReadonlySet<string> = new Set([
@@ -567,6 +701,72 @@ function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: strin
       }
     }
 
+    // Configurable count cap (#206): maxCalls + callWindow. Mutually exclusive
+    // with maxCallsPerHour so there is exactly one count cap per rule (avoid an
+    // ambiguous two-window count gate). Both require the other.
+    if (c.maxCalls !== undefined || c.callWindow !== undefined) {
+      if (c.maxCallsPerHour !== undefined) {
+        return {
+          error:
+            "capability-intent: `constraints.maxCalls`/`callWindow` cannot be combined with `maxCallsPerHour` (use one count cap)",
+        };
+      }
+      if (c.maxCalls === undefined || c.callWindow === undefined) {
+        return {
+          error:
+            "capability-intent: `constraints.maxCalls` and `constraints.callWindow` must be set together",
+        };
+      }
+      if (!isNonNegInt(c.maxCalls)) {
+        return {
+          error: "capability-intent: `constraints.maxCalls` must be a non-negative integer",
+        };
+      }
+      if (typeof c.callWindow !== "string" || parseIso8601DurationSeconds(c.callWindow) === null) {
+        return {
+          error:
+            "capability-intent: `constraints.callWindow` must be a positive ISO-8601 duration (e.g. PT1H, P1D)",
+        };
+      }
+    }
+
+    // Cumulative spend cap (#206).
+    if (c.cumulativeSpend !== undefined) {
+      const cs = c.cumulativeSpend;
+      if (!isPlainObject(cs)) {
+        return { error: "capability-intent: `constraints.cumulativeSpend` must be an object" };
+      }
+      const unknownCs = Object.keys(cs).filter((k) => !ALLOWED_CUMULATIVE_SPEND_KEYS.has(k));
+      if (unknownCs.length > 0) {
+        return {
+          error: `capability-intent: unknown constraints.cumulativeSpend key(s): ${unknownCs.join(", ")}`,
+        };
+      }
+      if (typeof cs.window !== "string" || parseIso8601DurationSeconds(cs.window) === null) {
+        return {
+          error:
+            "capability-intent: `cumulativeSpend.window` must be a positive ISO-8601 duration (e.g. PT24H, P1D)",
+        };
+      }
+      if (typeof cs.currency !== "string" || cs.currency.length === 0) {
+        return {
+          error: "capability-intent: `cumulativeSpend.currency` must be a non-empty string",
+        };
+      }
+      if (!isNonNegInt(cs.max)) {
+        return {
+          error:
+            "capability-intent: `cumulativeSpend.max` must be a non-negative integer (minor units; no floats)",
+        };
+      }
+      if (typeof cs.aggregateOver !== "string" || !CUMULATIVE_SPEND_SCOPES.has(cs.aggregateOver)) {
+        return {
+          error:
+            'capability-intent: `cumulativeSpend.aggregateOver` must be "operation" | "agent" | "grant"',
+        };
+      }
+    }
+
     if (c.argEquals !== undefined && !isStringRecord(c.argEquals)) {
       return { error: "capability-intent: `constraints.argEquals` must be Record<string,string>" };
     }
@@ -583,6 +783,19 @@ function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: strin
 
     constraints = {
       ...(c.maxCallsPerHour !== undefined ? { maxCallsPerHour: c.maxCallsPerHour as number } : {}),
+      ...(c.maxCalls !== undefined ? { maxCalls: c.maxCalls as number } : {}),
+      ...(c.callWindow !== undefined ? { callWindow: c.callWindow as string } : {}),
+      ...(c.cumulativeSpend !== undefined
+        ? {
+            cumulativeSpend: {
+              window: (c.cumulativeSpend as Record<string, unknown>).window as string,
+              currency: (c.cumulativeSpend as Record<string, unknown>).currency as string,
+              max: (c.cumulativeSpend as Record<string, unknown>).max as number,
+              aggregateOver: (c.cumulativeSpend as Record<string, unknown>)
+                .aggregateOver as CumulativeSpendScope,
+            },
+          }
+        : {}),
       ...(c.argEquals !== undefined ? { argEquals: c.argEquals as Record<string, string> } : {}),
       ...(c.argMatches !== undefined ? { argMatches: c.argMatches as Record<string, string> } : {}),
       ...(xConstraints !== undefined ? { x: xConstraints } : {}),
@@ -664,6 +877,29 @@ function evaluateConstraints(
         };
       }
     }
+  }
+
+  // Configurable count cap + cumulativeSpend (#206) are evaluated ONLY on the
+  // provider-action plane (composeProviderActionPolicyDecision), which wires the
+  // windowed count + spend aggregate + operation spend declaration. The legacy
+  // EvaluatorContext (tx-sign path) carries none of those signals, so a rule
+  // that declares them here CANNOT be evaluated => FAIL CLOSED (deny), never a
+  // silent pass. This mirrors the missing-signal discipline of maxCallsPerHour.
+  if (constraints.maxCalls !== undefined || constraints.callWindow !== undefined) {
+    return {
+      ...base,
+      passed: false,
+      reason:
+        "capability-intent: maxCalls/callWindow requires the provider-action plane (windowed invoke count not wired on this path)",
+    };
+  }
+  if (constraints.cumulativeSpend !== undefined) {
+    return {
+      ...base,
+      passed: false,
+      reason:
+        "capability-intent: cumulativeSpend requires the provider-action plane (spend aggregate not wired on this path)",
+    };
   }
 
   // maxCallsPerHour: evaluate against the capability-invoke counter. Absent
@@ -974,6 +1210,14 @@ export const PROVIDER_POLICY_REASON = {
   X_RATE_CAP_EXCEEDED: "POLICY_X_RATE_CAP_EXCEEDED",
   X_SPEND_CAP_EXCEEDED: "POLICY_X_SPEND_CAP_EXCEEDED",
   X_QUIET_HOURS: "POLICY_X_QUIET_HOURS",
+  // Cumulative-spend cap reason codes (#206). Bounded, stable set (no unbounded
+  // labels): one for the breach, one for a missing declared spend field, one for
+  // a currency mismatch. Missing aggregate context reuses INPUT_UNAVAILABLE and a
+  // malformed config reuses CONFIGURATION_INVALID (the house allowlist already
+  // carries both), so no new labels are minted for those.
+  CUMULATIVE_SPEND_CAP_EXCEEDED: "POLICY_CUMULATIVE_SPEND_CAP_EXCEEDED",
+  CUMULATIVE_SPEND_NO_SPEND_FIELD: "POLICY_CUMULATIVE_SPEND_NO_SPEND_FIELD",
+  CUMULATIVE_SPEND_CURRENCY_MISMATCH: "POLICY_CUMULATIVE_SPEND_CURRENCY_MISMATCH",
 } as const;
 
 export type ProviderPolicyEffect = "hard_deny" | "approval_required" | "allow";
@@ -991,6 +1235,15 @@ export interface ProviderPolicyContext {
   /** Authoritative trailing-hour invoke count. `undefined` => input
    *  unavailable => fail closed (hard_deny, POLICY_INPUT_UNAVAILABLE). */
   readonly invokeCount1h?: number;
+  /**
+   * Authoritative invoke count over the rule's configurable `callWindow` (#206),
+   * supplied by the invoke layer for the exact window the rule declares.
+   * `undefined` when a `maxCalls` rule is present but the count is unwired =>
+   * fail closed (POLICY_INPUT_UNAVAILABLE). Kept separate from `invokeCount1h`
+   * so the hardcoded-hour cap and the configurable-window cap never borrow each
+   * other's counter.
+   */
+  readonly windowedInvokeCount?: number;
   /**
    * IN-MEMORY-ONLY tweet text for `contentPolicy.blockedPatterns` matching.
    * Deliberately NOT part of {@link args} (which is validated scalars only) and
@@ -1013,6 +1266,43 @@ export interface ProviderPolicyContext {
     readonly accumulatedSpendMicros?: number;
     /** authoritative current minute-of-day UTC, 0..1439 (used by quietHours). */
     readonly nowMinuteUtc?: number;
+  };
+  /**
+   * The operation's DECLARED spend field (#206). The operation — not the caller
+   * — declares which validated `policyArgs` field carries the per-invoke spend
+   * amount and what currency it is denominated in. The composer reads the amount
+   * ONLY from `args[spendDeclaration.field]` (validated scalars, never raw JSON).
+   *
+   * `undefined` => the operation declares NO spend field. A `cumulativeSpend`
+   * rule on such an operation cannot be evaluated => DENY
+   * (POLICY_CUMULATIVE_SPEND_NO_SPEND_FIELD), never skipped. Operations that
+   * cannot move money simply never carry a declaration and so can never be
+   * governed by a spend cap by accident.
+   */
+  readonly spendDeclaration?: {
+    /** the `policyArgs` key holding the integer minor-unit spend amount. */
+    readonly field: string;
+    /** the currency/asset tag this amount is denominated in (verbatim compare). */
+    readonly currency: string;
+  };
+  /**
+   * Authoritative trailing-window spend aggregates (#206), keyed by the
+   * cumulativeSpend scope. Each entry is the ALREADY-COMMITTED (or
+   * reserved-and-committed) integer minor-unit sum over the rule's trailing
+   * window for that scope, in the operation's currency. The composer adds THIS
+   * invoke's spend on top and compares against the cap.
+   *
+   * `undefined` (the whole block OR the specific scope) => the aggregate is not
+   * wired for that scope => DENY (POLICY_INPUT_UNAVAILABLE). Steward never
+   * assumes a zero prior sum: an absent aggregate is a missing signal, not an
+   * empty window. The invoke layer supplies only the scopes its governing rules
+   * actually request, computed under the atomic reservation discipline so two
+   * concurrent invokes cannot both pass when their sum exceeds the cap.
+   */
+  readonly cumulativeSpend?: {
+    readonly operation?: number;
+    readonly agent?: number;
+    readonly grant?: number;
   };
 }
 
@@ -1231,6 +1521,101 @@ function evaluateProviderConstraints(
     if (typeof count !== "number" || !Number.isFinite(count))
       return PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE;
     if (count >= constraints.maxCallsPerHour) return PROVIDER_POLICY_REASON.HARD_DENY;
+  }
+
+  // Configurable count cap (#206): maxCalls over the trailing callWindow. The
+  // invoke layer supplies the count for THAT window via ctx.windowedInvokeCount;
+  // absent => fail closed (same discipline as maxCallsPerHour). A malformed
+  // callWindow is already rejected at store time, but re-validate at runtime so a
+  // hand-edited row cannot slip an unbounded window past the gate.
+  if (constraints.maxCalls !== undefined) {
+    if (
+      typeof constraints.callWindow !== "string" ||
+      parseIso8601DurationSeconds(constraints.callWindow) === null
+    ) {
+      return PROVIDER_POLICY_REASON.CONFIGURATION_INVALID;
+    }
+    const count = ctx.windowedInvokeCount;
+    if (typeof count !== "number" || !Number.isFinite(count))
+      return PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE;
+    if (count >= constraints.maxCalls) return PROVIDER_POLICY_REASON.HARD_DENY;
+  }
+
+  // Cumulative spend cap (#206).
+  if (constraints.cumulativeSpend !== undefined) {
+    const csReason = evaluateCumulativeSpend(constraints.cumulativeSpend, ctx);
+    if (csReason) return csReason;
+  }
+  return null;
+}
+
+/**
+ * Evaluate a cumulativeSpend cap against the provider-policy context. Returns a
+ * stable reason code on failure, or null when the cap holds. FAIL CLOSED in
+ * every ambiguous case:
+ *   - config window malformed at runtime (hand-edited row)  => CONFIGURATION_INVALID
+ *   - operation declares no spend field                      => NO_SPEND_FIELD
+ *   - the declared field is absent / not a non-negative int  => INPUT_UNAVAILABLE
+ *   - the operation currency != the cap currency (no FX)     => CURRENCY_MISMATCH
+ *   - the trailing-window aggregate for the scope is absent   => INPUT_UNAVAILABLE
+ *   - projected (aggregate + this spend) > max               => CAP_EXCEEDED
+ *
+ * Integer math only. `max` and every amount are minor units (micros/cents); the
+ * projected sum is computed with Number but every input is a validated safe
+ * integer and the comparison is exact for values within Number.MAX_SAFE_INTEGER
+ * (guarded below). No floats, no FX.
+ */
+function evaluateCumulativeSpend(
+  cs: CumulativeSpendConstraint,
+  ctx: ProviderPolicyContext,
+): string | null {
+  // Re-validate the window at runtime (store-time already rejected malformed).
+  if (parseIso8601DurationSeconds(cs.window) === null) {
+    return PROVIDER_POLICY_REASON.CONFIGURATION_INVALID;
+  }
+  if (!isNonNegInt(cs.max)) {
+    return PROVIDER_POLICY_REASON.CONFIGURATION_INVALID;
+  }
+
+  // The operation MUST declare a spend field; otherwise a spend cap cannot be
+  // evaluated and the action is denied (never silently skipped).
+  const decl = ctx.spendDeclaration;
+  if (!decl || typeof decl.field !== "string" || typeof decl.currency !== "string") {
+    return PROVIDER_POLICY_REASON.CUMULATIVE_SPEND_NO_SPEND_FIELD;
+  }
+
+  // No FX: the operation's spend currency must match the cap's currency exactly.
+  if (decl.currency !== cs.currency) {
+    return PROVIDER_POLICY_REASON.CUMULATIVE_SPEND_CURRENCY_MISMATCH;
+  }
+
+  // Spend derives ONLY from the validated policyArgs field the operation
+  // declared — never from raw JSON. Absent / non-integer / negative => fail
+  // closed (we cannot price the action, so we cannot let it through a spend cap).
+  const rawSpend = Object.hasOwn(ctx.args, decl.field) ? ctx.args[decl.field] : undefined;
+  if (!isNonNegInt(rawSpend)) {
+    return PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE;
+  }
+  const thisSpend = rawSpend;
+
+  // The trailing-window aggregate for the configured scope. Absent block OR
+  // absent scope entry => missing signal => deny (never assume a zero window).
+  const agg = ctx.cumulativeSpend;
+  if (!agg) return PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE;
+  const priorSum = agg[cs.aggregateOver];
+  if (!isNonNegInt(priorSum)) {
+    return PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE;
+  }
+
+  // Integer projected sum. Guard against exceeding safe-integer range so the
+  // comparison stays exact; an overflow fails closed rather than silently
+  // wrapping past the cap.
+  const projected = priorSum + thisSpend;
+  if (!Number.isSafeInteger(projected)) {
+    return PROVIDER_POLICY_REASON.CUMULATIVE_SPEND_CAP_EXCEEDED;
+  }
+  if (projected > cs.max) {
+    return PROVIDER_POLICY_REASON.CUMULATIVE_SPEND_CAP_EXCEEDED;
   }
   return null;
 }
