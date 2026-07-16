@@ -54,13 +54,13 @@ proof "M1 weaken threshold compare (boundary N-1)" "$Q" "boundary: first approva
 # M2: DROP DISTINCTNESS. Skip the same-approver duplicate short-circuit so a
 #     repeated approver would count again. The duplicate-approver test must fail.
 proof "M2 drop distinctness (duplicate approver)" "$Q" "duplicate approver" "$SVC" \
-  's/return fail("APPROVAL_DUPLICATE_APPROVER", 409);/existing.decisionIdempotencyKeyHash === existing.decisionIdempotencyKeyHash;/'
+  '1590s/return fail("APPROVAL_DUPLICATE_APPROVER", 409);/return { ok: true, httpStatus: 200, id: binding.intentId, status: binding.status, version: binding.bindingRevision, requestHash: binding.requestHash, actionDigest: binding.actionDigest };/'
 
 # M3: DROP REQUESTER-SEPARATION. Let the requester (agent owner) count toward the
 #     quorum by neutralizing the owner==approver guard in the quorum branch. The
 #     "requester can never count" test must fail.
 proof "M3 drop requester-separation (requester as approver)" "$Q" "can never count toward the quorum" "$SVC" \
-  '856s/if (agent?.ownerUserId \&\& agent.ownerUserId === userId) {/if (false) {/'
+  '922s/if (agent?.ownerUserId \&\& agent.ownerUserId === userId) {/if (false) {/'
 
 # M4: SKIP STALENESS ON THE SET. Bypass the approve-path dependency staleness so
 #     a mutated committed dependency after the first approval would NOT stale the
@@ -72,13 +72,13 @@ proof "M4 skip staleness on set (stale-after-first)" "$Q" "stale after first app
 #     the immediate-termination branch, so a deny no longer terminates the whole
 #     approval. The deny-after-partial-quorum test must fail.
 proof "M5 drop deny-terminates (deny after partial)" "$Q" "deny after a partial quorum terminates" "$SVC" \
-  '1589s/if (input.decision === "deny") {/if (false) {/'
+  '1657s/if (input.decision === "deny") {/if (false) {/'
 
 # M6: DROP ELIGIBLE-SET MEMBERSHIP. Accept any role-holder as an eligible quorum
 #     approver even if they are not on the frozen eligible set. The
 #     ineligible-Nth-approver (not in set) test must fail.
 proof "M6 drop eligible-set membership (ineligible Nth approver)" "$Q" "not in eligible set" "$SVC" \
-  '871s/if (!eligible.includes(userId)) {/if (false) {/'
+  '937s/if (!eligible.includes(userId)) {/if (false) {/'
 
 echo ""
 echo "==================================================="

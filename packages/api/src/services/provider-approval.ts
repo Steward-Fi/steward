@@ -205,6 +205,72 @@ export async function buildApprovalArm(args: {
     ) {
       throw new ApprovalArmError("APPROVAL_QUORUM_CONFIG_INVALID");
     }
+
+    // FAIL CLOSED AT STORE TIME on an UNREACHABLE quorum (codex P2): a
+    // structurally-valid eligible set can still be unsatisfiable if some listed
+    // ids are not real workspace_approvers, are not tenant members, or is the
+    // requester (agent owner) — all of whom are rejected at decide time. Compute
+    // the count of ids that are ACTUALLY able to vote right now (distinct tenant
+    // member + active in-window workspace_approver role for this workspace, and
+    // NOT the requesting agent's owner) and require it to be >= threshold. This
+    // makes it impossible to persist a quorum that can never complete.
+    const [wsRow] = await tx
+      .select({ environment: workspaces.environment })
+      .from(workspaces)
+      .where(and(eq(workspaces.tenantId, args.tenantId), eq(workspaces.id, args.workspaceId)))
+      .limit(1);
+    if (!wsRow) {
+      throw new ApprovalArmError("APPROVAL_QUORUM_CONFIG_INVALID");
+    }
+    const [ownerRow] = await tx
+      .select({ ownerUserId: agents.ownerUserId })
+      .from(agents)
+      .where(and(eq(agents.tenantId, args.tenantId), eq(agents.id, args.actorAgentId)))
+      .limit(1);
+    const requesterOwner = ownerRow?.ownerUserId ?? null;
+    const now = new Date();
+    let eligibleVoters = 0;
+    for (const uid of ids) {
+      // Requester (agent owner) can never count toward the quorum.
+      if (requesterOwner && uid === requesterOwner) continue;
+      // Must be a tenant member.
+      const [membership] = await tx
+        .select({ id: userTenants.id })
+        .from(userTenants)
+        .where(and(eq(userTenants.userId, uid), eq(userTenants.tenantId, args.tenantId)))
+        .limit(1);
+      if (!membership) continue;
+      // Must hold an active, in-window workspace_approver role for THIS workspace
+      // and its current environment.
+      const roleRows = await tx
+        .select({
+          roleKey: providerRoleBindings.roleKey,
+          notBefore: providerRoleBindings.notBefore,
+          expiresAt: providerRoleBindings.expiresAt,
+          environment: providerRoleBindings.environment,
+        })
+        .from(providerRoleBindings)
+        .where(
+          and(
+            eq(providerRoleBindings.tenantId, args.tenantId),
+            eq(providerRoleBindings.workspaceId, args.workspaceId),
+            eq(providerRoleBindings.principalType, "human"),
+            eq(providerRoleBindings.principalId, uid),
+            eq(providerRoleBindings.status, "active"),
+          ),
+        );
+      const canVote = roleRows.some(
+        (r) =>
+          r.roleKey === "workspace_approver" &&
+          (!r.notBefore || r.notBefore <= now) &&
+          (!r.expiresAt || r.expiresAt > now) &&
+          (!r.environment || r.environment === wsRow.environment),
+      );
+      if (canVote) eligibleVoters += 1;
+    }
+    if (eligibleVoters < quorum.threshold) {
+      throw new ApprovalArmError("APPROVAL_QUORUM_CONFIG_INVALID");
+    }
   }
 
   const commitment: ProviderApprovalCommitmentV1 = {
@@ -1443,6 +1509,8 @@ class ProviderApprovalService {
     } catch (e) {
       if (e instanceof AuditUnavailableError)
         return fail("EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE", 503);
+      // #205: a quorum loser that rolled back its non-counted evidence row.
+      if (e instanceof QuorumStateConflictError) return fail("APPROVAL_STATE_CONFLICT", 409);
       return fail("APPROVAL_PERSISTENCE_FAILED", 503);
     }
   }
@@ -1606,7 +1674,9 @@ class ProviderApprovalService {
         })
         .where(and(eq(approvalQueue.id, queue.id), eq(approvalQueue.status, "pending")))
         .returning({ id: approvalQueue.id });
-      if (upd.length === 0) return fail("APPROVAL_STATE_CONFLICT", 409);
+      // Post-insert conflict: roll back the evidence row we just wrote (throw,
+      // don't return) so a non-counted deny row is never committed.
+      if (upd.length === 0) throw new QuorumStateConflictError();
 
       await tx
         .update(providerActionBindings)
@@ -1689,9 +1759,11 @@ class ProviderApprovalService {
       .returning({ count: approvalQueue.quorumApprovalsCount });
     if (bumped.length === 0) {
       // The queue is no longer pending or already at threshold: a concurrent
-      // winner completed (or terminated) the quorum. The distinct decision row
-      // we inserted is retained as evidence but does not advance a completed set.
-      return fail("APPROVAL_STATE_CONFLICT", 409);
+      // winner completed (or terminated) the quorum. Roll back the evidence row
+      // we just inserted (throw, don't return) so a vote that did not advance the
+      // tally is never committed — the approvals table stays consistent with the
+      // queue tally + terminal state.
+      throw new QuorumStateConflictError();
     }
     const countAfter = bumped[0].count as number;
 
@@ -1728,9 +1800,9 @@ class ProviderApprovalService {
         )
         .returning({ id: approvalQueue.id });
       // Guarded single-winner: if a concurrent Nth approval already flipped the
-      // queue to approved, this loses. Our tally increment still counted, but we
-      // do NOT advance the binding twice.
-      if (qUpd.length === 0) return fail("APPROVAL_STATE_CONFLICT", 409);
+      // queue to approved, this loses. Roll back the whole tx (throw) so neither
+      // the tally bump nor the evidence row is committed by the loser.
+      if (qUpd.length === 0) throw new QuorumStateConflictError();
 
       const bUpd = await tx
         .update(providerActionBindings)
@@ -1749,7 +1821,7 @@ class ProviderApprovalService {
           ),
         )
         .returning({ intentId: providerActionBindings.intentId });
-      if (bUpd.length === 0) return fail("APPROVAL_STATE_CONFLICT", 409);
+      if (bUpd.length === 0) throw new QuorumStateConflictError();
 
       await tx
         .update(intents)
@@ -2160,6 +2232,21 @@ class ProviderApprovalService {
 // ── module helpers ──
 
 class AuditUnavailableError extends Error {}
+
+/**
+ * #205: thrown from the quorum decide path AFTER the provider_action_approvals
+ * evidence row has been inserted, when the guarded queue transition (tally CAS /
+ * pending->approved / deny) loses to a concurrent winner. Throwing (rather than
+ * returning fail()) rolls back the whole transaction so the non-counted evidence
+ * row is NEVER committed — the approvals table stays consistent with the queue
+ * tally and terminal state. The outer catch maps it to APPROVAL_STATE_CONFLICT.
+ */
+class QuorumStateConflictError extends Error {
+  constructor() {
+    super("APPROVAL_STATE_CONFLICT");
+    this.name = "QuorumStateConflictError";
+  }
+}
 
 type ApprovalAuditAppend = (event: { tenantId: string } & Record<string, unknown>) => Promise<void>;
 

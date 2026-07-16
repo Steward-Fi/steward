@@ -410,6 +410,47 @@ describe("#205 M-of-N quorum approval", () => {
     }
   });
 
+  // ── unreachable quorum fails closed at store time (codex P2) ─────────────
+  test("unreachable quorum (eligible ids that cannot vote) fails closed at store time", async () => {
+    await wipe();
+    // threshold 2 but the eligible set is [real approver, unknown UUID]: the
+    // unknown id has no workspace_approver role, so only 1 can ever vote < 2.
+    await seedFixture({
+      quorum: {
+        threshold: 2,
+        eligibleApproverUserIds: [F.APPROVER, "cccccccc-0000-4000-8000-000000000099"],
+      },
+    });
+    let threw = false;
+    try {
+      await createApprovalRequired();
+    } catch (e) {
+      threw = true;
+      expect(String((e as Error).message)).toContain("APPROVAL_QUORUM_CONFIG_INVALID");
+    }
+    expect(threw).toBe(true);
+    const rows = await getDb().select().from(approvalQueue);
+    expect(rows.length).toBe(0);
+  });
+
+  test("unreachable quorum where the only extra eligible member is the requester fails closed", async () => {
+    await wipe();
+    // threshold 2, eligible = [APPROVER, APPROVER_2] but APPROVER_2 is the agent
+    // owner (requester) => only 1 can vote (< 2) => reject at store time.
+    await seedFixture({
+      quorum: { threshold: 2, eligibleApproverUserIds: [F.APPROVER, F.APPROVER_2] },
+      agentOwnerUserId: F.APPROVER_2,
+    });
+    let threw = false;
+    try {
+      await createApprovalRequired();
+    } catch (e) {
+      threw = true;
+      expect(String((e as Error).message)).toContain("APPROVAL_QUORUM_CONFIG_INVALID");
+    }
+    expect(threw).toBe(true);
+  });
+
   // ── single-approver regression floor stays untouched ─────────────────────
   test("absent quorum: single-approver approve path is byte-for-byte unchanged", async () => {
     await wipe();
