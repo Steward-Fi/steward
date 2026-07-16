@@ -63,6 +63,7 @@ import {
   workspaces,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { estimateXPostMicros, X_POST_PRICE_TABLE_V1 } from "@stwd/policy-engine";
 import { buildXAction } from "@stwd/provider-x";
 import { eq } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
@@ -386,14 +387,24 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
     expect(JSON.stringify(b)).not.toContain("vibing");
   });
 
-  test("escalation urlPostRequiresApproval: a URL post escalates allow -> approval_required", async () => {
+  test.each([
+    ["bare IPv4", "read 8.8.8.8/x", "escalip1"],
+    ["zero-width split TLD", "read evil.c\u200Bom", "escalzw1"],
+  ])("URL pricing signal and approval escalation cover %s", async (_case, text, nonce) => {
+    const build = buildXAction(OP_TWEET as never, { text });
+    expect(build.policyArgs.hasUrl).toBe(true);
+    expect(estimateXPostMicros(build.policyArgs.hasUrl === true)).toBe(
+      X_POST_PRICE_TABLE_V1.urlMicros,
+    );
+    expect(X_POST_PRICE_TABLE_V1.urlMicros).toBe(200_000);
+
     await seed([
       allowRule("11111111-1111-4111-8111-1111111111d4", {
         contentPolicy: { allowUrls: true },
         escalation: { urlPostRequiresApproval: true },
       }),
     ]);
-    const out = await propose({ text: "read more at https://steward.fi" }, "escal001");
+    const out = await propose({ text }, nonce);
     expect(out.kind).toBe("approval_required");
   });
 
