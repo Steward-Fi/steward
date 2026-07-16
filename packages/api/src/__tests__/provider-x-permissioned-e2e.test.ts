@@ -63,7 +63,14 @@ import {
   workspaces,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { estimateXPostMicros, X_POST_PRICE_TABLE_V1 } from "@stwd/policy-engine";
 import { buildXAction } from "@stwd/provider-x";
+import {
+  computeXActionDigest,
+  jcsStringify,
+  sha256HexPrefixed,
+  xCanonicalActionBytes,
+} from "@stwd/shared";
 import { eq } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import { providerActionService } from "../services/provider-action-service";
@@ -305,6 +312,21 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
     expect(b.status).not.toBe("stub_succeeded");
   });
 
+  test.each([
+    ["bare IPv4", "visit 192.168.1.1/x now", "ipdeny01"],
+    ["zero-width split TLD", "visit evil.c\u200Bom now", "zwdeny01"],
+  ])("contentPolicy allowUrls=false denies %s through providerActionService", async (_case, text, nonce) => {
+    await seed([
+      allowRule("11111111-1111-4111-8111-1111111111a1", { contentPolicy: { allowUrls: false } }),
+    ]);
+    const out = await propose({ text }, nonce);
+    expect(out.kind).toBe("policy_denied");
+    if (out.kind !== "policy_denied") throw new Error(`got ${out.kind}`);
+    expect(out.code).toBe("POLICY_X_URL_FORBIDDEN");
+    const b = await bindingRow(out.intentId);
+    expect(b.status).not.toBe("stub_succeeded");
+  });
+
   test("contentPolicy allowUrls=false: a plain post is allowed", async () => {
     await seed([
       allowRule("11111111-1111-4111-8111-1111111111a1", { contentPolicy: { allowUrls: false } }),
@@ -371,15 +393,50 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
     expect(JSON.stringify(b)).not.toContain("vibing");
   });
 
-  test("escalation urlPostRequiresApproval: a URL post escalates allow -> approval_required", async () => {
+  test.each([
+    ["bare IPv4", "read 8.8.8.8/x", "escalip1"],
+    ["zero-width split TLD", "read evil.c\u200Bom", "escalzw1"],
+  ])("URL pricing signal and approval escalation cover %s", async (_case, text, nonce) => {
+    const build = buildXAction(OP_TWEET as never, { text });
+    expect(build.policyArgs.hasUrl).toBe(true);
+    expect(estimateXPostMicros(build.policyArgs.hasUrl === true)).toBe(
+      X_POST_PRICE_TABLE_V1.urlMicros,
+    );
+    expect(X_POST_PRICE_TABLE_V1.urlMicros).toBe(200_000);
+
     await seed([
       allowRule("11111111-1111-4111-8111-1111111111d4", {
         contentPolicy: { allowUrls: true },
         escalation: { urlPostRequiresApproval: true },
       }),
     ]);
-    const out = await propose({ text: "read more at https://steward.fi" }, "escal001");
+    const out = await propose({ text }, nonce);
     expect(out.kind).toBe("approval_required");
+  });
+
+  test("control stripping changes only hasUrl, never durable canonical or request identity", async () => {
+    const text = "h\u200Btt\u2060ps://e\u202Evil.c\u00ADom/x";
+    const build = buildXAction(OP_TWEET as never, { text });
+    await seed([
+      allowRule("11111111-1111-4111-8111-1111111111d4", {
+        contentPolicy: { allowUrls: true },
+        escalation: { urlPostRequiresApproval: true },
+      }),
+    ]);
+
+    const out = await propose({ text }, "digest01");
+    expect(out.kind).toBe("approval_required");
+    if (out.kind !== "approval_required") throw new Error(`got ${out.kind}`);
+    const b = await bindingRow(out.intentId);
+    const expectedBytes = xCanonicalActionBytes(build.action);
+    const expectedDigest = computeXActionDigest(build.action);
+
+    expect(build.policyText).toBe(text);
+    expect(build.action.canonicalBody).toEqual({ text });
+    expect(Buffer.from(b.canonicalActionBytes).toString("utf8")).toBe(expectedBytes);
+    expect(b.actionDigest).toBe(expectedDigest);
+    expect(b.requestEnvelope.actionDigest).toBe(expectedDigest);
+    expect(b.requestHash).toBe(sha256HexPrefixed(jcsStringify(b.requestEnvelope)));
   });
 
   test("fail-closed: a spendPolicy rule with unwired accumulated-spend input denies POLICY_INPUT_UNAVAILABLE", async () => {

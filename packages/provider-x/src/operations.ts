@@ -145,10 +145,18 @@ function assertNoLoneSurrogate(v: string, label: string): void {
  * It does NOT attempt X's exact weighted URL model.
  */
 function textHasUrl(text: string): boolean {
+  // Remove format controls that can visually join a host while splitting the
+  // token seen by the detector. This normalized copy is used only for the
+  // derived policy signal. The posted text and canonical digest remain exact.
+  // Include bidi embedding/override/isolate controls as the fail-safe choice.
+  const detectionText = text.replace(/\p{Cf}/gu, "");
   // scheme://... (http, https, ftp, etc.)
-  if (/[a-z][a-z0-9+.-]*:\/\/\S/i.test(text)) return true;
+  if (/[a-z][a-z0-9+.-]*:\/\/\S/i.test(detectionText)) return true;
   // bare www. host
-  if (/\bwww\.[^\s.]+\.[^\s]/i.test(text)) return true;
+  if (/\bwww\.[^\s.]+\.[^\s]/i.test(detectionText)) return true;
+  // Bare IPv4 literal, optionally followed by a path. Deliberately accepts any
+  // four decimal octets rather than risking a false negative on a policy signal.
+  if (/\b\d{1,3}(?:\.\d{1,3}){3}(?:\/\S*)?(?=$|[^\d.])/i.test(detectionText)) return true;
   // bare host.tld optionally with a path. We OVER-DETECT here (fail toward
   // treating an ambiguous token as a URL), because a false negative would let a
   // `contentPolicy.allowUrls:false` / URL-spend / URL-approval policy be BYPASSED
@@ -171,7 +179,7 @@ function textHasUrl(text: string): boolean {
     "vs.the",
   ]);
   const hostRe = /\b([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\.([a-z]{2,})((?:\/\S*)?)/gi;
-  for (const m of text.matchAll(hostRe)) {
+  for (const m of detectionText.matchAll(hostRe)) {
     const label = m[1].toLowerCase();
     const tld = m[2].toLowerCase();
     const hasPath = m[3].length > 0;

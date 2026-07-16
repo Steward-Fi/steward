@@ -201,6 +201,86 @@ describe("x.tweet.create", () => {
     expect(summoned.policyArgs.isReply).toBe(true);
   });
 
+  it("detects bare IPv4 and control-obfuscated URLs without changing canonical text", () => {
+    const urlCorpus = [
+      "visit 192.168.1.1 now",
+      "go 8.8.8.8/x",
+      "8.8.8.8:443/path?q=one#two",
+      "(8.8.8.8),",
+      "//8.8.8.8/path",
+      "even 999.999.999.999 is conservatively URL-shaped",
+      "evil.c\u200Bom",
+      "evil.c\u200Com/path",
+      "evil.c\u200Dom",
+      "evil.c\uFEFFom",
+      "evil.c\u2060om",
+      "evil.c\u202Eom",
+      "evil.c\u2066om",
+      "evil.c\u200Eom",
+      "evil.c\u200Fom",
+      "evil.c\u061Com",
+      "evil.c\u00ADom",
+      "h\u200Btt\u2060ps://example.com/path",
+      "e\u202Evi\u2066l.c\u00AD\uFEFFom/path",
+      "prefix \uFEFFevil\u200B.\u2060com\u200F",
+      "before\r\n\tevil.com\tafter",
+      "HTTPS://EXAMPLE.COM/X",
+      "http://[::1]/x",
+      "https://[2001:4860:4860::8888]/x",
+      "http://2130706433/x",
+      "http://0x7f000001/x",
+      "http://0177.0.0.1/x",
+      "www.example.com",
+      "xn--bcher-kva.example/path",
+    ];
+    for (const text of urlCorpus) {
+      const build = buildXAction("x.tweet.create", { text });
+      expect(build.policyArgs.hasUrl, text).toBe(true);
+      expect(build.action.canonicalBody).toEqual({ text });
+      expect(build.policyText).toBe(text);
+    }
+
+    // Bare exotic IP spellings are not link-shaped in X's public twitter-text
+    // behavior. Scheme-qualified forms above are still detected. Do not classify
+    // bare technical prose as a URL unless X starts autolinking these forms.
+    for (const text of ["[::1]", "2001:4860:4860::8888", "2130706433", "0x7f000001"]) {
+      expect(buildXAction("x.tweet.create", { text }).policyArgs.hasUrl, text).toBe(false);
+    }
+
+    // Four-component versions are intentionally over-detected. This is a
+    // conservative policy estimate, not a billing charge, and configured policy
+    // may deny or escalate rather than allowing a URL-shaped false negative.
+    expect(
+      buildXAction("x.tweet.create", { text: "release 1.2.3.4 today" }).policyArgs.hasUrl,
+    ).toBe(true);
+  });
+
+  it("keeps control-obfuscated text byte-exact in policy text, canonical bytes, and digest", () => {
+    const text = "h\u200Btt\u2060ps://e\u202Evil.c\u00ADom/x";
+    const stripped = text.replace(/\p{Cf}/gu, "");
+    const build = buildXAction("x.tweet.create", { text });
+    const strippedBuild = buildXAction("x.tweet.create", { text: stripped });
+
+    expect(build.policyArgs.hasUrl).toBe(true);
+    expect(build.policyText).toBe(text);
+    expect(build.action.canonicalBody).toEqual({ text });
+    expect(xCanonicalActionBytes(build.action)).toContain(text);
+    expect(xCanonicalActionBytes(build.action)).not.toBe(
+      xCanonicalActionBytes(strippedBuild.action),
+    );
+    expect(computeXActionDigest(build.action)).not.toBe(computeXActionDigest(strippedBuild.action));
+  });
+
+  it("rejects 100KB hostile text before URL regex evaluation within a broad bound", () => {
+    const hostile = "\u202E".repeat(100_000);
+    const started = performance.now();
+    expectCanon(
+      () => buildXAction("x.tweet.create", { text: hostile }),
+      "CANON_FIELD_TYPE_INVALID",
+    );
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
+
   it("rejects a non-boolean summoned arg (fail closed on type)", () => {
     expectCanon(
       () => buildXAction("x.tweet.create", { text: "hi", summoned: "yes" }),
