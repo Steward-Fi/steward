@@ -20,6 +20,10 @@ import {
   capturedCookieSchema,
   captureMetadataSchema,
   capturePayloadSchema,
+  MAX_CAPTURE_PAYLOAD_BYTES,
+  MAX_COOKIE_COUNT,
+  MAX_COOKIE_NAME_BYTES,
+  MAX_COOKIE_VALUE_BYTES,
   redactCapturePayload,
 } from "../capture-payload";
 
@@ -198,10 +202,133 @@ describe("(b) rejections", () => {
     expect(capturePayloadSchema.safeParse(p).success).toBe(false);
   });
 
-  test("an unexpected sameSite value is rejected", () => {
-    const p = realisticXComPayload();
-    p.jar[0]!.sameSite = "definitely_not_a_real_value" as never;
-    expect(capturePayloadSchema.safeParse(p).success).toBe(false);
+  test("an unexpected sameSite value is rejected, including case variants", () => {
+    for (const sameSite of ["definitely_not_a_real_value", "Lax", "None", "NONE"]) {
+      const p = realisticXComPayload();
+      p.jar[0]!.sameSite = sameSite as never;
+      expect(capturePayloadSchema.safeParse(p).success).toBe(false);
+    }
+  });
+
+  test("enforces UTF-8 name/value byte bounds, not only JS string length", () => {
+    expect(
+      capturedCookieSchema.safeParse({ name: "n".repeat(MAX_COOKIE_NAME_BYTES), value: "" })
+        .success,
+    ).toBe(true);
+    expect(
+      capturedCookieSchema.safeParse({ name: "n".repeat(MAX_COOKIE_NAME_BYTES + 1), value: "" })
+        .success,
+    ).toBe(false);
+    expect(
+      capturedCookieSchema.safeParse({ name: "n", value: "x".repeat(MAX_COOKIE_VALUE_BYTES) })
+        .success,
+    ).toBe(true);
+    expect(
+      capturedCookieSchema.safeParse({
+        name: "n",
+        value: "é".repeat(MAX_COOKIE_VALUE_BYTES / 2 + 1),
+      }).success,
+    ).toBe(false);
+  });
+
+  test("rejects oversized jars and oversized serialized payloads", () => {
+    const tooMany = realisticXComPayload();
+    tooMany.jar = Array.from({ length: MAX_COOKIE_COUNT + 1 }, (_, i) => ({
+      name: `c${i}`,
+      value: "x",
+    })) as typeof tooMany.jar;
+    tooMany.metadata.cookieCount = tooMany.jar.length;
+    expect(capturePayloadSchema.safeParse(tooMany).success).toBe(false);
+
+    const tooLarge = realisticXComPayload();
+    tooLarge.jar = Array.from({ length: 80 }, (_, i) => ({
+      name: `c${i}`,
+      value: "x".repeat(MAX_COOKIE_VALUE_BYTES),
+    })) as typeof tooLarge.jar;
+    tooLarge.metadata.cookieCount = tooLarge.jar.length;
+    expect(new TextEncoder().encode(JSON.stringify(tooLarge)).byteLength).toBeGreaterThan(
+      MAX_CAPTURE_PAYLOAD_BYTES,
+    );
+    expect(capturePayloadSchema.safeParse(tooLarge).success).toBe(false);
+  });
+
+  test("requires canonical domains and paths", () => {
+    for (const domain of ["X.COM", "x.com.", " x.com", "-bad.com", ".X.com"]) {
+      expect(capturedCookieSchema.safeParse({ name: "n", value: "v", domain }).success).toBe(false);
+    }
+    expect(
+      capturedCookieSchema.safeParse({ name: "n", value: "v", domain: ".x.com", path: "/api" })
+        .success,
+    ).toBe(true);
+    expect(capturedCookieSchema.safeParse({ name: "n", value: "v", path: "api" }).success).toBe(
+      false,
+    );
+  });
+
+  test("validates expiration precision and session consistency", () => {
+    for (const expirationDate of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.0001]) {
+      expect(
+        capturedCookieSchema.safeParse({ name: "n", value: "v", expirationDate }).success,
+      ).toBe(false);
+    }
+    expect(
+      capturedCookieSchema.safeParse({ name: "n", value: "v", expirationDate: 1.001 }).success,
+    ).toBe(true);
+    expect(
+      capturedCookieSchema.safeParse({ name: "n", value: "v", session: true, expirationDate: 1 })
+        .success,
+    ).toBe(false);
+  });
+
+  test("enforces cookie-prefix and hostOnly invariants", () => {
+    expect(capturedCookieSchema.safeParse({ name: "__Secure-id", value: "v" }).success).toBe(false);
+    expect(
+      capturedCookieSchema.safeParse({ name: "__Secure-id", value: "v", secure: true }).success,
+    ).toBe(true);
+    expect(
+      capturedCookieSchema.safeParse({
+        name: "__Host-id",
+        value: "v",
+        secure: true,
+        path: "/",
+        hostOnly: true,
+      }).success,
+    ).toBe(true);
+    expect(
+      capturedCookieSchema.safeParse({
+        name: "__Host-id",
+        value: "v",
+        secure: true,
+        path: "/",
+        hostOnly: true,
+        domain: "x.com",
+      }).success,
+    ).toBe(false);
+    expect(
+      capturedCookieSchema.safeParse({ name: "n", value: "v", hostOnly: true, domain: ".x.com" })
+        .success,
+    ).toBe(false);
+  });
+
+  test("rejects duplicate cookie identities and inconsistent metadata counts", () => {
+    const duplicate = realisticXComPayload();
+    duplicate.jar.push({ ...duplicate.jar[0]! });
+    duplicate.metadata.cookieCount = duplicate.jar.length;
+    expect(capturePayloadSchema.safeParse(duplicate).success).toBe(false);
+
+    const wrongCount = realisticXComPayload();
+    wrongCount.metadata.cookieCount = 999;
+    expect(capturePayloadSchema.safeParse(wrongCount).success).toBe(false);
+  });
+
+  test("rejects partitioned/SameParty drift and prototype-ish object inputs", () => {
+    for (const key of ["partitioned", "sameParty", "__proto__", "constructor", "prototype"]) {
+      const raw = JSON.parse(`{"name":"n","value":"v","${key}":true}`);
+      expect(capturedCookieSchema.safeParse(raw).success).toBe(false);
+    }
+    for (const name of ["__proto__", "constructor", "prototype"]) {
+      expect(capturedCookieSchema.safeParse({ name, value: "v" }).success).toBe(false);
+    }
   });
 });
 
@@ -309,12 +436,9 @@ describe("(d) no-leak / redaction property", () => {
     expect("jar" in safe).toBe(false);
   });
 
-  test("redactCapturePayload recomputes cookieCount from the jar, not trusting metadata.cookieCount", () => {
-    const p = realisticXComPayload();
-    // metadata LIES about the count; the safe view must reflect the real jar.
-    p.metadata.cookieCount = 999;
-    const parsed = capturePayloadSchema.parse(p);
+  test("redactCapturePayload recomputes cookieCount from the jar", () => {
+    const parsed = capturePayloadSchema.parse(realisticXComPayload());
     const safe = redactCapturePayload(parsed);
-    expect(safe.cookieCount).toBe(4);
+    expect(safe.cookieCount).toBe(parsed.jar.length);
   });
 });

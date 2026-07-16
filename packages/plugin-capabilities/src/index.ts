@@ -46,6 +46,10 @@ export {
   capturePayloadSchema,
   captureScopeSchema,
   captureTtlSchema,
+  MAX_CAPTURE_PAYLOAD_BYTES,
+  MAX_COOKIE_COUNT,
+  MAX_COOKIE_NAME_BYTES,
+  MAX_COOKIE_VALUE_BYTES,
   redactCapturePayload,
   sameSiteSchema,
 } from "./capture-payload";

@@ -35,6 +35,53 @@
 
 import { z } from "zod";
 
+/** Conservative receiver-side resource limits. Chrome does not expose a single
+ * portable cookie-size limit, so these bounds deliberately accept normal
+ * browser cookies while preventing a capture request from becoming an
+ * unbounded allocation or secret-store write. All byte limits are UTF-8, not
+ * JavaScript UTF-16 code-unit counts. */
+export const MAX_COOKIE_NAME_BYTES = 256;
+export const MAX_COOKIE_VALUE_BYTES = 4096;
+export const MAX_COOKIE_COUNT = 180;
+export const MAX_CAPTURE_PAYLOAD_BYTES = 256 * 1024;
+const MAX_DOMAIN_BYTES = 253;
+const MAX_PATH_BYTES = 2048;
+const MAX_STORE_ID_BYTES = 128;
+const MAX_METADATA_STRING_BYTES = 2048;
+const MAX_EXPIRATION_SECONDS = 8_640_000_000_000;
+
+const utf8ByteLength = (value: string): number => new TextEncoder().encode(value).byteLength;
+
+function boundedString(maxBytes: number, label: string, allowEmpty = false) {
+  const base = allowEmpty ? z.string() : z.string().min(1);
+  return base.refine((value) => utf8ByteLength(value) <= maxBytes, {
+    message: `${label} exceeds ${maxBytes} UTF-8 bytes`,
+  });
+}
+
+const cookieNameSchema = boundedString(MAX_COOKIE_NAME_BYTES, "cookie name")
+  .refine(
+    (name) => /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name),
+    "cookie name must use RFC token characters",
+  )
+  .refine(
+    (name) => !["__proto__", "constructor", "prototype"].includes(name),
+    "prototype-like cookie names are not accepted",
+  );
+const cookieValueSchema = boundedString(MAX_COOKIE_VALUE_BYTES, "cookie value", true);
+const domainSchema = boundedString(MAX_DOMAIN_BYTES, "domain").refine((domain) => {
+  const hostname = domain.startsWith(".") ? domain.slice(1) : domain;
+  return (
+    hostname === hostname.toLowerCase() &&
+    !hostname.endsWith(".") &&
+    hostname.split(".").every((label) => /^(?!-)[a-z0-9-]{1,63}(?<!-)$/.test(label))
+  );
+}, "domain must be a canonical lowercase hostname (optional leading dot)");
+const pathSchema = boundedString(MAX_PATH_BYTES, "cookie path").refine(
+  (path) => path.startsWith("/"),
+  "cookie path must start with /",
+);
+
 /**
  * chrome.cookies.SameSiteStatus. the extension passes through whatever chrome
  * reports; the observed set is exactly these four. pinned as an enum so a typo
@@ -54,24 +101,78 @@ export const sameSiteSchema = z.enum(["no_restriction", "lax", "strict", "unspec
  * required: `name`, `value` (a cookie with no name or no value is not a cookie).
  * everything else is optional + never defaulted (fidelity discipline above).
  */
-export const capturedCookieSchema = z
+const capturedCookieObjectSchema = z
   .object({
-    name: z.string().min(1),
+    name: cookieNameSchema,
     // NOTE: value may be an empty string for some cookies; only `name` needs a
-    // min length. a MISSING value, however, is rejected (a cookie must carry a
-    // value field to be a credential worth capturing).
-    value: z.string(),
-    domain: z.string().min(1).optional(),
-    path: z.string().min(1).optional(),
+    // min length. a MISSING value, however, is rejected.
+    value: cookieValueSchema,
+    domain: domainSchema.optional(),
+    path: pathSchema.optional(),
     secure: z.boolean().optional(),
     httpOnly: z.boolean().optional(),
     sameSite: sameSiteSchema.optional(),
-    expirationDate: z.number().optional(),
+    // Chrome reports seconds since epoch and may include millisecond precision.
+    expirationDate: z
+      .number()
+      .finite()
+      .nonnegative()
+      .max(MAX_EXPIRATION_SECONDS)
+      .refine((seconds) => Math.abs(seconds * 1000 - Math.round(seconds * 1000)) < 1e-6, {
+        message: "expirationDate supports at most millisecond precision",
+      })
+      .optional(),
     hostOnly: z.boolean().optional(),
     session: z.boolean().optional(),
-    storeId: z.string().optional(),
+    storeId: boundedString(MAX_STORE_ID_BYTES, "storeId", true).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((cookie, ctx) => {
+    if (cookie.name.startsWith("__Secure-") && cookie.secure !== true) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["secure"],
+        message: "__Secure- cookies must be secure",
+      });
+    }
+    if (
+      cookie.name.startsWith("__Host-") &&
+      (cookie.secure !== true ||
+        cookie.path !== "/" ||
+        cookie.hostOnly !== true ||
+        cookie.domain !== undefined)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "__Host- cookies require secure=true, path=/, hostOnly=true, and no domain",
+      });
+    }
+    if (cookie.hostOnly === true && cookie.domain?.startsWith(".")) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["domain"],
+        message: "hostOnly cookie domain cannot start with .",
+      });
+    }
+    if (cookie.session === true && cookie.expirationDate !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["expirationDate"],
+        message: "session cookie cannot expire",
+      });
+    }
+  });
+
+export const capturedCookieSchema = z.preprocess((input, ctx) => {
+  if (typeof input === "object" && input !== null) {
+    for (const key of ["__proto__", "constructor", "prototype"]) {
+      if (Object.hasOwn(input, key)) {
+        ctx.addIssue({ code: "custom", message: `prototype-like key ${key} is not accepted` });
+      }
+    }
+  }
+  return input;
+}, capturedCookieObjectSchema);
 
 export type CapturedCookie = z.infer<typeof capturedCookieSchema>;
 
@@ -107,16 +208,18 @@ export const captureScopeSchema = z
  */
 export const captureMetadataSchema = z
   .object({
-    domain: z.string().min(1),
-    capturedAt: z.string().min(1),
+    domain: domainSchema.refine((domain) => !domain.startsWith("."), {
+      message: "capture domain cannot start with .",
+    }),
+    capturedAt: z.iso.datetime({ offset: true, precision: 3 }),
     ttl: captureTtlSchema,
     scope: captureScopeSchema,
-    originUA: z.string().nullable(),
-    captureMethod: z.string().min(1),
+    originUA: boundedString(MAX_METADATA_STRING_BYTES, "originUA", true).nullable(),
+    captureMethod: boundedString(128, "captureMethod"),
     // provenance channel tag (jar.js sets 'PROTOTYPE-plaintext-localhost').
     // optional so the schema does not lock the prototype tag as permanent - a
     // sealed-channel push (slice 2) will set a different channel string.
-    channel: z.string().min(1).optional(),
+    channel: boundedString(128, "channel").optional(),
     cookieCount: z.number().int().nonnegative(),
   })
   .strict();
@@ -138,10 +241,47 @@ export type CaptureMetadata = z.infer<typeof captureMetadataSchema>;
  */
 export const capturePayloadSchema = z
   .object({
-    jar: z.array(capturedCookieSchema).min(1, "jar must contain at least one cookie"),
+    jar: z
+      .array(capturedCookieSchema)
+      .min(1, "jar must contain at least one cookie")
+      .max(MAX_COOKIE_COUNT, `jar cannot exceed ${MAX_COOKIE_COUNT} cookies`),
     metadata: captureMetadataSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((payload, ctx) => {
+    if (payload.metadata.cookieCount !== payload.jar.length) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["metadata", "cookieCount"],
+        message: "cookieCount must equal jar length",
+      });
+    }
+
+    const identities = new Set<string>();
+    payload.jar.forEach((cookie, index) => {
+      const identity = JSON.stringify([
+        cookie.name,
+        cookie.domain ?? payload.metadata.domain,
+        cookie.path ?? "/",
+        cookie.storeId ?? "",
+      ]);
+      if (identities.has(identity)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["jar", index],
+          message: "duplicate cookie identity (name/domain/path/storeId)",
+        });
+      }
+      identities.add(identity);
+    });
+
+    if (utf8ByteLength(JSON.stringify(payload)) > MAX_CAPTURE_PAYLOAD_BYTES) {
+      ctx.addIssue({
+        code: "custom",
+        message: `serialized capture exceeds ${MAX_CAPTURE_PAYLOAD_BYTES} UTF-8 bytes`,
+      });
+    }
+  });
 
 export type CapturePayload = z.infer<typeof capturePayloadSchema>;
 
@@ -164,6 +304,10 @@ export const CAPTURED_COOKIE_FIELDS = [
   "session",
   "storeId",
 ] as const;
+
+// Partitioned and SameParty are intentionally absent because the current
+// packageJar/PRESERVED_ATTRS source drops them. Strict parsing fails loudly
+// rather than implying replay fidelity that the extension does not provide.
 
 /**
  * a SAFE / loggable view of a capture payload: cookie NAMES + counts only,
