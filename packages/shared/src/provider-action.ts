@@ -764,8 +764,7 @@ export const PROVIDER_EXECUTION_COMMITMENT_SCHEMA_VERSION =
  * is `HMAC(v1Key, JCS(v1Payload))` with no prefix and a different key, so the two
  * can never be confused (spec §3.1, P12).
  */
-export const PROVIDER_EXECUTION_SIGNATURE_DOMAIN =
-  "steward.execution-authorization.v2\n" as const;
+export const PROVIDER_EXECUTION_SIGNATURE_DOMAIN = "steward.execution-authorization.v2\n" as const;
 
 export interface ProviderExecutionCommitmentTargetV2 {
   scheme: "https";
@@ -908,7 +907,9 @@ export function computeGrantDependencyHash(access: {
     matchedBindings: [...access.matchedBindings]
       .sort(byUuid)
       .map((b) => ({ id: b.id, revision: b.revision })),
-    matchedGrants: [...access.matchedGrants].sort(byUuid).map((g) => ({ id: g.id, revision: g.revision })),
+    matchedGrants: [...access.matchedGrants]
+      .sort(byUuid)
+      .map((g) => ({ id: g.id, revision: g.revision })),
   };
   return sha256HexPrefixed(jcsStringify(doc));
 }
@@ -1020,7 +1021,6 @@ export function buildProviderExecutionCommitmentV2(
     keyId: input.keyId,
   };
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Method canonicalization (section 3.3)

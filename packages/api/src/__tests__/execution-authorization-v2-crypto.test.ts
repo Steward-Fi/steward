@@ -26,7 +26,9 @@ import {
 
 const SHA = "sha256:" + "a".repeat(64);
 
-function commitment(overrides: Partial<ProviderExecutionCommitmentV2> = {}): ProviderExecutionCommitmentV2 {
+function commitment(
+  overrides: Partial<ProviderExecutionCommitmentV2> = {},
+): ProviderExecutionCommitmentV2 {
   return {
     schemaVersion: PROVIDER_EXECUTION_COMMITMENT_SCHEMA_VERSION,
     authorizationId: "auth-1",
@@ -99,7 +101,8 @@ describe("provider execution authorization v2 crypto", () => {
   });
 
   it("keyId rotation: first key signs, all listed keys verify", () => {
-    process.env.STEWARD_EXECUTION_AUTH_SECRET = "k2:new-secret-entropy-abcdef,k1:old-secret-entropy-abcdef";
+    process.env.STEWARD_EXECUTION_AUTH_SECRET =
+      "k2:new-secret-entropy-abcdef,k1:old-secret-entropy-abcdef";
     // Active key is k2 (first).
     expect(activeExecutionAuthV2Key().keyId).toBe("k2");
     const c2 = commitment({ keyId: "k2" });
@@ -111,7 +114,8 @@ describe("provider execution authorization v2 crypto", () => {
     process.env.STEWARD_EXECUTION_AUTH_SECRET = "k1:old-secret-entropy-abcdef";
     const c1 = commitment({ keyId: "k1" });
     const sig1 = signProviderExecutionCommitmentV2(c1);
-    process.env.STEWARD_EXECUTION_AUTH_SECRET = "k2:new-secret-entropy-abcdef,k1:old-secret-entropy-abcdef";
+    process.env.STEWARD_EXECUTION_AUTH_SECRET =
+      "k2:new-secret-entropy-abcdef,k1:old-secret-entropy-abcdef";
     expect(verifyProviderExecutionCommitmentV2(c1, sig1)).toBe(true);
   });
 

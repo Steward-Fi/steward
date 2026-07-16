@@ -16,6 +16,7 @@ import {
   type PolicyRule,
   type SignRequest,
 } from "@stwd/shared";
+
 // PR4 v2 signing crypto lives in @stwd/shared (pure, no DB) so the separate
 // proxy process can verify without depending on @stwd/api. Re-export here for
 // existing api-side callers/tests.
@@ -27,6 +28,7 @@ export {
   signProviderExecutionCommitmentV2,
   verifyProviderExecutionCommitmentV2,
 } from "@stwd/shared";
+
 import { and, eq, sql } from "drizzle-orm";
 
 export const EXECUTION_AUTHORIZATION_TTL_MS = 60_000;
@@ -288,4 +290,3 @@ function base64Url(value: Uint8Array): string {
   const binary = Array.from(value, (byte) => String.fromCharCode(byte)).join("");
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
-

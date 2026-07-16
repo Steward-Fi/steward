@@ -205,7 +205,23 @@ END $fn$;
 -- the states are PR4's, mirroring the G1 "each PR owns the columns/states its
 -- invariants require" adjudication.)
 
--- 3a0. Extend the status allowlist CHECK to admit the PR4 execution states.
+-- 3a0. Widen the canonical-profile CHECK to admit the X adapter profile.
+-- 0080 hardcoded the github literal (`canonical_profile = 'github.provider-action.v1'`),
+-- which blocked X governed bindings from persisting (the five describe.skip E2Es in
+-- provider-x-governed-e2e.test.ts, added by #198, were gated ONLY on this). #196-#198
+-- shipped the X adapter + canonical profile (`x.provider-action.v1`) end to end; the
+-- sole remaining gate was this allowlist. Widening it to an IN-list is a pure additive
+-- relaxation (no existing github row can violate it) and is done here — alongside the
+-- other provider_action_bindings CHECK extensions this migration already performs —
+-- rather than deferring a trivial 2-statement change to 0083. New adapters extend this
+-- list; the pipeline is otherwise adapter-agnostic.
+ALTER TABLE "provider_action_bindings" DROP CONSTRAINT "provider_action_bindings_profile_chk";
+--> statement-breakpoint
+ALTER TABLE "provider_action_bindings" ADD CONSTRAINT "provider_action_bindings_profile_chk"
+  CHECK ("canonical_profile" IN ('github.provider-action.v1', 'x.provider-action.v1'));
+--> statement-breakpoint
+
+-- 3a0b. Extend the status allowlist CHECK to admit the PR4 execution states.
 ALTER TABLE "provider_action_bindings" DROP CONSTRAINT "provider_action_bindings_status_chk";
 --> statement-breakpoint
 ALTER TABLE "provider_action_bindings" ADD CONSTRAINT "provider_action_bindings_status_chk"

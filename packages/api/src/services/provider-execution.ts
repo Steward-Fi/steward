@@ -32,13 +32,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { executionAuthorizationNonces } from "@stwd/db";
 import {
+  activeExecutionAuthV2Key,
   buildProviderExecutionCommitmentV2,
+  computeProviderExecutionCommitmentHash,
   decodeUtf8Strict,
   type GithubCanonicalActionV1,
   isExecutionAuthV2SecretConfigured,
   type ProviderApprovalCommitmentV1,
-  activeExecutionAuthV2Key,
-  computeProviderExecutionCommitmentHash,
   signProviderExecutionCommitmentV2,
   strictParseJson,
 } from "@stwd/shared";
@@ -213,9 +213,7 @@ export async function mintProviderExecutionAuthorizationWithinTx(
       capability: "credential.inject_http",
       backend: "credential-proxy",
       payloadDigest: bareDigest(binding.actionDigest),
-      policyRevisionHash: bareDigest(
-        binding.approvalCommitment.policyDecision.policyRevisionHash,
-      ),
+      policyRevisionHash: bareDigest(binding.approvalCommitment.policyDecision.policyRevisionHash),
       approvalId: binding.approvalId,
       nonce,
       signature,
