@@ -11,7 +11,6 @@ export type { PriceOracle } from "./price-oracle.js";
 export { createPriceOracle } from "./price-oracle.js";
 export * from "./provider-action.js";
 export * from "./provider-approval.js";
-export * from "./x-provider-action.js";
 export * from "./provider-authority.js";
 // ─── Non-throwing description of an arbitrary thrown value (fail-closed catches) ───
 export { describeThrown, UNPRINTABLE_THROWN_VALUE } from "./safe-error.js";
@@ -33,6 +32,7 @@ export type {
 export * from "./types/venue.js";
 // ─── Runtime-extensible webhook event registry (core ∪ plugin-declared) ───
 export { WebhookEventRegistry } from "./webhook-event-registry.js";
+export * from "./x-provider-action.js";
 
 // ─── Tenancy ───
 
