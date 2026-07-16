@@ -1,6 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { StewardClient } from "@stwd/sdk";
-import { type ProviderApi, ProviderApiError, sanitizeProviderPayload } from "../provider-api.js";
+import {
+  createProviderApi,
+  type ProviderApi,
+  ProviderApiError,
+  sanitizeProviderPayload,
+} from "../provider-api.js";
 import { buildTools, type StewardTool } from "../tools.js";
 
 const ACTION_ID = `pa_12345678-1234-1234-1234-123456789abc`;
@@ -128,6 +133,78 @@ describe("governed provider action tools", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("timed out");
     expect(result.content[0].text).not.toMatch(/executed|allowed|succeeded/);
+  });
+});
+
+describe("createProviderApi HTTP transport", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  function stubFetch(
+    status: number,
+    body: unknown,
+  ): { seen: Array<{ url: string; init?: RequestInit }> } {
+    const seen: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      seen.push({ url: String(url), init });
+      return new Response(JSON.stringify(body), {
+        status,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    return { seen };
+  }
+
+  test("throws ProviderApiError (never a success value) on an upstream 5xx", async () => {
+    stubFetch(503, { error: "UPSTREAM_UNAVAILABLE" });
+    const api = createProviderApi({
+      baseUrl: "https://steward.example",
+      bearerToken: "agent-jwt",
+    });
+    let thrown: unknown;
+    try {
+      await api.request("/v2/provider-actions", { method: "POST", body: "{}" });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(ProviderApiError);
+    expect((thrown as ProviderApiError).status).toBe(503);
+    expect((thrown as ProviderApiError).message).toBe("UPSTREAM_UNAVAILABLE");
+  });
+
+  test("builds auth + tenant headers from config only, never from the path", async () => {
+    const { seen } = stubFetch(200, { ok: true });
+    const api = createProviderApi({
+      baseUrl: "https://steward.example/",
+      bearerToken: "agent-jwt",
+      tenantId: "tenant-a",
+    });
+    await api.request("/v2/provider-actions", { method: "POST", body: "{}" });
+    expect(seen).toHaveLength(1);
+    expect(seen[0].url).toBe("https://steward.example/v2/provider-actions");
+    const headers = new Headers(seen[0].init?.headers);
+    expect(headers.get("authorization")).toBe("Bearer agent-jwt");
+    expect(headers.get("x-steward-tenant")).toBe("tenant-a");
+  });
+
+  test("redacts secrets in a real non-ok error body before throwing", async () => {
+    const canary = "canary-http-5xx-9a1";
+    stubFetch(403, {
+      error: "POLICY_DENIED",
+      authorization: `Bearer ${canary}`,
+      detail: `token=${canary}`,
+    });
+    const api = createProviderApi({ baseUrl: "https://steward.example", bearerToken: "agent-jwt" });
+    let thrown: unknown;
+    try {
+      await api.request("/v2/provider-actions", { method: "POST", body: "{}" });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(ProviderApiError);
+    expect(JSON.stringify((thrown as ProviderApiError).data)).not.toContain(canary);
   });
 });
 

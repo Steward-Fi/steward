@@ -50,4 +50,14 @@ python3 -c 'p="packages/mcp/src/tools.ts";s=open(p).read();start=s.index("const 
 expect_red "rejects malformed action ids"
 restore_green
 
-echo "4/4 provider-action mutation proofs passed"
+# Upstream non-2xx must throw, never render as a success value (5xx-honesty).
+python3 -c 'p="packages/mcp/src/provider-api.ts";s=open(p).read();s=s.replace("if (!response.ok) {", "if (false && !response.ok) {", 1);open(p,"w").write(s)'
+expect_red "throws ProviderApiError"
+restore_green
+
+# Redaction must run on real non-ok error bodies before they surface.
+python3 -c 'p="packages/mcp/src/provider-api.ts";s=open(p).read();s=s.replace("const clean = sanitizeProviderPayload(payload);", "const clean = payload;", 1);open(p,"w").write(s)'
+expect_red "redacts secrets in a real non-ok"
+restore_green
+
+echo "6/6 provider-action mutation proofs passed"
