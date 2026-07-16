@@ -206,7 +206,7 @@ proof "M17 accept mismatched claim routeRevision at gate (P32)" "packages/proxy"
 #      partial claim without secretVersion would skip the decrypt-time version
 #      recheck, so it must NOT be verified at the gate). Drop the requirement.
 proof "M18 accept claim missing secretVersion at gate (P33)" "packages/proxy" "$GOV_TEST" "P33" "$PROXY" \
-  's/governedClaim.secretVersion !== undefined;/true;/'
+  's/governedClaim.secretVersion !== undefined &&/true &&/'
 
 # M19: let a verified governed dispatch re-enter the legacy proxy-approval hold
 #      → P34 (a governed route that also carries requiresApproval must NOT be held
@@ -237,6 +237,29 @@ proof "M21 drop success-path body drain (P36)" "packages/proxy" "$GOV_TEST" "P36
 #      through. Neutralize the mismatch comparison so it never denies.
 proof "M22 accept route bound to a different operation (P2 route/op mismatch)" "packages/proxy" "$GOV_TEST" "route.operation mismatch" "$GOV" \
   's/liveRoute.providerOperationId !== loaded.operationId/false/'
+
+# M23: skip the independent actionDigest recompute over persisted canonical bytes.
+#      The signed commitment carries the approved digest, so without this check a
+#      DB-level body/query mutation that leaves target/header names unchanged can
+#      be forwarded under the old signature.
+proof "M23 skip final canonical actionDigest recompute (P12b)" "packages/proxy" "$GOV_TEST" "P12b" "$GOV" \
+  's/if (computeActionDigest(loaded.canonicalAction) !== loaded.actionDigest) {/if (false) {/'
+
+# M24: remove the exact decrypt-boundary account-status recheck. P31b disables
+#      the account after claim and after the earlier boundary check, so only this
+#      final guard can prevent credential use.
+proof "M24 skip exact decrypt-boundary account status recheck (P31b)" "packages/proxy" "$GOV_TEST" "P31b" "$PROXY" \
+  's/liveAccount.status !== "active"/false/'
+
+# M25: accept a zero-row claimed->dispatched transition as ownership. K01b makes
+#      another terminal writer win after claim; forwarding must remain impossible.
+proof "M25 forward without atomic claimed-to-dispatched ownership (K01b)" "packages/proxy" "$GOV_TEST" "K01b" "$GOV" \
+  's/if (updated.length !== 1) return;/if (false) return;/'
+
+# M26: omit signed-to-loaded routeRevision equality. P12c substitutes both the
+#      live route and nonce revision while retaining the old signed approval.
+proof "M26 accept denormalized nonce route substitution (P12c)" "packages/proxy" "$GOV_TEST" "P12c" "$GOV" \
+  's/rebuilt.routeRevision !== loaded.routeRevision ||//'
 
 echo ""
 echo "==================================================="

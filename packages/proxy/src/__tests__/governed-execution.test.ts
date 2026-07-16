@@ -49,6 +49,7 @@ import {
   buildProviderExecutionCommitmentV2,
   canonicalActionBytes,
   computeActionDigest,
+  computeApprovalCommitmentHash,
   computeProviderExecutionCommitmentHash,
   type GithubCanonicalActionV1,
   jcsStringify,
@@ -232,7 +233,6 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
   const requestHash = sha256HexPrefixed(`req:${intentId}`);
   const policyRevisionHash = sha256HexPrefixed("policy:1");
   const accessDecisionHash = sha256HexPrefixed("access:1");
-  const approvalCommitmentHash = sha256HexPrefixed(`approval:${intentId}`);
   const approvalId = `aq_${randomUUID().slice(0, 8)}`;
 
   const approvalCommitment: ProviderApprovalCommitmentV1 = {
@@ -281,6 +281,7 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
     requestedAt: now.toISOString(),
     expiresAt: expiresAt.toISOString(),
   };
+  const approvalCommitmentHash = computeApprovalCommitmentHash(approvalCommitment);
 
   const commitment = buildProviderExecutionCommitmentV2({
     approval: approvalCommitment,
@@ -595,6 +596,11 @@ describe("PR4 governed proxy authority gate (X1, §5.1)", () => {
         routeRevision: 1,
         secretId: IDS.secret,
         secretVersion: 1,
+        workspaceId: IDS.workspace,
+        providerAccountId: IDS.account,
+        operationId: IDS.operation,
+        operationRevision: 1,
+        providerAccountRevision: 1,
       }),
     );
     expect(res.status).toBe(403);
@@ -754,12 +760,17 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
   });
 
   it("P14: a secret rotation after mint fails the claim (stale secret)", async () => {
-    const { intentId } = await seedExecutionReady();
+    const { intentId, authorizationId } = await seedExecutionReady();
     await getDb().update(secrets).set({ version: 2 }).where(eq(secrets.id, IDS.secret));
     const res = await dispatchGovernedExecution(intentId, IDS.tenant);
     expect(res.ok).toBe(false);
     expect(res.code).toBe("EXEC_AUTH_STALE_SECRET");
     expect(captured).toBeNull();
+    const [n] = await getDb()
+      .select({ status: executionAuthorizationNonces.status })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(n.status).toBe("active");
   });
 
   it("P11: a tampered signature fails revalidation before any claim/decrypt", async () => {
@@ -773,6 +784,59 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
       .from(executionAuthorizationNonces)
       .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
     expect(n.status).toBe("active");
+    expect(captured).toBeNull();
+  });
+
+  it("P12b: DB-level canonical body mutation fails the final actionDigest recompute", async () => {
+    const { intentId, authorizationId } = await seedExecutionReady();
+    const tampered = structuredClone(ACTION);
+    tampered.canonicalBody = { unauthorized: true };
+
+    // Simulate storage corruption below the immutable-row trigger. The service,
+    // not only the trigger, must independently recompute and reject the action.
+    await getDb().execute(
+      sql`ALTER TABLE provider_action_bindings DISABLE TRIGGER provider_action_bindings_immutable`,
+    );
+    try {
+      await getDb()
+        .update(providerActionBindings)
+        .set({ canonicalActionBytes: Buffer.from(canonicalActionBytes(tampered), "utf8") })
+        .where(eq(providerActionBindings.intentId, intentId));
+    } finally {
+      await getDb().execute(
+        sql`ALTER TABLE provider_action_bindings ENABLE TRIGGER provider_action_bindings_immutable`,
+      );
+    }
+
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe("EXEC_AUTH_STALE_DEPENDENCY");
+    const [n] = await getDb()
+      .select({ status: executionAuthorizationNonces.status })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(n.status).toBe("active");
+    expect(captured).toBeNull();
+  });
+
+  it("P12c: substituted nonce route revision cannot escape the signed approval tuple", async () => {
+    const { intentId, authorizationId } = await seedExecutionReady();
+    // Move both the live route and the denormalized nonce column to revision 2,
+    // while leaving the signed PR3 approval commitment at revision 1. Comparing
+    // only nonce-to-live would accept this substitution; signed-to-loaded tuple
+    // equality must reject it before claim.
+    await getDb()
+      .update(secretRoutes)
+      .set({ authorityRevision: 2 })
+      .where(eq(secretRoutes.id, IDS.route));
+    await getDb()
+      .update(executionAuthorizationNonces)
+      .set({ routeRevision: 2 })
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe("EXEC_AUTH_STALE_DEPENDENCY");
     expect(captured).toBeNull();
   });
 
@@ -849,10 +913,17 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
       .update(providerAccounts)
       .set({ status: "disabled" })
       .where(eq(providerAccounts.id, IDS.account));
+    let beforeForwardReached = false;
+    dispatchMod.__setGovernedDispatchHooksForTests({
+      beforeForward: () => {
+        beforeForwardReached = true;
+      },
+    });
     const res = await dispatchGovernedExecution(intentId, IDS.tenant);
     expect(res.ok).toBe(false);
     expect(res.code).toBe("EXEC_AUTH_ACCOUNT_DISABLED");
     expect(captured).toBeNull();
+    expect(beforeForwardReached).toBe(false);
     // Post-claim denial: nonce consumed, dispatch_state failed, binding failed.
     const db = getDb();
     const [n] = await db
@@ -1018,6 +1089,31 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     }
   });
 
+  it("K01b: dispatch requires an atomic claimed-to-dispatched win before forwarding", async () => {
+    const { intentId } = await seedExecutionReady();
+    dispatchMod.__setGovernedDispatchHooksForTests({
+      beforeForward: async () => {
+        // Simulate another terminal-state writer winning after claim. This caller
+        // must not append a false dispatched audit or reach the forwarder.
+        await getDb()
+          .update(executionAuthorizationNonces)
+          .set({
+            dispatchState: "failed",
+            dispatchedAt: new Date(),
+            outcomeRecordedAt: new Date(),
+          })
+          .where(eq(executionAuthorizationNonces.intentId, intentId));
+        await getDb().execute(
+          sql`UPDATE provider_action_bindings SET status = 'failed', binding_revision = binding_revision + 1 WHERE intent_id = ${intentId}`,
+        );
+      },
+    });
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe("EXEC_TERMINAL_STATE");
+    expect(captured).toBeNull();
+  });
+
   it("P31: a secret VERSION rotated AFTER the claim but before decrypt fails closed (409 stale) with no forward (codex P1 stale-credential race)", async () => {
     // The claim succeeds (route + secret bound), then between claim and decrypt the
     // backing secret is rotated to a new version via the beforeForward hook. The
@@ -1031,13 +1127,28 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     const res = await dispatchGovernedExecution(intentId, IDS.tenant);
     // NO credential was forwarded against the rotated secret.
     expect(captured).toBeNull();
-    // Crucially, the denial is the 409 stale-secret gate, NOT a 500 decrypt
-    // failure. This distinguishes the intended recheck from decrypt happening to
-    // fail on the rotated version (which would also leave captured null): the
-    // proxy returns EXEC_AUTH_STALE_SECRET (409), classified here as a failed
-    // dispatch carrying upstreamStatusCode 409.
+    // Crucially, preserve the proxy's governed stale code. This was a local
+    // pre-forward denial, not an upstream provider response.
     expect(res.ok).toBe(false);
-    expect(res.upstreamStatusCode).toBe(409);
+    expect(res.code).toBe("EXEC_AUTH_STALE_SECRET");
+    expect(res.upstreamStatusCode).toBeUndefined();
+  });
+
+  it("P31b: account disabled after claim is denied at the exact decrypt boundary", async () => {
+    const { intentId } = await seedExecutionReady();
+    dispatchMod.__setGovernedDispatchHooksForTests({
+      beforeForward: async () => {
+        await getDb()
+          .update(providerAccounts)
+          .set({ status: "disabled" })
+          .where(eq(providerAccounts.id, IDS.account));
+      },
+    });
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe("EXEC_AUTH_ACCOUNT_DISABLED");
+    expect(res.upstreamStatusCode).toBeUndefined();
+    expect(captured).toBeNull();
   });
 
   it("P32: a forged direct claim with the right routeId + secretId but a WRONG routeRevision is denied at the gate (codex P1 stale-route)", async () => {
@@ -1052,6 +1163,11 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
         routeRevision: 999,
         secretId: IDS.secret,
         secretVersion: 1,
+        workspaceId: IDS.workspace,
+        providerAccountId: IDS.account,
+        operationId: IDS.operation,
+        operationRevision: 1,
+        providerAccountRevision: 1,
       }),
     );
     const res = await forged;
@@ -1072,6 +1188,11 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
         routeRevision: 1,
         secretId: IDS.secret,
         // secretVersion intentionally omitted
+        workspaceId: IDS.workspace,
+        providerAccountId: IDS.account,
+        operationId: IDS.operation,
+        operationRevision: 1,
+        providerAccountRevision: 1,
       }),
     );
     expect(res.status).toBe(403);

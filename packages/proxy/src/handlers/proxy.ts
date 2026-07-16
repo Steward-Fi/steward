@@ -16,7 +16,20 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import type { ClientRequest, RequestOptions } from "node:http";
 import { isIP, type LookupFunction } from "node:net";
 import type { SecretRoute } from "@stwd/db";
-import { and, desc, eq, getDb, gt, isNull, or, secretRoutes, secrets } from "@stwd/db";
+import {
+  and,
+  desc,
+  eq,
+  getDb,
+  gt,
+  isNull,
+  or,
+  providerAccounts,
+  providerOperations,
+  secretRoutes,
+  secrets,
+  workspaces,
+} from "@stwd/db";
 import { getRedis, type SpendReservation, settleReservedSpend } from "@stwd/redis";
 import { SecretVault } from "@stwd/vault";
 import type { Context } from "hono";
@@ -1125,6 +1138,11 @@ export async function handleProxy(c: Context): Promise<Response> {
         routeRevision?: number;
         secretId?: string;
         secretVersion?: number;
+        workspaceId?: string;
+        providerAccountId?: string;
+        operationId?: string;
+        operationRevision?: number;
+        providerAccountRevision?: number;
       }
     | undefined;
   // Set once the governed claim is verified against the selected route; the
@@ -1152,8 +1170,15 @@ export async function handleProxy(c: Context): Promise<Response> {
       // secretVersion is REQUIRED for a verified governed claim (codex P2): a
       // partial claim that omits it must NOT be treated as verified, otherwise the
       // decrypt-time version recheck below (guarded on secretVersion !== undefined)
-      // would be skipped and a rotated secret could be decrypted. Missing = stale.
-      governedClaim.secretVersion !== undefined;
+      // would be skipped and a rotated secret could be decrypted. The live
+      // account/operation boundary fields are also required for the final
+      // decrypt-time recheck below. Missing = unverified.
+      governedClaim.secretVersion !== undefined &&
+      governedClaim.workspaceId !== undefined &&
+      governedClaim.providerAccountId !== undefined &&
+      governedClaim.operationId !== undefined &&
+      governedClaim.operationRevision !== undefined &&
+      governedClaim.providerAccountRevision !== undefined;
     if (!claimMatches) {
       await recordRequiredAudit({
         agentId,
@@ -1536,18 +1561,16 @@ export async function handleProxy(c: Context): Promise<Response> {
 
   // 3. Decrypt credential
   //
-  // Governed stale-secret backstop (codex P1): the gate above pinned the claimed
-  // secretId, but the secret VERSION can still rotate in the window between the
-  // claim and this decrypt. A governed dispatch must decrypt the EXACT version it
-  // was authorized against, never a freshly-rotated credential. Re-read the live
-  // version and fail closed (409 stale) on drift before touching the vault.
-  if (authorityMode === "governed_v2" && governedClaim?.secretVersion !== undefined) {
-    const [liveSecret] = await getDb()
-      .select({ version: secrets.version })
-      .from(secrets)
-      .where(and(eq(secrets.tenantId, tenantId), eq(secrets.id, route.secretId)))
-      .limit(1);
-    if (!liveSecret || liveSecret.version !== governedClaim.secretVersion) {
+  // Governed signing-boundary backstop: account/workspace/operation status and
+  // secret version can change after the claim transaction but before this exact
+  // decrypt point. Re-read every live boundary fact here, after proxy policy/DNS
+  // checks and immediately before touching the vault.
+  const denyGovernedAtDecryptBoundary = async (
+    error: "EXEC_AUTH_ACCOUNT_DISABLED" | "EXEC_AUTH_STALE_DEPENDENCY" | "EXEC_AUTH_STALE_SECRET",
+    reason: string,
+  ): Promise<Response> => {
+    let auditUnavailable = false;
+    try {
       await recordRequiredAudit({
         agentId,
         tenantId,
@@ -1556,12 +1579,89 @@ export async function handleProxy(c: Context): Promise<Response> {
         method,
         statusCode: 409,
         latencyMs: Date.now() - startTime,
-        reason: "governed-stale-secret-version",
+        reason,
       });
+    } catch {
+      auditUnavailable = true;
+    } finally {
+      // Required-audit failure must fail closed without leaking the slot or spend
+      // reservation held by this pre-forward path.
       await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
       await releaseUnsafeProxyRequest(replayClaim);
       proxySlot.release();
-      return c.json({ ok: false, error: "EXEC_AUTH_STALE_SECRET" }, 409);
+    }
+    return auditUnavailable
+      ? c.json({ ok: false, error: "EXEC_AUDIT_UNAVAILABLE" }, 503)
+      : c.json({ ok: false, error }, 409);
+  };
+
+  if (authorityMode === "governed_v2" && governedClaim) {
+    const db = getDb();
+    const [liveWorkspace] = await db
+      .select({ status: workspaces.status })
+      .from(workspaces)
+      .where(
+        and(
+          eq(workspaces.tenantId, tenantId),
+          eq(workspaces.id, governedClaim.workspaceId as string),
+        ),
+      )
+      .limit(1);
+    const [liveAccount] = await db
+      .select({ status: providerAccounts.status, revision: providerAccounts.revision })
+      .from(providerAccounts)
+      .where(
+        and(
+          eq(providerAccounts.tenantId, tenantId),
+          eq(providerAccounts.workspaceId, governedClaim.workspaceId as string),
+          eq(providerAccounts.id, governedClaim.providerAccountId as string),
+        ),
+      )
+      .limit(1);
+    const [liveOperation] = await db
+      .select({ status: providerOperations.status, revision: providerOperations.revision })
+      .from(providerOperations)
+      .where(
+        and(
+          eq(providerOperations.tenantId, tenantId),
+          eq(providerOperations.workspaceId, governedClaim.workspaceId as string),
+          eq(providerOperations.providerAccountId, governedClaim.providerAccountId as string),
+          eq(providerOperations.id, governedClaim.operationId as string),
+        ),
+      )
+      .limit(1);
+    if (
+      !liveWorkspace ||
+      liveWorkspace.status !== "active" ||
+      !liveAccount ||
+      liveAccount.status !== "active" ||
+      !liveOperation ||
+      liveOperation.status !== "active"
+    ) {
+      return denyGovernedAtDecryptBoundary(
+        "EXEC_AUTH_ACCOUNT_DISABLED",
+        "governed-account-boundary-disabled",
+      );
+    }
+    if (
+      liveAccount.revision !== governedClaim.providerAccountRevision ||
+      liveOperation.revision !== governedClaim.operationRevision
+    ) {
+      return denyGovernedAtDecryptBoundary(
+        "EXEC_AUTH_STALE_DEPENDENCY",
+        "governed-operation-revision-stale",
+      );
+    }
+    const [liveSecret] = await db
+      .select({ version: secrets.version })
+      .from(secrets)
+      .where(and(eq(secrets.tenantId, tenantId), eq(secrets.id, route.secretId)))
+      .limit(1);
+    if (!liveSecret || liveSecret.version !== governedClaim.secretVersion) {
+      return denyGovernedAtDecryptBoundary(
+        "EXEC_AUTH_STALE_SECRET",
+        "governed-stale-secret-version",
+      );
     }
   }
 

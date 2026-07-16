@@ -34,6 +34,8 @@ import { executionAuthorizationNonces } from "@stwd/db";
 import {
   activeExecutionAuthV2Key,
   buildProviderExecutionCommitmentV2,
+  computeActionDigest,
+  computeApprovalCommitmentHash,
   computeProviderExecutionCommitmentHash,
   decodeUtf8Strict,
   type GithubCanonicalActionV1,
@@ -173,6 +175,29 @@ export async function mintProviderExecutionAuthorizationWithinTx(
 
   const active = activeExecutionAuthV2Key();
   const action = parseCanonicalAction(binding.canonicalActionBytes);
+
+  // The approval JSON, its stored hash, and the denormalized binding tuple must
+  // all describe the same approved action before we mint a signature. Otherwise
+  // a storage-level substitution could be blessed with a fresh v2 authorization.
+  const approval = binding.approvalCommitment;
+  if (
+    computeApprovalCommitmentHash(approval) !== binding.approvalCommitmentHash ||
+    approval.intentId !== binding.intentId ||
+    approval.tenantId !== binding.tenantId ||
+    approval.workspaceId !== binding.workspaceId ||
+    approval.requestActor.id !== binding.actorAgentId ||
+    approval.providerAccount.id !== binding.providerAccountId ||
+    approval.operation.id !== binding.operationId ||
+    approval.operation.revision !== binding.operationRevision ||
+    approval.requestHash !== binding.requestHash ||
+    approval.actionDigest !== binding.actionDigest ||
+    computeActionDigest(action) !== binding.actionDigest
+  ) {
+    throw new ProviderExecutionMintError(
+      "EXEC_AUTH_MINT_FAILED",
+      "approval commitment, binding, and canonical action are inconsistent",
+    );
+  }
 
   const commitment = buildProviderExecutionCommitmentV2({
     approval: binding.approvalCommitment,

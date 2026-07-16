@@ -42,6 +42,8 @@ import {
 } from "@stwd/db";
 import {
   buildProviderExecutionCommitmentV2,
+  computeActionDigest,
+  computeApprovalCommitmentHash,
   computeProviderExecutionCommitmentHash,
   decodeUtf8Strict,
   type GithubCanonicalActionV1,
@@ -294,6 +296,17 @@ export async function dispatchGovernedExecution(
   }
 
   // ── Signing-boundary revalidation (X5, §4.1 step 3) ────────────────────────
+  // First recompute actionDigest from the persisted canonical action itself. The
+  // commitment carries the approved digest, so merely rebuilding the commitment
+  // without this equality would NOT detect a DB-level body/query mutation whose
+  // target and header-name set stayed unchanged. This check makes the exact
+  // outbound action bytes load-bearing at the final boundary.
+  if (computeActionDigest(loaded.canonicalAction) !== loaded.actionDigest) {
+    return deny("EXEC_AUTH_STALE_DEPENDENCY", 409, intentId, {
+      executionId: loaded.executionId,
+    });
+  }
+
   // Recompute the v2 commitment from the persisted approval + canonical action +
   // the mint's exact issuedAt/expiresAt/keyId (read from the nonce row), require
   // it equals the stored commitment_hash, and verify the HMAC signature over it.
@@ -301,6 +314,12 @@ export async function dispatchGovernedExecution(
   // + a domain-separated signature check BEFORE any decrypt (defense in depth
   // beyond the claim predicate; a tampered stored commitment_hash / signature is
   // caught here even if the claim's varchar equality somehow passed).
+  if (computeApprovalCommitmentHash(loaded.approvalCommitment) !== loaded.approvalCommitmentHash) {
+    return deny("EXEC_AUTH_STALE_DEPENDENCY", 409, intentId, {
+      executionId: loaded.executionId,
+    });
+  }
+
   const rebuilt = buildProviderExecutionCommitmentV2({
     approval: loaded.approvalCommitment,
     action: loaded.canonicalAction,
@@ -315,9 +334,24 @@ export async function dispatchGovernedExecution(
     expiresAt: loaded.expiresAt,
     keyId: loaded.keyId,
   });
-  if (computeProviderExecutionCommitmentHash(rebuilt) !== loaded.commitmentHash) {
-    // A bound fact drifted (or the stored hash was tampered): fail closed, no
-    // decrypt. The claim has not run yet, so nothing to roll back.
+  if (
+    computeProviderExecutionCommitmentHash(rebuilt) !== loaded.commitmentHash ||
+    rebuilt.tenantId !== loaded.tenantId ||
+    rebuilt.workspaceId !== loaded.workspaceId ||
+    rebuilt.actorAgentId !== loaded.actorAgentId ||
+    rebuilt.providerAccountId !== loaded.providerAccountId ||
+    rebuilt.operationId !== loaded.operationId ||
+    rebuilt.operationRevision !== loaded.operationRevision ||
+    rebuilt.requestHash !== loaded.requestHash ||
+    rebuilt.actionDigest !== loaded.actionDigest ||
+    rebuilt.grantDependencyHash !== loaded.grantDependencyHash ||
+    rebuilt.routeId !== loaded.routeId ||
+    rebuilt.routeRevision !== loaded.routeRevision ||
+    rebuilt.secretId !== loaded.secretId ||
+    rebuilt.secretVersion !== loaded.secretVersion
+  ) {
+    // A bound fact drifted, a denormalized nonce/binding column was substituted,
+    // or the stored hash was tampered. Fail before claim/decrypt.
     return deny("EXEC_AUTH_STALE_DEPENDENCY", 409, intentId, {
       executionId: loaded.executionId,
     });
@@ -350,6 +384,7 @@ export async function dispatchGovernedExecution(
         authorityRevision: secretRoutes.authorityRevision,
         mode: secretRoutes.authorityMode,
         providerOperationId: secretRoutes.providerOperationId,
+        secretId: secretRoutes.secretId,
       })
       .from(secretRoutes)
       .where(and(eq(secretRoutes.tenantId, tenantId), eq(secretRoutes.id, loaded.routeId)))
@@ -357,7 +392,8 @@ export async function dispatchGovernedExecution(
     if (
       !liveRoute ||
       liveRoute.mode !== "governed_v2" ||
-      liveRoute.authorityRevision !== loaded.routeRevision
+      liveRoute.authorityRevision !== loaded.routeRevision ||
+      liveRoute.secretId !== loaded.secretId
     ) {
       return deny("EXEC_AUTH_STALE_ROUTE", 409, intentId, { executionId: loaded.executionId });
     }
@@ -606,7 +642,7 @@ async function revalidateAccountBoundary(
   // (scope the lookup by workspace so a same-id account moved/rebound elsewhere
   // cannot pass, mirroring the approval boundary).
   const accRows = await db
-    .select({ status: providerAccounts.status })
+    .select({ status: providerAccounts.status, revision: providerAccounts.revision })
     .from(providerAccounts)
     .where(
       and(
@@ -618,6 +654,8 @@ async function revalidateAccountBoundary(
     .limit(1);
   const acc = accRows[0];
   if (!acc || acc.status !== "active") return { ok: false, code: "EXEC_AUTH_ACCOUNT_DISABLED" };
+  if (acc.revision !== loaded.approvalCommitment.providerAccount.revision)
+    return { ok: false, code: "EXEC_AUTH_STALE_DEPENDENCY" };
 
   // Provider operation: must exist, be active, live in the bound workspace +
   // account, AND its revision must still equal the committed one (codex P1b: the
@@ -756,6 +794,11 @@ async function dispatchOnce(
           routeRevision: loaded.routeRevision,
           secretId: loaded.secretId,
           secretVersion: loaded.secretVersion,
+          workspaceId: loaded.workspaceId,
+          providerAccountId: loaded.providerAccountId,
+          operationId: loaded.operationId,
+          operationRevision: loaded.operationRevision,
+          providerAccountRevision: loaded.approvalCommitment.providerAccount.revision,
         };
       return undefined;
     },
@@ -773,7 +816,15 @@ async function dispatchOnce(
   // Mark dispatched BEFORE awaiting the upstream body so a crash mid-flight
   // leaves an evidenced `dispatched` (→ reconciler treats as outcome_unknown,
   // F03/K08). Never blind retry (X8).
-  await setDispatched(tenantId, loaded);
+  const dispatchMarked = await setDispatched(tenantId, loaded);
+  if (!dispatchMarked) {
+    // Another state transition won after claim. Never forward unless this caller
+    // atomically owns claimed -> dispatched and its required audit committed.
+    return deny("EXEC_TERMINAL_STATE", 409, loaded.intentId, {
+      executionId: loaded.executionId,
+      dispatchState: "claimed",
+    });
+  }
   await hook("afterDispatchedAt");
 
   let response: Response;
@@ -836,20 +887,21 @@ async function dispatchOnce(
     };
   }
 
-  // Distinguish the proxy's forward-failure envelope (ambiguous) from a received
-  // upstream error (unambiguous). Reading the (already-buffered) response body is
-  // safe here; it is the proxy's own JSON, never the upstream credentialed body.
-  let forwardLevelFailure = false;
-  if (upstreamStatus === 502) {
+  // Distinguish proxy-generated pre-forward boundary denials from actual
+  // upstream responses. These exact envelopes are produced only by the governed
+  // decrypt boundary and must preserve their authority code, not be mislabeled as
+  // provider failures. Also distinguish the proxy's ambiguous forward-failure
+  // envelope from a genuine upstream 502.
+  let proxyError: string | undefined;
+  if (upstreamStatus === 409 || upstreamStatus === 502 || upstreamStatus === 503) {
     try {
-      const cloned = response.clone();
-      const parsed = (await cloned.json()) as { ok?: boolean; error?: string };
-      forwardLevelFailure = parsed?.ok === false && parsed?.error === "Upstream request failed";
+      const parsed = (await response.clone().json()) as { ok?: boolean; error?: string };
+      if (parsed?.ok === false) proxyError = parsed.error;
     } catch {
-      // A non-JSON 502 is treated as a received upstream error (unambiguous).
-      forwardLevelFailure = false;
+      proxyError = undefined;
     }
   }
+  const forwardLevelFailure = upstreamStatus === 502 && proxyError === "Upstream request failed";
   // Cancel the original body (the 502 branch cloned it; every other error status
   // never touched it) so the proxy in-flight slot is released (codex P2).
   drainBody(response);
@@ -862,6 +914,29 @@ async function dispatchOnce(
     });
   }
 
+  const governedBoundaryCodes: Partial<Record<string, GovernedDispatchCode>> = {
+    EXEC_AUTH_ACCOUNT_DISABLED: "EXEC_AUTH_ACCOUNT_DISABLED",
+    EXEC_AUTH_STALE_DEPENDENCY: "EXEC_AUTH_STALE_DEPENDENCY",
+    EXEC_AUTH_STALE_SECRET: "EXEC_AUTH_STALE_SECRET",
+  };
+  const governedBoundaryCode = proxyError ? governedBoundaryCodes[proxyError] : undefined;
+  if (governedBoundaryCode) {
+    await recordTerminal(tenantId, loaded, "failed", undefined);
+    return deny(governedBoundaryCode, upstreamStatus, loaded.intentId, {
+      executionId: loaded.executionId,
+      dispatchState: "failed",
+    });
+  }
+  if (proxyError === "EXEC_AUDIT_UNAVAILABLE") {
+    // The proxy already released all resources. Required terminal audit is also
+    // unavailable, so retain dispatched for reconciliation rather than inventing
+    // a terminal record with no evidence.
+    return deny("EXEC_AUDIT_UNAVAILABLE", 503, loaded.intentId, {
+      executionId: loaded.executionId,
+      dispatchState: "dispatched",
+    });
+  }
+
   await recordTerminal(tenantId, loaded, "failed", upstreamStatus);
   return deny("EXEC_DISPATCH_UPSTREAM_ERROR", 502, loaded.intentId, {
     executionId: loaded.executionId,
@@ -870,18 +945,23 @@ async function dispatchOnce(
   });
 }
 
-async function setDispatched(tenantId: string, loaded: LoadedGovernedExecution): Promise<void> {
+async function setDispatched(tenantId: string, loaded: LoadedGovernedExecution): Promise<boolean> {
+  let marked = false;
   await withTenantAuditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
     const dbTx = tx as ReturnType<typeof getDb>;
-    await dbTx
+    const updated = await dbTx
       .update(executionAuthorizationNonces)
       .set({ dispatchState: "dispatched", dispatchedAt: new Date() })
       .where(
         and(
           eq(executionAuthorizationNonces.authorizationId, loaded.authorizationId),
+          eq(executionAuthorizationNonces.tenantId, tenantId),
+          eq(executionAuthorizationNonces.status, "consumed"),
           eq(executionAuthorizationNonces.dispatchState, "claimed"),
         ),
-      );
+      )
+      .returning({ id: executionAuthorizationNonces.id });
+    if (updated.length !== 1) return;
     await appendRequiredAudit({
       tenantId,
       actorType: "system",
@@ -898,7 +978,9 @@ async function setDispatched(tenantId: string, loaded: LoadedGovernedExecution):
         providerIdempotencyKeyHash: sha256Hex(loaded.providerIdempotencyKey),
       },
     });
+    marked = true;
   });
+  return marked;
 }
 
 async function recordTerminal(

@@ -549,7 +549,9 @@ describe("0082 profile-CHECK widening: X admitted, unknown profiles still reject
 
   test("both github and x profiles persist under the widened CHECK", async () => {
     const db = getDb();
-    await db.insert(providerActionBindings).values(await bindingValues("github.provider-action.v1"));
+    await db
+      .insert(providerActionBindings)
+      .values(await bindingValues("github.provider-action.v1"));
     await db.insert(providerActionBindings).values(await bindingValues(X_PROVIDER_ACTION_PROFILE));
     const rows = await db.select().from(providerActionBindings);
     expect(rows.length).toBe(2);
@@ -564,7 +566,9 @@ describe("0082 profile-CHECK widening: X admitted, unknown profiles still reject
     const db = getDb();
     let caught: unknown;
     try {
-      await db.insert(providerActionBindings).values(await bindingValues("evil.provider-action.v1"));
+      await db
+        .insert(providerActionBindings)
+        .values(await bindingValues("evil.provider-action.v1"));
     } catch (e) {
       caught = e;
     }
