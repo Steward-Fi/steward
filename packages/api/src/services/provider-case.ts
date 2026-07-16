@@ -49,12 +49,19 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import {
   type AuditBundleData,
   type AuditReadExecutor,
-  type BundleEvent,
   readAuditBundleData,
   type SignedAuditBundle,
   signAuditBundle,
   verifyAuditChain,
 } from "./audit";
+
+/**
+ * The snapshot read surface: the Drizzle db OR a Drizzle transaction. Both
+ * support `.select()` and `.execute()`. CRITICAL for PGLite (single connection):
+ * every read inside `runInSnapshot` MUST use the SAME `tx` object, never a fresh
+ * `getDb()`, or the open transaction deadlocks the single connection.
+ */
+type SnapshotDb = ReturnType<typeof getDb>;
 
 /** Per-event serialized metadata cap (spec §3.6). */
 const MAX_EVENT_METADATA_BYTES = 16 * 1024;
@@ -154,7 +161,7 @@ async function correlateCaseEvents(
   tenantId: string,
   caseId: string,
 ): Promise<CorrelatedEvent[]> {
-  const result = await executor.execute(
+  const result: unknown = await executor.execute(
     sql`SELECT seq, action, hmac, metadata, created_at
         FROM audit_events
         WHERE tenant_id = ${tenantId}
@@ -299,8 +306,8 @@ export async function getProviderCase(
   caseId: string,
   authorizedWorkspaceIds: string[],
 ): Promise<ProviderCaseAssembly | null> {
-  return runInSnapshot((executor) =>
-    assembleWithinSnapshot(executor, tenantId, caseId, authorizedWorkspaceIds),
+  return runInSnapshot((sdb) =>
+    assembleWithinSnapshot(sdb, tenantId, caseId, authorizedWorkspaceIds),
   );
 }
 
@@ -315,72 +322,75 @@ export async function getProviderCaseEvidence(
   caseId: string,
   authorizedWorkspaceIds: string[],
 ): Promise<ProviderCaseEvidenceV1 | null> {
-  return runInSnapshot(async (executor) => {
-    const assembly = await assembleWithinSnapshot(
-      executor,
-      tenantId,
-      caseId,
-      authorizedWorkspaceIds,
-    );
-    if (!assembly) return null;
+  // 1) Assemble the manifest + fix the segment bounds inside ONE read-only
+  //    snapshot (all correlation/verify reads coherent).
+  const assembly = await runInSnapshot((sdb) =>
+    assembleWithinSnapshot(sdb, tenantId, caseId, authorizedWorkspaceIds),
+  );
+  if (!assembly) return null;
 
-    const { manifest, segmentFrom, segmentTo } = assembly;
+  const { manifest, segmentFrom, segmentTo } = assembly;
 
-    // A case with zero correlated events (e.g. binding present but genesis not
-    // yet drained) has no signed segment to bundle. Return an honest evidence
-    // envelope with an empty bundle and the incomplete manifest.
-    let bundle: SignedAuditBundle;
-    if (segmentFrom == null || segmentTo == null) {
-      const empty: AuditBundleData = {
-        head: null,
-        events: [],
-        bundleHeadHmac: null,
-        bundleHeadSeq: null,
-      };
-      bundle = await signAuditBundle(tenantId, 0, 0, empty);
-    } else {
-      const bundleData = await readAuditBundleData(tenantId, segmentFrom, segmentTo, executor);
-      bundle = await signAuditBundle(tenantId, segmentFrom, segmentTo, bundleData);
-    }
-
-    return {
-      version: 1,
-      tenantId,
-      caseId,
-      manifest,
-      bundle: {
-        version: 1,
-        tenantId: bundle.tenantId,
-        range: bundle.range,
-        canonicalizationSpec: bundle.canonicalizationSpec,
-        events: bundle.events as unknown[],
-        checkpoint: bundle.checkpoint,
-        generatedAt: bundle.generatedAt,
-      },
-      completeness: manifest.completeness,
-      generatedAt: new Date().toISOString(),
+  // 2) Read the bundle segment + sign OUTSIDE the read-only snapshot. The
+  //    audit chain is append-only and immutable once written, so re-reading the
+  //    SAME fixed [segmentFrom, segmentTo] range returns byte-identical events;
+  //    doing the signing (which persists a checkpoint best-effort) outside the
+  //    snapshot avoids a write-inside-read-only-tx deadlock on PGLite's single
+  //    connection while preserving manifest↔bundle consistency (the manifest's
+  //    seq+hmac index already pins exactly which events belong to the case).
+  let bundle: SignedAuditBundle;
+  if (segmentFrom == null || segmentTo == null) {
+    const empty: AuditBundleData = {
+      head: null,
+      events: [],
+      bundleHeadHmac: null,
+      bundleHeadSeq: null,
     };
-  });
+    bundle = await signAuditBundle(tenantId, 0, 0, empty);
+  } else {
+    const bundleData = await readAuditBundleData(tenantId, segmentFrom, segmentTo);
+    bundle = await signAuditBundle(tenantId, segmentFrom, segmentTo, bundleData);
+  }
+
+  return {
+    version: 1,
+    tenantId,
+    caseId,
+    manifest,
+    bundle: {
+      version: 1,
+      tenantId: bundle.tenantId,
+      range: bundle.range,
+      canonicalizationSpec: bundle.canonicalizationSpec,
+      events: bundle.events as unknown[],
+      checkpoint: bundle.checkpoint,
+      generatedAt: bundle.generatedAt,
+    },
+    completeness: manifest.completeness,
+    generatedAt: new Date().toISOString(),
+  };
 }
 
 /** Shared snapshot-scoped assembly used by both /case and /evidence. */
 async function assembleWithinSnapshot(
-  executor: AuditReadExecutor,
+  sdb: SnapshotDb,
   tenantId: string,
   caseId: string,
   authorizedWorkspaceIds: string[],
 ): Promise<ProviderCaseAssembly | null> {
-  const binding = await loadBinding(tenantId, caseId);
+  const binding = await loadBinding(sdb, tenantId, caseId);
   if (!binding) return null;
   if (!authorizedWorkspaceIds.includes(binding.workspaceId)) return null;
 
-  const [nonce, queue, operation, account, correlated] = await Promise.all([
-    loadNonce(tenantId, caseId),
-    binding.approvalQueueId ? loadQueue(tenantId, binding.approvalQueueId) : Promise.resolve(null),
-    loadOperation(tenantId, binding.operationId),
-    loadAccount(tenantId, binding.providerAccountId),
-    correlateCaseEvents(executor, tenantId, caseId),
-  ]);
+  // Sequential (NOT Promise.all): PGLite is a single connection and cannot run
+  // concurrent statements on the same snapshot tx (they would serialize/deadlock).
+  const nonce = await loadNonce(sdb, tenantId, caseId);
+  const queue = binding.approvalQueueId
+    ? await loadQueue(sdb, tenantId, binding.approvalQueueId)
+    : null;
+  const operation = await loadOperation(sdb, tenantId, binding.operationId);
+  const account = await loadAccount(sdb, tenantId, binding.providerAccountId);
+  const correlated = await correlateCaseEvents(sdb, tenantId, caseId);
 
   const assembly = buildManifest({
     tenantId,
@@ -403,7 +413,7 @@ async function assembleWithinSnapshot(
         fromSeq: assembly.segmentFrom,
         toSeq: assembly.segmentTo,
         requireHead: false,
-        executor,
+        executor: sdb,
       });
       if (!verify.valid) {
         pushReason(assembly.manifest, chainSegmentBrokenReason(verify.brokenAt));
@@ -733,9 +743,12 @@ function resolveTerminalAt(
 
 // ─── DB reads ─────────────────────────────────────────────────────────────────
 
-async function loadBinding(tenantId: string, caseId: string): Promise<BindingRow | null> {
-  const db = getDb();
-  const [row] = await db
+async function loadBinding(
+  sdb: SnapshotDb,
+  tenantId: string,
+  caseId: string,
+): Promise<BindingRow | null> {
+  const [row] = await sdb
     .select()
     .from(providerActionBindings)
     .where(
@@ -745,9 +758,12 @@ async function loadBinding(tenantId: string, caseId: string): Promise<BindingRow
   return row ?? null;
 }
 
-async function loadNonce(tenantId: string, caseId: string): Promise<NonceRow | null> {
-  const db = getDb();
-  const [row] = await db
+async function loadNonce(
+  sdb: SnapshotDb,
+  tenantId: string,
+  caseId: string,
+): Promise<NonceRow | null> {
+  const [row] = await sdb
     .select()
     .from(executionAuthorizationNonces)
     .where(
@@ -762,9 +778,12 @@ async function loadNonce(tenantId: string, caseId: string): Promise<NonceRow | n
   return row ?? null;
 }
 
-async function loadQueue(tenantId: string, queueId: string): Promise<QueueRow | null> {
-  const db = getDb();
-  const [row] = await db
+async function loadQueue(
+  sdb: SnapshotDb,
+  tenantId: string,
+  queueId: string,
+): Promise<QueueRow | null> {
+  const [row] = await sdb
     .select()
     .from(approvalQueue)
     .where(and(eq(approvalQueue.tenantId, tenantId), eq(approvalQueue.id, queueId)))
@@ -772,9 +791,12 @@ async function loadQueue(tenantId: string, queueId: string): Promise<QueueRow | 
   return row ?? null;
 }
 
-async function loadOperation(tenantId: string, operationId: string): Promise<OperationRow | null> {
-  const db = getDb();
-  const [row] = await db
+async function loadOperation(
+  sdb: SnapshotDb,
+  tenantId: string,
+  operationId: string,
+): Promise<OperationRow | null> {
+  const [row] = await sdb
     .select()
     .from(providerOperations)
     .where(and(eq(providerOperations.tenantId, tenantId), eq(providerOperations.id, operationId)))
@@ -782,9 +804,12 @@ async function loadOperation(tenantId: string, operationId: string): Promise<Ope
   return row ?? null;
 }
 
-async function loadAccount(tenantId: string, accountId: string): Promise<AccountRow | null> {
-  const db = getDb();
-  const [row] = await db
+async function loadAccount(
+  sdb: SnapshotDb,
+  tenantId: string,
+  accountId: string,
+): Promise<AccountRow | null> {
+  const [row] = await sdb
     .select()
     .from(providerAccounts)
     .where(and(eq(providerAccounts.tenantId, tenantId), eq(providerAccounts.id, accountId)))
@@ -801,7 +826,7 @@ async function loadAccount(tenantId: string, accountId: string): Promise<Account
  * non-blocking (§4.1). The audit chain-verify + bundle read are threaded the tx
  * executor so they share this snapshot (KC06).
  */
-async function runInSnapshot<T>(fn: (executor: AuditReadExecutor) => Promise<T>): Promise<T> {
+async function runInSnapshot<T>(fn: (sdb: SnapshotDb) => Promise<T>): Promise<T> {
   const db = getDb();
   try {
     return await db.transaction(async (tx) => {
@@ -816,7 +841,7 @@ async function runInSnapshot<T>(fn: (executor: AuditReadExecutor) => Promise<T>)
           // append-only chain. Never fail the read on this.
         }
       }
-      return await fn(tx as unknown as AuditReadExecutor);
+      return await fn(tx as unknown as SnapshotDb);
     });
   } catch (err) {
     // A genuine transaction failure surfaces to the caller (mapped to 500). We
