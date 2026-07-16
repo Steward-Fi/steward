@@ -4,15 +4,13 @@
  * ── State of this suite (READ THIS) ─────────────────────────────────────────
  * This file has THREE kinds of coverage:
  *
- *   1. ACTIVE full-chain-up-to-persist proof (`describe("X governed wiring …")`):
- *      proposes a real `x.tweet.create` through the real provider-action service
- *      against a fully-migrated PGLite. It proves the ENTIRE governed chain runs
- *      for X — access allow, policy composing an approval_required decision on the
- *      X profile, and the PR3 approval arm building — and that the ONLY thing that
- *      stops it is the persist of the `provider_action_bindings` row. It then
- *      isolates that persist failure to the EXACT database blocker
- *      (`provider_action_bindings_profile_chk`), proving it is the migration CHECK
- *      and not a wiring bug.
+ *   1. ACTIVE profile-CHECK widening regression (`describe("0082 profile-CHECK
+ *      widening …")`): PR4's 0082 migration widens the (previously github-only)
+ *      `provider_action_bindings_profile_chk` to admit 'x.provider-action.v1'.
+ *      These tests prove BOTH profiles now persist AND that an unknown profile is
+ *      still rejected by the SAME named CHECK (exact allowlist extension, not a
+ *      blanket relaxation). This REPLACES the obsolete #198 "blocker isolation"
+ *      tests that asserted X was rejected — that block no longer exists.
  *
  *   2. ACTIVE pure policy-composition unit (`describe("X policy composition …")`):
  *      no DB. Proves the X operation's capability-intent rules compose to
@@ -21,31 +19,30 @@
  *      proof that dropping the require-approval rule flips the write path to
  *      `allow` (i.e. the approval is genuinely load-bearing, not incidental).
  *
- *   3. SKIPPED full-chain E2E (`describe.skip("X governed provider-action E2E …")`):
+ *   3. ACTIVE full-chain E2E (`describe("X governed provider-action E2E …")`):
  *      the five end-to-end tests that require a `provider_action_bindings` row to
- *      PERSIST with `canonical_profile = 'x.provider-action.v1'`.
+ *      PERSIST with `canonical_profile = 'x.provider-action.v1'`. UN-SKIPPED by
+ *      PR4 (see below).
  *
- * ── Why the five E2E tests are skipped (the blocker) ────────────────────────
- * `packages/db/drizzle/0080_provider_action_bindings.sql` line 69:
+ * ── The blocker, and how PR4 resolved it ────────────────────────────────────
+ * `packages/db/drizzle/0080_provider_action_bindings.sql` line 69 originally:
  *
  *     CONSTRAINT "provider_action_bindings_profile_chk"
  *       CHECK ("canonical_profile" = 'github.provider-action.v1')
  *
- * The CHECK hardcodes the github profile literal, so NO X binding
- * (`canonical_profile = 'x.provider-action.v1'`) can be persisted yet. The
- * provider-action service builds the correct X binding and fails closed at the
- * INSERT (surfaced to the caller as `EVIDENCE_DECISION_PERSIST_FAILED`). This is
- * proven precisely by the ACTIVE suite below.
+ * The CHECK hardcoded the github profile literal, so NO X binding
+ * (`canonical_profile = 'x.provider-action.v1'`) could persist, and #198 shipped
+ * the five E2Es as `describe.skip` awaiting a widening migration.
  *
- * The migration that widens this CHECK to admit `'x.provider-action.v1'` is NOT
- * taken in this PR: the next free migration journal slot is owned by the in-flight
- * PR4 (feat/execution-authorization-v2, migration 0082). Taking a competing
- * migration here would collide the journal. The follow-up is: AFTER PR4 lands,
- * the next free slot (0083+) widens the profile CHECK, and these five tests get
- * un-skipped in that same follow-up PR (no code change to the tests is needed —
- * they already assert the full X chain end to end).
+ * PR4 (feat/execution-authorization-v2, migration 0082) owns the next journal
+ * slot AND already rewrites several provider_action_bindings CHECKs (status /
+ * state / approval-shape) for the new execution lifecycle. Widening the profile
+ * CHECK to an IN-list ('github.provider-action.v1', 'x.provider-action.v1') is a
+ * pure additive relaxation in the same family, so 0082 does it inline rather than
+ * deferring a trivial change to 0083. The five E2Es are un-skipped here with NO
+ * test-body change — they already assert the full X chain end to end.
  *
- * ── What the five (skipped) tests prove once unblocked ──────────────────────
+ * ── What the five (now active) tests prove ──────────────────────────────────
  * The FULL X governed chain over the real provider-action service + approval
  * state machine against PGLite, exactly as the github wiring is proven:
  *
@@ -106,7 +103,7 @@ import {
 } from "@stwd/policy-engine";
 import { buildXAction } from "@stwd/provider-x";
 import { X_PROVIDER_ACTION_PROFILE } from "@stwd/shared";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import { providerActionService } from "../services/provider-action-service";
 import { providerApprovalService } from "../services/provider-approval";
@@ -472,14 +469,18 @@ describe("X policy composition (authority plane, no DB)", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ACTIVE — full governed chain UP TO the constrained persist. Proves the entire
-// X governed pipeline runs against a fully-migrated PGLite, and that the ONLY
-// thing stopping it is the 0080 profile CHECK on provider_action_bindings — not a
-// wiring bug. Runs the real provider-action service (access + policy + approval
-// arm) and then isolates the persist failure to the exact DB constraint.
+// ACTIVE — 0082 profile-CHECK widening regression. #198 shipped this suite with a
+// two-test "blocker isolation" describe that asserted an X binding was REJECTED by
+// the (github-only) 0080 profile CHECK. PR4's 0082 widens that CHECK to admit
+// 'x.provider-action.v1', so the block is gone; the obsolete rejection tests were
+// removed and replaced with the inverse invariant: BOTH profiles now persist, and
+// a third unknown profile is still rejected by the SAME constraint (proving the
+// widening is an exact allowlist extension, not a blanket relaxation). The full
+// governed E2E chain (previously describe.skip, now unblocked below) is the
+// end-to-end proof that superseded the old "up to the persist" scaffolding.
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("X governed wiring up to the 0080 profile-CHECK blocker", () => {
+describe("0082 profile-CHECK widening: X admitted, unknown profiles still rejected", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY ||= "0".repeat(64);
@@ -495,105 +496,79 @@ describe("X governed wiring up to the 0080 profile-CHECK blocker", () => {
     await seedX();
   });
 
-  test("x.tweet.create runs the whole chain and fails CLOSED only at the binding persist", async () => {
-    // The whole governed pipeline runs: access allows (grant present), policy
-    // composes approval_required (write rules), and the PR3 approval arm builds
-    // — all BEFORE the provider_action_bindings insert. The insert carries
-    // canonical_profile = 'x.provider-action.v1', which violates the 0080 CHECK,
-    // so the create transaction rolls back and the service returns a fail-closed
-    // evidence failure. No partial binding, no approval queue row, no stub call.
-    const out = await propose(OP_TWEET_KEY, { text: "gm from a governed agent" }, "twcreate1");
-    expect(out.kind).toBe("evidence_failure");
-    if (out.kind !== "evidence_failure") throw new Error("unreachable");
-    expect(out.code).toBe("EVIDENCE_DECISION_PERSIST_FAILED");
-
-    // Transaction rolled back cleanly: nothing persisted for this intent.
-    const bindings = await getDb().select().from(providerActionBindings);
-    expect(bindings.length).toBe(0);
-    const queue = await getDb().select().from(approvalQueue);
-    expect(queue.length).toBe(0);
-  });
-
-  test("BLOCKER ISOLATION: the persist failure is PRECISELY the 0080 profile CHECK, not a wiring bug", async () => {
-    // Prove the exact database constraint that blocks X. Attempt the minimal
-    // provider_action_bindings insert that differs from a github binding ONLY in
-    // the profile literal, against the fully-migrated schema. The X profile is
-    // rejected by name; the github profile inserts fine. This pins the blocker to
-    // provider_action_bindings_profile_chk (0080 line 69) and nothing else.
+  // A minimal, fully-valid DENIED binding shape (access deny -> policy
+  // not_evaluated -> status denied). This satisfies every OTHER binding CHECK
+  // (state-machine, policy-shape, digest regexes, byte-size) with NO approval
+  // columns required, so the profile literal is the ONLY variable under test.
+  // Each attempt seeds its own intents row (the binding's intent_fk parent).
+  async function bindingValues(profile: string) {
     const db = getDb();
+    const h = "sha256:" + "a".repeat(64);
+    const idem = `sha256:${crypto.randomUUID().replace(/-/g, "").padEnd(64, "0").slice(0, 64)}`;
+    const intentId = crypto.randomUUID();
+    await db.insert(intents).values({
+      id: intentId,
+      tenantId: X.TENANT,
+      agentId: X.AGENT,
+      intentType: "provider-action",
+      status: "rejected",
+    });
+    return {
+      intentId,
+      tenantId: X.TENANT,
+      workspaceId: X.WORKSPACE,
+      actorAgentId: X.AGENT,
+      providerAccountId: X.ACCOUNT,
+      operationId: X.OP_TWEET,
+      operationRevision: 1,
+      canonicalProfile: profile,
+      canonicalActionBytes: Buffer.from("{}", "utf8"),
+      actionDigest: h,
+      requestEnvelope: {} as Record<string, unknown>,
+      requestHash: idem,
+      idempotencyKeyHash: idem,
+      safeSummary: {} as Record<string, unknown>,
+      accessDecisionId: crypto.randomUUID(),
+      accessEffect: "deny" as const,
+      accessReasonCode: "ACCESS_DENIED",
+      matchedBindingIds: [] as string[],
+      matchedGrantIds: [] as string[],
+      dependencyRevisions: {} as Record<string, unknown>,
+      accessDecision: {} as Record<string, unknown>,
+      accessDecisionHash: h,
+      policyDecisionId: null,
+      policyEffect: "not_evaluated" as const,
+      policyReasonCodes: [] as string[],
+      policyResults: [] as Array<Record<string, unknown>>,
+      policyRevisionHash: null,
+      policyDecision: null,
+      policyDecisionHash: null,
+      status: "denied",
+    };
+  }
 
-    // A minimal, fully-valid DENIED binding shape (access deny -> policy
-    // not_evaluated -> status denied). This satisfies every OTHER 0080 CHECK
-    // (state-machine, policy-shape, digest regexes, byte-size) with NO approval
-    // columns required, so the profile literal is the ONLY variable under test.
-    // Each attempt seeds its own intents row (the binding's intent_fk parent).
-    async function bindingValues(profile: string) {
-      const h = "sha256:" + "a".repeat(64);
-      const idem = `sha256:${crypto.randomUUID().replace(/-/g, "").padEnd(64, "0").slice(0, 64)}`;
-      const intentId = crypto.randomUUID();
-      await db.insert(intents).values({
-        id: intentId,
-        tenantId: X.TENANT,
-        agentId: X.AGENT,
-        intentType: "provider-action",
-        status: "rejected",
-      });
-      return {
-        intentId,
-        tenantId: X.TENANT,
-        workspaceId: X.WORKSPACE,
-        actorAgentId: X.AGENT,
-        providerAccountId: X.ACCOUNT,
-        operationId: X.OP_TWEET,
-        operationRevision: 1,
-        canonicalProfile: profile,
-        canonicalActionBytes: Buffer.from("{}", "utf8"),
-        actionDigest: h,
-        requestEnvelope: {} as Record<string, unknown>,
-        requestHash: idem,
-        idempotencyKeyHash: idem,
-        safeSummary: {} as Record<string, unknown>,
-        accessDecisionId: crypto.randomUUID(),
-        accessEffect: "deny" as const,
-        accessReasonCode: "ACCESS_DENIED",
-        matchedBindingIds: [] as string[],
-        matchedGrantIds: [] as string[],
-        dependencyRevisions: {} as Record<string, unknown>,
-        accessDecision: {} as Record<string, unknown>,
-        accessDecisionHash: h,
-        policyDecisionId: null,
-        policyEffect: "not_evaluated" as const,
-        policyReasonCodes: [] as string[],
-        policyResults: [] as Array<Record<string, unknown>>,
-        policyRevisionHash: null,
-        policyDecision: null,
-        policyDecisionHash: null,
-        status: "denied",
-      };
-    }
-
-    // CONTROL FIRST: the SAME row shape with the github profile literal persists
-    // cleanly. This proves the row satisfies EVERY other binding constraint
-    // (all NOT NULLs, every format/state CHECK, all FKs) — so the row is complete
-    // and valid in every dimension except the profile literal.
+  test("both github and x profiles persist under the widened CHECK", async () => {
+    const db = getDb();
     await db
       .insert(providerActionBindings)
       .values(await bindingValues("github.provider-action.v1"));
-    const control = await db.select().from(providerActionBindings);
-    expect(control.length).toBe(1);
-    expect(control[0]?.canonicalProfile).toBe("github.provider-action.v1");
+    await db.insert(providerActionBindings).values(await bindingValues(X_PROVIDER_ACTION_PROFILE));
+    const rows = await db.select().from(providerActionBindings);
+    expect(rows.length).toBe(2);
+    const profiles = rows.map((r) => r.canonicalProfile).sort();
+    expect(profiles).toEqual(["github.provider-action.v1", "x.provider-action.v1"]);
+  });
 
-    // Now the X row: byte-identical shape, ONLY canonical_profile swapped to
-    // 'x.provider-action.v1'. Since the control proved the shape is otherwise
-    // valid, the sole thing that can reject it is the profile CHECK
-    // (provider_action_bindings_profile_chk, 0080 line 69). Assert it throws a
-    // check_violation (SQLSTATE 23514) — not a null/FK/format error, and not a
-    // wiring defect.
+  test("an unknown profile is STILL rejected by provider_action_bindings_profile_chk (exact allowlist)", async () => {
+    // Prove 0082 widened the allowlist EXACTLY (added the X literal) rather than
+    // relaxing the constraint wholesale: a profile outside the {github, x} set is
+    // still rejected by the SAME named CHECK with SQLSTATE 23514.
+    const db = getDb();
     let caught: unknown;
     try {
       await db
         .insert(providerActionBindings)
-        .values(await bindingValues(X_PROVIDER_ACTION_PROFILE));
+        .values(await bindingValues("evil.provider-action.v1"));
     } catch (e) {
       caught = e;
     }
@@ -601,28 +576,21 @@ describe("X governed wiring up to the 0080 profile-CHECK blocker", () => {
     const code =
       (caught as { code?: string })?.code ?? (caught as { cause?: { code?: string } })?.cause?.code;
     expect(code).toBe("23514");
-    // The underlying PG error names the exact constraint: this pins the blocker
-    // to 0080's profile CHECK by NAME, not merely to "some check failed".
     const constraintName =
       (caught as { constraint?: string })?.constraint ??
       (caught as { cause?: { constraint?: string } })?.cause?.constraint;
     expect(constraintName).toBe("provider_action_bindings_profile_chk");
-
-    // And the X row did NOT persist: the table still holds only the github control.
-    const after = await db.select().from(providerActionBindings);
-    expect(after.length).toBe(1);
-    expect(after[0]?.canonicalProfile).toBe("github.provider-action.v1");
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SKIPPED — full X governed E2E. Blocked by 0080 provider_action_bindings_profile_chk
-// (see the file header). Un-skip in the post-PR4 follow-up PR that widens the
-// CHECK to admit 'x.provider-action.v1'. No test change is needed at that point —
-// these assert the full chain end to end and will pass once the binding persists.
+// UNBLOCKED (PR4) — full X governed E2E. 0082 widens provider_action_bindings_profile_chk
+// to admit 'x.provider-action.v1' (previously 0080 hardcoded the github literal, gating
+// these). No test change was needed to un-skip: they assert the full PR3 approval chain
+// end to end and pass now that the X binding persists.
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe.skip("X governed provider-action E2E (unblock after 0080 CHECK widened, post-PR4)", () => {
+describe("X governed provider-action E2E (unblocked by 0082 CHECK widening, PR4)", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY ||= "0".repeat(64);
@@ -709,10 +677,22 @@ describe.skip("X governed provider-action E2E (unblock after 0080 CHECK widened,
         .replace("original text", "attacker text"),
       "utf8",
     );
+    // PR4's immutability trigger (steward_provider_action_binding_guard) freezes
+    // canonical_action_bytes at the DB layer, so an attacker's raw column write is
+    // already rejected there. That trigger is defense-in-depth; the AUTHORITY check
+    // under test is the service's integrity re-hash at resume. Disable the trigger
+    // for the tamper so the mutated bytes reach resume and the recompute (not the
+    // trigger) is what fails closed — mirrors the github N24 negative test.
+    await getDb().execute(
+      sql`ALTER TABLE provider_action_bindings DISABLE TRIGGER provider_action_bindings_immutable`,
+    );
     await getDb()
       .update(providerActionBindings)
       .set({ canonicalActionBytes: tampered })
       .where(eq(providerActionBindings.intentId, out.intentId));
+    await getDb().execute(
+      sql`ALTER TABLE provider_action_bindings ENABLE TRIGGER provider_action_bindings_immutable`,
+    );
 
     const res = await providerApprovalService.resume({
       intentId: out.intentId,

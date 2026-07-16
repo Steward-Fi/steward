@@ -61,6 +61,9 @@ mock.module("@stwd/db", () => {
     priority: "priority",
   };
   const secrets = { id: "id" };
+  const providerAccounts = { id: "id" };
+  const providerOperations = { id: "id" };
+  const workspaces = { id: "id" };
   const policies = {
     agentId: "agentId",
     type: "type",
@@ -100,6 +103,9 @@ mock.module("@stwd/db", () => {
     getSql: () => null,
     secretRoutes,
     secrets,
+    providerAccounts,
+    providerOperations,
+    workspaces,
     policies,
     proxyAuditLog,
     getDb: () => ({

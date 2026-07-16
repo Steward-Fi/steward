@@ -42,6 +42,10 @@ services:
       DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
+      # PR4 execution authorization v2 key (keyId:secret,... rotation list).
+      # SEPARATE from STEWARD_JWT_SECRET; governed provider actions fail closed
+      # if unset. Both api (mint) and proxy (claim/verify) require it.
+      STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?STEWARD_EXECUTION_AUTH_SECRET is required - generate with: printf 'v1:%s' \"$(openssl rand -hex 32)\"}"
       STEWARD_PLATFORM_KEYS: "${STEWARD_PLATFORM_KEYS:-}"
       STEWARD_PLATFORM_KEY_SCOPES: "${STEWARD_PLATFORM_KEY_SCOPES:-}"
       ALLOW_USER_TENANT_CREATION: "${ALLOW_USER_TENANT_CREATION:-}"
@@ -112,6 +116,10 @@ services:
       DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
+      # PR4 execution authorization v2 key (keyId:secret,... rotation list).
+      # SEPARATE from STEWARD_JWT_SECRET; governed provider actions fail closed
+      # if unset. Both api (mint) and proxy (claim/verify) require it.
+      STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?STEWARD_EXECUTION_AUTH_SECRET is required - generate with: printf 'v1:%s' \"$(openssl rand -hex 32)\"}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?STEWARD_KDF_SALT is required - generate with: openssl rand -hex 32}"
       # Proxy-side approval expiry now extends the tamper-evident audit chain
       # (release.ts -> withTenantAuditedTransaction), so the audit HMAC key is

@@ -8,7 +8,7 @@
     "build": "tsc --noEmit",
     "dev": "bun run src/index.ts",
     "start": "bun run src/index.ts",
-    "test": "bun test --timeout 30000"
+    "test": "bun scripts/run-tests-isolated.ts"
   },
   "dependencies": {
     "@stwd/auth": "workspace:*",
