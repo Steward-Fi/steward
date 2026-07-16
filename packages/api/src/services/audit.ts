@@ -27,6 +27,7 @@ import {
   withTenantAuditQueue,
   writeAuditEvent,
 } from "@stwd/db";
+import { observeAuditCheckpoint } from "@stwd/shared";
 import { sql } from "drizzle-orm";
 import {
   type CheckpointEventContent,
@@ -589,6 +590,13 @@ export async function signAuditBundle(
     eventsToSeq: events.length > 0 ? events[events.length - 1].seq : 0,
   };
   const signed = signer.sign(checkpointPayload);
+  // Process-local operational gauge only. Durable checkpoint evidence is the
+  // signed payload/table below and remains authoritative across restarts.
+  try {
+    observeAuditCheckpoint(Date.parse(checkpointPayload.timestamp));
+  } catch {
+    // Monitoring is best-effort and cannot affect evidence generation.
+  }
 
   // Persist the checkpoint (append-only provenance). Best-effort: a persistence
   // failure must not deny the auditor their signed bundle (self-contained).

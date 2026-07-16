@@ -56,6 +56,7 @@ import { identityDiscoveryRoutes } from "./routes/discovery";
 import { discoveryRoutes, erc8004Routes } from "./routes/erc8004";
 import { globalWalletRoutes } from "./routes/global-wallet";
 import { intentRoutes } from "./routes/intents";
+import { metricsRoutes } from "./routes/metrics";
 import { platformRoutes } from "./routes/platform";
 import { policiesStandaloneRoutes } from "./routes/policies-standalone";
 import { registerProviderActionRoutes } from "./routes/provider-actions";
@@ -221,6 +222,7 @@ export function mountCoreIdempotencyAndRoutes(
       uptime: Math.floor((Date.now() - startTime) / 1000),
     }),
   );
+  app.route("/metrics", metricsRoutes);
 
   // ─── Route modules ──────────────────────────────────────────────────────────
 
