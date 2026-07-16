@@ -27,14 +27,22 @@ const RECENT_MFA_MS = 5 * 60_000;
 const OPERATION_KEY = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_]*)+$/;
 const KEY = /^[a-z][a-z0-9_-]{0,127}$/;
 const PROVIDER_OPERATION_ALLOWLIST: Readonly<
-  Record<string, Readonly<Record<string, "GET" | "POST">>>
+  Record<string, Readonly<Record<string, "GET" | "POST" | "DELETE">>>
 > = {
   github: {
     "github.issue.list": "GET",
     "github.pr.comment.create": "POST",
   },
+  x: {
+    "x.tweet.create": "POST",
+    "x.tweet.delete": "DELETE",
+    "x.user.me.read": "GET",
+  },
 };
-const PROVIDER_HOST_ALLOWLIST: Readonly<Record<string, string>> = { github: "api.github.com" };
+const PROVIDER_HOST_ALLOWLIST: Readonly<Record<string, string>> = {
+  github: "api.github.com",
+  x: "api.x.com",
+};
 const ENVIRONMENTS = new Set(["development", "staging", "production"]);
 const PRINCIPAL_TYPES = new Set(["human", "agent"]);
 const ROLES = new Set([

@@ -144,6 +144,13 @@ export async function buildApprovalArm(args: {
   requesterSeparation: boolean;
   requestedAt: string;
   expiresAt: string;
+  /**
+   * The adapter canonical profile of the action being committed (e.g.
+   * `github.provider-action.v1` or `x.provider-action.v1`). Bound into the
+   * commitment so a resume recomputes the same document; sourced from the
+   * validated action build, never hardcoded per provider.
+   */
+  canonicalProfile: ProviderApprovalCommitmentV1["operation"]["canonicalProfile"];
 }): Promise<{ queueId: string; commitmentHash: string; commitment: ProviderApprovalCommitmentV1 }> {
   const tx = args.tx;
 
@@ -179,7 +186,7 @@ export async function buildApprovalArm(args: {
       key: args.operation.operationKey,
       revision: args.operation.revision,
       riskClass: args.operation.riskClass,
-      canonicalProfile: "github.provider-action.v1",
+      canonicalProfile: args.canonicalProfile,
     },
     requestHash: args.requestHash,
     actionDigest: args.actionDigest,
