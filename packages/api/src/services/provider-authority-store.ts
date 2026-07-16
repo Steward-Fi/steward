@@ -27,14 +27,22 @@ const RECENT_MFA_MS = 5 * 60_000;
 const OPERATION_KEY = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_]*)+$/;
 const KEY = /^[a-z][a-z0-9_-]{0,127}$/;
 const PROVIDER_OPERATION_ALLOWLIST: Readonly<
-  Record<string, Readonly<Record<string, "GET" | "POST">>>
+  Record<string, Readonly<Record<string, "GET" | "POST" | "DELETE">>>
 > = {
   github: {
     "github.issue.list": "GET",
     "github.pr.comment.create": "POST",
   },
+  x: {
+    "x.tweet.create": "POST",
+    "x.tweet.delete": "DELETE",
+    "x.user.me.read": "GET",
+  },
 };
-const PROVIDER_HOST_ALLOWLIST: Readonly<Record<string, string>> = { github: "api.github.com" };
+const PROVIDER_HOST_ALLOWLIST: Readonly<Record<string, string>> = {
+  github: "api.github.com",
+  x: "api.x.com",
+};
 const ENVIRONMENTS = new Set(["development", "staging", "production"]);
 const PRINCIPAL_TYPES = new Set(["human", "agent"]);
 const ROLES = new Set([
@@ -253,6 +261,49 @@ export class ProviderAuthorityStore {
 
   async getTenantRevision(tenantId: string): Promise<number> {
     return this.ensureTenantState(tenantId);
+  }
+
+  /**
+   * Provider-account CONNECT authority (issue #195 workstream A): a caller may
+   * initiate/complete/disconnect an X (or other provider) OAuth connection when
+   * they are a tenant authority admin OR hold an active workspace_admin /
+   * workspace_approver binding for the target workspace (environment + temporal
+   * validity enforced). Mirrors the admin-OR-approver gate of PR3's
+   * hasWorkspaceRoleAuthority, scoped to the connect surface.
+   */
+  async canConnectProviderAccounts(
+    tenantId: string,
+    workspaceId: string,
+    userId: string,
+    tenantRole: string,
+  ): Promise<boolean> {
+    const ctx = { tenantId, actorUserId: userId, tenantRole };
+    if (await this.hasTenantAdmin(ctx)) return true;
+    if (!(await this.membership(tenantId, userId))) return false;
+    const [workspace] = await this.db()
+      .select({ environment: workspaces.environment, status: workspaces.status })
+      .from(workspaces)
+      .where(and(eq(workspaces.tenantId, tenantId), eq(workspaces.id, workspaceId)))
+      .limit(1);
+    if (!workspace || workspace.status !== "active") return false;
+    const rows = await this.db()
+      .select()
+      .from(providerRoleBindings)
+      .where(
+        and(
+          eq(providerRoleBindings.tenantId, tenantId),
+          eq(providerRoleBindings.workspaceId, workspaceId),
+          eq(providerRoleBindings.principalType, "human"),
+          eq(providerRoleBindings.principalId, userId),
+          eq(providerRoleBindings.status, "active"),
+        ),
+      );
+    const now = new Date();
+    return rows.some(
+      (row) =>
+        (row.roleKey === "workspace_admin" || row.roleKey === "workspace_approver") &&
+        activeAt(row, now, workspace.environment),
+    );
   }
 
   async createWorkspace(
