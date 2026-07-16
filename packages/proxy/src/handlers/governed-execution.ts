@@ -53,6 +53,7 @@ import {
   serializeCanonicalOutboundQuery,
   strictParseJson,
   verifyProviderExecutionCommitmentV2,
+  observeNonceClaimContention,
 } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";
 import type { Context } from "hono";
@@ -246,6 +247,13 @@ function deny(
   intentId: string,
   extra?: Partial<GovernedDispatchResult>,
 ): GovernedDispatchResult {
+  if (code === "EXEC_AUTH_CLAIM_LOST") {
+    try {
+      observeNonceClaimContention();
+    } catch {
+      // Metrics are never allowed to affect the claim decision.
+    }
+  }
   return { ok: false, code, httpStatus, intentId, ...extra };
 }
 

@@ -13,6 +13,7 @@
  */
 
 import { validateJwtSecretEnv } from "@stwd/auth";
+import { metricsTokenIsValid, renderSecurityMetrics, securityMetricsEnabled } from "@stwd/shared";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { PROXY_PORT } from "./config";
@@ -52,6 +53,25 @@ app.get("/health", (c) =>
     aliases: getAliasNames(),
   }),
 );
+
+// ─── Opt-in operator metrics (separate token, disabled by default) ────────────
+
+app.get("/metrics", (c) => {
+  if (!securityMetricsEnabled()) return c.json({ ok: false, error: "Not found" }, 404);
+  const authorization = c.req.header("Authorization");
+  const token = authorization?.startsWith("Bearer ") ? authorization.slice(7) : undefined;
+  if (!metricsTokenIsValid(token)) {
+    return c.json({ ok: false, error: "Metrics authentication required" }, 401);
+  }
+  try {
+    return c.text(renderSecurityMetrics(), 200, {
+      "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
+      "Cache-Control": "no-store",
+    });
+  } catch {
+    return c.json({ ok: false, error: "Metrics unavailable" }, 503);
+  }
+});
 
 // ─── All other routes go through auth + proxy ────────────────────────────────
 

@@ -23,6 +23,7 @@
  */
 
 import { createHmac } from "node:crypto";
+import { observeSecurityAuditEvent } from "@stwd/shared";
 import { sql } from "drizzle-orm";
 import { getDb } from "./client";
 
@@ -379,6 +380,13 @@ export async function appendAuditEvent(ev: AuditEventInput): Promise<void> {
         // we can safely skip in embedded mode.
         await appendAuditEventWithinTx(tx as AuditTxLike, ev);
       });
+      // Metrics are deliberately post-commit and best-effort. They cannot roll
+      // back or otherwise affect the audited authority transition.
+      try {
+        observeSecurityAuditEvent(ev.action, ev.metadata);
+      } catch {
+        // Monitoring must never become part of the security decision path.
+      }
       return;
     } catch (err) {
       if (attempt < 4 && isAuditSequenceConflict(err)) {
@@ -437,7 +445,8 @@ export async function withTenantAuditedTransaction<T>(
   return withTenantAuditQueue(tenantId, async () => {
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
-        return await db.transaction(async (tx) => {
+        const committedEvents: AuditEventInput[] = [];
+        const result = await db.transaction(async (tx) => {
           if (!isPGLiteRuntime()) {
             await tx.execute(
               sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_audit_${tenantId}`}, 0))`,
@@ -450,9 +459,18 @@ export async function withTenantAuditedTransaction<T>(
               );
             }
             await appendAuditEventWithinTx(tx as AuditTxLike, event);
+            committedEvents.push(event);
           };
           return await fn(tx, appendRequiredAudit);
         });
+        for (const event of committedEvents) {
+          try {
+            observeSecurityAuditEvent(event.action, event.metadata);
+          } catch {
+            // Monitoring must never become part of the security decision path.
+          }
+        }
+        return result;
       } catch (err) {
         if (attempt < 4 && isAuditSequenceConflict(err)) {
           await new Promise((resolve) => setTimeout(resolve, 5 * (attempt + 1)));
