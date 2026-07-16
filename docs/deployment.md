@@ -158,6 +158,13 @@ Downstream consumers (e.g. an eliza-cloud deployment) run their **own** instance
 this way with their own Railway + variables; they do not deploy from or depend on
 any other operator's instance.
 
+## Backup and disaster recovery
+
+Before storing production credentials or enabling governed provider actions,
+configure and test the [backup, restore, and disaster-recovery runbook](runbooks/backup-restore.md).
+A database dump without its matching root-secret escrow is not a recoverable
+Steward backup.
+
 ## Environment variable reference
 
 | Variable | Purpose | Default | Validation / production rule |
