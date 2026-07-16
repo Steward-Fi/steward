@@ -56,7 +56,11 @@ Ran `codex review --base origin/develop` iteratively. First pass surfaced 2 P2 f
 1. `/evidence` could export an unbounded audit range for an over-cap case segment (DoS) → now throws `CaseRangeTooLargeError` before the range read; route returns `400 CASE_RANGE_TOO_LARGE`; `/case` still serves the honest `unknown` manifest.
 2. Unknown/drifted correlated actions defaulted to the `genesis` role and could falsely satisfy completeness → added a non-satisfying `unclassified` role (shared + verifier mirror); unknown actions never satisfy a required role.
 
-Re-review after the fixes: clean (no actionable findings).
+Second pass surfaced 2 more findings (P1 + P2), both fixed with tests:
+1. [P1] The verifier derived its role map from EVERY event in the contiguous bundle segment; since the segment can include unrelated same-tenant events (§5.3/§7.5), another case's `exec_authorized` could back a fact or satisfy the forged-completeness guard. Now the verifier derives ALL role/fact reasoning ONLY from the signed events the manifest references (the case's own seqs).
+2. [P2] `queue_row_absent_for_approval_path` was gated on `approvalQueueId == null` (the opposite of the corruption case); a case that went through approval whose queue row was deleted was not flagged. Now flags any case with a non-null `approvalQueueId` whose queue row fails to load.
+
+Each fix has a dedicated regression test (§7.5 unrelated-event, deleted-queue-row). Mutation proofs re-confirmed 10/10 killed after each fix round.
 
 DO NOT MERGE — opened for review.
 
