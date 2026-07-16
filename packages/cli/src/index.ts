@@ -27,9 +27,9 @@ Usage:
   steward policy set --name NAME --rules '[...]' [--description TEXT] [--agent-id ID]
   steward approvals list|stats|approve|deny ...
   steward audit bundle [--from 1] [--to N] [--out bundle.json] [--verify]
-  steward provider-action create --workspace-id ID --account-id ID --operation KEY --action '{...}'
+  steward provider-action create --workspace-id ID --account-id ID --operation KEY --arguments '{...}' --idempotency-key KEY
   steward provider-action get|approval|case --id ID
-  steward provider-action approve|deny --id ID --reason TEXT
+  steward provider-action approve|deny --id ID --reason TEXT [--idempotency-key KEY]
   steward provider-action execute --id ID [--idempotency-key KEY]
   steward provider-action evidence --id ID [--out bundle.json] [--verify --fp HEX]
 
@@ -222,14 +222,17 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
  */
 async function providerActionCommand(action: string | undefined, ctx: CommandContext) {
   if (action === "create") {
-    // Create a provider action (PR2). `--action` is the canonical action JSON
-    // (as produced by the adapter builder); the API re-canonicalizes + digests.
+    // Create a provider action (PR2). The route's strict top-level schema accepts
+    // exactly {workspaceId, providerAccountId, operationKey, arguments,
+    // idempotencyKey}; the API canonicalizes + digests the arguments and hashes
+    // the idempotency key server-side. `--arguments` is the adapter argument JSON
+    // (e.g. {owner, repo, pullNumber, body}), NOT a pre-built canonical action.
     return ctx.api.request("POST", "/v2/provider-actions", {
       workspaceId: required(stringFlag(ctx.flags, "workspace-id"), "workspace-id"),
       providerAccountId: required(stringFlag(ctx.flags, "account-id"), "account-id"),
       operationKey: required(stringFlag(ctx.flags, "operation"), "operation"),
-      action: parseJsonFlag(ctx.flags, "action", undefined),
-      idempotencyKeyHash: stringFlag(ctx.flags, "idempotency-key-hash"),
+      arguments: parseJsonFlag(ctx.flags, "arguments", undefined),
+      idempotencyKey: required(stringFlag(ctx.flags, "idempotency-key"), "idempotency-key"),
     });
   }
   const id = () => encodeURIComponent(required(stringFlag(ctx.flags, "id"), "id"));
@@ -242,14 +245,20 @@ async function providerActionCommand(action: string | undefined, ctx: CommandCon
   }
   if (action === "approve" || action === "deny") {
     // A typed reason is REQUIRED for BOTH decisions (equal-weight, U4/PR3 §9.2).
+    // The route ALSO requires an idempotencyKey (rejects with
+    // APPROVAL_FIELD_INVALID otherwise) so a retried decision cannot double-apply.
     const reason = required(stringFlag(ctx.flags, "reason"), "reason");
+    const actionId = required(stringFlag(ctx.flags, "id"), "id");
+    const idempotencyKey =
+      stringFlag(ctx.flags, "idempotency-key") ?? `decide-${action}-${actionId}`.slice(0, 255);
     return ctx.api.request("POST", `/v2/provider-actions/${id()}/approval`, {
       decision: action === "approve" ? "approve" : "deny",
       reason,
-      reasonCode: stringFlag(ctx.flags, "reason-code"),
+      reasonCode: stringFlag(ctx.flags, "reason-code") ?? null,
       expectedVersion: intFlag(ctx.flags, "expected-version"),
       expectedRequestHash: stringFlag(ctx.flags, "expected-request-hash"),
       expectedActionDigest: stringFlag(ctx.flags, "expected-action-digest"),
+      idempotencyKey,
     });
   }
   if (action === "execute") {

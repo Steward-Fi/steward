@@ -119,10 +119,29 @@ export async function decideApproval(
   token: string | null,
   tenantId: string | null,
 ): Promise<unknown> {
+  // The route REQUIRES an idempotencyKey (rejects with APPROVAL_FIELD_INVALID
+  // otherwise), so the caller cannot double-apply a decision on a retry. Derive a
+  // stable key from the decision inputs (same decision on the same version/hashes
+  // -> same key -> idempotent). 8..255 visible-ASCII per the route's IDEM_KEY_RE.
+  const idempotencyKey =
+    `decide-${input.decision}-${id}-${input.expectedVersion}-${input.expectedActionDigest}`.slice(
+      0,
+      255,
+    );
   const res = await fetch(`${API_URL}/v2/provider-actions/${encodeURIComponent(id)}/approval`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders(token, tenantId) },
-    body: JSON.stringify(input),
+    body: JSON.stringify({
+      decision: input.decision,
+      reason: input.reason,
+      // reasonCode is an allowed field; the UI supplies a null free-form reason
+      // code (the typed prose reason is the operator's rationale).
+      reasonCode: null,
+      expectedVersion: input.expectedVersion,
+      expectedRequestHash: input.expectedRequestHash,
+      expectedActionDigest: input.expectedActionDigest,
+      idempotencyKey,
+    }),
   });
   return readJsonOrThrow(res);
 }
