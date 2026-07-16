@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # URL detection mutation proofs. Each mutation must turn the focused green
 # regression into red, then the original source is restored without residue.
-set -uo pipefail
+set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 SOURCE="$ROOT/packages/provider-x/src/operations.ts"
 BACKUP="$(mktemp)"
@@ -33,6 +33,6 @@ proof "M1 remove bare IPv4 branch" "detects bare IPv4" run_provider \
 proof "M2 remove format-control stripping" "control-obfuscated URLs" run_provider \
 'p=__import__("sys").argv[1];s=open(p).read();old="  const detectionText = text.replace(/[\\u200b-\\u200d\\u202a-\\u202e\\u2060\\u2066-\\u2069\\ufeff]/gi, \"\");";assert old in s;open(p,"w").write(s.replace(old,"  const detectionText = text;"))'
 proof "M3 weaken hasUrl pricing and policy propagation" "URL pricing signal and approval escalation" run_e2e \
-'p=__import__("sys").argv[1];s=open(p).read();old="  const policyArgs: Record<string, unknown> = {\\n    isReply: replyToTweetId !== undefined,\\n    hasUrl,";assert old in s;open(p,"w").write(s.replace(old,old[:-7]+"hasUrl: false,"))'
+'p=__import__("sys").argv[1];s=open(p).read();old="  const policyArgs: Record<string, unknown> = {\n    isReply: replyToTweetId !== undefined,\n    hasUrl,";assert old in s;open(p,"w").write(s.replace(old,old.replace("    hasUrl,", "    hasUrl: false,")))'
 
 echo "3/3 mutations killed"
