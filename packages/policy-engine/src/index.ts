@@ -9,14 +9,27 @@ export type {
   ProviderPolicyEvaluationV1,
   ProviderPolicyRule,
   ProviderPolicyRuleResult,
+  XConstraints,
+  XConstraintVerdict,
+  XContentPolicy,
+  XEscalationPolicy,
+  XPostsWindowCap,
+  XQuietHours,
+  XReplyMode,
+  XReplyPolicy,
+  XSpendPolicy,
 } from "./capability-intent";
 export {
   CAPABILITY_INTENT_RULE_TYPE,
   capabilityIntentContribution,
   composeCapabilityIntentDecision,
   composeProviderActionPolicyDecision,
+  estimateXPostMicros,
   evaluateCapabilityIntent,
+  evaluateXConstraints,
   PROVIDER_POLICY_REASON,
+  X_POST_PRICE_TABLE_V1,
+  X_POST_PRICE_TABLE_VERSION,
 } from "./capability-intent";
 export type {
   AuditHook,

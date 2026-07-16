@@ -65,8 +65,95 @@ import type { EvaluatorContext } from "./evaluators";
 /** the contributed rule-type discriminator. */
 export const CAPABILITY_INTENT_RULE_TYPE = "capability-intent" as const;
 
+// ─── Permissioned-X: per-post price table (versioned constant) ────────────────
+//
+// SOURCE (captured 2026-07-16, docs.x.com pay-per-use, effective Feb 6 2026):
+//   - a post WITHOUT a URL costs $0.015  => 15000 micro-dollars
+//   - a post WITH a URL     costs $0.20   => 200000 micro-dollars
+// Denominated in micro-dollars (integer-exact; no float spend math). A price
+// change is a reviewable diff to this constant, never silent drift. This is an
+// ESTIMATE table for the spend-cap policy, NOT a billing oracle.
+export const X_POST_PRICE_TABLE_VERSION = "x-post-price.v1" as const;
+export const X_POST_PRICE_TABLE_V1 = {
+  /** plain text post, no URL: $0.015 */
+  plainMicros: 15_000,
+  /** post containing a URL: $0.20 */
+  urlMicros: 200_000,
+} as const;
+
+/** Estimated micro-dollar cost of a single tweet.create action. */
+export function estimateXPostMicros(hasUrl: boolean): number {
+  return hasUrl ? X_POST_PRICE_TABLE_V1.urlMicros : X_POST_PRICE_TABLE_V1.plainMicros;
+}
+
 /** The effect a matching `capability-intent` rule applies. */
 export type CapabilityIntentEffect = "allow" | "deny" | "require-approval";
+
+// ─── Permissioned-X constraint sub-block (X-only) ──────────────────────────
+//
+// This is the instance-level X policy vocabulary X's native OAuth2 scopes cannot
+// express (see docs/security/permissioned-x.mdx). It lives INSIDE
+// capability-intent constraints so X flows through the SAME composer + precedence
+// + persisted decision doc as github — no new rule type, no invented registry.
+// The `x` block is ONLY valid on an `x.*` operation; on a non-X operation it is a
+// config error (fail closed). All sub-fields fail closed.
+
+/** replyPolicy.mode: gate replies independently of original posts. */
+export type XReplyMode = "any" | "summoned-only" | "none";
+
+/** Content conditions on a tweet's text (adapter-derived signals). */
+export interface XContentPolicy {
+  /** false => any post whose text contains a URL is denied (also a spend lever:
+   *  a URL post costs $0.20 vs $0.015). */
+  readonly allowUrls?: boolean;
+  /** deny a post whose adapter-counted code-point length exceeds this. */
+  readonly maxLength?: number;
+  /** anchored regexes; a match on the (in-memory) tweet text denies. An invalid
+   *  regex denies (fail closed). */
+  readonly blockedPatterns?: string[];
+}
+
+/** replyPolicy: gate replies vs originals + the summoned-only precondition. */
+export interface XReplyPolicy {
+  readonly mode: XReplyMode;
+}
+
+/** maxPostsPerWindow: operator-authored count cap over a trailing window. */
+export interface XPostsWindowCap {
+  readonly max: number;
+  readonly windowSeconds: number;
+}
+
+/** spendPolicy: estimated micro-dollar spend ceiling over the price table. */
+export interface XSpendPolicy {
+  readonly maxSpendMicros: number;
+}
+
+/** escalation: conditions that downgrade an allow to approval_required. */
+export interface XEscalationPolicy {
+  /** any URL post routes to human approval even if allowUrls is true. */
+  readonly urlPostRequiresApproval?: boolean;
+  /** estimated spend over this (but under the hard cap) routes to approval. */
+  readonly spendOverMicrosRequiresApproval?: number;
+}
+
+/** quietHours: UTC minute-of-day window in which writes are denied. */
+export interface XQuietHours {
+  /** inclusive start minute-of-day UTC, 0..1439. */
+  readonly startMinuteUtc: number;
+  /** exclusive end minute-of-day UTC, 0..1439. Wrap (start>end) spans midnight. */
+  readonly endMinuteUtc: number;
+}
+
+/** The X-only constraint sub-block. */
+export interface XConstraints {
+  readonly replyPolicy?: XReplyPolicy;
+  readonly contentPolicy?: XContentPolicy;
+  readonly maxPostsPerWindow?: XPostsWindowCap;
+  readonly spendPolicy?: XSpendPolicy;
+  readonly escalation?: XEscalationPolicy;
+  readonly quietHours?: XQuietHours;
+}
 
 /** Constraints evaluated ONLY on an `effect: "allow"` match. */
 export interface CapabilityIntentConstraints {
@@ -89,6 +176,12 @@ export interface CapabilityIntentConstraints {
    * never throws).
    */
   readonly argMatches?: Record<string, string>;
+  /**
+   * X-only instance-level policy sub-block (permissioned X). ONLY valid on an
+   * `x.*` operation — present on a non-X operation => config error (fail closed).
+   * See {@link XConstraints} + docs/security/permissioned-x.mdx.
+   */
+  readonly x?: XConstraints;
 }
 
 /** The jsonb config of a `capability-intent` rule. */
@@ -188,7 +281,202 @@ const ALLOWED_CONSTRAINT_KEYS: ReadonlySet<string> = new Set([
   "maxCallsPerHour",
   "argEquals",
   "argMatches",
+  "x",
 ]);
+
+// Permissioned-X allowed keys (fail closed on any typo).
+const ALLOWED_X_KEYS: ReadonlySet<string> = new Set([
+  "replyPolicy",
+  "contentPolicy",
+  "maxPostsPerWindow",
+  "spendPolicy",
+  "escalation",
+  "quietHours",
+]);
+const ALLOWED_REPLY_KEYS: ReadonlySet<string> = new Set(["mode"]);
+const ALLOWED_CONTENT_KEYS: ReadonlySet<string> = new Set([
+  "allowUrls",
+  "maxLength",
+  "blockedPatterns",
+]);
+const ALLOWED_WINDOW_KEYS: ReadonlySet<string> = new Set(["max", "windowSeconds"]);
+const ALLOWED_SPEND_KEYS: ReadonlySet<string> = new Set(["maxSpendMicros"]);
+const ALLOWED_ESCALATION_KEYS: ReadonlySet<string> = new Set([
+  "urlPostRequiresApproval",
+  "spendOverMicrosRequiresApproval",
+]);
+const ALLOWED_QUIET_KEYS: ReadonlySet<string> = new Set(["startMinuteUtc", "endMinuteUtc"]);
+const X_REPLY_MODES: ReadonlySet<string> = new Set(["any", "summoned-only", "none"]);
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function isNonNegInt(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 0;
+}
+
+function isPosInt(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v > 0;
+}
+
+function isMinuteOfDay(v: unknown): v is number {
+  return typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 1439;
+}
+
+/**
+ * Validate the X constraint sub-block. FAIL CLOSED: any unknown key, wrong type,
+ * or out-of-range value returns an error string (the caller hard-denies). Returns
+ * a typed {@link XConstraints} on success.
+ */
+function parseXConstraints(rawInput: unknown): XConstraints | { error: string } {
+  if (!isPlainObject(rawInput)) {
+    return { error: "capability-intent: `constraints.x` must be an object" };
+  }
+  const unknown = Object.keys(rawInput).filter((k) => !ALLOWED_X_KEYS.has(k));
+  if (unknown.length > 0) {
+    return { error: `capability-intent: unknown constraints.x key(s): ${unknown.join(", ")}` };
+  }
+
+  const out: {
+    replyPolicy?: XReplyPolicy;
+    contentPolicy?: XContentPolicy;
+    maxPostsPerWindow?: XPostsWindowCap;
+    spendPolicy?: XSpendPolicy;
+    escalation?: XEscalationPolicy;
+    quietHours?: XQuietHours;
+  } = {};
+
+  // replyPolicy
+  if (rawInput.replyPolicy !== undefined) {
+    const rp = rawInput.replyPolicy;
+    if (!isPlainObject(rp)) return { error: "capability-intent: `x.replyPolicy` must be an object" };
+    const u = Object.keys(rp).filter((k) => !ALLOWED_REPLY_KEYS.has(k));
+    if (u.length > 0)
+      return { error: `capability-intent: unknown x.replyPolicy key(s): ${u.join(", ")}` };
+    if (typeof rp.mode !== "string" || !X_REPLY_MODES.has(rp.mode))
+      return {
+        error: 'capability-intent: `x.replyPolicy.mode` must be "any"|"summoned-only"|"none"',
+      };
+    out.replyPolicy = { mode: rp.mode as XReplyMode };
+  }
+
+  // contentPolicy
+  if (rawInput.contentPolicy !== undefined) {
+    const cp = rawInput.contentPolicy;
+    if (!isPlainObject(cp))
+      return { error: "capability-intent: `x.contentPolicy` must be an object" };
+    const u = Object.keys(cp).filter((k) => !ALLOWED_CONTENT_KEYS.has(k));
+    if (u.length > 0)
+      return { error: `capability-intent: unknown x.contentPolicy key(s): ${u.join(", ")}` };
+    const content: { allowUrls?: boolean; maxLength?: number; blockedPatterns?: string[] } = {};
+    if (cp.allowUrls !== undefined) {
+      if (typeof cp.allowUrls !== "boolean")
+        return { error: "capability-intent: `x.contentPolicy.allowUrls` must be a boolean" };
+      content.allowUrls = cp.allowUrls;
+    }
+    if (cp.maxLength !== undefined) {
+      if (!isPosInt(cp.maxLength))
+        return {
+          error: "capability-intent: `x.contentPolicy.maxLength` must be a positive integer",
+        };
+      content.maxLength = cp.maxLength;
+    }
+    if (cp.blockedPatterns !== undefined) {
+      if (
+        !Array.isArray(cp.blockedPatterns) ||
+        !cp.blockedPatterns.every((p) => typeof p === "string" && p.length > 0)
+      )
+        return {
+          error:
+            "capability-intent: `x.contentPolicy.blockedPatterns` must be a non-empty string[] of non-empty strings",
+        };
+      content.blockedPatterns = cp.blockedPatterns as string[];
+    }
+    out.contentPolicy = content;
+  }
+
+  // maxPostsPerWindow
+  if (rawInput.maxPostsPerWindow !== undefined) {
+    const w = rawInput.maxPostsPerWindow;
+    if (!isPlainObject(w))
+      return { error: "capability-intent: `x.maxPostsPerWindow` must be an object" };
+    const u = Object.keys(w).filter((k) => !ALLOWED_WINDOW_KEYS.has(k));
+    if (u.length > 0)
+      return { error: `capability-intent: unknown x.maxPostsPerWindow key(s): ${u.join(", ")}` };
+    if (!isNonNegInt(w.max))
+      return {
+        error: "capability-intent: `x.maxPostsPerWindow.max` must be a non-negative integer",
+      };
+    if (!isPosInt(w.windowSeconds))
+      return {
+        error: "capability-intent: `x.maxPostsPerWindow.windowSeconds` must be a positive integer",
+      };
+    out.maxPostsPerWindow = { max: w.max, windowSeconds: w.windowSeconds };
+  }
+
+  // spendPolicy
+  if (rawInput.spendPolicy !== undefined) {
+    const s = rawInput.spendPolicy;
+    if (!isPlainObject(s)) return { error: "capability-intent: `x.spendPolicy` must be an object" };
+    const u = Object.keys(s).filter((k) => !ALLOWED_SPEND_KEYS.has(k));
+    if (u.length > 0)
+      return { error: `capability-intent: unknown x.spendPolicy key(s): ${u.join(", ")}` };
+    if (!isNonNegInt(s.maxSpendMicros))
+      return {
+        error: "capability-intent: `x.spendPolicy.maxSpendMicros` must be a non-negative integer",
+      };
+    out.spendPolicy = { maxSpendMicros: s.maxSpendMicros };
+  }
+
+  // escalation
+  if (rawInput.escalation !== undefined) {
+    const e = rawInput.escalation;
+    if (!isPlainObject(e)) return { error: "capability-intent: `x.escalation` must be an object" };
+    const u = Object.keys(e).filter((k) => !ALLOWED_ESCALATION_KEYS.has(k));
+    if (u.length > 0)
+      return { error: `capability-intent: unknown x.escalation key(s): ${u.join(", ")}` };
+    const esc: { urlPostRequiresApproval?: boolean; spendOverMicrosRequiresApproval?: number } = {};
+    if (e.urlPostRequiresApproval !== undefined) {
+      if (typeof e.urlPostRequiresApproval !== "boolean")
+        return {
+          error: "capability-intent: `x.escalation.urlPostRequiresApproval` must be a boolean",
+        };
+      esc.urlPostRequiresApproval = e.urlPostRequiresApproval;
+    }
+    if (e.spendOverMicrosRequiresApproval !== undefined) {
+      if (!isNonNegInt(e.spendOverMicrosRequiresApproval))
+        return {
+          error:
+            "capability-intent: `x.escalation.spendOverMicrosRequiresApproval` must be a non-negative integer",
+        };
+      esc.spendOverMicrosRequiresApproval = e.spendOverMicrosRequiresApproval;
+    }
+    out.escalation = esc;
+  }
+
+  // quietHours
+  if (rawInput.quietHours !== undefined) {
+    const q = rawInput.quietHours;
+    if (!isPlainObject(q)) return { error: "capability-intent: `x.quietHours` must be an object" };
+    const u = Object.keys(q).filter((k) => !ALLOWED_QUIET_KEYS.has(k));
+    if (u.length > 0)
+      return { error: `capability-intent: unknown x.quietHours key(s): ${u.join(", ")}` };
+    if (!isMinuteOfDay(q.startMinuteUtc) || !isMinuteOfDay(q.endMinuteUtc))
+      return {
+        error:
+          "capability-intent: `x.quietHours.startMinuteUtc`/`endMinuteUtc` must be integers 0..1439",
+      };
+    if (q.startMinuteUtc === q.endMinuteUtc)
+      return {
+        error:
+          "capability-intent: `x.quietHours` start and end must differ (empty/full window is ambiguous)",
+      };
+    out.quietHours = { startMinuteUtc: q.startMinuteUtc, endMinuteUtc: q.endMinuteUtc };
+  }
+
+  return out;
+}
 
 function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: string } {
   // FAIL CLOSED on a non-object config. `rule.config` is opaque jsonb and can be
@@ -285,10 +573,18 @@ function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: strin
       return { error: "capability-intent: `constraints.argMatches` must be Record<string,string>" };
     }
 
+    let xConstraints: XConstraints | undefined;
+    if (c.x !== undefined) {
+      const parsedX = parseXConstraints(c.x);
+      if ("error" in parsedX) return { error: parsedX.error };
+      xConstraints = parsedX;
+    }
+
     constraints = {
       ...(c.maxCallsPerHour !== undefined ? { maxCallsPerHour: c.maxCallsPerHour as number } : {}),
       ...(c.argEquals !== undefined ? { argEquals: c.argEquals as Record<string, string> } : {}),
       ...(c.argMatches !== undefined ? { argMatches: c.argMatches as Record<string, string> } : {}),
+      ...(xConstraints !== undefined ? { x: xConstraints } : {}),
     };
   }
 
@@ -668,6 +964,15 @@ export const PROVIDER_POLICY_REASON = {
   CONFIGURATION_INVALID: "POLICY_CONFIGURATION_INVALID",
   INPUT_UNAVAILABLE: "POLICY_INPUT_UNAVAILABLE",
   EVALUATOR_ERROR: "POLICY_EVALUATOR_ERROR",
+  // Permissioned-X reason codes (see docs/security/permissioned-x.mdx).
+  X_REPLY_NOT_SUMMONED: "POLICY_X_REPLY_NOT_SUMMONED",
+  X_REPLY_FORBIDDEN: "POLICY_X_REPLY_FORBIDDEN",
+  X_URL_FORBIDDEN: "POLICY_X_URL_FORBIDDEN",
+  X_CONTENT_TOO_LONG: "POLICY_X_CONTENT_TOO_LONG",
+  X_CONTENT_BLOCKED: "POLICY_X_CONTENT_BLOCKED",
+  X_RATE_CAP_EXCEEDED: "POLICY_X_RATE_CAP_EXCEEDED",
+  X_SPEND_CAP_EXCEEDED: "POLICY_X_SPEND_CAP_EXCEEDED",
+  X_QUIET_HOURS: "POLICY_X_QUIET_HOURS",
 } as const;
 
 export type ProviderPolicyEffect = "hard_deny" | "approval_required" | "allow";
@@ -685,6 +990,29 @@ export interface ProviderPolicyContext {
   /** Authoritative trailing-hour invoke count. `undefined` => input
    *  unavailable => fail closed (hard_deny, POLICY_INPUT_UNAVAILABLE). */
   readonly invokeCount1h?: number;
+  /**
+   * IN-MEMORY-ONLY tweet text for `contentPolicy.blockedPatterns` matching.
+   * Deliberately NOT part of {@link args} (which is validated scalars only) and
+   * NEVER persisted. `undefined` for non-text operations; a blockedPatterns rule
+   * then fails closed (POLICY_INPUT_UNAVAILABLE). See
+   * docs/security/permissioned-x.mdx "Text availability".
+   */
+  readonly policyText?: string;
+  /**
+   * Permissioned-X authoritative inputs. Each is `undefined` when unwired; a
+   * policy that REQUIRES the input then fails closed (POLICY_INPUT_UNAVAILABLE).
+   * Steward never borrows a different counter or silently passes.
+   */
+  readonly x?: {
+    /** authoritative count of posts already made in the policy's trailing
+     *  window (used by maxPostsPerWindow). */
+    readonly postsInWindow?: number;
+    /** authoritative accumulated estimated micro-dollar spend in the window
+     *  (used by spendPolicy; the current action's cost is added on top). */
+    readonly accumulatedSpendMicros?: number;
+    /** authoritative current minute-of-day UTC, 0..1439 (used by quietHours). */
+    readonly nowMinuteUtc?: number;
+  };
 }
 
 export interface ProviderPolicyRuleResult {
@@ -803,12 +1131,28 @@ export function composeProviderActionPolicyDecision(
 
       // effect === allow: evaluate its hard constraints. A FAILED hard
       // constraint is a hard deny (a rate cap / arg gate is not negotiable via
-      // approval).
+      // approval). A permissioned-X ESCALATION downgrades the allow to an
+      // approval (never softens a deny).
       const denial = evaluateProviderConstraints(parsed.constraints, context);
       if (denial) {
         sawHardDeny = true;
         reasonCodes.add(denial);
         results.push(mkResult(rule.id, "allow", "hard_deny", denial));
+        continue;
+      }
+      const xVerdict = evaluateXConstraints(parsed.constraints?.x, context);
+      if (xVerdict.kind === "deny") {
+        sawHardDeny = true;
+        reasonCodes.add(xVerdict.reasonCode);
+        results.push(mkResult(rule.id, "allow", "hard_deny", xVerdict.reasonCode));
+        continue;
+      }
+      if (xVerdict.kind === "escalate") {
+        sawApproval = true;
+        reasonCodes.add(PROVIDER_POLICY_REASON.APPROVAL_REQUIRED);
+        results.push(
+          mkResult(rule.id, "allow", "approval_required", PROVIDER_POLICY_REASON.APPROVAL_REQUIRED),
+        );
         continue;
       }
       sawPassingAllow = true;
@@ -888,4 +1232,159 @@ function evaluateProviderConstraints(
     if (count >= constraints.maxCallsPerHour) return PROVIDER_POLICY_REASON.HARD_DENY;
   }
   return null;
+}
+
+// ─── Permissioned-X evaluation ──────────────────────────────────────────
+
+export type XConstraintVerdict =
+  | { kind: "pass" }
+  | { kind: "deny"; reasonCode: string }
+  | { kind: "escalate" };
+
+/** True for a boolean-typed policy arg that is strictly `true`. */
+function argIsTrue(args: Record<string, unknown>, key: string): boolean {
+  return args[key] === true;
+}
+
+/**
+ * Evaluate the permissioned-X constraint sub-block against the provider-policy
+ * context. Returns:
+ *   - { kind: "deny", reasonCode }  on the FIRST hard failure (deny wins),
+ *   - { kind: "escalate" }          when no deny but an escalation condition holds,
+ *   - { kind: "pass" }              when the X block is absent or fully satisfied.
+ *
+ * FAIL CLOSED everywhere: an `x` block on a NON-X operation denies; an
+ * unavailable required input denies; an unexpected content shape denies. Deny is
+ * evaluated BEFORE escalation so a hard deny can never be softened to approval.
+ */
+export function evaluateXConstraints(
+  x: XConstraints | undefined,
+  ctx: ProviderPolicyContext,
+): XConstraintVerdict {
+  if (!x) return { kind: "pass" };
+
+  // An X policy block only applies to x.* operations. On any other operation it
+  // is a configuration error (fail closed) — we never silently ignore it.
+  if (!ctx.operationKey.startsWith("x.")) {
+    return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.CONFIGURATION_INVALID };
+  }
+
+  const { args } = ctx;
+  const isReply = argIsTrue(args, "isReply");
+  const summoned = argIsTrue(args, "summoned");
+  const hasUrl = argIsTrue(args, "hasUrl");
+
+  // ── replyPolicy ──
+  if (x.replyPolicy) {
+    if (isReply) {
+      if (x.replyPolicy.mode === "none") {
+        return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.X_REPLY_FORBIDDEN };
+      }
+      if (x.replyPolicy.mode === "summoned-only" && !summoned) {
+        // The Feb-2026 anti-spam upstream-denial class, modeled locally: an
+        // un-summoned programmatic reply would 403 at the wire, so we deny it
+        // BEFORE the wasted billed call.
+        return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.X_REPLY_NOT_SUMMONED };
+      }
+      // mode === "any": allowed to proceed (operator accepts upstream risk).
+    }
+    // Not a reply: replyPolicy is inert (it only gates replies).
+  }
+
+  // ── contentPolicy ──
+  if (x.contentPolicy) {
+    if (x.contentPolicy.allowUrls === false && hasUrl) {
+      return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.X_URL_FORBIDDEN };
+    }
+    if (x.contentPolicy.maxLength !== undefined) {
+      const len = args.textCodePointLength;
+      // A content-length policy REQUIRES the length signal. Absent => fail closed.
+      if (typeof len !== "number" || !Number.isInteger(len)) {
+        return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
+      }
+      if (len > x.contentPolicy.maxLength) {
+        return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.X_CONTENT_TOO_LONG };
+      }
+    }
+    if (x.contentPolicy.blockedPatterns && x.contentPolicy.blockedPatterns.length > 0) {
+      const text = ctx.policyText;
+      // Pattern matching REQUIRES the in-memory text channel. Absent/non-string
+      // => fail closed (we cannot prove the content is clean).
+      if (typeof text !== "string") {
+        return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
+      }
+      for (const pattern of x.contentPolicy.blockedPatterns) {
+        let re: RegExp;
+        try {
+          re = new RegExp(pattern);
+        } catch {
+          // Invalid regex in config => fail closed (never throw).
+          return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.CONFIGURATION_INVALID };
+        }
+        if (re.test(text)) {
+          return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.X_CONTENT_BLOCKED };
+        }
+      }
+    }
+  }
+
+  // ── quietHours ── (gates writes; reads never carry it in practice)
+  if (x.quietHours) {
+    const now = ctx.x?.nowMinuteUtc;
+    if (typeof now !== "number" || !Number.isInteger(now)) {
+      return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
+    }
+    const { startMinuteUtc: start, endMinuteUtc: end } = x.quietHours;
+    // Non-wrapping window [start, end); wrapping window (start > end) spans
+    // midnight so the quiet region is [start, 1440) ∪ [0, end).
+    const inWindow =
+      start < end ? now >= start && now < end : now >= start || now < end;
+    if (inWindow) {
+      return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.X_QUIET_HOURS };
+    }
+  }
+
+  // ── maxPostsPerWindow ──
+  if (x.maxPostsPerWindow) {
+    const posts = ctx.x?.postsInWindow;
+    if (typeof posts !== "number" || !Number.isFinite(posts)) {
+      return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
+    }
+    if (posts >= x.maxPostsPerWindow.max) {
+      return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.X_RATE_CAP_EXCEEDED };
+    }
+  }
+
+  // ── spendPolicy (hard cap over estimated spend) ──
+  // Estimated spend = accumulated window spend + this action's price.
+  const thisActionMicros = estimateXPostMicros(hasUrl);
+  let projectedMicros: number | undefined;
+  if (x.spendPolicy || x.escalation?.spendOverMicrosRequiresApproval !== undefined) {
+    const accumulated = ctx.x?.accumulatedSpendMicros;
+    if (typeof accumulated !== "number" || !Number.isFinite(accumulated)) {
+      return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
+    }
+    projectedMicros = accumulated + thisActionMicros;
+  }
+  if (x.spendPolicy && projectedMicros !== undefined) {
+    if (projectedMicros > x.spendPolicy.maxSpendMicros) {
+      return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.X_SPEND_CAP_EXCEEDED };
+    }
+  }
+
+  // ── escalation (only reached when NO hard deny fired) ──
+  if (x.escalation) {
+    if (x.escalation.urlPostRequiresApproval === true && hasUrl) {
+      return { kind: "escalate" };
+    }
+    if (
+      x.escalation.spendOverMicrosRequiresApproval !== undefined &&
+      projectedMicros !== undefined &&
+      projectedMicros > x.escalation.spendOverMicrosRequiresApproval
+    ) {
+      return { kind: "escalate" };
+    }
+  }
+
+  return { kind: "pass" };
 }
