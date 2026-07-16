@@ -80,6 +80,7 @@ const CS = {
   ROUTE_NODECL: "61000000-0000-4000-8000-0000000000c2",
   GRANTOR: "11000000-0000-4000-8000-0000000000c1",
   GRANT: "a1000000-0000-4000-8000-0000000000c1",
+  ROLE_BINDING: "b1000000-0000-4000-8000-0000000000c1",
 } as const;
 
 const OP_TWEET_KEY = "x.tweet.create";
@@ -117,6 +118,29 @@ function spendCapRules(opKey: string, maxBytes: number, currency = "BYTES") {
             currency,
             max: maxBytes,
             aggregateOver: "agent",
+          },
+        },
+      },
+    },
+  ];
+}
+
+/** allow rule + a GRANT-scoped cumulativeSpend cap. */
+function grantScopedSpendRules(opKey: string, maxBytes: number) {
+  return [
+    {
+      id: "c3333333-3333-4333-8333-3333333333f3",
+      type: "capability-intent",
+      enabled: true,
+      config: {
+        capabilities: [opKey],
+        effect: "allow",
+        constraints: {
+          cumulativeSpend: {
+            window: "PT24H",
+            currency: "BYTES",
+            max: maxBytes,
+            aggregateOver: "grant",
           },
         },
       },
@@ -179,6 +203,8 @@ async function seed(opts: {
   declaredCurrency?: string;
   declareSpendField?: boolean;
   countCapMaxCalls?: number;
+  grantScoped?: boolean;
+  accessViaRoleBindingNoGrant?: boolean;
 }) {
   const db = getDb();
   await db.insert(tenants).values([{ id: CS.TENANT, name: "CS", apiKeyHash: "hcs" }]);
@@ -239,7 +265,9 @@ async function seed(opts: {
     policyRules:
       opts.countCapMaxCalls !== undefined
         ? countCapRules(OP_TWEET_KEY, opts.countCapMaxCalls)
-        : spendCapRules(OP_TWEET_KEY, opts.maxBytes, opts.capCurrency ?? "BYTES"),
+        : opts.grantScoped
+          ? grantScopedSpendRules(OP_TWEET_KEY, opts.maxBytes)
+          : spendCapRules(OP_TWEET_KEY, opts.maxBytes, opts.capCurrency ?? "BYTES"),
   };
   if (opts.countCapMaxCalls === undefined && opts.declareSpendField !== false) {
     requestProfile.spendDeclaration = {
@@ -259,20 +287,40 @@ async function seed(opts: {
       requestProfile,
     },
   ]);
-  await db.insert(providerGrants).values([
-    {
-      id: CS.GRANT,
-      tenantId: CS.TENANT,
-      workspaceId: CS.WORKSPACE,
-      providerAccountId: CS.ACCOUNT,
-      agentId: CS.AGENT,
-      operationKeys: [OP_TWEET_KEY],
-      environment: "production",
-      expiresAt: FUTURE,
-      grantedByUserId: CS.GRANTOR,
-      reason: "test",
-    },
-  ]);
+  if (opts.accessViaRoleBindingNoGrant) {
+    // Access via a workspace_operator role binding, NO grant => matchedGrantIds
+    // is empty. A grant-scoped cap then has no grant identity (codex P1).
+    await db.insert(providerRoleBindings).values([
+      {
+        id: CS.ROLE_BINDING,
+        tenantId: CS.TENANT,
+        workspaceId: CS.WORKSPACE,
+        principalType: "agent",
+        principalId: CS.AGENT,
+        roleKey: "workspace_operator",
+        operationKeys: [OP_TWEET_KEY],
+        environment: "production",
+        status: "active",
+        grantedByUserId: CS.GRANTOR,
+        reason: "operator",
+      },
+    ]);
+  } else {
+    await db.insert(providerGrants).values([
+      {
+        id: CS.GRANT,
+        tenantId: CS.TENANT,
+        workspaceId: CS.WORKSPACE,
+        providerAccountId: CS.ACCOUNT,
+        agentId: CS.AGENT,
+        operationKeys: [OP_TWEET_KEY],
+        environment: "production",
+        expiresAt: FUTURE,
+        grantedByUserId: CS.GRANTOR,
+        reason: "test",
+      },
+    ]);
+  }
 }
 
 function idemHash(seed: string): string {
@@ -372,6 +420,18 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     expect(c3.kind).toBe("policy_denied"); // count 2 >= 2 => deny
     if (c3.kind === "policy_denied") {
       expect(c3.code).toBe(PROVIDER_POLICY_REASON.HARD_DENY);
+    }
+  });
+
+  test("E2E #4: a grant-scoped cap with NO grant (role-binding access) denies (codex P1)", async () => {
+    // Access is granted via a workspace_operator role binding, so matchedGrantIds
+    // is empty. A `grant`-scoped cumulativeSpend rule has no grant identity to
+    // scope to => it must FAIL CLOSED, not pass under a shared empty bucket.
+    await seed({ maxBytes: 1_000_000, grantScoped: true, accessViaRoleBindingNoGrant: true });
+    const t = await proposeTweet("hello", "cs-e2e-4");
+    expect(t.kind).toBe("policy_denied");
+    if (t.kind === "policy_denied") {
+      expect(t.code).toBe(PROVIDER_POLICY_REASON.CUMULATIVE_SPEND_CAP_EXCEEDED);
     }
   });
 });

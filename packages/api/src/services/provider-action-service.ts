@@ -755,14 +755,21 @@ class ProviderActionService {
       };
     }
     if (effects.policy === "approval_required") {
-      // #206: the action is not executing now (it awaits human approval + a
-      // separate execute path). Reclaim the reservation so it does not consume
-      // budget while queued; the approved execute re-evaluates and re-reserves.
+      // #206 (codex P1): the approval EXECUTE path (provider-approval) mints the
+      // persisted commitment and does NOT re-run evaluatePolicy or re-reserve
+      // these Redis caps. If we released the reservation here, an approved action
+      // could later execute WITHOUT consuming the spend/count budget, letting
+      // approved bursts exceed the cap. So we KEEP the reservation (settle-like):
+      // the budget is consumed at DECISION time, which is fail-closed - an
+      // approval that is ultimately rejected/expired over-counts by one invoke
+      // for one window at worst (bounded deny-side error), never an allow-side
+      // bypass. (A future approval-plane re-reservation is the follow-up; it is
+      // in provider-approval.ts, outside this lane's scope fence.)
       await this.finalizeCumulativeSpend(
         (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [],
-        "failure",
+        "success",
       );
-      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
+      await this.finalizeWindowedInvoke(windowedInvokeReservation, "success");
       return {
         kind: "approval_required",
         code: "APPROVAL_REQUIRED",
@@ -1106,6 +1113,25 @@ class ProviderActionService {
       decl !== undefined && governing.some((g) => g.currency !== decl.currency);
     if (decl === undefined || thisSpend === undefined || currencyMismatch) {
       for (const g of governing) sums[bucketKeyOf(g)] = 0;
+      return { contextSums: sums, reservations: [] };
+    }
+
+    // FAIL CLOSED on a grant-scoped cap with NO grant identity (codex P1): access
+    // can be allowed via a role binding with an empty matchedGrantIds, in which
+    // case a `grant`-scoped rule has no grant to scope to. Reserving against a
+    // shared empty scopeKey would let unrelated agents share one fake bucket and
+    // slip the cap. Deny instead: feed the bucket AT cap+1 so the composer
+    // hard-denies (CUMULATIVE_SPEND_CAP_EXCEEDED), and take NO reservation.
+    const grantScopedWithoutGrant = governing.some(
+      (g) => g.aggregateOver === "grant" && (input.grantId === null || input.grantId.length === 0),
+    );
+    if (grantScopedWithoutGrant) {
+      for (const g of governing) {
+        sums[bucketKeyOf(g)] =
+          g.aggregateOver === "grant" && (input.grantId === null || input.grantId.length === 0)
+            ? g.max + 1
+            : 0;
+      }
       return { contextSums: sums, reservations: [] };
     }
 
