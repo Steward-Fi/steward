@@ -24,26 +24,40 @@ export type ApprovalDecision = (typeof APPROVAL_DECISIONS)[number];
 const executions = new Map<GovernedExecutionOutcome, number>(
   GOVERNED_EXECUTION_OUTCOMES.map((value) => [value, 0]),
 );
-const denials = new Map<DenialReasonClass, number>(DENIAL_REASON_CLASSES.map((value) => [value, 0]));
+const denials = new Map<DenialReasonClass, number>(
+  DENIAL_REASON_CLASSES.map((value) => [value, 0]),
+);
 const approvals = new Map<ApprovalDecision, number>(APPROVAL_DECISIONS.map((value) => [value, 0]));
 let bypassDenials = 0;
 let nonceContentions = 0;
 let lastCheckpointAtMs: number | null = null;
+let failObserverForTests = false;
 
-function incrementBounded<T extends string>(map: Map<T, number>, value: string, allowed: readonly T[]): void {
+function incrementBounded<T extends string>(
+  map: Map<T, number>,
+  value: string,
+  allowed: readonly T[],
+): void {
   if (!allowed.includes(value as T)) return;
   map.set(value as T, (map.get(value as T) ?? 0) + 1);
 }
 
 export function classifyDenialReason(reasonCode: unknown): DenialReasonClass {
   if (typeof reasonCode !== "string") return "other";
-  if (reasonCode.startsWith("SCOPE_") || reasonCode.startsWith("ACCESS_")) return "access";
-  if (reasonCode.startsWith("POLICY_")) return "policy";
-  if (reasonCode.includes("STALE_") || reasonCode.includes("DEPENDENCY")) return "stale_dependency";
-  if (reasonCode.includes("ACCOUNT_DISABLED")) return "account_disabled";
-  if (reasonCode.includes("AUDIT_UNAVAILABLE")) return "audit_unavailable";
-  if (reasonCode.includes("TERMINAL_STATE")) return "terminal_state";
-  if (reasonCode.startsWith("EXEC_AUTH_") || reasonCode.startsWith("AUTH_")) return "authorization";
+  const normalized = reasonCode.toUpperCase();
+  if (
+    normalized.startsWith("SCOPE_") ||
+    normalized.startsWith("ACCESS_") ||
+    normalized.startsWith("GRANT_") ||
+    normalized.includes("GRANT")
+  )
+    return "access";
+  if (normalized.startsWith("POLICY_")) return "policy";
+  if (normalized.includes("STALE_") || normalized.includes("DEPENDENCY")) return "stale_dependency";
+  if (normalized.includes("ACCOUNT_DISABLED")) return "account_disabled";
+  if (normalized.includes("AUDIT_UNAVAILABLE")) return "audit_unavailable";
+  if (normalized.includes("TERMINAL_STATE")) return "terminal_state";
+  if (normalized.startsWith("EXEC_AUTH_") || normalized.startsWith("AUTH_")) return "authorization";
   return "other";
 }
 
@@ -67,16 +81,44 @@ export function observeAuditCheckpoint(createdAtMs = Date.now()): void {
 }
 
 /** Observe only established typed audit events. Unknown actions are ignored. */
-export function observeSecurityAuditEvent(action: string, metadata: Record<string, unknown> = {}): void {
+export function observeSecurityAuditEvent(action: string, metadata: unknown = {}): void {
+  if (failObserverForTests) throw new Error("injected security metrics observer failure");
+  let fields: Record<string, unknown> = {};
+  if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
+    fields = metadata as Record<string, unknown>;
+  } else if (typeof metadata === "string") {
+    try {
+      const parsed = JSON.parse(metadata);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        fields = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Malformed metadata is untrusted detail, never a metric label.
+    }
+  }
   if (action === "provider.execution.succeeded") observeGovernedExecution("succeeded");
   else if (action === "provider.execution.failed") observeGovernedExecution("failed");
-  else if (action === "provider.execution.outcome_unknown") observeGovernedExecution("outcome_unknown");
-  else if (action === "provider.action.denied") observeDenial(metadata.reasonCode ?? metadata.accessReasonCode);
-  else if (action === "provider.execution.denied_at_boundary") {
-    observeDenial(metadata.reasonCode);
+  else if (action === "provider.execution.outcome_unknown")
+    observeGovernedExecution("outcome_unknown");
+  else if (action === "provider.action.denied") {
+    const policyReasons = fields.policyReasonCodes;
+    const reason =
+      fields.policyEffect === "hard_deny"
+        ? "POLICY_HARD_DENY"
+        : fields.policyEffect === "not_evaluated"
+          ? "ACCESS_DENIED"
+          : Array.isArray(policyReasons) && policyReasons.length > 0
+            ? policyReasons[0]
+            : (fields.reasonCode ?? fields.accessReasonCode);
+    observeDenial(reason);
+  } else if (action === "provider.execution.denied_at_boundary") {
+    observeDenial(fields.reasonCode);
     observeBypassDenial();
   } else if (action === "provider.approval.decided") {
-    observeApprovalDecision(typeof metadata.decision === "string" ? metadata.decision : "");
+    const decision = fields.decision ?? fields.toStatus;
+    observeApprovalDecision(
+      decision === "approved" ? "approved" : decision === "approval_denied" ? "denied" : "",
+    );
   }
 }
 
@@ -90,21 +132,39 @@ export function renderSecurityMetrics(nowMs = Date.now()): string {
     "# TYPE steward_governed_executions_total counter",
   ];
   for (const outcome of GOVERNED_EXECUTION_OUTCOMES) {
-    lines.push(metricLine("steward_governed_executions_total", `outcome=\"${outcome}\"`, executions.get(outcome) ?? 0));
+    lines.push(
+      metricLine(
+        "steward_governed_executions_total",
+        `outcome="${outcome}"`,
+        executions.get(outcome) ?? 0,
+      ),
+    );
   }
   lines.push(
     "# HELP steward_security_denials_total Security denials by bounded reason class.",
     "# TYPE steward_security_denials_total counter",
   );
   for (const reasonClass of DENIAL_REASON_CLASSES) {
-    lines.push(metricLine("steward_security_denials_total", `reason_class=\"${reasonClass}\"`, denials.get(reasonClass) ?? 0));
+    lines.push(
+      metricLine(
+        "steward_security_denials_total",
+        `reason_class="${reasonClass}"`,
+        denials.get(reasonClass) ?? 0,
+      ),
+    );
   }
   lines.push(
     "# HELP steward_approval_decisions_total Provider approval decisions by bounded decision.",
     "# TYPE steward_approval_decisions_total counter",
   );
   for (const decision of APPROVAL_DECISIONS) {
-    lines.push(metricLine("steward_approval_decisions_total", `decision=\"${decision}\"`, approvals.get(decision) ?? 0));
+    lines.push(
+      metricLine(
+        "steward_approval_decisions_total",
+        `decision="${decision}"`,
+        approvals.get(decision) ?? 0,
+      ),
+    );
   }
   lines.push(
     "# HELP steward_governed_boundary_denials_total Governed execution attempts denied at the provider boundary.",
@@ -115,21 +175,34 @@ export function renderSecurityMetrics(nowMs = Date.now()): string {
     metricLine("steward_nonce_claim_contentions_total", "", nonceContentions),
     "# HELP steward_audit_checkpoint_age_seconds Seconds since this process last created an audit checkpoint; -1 means none observed since start.",
     "# TYPE steward_audit_checkpoint_age_seconds gauge",
-    metricLine("steward_audit_checkpoint_age_seconds", "", lastCheckpointAtMs === null ? -1 : Math.max(0, (nowMs - lastCheckpointAtMs) / 1000)),
+    metricLine(
+      "steward_audit_checkpoint_age_seconds",
+      "",
+      lastCheckpointAtMs === null ? -1 : Math.max(0, (nowMs - lastCheckpointAtMs) / 1000),
+    ),
   );
   return `${lines.join("\n")}\n`;
 }
 
-export function securityMetricsEnabled(env: Record<string, string | undefined> = process.env): boolean {
+export function securityMetricsEnabled(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
   return env.STEWARD_METRICS_ENABLED === "true";
 }
 
-export function metricsTokenIsValid(candidate: string | undefined, env: Record<string, string | undefined> = process.env): boolean {
+export function metricsTokenIsValid(
+  candidate: string | undefined,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
   const configured = env.STEWARD_METRICS_TOKEN;
   if (!configured || configured.length < 32 || !candidate) return false;
   const expected = new TextEncoder().encode(configured);
   const actual = new TextEncoder().encode(candidate);
   return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+export function __setSecurityMetricsObserverFailureForTests(enabled: boolean): void {
+  failObserverForTests = enabled;
 }
 
 export function __resetSecurityMetricsForTests(): void {
@@ -139,4 +212,5 @@ export function __resetSecurityMetricsForTests(): void {
   bypassDenials = 0;
   nonceContentions = 0;
   lastCheckpointAtMs = null;
+  failObserverForTests = false;
 }

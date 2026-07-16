@@ -15,7 +15,7 @@ describe("bounded security metrics", () => {
     observeSecurityAuditEvent("provider.execution.succeeded", {});
     observeSecurityAuditEvent("provider.execution.outcome_unknown", {});
     observeSecurityAuditEvent("provider.action.denied", { reasonCode: "POLICY_HARD_DENY" });
-    observeSecurityAuditEvent("provider.approval.decided", { decision: "denied" });
+    observeSecurityAuditEvent("provider.approval.decided", { toStatus: "approval_denied" });
     const rendered = renderSecurityMetrics(1000);
     expect(rendered).toContain('outcome="succeeded"} 1');
     expect(rendered).toContain('outcome="outcome_unknown"} 1');
@@ -24,7 +24,12 @@ describe("bounded security metrics", () => {
   });
 
   test("rejects arbitrary labels and never renders secret or PII canaries", () => {
-    const canaries = ["sk_live_SUPERSECRET", "person@example.com", "tenant-123", "raw-custom-reason"];
+    const canaries = [
+      "sk_live_SUPERSECRET",
+      "person@example.com",
+      "tenant-123",
+      "raw-custom-reason",
+    ];
     observeSecurityAuditEvent("provider.action.denied", {
       reasonCode: canaries[3],
       token: canaries[0],
