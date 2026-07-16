@@ -1079,12 +1079,88 @@ export const approvalQueue = pgTable(
     decisionRequestHash: varchar("decision_request_hash", { length: 71 }),
     consumedAt: timestamp("consumed_at", { withTimezone: true }),
     consumedBy: varchar("consumed_by", { length: 64 }),
+    // ── #205 M-of-N quorum arm (0083) ──
+    // NULL threshold => single-approver legacy path (byte-for-byte unchanged).
+    // A non-NULL threshold flips the provider-action approval into flat N-of-M
+    // quorum: `quorum_threshold` DISTINCT eligible approvals are required before
+    // the queue can transition pending -> approved (execute-reachable). Nested
+    // quorums are out of scope. `quorum_eligible_user_ids` is the frozen,
+    // workspace_approver-scoped eligible set committed at create time.
+    // `quorum_approvals_count` is the guarded running tally of DISTINCT approve
+    // decisions at the CURRENT binding revision; it is reset to 0 whenever the
+    // set is invalidated (staleness bumps binding_revision).
+    quorumThreshold: integer("quorum_threshold"),
+    quorumEligibleUserIds: uuid("quorum_eligible_user_ids").array().notNull().default([]),
+    quorumApprovalsCount: integer("quorum_approvals_count").notNull().default(0),
   },
   (table) => ({
     txIdUniqueIdx: uniqueIndex("approval_queue_tx_id_idx").on(table.txId),
     statusIdx: index("approval_queue_status_idx").on(table.status),
   }),
 );
+
+/**
+ * #205 M-of-N quorum: one row per DISTINCT approver decision on a provider-action
+ * approval. The single-approver legacy path never inserts here (it records its
+ * lone decision on `approval_queue` directly). Every row binds the EXACT
+ * request_hash / action_digest / approval_commitment_hash and the
+ * `binding_revision_at_decision` the approval was cast against, so a dependency
+ * or payload change (which bumps binding_revision) invalidates the WHOLE
+ * collected set — a stale approval can never count toward a later quorum.
+ *
+ * Distinctness is a UNIQUE(approval_queue_id, approver_user_id): an approver
+ * approving twice is rejected loudly the second time. The requester (agent owner)
+ * can never be an eligible approver (enforced at decide time), so requester
+ * separation generalizes to "requester never counts toward quorum".
+ */
+export const providerActionApprovals = pgTable(
+  "provider_action_approvals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    approvalQueueId: varchar("approval_queue_id", { length: 64 })
+      .notNull()
+      .references(() => approvalQueue.id, { onDelete: "cascade" }),
+    intentId: varchar("intent_id", { length: 64 }).notNull(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    approverUserId: uuid("approver_user_id").notNull(),
+    decision: varchar("decision", { length: 16 }).notNull(),
+    bindingRevisionAtDecision: integer("binding_revision_at_decision").notNull(),
+    requestHash: varchar("request_hash", { length: 71 }).notNull(),
+    actionDigest: varchar("action_digest", { length: 71 }).notNull(),
+    approvalCommitmentHash: varchar("approval_commitment_hash", { length: 71 }).notNull(),
+    decisionIdempotencyKeyHash: varchar("decision_idempotency_key_hash", { length: 71 }).notNull(),
+    decisionRequestHash: varchar("decision_request_hash", { length: 71 }).notNull(),
+    mfaVerifiedAt: timestamp("mfa_verified_at", { withTimezone: true }),
+    mfaAgeMsAtDecision: integer("mfa_age_ms_at_decision"),
+    reasonCode: varchar("reason_code", { length: 96 }),
+    reason: text("reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    // Distinctness: an approver counts at most once per approval.
+    approverUniqueIdx: uniqueIndex("provider_action_approvals_approver_uniq").on(
+      table.approvalQueueId,
+      table.approverUserId,
+    ),
+    // Cross-action decision-idempotency-key reuse guard (mirrors approval_queue).
+    idemUniqueIdx: uniqueIndex("provider_action_approvals_idem_uniq").on(
+      table.tenantId,
+      table.approverUserId,
+      table.decisionIdempotencyKeyHash,
+    ),
+    queueIdx: index("provider_action_approvals_queue_idx").on(table.approvalQueueId),
+    intentIdx: index("provider_action_approvals_intent_idx").on(table.tenantId, table.intentId),
+    queueFk: foreignKey({
+      columns: [table.approvalQueueId],
+      foreignColumns: [approvalQueue.id],
+      name: "provider_action_approvals_queue_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+export type ProviderActionApprovalRow = typeof providerActionApprovals.$inferSelect;
+export type NewProviderActionApprovalRow = typeof providerActionApprovals.$inferInsert;
 
 /**
  * First-class Privy-style intents for actions that may require authorization
