@@ -55,7 +55,9 @@ import { getConfiguredVault } from "./vault-factory";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-export const API_VERSION = process.env.API_VERSION || "0.3.0";
+// Re-export for existing callers while keeping the version constant available
+// from a dependency-light module for audit signing and maintenance scripts.
+export { API_VERSION } from "./version";
 export const DEFAULT_TENANT_ID = "default";
 
 /**

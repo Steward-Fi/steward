@@ -34,7 +34,7 @@ import {
   eventsContentDigest,
   getCheckpointSigner,
 } from "./audit-checkpoint";
-import { API_VERSION } from "./context";
+import { API_VERSION } from "./version";
 
 /**
  * The canonicalization contract an offline verifier must reproduce per event.
