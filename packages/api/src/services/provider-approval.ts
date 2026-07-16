@@ -912,7 +912,13 @@ class ProviderApprovalService {
     const { binding, queue } = loaded;
     // DB time. drizzle's tx.execute returns either an array (postgres-js) or a
     // { rows } object (pglite/neon), so normalize.
-    const dueRes = await tx.execute(sql`SELECT (${queue.expiresAt} <= now()) AS due`);
+    // Explicit ::timestamptz cast + ISO-string param so the comparison type is
+    // unambiguous on postgres-js (which otherwise sends a bare Date param with an
+    // unknown type OID, and PG cannot infer `$1 <= now()`). PGLite already
+    // tolerated the untyped form; the cast is behavior-neutral there.
+    const dueRes = await tx.execute(
+      sql`SELECT (${queue.expiresAt?.toISOString() ?? null}::timestamptz <= now()) AS due`,
+    );
     const dueRows = (
       Array.isArray(dueRes) ? dueRes : ((dueRes as { rows?: unknown[] }).rows ?? [])
     ) as Array<{ due: boolean }>;
