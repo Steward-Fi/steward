@@ -128,15 +128,17 @@ export async function decideApproval(
       0,
       255,
     );
+  // reasonCode is OMITTED (not null): the route's strict schema rejects a
+  // present `reasonCode` unless isApprovalReasonCode(value) passes, and
+  // isApprovalReasonCode(null) is false -> APPROVAL_FIELD_INVALID. The UI's
+  // free-form prose reason is the operator rationale; no structured code is
+  // supplied, so the key must be absent, not null.
   const res = await fetch(`${API_URL}/v2/provider-actions/${encodeURIComponent(id)}/approval`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders(token, tenantId) },
     body: JSON.stringify({
       decision: input.decision,
       reason: input.reason,
-      // reasonCode is an allowed field; the UI supplies a null free-form reason
-      // code (the typed prose reason is the operator's rationale).
-      reasonCode: null,
       expectedVersion: input.expectedVersion,
       expectedRequestHash: input.expectedRequestHash,
       expectedActionDigest: input.expectedActionDigest,
@@ -172,7 +174,15 @@ export async function getEvidence(
   return unwrap(await readJsonOrThrow(res));
 }
 
-/** Terminal states where decision controls MUST be disabled (honest UX, U4). */
+/**
+ * A provider-action approval is decidable ONLY while its binding is still
+ * awaiting a human decision (`pending_approval`). Every other binding status
+ * (`approved`, `execution_ready`, `executing`, `denied`, `stale`, `expired`,
+ * terminal) is past the decision point, so the approve/deny controls MUST be
+ * disabled and the honest terminal-state banner shown (U4). Enabling controls on
+ * an already-`approved` action would let a follow-up decision hit a server-side
+ * conflict instead of being blocked in the UI.
+ */
 export function isDecidableStatus(status: string): boolean {
-  return status === "pending_approval" || status === "approved" || status === "pending";
+  return status === "pending_approval";
 }
