@@ -39,11 +39,11 @@ import {
 import {
   computeApprovalCommitmentHash,
   computeDecisionRequestHash,
+  isRegisteredProfile,
   jcsStringify,
   PROVIDER_APPROVAL_AUDIT_SCHEMA,
   type ProviderApprovalAuditPayloadV1,
   type ProviderApprovalCommitmentV1,
-  isRegisteredProfile,
   sha256HexPrefixed,
 } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";

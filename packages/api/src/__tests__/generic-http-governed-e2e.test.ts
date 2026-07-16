@@ -189,7 +189,9 @@ async function seedGeneric() {
   ]);
   await db
     .insert(agents)
-    .values([{ id: G.AGENT, tenantId: G.TENANT, name: "AG", walletAddress: "0x1", ownerUserId: null }]);
+    .values([
+      { id: G.AGENT, tenantId: G.TENANT, name: "AG", walletAddress: "0x1", ownerUserId: null },
+    ]);
   await db.insert(secrets).values([
     {
       id: G.SECRET,
@@ -555,12 +557,7 @@ describe("#201 generic-http governed provider-action E2E", () => {
   test("E2E arg reject: an out-of-descriptor argument is denied at propose", async () => {
     let code = "";
     try {
-      await propose(
-        OP_CREATE_KEY,
-        "POST",
-        { title: "x", priority: 1, surprise: "y" },
-        "gharg0001",
-      );
+      await propose(OP_CREATE_KEY, "POST", { title: "x", priority: 1, surprise: "y" }, "gharg0001");
     } catch (e) {
       code = (e as { code?: string }).code ?? "";
     }
