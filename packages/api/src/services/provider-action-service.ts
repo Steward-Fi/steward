@@ -1408,7 +1408,7 @@ export function extractRequesterSeparation(requestProfile: Record<string, unknow
  * THROWS {@link ApprovalArmError}("APPROVAL_QUORUM_CONFIG_INVALID") when a quorum
  * key is present but malformed (non-integer / <1 / > eligible-set size / empty
  * or duplicate or non-string eligible set / unknown members). Creation then
- * fails closed — a malformed quorum is NEVER stored (spec §7).
+ * fails closed. A malformed quorum is NEVER stored (spec §7).
  *
  * NOTE: membership-of-eligible-users-in-the-workspace_approver-role is NOT
  * verified here (the request profile does not carry role state); it is enforced

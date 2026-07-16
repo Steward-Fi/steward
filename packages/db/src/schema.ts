@@ -1106,7 +1106,7 @@ export const approvalQueue = pgTable(
  * request_hash / action_digest / approval_commitment_hash and the
  * `binding_revision_at_decision` the approval was cast against, so a dependency
  * or payload change (which bumps binding_revision) invalidates the WHOLE
- * collected set — a stale approval can never count toward a later quorum.
+ * collected set, so a stale approval can never count toward a later quorum.
  *
  * Distinctness is a UNIQUE(approval_queue_id, approver_user_id): an approver
  * approving twice is rejected loudly the second time. The requester (agent owner)

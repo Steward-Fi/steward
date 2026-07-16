@@ -209,7 +209,7 @@ export async function buildApprovalArm(args: {
     // FAIL CLOSED AT STORE TIME on an UNREACHABLE quorum (codex P2): a
     // structurally-valid eligible set can still be unsatisfiable if some listed
     // ids are not real workspace_approvers, are not tenant members, or is the
-    // requester (agent owner) — all of whom are rejected at decide time. Compute
+    // requester (agent owner), all of whom are rejected at decide time. Compute
     // the count of ids that are ACTUALLY able to vote right now (distinct tenant
     // member + active in-window workspace_approver role for this workspace, and
     // NOT the requesting agent's owner) and require it to be >= threshold. This
@@ -1761,7 +1761,7 @@ class ProviderApprovalService {
       // The queue is no longer pending or already at threshold: a concurrent
       // winner completed (or terminated) the quorum. Roll back the evidence row
       // we just inserted (throw, don't return) so a vote that did not advance the
-      // tally is never committed — the approvals table stays consistent with the
+      // tally is never committed, so the approvals table stays consistent with the
       // queue tally + terminal state.
       throw new QuorumStateConflictError();
     }
@@ -2238,7 +2238,7 @@ class AuditUnavailableError extends Error {}
  * evidence row has been inserted, when the guarded queue transition (tally CAS /
  * pending->approved / deny) loses to a concurrent winner. Throwing (rather than
  * returning fail()) rolls back the whole transaction so the non-counted evidence
- * row is NEVER committed — the approvals table stays consistent with the queue
+ * row is NEVER committed, so the approvals table stays consistent with the queue
  * tally and terminal state. The outer catch maps it to APPROVAL_STATE_CONFLICT.
  */
 class QuorumStateConflictError extends Error {
