@@ -229,6 +229,15 @@ proof "M20 body via JSON.stringify not JCS (P35)" "packages/proxy" "$GOV_TEST" "
 proof "M21 drop success-path body drain (P36)" "packages/proxy" "$GOV_TEST" "P36" "$GOV" \
   '0,/drainBody(response);/s/drainBody(response);//'
 
+# M22: drop the live route↔operation binding check → P2 (codex): a governed route
+#      configured for operation A must not inject its credential for a nonce minted
+#      for a DIFFERENT operation B. provider_operations.secret_route_id is not
+#      unique and the authority_revision bump only catches a reconfiguration of the
+#      SAME route, so without this assert a cross-operation credential swap slips
+#      through. Neutralize the mismatch comparison so it never denies.
+proof "M22 accept route bound to a different operation (P2 route/op mismatch)" "packages/proxy" "$GOV_TEST" "route.operation mismatch" "$GOV" \
+  's/liveRoute.providerOperationId !== loaded.operationId/false/'
+
 echo ""
 echo "==================================================="
 echo "PR4 MUTATION PROOFS: $pass_count killed, $fail_count invalid"

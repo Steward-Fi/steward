@@ -706,6 +706,53 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
+  it("P2 (codex): a live route bound to a DIFFERENT operation than the nonce fails closed (route↔operation mismatch), no decrypt", async () => {
+    const { intentId } = await seedExecutionReady();
+    // Repoint the LIVE governed route's provider_operation_id at a DIFFERENT
+    // operation than the one the nonce was minted for, WITHOUT bumping
+    // authority_revision (disable the 0082 bump trigger for the mutation), so the
+    // revision guard cannot mask the check. provider_operations.secret_route_id is
+    // not unique, so this models a nonce for operation B reaching for a route that
+    // actually belongs to operation A. The new route↔operation binding assertion
+    // must fail closed (EXEC_AUTH_STALE_ROUTE) BEFORE any claim/decrypt.
+    const OTHER_OP = "40000000-0000-4000-8000-0000000000ff";
+    const db = getDb();
+    // A REAL second operation in the same tenant/workspace/account (so the 0082
+    // provider_operation_fk is satisfied) that the nonce was NOT minted for.
+    await db.insert(providerOperations).values({
+      id: OTHER_OP,
+      tenantId: IDS.tenant,
+      workspaceId: IDS.workspace,
+      providerAccountId: IDS.account,
+      secretRouteId: IDS.route,
+      operationKey: "issues.create",
+      riskClass: "write",
+      revision: 1,
+    });
+    await db.execute(
+      sql`ALTER TABLE secret_routes DISABLE TRIGGER secret_routes_bump_authority_revision`,
+    );
+    await db
+      .update(secretRoutes)
+      .set({ providerOperationId: OTHER_OP })
+      .where(eq(secretRoutes.id, IDS.route));
+    await db.execute(
+      sql`ALTER TABLE secret_routes ENABLE TRIGGER secret_routes_bump_authority_revision`,
+    );
+    // Sanity: authority_revision is UNCHANGED (so only the new binding check can deny).
+    const [live] = await db
+      .select({ rev: secretRoutes.authorityRevision, op: secretRoutes.providerOperationId })
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, IDS.route))
+      .limit(1);
+    expect(live?.rev).toBe(1);
+    expect(live?.op).toBe(OTHER_OP);
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe("EXEC_AUTH_STALE_ROUTE");
+    expect(captured).toBeNull();
+  });
+
   it("P14: a secret rotation after mint fails the claim (stale secret)", async () => {
     const { intentId } = await seedExecutionReady();
     await getDb().update(secrets).set({ version: 2 }).where(eq(secrets.id, IDS.secret));

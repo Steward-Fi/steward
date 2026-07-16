@@ -349,6 +349,7 @@ export async function dispatchGovernedExecution(
       .select({
         authorityRevision: secretRoutes.authorityRevision,
         mode: secretRoutes.authorityMode,
+        providerOperationId: secretRoutes.providerOperationId,
       })
       .from(secretRoutes)
       .where(and(eq(secretRoutes.tenantId, tenantId), eq(secretRoutes.id, loaded.routeId)))
@@ -358,6 +359,17 @@ export async function dispatchGovernedExecution(
       liveRoute.mode !== "governed_v2" ||
       liveRoute.authorityRevision !== loaded.routeRevision
     ) {
+      return deny("EXEC_AUTH_STALE_ROUTE", 409, intentId, { executionId: loaded.executionId });
+    }
+    // Route↔operation binding (codex P2): the nonce binds routeId and operationId
+    // independently, and provider_operations.secret_route_id is NOT unique, so a
+    // governed route configured for operation A must not be usable to inject a
+    // credential for a DIFFERENT operation B. The authority_revision bump (0082
+    // trigger) catches a RECONFIGURATION of THIS route, but not the case where a
+    // nonce for operation B references a route whose provider_operation_id points
+    // at operation A. Assert the live route is still bound to exactly the minted
+    // operation before any decrypt — fail closed on mismatch.
+    if (liveRoute.providerOperationId !== loaded.operationId) {
       return deny("EXEC_AUTH_STALE_ROUTE", 409, intentId, { executionId: loaded.executionId });
     }
     const [liveSecret] = await db
