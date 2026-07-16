@@ -7,7 +7,8 @@
 
 import { proxyAuditLog } from "@stwd/db";
 import { and, count, desc, eq, gte, inArray, lte, type SQL, sql } from "drizzle-orm";
-import { type Context, Hono } from "hono";
+import { Hono } from "hono";
+import { auditOwnerAdminMfaGate } from "../middleware/audit-gate";
 import {
   type AuditBundleData,
   BUNDLE_CANONICALIZATION_SPEC,
@@ -25,7 +26,6 @@ import {
   agents,
   approvalQueue,
   db,
-  setNoStoreHeaders,
   transactions,
 } from "../services/context";
 
@@ -40,41 +40,14 @@ const MAX_AUDIT_BUNDLE_EVENTS = 10_000;
 // BUNDLE_CANONICALIZATION_SPEC now lives in services/audit (single source of
 // truth, spec §6.2) and is imported above.
 const MAX_AUDIT_EXPORT_RANGE_MS = 31 * 24 * 60 * 60 * 1000;
-const AUDIT_READ_MFA_MAX_AGE_MS = 5 * 60_000;
 const MAX_AUDIT_METADATA_FILTERS = 5;
 const AUDIT_ACTION_FILTER_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 const AUDIT_METADATA_PATH_PART_PATTERN = /^[A-Za-z0-9_]{1,64}$/;
 const MAX_AUDIT_METADATA_VALUE_LENGTH = 256;
 
-function hasRecentSessionMfa(
-  c: Context<{ Variables: AppVariables }>,
-  maxAgeMs = AUDIT_READ_MFA_MAX_AGE_MS,
-) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
-}
-
-auditRoutes.use("*", async (c, next) => {
-  const role = c.get("tenantRole");
-  if (c.get("authType") !== "session-jwt" || (role !== "owner" && role !== "admin")) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Audit routes require owner or admin session" },
-      403,
-    );
-  }
-  if (!hasRecentSessionMfa(c)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Audit routes require recent MFA verification" },
-      403,
-    );
-  }
-  setNoStoreHeaders(c);
-  return next();
-});
+// Owner/admin + recent-MFA gate, shared with the PR5 case/evidence routes so
+// both surfaces enforce an IDENTICAL posture (spec §6.3).
+auditRoutes.use("*", auditOwnerAdminMfaGate);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
