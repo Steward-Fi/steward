@@ -11,6 +11,42 @@ export interface TokenInfo {
   symbol: string;
   decimals: number;
   chainId: number;
+  /** Human-readable asset name when the registry knows it. */
+  name?: string;
+  /** Canonical project URL supplied by the asset issuer/operator. */
+  website?: string;
+}
+
+// ─── Known Tokens ───────────────────────────────────────────────────────────
+
+/**
+ * Monero on Solana. The token's on-chain Metaplex metadata uses the public
+ * symbol `XMR`; `MONERO_ON_SOLANA` is the unambiguous product name used in
+ * Steward surfaces so it is not confused with native-chain Monero.
+ */
+export const MONERO_ON_SOLANA: TokenInfo = Object.freeze({
+  address: "WXMRyRZhsa19ety5erZhHg4N3xj3EVN92u94422teJp",
+  symbol: "XMR",
+  decimals: 12,
+  chainId: 101,
+  name: "Monero on Solana",
+  website: "https://wxmr.io",
+});
+
+export const KNOWN_TOKENS: readonly TokenInfo[] = Object.freeze([MONERO_ON_SOLANA]);
+
+/**
+ * Return exact token metadata when Steward knows the asset. Solana addresses
+ * are case-sensitive, while EVM addresses are conventionally case-insensitive.
+ */
+export function getKnownToken(chainId: number, tokenAddress: string): TokenInfo | undefined {
+  return KNOWN_TOKENS.find(
+    (token) =>
+      token.chainId === chainId &&
+      (chainId === 101 || chainId === 102
+        ? token.address === tokenAddress
+        : token.address.toLowerCase() === tokenAddress.toLowerCase()),
+  );
 }
 
 // ─── Native Tokens ────────────────────────────────────────────────────────────
@@ -73,6 +109,8 @@ export function getTokenDecimals(chainId: number, tokenAddress?: string): number
   if (!tokenAddress || tokenAddress === "native" || tokenAddress === "") {
     return getNativeDecimals(chainId);
   }
+  const knownToken = getKnownToken(chainId, tokenAddress);
+  if (knownToken) return knownToken.decimals;
   const key = `${chainId}:${tokenAddress.toLowerCase()}`;
   return KNOWN_TOKEN_DECIMALS[key] ?? 18;
 }

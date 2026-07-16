@@ -1,7 +1,7 @@
 /**
  * compose.ts — the COMPOSITION ROOT that assembles the deployable Steward
  * server: the lean core (`createApp()`) plus the opt-in plugins this repo's own
- * deployment wants (currently: trading).
+ * deployment can enable (trading, capabilities, and wxmr).
  *
  * WHY A SEPARATE COMPOSITION ROOT
  * -------------------------------
@@ -96,7 +96,7 @@ function makeDeferredRouteApp(app: StewardApp): {
 
 /**
  * Build the fully-composed deployable Steward app: lean core + this repo's opt-in
- * plugins (trading), with the canonical middleware/route ordering preserved.
+ * plugins, with the canonical middleware/route ordering preserved.
  *
  * the trading plugin is imported with a static, bundler-discoverable specifier
  * (so the deployed Worker bundle includes it); only this deploy-only composition
@@ -167,6 +167,13 @@ export async function composeApp(): Promise<Hono<{ Variables: AppVariables }>> {
       capabilitiesPlugin: ComposedPlugin;
     };
     plugins.push(capabilitiesPlugin);
+  }
+
+  if (enabled.has("wxmr")) {
+    const { wxmrPlugin } = (await import("@stwd/plugin-wxmr")) as {
+      wxmrPlugin: ComposedPlugin;
+    };
+    plugins.push(wxmrPlugin);
   }
 
   const { deferred, flush } = makeDeferredRouteApp(app);
@@ -241,6 +248,13 @@ export async function runComposedPluginMigrations(): Promise<
       capabilitiesPlugin: ComposedPlugin;
     };
     host.collectMigrations(capabilitiesPlugin);
+  }
+
+  if (enabled.has("wxmr")) {
+    const { wxmrPlugin } = (await import("@stwd/plugin-wxmr")) as {
+      wxmrPlugin: ComposedPlugin;
+    };
+    host.collectMigrations(wxmrPlugin);
   }
 
   return host.runMigrations();

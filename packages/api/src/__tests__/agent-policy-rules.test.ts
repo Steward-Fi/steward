@@ -7,6 +7,7 @@ import type { AppVariables } from "../services/context";
 
 const TENANT_ID = `policy-rules-tenant-${Date.now()}`;
 const AGENT_ID = `policy-rules-agent-${Date.now()}`;
+const TYPED_DATA_AGENT_ID = `typed-data-policy-agent-${Date.now()}`;
 
 async function makeApp() {
   const { agentRoutes } = await import("../routes/agents");
@@ -29,6 +30,8 @@ describe("agent policy rule CRUD", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "agent-policy-rules-master-password";
+    process.env.STEWARD_AUDIT_HMAC_KEY =
+      "agent-policy-rules-test-audit-hmac-key-0123456789abcdef0123456789";
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
@@ -38,12 +41,22 @@ describe("agent policy rule CRUD", () => {
       name: "Policy Rules Tenant",
       apiKeyHash: "hash",
     });
-    await getDb().insert(agents).values({
-      id: AGENT_ID,
-      tenantId: TENANT_ID,
-      name: "Policy Rules Agent",
-      walletAddress: "0x1234567890123456789012345678901234567890",
-    });
+    await getDb()
+      .insert(agents)
+      .values([
+        {
+          id: AGENT_ID,
+          tenantId: TENANT_ID,
+          name: "Policy Rules Agent",
+          walletAddress: "0x1234567890123456789012345678901234567890",
+        },
+        {
+          id: TYPED_DATA_AGENT_ID,
+          tenantId: TENANT_ID,
+          name: "Typed Data Policy Agent",
+          walletAddress: "0x1234567890123456789012345678901234567891",
+        },
+      ]);
     await getDb()
       .insert(policies)
       .values({
@@ -60,6 +73,7 @@ describe("agent policy rule CRUD", () => {
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
   });
 
   it("creates, lists, gets, updates, and deletes nested policy rules", async () => {
@@ -163,5 +177,89 @@ describe("agent policy rule CRUD", () => {
     expect(response.status).toBe(201);
     expect(body.ok).toBe(true);
     expect(body.data.id).not.toBe("existing-spend");
+  });
+
+  it("stores a valid typed-data policy, rejects malformed replacement, and gates the public sign route", async () => {
+    const malformedResponse = await app.request(`/agents/${TYPED_DATA_AGENT_ID}/policies`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify([
+        {
+          id: "malformed",
+          type: "typed-data",
+          enabled: true,
+          config: { allowedChainIds: ["8453"] },
+        },
+      ]),
+    });
+    expect(malformedResponse.status).toBe(400);
+    expect(
+      await getDb().select().from(policies).where(eq(policies.agentId, TYPED_DATA_AGENT_ID)),
+    ).toHaveLength(0);
+
+    const allowedContract = "0x000000000022d473030f116ddee9f6b43ac78ba3";
+    const allowedSpender = "0x1111111111111111111111111111111111111111";
+    const storeResponse = await app.request(`/agents/${TYPED_DATA_AGENT_ID}/policies`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify([
+        {
+          id: "permit-policy",
+          type: "typed-data",
+          enabled: true,
+          config: {
+            verifyingContractAllowlist: [allowedContract],
+            allowedChainIds: [8453],
+            allowedPrimaryTypes: ["PermitSingle"],
+            messageConditions: [
+              { field: "spender", operator: "address_in", values: [allowedSpender] },
+              { field: "amount", operator: "uint_max", value: "1000" },
+            ],
+          },
+        },
+      ]),
+    });
+    expect(storeResponse.status).toBe(200);
+    const stored = await getDb()
+      .select()
+      .from(policies)
+      .where(eq(policies.agentId, TYPED_DATA_AGENT_ID));
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.type).toBe("typed-data");
+
+    const { vaultRoutes } = await import("../routes/vault");
+    const vaultApp = new Hono<{ Variables: AppVariables }>();
+    vaultApp.use("*", async (c, next) => {
+      c.set("tenantId", TENANT_ID);
+      c.set("authType", "session-jwt");
+      c.set("tenantRole", "owner");
+      c.set("userId", "00000000-0000-4000-8000-000000000001");
+      c.set("sessionMfaVerifiedAt", Date.now());
+      await next();
+    });
+    vaultApp.route("/vault", vaultRoutes);
+
+    const deniedResponse = await vaultApp.request(`/vault/${TYPED_DATA_AGENT_ID}/sign-typed-data`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        domain: { name: "Permit2", chainId: 8453, verifyingContract: allowedContract },
+        types: {
+          PermitSingle: [
+            { name: "spender", type: "address" },
+            { name: "amount", type: "uint256" },
+          ],
+        },
+        primaryType: "PermitSingle",
+        value: {
+          spender: "0x2222222222222222222222222222222222222222",
+          amount: "1001",
+        },
+      }),
+    });
+    expect(deniedResponse.status).toBe(403);
+    const deniedBody = (await deniedResponse.json()) as { ok: boolean; error?: string };
+    expect(deniedBody.ok).toBe(false);
+    expect(deniedBody.error).toBe("Transaction rejected by policy");
   });
 });

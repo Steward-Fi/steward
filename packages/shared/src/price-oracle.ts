@@ -1,5 +1,5 @@
 /**
- * Price Oracle — fetches USD prices for native and ERC-20 tokens via DexScreener.
+ * Price Oracle — fetches USD prices for native and fungible tokens via DexScreener.
  *
  * - Free API, no key required
  * - Caches prices for configurable TTL (default 60s)
@@ -58,7 +58,8 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
   const cache = new Map<string, CacheEntry>();
 
   function cacheKey(chainId: number, address: string): string {
-    return `${chainId}:${address.toLowerCase()}`;
+    const normalized = chainId === 101 || chainId === 102 ? address : address.toLowerCase();
+    return `${chainId}:${normalized}`;
   }
 
   function getCached(key: string): number | null {
@@ -93,6 +94,8 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
         return "arbitrum";
       case 43114:
         return "avalanche";
+      case 101:
+        return "solana";
       default:
         return null;
     }

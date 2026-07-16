@@ -56,6 +56,19 @@ describe("resolveEnabledPlugins — FULL (trading)", () => {
   });
 });
 
+describe("resolveEnabledPlugins — wxmr", () => {
+  it("enables only the opt-in wxmr bridge plugin when requested", () => {
+    expect([...resolveEnabledPlugins({ STEWARD_PLUGINS: " wxmr " })]).toEqual(["wxmr"]);
+  });
+
+  it("composes wxmr with other known plugins without duplication", () => {
+    expect([...resolveEnabledPlugins({ STEWARD_PLUGINS: "trading,wxmr,WXMR" })]).toEqual([
+      "trading",
+      "wxmr",
+    ]);
+  });
+});
+
 describe("resolveEnabledPlugins — legacy STEWARD_ENABLE_TRADING", () => {
   it("enables trading for STEWARD_ENABLE_TRADING=true", () => {
     expect(resolveEnabledPlugins({ STEWARD_ENABLE_TRADING: "true" }).has("trading")).toBe(true);
@@ -121,6 +134,7 @@ describe("KNOWN_PLUGIN_NAMES", () => {
   it("contains trading and nothing unexpected", () => {
     expect(KNOWN_PLUGIN_NAMES.has("trading")).toBe(true);
     expect(KNOWN_PLUGIN_NAMES.has("capabilities")).toBe(true);
-    expect([...KNOWN_PLUGIN_NAMES]).toEqual(["trading", "capabilities"]);
+    expect(KNOWN_PLUGIN_NAMES.has("wxmr")).toBe(true);
+    expect([...KNOWN_PLUGIN_NAMES]).toEqual(["trading", "capabilities", "wxmr"]);
   });
 });

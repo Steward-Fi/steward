@@ -56,6 +56,7 @@
         "@stwd/db": "workspace:*",
         "@stwd/plugin-capabilities": "workspace:*",
         "@stwd/plugin-trading": "workspace:*",
+        "@stwd/plugin-wxmr": "workspace:*",
         "@stwd/policy-engine": "workspace:*",
         "@stwd/provider-github": "workspace:*",
         "@stwd/provider-x": "workspace:*",
@@ -263,6 +264,23 @@
       "devDependencies": {
         "@stwd/auth": "workspace:*",
         "@types/node": "^25.5.0",
+      },
+    },
+    "packages/plugin-wxmr": {
+      "name": "@stwd/plugin-wxmr",
+      "version": "0.1.0",
+      "dependencies": {
+        "@noble/curves": "^1.6.0",
+        "@noble/hashes": "^1.6.0",
+        "@solana/web3.js": "^1",
+        "@stwd/adapters": "workspace:*",
+        "@stwd/shared": "workspace:*",
+        "bs58": "^6.0.0",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
+        "@types/node": "^25.5.0",
+        "typescript": "^5.8.0",
       },
     },
     "packages/policy-engine": {
@@ -1668,6 +1686,8 @@
     "@stwd/plugin-sdk": ["@stwd/plugin-sdk@workspace:packages/plugin-sdk"],
 
     "@stwd/plugin-trading": ["@stwd/plugin-trading@workspace:packages/plugin-trading"],
+
+    "@stwd/plugin-wxmr": ["@stwd/plugin-wxmr@workspace:packages/plugin-wxmr"],
 
     "@stwd/policy-engine": ["@stwd/policy-engine@workspace:packages/policy-engine"],
 

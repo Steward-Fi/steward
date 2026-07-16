@@ -32,6 +32,7 @@
     "@stwd/db": "workspace:*",
     "@stwd/plugin-capabilities": "workspace:*",
     "@stwd/plugin-trading": "workspace:*",
+    "@stwd/plugin-wxmr": "workspace:*",
     "@stwd/policy-engine": "workspace:*",
     "@stwd/provider-github": "workspace:*",
     "@stwd/provider-x": "workspace:*",

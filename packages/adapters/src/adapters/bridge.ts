@@ -46,6 +46,21 @@ export interface BridgeQuote {
   readonly route: ReadonlyArray<{ bridge: string; fromChainId: number; toChainId: number }>;
   readonly slippageBps: number;
   readonly expiresAt: number;
+  /** Provider-specific route direction, when useful to a handoff UI. */
+  readonly direction?: string;
+  /** Whether execution is returned as a transaction or an external handoff. */
+  readonly executionMode?: "unsigned-transaction" | "external-handoff";
+  /** Fixed HTTPS destination for an external provider handoff. */
+  readonly handoffUrl?: string;
+  /** Indicative provider fee read when the quote was created. */
+  readonly feeBps?: number;
+  /** Whether the fee is final, a global estimate, or not applicable. */
+  readonly feeScope?: "final" | "global-estimate" | "not-applicable";
+  /** Solana slot at which an on-chain fee was observed, when available. */
+  readonly feeObservedSlot?: number;
+  readonly feeObservedAt?: number;
+  /** Non-secret execution caveats callers should present before continuing. */
+  readonly notices?: readonly string[];
 }
 
 export interface BridgeBuildRequest {
@@ -64,12 +79,49 @@ export interface BridgeSession {
   readonly toChainId: number;
   readonly recipient: string;
   readonly createdAt: number;
+  readonly direction?: string;
+  readonly executionMode?: "unsigned-transaction" | "external-handoff";
+  readonly handoffUrl?: string;
+  /** Prevents the API audit layer from persisting a privacy-sensitive recipient. */
+  readonly recipientSensitive?: boolean;
+  readonly notices?: readonly string[];
+  readonly expiresAt?: number;
 }
+
+/**
+ * Explicit external execution handoff for bridge providers that do not expose a
+ * safe transaction-building API. This is deliberately NOT an
+ * {@link UnsignedTxIntent}: it has no calldata, signature, or broadcastable
+ * payload, and the caller must authorize the operation at `url`.
+ */
+export interface BridgeHandoff {
+  readonly kind: "external-handoff";
+  readonly category: "bridge";
+  readonly provider: string;
+  readonly quoteId: string;
+  readonly direction: string;
+  readonly url: string;
+  readonly fromChainId: number;
+  readonly toChainId: number;
+  readonly amountIn: string;
+  /** Trusted server-derived USD notional used by the route's policy gate. */
+  readonly estimatedUsd: number;
+  readonly recipient: string;
+  readonly recipientSensitive?: boolean;
+  readonly expiresAt: number;
+  readonly feeBps: number;
+  readonly feeScope: "global-estimate" | "owner-observed" | "not-applicable";
+  readonly feeObservedSlot?: number;
+  readonly feeObservedAt: number;
+  readonly notices: readonly string[];
+}
+
+export type BridgeBuildResult = UnsignedTxIntent | BridgeHandoff;
 
 export interface BridgeAdapter extends BaseAdapter {
   readonly category: "bridge";
   getQuote(request: BridgeQuoteRequest): Promise<BridgeQuote>;
-  buildBridge(request: BridgeBuildRequest): Promise<UnsignedTxIntent>;
+  buildBridge(request: BridgeBuildRequest): Promise<BridgeBuildResult>;
   createSession(
     quote: BridgeQuote,
     owner: { tenantId: string; userId: string },

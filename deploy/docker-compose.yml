@@ -37,6 +37,8 @@ services:
       CHAIN_ID: "${CHAIN_ID:-8453}"
       STEWARD_PLATFORM_KEY: "${STEWARD_PLATFORM_KEY:-}"
       SOLANA_RPC_URL: "${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}"
+      STEWARD_PLUGINS: "${STEWARD_PLUGINS:-}"
+      WXMR_SOLANA_RPC_URL: "${WXMR_SOLANA_RPC_URL:-}"
     volumes:
       - steward-data:/app/data
     depends_on:

@@ -102,6 +102,7 @@ Components include `StewardLogin`, `StewardAuthGuard`, `StewardUserButton`, `Ste
 | `@stwd/vault` | Local and pluggable wallet-key storage and signing primitives. Policy enforcement is provided by governed execution paths. |
 | `@stwd/policy-engine` | Composable policy decisions for scoped provider capabilities and wallet actions. |
 | `@stwd/proxy` | Credential-injecting proxy for configured routes. |
+| `@stwd/plugin-wxmr` | Opt-in wxmr.io integration for Monero on Solana bridge handoffs. |
 
 ## Self-hosting
 
@@ -165,9 +166,15 @@ See [`.env.example`](.env.example) for the full list.
 
 Wallet primitives support Ethereum, Base, Polygon, Arbitrum, BSC, Gnosis, Base Sepolia, BSC Testnet, Solana, Bitcoin, and Monero. Support differs by route, operation, custody backend, and deployment. This list is not a claim that every network shares the primary EVM execution authorization boundary.
 
+The opt-in `@stwd/plugin-wxmr` integration prepares handoffs in both directions
+between native Monero and Monero on Solana. Steward policy-checks the handoff
+request, but the plugin does not sign, submit, settle, or verify completion of
+the bridge operation; users complete it interactively at [wxmr.io](https://wxmr.io).
+
 ## Integrations
 
 - [ElizaOS](https://elizaos.ai) through [`@stwd/eliza-plugin`](https://www.npmjs.com/package/@stwd/eliza-plugin)
+- [Monero on Solana](https://wxmr.io) bridge handoffs through the opt-in `@stwd/plugin-wxmr` integration ([guide](docs/guides/monero-on-solana.mdx))
 - wagmi v2 and v3, with a MetaMask Connect EVM connector
 - Model Context Protocol server for AI agents and IDEs
 

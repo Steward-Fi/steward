@@ -49107,6 +49107,47 @@
                             },
                             "expiresAt": {
                               "type": "integer"
+                            },
+                            "direction": {
+                              "type": "string"
+                            },
+                            "executionMode": {
+                              "type": "string",
+                              "enum": [
+                                "unsigned-transaction",
+                                "external-handoff"
+                              ]
+                            },
+                            "handoffUrl": {
+                              "type": "string",
+                              "format": "uri"
+                            },
+                            "feeBps": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 10000
+                            },
+                            "feeScope": {
+                              "type": "string",
+                              "enum": [
+                                "final",
+                                "global-estimate",
+                                "not-applicable"
+                              ]
+                            },
+                            "feeObservedSlot": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "feeObservedAt": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "notices": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
                             }
                           }
                         }
@@ -49449,6 +49490,47 @@
                       },
                       "expiresAt": {
                         "type": "integer"
+                      },
+                      "direction": {
+                        "type": "string"
+                      },
+                      "executionMode": {
+                        "type": "string",
+                        "enum": [
+                          "unsigned-transaction",
+                          "external-handoff"
+                        ]
+                      },
+                      "handoffUrl": {
+                        "type": "string",
+                        "format": "uri"
+                      },
+                      "feeBps": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10000
+                      },
+                      "feeScope": {
+                        "type": "string",
+                        "enum": [
+                          "final",
+                          "global-estimate",
+                          "not-applicable"
+                        ]
+                      },
+                      "feeObservedSlot": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "feeObservedAt": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "notices": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
                       }
                     }
                   },
@@ -49478,61 +49560,169 @@
                       "const": true
                     },
                     "data": {
-                      "type": "object",
-                      "properties": {
-                        "unsignedIntent": {
+                      "oneOf": [
+                        {
                           "type": "object",
                           "required": [
-                            "signed",
-                            "kind",
-                            "chainId",
-                            "to",
-                            "value",
-                            "owner",
-                            "category",
-                            "provider"
+                            "unsignedIntent"
                           ],
                           "properties": {
-                            "signed": {
-                              "type": "boolean",
-                              "const": false
-                            },
-                            "kind": {
-                              "type": "string",
-                              "enum": [
-                                "evm-tx",
-                                "evm-typed-data",
-                                "abstract-intent"
-                              ]
-                            },
-                            "chainId": {
-                              "type": "integer"
-                            },
-                            "to": {
-                              "type": "string"
-                            },
-                            "value": {
-                              "type": "string"
-                            },
-                            "data": {
-                              "type": "string"
-                            },
-                            "owner": {
-                              "type": "string"
-                            },
-                            "category": {
-                              "type": "string"
-                            },
-                            "provider": {
-                              "type": "string"
-                            },
-                            "metadata": {
+                            "unsignedIntent": {
                               "type": "object",
-                              "additionalProperties": true
+                              "required": [
+                                "signed",
+                                "kind",
+                                "chainId",
+                                "to",
+                                "value",
+                                "owner",
+                                "category",
+                                "provider"
+                              ],
+                              "properties": {
+                                "signed": {
+                                  "type": "boolean",
+                                  "const": false
+                                },
+                                "kind": {
+                                  "type": "string",
+                                  "enum": [
+                                    "evm-tx",
+                                    "evm-typed-data",
+                                    "abstract-intent"
+                                  ]
+                                },
+                                "chainId": {
+                                  "type": "integer"
+                                },
+                                "to": {
+                                  "type": "string"
+                                },
+                                "value": {
+                                  "type": "string"
+                                },
+                                "data": {
+                                  "type": "string"
+                                },
+                                "owner": {
+                                  "type": "string"
+                                },
+                                "category": {
+                                  "type": "string"
+                                },
+                                "provider": {
+                                  "type": "string"
+                                },
+                                "metadata": {
+                                  "type": "object",
+                                  "additionalProperties": true
+                                }
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "handoff"
+                          ],
+                          "properties": {
+                            "handoff": {
+                              "type": "object",
+                              "required": [
+                                "kind",
+                                "category",
+                                "provider",
+                                "quoteId",
+                                "direction",
+                                "url",
+                                "fromChainId",
+                                "toChainId",
+                                "amountIn",
+                                "estimatedUsd",
+                                "recipient",
+                                "expiresAt",
+                                "notices",
+                                "feeBps",
+                                "feeScope",
+                                "feeObservedAt"
+                              ],
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "external-handoff"
+                                },
+                                "category": {
+                                  "type": "string",
+                                  "const": "bridge"
+                                },
+                                "provider": {
+                                  "type": "string"
+                                },
+                                "quoteId": {
+                                  "type": "string"
+                                },
+                                "direction": {
+                                  "type": "string"
+                                },
+                                "url": {
+                                  "type": "string",
+                                  "format": "uri"
+                                },
+                                "fromChainId": {
+                                  "type": "integer"
+                                },
+                                "toChainId": {
+                                  "type": "integer"
+                                },
+                                "amountIn": {
+                                  "type": "string"
+                                },
+                                "estimatedUsd": {
+                                  "type": "number",
+                                  "exclusiveMinimum": 0
+                                },
+                                "recipient": {
+                                  "type": "string"
+                                },
+                                "recipientSensitive": {
+                                  "type": "boolean"
+                                },
+                                "expiresAt": {
+                                  "type": "integer"
+                                },
+                                "feeBps": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 10000
+                                },
+                                "feeScope": {
+                                  "type": "string",
+                                  "enum": [
+                                    "global-estimate",
+                                    "owner-observed",
+                                    "not-applicable"
+                                  ]
+                                },
+                                "feeObservedSlot": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "feeObservedAt": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "notices": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  }
+                                }
+                              }
                             }
                           }
                         }
-                      }
+                      ]
                     }
                   }
                 }
@@ -49867,6 +50057,47 @@
                       },
                       "expiresAt": {
                         "type": "integer"
+                      },
+                      "direction": {
+                        "type": "string"
+                      },
+                      "executionMode": {
+                        "type": "string",
+                        "enum": [
+                          "unsigned-transaction",
+                          "external-handoff"
+                        ]
+                      },
+                      "handoffUrl": {
+                        "type": "string",
+                        "format": "uri"
+                      },
+                      "feeBps": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10000
+                      },
+                      "feeScope": {
+                        "type": "string",
+                        "enum": [
+                          "final",
+                          "global-estimate",
+                          "not-applicable"
+                        ]
+                      },
+                      "feeObservedSlot": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "feeObservedAt": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "notices": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
                       }
                     }
                   }
@@ -49925,6 +50156,32 @@
                               "type": "string"
                             },
                             "createdAt": {
+                              "type": "integer"
+                            },
+                            "direction": {
+                              "type": "string"
+                            },
+                            "executionMode": {
+                              "type": "string",
+                              "enum": [
+                                "unsigned-transaction",
+                                "external-handoff"
+                              ]
+                            },
+                            "handoffUrl": {
+                              "type": "string",
+                              "format": "uri"
+                            },
+                            "recipientSensitive": {
+                              "type": "boolean"
+                            },
+                            "notices": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "expiresAt": {
                               "type": "integer"
                             }
                           }
@@ -50223,6 +50480,32 @@
                               "type": "string"
                             },
                             "createdAt": {
+                              "type": "integer"
+                            },
+                            "direction": {
+                              "type": "string"
+                            },
+                            "executionMode": {
+                              "type": "string",
+                              "enum": [
+                                "unsigned-transaction",
+                                "external-handoff"
+                              ]
+                            },
+                            "handoffUrl": {
+                              "type": "string",
+                              "format": "uri"
+                            },
+                            "recipientSensitive": {
+                              "type": "boolean"
+                            },
+                            "notices": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "expiresAt": {
                               "type": "integer"
                             }
                           }
@@ -56974,6 +57257,47 @@
                             },
                             "expiresAt": {
                               "type": "integer"
+                            },
+                            "direction": {
+                              "type": "string"
+                            },
+                            "executionMode": {
+                              "type": "string",
+                              "enum": [
+                                "unsigned-transaction",
+                                "external-handoff"
+                              ]
+                            },
+                            "handoffUrl": {
+                              "type": "string",
+                              "format": "uri"
+                            },
+                            "feeBps": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 10000
+                            },
+                            "feeScope": {
+                              "type": "string",
+                              "enum": [
+                                "final",
+                                "global-estimate",
+                                "not-applicable"
+                              ]
+                            },
+                            "feeObservedSlot": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "feeObservedAt": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "notices": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
                             }
                           }
                         }
@@ -57316,6 +57640,47 @@
                       },
                       "expiresAt": {
                         "type": "integer"
+                      },
+                      "direction": {
+                        "type": "string"
+                      },
+                      "executionMode": {
+                        "type": "string",
+                        "enum": [
+                          "unsigned-transaction",
+                          "external-handoff"
+                        ]
+                      },
+                      "handoffUrl": {
+                        "type": "string",
+                        "format": "uri"
+                      },
+                      "feeBps": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10000
+                      },
+                      "feeScope": {
+                        "type": "string",
+                        "enum": [
+                          "final",
+                          "global-estimate",
+                          "not-applicable"
+                        ]
+                      },
+                      "feeObservedSlot": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "feeObservedAt": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "notices": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
                       }
                     }
                   },
@@ -57345,61 +57710,169 @@
                       "const": true
                     },
                     "data": {
-                      "type": "object",
-                      "properties": {
-                        "unsignedIntent": {
+                      "oneOf": [
+                        {
                           "type": "object",
                           "required": [
-                            "signed",
-                            "kind",
-                            "chainId",
-                            "to",
-                            "value",
-                            "owner",
-                            "category",
-                            "provider"
+                            "unsignedIntent"
                           ],
                           "properties": {
-                            "signed": {
-                              "type": "boolean",
-                              "const": false
-                            },
-                            "kind": {
-                              "type": "string",
-                              "enum": [
-                                "evm-tx",
-                                "evm-typed-data",
-                                "abstract-intent"
-                              ]
-                            },
-                            "chainId": {
-                              "type": "integer"
-                            },
-                            "to": {
-                              "type": "string"
-                            },
-                            "value": {
-                              "type": "string"
-                            },
-                            "data": {
-                              "type": "string"
-                            },
-                            "owner": {
-                              "type": "string"
-                            },
-                            "category": {
-                              "type": "string"
-                            },
-                            "provider": {
-                              "type": "string"
-                            },
-                            "metadata": {
+                            "unsignedIntent": {
                               "type": "object",
-                              "additionalProperties": true
+                              "required": [
+                                "signed",
+                                "kind",
+                                "chainId",
+                                "to",
+                                "value",
+                                "owner",
+                                "category",
+                                "provider"
+                              ],
+                              "properties": {
+                                "signed": {
+                                  "type": "boolean",
+                                  "const": false
+                                },
+                                "kind": {
+                                  "type": "string",
+                                  "enum": [
+                                    "evm-tx",
+                                    "evm-typed-data",
+                                    "abstract-intent"
+                                  ]
+                                },
+                                "chainId": {
+                                  "type": "integer"
+                                },
+                                "to": {
+                                  "type": "string"
+                                },
+                                "value": {
+                                  "type": "string"
+                                },
+                                "data": {
+                                  "type": "string"
+                                },
+                                "owner": {
+                                  "type": "string"
+                                },
+                                "category": {
+                                  "type": "string"
+                                },
+                                "provider": {
+                                  "type": "string"
+                                },
+                                "metadata": {
+                                  "type": "object",
+                                  "additionalProperties": true
+                                }
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "handoff"
+                          ],
+                          "properties": {
+                            "handoff": {
+                              "type": "object",
+                              "required": [
+                                "kind",
+                                "category",
+                                "provider",
+                                "quoteId",
+                                "direction",
+                                "url",
+                                "fromChainId",
+                                "toChainId",
+                                "amountIn",
+                                "estimatedUsd",
+                                "recipient",
+                                "expiresAt",
+                                "notices",
+                                "feeBps",
+                                "feeScope",
+                                "feeObservedAt"
+                              ],
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "external-handoff"
+                                },
+                                "category": {
+                                  "type": "string",
+                                  "const": "bridge"
+                                },
+                                "provider": {
+                                  "type": "string"
+                                },
+                                "quoteId": {
+                                  "type": "string"
+                                },
+                                "direction": {
+                                  "type": "string"
+                                },
+                                "url": {
+                                  "type": "string",
+                                  "format": "uri"
+                                },
+                                "fromChainId": {
+                                  "type": "integer"
+                                },
+                                "toChainId": {
+                                  "type": "integer"
+                                },
+                                "amountIn": {
+                                  "type": "string"
+                                },
+                                "estimatedUsd": {
+                                  "type": "number",
+                                  "exclusiveMinimum": 0
+                                },
+                                "recipient": {
+                                  "type": "string"
+                                },
+                                "recipientSensitive": {
+                                  "type": "boolean"
+                                },
+                                "expiresAt": {
+                                  "type": "integer"
+                                },
+                                "feeBps": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 10000
+                                },
+                                "feeScope": {
+                                  "type": "string",
+                                  "enum": [
+                                    "global-estimate",
+                                    "owner-observed",
+                                    "not-applicable"
+                                  ]
+                                },
+                                "feeObservedSlot": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "feeObservedAt": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "notices": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  }
+                                }
+                              }
                             }
                           }
                         }
-                      }
+                      ]
                     }
                   }
                 }
@@ -57734,6 +58207,47 @@
                       },
                       "expiresAt": {
                         "type": "integer"
+                      },
+                      "direction": {
+                        "type": "string"
+                      },
+                      "executionMode": {
+                        "type": "string",
+                        "enum": [
+                          "unsigned-transaction",
+                          "external-handoff"
+                        ]
+                      },
+                      "handoffUrl": {
+                        "type": "string",
+                        "format": "uri"
+                      },
+                      "feeBps": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10000
+                      },
+                      "feeScope": {
+                        "type": "string",
+                        "enum": [
+                          "final",
+                          "global-estimate",
+                          "not-applicable"
+                        ]
+                      },
+                      "feeObservedSlot": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "feeObservedAt": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "notices": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
                       }
                     }
                   }
@@ -57792,6 +58306,32 @@
                               "type": "string"
                             },
                             "createdAt": {
+                              "type": "integer"
+                            },
+                            "direction": {
+                              "type": "string"
+                            },
+                            "executionMode": {
+                              "type": "string",
+                              "enum": [
+                                "unsigned-transaction",
+                                "external-handoff"
+                              ]
+                            },
+                            "handoffUrl": {
+                              "type": "string",
+                              "format": "uri"
+                            },
+                            "recipientSensitive": {
+                              "type": "boolean"
+                            },
+                            "notices": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "expiresAt": {
                               "type": "integer"
                             }
                           }
@@ -58090,6 +58630,32 @@
                               "type": "string"
                             },
                             "createdAt": {
+                              "type": "integer"
+                            },
+                            "direction": {
+                              "type": "string"
+                            },
+                            "executionMode": {
+                              "type": "string",
+                              "enum": [
+                                "unsigned-transaction",
+                                "external-handoff"
+                              ]
+                            },
+                            "handoffUrl": {
+                              "type": "string",
+                              "format": "uri"
+                            },
+                            "recipientSensitive": {
+                              "type": "boolean"
+                            },
+                            "notices": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "expiresAt": {
                               "type": "integer"
                             }
                           }
