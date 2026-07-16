@@ -295,6 +295,63 @@ describe("PR5 offline verifier (synthetic bundles)", () => {
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 
+  it("codex-P1/§7.5: an unrelated same-tenant event in the segment cannot satisfy completeness", () => {
+    // Bundle segment = [genesis(seq1), UNRELATED exec_authorized(seq2)]. The
+    // manifest references ONLY seq1 and claims terminalState 'executing' (which
+    // requires exec_authorized + exec_claimed). The seq2 exec_authorized belongs
+    // to ANOTHER case (different intentId) and must NOT satisfy the required
+    // role, so a manifest claiming complete must FAIL.
+    const events = [
+      {
+        seq: 1,
+        prevHash: "00".repeat(32),
+        hmac: "11".repeat(32),
+        actorType: "agent",
+        actorId: "ag",
+        action: "provider.action.allowed",
+        resourceType: "provider_action",
+        resourceId: CASE,
+        metadata: {
+          intentId: CASE,
+          actionDigest: `sha256:${"a".repeat(64)}`,
+          requestHash: `sha256:${"b".repeat(64)}`,
+          accessDecisionHash: `sha256:${"c".repeat(64)}`,
+          policyDecisionHash: `sha256:${"d".repeat(64)}`,
+        },
+        ipAddress: null,
+        userAgent: null,
+        requestId: null,
+        createdAt: "2026-07-16T00:00:00.000Z",
+      },
+      {
+        seq: 2,
+        prevHash: "11".repeat(32),
+        hmac: "22".repeat(32),
+        actorType: "system",
+        actorId: "steward-system",
+        action: "provider.execution.authorized",
+        resourceType: "provider_action",
+        resourceId: "pa_ffffffff-ffff-ffff-ffff-ffffffffffff", // DIFFERENT case
+        metadata: { intentId: "pa_ffffffff-ffff-ffff-ffff-ffffffffffff", authorizationId: "other" },
+        ipAddress: null,
+        userAgent: null,
+        requestId: null,
+        createdAt: "2026-07-16T00:00:01.000Z",
+      },
+    ];
+    const env = buildEnvelope({
+      events,
+      payloadPatch: { seq: 2, headHmac: "22".repeat(32), expectedCount: 2, eventsToSeq: 2 },
+    });
+    // Manifest references ONLY the genesis seq (the case's own event).
+    (env.manifest as Record<string, unknown>).terminalState = "executing";
+    (env.manifest as Record<string, unknown>).completeness = "complete";
+    (env.manifest as Record<string, unknown>).missingRequiredRoles = [];
+    const r = run(env);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("complete");
+  });
+
   it("plain /audit/bundle (no manifest) still PASSes (no regression)", () => {
     const env = buildEnvelope();
     const plain = env.bundle;

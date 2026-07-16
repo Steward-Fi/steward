@@ -531,7 +531,11 @@ function buildManifest(args: BuildManifestArgs): ProviderCaseAssembly {
   }
 
   // Row-absence honesty (§4.6, N47/N48).
-  if (isApprovalPath(terminalState) && !queue && binding.approvalQueueId == null) {
+  // A case that WENT THROUGH approval has a non-null approvalQueueId. If that
+  // referenced queue row failed to load (deleted / corrupted), flag it — do NOT
+  // gate on `approvalQueueId == null`, which is the OPPOSITE (a case that never
+  // had a queue, e.g. the allowed-stub direct path). (codex P2)
+  if (binding.approvalQueueId != null && !queue) {
     pushReasonList(reasons, PROVIDER_CASE_REASON.QUEUE_ROW_ABSENT_FOR_APPROVAL_PATH);
   }
   if (isExecutionPath(terminalState) && !nonce) {
@@ -700,19 +704,6 @@ function byteLength(s: string): number {
   return new TextEncoder().encode(s).length;
 }
 
-function isApprovalPath(t: ProviderCaseTerminalState): boolean {
-  return (
-    t === "pending_approval" ||
-    t === "approval_denied" ||
-    t === "approval_expired" ||
-    t === "approval_staled" ||
-    t === "execution_ready" ||
-    t === "executing" ||
-    t === "succeeded" ||
-    t === "failed" ||
-    t === "outcome_unknown"
-  );
-}
 function isExecutionPath(t: ProviderCaseTerminalState): boolean {
   return t === "executing" || t === "succeeded" || t === "failed" || t === "outcome_unknown";
 }

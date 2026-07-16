@@ -465,10 +465,17 @@ function verifyManifest(manifest, events, payload) {
   }
 
   // Build seq -> signed bundle event. (§7.4.1) Each manifest event MUST match
-  // the signed bundle event at its seq by hmac AND action.
+  // the signed bundle event at its seq by hmac AND action. The bundle carries
+  // the CONTIGUOUS chain segment spanning the case, which may include unrelated
+  // same-tenant events (§5.3/§7.5); we therefore collect ONLY the SIGNED events
+  // the manifest references (the case's own seqs) into `caseEvents` and derive
+  // ALL role/fact reasoning from that set — never from the whole segment — so an
+  // unrelated case's `exec_authorized` (or any role) can neither back a fact nor
+  // satisfy the forged-completeness guard (codex P1).
   const bySeq = new Map();
   for (const ev of events) bySeq.set(ev.seq, ev);
   if (!Array.isArray(manifest.events)) fail("manifest.events is not an array");
+  const caseEvents = [];
   for (const me of manifest.events) {
     const be = bySeq.get(me.seq);
     if (!be) {
@@ -486,15 +493,16 @@ function verifyManifest(manifest, events, payload) {
     if (expectedRole !== null && me.role !== expectedRole) {
       fail(`manifest event seq ${me.seq} role ${me.role} != role for action ${be.action}`, me.seq);
     }
+    caseEvents.push(be);
   }
 
   // (§7.4.2) Each manifest FACT that a signed event carries in metadata must
   // equal the value in the owning signed event. A fact with no backing signed
   // event is REJECTED.
   const eventByRole = new Map();
-  for (const ev of events) {
+  for (const ev of caseEvents) {
     const r = roleForAction(ev.action);
-    if (r && !eventByRole.has(r)) eventByRole.set(r, ev);
+    if (r && r !== "unclassified" && !eventByRole.has(r)) eventByRole.set(r, ev);
   }
   const genesis = eventByRole.get("genesis");
   const factCheck = (role, metaKey, manifestVal) => {
@@ -545,9 +553,9 @@ function verifyManifest(manifest, events, payload) {
   // the required roles ABSENT from the signed event set. A manifest claiming
   // `complete` while a required role is not present in the SIGNED events FAILS.
   const presentRoles = new Set();
-  for (const ev of events) {
+  for (const ev of caseEvents) {
     const r = roleForAction(ev.action);
-    if (r) presentRoles.add(r);
+    if (r && r !== "unclassified") presentRoles.add(r);
   }
   const required = requiredRoles(manifest.terminalState);
   const actuallyMissing = required.filter((r) => !presentRoles.has(r));

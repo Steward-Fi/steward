@@ -25,8 +25,9 @@ The spec was written pre-PR4/pre-X-provider. I re-verified every anchor against 
 - `provider-case-evidence.integration.test.ts` — 15 (route + offline round-trip: N01/N02/N03, N04, N05, N06, N07, N08, N09, N11, N12, N17/N35, N24, N37/N38/N39, clean PASS w/wo fingerprint, access-denied honest complete).
 - `provider-case-verifier.test.ts` — 10 (synthetic no-DB: N18, N19, N20, N22, N40, N43, N44, N45, clean, plain-bundle no-regression).
 - `provider-case-purity.test.ts` — 2 (static pure-read assertion, deterministic manifest).
-- `provider-case-honesty.test.ts` — 5 (chain_segment_broken → unknown KC07; genesis-never-drained → never complete KC14; concurrent reads identical KC04/KC06; row-absence honesty; effect surfacing).
-- **PR5 total: 41/41.**
+- `provider-case-honesty.test.ts` — 6 (chain_segment_broken → unknown KC07; genesis-never-drained → never complete KC14; concurrent reads identical KC04/KC06; row-absence honesty; effect surfacing; unknown-action → `unclassified` never satisfies genesis).
+- Plus KC15 over-cap → `400 CASE_RANGE_TOO_LARGE` (in the integration suite).
+- **PR5 total: 43/43.**
 - **Regression (all pass):** `/audit/bundle` 12 (signAuditBundle factor-out, incl. offline verifier round-trip — no behavior change); PR3 approval lifecycle/negative/boundary + provider-action-service 56; PR3 approval route/concurrency + provider-x-governed-e2e 34; PR4 governed-execution 35.
 
 ### Mutation receipts (§9) — `packages/api/scripts/pr5-mutation-proofs.sh`
@@ -48,6 +49,14 @@ The spec was written pre-PR4/pre-X-provider. I re-verified every anchor against 
 1. **Governed-execution terminal states (`executing`/`succeeded`/`failed`/`outcome_unknown` via the PROXY path) are not seeded in PR5 unit tests.** The `succeeded`/`failed`/`outcome_unknown` binding states and the v2 execution nonce are produced by PR4's proxy `dispatchGovernedExecution`, which PR5 does not exercise (it's PR4's tested territory + needs the fake transport arriving in PR6). PR5 tests cover: the ALLOWED-stub path (`allowed_stub`→`succeeded`/`failed`), access-denied, pending, approved/execution_ready, plus the manifest's execution-fact plumbing via the verifier synthetic bundles and the terminal-state resolver unit-level. A full governed→executed→evidence e2e lands naturally in PR6 (golden path) which consumes `/evidence` + the verifier. The N25 (raw provider idempotency key) guard is enforced at the SOURCE (PR4 emits only the hash; asserted by the C3-confirmed anchor + the manifest's own hashing), and the leak-scan asserts absence in exported evidence.
 2. **REPEATABLE READ isolation is best-effort on non-PGLite:** `SET TRANSACTION ISOLATION LEVEL` inside the tx is wrapped in try/catch (some drivers only honor isolation at BEGIN). The append-only monotonic chain makes a re-read safe regardless, and the manifest's seq+hmac index pins the case events; the evidence bundle read+sign runs just after the snapshot (immutable range) to avoid a write-inside-read-only-tx deadlock on PGLite's single connection. A true real-Postgres REPEATABLE-READ coherence CI assertion (KC01/KC06 on real PG) is deferred to the PR7 real-Postgres harness (the spec routes KC-on-real-PG there).
 3. **Verifier `roleForAction`/`requiredRoles` are replicated** (the verifier has ZERO project imports by design). They mirror `@stwd/shared/provider-case.ts`; a drift would be caught by the round-trip integration tests (the API-produced manifest is verified by the script), but there is no compile-time link. A golden-vector cross-check test asserts the API canonicalizer and the verifier agree byte-for-byte on the checkpoint/events digest (via the existing audit-bundle offline round-trip).
+
+### Codex review
+
+Ran `codex review --base origin/develop` iteratively. First pass surfaced 2 P2 findings, both fixed with tests:
+1. `/evidence` could export an unbounded audit range for an over-cap case segment (DoS) → now throws `CaseRangeTooLargeError` before the range read; route returns `400 CASE_RANGE_TOO_LARGE`; `/case` still serves the honest `unknown` manifest.
+2. Unknown/drifted correlated actions defaulted to the `genesis` role and could falsely satisfy completeness → added a non-satisfying `unclassified` role (shared + verifier mirror); unknown actions never satisfy a required role.
+
+Re-review after the fixes: clean (no actionable findings).
 
 DO NOT MERGE — opened for review.
 

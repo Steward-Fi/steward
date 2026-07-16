@@ -100,6 +100,17 @@ describe("PR5 case honesty + chain integrity", () => {
     expect(m.completeness).not.toBe("complete");
   });
 
+  test("codex-P2: approval-path case with a DELETED queue row → queue_row_absent, not complete", async () => {
+    const { intentId } = await createPendingCase();
+    // The pending case has a non-null approvalQueueId. Delete the referenced
+    // queue row (simulate corruption). The manifest must flag the absence and
+    // never mark the case complete.
+    await getDb().execute(sql`DELETE FROM approval_queue WHERE tenant_id = ${F.TENANT}`);
+    const m = (await getProviderCase(F.TENANT, intentId, ALL_WS))!.manifest;
+    expect(m.incompletenessReasons).toContain("queue_row_absent_for_approval_path");
+    expect(m.completeness).not.toBe("complete");
+  });
+
   test("access-deny reason code surfaces on the manifest (denied_access, effect deny)", async () => {
     const { intentId } = await createPendingCase();
     // Force the binding into a denied access shape is non-trivial via trigger;
