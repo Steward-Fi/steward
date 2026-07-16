@@ -1,0 +1,118 @@
+---
+title: "Provider Authority: Golden Path"
+description: "Single-command fake proof and the separate real GitHub sandbox run for the governed-provider thesis."
+---
+
+# Provider Authority: Golden Path
+
+This is the exact workflow that reproduces the six-PR governed-provider thesis:
+a **single-command fake CI proof** that runs the whole matrix against a
+deterministic in-process transport, and a **separate documented real GitHub
+sandbox run** against a throwaway org. Both traverse the **identical** governed
+code path; they differ **only** in the terminal forwarder.
+
+## What "governed" means here
+
+An enrolled provider route runs a consequential action only through:
+
+```
+POST /v2/provider-actions          (create; PR2 canonicalization + binding)
+  -> access check                  (PR1 grants/role-bindings)
+  -> policy decision               (allow / approval_required)
+  -> POST /:id/approval            (human approve/deny with typed reason; PR3)
+  -> POST /:id/execute             (typed system resume; PR3 mints the PR4 nonce)
+  -> dispatchGovernedExecution     (atomic single-winner claim; PR4)
+  -> decrypt + inject credential   (verifier-only; agent never sees it)
+  -> terminal forwarder            (real GitHub, or the fake)
+  -> GET /:id/case, /:id/evidence  (correlated manifest + signed bundle; PR5)
+```
+
+No new authority is introduced by the golden path. It exercises PR1–PR5 only.
+
+## 1. The fake CI proof (every PR, credential-free)
+
+```bash
+# From the repo root, deterministic, zero network egress, zero credentials.
+node scripts/provider-authority-golden-path.mjs
+```
+
+This runs the in-process E2E matrix
+(`packages/api/src/__tests__/provider-authority-e2e.test.ts`) plus the
+static-inventory guard
+(`packages/proxy/src/__tests__/fake-provider-transport-inventory.test.ts`) and
+writes a stable artifact bundle to `artifacts/provider-authority/fake/`:
+
+| Artifact | Meaning |
+|---|---|
+| `test-report.json` | matrix pass/fail with invariant tags |
+| `image-commit.txt` | the git SHA under test |
+| `dispatch-count.json` | recorded local dispatch attempts (1 on success, 0 on denials) |
+| `verifier-report.txt` | offline verifier PASS (clean) + FAIL (tamper) summary |
+| `canary-report.json` | credential-sentinel sweep (must be all-clear) |
+| `manifest.json` | index + the claim wording in force (pre/post real-proof) |
+
+The fake transport is **unselectable in production**: it is injected only through
+the module-private, `__`-prefixed test seam `__setForwardProxyRequestForTests`,
+sits **behind** every SSRF/DNS/public-HTTPS guard (it replaces the terminal I/O
+only), and a static inventory test proves no `src/` production module imports it.
+The command fails closed on any test failure or credential-canary hit.
+
+## 2. The real GitHub sandbox run (documented, on-demand)
+
+The real run proves the abstraction survives real GitHub semantics
+(idempotency-artifact shape, rate limits, timeouts). It uses the **default**
+DNS-vetted forwarder, the same code path, real terminal I/O.
+
+```bash
+# Supply sandbox credentials OUT-OF-BAND (never commit them).
+cp deploy/enterprise-reference/provider-github-sandbox.env.example \
+   deploy/enterprise-reference/provider-github-sandbox.env
+# ...fill from your secret store, then:
+set -a; . deploy/enterprise-reference/provider-github-sandbox.env; set +a
+
+# Validate wiring without a consequential write:
+node scripts/provider-authority-sandbox.mjs --preflight
+```
+
+Requirements:
+
+- A **throwaway** GitHub org + repo (e.g. `steward-sandbox/hello`) with a
+  dedicated GitHub App scoped to that repo only (`issues:read`,
+  `pull_requests:write`).
+- The App private key + installation ID supplied via **env only**
+  (`GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY`).
+  The committed artifact is a `*.example` with placeholders and presence guards.
+
+The write operation (`github.pr.comment.create`) is **not** natively idempotent
+at GitHub; on a post-dispatch timeout Steward records `outcome_unknown` and
+reconciles via the created comment's stable `id`/`node_id` marker rather than
+blindly re-posting. A rate-limit (429/403 with `Retry-After`) is classified as a
+bounded `failed` with the retry-after surfaced, never auto-retried.
+
+## 3. Offline verification
+
+Both runs produce a signed evidence bundle. Verify it offline, binding trust to
+a signing-key fingerprint you obtained **out-of-band**:
+
+```bash
+node scripts/verify-evidence-bundle.mjs <bundle.json> \
+  --expected-key-fingerprint <sha256-of-trusted-SPKI-PEM>
+```
+
+Verifying against the **embedded** key proves self-consistency only, **not**
+trust to a known root. Always supply the fingerprint.
+
+## 4. Trust surfaces (dashboard)
+
+- `dashboard/approvals/[id]`, the approval detail: equal-weight approve/deny, a
+  required typed reason, the exact action as a safe summary + digests (never
+  canonical bytes), honest terminal states.
+- `dashboard/actions/[id]`, the case/evidence surface: PR5 `completeness` and
+  `incompletenessReasons` rendered verbatim, the operator-key trust limit
+  stated, the signed bundle download + the exact offline verify command.
+
+## Distribution note
+
+The **repo script is the authoritative proof**. The `steward provider-action …`
+CLI commands are convenience wrappers over the same PR2–PR5 routes; CLI
+distribution is unsettled, so they carry no independent authority.

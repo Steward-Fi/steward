@@ -65,6 +65,20 @@ export async function runDoctor(
       ok: Boolean(env.STEWARD_PROXY_REQUEST_SIGNING_SECRETS),
       detail: "required for production proxy request signing",
     });
+    // PR6 governed-route prerequisites (§8.2). A governed provider dispatch needs
+    // the PR4 execution-auth secret (mint/claim) AND the PR5 audit signing key
+    // (evidence export). Both are already in the `required` list above; this
+    // strict check states them as an explicit governed-route readiness gate so a
+    // failed run is obvious, not a silent skip (U10). We VERIFY presence here;
+    // we do NOT duplicate the secret-format checks.
+    checks.push({
+      name: "strict:governed-route-prerequisites",
+      ok: Boolean(env.STEWARD_EXECUTION_AUTH_SECRET) && Boolean(env.STEWARD_AUDIT_SIGNING_KEY),
+      detail:
+        "governed provider dispatch requires STEWARD_EXECUTION_AUTH_SECRET (PR4 " +
+        "mint/claim) and STEWARD_AUDIT_SIGNING_KEY (PR5 /evidence). Missing either " +
+        "fails closed at dispatch/evidence, never a silent pass.",
+    });
   }
 
   const api = options.api ?? new StewardApiClient({ baseUrl: env.STEWARD_API_URL });

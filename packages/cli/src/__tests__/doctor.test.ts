@@ -110,3 +110,57 @@ describe("steward doctor secret redaction", () => {
     }
   });
 });
+
+describe("PR6 governed-route prerequisites (strict)", () => {
+  test("passes when exec-auth + audit signing keys present", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "steward-doctor-"));
+    try {
+      const envPath = join(dir, ".env");
+      const full: Record<string, string> = {
+        DATABASE_URL: "postgresql://steward:pw@postgres:5432/steward",
+        STEWARD_MASTER_PASSWORD: randomBytes(32).toString("hex"),
+        STEWARD_JWT_SECRET: randomBytes(32).toString("hex"),
+        STEWARD_EXECUTION_AUTH_SECRET: `v1:${randomBytes(32).toString("hex")}`,
+        STEWARD_KDF_SALT: randomBytes(32).toString("hex"),
+        STEWARD_AUDIT_HMAC_KEY: randomBytes(32).toString("hex"),
+        STEWARD_AUDIT_SIGNING_KEY: randomBytes(32).toString("hex"),
+      };
+      writeFileSync(
+        envPath,
+        `${Object.entries(full)
+          .map(([k, v]) => `${k}=${v}`)
+          .join("\n")}\n`,
+      );
+      const ok = await runDoctor({ envPath, strict: true, api: stubApi() });
+      const gate = ok.checks.find((c) => c.name === "strict:governed-route-prerequisites");
+      expect(gate?.ok).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("fails closed when the PR4 exec-auth secret is absent", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "steward-doctor-"));
+    try {
+      const envPath = join(dir, ".env");
+      writeFileSync(
+        envPath,
+        [
+          "DATABASE_URL=postgresql://steward:pw@postgres:5432/steward",
+          `STEWARD_MASTER_PASSWORD=${randomBytes(32).toString("hex")}`,
+          `STEWARD_JWT_SECRET=${randomBytes(32).toString("hex")}`,
+          `STEWARD_KDF_SALT=${randomBytes(32).toString("hex")}`,
+          `STEWARD_AUDIT_HMAC_KEY=${randomBytes(32).toString("hex")}`,
+          `STEWARD_AUDIT_SIGNING_KEY=${randomBytes(32).toString("hex")}`,
+        ].join("\n") + "\n",
+      );
+      const res = await runDoctor({ envPath, strict: true, api: stubApi() });
+      const gate = res.checks.find((c) => c.name === "strict:governed-route-prerequisites");
+      expect(gate?.ok).toBe(false);
+      const req = res.checks.find((c) => c.name === "env:STEWARD_EXECUTION_AUTH_SECRET");
+      expect(req?.ok).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
