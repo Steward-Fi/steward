@@ -156,15 +156,31 @@ function textHasUrl(text: string): boolean {
     // boundary): only treat as a URL when it has a path/query OR the TLD is a
     // common one. This keeps "e.g" / "i.e" / "U.S" out while catching real
     // hosts. We fail toward DETECTING a URL when ambiguous.
-    const m = text.match(
-      /\b([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\.([a-z]{2,})((?:\/\S*)?)/i,
-    );
+    const m = text.match(/\b([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\.([a-z]{2,})((?:\/\S*)?)/i);
     if (m) {
       const tld = m[2].toLowerCase();
       const hasPath = m[3].length > 0;
       const COMMON_TLDS = new Set([
-        "com", "org", "net", "io", "co", "gg", "app", "dev", "xyz", "ai",
-        "fun", "me", "tv", "fi", "info", "biz", "gov", "edu", "news", "link",
+        "com",
+        "org",
+        "net",
+        "io",
+        "co",
+        "gg",
+        "app",
+        "dev",
+        "xyz",
+        "ai",
+        "fun",
+        "me",
+        "tv",
+        "fi",
+        "info",
+        "biz",
+        "gov",
+        "edu",
+        "news",
+        "link",
       ]);
       if (hasPath || COMMON_TLDS.has(tld)) return true;
     }

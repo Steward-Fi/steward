@@ -350,7 +350,8 @@ function parseXConstraints(rawInput: unknown): XConstraints | { error: string } 
   // replyPolicy
   if (rawInput.replyPolicy !== undefined) {
     const rp = rawInput.replyPolicy;
-    if (!isPlainObject(rp)) return { error: "capability-intent: `x.replyPolicy` must be an object" };
+    if (!isPlainObject(rp))
+      return { error: "capability-intent: `x.replyPolicy` must be an object" };
     const u = Object.keys(rp).filter((k) => !ALLOWED_REPLY_KEYS.has(k));
     if (u.length > 0)
       return { error: `capability-intent: unknown x.replyPolicy key(s): ${u.join(", ")}` };
@@ -1337,8 +1338,7 @@ export function evaluateXConstraints(
     const { startMinuteUtc: start, endMinuteUtc: end } = x.quietHours;
     // Non-wrapping window [start, end); wrapping window (start > end) spans
     // midnight so the quiet region is [start, 1440) ∪ [0, end).
-    const inWindow =
-      start < end ? now >= start && now < end : now >= start || now < end;
+    const inWindow = start < end ? now >= start && now < end : now >= start || now < end;
     if (inWindow) {
       return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.X_QUIET_HOURS };
     }

@@ -34,7 +34,15 @@
  * the denied URL post flip to allowed).
  */
 
-import { beforeAll, beforeEach, afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from "bun:test";
 import {
   agents,
   approvalQueue,
@@ -285,7 +293,9 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
   });
 
   test("contentPolicy allowUrls=false: URL post is policy_denied, no execution", async () => {
-    await seed([allowRule("11111111-1111-4111-8111-1111111111a1", { contentPolicy: { allowUrls: false } })]);
+    await seed([
+      allowRule("11111111-1111-4111-8111-1111111111a1", { contentPolicy: { allowUrls: false } }),
+    ]);
     const out = await propose({ text: "check https://waifu.fun now" }, "urldeny1");
     expect(out.kind).toBe("policy_denied");
     if (out.kind !== "policy_denied") throw new Error(`got ${out.kind}`);
@@ -296,7 +306,9 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
   });
 
   test("contentPolicy allowUrls=false: a plain post is allowed", async () => {
-    await seed([allowRule("11111111-1111-4111-8111-1111111111a1", { contentPolicy: { allowUrls: false } })]);
+    await seed([
+      allowRule("11111111-1111-4111-8111-1111111111a1", { contentPolicy: { allowUrls: false } }),
+    ]);
     const out = await propose({ text: "gm, no links here" }, "plainok1");
     expect(out.kind).toBe("allowed");
     if (out.kind !== "allowed") throw new Error(`got ${out.kind}`);
@@ -304,7 +316,9 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
   });
 
   test("replyPolicy summoned-only: an un-summoned reply is policy_denied (upstream-403 class, NOT outcome_unknown)", async () => {
-    await seed([allowRule("11111111-1111-4111-8111-1111111111b2", { replyPolicy: { mode: "summoned-only" } })]);
+    await seed([
+      allowRule("11111111-1111-4111-8111-1111111111b2", { replyPolicy: { mode: "summoned-only" } }),
+    ]);
     const out = await propose(
       { text: "thanks for the mention!", replyToTweetId: "1750000000000000000", summoned: false },
       "unsummon1",
@@ -319,7 +333,9 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
   });
 
   test("replyPolicy summoned-only: a summoned reply is allowed (guard is load-bearing)", async () => {
-    await seed([allowRule("11111111-1111-4111-8111-1111111111b2", { replyPolicy: { mode: "summoned-only" } })]);
+    await seed([
+      allowRule("11111111-1111-4111-8111-1111111111b2", { replyPolicy: { mode: "summoned-only" } }),
+    ]);
     const out = await propose(
       { text: "thanks for the mention!", replyToTweetId: "1750000000000000000", summoned: true },
       "summon001",

@@ -19,9 +19,9 @@ import {
   composeProviderActionPolicyDecision,
   estimateXPostMicros,
   evaluateXConstraints,
-  PROVIDER_POLICY_REASON as R,
   type ProviderPolicyContext,
   type ProviderPolicyRule,
+  PROVIDER_POLICY_REASON as R,
   X_POST_PRICE_TABLE_V1,
   type XConstraints,
 } from "../capability-intent.js";
@@ -138,7 +138,9 @@ describe("permissioned-X: contentPolicy", () => {
   it("blockedPatterns denies a matching text via the in-memory policyText channel", () => {
     // Patterns are standard JS RegExp source (no inline (?i) flag). Author
     // case-insensitivity into the pattern itself.
-    const x: XConstraints = { contentPolicy: { blockedPatterns: ["[Aa][Ii][Rr][Dd][Rr][Oo][Pp]"] } };
+    const x: XConstraints = {
+      contentPolicy: { blockedPatterns: ["[Aa][Ii][Rr][Dd][Rr][Oo][Pp]"] },
+    };
     const c = ctx({}, { policyText: "free AIRDROP now" });
     expect(decide(x, c).reasonCodes).toContain(R.X_CONTENT_BLOCKED);
     const clean = ctx({}, { policyText: "gm friends" });
