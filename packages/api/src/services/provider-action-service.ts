@@ -118,8 +118,11 @@ export type ProviderActionOutcome =
     }
   | {
       kind: "evidence_failure";
-      code: "EVIDENCE_DECISION_PERSIST_FAILED" | "EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE";
-      httpStatus: 503;
+      code:
+        | "EVIDENCE_DECISION_PERSIST_FAILED"
+        | "EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE"
+        | "APPROVAL_QUORUM_CONFIG_INVALID";
+      httpStatus: 503 | 422;
       intentId?: string;
     }
   | {
@@ -514,6 +517,10 @@ class ProviderActionService {
             policyRevisionHash: (policy as PolicyResult).doc.policyRevisionHash,
             evaluatorVersion: EVALUATOR_VERSION,
             requesterSeparation: extractRequesterSeparation(txOperation.requestProfile),
+            // #205: read + fail-closed-validate the quorum config from the same
+            // request-profile source. A malformed quorum throws ApprovalArmError
+            // (creation fails closed); absent quorum => single-approver path.
+            quorum: extractQuorumConfig(txOperation.requestProfile),
             requestedAt: input.requestedAt,
             expiresAt: input.expiresAt,
             // Bind the adapter profile from the validated build, never a
@@ -602,6 +609,18 @@ class ProviderActionService {
       // creation CLOSED (spec §5.2) — surfaced as an evidence failure so no
       // partial approval arm is ever visible.
       if (e instanceof ApprovalArmError) {
+        // A malformed #205 quorum config fails creation CLOSED at store time
+        // (spec §7) and surfaces its specific code so the misconfig is
+        // observable; a missing execution dependency (route/credential) uses
+        // the generic evidence-failure code (spec §5.2). No partial approval
+        // arm is ever visible either way.
+        if (e.code === "APPROVAL_QUORUM_CONFIG_INVALID") {
+          return {
+            kind: "evidence_failure",
+            code: "APPROVAL_QUORUM_CONFIG_INVALID",
+            httpStatus: 422,
+          };
+        }
         return {
           kind: "evidence_failure",
           code: "EVIDENCE_DECISION_PERSIST_FAILED",
@@ -1378,6 +1397,64 @@ export function extractRequesterSeparation(requestProfile: Record<string, unknow
   const reqs = (requestProfile as { approvalRequirements?: unknown }).approvalRequirements;
   if (typeof reqs !== "object" || reqs === null) return false;
   return (reqs as { requesterSeparation?: unknown }).requesterSeparation === true;
+}
+
+/**
+ * Extract + FAIL-CLOSED-validate the operation's #205 quorum config from
+ * `request_profile.approvalRequirements.quorum`, the same forward-compatible
+ * source as {@link extractRequesterSeparation}. Returns:
+ *   - `undefined` when no quorum is configured => single-approver legacy path.
+ *   - `{ threshold, eligibleApproverUserIds }` when a well-formed quorum is set.
+ * THROWS {@link ApprovalArmError}("APPROVAL_QUORUM_CONFIG_INVALID") when a quorum
+ * key is present but malformed (non-integer / <1 / > eligible-set size / empty
+ * or duplicate or non-string eligible set / unknown members). Creation then
+ * fails closed — a malformed quorum is NEVER stored (spec §7).
+ *
+ * NOTE: membership-of-eligible-users-in-the-workspace_approver-role is NOT
+ * verified here (the request profile does not carry role state); it is enforced
+ * per-approval at decide time via checkApprover (spec §5). Store-time validation
+ * is purely structural: shape + threshold-reachability.
+ */
+export function extractQuorumConfig(
+  requestProfile: Record<string, unknown>,
+): { threshold: number; eligibleApproverUserIds: string[] } | undefined {
+  const reqs = (requestProfile as { approvalRequirements?: unknown }).approvalRequirements;
+  if (typeof reqs !== "object" || reqs === null) return undefined;
+  const q = (reqs as { quorum?: unknown }).quorum;
+  if (q === undefined || q === null) return undefined;
+  if (typeof q !== "object" || Array.isArray(q)) {
+    throw new ApprovalArmError("APPROVAL_QUORUM_CONFIG_INVALID");
+  }
+  const rec = q as Record<string, unknown>;
+  // Reject unknown keys (fail closed on typos).
+  for (const k of Object.keys(rec)) {
+    if (k !== "threshold" && k !== "eligibleApproverUserIds") {
+      throw new ApprovalArmError("APPROVAL_QUORUM_CONFIG_INVALID");
+    }
+  }
+  const threshold = rec.threshold;
+  const eligible = rec.eligibleApproverUserIds;
+  if (
+    typeof threshold !== "number" ||
+    !Number.isInteger(threshold) ||
+    threshold < 1 ||
+    !Array.isArray(eligible) ||
+    eligible.length === 0 ||
+    !eligible.every((u) => typeof u === "string" && u.length > 0)
+  ) {
+    throw new ApprovalArmError("APPROVAL_QUORUM_CONFIG_INVALID");
+  }
+  const ids = eligible as string[];
+  // No duplicate eligible ids (a duplicate would inflate the apparent set size
+  // and could let a threshold exceed the true distinct-approver count).
+  if (new Set(ids).size !== ids.length) {
+    throw new ApprovalArmError("APPROVAL_QUORUM_CONFIG_INVALID");
+  }
+  // Threshold must be reachable within the distinct eligible set.
+  if (threshold > ids.length) {
+    throw new ApprovalArmError("APPROVAL_QUORUM_CONFIG_INVALID");
+  }
+  return { threshold, eligibleApproverUserIds: ids };
 }
 
 function capabilitySelectorMatches(config: Record<string, unknown>, operationKey: string): boolean {
