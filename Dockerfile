@@ -52,6 +52,7 @@ COPY packages/erc8004/package.json           packages/erc8004/package.json
 COPY packages/erc8183/package.json           packages/erc8183/package.json
 COPY packages/plugin-capabilities/package.json packages/plugin-capabilities/package.json
 COPY packages/plugin-trading/package.json     packages/plugin-trading/package.json
+COPY packages/plugin-wxmr/package.json        packages/plugin-wxmr/package.json
 COPY packages/provider-github/package.json    packages/provider-github/package.json
 COPY packages/provider-x/package.json         packages/provider-x/package.json
 COPY packages/proxy-client/package.json       packages/proxy-client/package.json
@@ -88,6 +89,7 @@ COPY packages/erc8004/package.json           packages/erc8004/package.json
 COPY packages/erc8183/package.json           packages/erc8183/package.json
 COPY packages/plugin-capabilities/package.json packages/plugin-capabilities/package.json
 COPY packages/plugin-trading/package.json     packages/plugin-trading/package.json
+COPY packages/plugin-wxmr/package.json        packages/plugin-wxmr/package.json
 COPY packages/provider-github/package.json    packages/provider-github/package.json
 COPY packages/provider-x/package.json         packages/provider-x/package.json
 COPY packages/proxy-client/package.json       packages/proxy-client/package.json
@@ -118,6 +120,7 @@ COPY packages/auth        packages/auth
 COPY packages/db          packages/db
 COPY packages/plugin-capabilities packages/plugin-capabilities
 COPY packages/plugin-trading packages/plugin-trading
+COPY packages/plugin-wxmr packages/plugin-wxmr
 COPY packages/provider-github packages/provider-github
 COPY packages/provider-x packages/provider-x
 COPY packages/proxy-client packages/proxy-client
@@ -146,6 +149,7 @@ RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/policy-engine     node_modules/@stwd/policy-engine && \
     ln -sf ../../../packages/plugin-capabilities node_modules/@stwd/plugin-capabilities && \
     ln -sf ../../../packages/plugin-trading    node_modules/@stwd/plugin-trading && \
+    ln -sf ../../../packages/plugin-wxmr       node_modules/@stwd/plugin-wxmr && \
     ln -sf ../../../packages/provider-github   node_modules/@stwd/provider-github && \
     ln -sf ../../../packages/provider-x         node_modules/@stwd/provider-x && \
     ln -sf ../../../packages/proxy-client      node_modules/@stwd/proxy-client && \
@@ -180,6 +184,7 @@ COPY packages/erc8004/package.json           packages/erc8004/package.json
 COPY packages/erc8183/package.json           packages/erc8183/package.json
 COPY packages/plugin-capabilities/package.json packages/plugin-capabilities/package.json
 COPY packages/plugin-trading/package.json     packages/plugin-trading/package.json
+COPY packages/plugin-wxmr/package.json        packages/plugin-wxmr/package.json
 COPY packages/provider-github/package.json    packages/provider-github/package.json
 COPY packages/provider-x/package.json         packages/provider-x/package.json
 COPY packages/proxy-client/package.json       packages/proxy-client/package.json
@@ -207,6 +212,7 @@ COPY --from=build /app/packages/auth        packages/auth
 COPY --from=build /app/packages/db          packages/db
 COPY --from=build /app/packages/plugin-capabilities packages/plugin-capabilities
 COPY --from=build /app/packages/plugin-trading packages/plugin-trading
+COPY --from=build /app/packages/plugin-wxmr packages/plugin-wxmr
 COPY --from=build /app/packages/provider-github packages/provider-github
 COPY --from=build /app/packages/provider-x packages/provider-x
 COPY --from=build /app/packages/proxy-client packages/proxy-client
@@ -236,6 +242,7 @@ RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/policy-engine node_modules/@stwd/policy-engine && \
     ln -sf ../../../packages/plugin-capabilities node_modules/@stwd/plugin-capabilities && \
     ln -sf ../../../packages/plugin-trading    node_modules/@stwd/plugin-trading && \
+    ln -sf ../../../packages/plugin-wxmr       node_modules/@stwd/plugin-wxmr && \
     ln -sf ../../../packages/provider-github   node_modules/@stwd/provider-github && \
     ln -sf ../../../packages/provider-x         node_modules/@stwd/provider-x && \
     ln -sf ../../../packages/proxy-client      node_modules/@stwd/proxy-client && \

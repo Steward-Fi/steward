@@ -654,6 +654,14 @@ export interface BridgeQuote {
   route: Array<{ bridge: string; fromChainId: number; toChainId: number }>;
   slippageBps: number;
   expiresAt: number;
+  direction?: string;
+  executionMode?: "unsigned-transaction" | "external-handoff";
+  handoffUrl?: string;
+  feeBps?: number;
+  feeScope?: "final" | "global-estimate" | "not-applicable";
+  feeObservedSlot?: number;
+  feeObservedAt?: number;
+  notices?: string[];
 }
 
 export interface BridgeBuildInput {
@@ -672,7 +680,36 @@ export interface BridgeSession {
   toChainId: number;
   recipient: string;
   createdAt: number;
+  direction?: string;
+  executionMode?: "unsigned-transaction" | "external-handoff";
+  handoffUrl?: string;
+  recipientSensitive?: boolean;
+  notices?: string[];
+  expiresAt?: number;
 }
+
+export interface BridgeHandoff {
+  kind: "external-handoff";
+  category: "bridge";
+  provider: string;
+  quoteId: string;
+  direction: string;
+  url: string;
+  fromChainId: number;
+  toChainId: number;
+  amountIn: string;
+  estimatedUsd: number;
+  recipient: string;
+  recipientSensitive?: boolean;
+  expiresAt: number;
+  feeBps: number;
+  feeScope: "global-estimate" | "owner-observed" | "not-applicable";
+  feeObservedSlot?: number;
+  feeObservedAt: number;
+  notices: string[];
+}
+
+export type BridgeBuildResult = AdapterUnsignedIntent | BridgeHandoff;
 
 export type SparkNetwork = "mainnet" | "testnet" | "signet";
 
@@ -3092,16 +3129,18 @@ export class StewardClient {
     return response.data.quote;
   }
 
-  async buildBridgeIntent(input: BridgeBuildInput): Promise<AdapterUnsignedIntent> {
+  async buildBridgeIntent(input: BridgeBuildInput): Promise<BridgeBuildResult> {
     const response = await this.request<
-      { unsignedIntent: AdapterUnsignedIntent },
+      { unsignedIntent?: AdapterUnsignedIntent; handoff?: BridgeHandoff },
       StewardErrorResponse
     >("/adapters/bridge/build", {
       method: "POST",
       body: JSON.stringify(input),
     });
     if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
-    return response.data.unsignedIntent;
+    const result = response.data.unsignedIntent ?? response.data.handoff;
+    if (!result) throw new StewardApiError("Bridge adapter returned no build result", 502);
+    return result;
   }
 
   async createBridgeSession(quote: BridgeQuote): Promise<BridgeSession> {

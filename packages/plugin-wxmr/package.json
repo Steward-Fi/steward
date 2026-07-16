@@ -1,0 +1,31 @@
+{
+  "name": "@stwd/plugin-wxmr",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "dev": "tsc --watch",
+    "test": "bun test src/__tests__/",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.6.0",
+    "@noble/hashes": "^1.6.0",
+    "@solana/web3.js": "^1",
+    "@stwd/adapters": "workspace:*",
+    "@stwd/shared": "workspace:*",
+    "bs58": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^25.5.0",
+    "typescript": "^5.8.0"
+  },
+  "description": "Opt-in wxmr.io bridge handoff provider and Monero-on-Solana integration for Steward"
+}

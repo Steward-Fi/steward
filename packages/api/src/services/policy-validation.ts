@@ -55,6 +55,48 @@ function areOptionalEvmAddresses(value: unknown): boolean {
   return value === undefined || (Array.isArray(value) && value.every(isEvmAddress));
 }
 
+function hasOnlyKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>): boolean {
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function isNonEmptyArrayOf(value: unknown, predicate: (entry: unknown) => boolean): boolean {
+  return Array.isArray(value) && value.length > 0 && value.every(predicate);
+}
+
+const TYPED_DATA_CONFIG_KEYS = new Set([
+  "verifyingContractAllowlist",
+  "verifyingContractBlocklist",
+  "allowedChainIds",
+  "allowedDomainNames",
+  "allowedPrimaryTypes",
+  "messageConditions",
+]);
+const TYPED_DATA_CONDITION_BASE_KEYS = new Set(["field", "operator"]);
+const TYPED_DATA_CONDITION_VALUE_KEYS = new Set(["field", "operator", "value"]);
+const TYPED_DATA_CONDITION_VALUES_KEYS = new Set(["field", "operator", "values"]);
+const FORBIDDEN_TYPED_DATA_PATH_SEGMENTS = new Set(["__proto__", "prototype", "constructor"]);
+
+function isTypedDataFieldPath(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0) return false;
+  const segments = value.split(".");
+  return segments.every(
+    (segment) =>
+      /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(segment) &&
+      !FORBIDDEN_TYPED_DATA_PATH_SEGMENTS.has(segment),
+  );
+}
+
+function isTypedDataUintBound(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  const hex = /^0x([0-9a-fA-F]+)$/.exec(trimmed);
+  if (hex) {
+    const normalized = hex[1]?.replace(/^0+/, "") || "0";
+    return normalized.length <= 64;
+  }
+  return isWeiString(trimmed);
+}
+
 function validatePolicyConfig(policy: PolicyRule): string | null {
   const config = policy.config;
 
@@ -246,6 +288,90 @@ function validatePolicyConfig(policy: PolicyRule): string | null {
         return "leverage-cap.maxLeverage must be a positive number";
       }
       return null;
+
+    case "typed-data": {
+      if (!hasOnlyKeys(config, TYPED_DATA_CONFIG_KEYS)) {
+        return "typed-data.config contains an unknown key";
+      }
+      if (
+        config.verifyingContractAllowlist !== undefined &&
+        !isNonEmptyArrayOf(config.verifyingContractAllowlist, isEvmAddress)
+      ) {
+        return "typed-data.verifyingContractAllowlist must be a non-empty EVM address array";
+      }
+      if (
+        config.verifyingContractBlocklist !== undefined &&
+        !isNonEmptyArrayOf(config.verifyingContractBlocklist, isEvmAddress)
+      ) {
+        return "typed-data.verifyingContractBlocklist must be a non-empty EVM address array";
+      }
+      if (
+        config.allowedChainIds !== undefined &&
+        !isNonEmptyArrayOf(config.allowedChainIds, isPositiveInteger)
+      ) {
+        return "typed-data.allowedChainIds must be a non-empty positive safe-integer array";
+      }
+      if (
+        config.allowedDomainNames !== undefined &&
+        !isNonEmptyArrayOf(
+          config.allowedDomainNames,
+          (name) => typeof name === "string" && name.length > 0 && name === name.trim(),
+        )
+      ) {
+        return "typed-data.allowedDomainNames must be a non-empty array of trimmed strings";
+      }
+      if (
+        config.allowedPrimaryTypes !== undefined &&
+        !isNonEmptyArrayOf(
+          config.allowedPrimaryTypes,
+          (type) => typeof type === "string" && /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(type),
+        )
+      ) {
+        return "typed-data.allowedPrimaryTypes must be a non-empty EIP-712 type-name array";
+      }
+      if (config.messageConditions !== undefined) {
+        if (
+          !Array.isArray(config.messageConditions) ||
+          config.messageConditions.length === 0 ||
+          config.messageConditions.some((condition) => {
+            if (
+              !isPlainObject(condition) ||
+              !isTypedDataFieldPath(condition.field) ||
+              typeof condition.operator !== "string" ||
+              !hasOnlyKeys(
+                condition,
+                condition.operator === "address_in" ||
+                  condition.operator === "address_not_in" ||
+                  condition.operator === "in" ||
+                  condition.operator === "not_in"
+                  ? TYPED_DATA_CONDITION_VALUES_KEYS
+                  : condition.operator === "eq" || condition.operator === "uint_max"
+                    ? TYPED_DATA_CONDITION_VALUE_KEYS
+                    : TYPED_DATA_CONDITION_BASE_KEYS,
+              )
+            ) {
+              return true;
+            }
+            if (condition.operator === "address_in" || condition.operator === "address_not_in") {
+              return !isNonEmptyArrayOf(condition.values, isEvmAddress);
+            }
+            if (condition.operator === "in" || condition.operator === "not_in") {
+              return !isNonEmptyArrayOf(condition.values, (value) => typeof value === "string");
+            }
+            if (condition.operator === "eq") {
+              return typeof condition.value !== "string";
+            }
+            if (condition.operator === "uint_max") {
+              return !isTypedDataUintBound(condition.value);
+            }
+            return true;
+          })
+        ) {
+          return "typed-data.messageConditions must be a non-empty array of valid conditions with exactly the matching value/values shape";
+        }
+      }
+      return null;
+    }
 
     case "raw-signing-chain":
       if (
