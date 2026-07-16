@@ -66,6 +66,12 @@ export type ProviderActionBuild = GithubActionBuild | XActionBuild;
 /** The structurally-shared canonical action shape both adapters emit. */
 type AnyCanonicalActionV1 = GithubCanonicalActionV1 | XCanonicalActionV1;
 
+import {
+  type CumulativeSpendScope,
+  releaseCumulativeSpend,
+  reserveCumulativeSpend,
+  settleCumulativeSpend,
+} from "@stwd/redis";
 import { and, eq, sql } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import { appendAuditEvent, withTenantAuditQueue, writeAuditEvent } from "./audit";
@@ -73,6 +79,19 @@ import { ApprovalArmError, buildApprovalArm } from "./provider-approval";
 
 const EVALUATOR_VERSION = "provider-action.v1";
 const POLICY_TYPE = "capability-intent" as const;
+
+/**
+ * A handle to an atomic cumulative-spend reservation (#206) so the pipeline can
+ * SETTLE it (known-success) or RELEASE it (known-failure/deny). On
+ * outcome_unknown the pipeline deliberately does NEITHER — the reservation ages
+ * out at the window edge (fail closed for a money cap: never free budget that
+ * may have really spent).
+ */
+export interface CumulativeSpendReservationHandle {
+  keyParts: { agentId: string; scope: CumulativeSpendScope; scopeKey: string; currency: string };
+  reservationId: string;
+  amount: number;
+}
 
 // ─── Public result envelope ───────────────────────────────────────────────────
 
@@ -291,6 +310,7 @@ type PolicyResult = {
   doc: PersistedPolicyDecisionV1;
   evaluation: ProviderPolicyEvaluationV1;
   decisionId: string;
+  cumulativeSpendReservations: CumulativeSpendReservationHandle[];
 };
 
 class ProviderActionService {
@@ -381,6 +401,9 @@ class ProviderActionService {
     // Outer-scope handles the tx fills so the post-commit branching can read them.
     let access!: { effect: "allow" | "deny"; doc: PersistedAccessDecisionV1 };
     let policy: PolicyResult | null = null;
+    // #206: hoisted so the catch/drain-failure paths can reclaim reservations
+    // even where TS narrows `policy` to never inside the tx-callback flow.
+    let cumulativeSpendReservations: CumulativeSpendReservationHandle[] = [];
     let requestHash = "";
     const effects: {
       access: "allow" | "deny";
@@ -455,8 +478,14 @@ class ProviderActionService {
                 intentId,
                 requestHash,
                 actionDigest,
+                // grant-scope cumulativeSpend aggregates over the matched grant
+                // (deterministic: matchedGrantIds is sorted). Absent => grant
+                // scope resolves to "" and the composer fails closed if a rule
+                // aggregates over grant without one.
+                grantId: access.doc.matchedGrantIds[0] ?? null,
               })
             : null;
+        cumulativeSpendReservations = policy?.cumulativeSpendReservations ?? [];
 
         effects.access = access.effect;
         effects.policy =
@@ -605,6 +634,12 @@ class ProviderActionService {
         });
       });
     } catch (e) {
+      // #206: the decision transaction failed to persist, so the action WILL NOT
+      // execute (the stub is never reached). Reclaim any cumulative-spend
+      // reservations taken during eval so a persistence failure does not leak
+      // budget. This is a KNOWN non-execution (distinct from the stub-threw
+      // outcome_unknown), so release is correct + fail-closed on the deny side.
+      await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
       // A missing PR1 execution dependency (route/credential) fails approval
       // creation CLOSED (spec §5.2) — surfaced as an evidence failure so no
       // partial approval arm is ever visible.
@@ -639,6 +674,9 @@ class ProviderActionService {
     // ── Step 3: drain the required-audit outbox before the stub can run. ──
     const drained = await this.drainAuditOutbox(tenantId, intentId).catch(() => false);
     if (!drained) {
+      // #206: audit unavailable => the stub will NOT run (known non-execution).
+      // Reclaim the reservation so a required-audit outage does not leak budget.
+      await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
       return {
         kind: "evidence_failure",
         code: "EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE",
@@ -659,6 +697,14 @@ class ProviderActionService {
       };
     }
     if (effects.policy === "hard_deny") {
+      // #206: reclaim any cumulative-spend reservations this decision holds. A
+      // spend-cap breach already released its own reservations during eval; this
+      // covers a deny for a DIFFERENT reason where a cumulativeSpend rule had
+      // passed and reserved — the action will not execute, so free its budget.
+      await this.finalizeCumulativeSpend(
+        (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [],
+        "failure",
+      );
       const code = (policy as PolicyResult | null)?.doc.reasonCodes[0] ?? "POLICY_HARD_DENY";
       return {
         kind: "policy_denied",
@@ -670,6 +716,13 @@ class ProviderActionService {
       };
     }
     if (effects.policy === "approval_required") {
+      // #206: the action is not executing now (it awaits human approval + a
+      // separate execute path). Reclaim the reservation so it does not consume
+      // budget while queued; the approved execute re-evaluates and re-reserves.
+      await this.finalizeCumulativeSpend(
+        (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [],
+        "failure",
+      );
       return {
         kind: "approval_required",
         code: "APPROVAL_REQUIRED",
@@ -681,10 +734,16 @@ class ProviderActionService {
     }
 
     // ── Step 4: allow — call the in-process stub, then record the transition. ──
+    const csReservations = (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [];
     let stub: ProviderActionStubResult;
     try {
       stub = await executeProviderActionStub(intentId);
     } catch {
+      // #206: OUTCOME_UNKNOWN. The stub threw AFTER we admitted + reserved; we
+      // cannot prove the action did or did not spend. Deliberately DO NOT release
+      // the reservation — it ages out at the window edge. Fail closed: never free
+      // budget that may have really been spent (a deny-side error is safe; an
+      // allow-side error is not).
       return {
         kind: "backend_unavailable",
         code: "BACKEND_STUB_UNAVAILABLE",
@@ -694,6 +753,9 @@ class ProviderActionService {
         actionDigest,
       };
     }
+    // #206: known outcome. stub_succeeded => settle (keep counted); stub_failed
+    // => release (reclaim budget, the action did not spend).
+    await this.finalizeCumulativeSpend(csReservations, stub.ok ? "success" : "failure");
     // Record the narrow allowed_stub -> stub_succeeded|stub_failed transition.
     await this.db()
       .update(providerActionBindings)
@@ -923,6 +985,173 @@ class ProviderActionService {
     };
   }
 
+  /**
+   * #206: atomically reserve this invoke's spend for every governing
+   * cumulativeSpend rule, and return the per-scope prior sums to feed the policy
+   * composer.
+   *
+   * SINGLE-WINNER CONCURRENCY: each reservation is a single Redis Lua script
+   * that prunes the trailing window, sums the survivors, and only admits when
+   * `sum + amount <= max`. Two concurrent invokes therefore cannot both pass a
+   * cap. The composer re-derives the same verdict from `priorSum` so the
+   * persisted decision doc matches the reservation; on a REJECTED reservation we
+   * feed a `priorSum` AT the cap so the composer's projected sum breaches and the
+   * decision is a hard deny (reason POLICY_CUMULATIVE_SPEND_CAP_EXCEEDED).
+   *
+   * FAIL CLOSED: if the operation declares no spend field, or the declared field
+   * is absent/non-integer, or the currency mismatches, we do NOT reserve and
+   * leave the composer to deny (NO_SPEND_FIELD / INPUT_UNAVAILABLE /
+   * CURRENCY_MISMATCH). A Redis error while reserving is treated as a breach for
+   * that scope (deny), never a silent pass. Reservations already taken for OTHER
+   * scopes on the same invoke are RELEASED if a later scope denies, so a denied
+   * invoke never leaks budget.
+   */
+  private async reserveCumulativeSpendForInvoke(input: {
+    rules: ProviderPolicyRule[];
+    operationKey: string;
+    agentId: string;
+    grantId: string | null;
+    spendDeclaration: { field: string; currency: string } | undefined;
+    policyArgs: Record<string, unknown>;
+  }): Promise<{
+    contextSums: { operation?: number; agent?: number; grant?: number } | undefined;
+    reservations: CumulativeSpendReservationHandle[];
+  }> {
+    const governing = extractGoverningCumulativeSpend(input.rules, input.operationKey);
+    if (governing.length === 0) {
+      return { contextSums: undefined, reservations: [] };
+    }
+
+    const sums: { operation?: number; agent?: number; grant?: number } = {};
+    const reservations: CumulativeSpendReservationHandle[] = [];
+
+    // Resolve this invoke's spend from the declared, validated policyArgs field.
+    // Absent declaration or bad value => do NOT reserve; the composer fails closed.
+    const decl = input.spendDeclaration;
+    const rawSpend =
+      decl && Object.hasOwn(input.policyArgs, decl.field) ? input.policyArgs[decl.field] : undefined;
+    const spendValid =
+      decl !== undefined &&
+      typeof rawSpend === "number" &&
+      Number.isInteger(rawSpend) &&
+      rawSpend >= 0;
+    const thisSpend = spendValid ? (rawSpend as number) : undefined;
+
+    for (const g of governing) {
+      const scopeKey =
+        g.aggregateOver === "operation"
+          ? input.operationKey
+          : g.aggregateOver === "grant"
+            ? (input.grantId ?? "")
+            : "";
+
+      // If we cannot price this invoke (no declaration / bad value / currency
+      // mismatch), do NOT reserve. Feed a prior sum so the composer's own
+      // fail-closed check fires with the correct reason (NO_SPEND_FIELD /
+      // INPUT_UNAVAILABLE / CURRENCY_MISMATCH), and DON'T leak a reservation.
+      if (decl === undefined || thisSpend === undefined || decl.currency !== g.currency) {
+        // Leave the scope sum UNSET so the composer sees an absent aggregate only
+        // if it also lacks a declaration/currency issue; the composer prioritizes
+        // NO_SPEND_FIELD / CURRENCY_MISMATCH before the aggregate read, so the
+        // reason is correct regardless. Provide 0 so a pure INPUT_UNAVAILABLE
+        // path (declared + valid + currency-match but grant scopeKey empty) still
+        // resolves; but here at least one of decl/spend/currency failed, so the
+        // composer denies before reading the sum.
+        sums[g.aggregateOver] = sums[g.aggregateOver] ?? 0;
+        continue;
+      }
+
+      let reserved: Awaited<ReturnType<typeof reserveCumulativeSpend>>;
+      try {
+        reserved = await reserveCumulativeSpend({
+          agentId: input.agentId,
+          scope: g.aggregateOver,
+          scopeKey,
+          currency: g.currency,
+          windowSeconds: g.windowSeconds,
+          max: g.max,
+          amount: thisSpend,
+        });
+      } catch {
+        // A Redis/parse failure is a missing signal => deny for this scope. Feed a
+        // prior sum AT the cap so projected = cap + thisSpend > cap (thisSpend may
+        // be 0, so use cap+1 to guarantee a breach even for a zero-spend invoke).
+        sums[g.aggregateOver] = Math.max(g.max, sums[g.aggregateOver] ?? 0) + 1;
+        continue;
+      }
+
+      if (reserved.ok) {
+        // Feed the real prior sum; the composer's projected = priorSum + thisSpend
+        // matches the reservation's admitted total, so allow.
+        sums[g.aggregateOver] = reserved.priorSum;
+        reservations.push({
+          keyParts: {
+            agentId: input.agentId,
+            scope: g.aggregateOver,
+            scopeKey,
+            currency: g.currency,
+          },
+          reservationId: reserved.reservationId as string,
+          amount: thisSpend,
+        });
+      } else {
+        // Rejected: feed a prior sum at the cap so the composer denies with
+        // CUMULATIVE_SPEND_CAP_EXCEEDED. +1 guarantees a breach even if thisSpend
+        // is 0. No reservation was taken.
+        sums[g.aggregateOver] = g.max + 1;
+      }
+    }
+
+    // If ANY scope denied (sum forced over its cap), the whole invoke will deny.
+    // Release reservations taken for the OTHER (passing) scopes so a denied
+    // invoke never leaks budget. We detect a denial by re-checking each governing
+    // rule against its fed sum.
+    const willDeny = governing.some((g) => {
+      const priorSum = sums[g.aggregateOver];
+      if (priorSum === undefined) return true; // absent => composer denies
+      const spend = thisSpend ?? 0;
+      return priorSum + spend > g.max || decl === undefined || decl.currency !== g.currency;
+    });
+    if (willDeny && reservations.length > 0) {
+      await Promise.all(
+        reservations.map((r) =>
+          releaseCumulativeSpend({
+            keyParts: r.keyParts,
+            reservationId: r.reservationId,
+            amount: r.amount,
+          }).catch(() => undefined),
+        ),
+      );
+      return { contextSums: sums, reservations: [] };
+    }
+
+    return { contextSums: sums, reservations };
+  }
+
+  /**
+   * Settle (success) or release (failure) the cumulative-spend reservations a
+   * decision took. On outcome_unknown the caller passes neither and the
+   * reservations age out at the window edge (fail closed). Safe on an empty list.
+   */
+  private async finalizeCumulativeSpend(
+    reservations: CumulativeSpendReservationHandle[],
+    outcome: "success" | "failure",
+  ): Promise<void> {
+    if (reservations.length === 0) return;
+    await Promise.all(
+      reservations.map((r) =>
+        (outcome === "success"
+          ? settleCumulativeSpend({ keyParts: r.keyParts, reservationId: r.reservationId })
+          : releaseCumulativeSpend({
+              keyParts: r.keyParts,
+              reservationId: r.reservationId,
+              amount: r.amount,
+            })
+        ).catch(() => undefined),
+      ),
+    );
+  }
+
   // ── Policy evaluation (spec §6.2 / §6.3) ──
   private async evaluatePolicy(args: {
     tenantId: string;
@@ -933,10 +1162,14 @@ class ProviderActionService {
     intentId: string;
     requestHash: string;
     actionDigest: string;
+    grantId?: string | null;
   }): Promise<{
     doc: PersistedPolicyDecisionV1;
     evaluation: ProviderPolicyEvaluationV1;
     decisionId: string;
+    /** Atomic cumulative-spend reservations taken during this evaluation. Settle
+     *  on known-success, release on known-failure/deny, leave on outcome_unknown. */
+    cumulativeSpendReservations: CumulativeSpendReservationHandle[];
   }> {
     const decidedAt = new Date().toISOString();
     const decisionId = randomUUID();
@@ -954,6 +1187,25 @@ class ProviderActionService {
     // policyText, so this is undefined and any content-pattern rule fails closed.
     const policyText = "policyText" in build ? build.policyText : undefined;
 
+    // -- #206: cumulative-spend aggregate wiring + atomic reservation. --
+    // Resolve the operation's declared spend field/currency and, for each
+    // governing cumulativeSpend rule, ATOMICALLY reserve this invoke's spend
+    // against the trailing-window cap. The reservation is the authoritative,
+    // TOCTOU-free gate. The reserved priorSum is fed to the composer so its
+    // in-policy check agrees with the reservation; a REJECTED reservation feeds a
+    // prior sum AT the cap so the composer's projected sum breaches and denies. A
+    // missing declaration / absent aggregate is left to the composer to fail
+    // closed exactly as specified.
+    const spendDeclaration = extractSpendDeclaration(operation.requestProfile);
+    const cumulative = await this.reserveCumulativeSpendForInvoke({
+      rules,
+      operationKey: operation.operationKey,
+      agentId: args.actorAgentId,
+      grantId: args.grantId ?? null,
+      spendDeclaration,
+      policyArgs: build.policyArgs,
+    });
+
     const context: ProviderPolicyContext = {
       operationKey: operation.operationKey,
       args: build.policyArgs,
@@ -967,6 +1219,14 @@ class ProviderActionService {
       // fail closed (POLICY_INPUT_UNAVAILABLE) exactly as specified.
       invokeCount1h: undefined,
       ...(policyText !== undefined ? { policyText } : {}),
+      // #206 cumulative-spend aggregate + declaration. spendDeclaration absent =>
+      // a cumulativeSpend rule fails closed (NO_SPEND_FIELD). cumulativeSpend
+      // carries the reserved priorSum per scope; absent scope => fail closed
+      // (INPUT_UNAVAILABLE). See reserveCumulativeSpendForInvoke.
+      ...(spendDeclaration !== undefined ? { spendDeclaration } : {}),
+      ...(cumulative.contextSums !== undefined
+        ? { cumulativeSpend: cumulative.contextSums }
+        : {}),
       // Permissioned-X authoritative inputs (post count / accumulated spend /
       // now-minute) are NOT wired into the service in Phase 1 — exactly the same
       // posture as invokeCount1h above. A permissioned-X rule that REQUIRES one
@@ -1039,7 +1299,12 @@ class ProviderActionService {
       evaluatorVersion: EVALUATOR_VERSION,
       decidedAt,
     };
-    return { doc, evaluation, decisionId };
+    return {
+      doc,
+      evaluation,
+      decisionId,
+      cumulativeSpendReservations: cumulative.reservations,
+    };
   }
 
   /**
@@ -1383,6 +1648,128 @@ function extractCapabilityIntentRules(
     });
   }
   return rules;
+}
+
+/**
+ * Extract the operation's DECLARED spend field (#206). The OPERATION — not the
+ * caller — declares which validated `policyArgs` field carries the per-invoke
+ * spend amount and its currency, via
+ * `request_profile.spendDeclaration: { field: string, currency: string }`.
+ * Absent/malformed => undefined; a cumulativeSpend rule on such an operation
+ * then fails closed (POLICY_CUMULATIVE_SPEND_NO_SPEND_FIELD) in the composer.
+ * We NEVER infer a spend field — an operation that cannot move money simply
+ * carries no declaration and can never be governed by a spend cap by accident.
+ */
+function extractSpendDeclaration(
+  requestProfile: Record<string, unknown>,
+): { field: string; currency: string } | undefined {
+  const raw = (requestProfile as { spendDeclaration?: unknown }).spendDeclaration;
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const decl = raw as Record<string, unknown>;
+  if (
+    typeof decl.field !== "string" ||
+    decl.field.length === 0 ||
+    typeof decl.currency !== "string" ||
+    decl.currency.length === 0
+  ) {
+    return undefined;
+  }
+  return { field: decl.field, currency: decl.currency };
+}
+
+/**
+ * The governing cumulativeSpend rules for an operation, with each rule's
+ * resolved window seconds + scope + cap. Used to drive the atomic reservations
+ * and the policy context's prior-sum signal.
+ */
+interface GoverningCumulativeSpend {
+  ruleId: string;
+  window: string;
+  windowSeconds: number;
+  currency: string;
+  max: number;
+  aggregateOver: "operation" | "agent" | "grant";
+}
+
+/**
+ * Extract the governing cumulativeSpend constraints from the operation's enabled
+ * capability-intent rules that name this operation. Only WELL-FORMED
+ * cumulativeSpend blocks are returned; a malformed one is left to the composer
+ * (which hard-denies on a malformed governing config), so we never silently
+ * skip a broken cap. Returns [] when none govern.
+ */
+function extractGoverningCumulativeSpend(
+  rules: ProviderPolicyRule[],
+  operationKey: string,
+): GoverningCumulativeSpend[] {
+  const out: GoverningCumulativeSpend[] = [];
+  for (const r of rules) {
+    if (!r.enabled) continue;
+    if (!capabilitySelectorMatches(r.config, operationKey)) continue;
+    const constraints = (r.config as { constraints?: unknown }).constraints;
+    if (typeof constraints !== "object" || constraints === null) continue;
+    const cs = (constraints as { cumulativeSpend?: unknown }).cumulativeSpend;
+    if (typeof cs !== "object" || cs === null) continue;
+    const block = cs as Record<string, unknown>;
+    const windowSeconds = parseIso8601DurationSecondsForApi(block.window);
+    if (
+      typeof block.window !== "string" ||
+      windowSeconds === null ||
+      typeof block.currency !== "string" ||
+      block.currency.length === 0 ||
+      typeof block.max !== "number" ||
+      !Number.isInteger(block.max) ||
+      block.max < 0 ||
+      (block.aggregateOver !== "operation" &&
+        block.aggregateOver !== "agent" &&
+        block.aggregateOver !== "grant")
+    ) {
+      // Malformed cap: leave it to the composer to hard-deny. Do NOT reserve.
+      continue;
+    }
+    out.push({
+      ruleId: r.id,
+      window: block.window,
+      windowSeconds,
+      currency: block.currency,
+      max: block.max,
+      aggregateOver: block.aggregateOver,
+    });
+  }
+  return out;
+}
+
+/**
+ * Restricted ISO-8601 duration -> positive integer seconds, mirroring the
+ * policy-engine parser (P[nD]T[nH][nM][nS], PnW; Y/M rejected as ambiguous).
+ * Kept local to avoid a runtime import cycle; the policy engine owns the
+ * canonical parser and both must agree (a divergence would let a window the
+ * policy accepts fail to reserve, or vice versa — covered by an E2E).
+ */
+function parseIso8601DurationSecondsForApi(input: unknown): number | null {
+  if (typeof input !== "string" || input.length === 0) return null;
+  const weeks = /^P(\d+)W$/.exec(input);
+  if (weeks) {
+    const n = Number(weeks[1]);
+    if (!Number.isSafeInteger(n) || n <= 0) return null;
+    return n * 604800;
+  }
+  const m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(input);
+  if (!m) return null;
+  const [, dStr, hStr, mStr, sStr] = m;
+  if (dStr === undefined && hStr === undefined && mStr === undefined && sStr === undefined) {
+    return null;
+  }
+  const days = dStr === undefined ? 0 : Number(dStr);
+  const hours = hStr === undefined ? 0 : Number(hStr);
+  const mins = mStr === undefined ? 0 : Number(mStr);
+  const secs = sStr === undefined ? 0 : Number(sStr);
+  for (const n of [days, hours, mins, secs]) {
+    if (!Number.isSafeInteger(n) || n < 0) return null;
+  }
+  const total = days * 86400 + hours * 3600 + mins * 60 + secs;
+  if (!Number.isSafeInteger(total) || total <= 0) return null;
+  return total;
 }
 
 /**
