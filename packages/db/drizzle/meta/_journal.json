@@ -449,6 +449,13 @@
       "when": 1784313600000,
       "tag": "0083_provider_approval_quorum",
       "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1784400000000,
+      "tag": "0084_generic_http_profile",
+      "breakpoints": true
     }
   ]
 }
