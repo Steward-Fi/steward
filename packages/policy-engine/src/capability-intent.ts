@@ -395,12 +395,7 @@ function parseIso8601DurationSeconds(input: unknown): number | null {
   if (!m) return null;
   const [, dStr, hStr, mStr, sStr] = m;
   // Must carry at least one component; a bare "P" or "PT" is meaningless.
-  if (
-    dStr === undefined &&
-    hStr === undefined &&
-    mStr === undefined &&
-    sStr === undefined
-  ) {
+  if (dStr === undefined && hStr === undefined && mStr === undefined && sStr === undefined) {
     return null;
   }
   // If a `T` was written it must be followed by at least one time component: the

@@ -21,10 +21,10 @@
 import { describe, expect, it } from "bun:test";
 import {
   composeProviderActionPolicyDecision,
-  parseCapabilityIntentConfigForTest,
   PROVIDER_POLICY_REASON,
   type ProviderPolicyContext,
   type ProviderPolicyRule,
+  parseCapabilityIntentConfigForTest,
 } from "../capability-intent.js";
 
 const OP = "wallet.transfer";
@@ -191,18 +191,18 @@ describe("cumulativeSpend — aggregateOver scope selection", () => {
       composeProviderActionPolicyDecision([spendRule(5_000_000, "operation")], overCtx).effect,
     ).toBe("hard_deny");
     // agent-scoped rule on the same context passes (agent sum is 0).
-    expect(composeProviderActionPolicyDecision([spendRule(5_000_000, "agent")], overCtx).effect).toBe(
-      "allow",
-    );
+    expect(
+      composeProviderActionPolicyDecision([spendRule(5_000_000, "agent")], overCtx).effect,
+    ).toBe("allow");
   });
 
   it("grant scope reads the grant sum independently", () => {
     const overCtx = ctx({
       cumulativeSpend: { operation: 0, agent: 0, grant: 5_000_000 },
     });
-    expect(composeProviderActionPolicyDecision([spendRule(5_000_000, "grant")], overCtx).effect).toBe(
-      "hard_deny",
-    );
+    expect(
+      composeProviderActionPolicyDecision([spendRule(5_000_000, "grant")], overCtx).effect,
+    ).toBe("hard_deny");
   });
 });
 
@@ -231,7 +231,9 @@ describe("cumulativeSpend — precedence (deny wins)", () => {
 describe("configurable count window (maxCalls + callWindow)", () => {
   it("maxCallsPerHour regression: still reads invokeCount1h, denies at cap", () => {
     const r = rule({ capabilities: [OP], effect: "allow", constraints: { maxCallsPerHour: 2 } });
-    expect(composeProviderActionPolicyDecision([r], ctx({ invokeCount1h: 1 })).effect).toBe("allow");
+    expect(composeProviderActionPolicyDecision([r], ctx({ invokeCount1h: 1 })).effect).toBe(
+      "allow",
+    );
     expect(composeProviderActionPolicyDecision([r], ctx({ invokeCount1h: 2 })).effect).toBe(
       "hard_deny",
     );
@@ -250,12 +252,12 @@ describe("configurable count window (maxCalls + callWindow)", () => {
       effect: "allow",
       constraints: { maxCalls: 3, callWindow: "P1D" },
     });
-    expect(
-      composeProviderActionPolicyDecision([r], ctx({ windowedInvokeCount: 2 })).effect,
-    ).toBe("allow");
-    expect(
-      composeProviderActionPolicyDecision([r], ctx({ windowedInvokeCount: 3 })).effect,
-    ).toBe("hard_deny");
+    expect(composeProviderActionPolicyDecision([r], ctx({ windowedInvokeCount: 2 })).effect).toBe(
+      "allow",
+    );
+    expect(composeProviderActionPolicyDecision([r], ctx({ windowedInvokeCount: 3 })).effect).toBe(
+      "hard_deny",
+    );
   });
 
   it("maxCalls set but windowedInvokeCount absent => deny (INPUT_UNAVAILABLE)", () => {
@@ -276,7 +278,12 @@ describe("cumulativeSpend + maxCalls — store-time config validation (fail clos
 
   it("accepts a well-formed cumulativeSpend block", () => {
     const r = store({
-      cumulativeSpend: { window: "PT24H", currency: "USD", max: 10_000_000, aggregateOver: "agent" },
+      cumulativeSpend: {
+        window: "PT24H",
+        currency: "USD",
+        max: 10_000_000,
+        aggregateOver: "agent",
+      },
     });
     expect("error" in r).toBe(false);
   });

@@ -197,7 +197,8 @@ function nextSeq(): string {
 export async function reserveCumulativeSpend(
   input: ReserveCumulativeSpendInput,
 ): Promise<ReserveCumulativeSpendResult> {
-  if (!isNonNegInt(input.amount)) throw new Error(`invalid cumulative spend amount: ${input.amount}`);
+  if (!isNonNegInt(input.amount))
+    throw new Error(`invalid cumulative spend amount: ${input.amount}`);
   if (!isNonNegInt(input.max)) throw new Error(`invalid cumulative spend max: ${input.max}`);
   if (
     typeof input.windowSeconds !== "number" ||

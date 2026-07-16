@@ -21,6 +21,17 @@ export {
   isKnownHost,
 } from "./cost-estimator.js";
 export {
+  type CumulativeSpendKeyParts,
+  type CumulativeSpendScope,
+  type CumulativeSpendSnapshot,
+  getCumulativeSpendSum,
+  type ReserveCumulativeSpendInput,
+  type ReserveCumulativeSpendResult,
+  releaseCumulativeSpend,
+  reserveCumulativeSpend,
+  settleCumulativeSpend,
+} from "./cumulative-spend-tracker.js";
+export {
   type CachedPolicy,
   getCachedPolicies,
   invalidateCache,
@@ -43,16 +54,5 @@ export {
   type SpendReservation,
   settleReservedSpend,
 } from "./spend-tracker.js";
-export {
-  type CumulativeSpendKeyParts,
-  type CumulativeSpendScope,
-  type CumulativeSpendSnapshot,
-  getCumulativeSpendSum,
-  releaseCumulativeSpend,
-  type ReserveCumulativeSpendInput,
-  type ReserveCumulativeSpendResult,
-  reserveCumulativeSpend,
-  settleCumulativeSpend,
-} from "./cumulative-spend-tracker.js";
 export type { IoredisPipelineLike } from "./upstash-adapter.js";
 export { createUpstashIoredisAdapter } from "./upstash-adapter.js";

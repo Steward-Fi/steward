@@ -1029,7 +1029,9 @@ class ProviderActionService {
     // Absent declaration or bad value => do NOT reserve; the composer fails closed.
     const decl = input.spendDeclaration;
     const rawSpend =
-      decl && Object.hasOwn(input.policyArgs, decl.field) ? input.policyArgs[decl.field] : undefined;
+      decl && Object.hasOwn(input.policyArgs, decl.field)
+        ? input.policyArgs[decl.field]
+        : undefined;
     const spendValid =
       decl !== undefined &&
       typeof rawSpend === "number" &&
@@ -1224,9 +1226,7 @@ class ProviderActionService {
       // carries the reserved priorSum per scope; absent scope => fail closed
       // (INPUT_UNAVAILABLE). See reserveCumulativeSpendForInvoke.
       ...(spendDeclaration !== undefined ? { spendDeclaration } : {}),
-      ...(cumulative.contextSums !== undefined
-        ? { cumulativeSpend: cumulative.contextSums }
-        : {}),
+      ...(cumulative.contextSums !== undefined ? { cumulativeSpend: cumulative.contextSums } : {}),
       // Permissioned-X authoritative inputs (post count / accumulated spend /
       // now-minute) are NOT wired into the service in Phase 1 — exactly the same
       // posture as invokeCount1h above. A permissioned-X rule that REQUIRES one

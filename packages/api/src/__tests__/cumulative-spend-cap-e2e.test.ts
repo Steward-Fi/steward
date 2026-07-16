@@ -50,14 +50,14 @@ import {
   secretRoutes,
   secrets,
   tenants,
-  userTenants,
   users,
+  userTenants,
   workspaces,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { PROVIDER_POLICY_REASON } from "@stwd/policy-engine";
-import { disconnectRedis, getRedis } from "@stwd/redis";
 import { buildXAction } from "@stwd/provider-x";
+import { disconnectRedis, getRedis } from "@stwd/redis";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import { providerActionService } from "../services/provider-action-service";
 
@@ -83,7 +83,6 @@ const CS = {
 } as const;
 
 const OP_TWEET_KEY = "x.tweet.create";
-const OP_NODECL_KEY = "x.tweet.create"; // same op key; separate account not needed
 const FUTURE = new Date(Date.now() + 365 * 24 * 3600_000);
 
 function principal(): ProviderPrincipalV1 {
