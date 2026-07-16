@@ -30,7 +30,7 @@ export class LocalCustodyAcknowledgementRequiredError extends Error {
         "application memory at sign time, so a memory-scrape of this process " +
         `exposes every key. Acknowledge this posture explicitly by setting ${LOCAL_CUSTODY_ACK_ENV}=true, ` +
         "or move to a stronger backend (STEWARD_KMS_PROVIDER=aws|pkcs11, or an " +
-        "third-party-custody provider). See docs/security/custody-posture.md.",
+        "external-custody provider). See docs/security/custody-posture.md.",
     );
   }
 }
@@ -102,8 +102,8 @@ function requireKmsConfiguration(provider: "aws" | "pkcs11"): void {
  * True when the resolved custody mode materializes plaintext private-key bytes
  * in this process's memory at sign time. This is the honest boundary from
  * VISION.md: `local` AND both `kms-envelope:*` modes decrypt the key to a
- * plaintext string in-process before signing. Only an third-party-custody provider
- * (wired via VaultConfig.third-partyKeyCustodyProvider, not a vault-factory mode)
+ * plaintext string in-process before signing. Only an external-custody provider
+ * (wired via VaultConfig.externalKeyCustodyProvider, not a vault-factory mode)
  * keeps plaintext out of this process entirely.
  *
  * The acknowledgement gate below is scoped narrowly to `local` — the weakest
