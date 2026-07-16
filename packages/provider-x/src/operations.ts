@@ -149,41 +149,38 @@ function textHasUrl(text: string): boolean {
   if (/[a-z][a-z0-9+.-]*:\/\/\S/i.test(text)) return true;
   // bare www. host
   if (/\bwww\.[^\s.]+\.[^\s]/i.test(text)) return true;
-  // bare host.tld optionally with a path — require a known-ish TLD shape
-  // (2+ letters) to avoid matching ordinary sentences with periods.
-  if (/\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.[a-z]{2,}(?:\/\S*)?/i.test(text)) {
-    // Guard against plain "word.word" prose (no path, common English word
-    // boundary): only treat as a URL when it has a path/query OR the TLD is a
-    // common one. This keeps "e.g" / "i.e" / "U.S" out while catching real
-    // hosts. We fail toward DETECTING a URL when ambiguous.
-    const m = text.match(/\b([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\.([a-z]{2,})((?:\/\S*)?)/i);
-    if (m) {
-      const tld = m[2].toLowerCase();
-      const hasPath = m[3].length > 0;
-      const COMMON_TLDS = new Set([
-        "com",
-        "org",
-        "net",
-        "io",
-        "co",
-        "gg",
-        "app",
-        "dev",
-        "xyz",
-        "ai",
-        "fun",
-        "me",
-        "tv",
-        "fi",
-        "info",
-        "biz",
-        "gov",
-        "edu",
-        "news",
-        "link",
-      ]);
-      if (hasPath || COMMON_TLDS.has(tld)) return true;
-    }
+  // bare host.tld optionally with a path. We OVER-DETECT here (fail toward
+  // treating an ambiguous token as a URL), because a false negative would let a
+  // `contentPolicy.allowUrls:false` / URL-spend / URL-approval policy be BYPASSED
+  // by a real bare domain on an uncommon TLD (e.g. `example.social`, `foo.shop`).
+  // A false positive only denies/escalates a borderline post, which is the safe
+  // direction (codex P2, PR review). We therefore treat ANY `label.tld` token
+  // (tld = 2+ ASCII letters) with a path OR a plausible domain shape as a URL,
+  // and EXCLUDE only a small deny-list of common English abbreviations that
+  // appear as `word.word` in ordinary prose.
+  //
+  // The dot must be immediately followed by 2+ ASCII letters (`\.[a-z]{2,}`), so
+  // ordinary prose with a space after the period ("fine. really") does NOT match
+  // — only a glued `label.tld` token does. Common English abbreviations with a
+  // single-letter right side ("e.g", "i.e", "p.m", "a.m", "u.s", "u.k") also do
+  // not match (1-letter tld). What remains are host-shaped tokens, which we
+  // OVER-DETECT as URLs regardless of TLD (a path is not required). We keep a
+  // tiny deny-list only for the rare glued 2+-letter-tld prose abbreviations.
+  const PROSE_ABBREVIATIONS: ReadonlySet<string> = new Set([
+    "etc.al", // "etc.al" style typo runs
+    "vs.the",
+  ]);
+  const hostRe = /\b([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\.([a-z]{2,})((?:\/\S*)?)/gi;
+  for (const m of text.matchAll(hostRe)) {
+    const label = m[1].toLowerCase();
+    const tld = m[2].toLowerCase();
+    const hasPath = m[3].length > 0;
+    // A path always makes it a URL.
+    if (hasPath) return true;
+    // Skip a couple of glued prose abbreviations; everything else host-shaped is
+    // over-detected as a URL (safe direction for a no-URL / spend policy).
+    if (PROSE_ABBREVIATIONS.has(`${label}.${tld}`)) continue;
+    return true;
   }
   return false;
 }

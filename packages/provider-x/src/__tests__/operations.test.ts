@@ -178,6 +178,20 @@ describe("x.tweet.create", () => {
     const prose = buildXAction("x.tweet.create", { text: "i.e. this is fine. really." });
     expect(prose.policyArgs.hasUrl).toBe(false);
 
+    // over-detection: a bare domain on an UNCOMMON tld must still be a URL, so a
+    // no-URL / URL-spend policy cannot be bypassed (codex P2 review fix).
+    for (const t of [
+      "visit example.social now",
+      "check foo.shop today",
+      "join my.community here",
+    ]) {
+      expect(buildXAction("x.tweet.create", { text: t }).policyArgs.hasUrl).toBe(true);
+    }
+    // common English abbreviations with a single-letter right side stay non-URL.
+    for (const t of ["e.g. this", "meet at 5 p.m. sharp", "the u.s. economy"]) {
+      expect(buildXAction("x.tweet.create", { text: t }).policyArgs.hasUrl).toBe(false);
+    }
+
     const summoned = buildXAction("x.tweet.create", {
       text: "thanks!",
       replyToTweetId: "9",
