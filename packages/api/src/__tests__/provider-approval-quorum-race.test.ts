@@ -13,7 +13,15 @@
  * pool the preload left in place when DATABASE_URL is set.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from "bun:test";
 import {
   approvalQueue,
   getDb,

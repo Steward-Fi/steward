@@ -14,22 +14,15 @@
  */
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { createPGLiteDb } from "../pglite";
 
 setDefaultTimeout(120_000);
 
+// createPGLiteDb() applies every migration in packages/db/drizzle (including
+// 0083) before returning, so the assertions run against the fully-migrated
+// schema without a hand-rolled applier.
 let client: PGlite;
-const migrationsDir = new URL("../../drizzle", import.meta.url).pathname;
-
-async function applyFile(c: PGlite, file: string) {
-  const sql = await readFile(join(migrationsDir, file), "utf8");
-  for (const stmt of sql.split("--> statement-breakpoint")) {
-    if (stmt.trim()) await c.exec(stmt);
-  }
-}
 
 describe("#205 quorum migration (0083)", () => {
   beforeAll(async () => {

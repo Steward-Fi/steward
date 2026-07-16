@@ -103,7 +103,10 @@ function decide(
   });
 }
 
-const TWO_OF_THREE = { threshold: 2, eligibleApproverUserIds: [F.APPROVER, F.APPROVER_2, F.APPROVER_3] };
+const TWO_OF_THREE = {
+  threshold: 2,
+  eligibleApproverUserIds: [F.APPROVER, F.APPROVER_2, F.APPROVER_3],
+};
 
 describe("#205 M-of-N quorum approval", () => {
   beforeAll(async () => {
@@ -363,7 +366,10 @@ describe("#205 M-of-N quorum approval", () => {
   describe("malformed config fails closed at store time", () => {
     const cases: Array<{ name: string; quorum: unknown }> = [
       { name: "threshold 0", quorum: { threshold: 0, eligibleApproverUserIds: [F.APPROVER] } },
-      { name: "threshold negative", quorum: { threshold: -1, eligibleApproverUserIds: [F.APPROVER] } },
+      {
+        name: "threshold negative",
+        quorum: { threshold: -1, eligibleApproverUserIds: [F.APPROVER] },
+      },
       {
         name: "threshold non-integer",
         quorum: { threshold: 1.5, eligibleApproverUserIds: [F.APPROVER, F.APPROVER_2] },

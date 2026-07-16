@@ -122,8 +122,7 @@ export async function seedFixture(
       tenantId: F.TENANT,
       name: "A",
       walletAddress: "0x1",
-      ownerUserId:
-        opts.agentOwnerUserId ?? (opts.requesterSeparation ? F.AGENT_OWNER : null),
+      ownerUserId: opts.agentOwnerUserId ?? (opts.requesterSeparation ? F.AGENT_OWNER : null),
     },
   ]);
   await db.insert(secrets).values([
