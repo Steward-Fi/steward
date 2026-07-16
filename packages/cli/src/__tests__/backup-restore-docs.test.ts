@@ -39,12 +39,16 @@ describe("backup/restore documentation contract", () => {
     expect(runbook).toContain("The secrets are not stored in the database");
     expect(runbook).toContain("never blindly\n  retried or reset to `none`");
     expect(runbook).toContain("no exactly-once recovery claim");
-    expect(runbook).toContain("A skipped secret,\naudit, nonce, or approval assertion is a failed drill");
+    expect(runbook).toContain(
+      "A skipped secret,\naudit, nonce, or approval assertion is a failed drill",
+    );
   });
 
   test("is linked from deployment docs and local Markdown links resolve", () => {
     const deployment = read("docs/deployment.md");
-    expect(deployment).toContain("[backup, restore, and disaster-recovery runbook](runbooks/backup-restore.md)");
+    expect(deployment).toContain(
+      "[backup, restore, and disaster-recovery runbook](runbooks/backup-restore.md)",
+    );
 
     for (const match of runbook.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) {
       const target = match[1];
