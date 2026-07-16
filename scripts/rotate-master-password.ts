@@ -58,6 +58,7 @@ import { writeAuditEvent } from "../packages/api/src/services/audit";
 import {
   accounts,
   agents,
+  closeDb,
   createDb,
   encryptedChainKeys,
   encryptedKeys,
@@ -947,6 +948,11 @@ async function main() {
   const tables: TableName[] = args.table ? [args.table] : ALL_TABLES;
   const { client, db } = createDb();
   const failures: string[] = [];
+  // Tracks whether the write transaction committed. Once true, the persistent
+  // inventory is durably under the NEW root, so a LATER failure (e.g. the
+  // completion audit event) must NOT be reported as an abort or trigger the
+  // runbook's data-restore path. The rotation itself already succeeded.
+  let committed = false;
 
   try {
     // Complete preflight happens before the first mutation. This prevents a bad
@@ -980,28 +986,62 @@ async function main() {
           console.log(summarize(res, false));
         }
       });
+      // The transaction has COMMITTED. Every subsequent step is post-success
+      // bookkeeping and cannot un-rotate the data.
+      committed = true;
 
-      await writeAuditEvent({
-        tenantId: "system",
-        actorType: "system",
-        action: "system.master_password_rotation.complete",
-        resourceType: "encrypted_inventory",
-        resourceId: "all",
-        metadata: {
-          tables,
-          preflightCounts: preflight.map((result) => ({
-            table: result.table,
-            rotated: result.rotated,
-            alreadyRotated: result.alreadyRotated,
-          })),
-        },
-      });
+      // Best-effort completion audit event. It runs OUTSIDE the rotation
+      // transaction, so its failure (e.g. STEWARD_AUDIT_HMAC_KEY absent, an
+      // audit-chain conflict) must never masquerade as a rotation failure: the
+      // ciphertext is already re-encrypted and durable. Warn loudly, keep a
+      // distinct non-zero exit so automation still notices the missing record,
+      // but do NOT print ROTATION ABORTED (which would invite a catastrophic
+      // restore of an already-rotated database).
+      try {
+        await writeAuditEvent({
+          tenantId: "system",
+          actorType: "system",
+          action: "system.master_password_rotation.complete",
+          resourceType: "encrypted_inventory",
+          resourceId: "all",
+          metadata: {
+            tables,
+            preflightCounts: preflight.map((result) => ({
+              table: result.table,
+              rotated: result.rotated,
+              alreadyRotated: result.alreadyRotated,
+            })),
+          },
+        });
+      } catch (auditErr) {
+        console.error(
+          `ROTATION COMPLETE, but the completion audit event could not be written: ${errMsg(
+            auditErr,
+          )}. The database is fully re-encrypted under the NEW root, do NOT restore the backup. ` +
+            "Record the rotation in your incident log manually and ensure STEWARD_AUDIT_HMAC_KEY is set.",
+        );
+        process.exitCode = 2;
+      }
     }
   } catch (err) {
-    console.error(`ROTATION ABORTED: ${errMsg(err)}`);
-    process.exitCode = 1;
+    if (committed) {
+      // Should be unreachable (post-commit failures are handled above), but stay
+      // fail-safe: never tell the operator to roll back a committed rotation.
+      console.error(
+        `ROTATION COMPLETE, but a post-commit step failed: ${errMsg(err)}. ` +
+          "The database is re-encrypted under the NEW root, do NOT restore the backup.",
+      );
+      process.exitCode = 2;
+    } else {
+      console.error(`ROTATION ABORTED: ${errMsg(err)}`);
+      process.exitCode = 1;
+    }
   } finally {
     await client.end();
+    // writeAuditEvent uses the shared getDb() pool, which is distinct from the
+    // createDb() handle above. Close it too, otherwise the open pool keeps the
+    // event loop alive and the documented `--confirm` command never returns.
+    await closeDb().catch(() => {});
   }
 }
 

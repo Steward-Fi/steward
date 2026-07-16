@@ -1,4 +1,6 @@
 import { afterAll, describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { createDb, eq, tenantConfigs, tenants } from "@stwd/db";
 import { buildRotationKeystores, rotateTable } from "../../../../scripts/rotate-master-password";
 import type { EncryptedKey } from "../keystore";
@@ -12,6 +14,9 @@ const NEW_PASSWORD = "real-pg-new-master-password-bbbbbbbb";
 const NEW_SALT = "bb".repeat(16);
 const tenantId = `rotation-real-pg-${process.pid}`;
 const connection = url ? createDb(url) : null;
+const scriptPath = fileURLToPath(
+  new URL("../../../../scripts/rotate-master-password.ts", import.meta.url),
+);
 
 suite("master-password rotation real PostgreSQL transaction", () => {
   afterAll(async () => {
@@ -50,5 +55,74 @@ suite("master-password rotation real PostgreSQL transaction", () => {
     const encrypted = JSON.parse(row.emailConfig?.apiKeyEncrypted ?? "") as EncryptedKey;
     expect(new KeyStore(OLD_PASSWORD, OLD_SALT).decrypt(encrypted)).toBe("real-pg-plaintext");
     expect(() => new KeyStore(NEW_PASSWORD, NEW_SALT).decrypt(encrypted)).toThrow();
+  });
+
+  // A completion audit event runs AFTER the transaction commits. If it fails
+  // (e.g. STEWARD_AUDIT_HMAC_KEY absent), the ciphertext is already durable, so
+  // the script must report COMPLETE (not ABORTED), exit non-1, exit promptly
+  // (no hung audit pool), and leave the data rotated to the NEW root. Reporting
+  // a committed rotation as aborted would invite a catastrophic backup restore.
+  it("reports COMPLETE not ABORTED when the post-commit audit event fails, and exits cleanly", () => {
+    if (!url) throw new Error("real PostgreSQL URL missing");
+    const auditTenant = `${tenantId}-audit`;
+    const env: Record<string, string> = {
+      PATH: process.env.PATH ?? "",
+      DATABASE_URL: url,
+      STEWARD_MASTER_PASSWORD: OLD_PASSWORD,
+      STEWARD_KDF_SALT: OLD_SALT,
+      STEWARD_MASTER_PASSWORD_NEW: NEW_PASSWORD,
+      STEWARD_KDF_SALT_NEW: NEW_SALT,
+      // NODE_ENV=production forces the audit key to be mandatory; leaving
+      // STEWARD_AUDIT_HMAC_KEY unset makes the post-commit audit write throw.
+      NODE_ENV: "production",
+    };
+
+    // Seed one rotatable row under the OLD root just before the run.
+    const seedOld = new KeyStore(OLD_PASSWORD, OLD_SALT).encrypt("audit-path-plaintext");
+    return (async () => {
+      const { db } = connection ?? createDb(url);
+      await db
+        .insert(tenants)
+        .values({ id: auditTenant, name: auditTenant, apiKeyHash: auditTenant });
+      await db.insert(tenantConfigs).values({
+        tenantId: auditTenant,
+        emailConfig: {
+          provider: "resend",
+          from: "audit-path@example.com",
+          apiKeyEncrypted: JSON.stringify(seedOld),
+        },
+      });
+
+      const result = spawnSync("bun", ["run", scriptPath, "--confirm"], {
+        env,
+        encoding: "utf8",
+        timeout: 60_000,
+      });
+
+      // Exited (not killed by the 60s timeout => no hung audit pool).
+      expect(result.signal).toBeNull();
+      const output = `${result.stdout}\n${result.stderr}`;
+      expect(output).toContain("ROTATION COMPLETE");
+      expect(output).toContain("do NOT restore the backup");
+      expect(output).not.toContain("ROTATION ABORTED");
+      // Distinct non-zero status for the missing audit record, never the plain
+      // abort code 1.
+      expect(result.status).not.toBe(1);
+      expect(result.status).toBe(2);
+
+      // The row is genuinely rotated to the NEW root despite the audit failure.
+      const [after] = await db
+        .select()
+        .from(tenantConfigs)
+        .where(eq(tenantConfigs.tenantId, auditTenant));
+      const enc = JSON.parse(after.emailConfig?.apiKeyEncrypted ?? "") as EncryptedKey;
+      expect(new KeyStore(NEW_PASSWORD, NEW_SALT).decrypt(enc)).toBe("audit-path-plaintext");
+      expect(() => new KeyStore(OLD_PASSWORD, OLD_SALT).decrypt(enc)).toThrow();
+
+      await db
+        .delete(tenants)
+        .where(eq(tenants.id, auditTenant))
+        .catch(() => {});
+    })();
   });
 });

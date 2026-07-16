@@ -58,12 +58,14 @@ In-memory or Redis MFA challenges and import sessions are also encrypted with th
 2. Drain or clear encrypted MFA, device-authorization, and import-session records.
 3. Confirm a tested backup and record row counts for every inventory table.
 4. If webhooks use dedicated roots, set the current `STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY` and `STEWARD_WEBHOOK_SECRET_KDF_SALT`. To rotate those too, set their `*_NEW` counterparts. If they fall back to master/KDF, no extra values are needed.
-5. Export roots from a protected, non-recorded environment. Prefer a secret-manager injection mechanism over interactive shell text.
+5. Set `STEWARD_AUDIT_HMAC_KEY`. The script writes one completion audit event after the transaction commits; in production the audit chain requires this key. If it is absent the re-encryption still commits, but the script exits with a distinct non-zero status and prints that the audit record could not be written. That is not a rotation failure and must not trigger a database restore.
+6. Export roots from a protected, non-recorded environment. Prefer a secret-manager injection mechanism over interactive shell text.
 
 ### Exact procedure
 
 ```sh
 export DATABASE_URL='postgresql://...'
+export STEWARD_AUDIT_HMAC_KEY="$AUDIT_HMAC_KEY_FROM_SECRET_MANAGER"
 export STEWARD_MASTER_PASSWORD="$OLD_MASTER_FROM_SECRET_MANAGER"
 export STEWARD_KDF_SALT="$OLD_KDF_SALT_FROM_SECRET_MANAGER"
 export STEWARD_MASTER_PASSWORD_NEW="$NEW_MASTER_FROM_SECRET_MANAGER"
@@ -86,7 +88,7 @@ Then atomically replace the deployed master and KDF variables with the new value
 
 ### Rollback
 
-Before application cutover, a transaction failure needs no data rollback. Fix the cause and rerun. After database success but before all replicas use the new root, finish the configuration cutover rather than serving mixed roots. If post-cutover verification fails, stop every consumer and restore the database backup together with the old master and old KDF salt. Never restore only one half of that pair. Retain the old pair as long as backups encrypted under it are retained.
+Before application cutover, a transaction failure needs no data rollback. Fix the cause and rerun. A `ROTATION ABORTED` message means the transaction rolled back and nothing was written. A `ROTATION COMPLETE, but ...` message means the re-encryption committed and only a post-commit step (the completion audit event) failed; do not restore the backup in that case, record the rotation manually and fix the reported cause before the next run. After database success but before all replicas use the new root, finish the configuration cutover rather than serving mixed roots. If post-cutover verification fails, stop every consumer and restore the database backup together with the old master and old KDF salt. Never restore only one half of that pair. Retain the old pair as long as backups encrypted under it are retained.
 
 Blast radius of an incorrect root is all local encrypted custody and credentials. The script does not rotate KMS/HSM-managed material.
 

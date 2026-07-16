@@ -65,4 +65,15 @@ expect_killed omit-encrypted-inventory-class bun test scripts/__tests__/rotate-m
 mutate_rotation 'name: `pending-proxy:${row.requestDigest}`' 'name: "pending-proxy:wrong-aad"'
 expect_killed drop-aad-fidelity bun test packages/vault/src/__tests__/rotate-master-password.test.ts
 
-echo 'All 6 key-rotation mutations killed.'
+# In-transaction drift guard: removing the mid-transaction failure abort must be
+# caught (a row failing auth during the write pass has to roll the txn back).
+mutate_rotation 'throw new Error(`${table} changed after preflight; transaction rolled back`);' '/* mutant: drift guard removed */;'
+expect_killed allow-in-transaction-drift bun test scripts/__tests__/rotate-master-password-cli.test.ts
+
+# Post-commit audit failure must be reported as COMPLETE (data is durable), not
+# as an abort. Mislabelling the post-commit path as ABORTED would invite
+# restoring an already-rotated database.
+mutate_rotation 'ROTATION COMPLETE, but the completion audit event could not be written' 'ROTATION ABORTED after the completion audit event could not be written'
+expect_killed post-commit-audit-mislabelled-as-abort bun test packages/vault/src/__tests__/rotate-master-password.real-pg.test.ts
+
+echo 'All 8 key-rotation mutations killed.'

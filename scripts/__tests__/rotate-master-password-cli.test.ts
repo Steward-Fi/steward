@@ -29,6 +29,16 @@ describe("master-password rotation command contract", () => {
     expect(source.match(/if \(failures\.length > 0\)/g)?.length).toBe(1);
     expect(source).toContain("await db.transaction");
     expect(source).toContain("transaction rolled back");
+    // In-transaction drift guard: a row that fails to authenticate DURING the
+    // write pass (e.g. concurrent modification after preflight) must abort the
+    // whole transaction, not silently commit a partial rotation.
+    expect(source).toMatch(/if \(res\.failed\.length > 0\)\s*{\s*throw new Error/);
+    // A post-commit failure (the completion audit event) must NOT be reported
+    // as ROTATION ABORTED, which would invite a catastrophic restore of an
+    // already-rotated database. It is gated behind the committed flag.
+    expect(source).toContain("let committed = false");
+    expect(source).toContain("committed = true");
+    expect(source).toContain("ROTATION COMPLETE");
     expect(source).not.toMatch(/console\.(?:log|error)\([^\n]*(?:plaintext|oldPw|newPw)/);
   });
 
