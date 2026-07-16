@@ -65,6 +65,12 @@ import {
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { estimateXPostMicros, X_POST_PRICE_TABLE_V1 } from "@stwd/policy-engine";
 import { buildXAction } from "@stwd/provider-x";
+import {
+  computeXActionDigest,
+  jcsStringify,
+  sha256HexPrefixed,
+  xCanonicalActionBytes,
+} from "@stwd/shared";
 import { eq } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import { providerActionService } from "../services/provider-action-service";
@@ -406,6 +412,31 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
     ]);
     const out = await propose({ text }, nonce);
     expect(out.kind).toBe("approval_required");
+  });
+
+  test("control stripping changes only hasUrl, never durable canonical or request identity", async () => {
+    const text = "h\u200Btt\u2060ps://e\u202Evil.c\u00ADom/x";
+    const build = buildXAction(OP_TWEET as never, { text });
+    await seed([
+      allowRule("11111111-1111-4111-8111-1111111111d4", {
+        contentPolicy: { allowUrls: true },
+        escalation: { urlPostRequiresApproval: true },
+      }),
+    ]);
+
+    const out = await propose({ text }, "digest01");
+    expect(out.kind).toBe("approval_required");
+    if (out.kind !== "approval_required") throw new Error(`got ${out.kind}`);
+    const b = await bindingRow(out.intentId);
+    const expectedBytes = xCanonicalActionBytes(build.action);
+    const expectedDigest = computeXActionDigest(build.action);
+
+    expect(build.policyText).toBe(text);
+    expect(build.action.canonicalBody).toEqual({ text });
+    expect(Buffer.from(b.canonicalActionBytes).toString("utf8")).toBe(expectedBytes);
+    expect(b.actionDigest).toBe(expectedDigest);
+    expect(b.requestEnvelope.actionDigest).toBe(expectedDigest);
+    expect(b.requestHash).toBe(sha256HexPrefixed(jcsStringify(b.requestEnvelope)));
   });
 
   test("fail-closed: a spendPolicy rule with unwired accumulated-spend input denies POLICY_INPUT_UNAVAILABLE", async () => {

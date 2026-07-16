@@ -34,5 +34,7 @@ proof "M2 remove format-control stripping" "control-obfuscated URLs" run_provide
 'p=__import__("sys").argv[1];s=open(p).read();old="  const detectionText = text.replace(/\\p{Cf}/gu, \"\");";assert old in s;open(p,"w").write(s.replace(old,"  const detectionText = text;"))'
 proof "M3 weaken hasUrl pricing and policy propagation" "URL pricing signal and approval escalation" run_e2e \
 'p=__import__("sys").argv[1];s=open(p).read();old="  const policyArgs: Record<string, unknown> = {\n    isReply: replyToTweetId !== undefined,\n    hasUrl,";assert old in s;open(p,"w").write(s.replace(old,old.replace("    hasUrl,", "    hasUrl: false,")))'
+proof "M4 strip controls from posted and canonical text" "keeps control-obfuscated text byte-exact" run_provider \
+'p=__import__("sys").argv[1];s=open(p).read();old="  const text = validateTweetText(args.text);";assert old in s;q=chr(34);new="  const text = validateTweetText(args.text).replace(/\\p{Cf}/gu, "+q+q+");";open(p,"w").write(s.replace(old,new))'
 
-echo "3/3 mutations killed"
+echo "4/4 mutations killed"
