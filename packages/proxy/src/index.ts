@@ -56,8 +56,16 @@ app.get("/health", (c) =>
 
 // ─── Opt-in operator metrics (separate token, disabled by default) ────────────
 
-app.get("/metrics", (c) => {
-  if (!securityMetricsEnabled()) return c.json({ ok: false, error: "Not found" }, 404);
+app.get("/metrics", (c, next) => {
+  // Disabled is the default. Fall THROUGH to the normal auth + proxy pipeline
+  // (return next()) rather than emitting a distinctive 404 here, so a disabled
+  // /metrics is byte-identical to any other unrouted path (the proxy's catch-all
+  // runs authMiddleware first, so an unauthenticated probe of /metrics gets the
+  // exact same 401 as an unauthenticated probe of any random path). Emitting a
+  // 404 only from here would fingerprint the endpoint's existence to an
+  // unauthenticated attacker, since every other path returns 401. This mirrors
+  // the API side, where the disabled 404 is identical to the generic notFound.
+  if (!securityMetricsEnabled()) return next();
   const authorization = c.req.header("Authorization");
   const token = authorization?.startsWith("Bearer ") ? authorization.slice(7) : undefined;
   if (!metricsTokenIsValid(token)) {

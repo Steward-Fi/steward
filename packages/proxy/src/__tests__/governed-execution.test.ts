@@ -46,6 +46,8 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import {
+  __resetSecurityMetricsForTests,
+  __setSecurityMetricsObserverFailureForTests,
   buildProviderExecutionCommitmentV2,
   canonicalActionBytes,
   computeActionDigest,
@@ -539,6 +541,7 @@ beforeEach(async () => {
 afterEach(() => {
   // Reset any fault-injection hooks so a race test cannot leak into the next.
   dispatchMod.__resetGovernedDispatchHooksForTests();
+  __resetSecurityMetricsForTests();
 });
 
 // Build a minimal Hono-like context for handleProxy with an optional forged
@@ -1278,5 +1281,40 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     // The governed claim consumed exactly once; the direct hit never touched it.
     expect(n.status).toBe("consumed");
     void gov;
+  });
+
+  it("a THROWING metrics observer never changes the governed dispatch outcome (post-commit isolation, all proxy hook sites)", async () => {
+    // observeSecurityAuditEvent is invoked from the post-commit loop of EVERY
+    // withTenantAuditedTransaction the proxy dispatch path runs: the claim, the
+    // claimed->dispatched transition, and the terminal outcome. Force that
+    // observer to throw for the WHOLE dispatch and prove:
+    //   1. the dispatch still succeeds (ok:true, EXEC_DISPATCH_SUCCEEDED),
+    //   2. the nonce is consumed and reaches the terminal succeeded state,
+    //   3. exactly one upstream forward happened (no blind retry, X8),
+    // i.e. a metrics failure can never block, delay, or reorder the atomic
+    // claimed->dispatched transition or the authority decision.
+    __setSecurityMetricsObserverFailureForTests(true);
+    try {
+      const { intentId, authorizationId } = await seedExecutionReady();
+      forwarderMode = "ok";
+      const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+      expect(res.ok).toBe(true);
+      expect(res.code).toBe("EXEC_DISPATCH_SUCCEEDED");
+      expect(res.dispatchState).toBe("succeeded");
+      // Exactly one forward reached the upstream.
+      expect(captured).not.toBeNull();
+      const db = getDb();
+      const [n] = await db
+        .select({
+          status: executionAuthorizationNonces.status,
+          dispatchState: executionAuthorizationNonces.dispatchState,
+        })
+        .from(executionAuthorizationNonces)
+        .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+      expect(n.status).toBe("consumed");
+      expect(n.dispatchState).toBe("succeeded");
+    } finally {
+      __setSecurityMetricsObserverFailureForTests(false);
+    }
   });
 });
