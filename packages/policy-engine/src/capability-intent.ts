@@ -815,6 +815,20 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 }
 
 /**
+ * Test-only re-export of the internal config parser + duration parser so the
+ * store-time (write-path) validation can be asserted directly. NOT part of the
+ * runtime decision surface; the composers call the internal `parseConfig`.
+ */
+export function parseCapabilityIntentConfigForTest(
+  rawInput: unknown,
+): CapabilityIntentConfig | { error: string } {
+  return parseConfig(rawInput);
+}
+export function parseIso8601DurationSecondsForTest(input: unknown): number | null {
+  return parseIso8601DurationSeconds(input);
+}
+
+/**
  * Evaluate the constraints on an `effect: "allow"` match. Returns a deny result
  * on the FIRST failed constraint, or `null` when every constraint holds.
  */
