@@ -71,6 +71,14 @@ function renderEnv(options: InitOptions): string {
     "STEWARD_EXECUTION_AUTH_SECRET=v1:" + hex(32),
     "STEWARD_SESSION_SECRET=" + hex(32),
     "STEWARD_KDF_SALT=" + hex(32),
+    // This env sets NODE_ENV=production with no STEWARD_KMS_PROVIDER, so the
+    // vault resolves to `local` custody (plaintext key in app memory at sign
+    // time). The production custody gate refuses to boot local mode unless the
+    // posture is acknowledged, so a generated env must carry the ack to boot.
+    // Generating local custody IS the deliberate default choice; record it
+    // explicitly and auditably. To harden, set STEWARD_KMS_PROVIDER=aws|pkcs11
+    // and clear this. See docs/security/custody-posture.md.
+    "STEWARD_ACK_LOCAL_CUSTODY=true",
     "STEWARD_AUDIT_HMAC_KEY=" + hex(32),
     "# Raw 32-byte Ed25519 seed hex; supported by packages/api/src/services/audit-checkpoint.ts.",
     "STEWARD_AUDIT_SIGNING_KEY=" + hex(32),

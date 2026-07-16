@@ -44,6 +44,16 @@ services:
       STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?required}"
       STEWARD_SESSION_SECRET: "${STEWARD_SESSION_SECRET:?required}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?required}"
+      # Custody posture: no STEWARD_KMS_PROVIDER is set, so the vault runs in
+      # `local` mode (plaintext key in app memory at sign time). With
+      # NODE_ENV=production the vault refuses to boot local mode unless the
+      # posture is acknowledged. The value comes from .env (this profile requires
+      # an .env; the template ships STEWARD_ACK_LOCAL_CUSTODY=true as the
+      # reference stack's deliberate, auditable local-custody posture). No
+      # `:-true` default is injected here so an env that omits it fails closed
+      # rather than silently acking. To harden, set STEWARD_KMS_PROVIDER=aws|pkcs11
+      # (+ config) and clear the ack. See docs/security/custody-posture.md.
+      STEWARD_ACK_LOCAL_CUSTODY: "${STEWARD_ACK_LOCAL_CUSTODY:-}"
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?required}"
       STEWARD_AUDIT_SIGNING_KEY: "${STEWARD_AUDIT_SIGNING_KEY:?required}"
       STEWARD_PLATFORM_KEYS: "${STEWARD_PLATFORM_KEYS:-}"
