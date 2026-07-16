@@ -16,7 +16,7 @@
  * subpaths (the global app.ts only wires it for /v2/workspaces|provider-accounts
  * |...), so every request 403'd and the feature was unreachable in production.
  */
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
 process.env.STEWARD_PGLITE_MEMORY = "true";
 process.env.STEWARD_AUDIT_HMAC_KEY = process.env.STEWARD_AUDIT_HMAC_KEY || "0".repeat(64);
@@ -30,7 +30,7 @@ process.env.STEWARD_JWT_SECRET =
   process.env.STEWARD_JWT_SECRET || "pr5-route-wiring-jwt-secret-0123456789abcdef0123456789";
 
 import { signAccessToken, signAgentToken } from "@stwd/auth";
-import { getDb, tenants, users, userTenants } from "@stwd/db";
+import { closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 
 const TENANT = "default";
@@ -95,6 +95,14 @@ describe("PR5 case routes: real composed-app auth wiring", () => {
     const mod = await import("../app");
     app = mod.mountCoreIdempotencyAndRoutes(mod.createApp());
   }, 120_000);
+
+  afterAll(async () => {
+    // Close the PGLite client + clear the override so this file does not leak an
+    // open handle into the shared bun test run (an unclosed client makes the
+    // file exit 99 even with every test passing). Mirrors the teardown in
+    // provider-case-evidence.integration.test.ts.
+    await closeDb();
+  });
 
   function hitCase(token?: string) {
     return app.request(
