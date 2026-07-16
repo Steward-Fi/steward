@@ -201,6 +201,12 @@ rule type, NO new policy registry, NO new evaluator dispatch.
   (`isReply`, `replyToTweetId`, `hasUrl`, `textCodePointLength`, `summoned`) — it
   NEVER lifts a raw body field. New args (`hasUrl`, `summoned`) are derived and
   validated in `buildXAction`.
+- **Required-signal fail-closed:** a boolean signal a policy CONSUMES
+  (`isReply` for replyPolicy, `summoned` for summoned-only, `hasUrl` for
+  allowUrls / URL-escalation / spend pricing) that is ABSENT or non-boolean on
+  the context (e.g. an X policy mis-applied to `x.tweet.delete`, which carries no
+  such signal) => `POLICY_INPUT_UNAVAILABLE`. The evaluator NEVER coerces a
+  missing signal to `false` and silently passes.
 
 ## Text availability (why `blockedPatterns` is careful)
 
@@ -219,6 +225,7 @@ persisted document.
 | --- | --- | --- |
 | unknown `x` constraint key | hard_deny | `POLICY_CONFIGURATION_INVALID` |
 | `x` block on a non-X operation | hard_deny | `POLICY_CONFIGURATION_INVALID` |
+| required boolean signal absent/non-boolean (isReply / summoned / hasUrl) when a policy consumes it | hard_deny | `POLICY_INPUT_UNAVAILABLE` |
 | un-summoned reply under `summoned-only` | hard_deny | `POLICY_X_REPLY_NOT_SUMMONED` |
 | reply under `none` | hard_deny | `POLICY_X_REPLY_FORBIDDEN` |
 | URL post under `allowUrls:false` | hard_deny | `POLICY_X_URL_FORBIDDEN` |

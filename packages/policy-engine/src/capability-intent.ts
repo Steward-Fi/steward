@@ -1242,9 +1242,18 @@ export type XConstraintVerdict =
   | { kind: "deny"; reasonCode: string }
   | { kind: "escalate" };
 
-/** True for a boolean-typed policy arg that is strictly `true`. */
-function argIsTrue(args: Record<string, unknown>, key: string): boolean {
-  return args[key] === true;
+/**
+ * Read a REQUIRED boolean policy arg. Returns the boolean value, or `undefined`
+ * when the arg is absent or not a boolean. A permissioned-X policy that DEPENDS
+ * on this signal must fail closed (POLICY_INPUT_UNAVAILABLE) on `undefined` — we
+ * NEVER coerce a missing/mistyped signal to `false`, because that would let a
+ * URL/reply gate silently pass on an operation whose build doesn't carry the
+ * signal (e.g. x.tweet.delete / x.user.me.read, or a malformed context). This is
+ * the content-shape fail-closed contract (codex P2, PR review).
+ */
+function readBool(args: Record<string, unknown>, key: string): boolean | undefined {
+  const v = args[key];
+  return typeof v === "boolean" ? v : undefined;
 }
 
 /**
@@ -1271,21 +1280,31 @@ export function evaluateXConstraints(
   }
 
   const { args } = ctx;
-  const isReply = argIsTrue(args, "isReply");
-  const summoned = argIsTrue(args, "summoned");
-  const hasUrl = argIsTrue(args, "hasUrl");
 
   // ── replyPolicy ──
+  // A replyPolicy DEPENDS on the `isReply` signal; absent/non-boolean => fail
+  // closed (an operation whose build doesn't carry isReply must NOT slip a reply
+  // gate). `summoned` is only required when we actually reach the summoned check.
   if (x.replyPolicy) {
+    const isReply = readBool(args, "isReply");
+    if (isReply === undefined) {
+      return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
+    }
     if (isReply) {
       if (x.replyPolicy.mode === "none") {
         return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.X_REPLY_FORBIDDEN };
       }
-      if (x.replyPolicy.mode === "summoned-only" && !summoned) {
-        // The Feb-2026 anti-spam upstream-denial class, modeled locally: an
-        // un-summoned programmatic reply would 403 at the wire, so we deny it
-        // BEFORE the wasted billed call.
-        return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.X_REPLY_NOT_SUMMONED };
+      if (x.replyPolicy.mode === "summoned-only") {
+        const summoned = readBool(args, "summoned");
+        if (summoned === undefined) {
+          return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
+        }
+        if (!summoned) {
+          // The Feb-2026 anti-spam upstream-denial class, modeled locally: an
+          // un-summoned programmatic reply would 403 at the wire, so we deny it
+          // BEFORE the wasted billed call.
+          return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.X_REPLY_NOT_SUMMONED };
+        }
       }
       // mode === "any": allowed to proceed (operator accepts upstream risk).
     }
@@ -1294,8 +1313,15 @@ export function evaluateXConstraints(
 
   // ── contentPolicy ──
   if (x.contentPolicy) {
-    if (x.contentPolicy.allowUrls === false && hasUrl) {
-      return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.X_URL_FORBIDDEN };
+    // allowUrls DEPENDS on the `hasUrl` signal; absent/non-boolean => fail closed.
+    if (x.contentPolicy.allowUrls === false) {
+      const hasUrl = readBool(args, "hasUrl");
+      if (hasUrl === undefined) {
+        return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
+      }
+      if (hasUrl) {
+        return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.X_URL_FORBIDDEN };
+      }
     }
     if (x.contentPolicy.maxLength !== undefined) {
       const len = args.textCodePointLength;
@@ -1355,16 +1381,30 @@ export function evaluateXConstraints(
     }
   }
 
+  // Any spend/URL-escalation policy DEPENDS on the `hasUrl` signal to price the
+  // action; absent/non-boolean => fail closed for those policies only.
+  const needsHasUrl =
+    x.spendPolicy !== undefined ||
+    x.escalation?.spendOverMicrosRequiresApproval !== undefined ||
+    x.escalation?.urlPostRequiresApproval === true;
+  let hasUrl: boolean | undefined;
+  if (needsHasUrl) {
+    hasUrl = readBool(args, "hasUrl");
+    if (hasUrl === undefined) {
+      return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
+    }
+  }
+
   // ── spendPolicy (hard cap over estimated spend) ──
   // Estimated spend = accumulated window spend + this action's price.
-  const thisActionMicros = estimateXPostMicros(hasUrl);
   let projectedMicros: number | undefined;
   if (x.spendPolicy || x.escalation?.spendOverMicrosRequiresApproval !== undefined) {
     const accumulated = ctx.x?.accumulatedSpendMicros;
     if (typeof accumulated !== "number" || !Number.isFinite(accumulated)) {
       return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
     }
-    projectedMicros = accumulated + thisActionMicros;
+    // hasUrl is guaranteed defined here (needsHasUrl covers both branches).
+    projectedMicros = accumulated + estimateXPostMicros(hasUrl === true);
   }
   if (x.spendPolicy && projectedMicros !== undefined) {
     if (projectedMicros > x.spendPolicy.maxSpendMicros) {
@@ -1374,7 +1414,7 @@ export function evaluateXConstraints(
 
   // ── escalation (only reached when NO hard deny fired) ──
   if (x.escalation) {
-    if (x.escalation.urlPostRequiresApproval === true && hasUrl) {
+    if (x.escalation.urlPostRequiresApproval === true && hasUrl === true) {
       return { kind: "escalate" };
     }
     if (

@@ -337,6 +337,51 @@ describe("permissioned-X: scoping + fail-closed", () => {
     expect(evaluateXConstraints(undefined, ctx()).kind).toBe("pass");
   });
 
+  // codex P2: a required boolean signal that is ABSENT/non-boolean must fail
+  // closed (POLICY_INPUT_UNAVAILABLE), NOT coerce to false and silently pass.
+  it("allowUrls=false fails closed when the hasUrl signal is absent", () => {
+    const x: XConstraints = { contentPolicy: { allowUrls: false } };
+    const c = ctx();
+    delete (c.args as Record<string, unknown>).hasUrl;
+    const d = decide(x, c);
+    expect(d.effect).toBe("hard_deny");
+    expect(d.reasonCodes).toContain(R.INPUT_UNAVAILABLE);
+  });
+
+  it("allowUrls=false fails closed when hasUrl is a non-boolean", () => {
+    const x: XConstraints = { contentPolicy: { allowUrls: false } };
+    const c = ctx({ hasUrl: "true" as unknown as boolean });
+    expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
+  });
+
+  it("replyPolicy fails closed when the isReply signal is absent", () => {
+    const x: XConstraints = { replyPolicy: { mode: "none" } };
+    const c = ctx();
+    delete (c.args as Record<string, unknown>).isReply;
+    expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
+  });
+
+  it("summoned-only fails closed when the summoned signal is absent on a reply", () => {
+    const x: XConstraints = { replyPolicy: { mode: "summoned-only" } };
+    const c = ctx({ isReply: true });
+    delete (c.args as Record<string, unknown>).summoned;
+    expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
+  });
+
+  it("url escalation fails closed when hasUrl is absent", () => {
+    const x: XConstraints = { escalation: { urlPostRequiresApproval: true } };
+    const c = ctx();
+    delete (c.args as Record<string, unknown>).hasUrl;
+    expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
+  });
+
+  it("spendPolicy fails closed when hasUrl is absent (cannot price the action)", () => {
+    const x: XConstraints = { spendPolicy: { maxSpendMicros: 1_000_000 } };
+    const c = ctx({}, { x: { accumulatedSpendMicros: 0 } });
+    delete (c.args as Record<string, unknown>).hasUrl;
+    expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
+  });
+
   it("evaluateXConstraints denies an x block on a non-x op directly", () => {
     const v = evaluateXConstraints(
       { replyPolicy: { mode: "none" } },

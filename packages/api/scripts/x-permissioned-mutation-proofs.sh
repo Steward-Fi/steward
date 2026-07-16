@@ -46,9 +46,9 @@ proof() {
   mv "$ENGINE.bak" "$ENGINE"
 }
 
-# M1: reply summoned-only no longer requires summoned -> un-summoned reply passes.
+# M1: reply summoned-only no longer denies an un-summoned reply.
 proof "M1 summoned-only ignores summoned flag" "summoned-only denies an un-summoned reply" \
-  's/x.replyPolicy.mode === "summoned-only" && !summoned/x.replyPolicy.mode === "summoned-only" \&\& false/'
+  's/if (!summoned) {/if (false) {/'
 
 # M2: reply mode=none no longer forbids replies.
 proof "M2 replyPolicy none no longer denies" "mode=none denies a reply" \
@@ -56,7 +56,7 @@ proof "M2 replyPolicy none no longer denies" "mode=none denies a reply" \
 
 # M3: allowUrls=false no longer denies URL posts.
 proof "M3 allowUrls=false ignores hasUrl" "allowUrls=false denies a URL post" \
-  's/if (x.contentPolicy.allowUrls === false && hasUrl) {/if (false) {/'
+  's/if (hasUrl) {/if (false) {/'
 
 # M4: maxLength no longer enforced.
 proof "M4 maxLength not enforced" "maxLength denies an over-length post" \
@@ -80,7 +80,7 @@ proof "M8 quiet hours not enforced" "denies inside a non-wrapping window" \
 
 # M9: url-post escalation no longer escalates (would silently allow the $0.20 post).
 proof "M9 url escalation dropped" "urlPostRequiresApproval escalates a URL post to approval" \
-  's/if (x.escalation.urlPostRequiresApproval === true && hasUrl) {/if (false) {/'
+  's/if (x.escalation.urlPostRequiresApproval === true && hasUrl === true) {/if (false) {/'
 
 # M10: x-block-on-non-x-op no longer a config error (scope leak).
 proof "M10 x block scope check dropped" "an x block on a NON-x operation is a config error" \
