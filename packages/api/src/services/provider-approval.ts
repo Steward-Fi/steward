@@ -40,11 +40,11 @@ import {
 import {
   computeApprovalCommitmentHash,
   computeDecisionRequestHash,
+  isRegisteredProfile,
   jcsStringify,
   PROVIDER_APPROVAL_AUDIT_SCHEMA,
   type ProviderApprovalAuditPayloadV1,
   type ProviderApprovalCommitmentV1,
-  isRegisteredProfile,
   sha256HexPrefixed,
   verifyProviderExecutionPolicyEvidence,
 } from "@stwd/shared";

@@ -17,6 +17,7 @@
 
 import { describe, expect, it } from "bun:test";
 import {
+  assertRegisteredProfile,
   buildGenericHttpAction,
   CanonError,
   computeActionDigest,
@@ -27,16 +28,15 @@ import {
   GENERIC_HTTP_GOLDEN_VECTORS,
   GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
   GenericDescriptorError,
-  genericHttpCanonicalActionBytes,
   GITHUB_PROVIDER_ACTION_PROFILE,
   GOLDEN_VECTORS,
+  genericHttpCanonicalActionBytes,
   isRegisteredProfile,
   REGISTERED_PROFILES,
   UnregisteredProfileError,
   validateGenericHttpDescriptor,
   X_GOLDEN_VECTORS,
   X_PROVIDER_ACTION_PROFILE,
-  assertRegisteredProfile,
 } from "../index.js";
 
 function descriptorDenies(raw: unknown): string | null {
@@ -171,37 +171,37 @@ describe("descriptor validation", () => {
     expect(descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://127.0.0.1" })).toBe(
       "CANON_DESCRIPTOR_ORIGIN_INVALID",
     );
-    expect(descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://169.254.169.254" })).toBe(
-      "CANON_DESCRIPTOR_ORIGIN_INVALID",
-    );
+    expect(
+      descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://169.254.169.254" }),
+    ).toBe("CANON_DESCRIPTOR_ORIGIN_INVALID");
   });
 
   it("rejects userinfo, port tricks, wildcard, single-label, trailing-dot-double, punycode-as-unicode", () => {
-    expect(descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://user@api.example.com" })).toBe(
-      "CANON_DESCRIPTOR_ORIGIN_INVALID",
-    );
-    expect(descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://api.example.com:8443" })).toBe(
-      "CANON_DESCRIPTOR_ORIGIN_INVALID",
-    );
-    expect(descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://*.example.com" })).toBe(
-      "CANON_DESCRIPTOR_ORIGIN_INVALID",
-    );
+    expect(
+      descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://user@api.example.com" }),
+    ).toBe("CANON_DESCRIPTOR_ORIGIN_INVALID");
+    expect(
+      descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://api.example.com:8443" }),
+    ).toBe("CANON_DESCRIPTOR_ORIGIN_INVALID");
+    expect(
+      descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://*.example.com" }),
+    ).toBe("CANON_DESCRIPTOR_ORIGIN_INVALID");
     expect(descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://localhost" })).toBe(
       "CANON_DESCRIPTOR_ORIGIN_INVALID",
     );
-    expect(descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://api.example.com.." })).toBe(
-      "CANON_DESCRIPTOR_ORIGIN_INVALID",
-    );
+    expect(
+      descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://api.example.com.." }),
+    ).toBe("CANON_DESCRIPTOR_ORIGIN_INVALID");
     // Unicode homograph host (must be pre-encoded punycode; raw unicode denies).
-    expect(descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://exаmple.com" })).toBe(
-      "CANON_DESCRIPTOR_ORIGIN_INVALID",
-    );
+    expect(
+      descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://exаmple.com" }),
+    ).toBe("CANON_DESCRIPTOR_ORIGIN_INVALID");
   });
 
   it("rejects a host with an invalid DNS label (underscore)", () => {
-    expect(descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://api_example.com" })).toBe(
-      "CANON_DESCRIPTOR_ORIGIN_INVALID",
-    );
+    expect(
+      descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://api_example.com" }),
+    ).toBe("CANON_DESCRIPTOR_ORIGIN_INVALID");
   });
 
   it("rejects a credential header in the allowlist", () => {
@@ -289,9 +289,9 @@ describe("descriptor validation", () => {
   });
 
   it("rejects wrong profile string", () => {
-    expect(descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, profile: "x.provider-action.v1" })).toBe(
-      "CANON_DESCRIPTOR_PROFILE_INVALID",
-    );
+    expect(
+      descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, profile: "x.provider-action.v1" }),
+    ).toBe("CANON_DESCRIPTOR_PROFILE_INVALID");
   });
 
   it("rejects a body-bearing-only method with no body schema", () => {
@@ -315,7 +315,9 @@ describe("generic-http argument adversarial", () => {
   it("rejects traversal payloads in a string segment", () => {
     for (const evil of ["..", "../etc", "a/b", "a\\b", "a\u0000b", "..%2f"]) {
       // pattern ^[a-z0-9-]{1,40}$ already blocks these, so canon denies.
-      expect(buildDenies(A, "GET", { org: evil, projectId: "11111111-1111-4111-8111-111111111111" })).not.toBeNull();
+      expect(
+        buildDenies(A, "GET", { org: evil, projectId: "11111111-1111-4111-8111-111111111111" }),
+      ).not.toBeNull();
     }
   });
 
@@ -392,7 +394,9 @@ describe("generic-http argument adversarial", () => {
         "op.key",
         d,
         "GET",
-        JSON.parse('{"__proto__":{"x":1},"org":"acme","projectId":"11111111-1111-4111-8111-111111111111"}'),
+        JSON.parse(
+          '{"__proto__":{"x":1},"org":"acme","projectId":"11111111-1111-4111-8111-111111111111"}',
+        ),
       );
     } catch (e) {
       if (e instanceof CanonError) code = e.code;
@@ -411,9 +415,9 @@ describe("generic-http argument adversarial", () => {
     expect(buildDenies(B, "POST", { title: "x", priority: 1, urgent: "yes", estimate: "1" })).toBe(
       "CANON_FIELD_TYPE_INVALID",
     );
-    expect(buildDenies(B, "POST", { title: "x", priority: 1, urgent: true, estimate: "1.2.3" })).toBe(
-      "CANON_DECIMAL_STRING_INVALID",
-    );
+    expect(
+      buildDenies(B, "POST", { title: "x", priority: 1, urgent: true, estimate: "1.2.3" }),
+    ).toBe("CANON_DECIMAL_STRING_INVALID");
   });
 
   // Dedicated mutation-target: a permissive dot-allowing pattern still cannot
@@ -467,6 +471,8 @@ describe("generic-http argument adversarial", () => {
     const names = build.action.selectedHeaders.map(([n]) => n);
     expect(names).not.toContain("authorization");
     expect(names).not.toContain("cookie");
-    expect(genericHttpCanonicalActionBytes(build.action).toLowerCase()).not.toContain("authorization");
+    expect(genericHttpCanonicalActionBytes(build.action).toLowerCase()).not.toContain(
+      "authorization",
+    );
   });
 });

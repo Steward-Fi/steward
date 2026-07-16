@@ -42,7 +42,6 @@ import {
   CanonError,
   type CanonicalMethod,
   canonicalizeContentType,
-  canonicalizeHeaders,
   canonicalizeMethod,
   canonicalizeQueryPairs,
   encodeRfc3986,
@@ -245,7 +244,11 @@ const FORBIDDEN_HEADERS: ReadonlySet<string> = new Set([
 const HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9a-z]+$/;
 const PARAM_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const QUERY_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const PROTO_POLLUTION_KEYS: ReadonlySet<string> = new Set(["__proto__", "constructor", "prototype"]);
+const PROTO_POLLUTION_KEYS: ReadonlySet<string> = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
 
 /** Reject any prototype-pollution key anywhere in a plain object graph. */
 function assertNoProtoPollution(v: unknown, where: string): void {
@@ -283,15 +286,13 @@ export function canonicalizeGenericOrigin(raw: unknown): string {
     descriptorFail("CANON_DESCRIPTOR_ORIGIN_INVALID", "control/space in origin");
 
   const schemeMatch = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(s);
-  if (!schemeMatch)
-    descriptorFail("CANON_DESCRIPTOR_ORIGIN_INVALID", "origin missing scheme://");
+  if (!schemeMatch) descriptorFail("CANON_DESCRIPTOR_ORIGIN_INVALID", "origin missing scheme://");
   const scheme = schemeMatch[1].toLowerCase();
   if (scheme !== "https")
     descriptorFail("CANON_DESCRIPTOR_ORIGIN_INVALID", `scheme '${scheme}' not https`);
 
   const rest = s.slice(schemeMatch[0].length);
-  if (rest.includes("@"))
-    descriptorFail("CANON_DESCRIPTOR_ORIGIN_INVALID", "userinfo not allowed");
+  if (rest.includes("@")) descriptorFail("CANON_DESCRIPTOR_ORIGIN_INVALID", "userinfo not allowed");
   if (rest.includes("?"))
     descriptorFail("CANON_DESCRIPTOR_ORIGIN_INVALID", "query not allowed in origin");
   if (rest.includes("#"))
@@ -317,16 +318,13 @@ export function canonicalizeGenericOrigin(raw: unknown): string {
       descriptorFail("CANON_DESCRIPTOR_ORIGIN_INVALID", `nondefault port ${portStr}`);
   }
 
-  if (/%/.test(host))
-    descriptorFail("CANON_DESCRIPTOR_ORIGIN_INVALID", "percent escape in host");
+  if (/%/.test(host)) descriptorFail("CANON_DESCRIPTOR_ORIGIN_INVALID", "percent escape in host");
   if (/[^\x00-\x7f]/.test(host))
     descriptorFail("CANON_DESCRIPTOR_ORIGIN_INVALID", "non-ASCII host (punycode required)");
   let h = host.toLowerCase();
-  if (h.endsWith(".."))
-    descriptorFail("CANON_DESCRIPTOR_ORIGIN_INVALID", "multiple terminal dots");
+  if (h.endsWith("..")) descriptorFail("CANON_DESCRIPTOR_ORIGIN_INVALID", "multiple terminal dots");
   if (h.endsWith(".")) h = h.slice(0, -1);
-  if (h.startsWith("["))
-    descriptorFail("CANON_DESCRIPTOR_ORIGIN_INVALID", "IP literal host");
+  if (h.startsWith("[")) descriptorFail("CANON_DESCRIPTOR_ORIGIN_INVALID", "IP literal host");
   if (/^[0-9]+(\.[0-9]+)*$/.test(h))
     descriptorFail("CANON_DESCRIPTOR_ORIGIN_INVALID", "numeric/IPv4 host");
   if (h.includes("*"))
@@ -343,14 +341,20 @@ export function canonicalizeGenericOrigin(raw: unknown): string {
 
 function validatePattern(pattern: unknown, where: string): string {
   if (typeof pattern !== "string" || pattern.length === 0 || pattern.length > 512)
-    descriptorFail("CANON_DESCRIPTOR_SEGMENT_INVALID", `${where}: pattern must be a bounded string`);
+    descriptorFail(
+      "CANON_DESCRIPTOR_SEGMENT_INVALID",
+      `${where}: pattern must be a bounded string`,
+    );
   const p = pattern as string;
   // Must be fully anchored so a partial match cannot smuggle a delimiter.
   if (!p.startsWith("^") || !p.endsWith("$"))
     descriptorFail("CANON_DESCRIPTOR_SEGMENT_INVALID", `${where}: pattern must be anchored ^...$`);
   // Reject patterns that could admit a path/query delimiter or dot-segment.
-  if (/[\/\\]/.test(p))
-    descriptorFail("CANON_DESCRIPTOR_SEGMENT_INVALID", `${where}: pattern must not contain / or \\`);
+  if (/[/\\]/.test(p))
+    descriptorFail(
+      "CANON_DESCRIPTOR_SEGMENT_INVALID",
+      `${where}: pattern must not contain / or \\`,
+    );
   try {
     // Construct to prove it compiles; not used for match here.
     new RegExp(p);
@@ -374,9 +378,7 @@ function validateSegmentType(t: unknown, where: string): GenericSegmentType {
  * passes before it can govern requests; an unregistered/invalid descriptor
  * never reaches canonicalization.
  */
-export function validateGenericHttpDescriptor(
-  raw: unknown,
-): GenericHttpOperationDescriptorV1 {
+export function validateGenericHttpDescriptor(raw: unknown): GenericHttpOperationDescriptorV1 {
   if (!isPlainObject(raw))
     descriptorFail("CANON_DESCRIPTOR_SHAPE_INVALID", "descriptor must be a plain object");
   assertNoProtoPollution(raw, "descriptor");
@@ -419,7 +421,10 @@ export function validateGenericHttpDescriptor(
       );
     if (hasLiteral) {
       if (typeof seg.literal !== "string" || seg.literal.length === 0)
-        descriptorFail("CANON_DESCRIPTOR_SEGMENT_INVALID", "literal segment must be a nonempty string");
+        descriptorFail(
+          "CANON_DESCRIPTOR_SEGMENT_INVALID",
+          "literal segment must be a nonempty string",
+        );
       const lit = seg.literal as string;
       // A literal segment is framed verbatim; it must itself be a single safe
       // segment (no delimiter, no dot-segment, only unreserved-ish chars).
@@ -440,7 +445,10 @@ export function validateGenericHttpDescriptor(
         descriptorFail("CANON_DESCRIPTOR_SEGMENT_INVALID", "param must be an object");
       const p = param as Record<string, unknown>;
       if (typeof p.name !== "string" || !PARAM_NAME_RE.test(p.name))
-        descriptorFail("CANON_DESCRIPTOR_SEGMENT_INVALID", `invalid param name '${String(p.name)}'`);
+        descriptorFail(
+          "CANON_DESCRIPTOR_SEGMENT_INVALID",
+          `invalid param name '${String(p.name)}'`,
+        );
       if (paramNames.has(p.name))
         descriptorFail("CANON_DESCRIPTOR_SEGMENT_INVALID", `duplicate param name '${p.name}'`);
       paramNames.add(p.name);
@@ -486,7 +494,10 @@ export function validateGenericHttpDescriptor(
       const spec: GenericQueryParamSpec = { name: q.name, type };
       if ("required" in q && q.required !== undefined) {
         if (typeof q.required !== "boolean")
-          descriptorFail("CANON_DESCRIPTOR_QUERY_INVALID", `query '${q.name}' required must be bool`);
+          descriptorFail(
+            "CANON_DESCRIPTOR_QUERY_INVALID",
+            `query '${q.name}' required must be bool`,
+          );
         spec.required = q.required;
       }
       if (type === "string") {
@@ -494,7 +505,10 @@ export function validateGenericHttpDescriptor(
           descriptorFail("CANON_DESCRIPTOR_QUERY_INVALID", `query '${q.name}' requires a pattern`);
         spec.pattern = validatePattern(q.pattern, `query '${q.name}'`);
       } else if ("pattern" in q && q.pattern !== undefined) {
-        descriptorFail("CANON_DESCRIPTOR_QUERY_INVALID", `pattern only on string query '${q.name}'`);
+        descriptorFail(
+          "CANON_DESCRIPTOR_QUERY_INVALID",
+          `pattern only on string query '${q.name}'`,
+        );
       }
       if (type === "int") {
         if ("min" in q && q.min !== undefined) {
@@ -573,7 +587,10 @@ export function validateGenericHttpDescriptor(
         descriptorFail("CANON_DESCRIPTOR_BODY_SCHEMA_INVALID", "body field must be an object");
       const f = fRaw as Record<string, unknown>;
       if (typeof f.name !== "string" || !PARAM_NAME_RE.test(f.name))
-        descriptorFail("CANON_DESCRIPTOR_BODY_SCHEMA_INVALID", `invalid body field '${String(f.name)}'`);
+        descriptorFail(
+          "CANON_DESCRIPTOR_BODY_SCHEMA_INVALID",
+          `invalid body field '${String(f.name)}'`,
+        );
       if (seenF.has(f.name))
         descriptorFail("CANON_DESCRIPTOR_BODY_SCHEMA_INVALID", `duplicate body field '${f.name}'`);
       seenF.add(f.name);
@@ -583,16 +600,25 @@ export function validateGenericHttpDescriptor(
         f.type !== "bool" &&
         f.type !== "decimal-string"
       )
-        descriptorFail("CANON_DESCRIPTOR_BODY_SCHEMA_INVALID", `invalid body field type '${f.name}'`);
+        descriptorFail(
+          "CANON_DESCRIPTOR_BODY_SCHEMA_INVALID",
+          `invalid body field type '${f.name}'`,
+        );
       const spec: GenericBodyFieldSpec = { name: f.name, type: f.type as GenericBodyFieldType };
       if ("required" in f && f.required !== undefined) {
         if (typeof f.required !== "boolean")
-          descriptorFail("CANON_DESCRIPTOR_BODY_SCHEMA_INVALID", `body '${f.name}' required must be bool`);
+          descriptorFail(
+            "CANON_DESCRIPTOR_BODY_SCHEMA_INVALID",
+            `body '${f.name}' required must be bool`,
+          );
         spec.required = f.required;
       }
       if (f.type === "string") {
         if (!("pattern" in f) || f.pattern === undefined)
-          descriptorFail("CANON_DESCRIPTOR_BODY_SCHEMA_INVALID", `body '${f.name}' requires a pattern`);
+          descriptorFail(
+            "CANON_DESCRIPTOR_BODY_SCHEMA_INVALID",
+            `body '${f.name}' requires a pattern`,
+          );
         // Body patterns may contain / (JSON string value, not a path), so use a
         // looser anchored check.
         if (
@@ -602,20 +628,36 @@ export function validateGenericHttpDescriptor(
           !(f.pattern as string).startsWith("^") ||
           !(f.pattern as string).endsWith("$")
         )
-          descriptorFail("CANON_DESCRIPTOR_BODY_SCHEMA_INVALID", `body '${f.name}' pattern invalid`);
+          descriptorFail(
+            "CANON_DESCRIPTOR_BODY_SCHEMA_INVALID",
+            `body '${f.name}' pattern invalid`,
+          );
         try {
           new RegExp(f.pattern as string);
         } catch {
-          descriptorFail("CANON_DESCRIPTOR_BODY_SCHEMA_INVALID", `body '${f.name}' pattern no compile`);
+          descriptorFail(
+            "CANON_DESCRIPTOR_BODY_SCHEMA_INVALID",
+            `body '${f.name}' pattern no compile`,
+          );
         }
         spec.pattern = f.pattern as string;
         if ("maxBytes" in f && f.maxBytes !== undefined) {
-          if (typeof f.maxBytes !== "number" || !Number.isSafeInteger(f.maxBytes) || f.maxBytes <= 0)
-            descriptorFail("CANON_DESCRIPTOR_BODY_SCHEMA_INVALID", `body '${f.name}' maxBytes invalid`);
+          if (
+            typeof f.maxBytes !== "number" ||
+            !Number.isSafeInteger(f.maxBytes) ||
+            f.maxBytes <= 0
+          )
+            descriptorFail(
+              "CANON_DESCRIPTOR_BODY_SCHEMA_INVALID",
+              `body '${f.name}' maxBytes invalid`,
+            );
           spec.maxBytes = f.maxBytes;
         }
       } else if ("pattern" in f && f.pattern !== undefined && f.type !== "decimal-string") {
-        descriptorFail("CANON_DESCRIPTOR_BODY_SCHEMA_INVALID", `pattern only on string body '${f.name}'`);
+        descriptorFail(
+          "CANON_DESCRIPTOR_BODY_SCHEMA_INVALID",
+          `pattern only on string body '${f.name}'`,
+        );
       }
       if (f.type === "int") {
         if ("min" in f && f.min !== undefined) {
@@ -658,8 +700,7 @@ export function validateGenericHttpDescriptor(
     code: GenericDescriptorErrorCode,
     label: string,
   ): string[] => {
-    if (!Array.isArray(listRaw))
-      descriptorFail(code, `${label} must be an array`);
+    if (!Array.isArray(listRaw)) descriptorFail(code, `${label} must be an array`);
     const seen = new Set<string>();
     const out: string[] = [];
     for (const n of listRaw as unknown[]) {
@@ -672,8 +713,16 @@ export function validateGenericHttpDescriptor(
     return out;
   };
   const projection: GenericProjectionSpec = {
-    policyArgs: validateNameList(proj.policyArgs, "CANON_DESCRIPTOR_POLICY_ARG_INVALID", "policyArgs"),
-    safeSummary: validateNameList(proj.safeSummary, "CANON_DESCRIPTOR_SUMMARY_INVALID", "safeSummary"),
+    policyArgs: validateNameList(
+      proj.policyArgs,
+      "CANON_DESCRIPTOR_POLICY_ARG_INVALID",
+      "policyArgs",
+    ),
+    safeSummary: validateNameList(
+      proj.safeSummary,
+      "CANON_DESCRIPTOR_SUMMARY_INVALID",
+      "safeSummary",
+    ),
   };
 
   return {
@@ -702,7 +751,6 @@ export interface GenericHttpActionBuild {
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const INT_RE = /^(0|-?[1-9][0-9]*)$/;
 
 function argError(message: string): never {
   throw new CanonError("CANON_FIELD_TYPE_INVALID", message);
@@ -733,8 +781,7 @@ function validateScalarValue(
       return { stringForm: String(value), scalar: value };
     }
     case "bool": {
-      if (typeof value !== "boolean")
-        argError(`${name} must be a boolean`);
+      if (typeof value !== "boolean") argError(`${name} must be a boolean`);
       return { stringForm: String(value), scalar: value as boolean };
     }
     case "decimal-string": {
@@ -743,8 +790,7 @@ function validateScalarValue(
       return { stringForm: value, scalar: value };
     }
     case "string": {
-      if (typeof value !== "string")
-        argError(`${name} must be a string`);
+      if (typeof value !== "string") argError(`${name} must be a string`);
       const v = value as string;
       // Reject lone surrogates.
       for (let i = 0; i < v.length; i++) {
@@ -895,8 +941,7 @@ export function buildGenericHttpAction(
 
   // Any argument not consumed by a declared segment/query/body field denies.
   for (const k of Object.keys(args)) {
-    if (!consumed.has(k))
-      throw new CanonError("CANON_UNKNOWN_FIELD", `unknown argument '${k}'`);
+    if (!consumed.has(k)) throw new CanonError("CANON_UNKNOWN_FIELD", `unknown argument '${k}'`);
   }
 
   // ── Canonicalize via the shared primitives (byte-identical framing) ──
@@ -956,9 +1001,7 @@ export function buildGenericHttpAction(
  * header here with the same posture (credential-forbidden already enforced at
  * descriptor time; re-checked here fail-closed) and sort by name.
  */
-function canonicalizeGenericHeaders(
-  raw: ReadonlyArray<[string, string]>,
-): Array<[string, string]> {
+function canonicalizeGenericHeaders(raw: ReadonlyArray<[string, string]>): Array<[string, string]> {
   const byName = new Map<string, string>();
   for (const [rawName, rawValue] of raw) {
     const name = rawName.toLowerCase();
@@ -969,7 +1012,8 @@ function canonicalizeGenericHeaders(
       FORBIDDEN_HEADER_PREFIXES.some((pre) => name.startsWith(pre))
     )
       throw new CanonError("CANON_HEADER_CREDENTIAL_FORBIDDEN", `forbidden header '${name}'`);
-    if (byName.has(name)) throw new CanonError("CANON_HEADER_DUPLICATE", `duplicate header '${name}'`);
+    if (byName.has(name))
+      throw new CanonError("CANON_HEADER_DUPLICATE", `duplicate header '${name}'`);
     const value = rawValue.replace(/^[ \t]+/, "").replace(/[ \t]+$/, "");
     for (let i = 0; i < value.length; i++) {
       const c = value.charCodeAt(i);
@@ -987,9 +1031,7 @@ function canonicalizeGenericHeaders(
 // Canonical action bytes + digest (generic-http)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function toGenericCanonicalActionObject(
-  a: GenericHttpCanonicalActionV1,
-): Record<string, unknown> {
+function toGenericCanonicalActionObject(a: GenericHttpCanonicalActionV1): Record<string, unknown> {
   return {
     profile: a.profile,
     method: a.method,
