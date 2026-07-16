@@ -1,0 +1,249 @@
+---
+title: "Permissioned X — instance-level policy vocabulary"
+status: Design + Phase-1 implementation
+date: 2026-07-16
+---
+
+{/*
+This document describes the instance-level policy vocabulary Steward adds ON TOP
+of X's native OAuth2 scope model for governed X provider-actions. It is scoped to
+Phase 1 (the policy dimensions shipped in feat/x-permissioned-policies). It must
+NOT be read as a claim that Steward enforces X's own server-side limits — it does
+not. Steward enforces its OWN instance-level policy BEFORE an action reaches the
+wire, and classifies certain X server-side denials (summoned-reply 403) as an
+expected upstream-denial class so they surface as a clear failed outcome rather
+than outcome_unknown.
+*/}
+
+# Permissioned X
+
+**Status:** Design + Phase-1 implementation. Last reviewed 2026-07-16.
+**Scope:** the `capability-intent` policy plane for `x.provider-action.v1`
+operations (`x.tweet.create`, `x.tweet.delete`, `x.user.me.read`) on `develop`.
+
+If this document disagrees with the code, the code is right. File an issue.
+
+## Why "permissioned X" is a real gap, not marketing
+
+X's native delegation model gives an application (or a delegated user) a
+**class-level standing permission**. It cannot express the per-call,
+per-window, content-conditional constraints an operator needs to safely delegate
+an X account to an autonomous agent. Steward fills exactly that gap: it is the
+**instance-level policy layer** X's own scope model cannot represent.
+
+### X's native delegation model (what it CAN express)
+
+- **OAuth2 scopes** (`tweet.read`, `tweet.write`, `users.read`, `offline.access`,
+  …): a scope is a **standing, class-level grant**. `tweet.write` authorizes
+  *every* write the token can reach — create, reply, delete — for the token's
+  lifetime. There is no "reply-only", no "no-URL", no "≤N posts/hour", no "only
+  when summoned", no spend ceiling. A scope is binary and coarse.
+  Receipt: X API OAuth2 scopes (docs.x.com "Authentication → OAuth 2.0 →
+  scopes").
+- **X Delegate / delegate accounts**: this is **human RBAC** — it lets a person
+  operate an org account with a role. It is an account-access model, not an API
+  policy-composition model. It cannot gate a *programmatic* call by content,
+  rate, or spend. Receipt: X Help "About account delegation".
+
+Both are **class-level**: they answer "may this identity write tweets at all?"
+Neither answers "may this *specific* action, *right now*, under *these*
+conditions, proceed?" That second question is the authority plane's job.
+
+### The exact instance-level gaps Steward fills
+
+| Dimension | X native | Steward instance-level policy |
+| --- | --- | --- |
+| Reply-vs-original | scope is write-all | `replyPolicy.mode` gates replies independently of originals |
+| Content conditions | none | `contentPolicy` (no-URL, max length, blocked patterns) |
+| Rate / count caps per window | server rate limits are global + opaque | `maxPostsPerWindow` (explicit count + window) |
+| Spend ceiling | billing is post-hoc | estimated-spend cap over the per-post price table |
+| Approval escalation | none | any URL post (or over-threshold spend) → `approval_required` |
+| Summoned-reply constraint | 403 at the wire (Feb 2026 anti-spam) | modeled as a policy denial class BEFORE the wasted call |
+
+Every dimension below FAILS CLOSED: an unknown content shape denies; a policy
+evaluation error denies; a missing required policy input denies.
+
+## The policy dimensions (with X API receipts)
+
+X's developer docs are agent-readable (`docs.x.com`, `llms.txt`, `.md`
+suffixes). The receipts below are captured at design time (2026-07-16); the
+per-post price table is a **versioned constant** in code with a source comment so
+a price change is a reviewable diff, not silent drift.
+
+### 1. Reply-only / summoned-reply constraint (`replyPolicy`)
+
+**X receipt (Feb 2026 anti-spam):** a *programmatic* reply on the self-serve
+tiers (Free / Basic / Pro / Pay-Per-Use) to `POST /2/tweets` returns **403
+Forbidden** unless the replier's account was **@mentioned or quoted** by the
+post being replied to. Enterprise / Public-Utility apps are exempt. Source:
+X developer platform reply-restriction announcement (Feb 2026); corroborated by
+multiple trackers (tekedia, phemex, piunikaweb, Feb 2026).
+
+**Why model it in policy (not just let the wire 403):**
+1. A blind programmatic reply that will 403 is a **wasted, billed** API call
+   (X bills on submission, not success).
+2. An operator wants to *forbid* un-summoned replies as a matter of policy, not
+   discover the ban at the wire per-call.
+
+**Modeled as:** `replyPolicy.mode`:
+- `'any'` — replies allowed (operator accepts the upstream risk).
+- `'summoned-only'` — a reply is allowed ONLY when the action is marked
+  `summoned` (the caller asserts the account was @mentioned/quoted). An
+  un-summoned reply is a policy **hard_deny** (`POLICY_X_REPLY_NOT_SUMMONED`)
+  BEFORE dispatch. This is the **expected upstream-denial class** made explicit:
+  Steward denies locally what X would 403 at the wire.
+- `'none'` — replies forbidden entirely (`POLICY_X_REPLY_FORBIDDEN`); only
+  original posts pass.
+
+`isReply` and `replyToTweetId` are already adapter-validated policy args
+(`buildXAction`). `summoned` is a new validated boolean policy arg (see
+"Summoned detection" below).
+
+### 2. Content conditions (`contentPolicy`)
+
+**X receipt (pricing, Feb 6 2026 pay-per-use):** a post **without** a URL costs
+**$0.015**; a post **with** a URL costs **$0.20** (>13× more). Source: X API
+pay-per-use pricing (gigazine 2026-02-09; sorsa/blotato/postproxy trackers).
+
+**Key insight:** a **no-URL policy is ALSO a spend policy.** Blocking URL posts
+caps the per-post cost at $0.015. `contentPolicy` therefore covers both a content
+constraint and a cost lever:
+
+- `allowUrls: boolean` — `false` denies any post whose text contains a URL
+  (`POLICY_X_URL_FORBIDDEN`). URL detection is adapter-derived (`hasUrl` policy
+  arg), never lifted from raw JSON.
+- `maxLength: number` — deny a post whose adapter-counted code-point length
+  exceeds the cap (`POLICY_X_CONTENT_TOO_LONG`). This is stricter-or-equal to X's
+  280 weighted limit (the adapter already bounds 1..280).
+- `blockedPatterns: string[]` — each is an anchored regex; a match on the text
+  denies (`POLICY_X_CONTENT_BLOCKED`). An **invalid** regex in config denies
+  (`POLICY_CONFIGURATION_INVALID`) — fail closed, never throw.
+
+> Content matching operates on an adapter-derived boolean/length surface plus (for
+> `blockedPatterns`) a normalized text digest channel, NOT the safe-summary
+> (which is contractually text-free). See "Text availability" below.
+
+### 3. Rate / count cap per window (`maxPostsPerWindow`)
+
+**X receipt:** X's own POST rate limits are **global, per-app, opaque** and reset
+on X's schedule; they are not an operator-authored budget. Source: X API rate
+limits (docs.x.com "Fundamentals → Rate limits").
+
+**Modeled as:** `maxPostsPerWindow: { max: number, windowSeconds: number }` — an
+operator-authored count cap over a trailing window. Evaluated against the
+authoritative trailing-window post count. If the count input is unavailable, the
+rule **denies** (`POLICY_INPUT_UNAVAILABLE`) — never borrows another counter,
+never silently passes. This reuses the existing `invokeCount1h` wiring contract
+(the count is authoritative or the rule fails closed).
+
+### 4. Estimated-spend cap (`spendPolicy`)
+
+**Modeled as:** `spendPolicy.maxSpendMicros: number` (spend denominated in
+micro-dollars to stay integer-exact) evaluated against **estimated** spend:
+`priceForAction + accumulatedWindowSpend`. The per-post price table is a
+**versioned constant** (`X_POST_PRICE_TABLE_V1`) with a source comment:
+
+- plain post: `15000` micros ($0.015)
+- URL post: `200000` micros ($0.20)
+
+Accumulation is over the same trailing window as `maxPostsPerWindow` (the
+authoritative accumulated-spend input). Unavailable input →
+`POLICY_INPUT_UNAVAILABLE` (fail closed). Over cap →
+`POLICY_X_SPEND_CAP_EXCEEDED`.
+
+> This is an *estimate*, not a billing oracle. The doc/PR never claims exact
+> spend accounting — the price table is design-time truth and drift is a
+> reviewable constant change.
+
+### 5. Approval-escalation thresholds (`escalation`)
+
+**Modeled as:** conditions that, when met on an otherwise-allowed action,
+DOWNGRADE the effect from `allow` to `approval_required` (never upgrade a deny to
+an allow):
+
+- `urlPostRequiresApproval: boolean` — any URL post (the expensive $0.20 class)
+  routes to human approval even if `allowUrls` is true.
+- `spendOverMicrosRequiresApproval: number` — an estimated spend over this
+  threshold (but under the hard `maxSpendMicros` cap) routes to approval.
+
+Escalation obeys the plane's canonical precedence: **hard_deny > approval_required
+> allow**. A hard deny from any rule always wins; escalation can only turn a
+would-be allow into an approval.
+
+### 6. DM / mention / hashtag / quiet-hours (Phase-1 scope note)
+
+- **DM restrictions:** the current adapter exposes NO DM operation
+  (`x.tweet.*`, `x.user.me.read` only). A DM policy has no operation to gate in
+  Phase 1. It is documented here as a **known gap** and will attach to a future
+  `x.dm.*` operation. We do NOT ship a dead DM rule.
+- **mention/hashtag restrictions:** expressible TODAY via
+  `contentPolicy.blockedPatterns` (e.g. block `@competitor`, block `#banned`).
+  A dedicated structured surface is deferred; the pattern channel covers the
+  Phase-1 need without a second matcher.
+- **quiet hours:** `quietHours: { startMinuteUtc, endMinuteUtc }` gates writes to
+  a UTC minute-of-day window. Evaluated against an authoritative
+  `nowMinuteUtc` policy input; unavailable → `POLICY_INPUT_UNAVAILABLE`.
+
+## How it plugs into the existing plane (no invented registry)
+
+The permissioned-X vocabulary is an **additive extension of the existing
+`capability-intent` config `constraints`** — the SAME rule type, SAME composer
+(`composeProviderActionPolicyDecision`), SAME precedence, SAME persisted
+`ProviderPolicyEvaluationV1` document that github flows through. There is NO new
+rule type, NO new policy registry, NO new evaluator dispatch.
+
+- github's `constraints` (`argEquals` / `argMatches` / `maxCallsPerHour`) are
+  untouched and still evaluate byte-identically.
+- X adds `constraints.x` (an OPTIONAL, X-only sub-block). A non-X operation with
+  an `x` constraint block is a config error (fail closed) — the sub-block only
+  applies to `x.*` operations.
+- The composer reads adapter-validated policy args
+  (`isReply`, `replyToTweetId`, `hasUrl`, `textCodePointLength`, `summoned`) — it
+  NEVER lifts a raw body field. New args (`hasUrl`, `summoned`) are derived and
+  validated in `buildXAction`.
+
+## Text availability (why `blockedPatterns` is careful)
+
+The safe-summary is contractually **text-free** (only length + sha256). To match
+`blockedPatterns` without re-introducing a text leak, the adapter emits a
+SEPARATE, non-persisted `policyText` channel on `policyArgs` that the composer
+reads IN-MEMORY during evaluation and that is NEVER written to the decision doc,
+the safe-summary, or the audit event. The persisted decision records only the
+matched pattern's index/reason code, never the text. This is documented as the
+one place the composer sees text, and it is mutation-proven to stay out of the
+persisted document.
+
+## Fail-closed matrix (Phase 1)
+
+| Situation | Effect | Reason code |
+| --- | --- | --- |
+| unknown `x` constraint key | hard_deny | `POLICY_CONFIGURATION_INVALID` |
+| `x` block on a non-X operation | hard_deny | `POLICY_CONFIGURATION_INVALID` |
+| un-summoned reply under `summoned-only` | hard_deny | `POLICY_X_REPLY_NOT_SUMMONED` |
+| reply under `none` | hard_deny | `POLICY_X_REPLY_FORBIDDEN` |
+| URL post under `allowUrls:false` | hard_deny | `POLICY_X_URL_FORBIDDEN` |
+| text over `maxLength` | hard_deny | `POLICY_X_CONTENT_TOO_LONG` |
+| `blockedPatterns` match | hard_deny | `POLICY_X_CONTENT_BLOCKED` |
+| invalid `blockedPatterns` regex | hard_deny | `POLICY_CONFIGURATION_INVALID` |
+| post count over `maxPostsPerWindow` | hard_deny | `POLICY_X_RATE_CAP_EXCEEDED` |
+| count input unavailable (cap set) | hard_deny | `POLICY_INPUT_UNAVAILABLE` |
+| estimated spend over `maxSpendMicros` | hard_deny | `POLICY_X_SPEND_CAP_EXCEEDED` |
+| spend input unavailable (cap set) | hard_deny | `POLICY_INPUT_UNAVAILABLE` |
+| now-minute input unavailable (quiet hours set) | hard_deny | `POLICY_INPUT_UNAVAILABLE` |
+| write inside quiet-hours window | hard_deny | `POLICY_X_QUIET_HOURS` |
+| URL post + `urlPostRequiresApproval` | approval_required | `APPROVAL_REQUIRED` |
+| spend over escalation threshold | approval_required | `APPROVAL_REQUIRED` |
+
+## Honest gaps (Phase 1)
+
+- **No DM policy operation** — deferred until `x.dm.*` exists.
+- **Estimate, not billing truth** — the price table is a design-time constant;
+  Steward does not read X's live billing.
+- **Count/spend/now inputs are wired-or-deny** — Phase 1 proves the evaluation
+  and the fail-closed behavior; the trailing-window accumulator wiring in the
+  live route is a follow-on (the same posture as `invokeCount1h` on develop,
+  which is `undefined` in the service and fails closed by design).
+- **Summoned assertion is caller-supplied** — Steward cannot itself verify the
+  post @mentioned/quoted the account without a read call; `summoned-only` gates
+  on the asserted arg and the upstream 403 remains the backstop. This is
+  documented, not hidden.
