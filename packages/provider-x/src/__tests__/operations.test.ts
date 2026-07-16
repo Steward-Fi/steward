@@ -124,15 +124,23 @@ describe("x.tweet.create", () => {
     );
   });
 
-  it("safe_summary shows length + sha256 + short preview, never full text", () => {
+  it("safe_summary shows length + sha256 only, never any slice of the text", () => {
     const secret = "this is a secret tweet body that must not leak in full ".repeat(3).trim();
     const b = buildXAction("x.tweet.create", { text: secret });
     const s = JSON.stringify(b.safeSummary);
     expect(s).not.toContain(secret);
     expect(b.safeSummary.textByteLength).toBe(Buffer.from(secret, "utf8").length);
     expect(String(b.safeSummary.textSha256)).toMatch(/^sha256:[0-9a-f]{64}$/);
-    // preview is bounded to 32 code points
-    expect([...String(b.safeSummary.textPreview)].length).toBeLessThanOrEqual(32);
+    // no preview field exists at all (codex P2 fix): summaries carry no text slice.
+    expect("textPreview" in b.safeSummary).toBe(false);
+  });
+
+  it("safe_summary of a SHORT tweet does not leak the body (codex P2 regression)", () => {
+    // A 2-char tweet must not appear verbatim anywhere in the summary.
+    const b = buildXAction("x.tweet.create", { text: "gm" });
+    const s = JSON.stringify(b.safeSummary);
+    expect(s).not.toContain("gm");
+    expect("textPreview" in b.safeSummary).toBe(false);
   });
 
   it("policy args are validated scalars only (no raw text, no raw body)", () => {

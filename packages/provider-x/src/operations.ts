@@ -171,16 +171,17 @@ function buildTweetCreate(rawArgs: unknown): XActionBuild {
   const byteLength = Buffer.from(text, "utf8").length;
   const codePointLength = [...text].length;
   const textSha256 = `sha256:${createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex")}`;
-  // Non-authoritative preview: first 32 code points, never the full text.
-  const preview = [...text].slice(0, 32).join("");
 
+  // Safe summary mirrors the GitHub adapter: length + sha256 only, never any
+  // slice of the text. A preview was intentionally REMOVED (codex P2, #195
+  // workstream B): for short tweets a prefix preview equals the full body, which
+  // would leak user content the summary is contractually forbidden to contain.
   const safeSummary: Record<string, unknown> = {
     operation: "x.tweet.create",
     isReply: replyToTweetId !== undefined,
     textCodePointLength: codePointLength,
     textByteLength: byteLength,
     textSha256,
-    textPreview: preview,
   };
   if (replyToTweetId !== undefined) safeSummary.replyToTweetId = replyToTweetId;
 
