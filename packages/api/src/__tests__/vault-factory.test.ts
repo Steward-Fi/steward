@@ -1,11 +1,14 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import {
   _clearConfiguredVaultsForTests,
+  assertProductionCustodyAcknowledged,
   configuredVaultStartupLogLine,
   createConfiguredVault,
   getConfiguredVault,
+  LOCAL_CUSTODY_ACK_ENV,
+  modeExposesPlaintextAtSignTime,
   VAULT_CAPABILITY_REGISTRY,
   VAULT_SIGNING_CAPABILITIES,
   type VaultMode,
@@ -26,7 +29,15 @@ const ENV_KEYS = [
   "STEWARD_PKCS11_MODULE",
   "STEWARD_PKCS11_PIN",
   "STEWARD_PKCS11_KEY_LABEL",
+  "STEWARD_ACK_LOCAL_CUSTODY",
+  "STEWARD_KDF_SALT",
 ] as const;
+
+// A known-valid KDF salt (>=32 hex chars). Production-boot tests pin this
+// unconditionally so the suite is hermetic: an invalid/short ambient
+// STEWARD_KDF_SALT in the caller's shell or CI must not surface as a Vault
+// salt-validation failure masquerading as an acknowledgement-gate result.
+const TEST_KDF_SALT = "a".repeat(64);
 
 const originalEnv: Record<(typeof ENV_KEYS)[number], string | undefined> = Object.fromEntries(
   ENV_KEYS.map((key) => [key, process.env[key]]),
@@ -60,6 +71,15 @@ function productionTsFiles(dir: string): string[] {
   }
   return files;
 }
+
+beforeEach(() => {
+  // Pin a known-valid KDF salt for the whole suite so no test inherits an
+  // invalid/short ambient STEWARD_KDF_SALT from the caller's shell or CI. Tests
+  // that specifically exercise salt-independent behaviour set their own env;
+  // this only guarantees Vault construction is not blocked by a bad ambient salt
+  // (which would masquerade as an acknowledgement-gate or fallback failure).
+  process.env.STEWARD_KDF_SALT = TEST_KDF_SALT;
+});
 
 afterEach(() => {
   restoreEnv();
@@ -134,6 +154,104 @@ describe("vault factory", () => {
         expect(VAULT_CAPABILITY_REGISTRY[mode][capability]).toBe(true);
       }
     }
+  });
+
+  describe("production local-custody acknowledgement gate", () => {
+    it("fails closed in production with local plaintext custody and no acknowledgement", () => {
+      process.env.NODE_ENV = "production";
+      process.env.STEWARD_MASTER_PASSWORD = "prod-master-password";
+      process.env.STEWARD_KDF_SALT = TEST_KDF_SALT;
+      delete process.env.STEWARD_KMS_PROVIDER;
+      delete process.env.STEWARD_ACK_LOCAL_CUSTODY;
+
+      // Both the direct assertion and the real composition boundary must refuse.
+      expect(() => assertProductionCustodyAcknowledged("local")).toThrow(
+        /local_custody_acknowledgement_required|Refusing to boot/,
+      );
+      expect(() => createConfiguredVault()).toThrow(LOCAL_CUSTODY_ACK_ENV);
+      expect(() => getConfiguredVault()).toThrow(LOCAL_CUSTODY_ACK_ENV);
+    });
+
+    it("boots in production with local custody when explicitly acknowledged", () => {
+      process.env.NODE_ENV = "production";
+      process.env.STEWARD_MASTER_PASSWORD = "prod-master-password";
+      process.env.STEWARD_KDF_SALT = TEST_KDF_SALT;
+      delete process.env.STEWARD_KMS_PROVIDER;
+      process.env.STEWARD_ACK_LOCAL_CUSTODY = "true";
+
+      expect(() => assertProductionCustodyAcknowledged("local")).not.toThrow();
+      expect(() => createConfiguredVault()).not.toThrow();
+    });
+
+    it("rejects a malformed acknowledgement value (only exact 'true' passes)", () => {
+      process.env.NODE_ENV = "production";
+      process.env.STEWARD_MASTER_PASSWORD = "prod-master-password";
+      process.env.STEWARD_KDF_SALT = TEST_KDF_SALT;
+      delete process.env.STEWARD_KMS_PROVIDER;
+
+      for (const value of ["TRUE", "1", "yes", "true ", " true", "True", ""]) {
+        process.env.STEWARD_ACK_LOCAL_CUSTODY = value;
+        expect(() => assertProductionCustodyAcknowledged("local")).toThrow(LOCAL_CUSTODY_ACK_ENV);
+        expect(() => createConfiguredVault()).toThrow(LOCAL_CUSTODY_ACK_ENV);
+      }
+    });
+
+    it("does not require acknowledgement outside production (dev/test ergonomics unchanged)", () => {
+      process.env.STEWARD_MASTER_PASSWORD = "dev-master-password";
+      process.env.STEWARD_KDF_SALT = TEST_KDF_SALT;
+      delete process.env.STEWARD_KMS_PROVIDER;
+      delete process.env.STEWARD_ACK_LOCAL_CUSTODY;
+
+      for (const env of ["test", "development", undefined]) {
+        if (env === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = env;
+        expect(() => assertProductionCustodyAcknowledged("local")).not.toThrow();
+        expect(() => createConfiguredVault()).not.toThrow();
+        _clearConfiguredVaultsForTests();
+      }
+    });
+
+    it("lets stronger KMS-envelope modes boot in production without the local ack", () => {
+      process.env.NODE_ENV = "production";
+      process.env.STEWARD_MASTER_PASSWORD = "prod-master-password";
+      process.env.STEWARD_KDF_SALT = TEST_KDF_SALT;
+      delete process.env.STEWARD_ACK_LOCAL_CUSTODY;
+
+      // The gate is scoped to local; stronger modes are unaffected by the ack.
+      expect(() => assertProductionCustodyAcknowledged("kms-envelope:aws")).not.toThrow();
+      expect(() => assertProductionCustodyAcknowledged("kms-envelope:pkcs11")).not.toThrow();
+    });
+
+    it("treats local and both KMS-envelope modes as plaintext-at-sign-time", () => {
+      expect(modeExposesPlaintextAtSignTime("local")).toBe(true);
+      expect(modeExposesPlaintextAtSignTime("kms-envelope:aws")).toBe(true);
+      expect(modeExposesPlaintextAtSignTime("kms-envelope:pkcs11")).toBe(true);
+      // Unknown mode fails closed (treated as plaintext-exposing).
+      expect(modeExposesPlaintextAtSignTime("totally-unknown-mode" as VaultMode)).toBe(true);
+    });
+
+    it("never leaks secret material in the gate error or the boot log", () => {
+      process.env.NODE_ENV = "production";
+      process.env.STEWARD_MASTER_PASSWORD = "top-secret-master-password-xyz";
+      process.env.STEWARD_KDF_SALT = TEST_KDF_SALT;
+      delete process.env.STEWARD_KMS_PROVIDER;
+      delete process.env.STEWARD_ACK_LOCAL_CUSTODY;
+
+      let message = "";
+      try {
+        createConfiguredVault();
+      } catch (err) {
+        message = err instanceof Error ? err.message : String(err);
+      }
+      expect(message).not.toContain("top-secret-master-password-xyz");
+
+      process.env.STEWARD_ACK_LOCAL_CUSTODY = "true";
+      const line = configuredVaultStartupLogLine();
+      expect(line).toContain("mode=local");
+      expect(line).toContain("plaintext_at_sign_time=true");
+      expect(line).toContain("local_custody_acknowledged=true");
+      expect(line).not.toContain("top-secret-master-password-xyz");
+    });
   });
 
   it("disallows production new Vault construction outside the factory", () => {

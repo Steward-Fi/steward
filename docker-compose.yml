@@ -68,6 +68,15 @@ services:
       DISCORD_CLIENT_ID: "${DISCORD_CLIENT_ID:-}"
       DISCORD_CLIENT_SECRET: "${DISCORD_CLIENT_SECRET:-}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?STEWARD_KDF_SALT is required - generate with: openssl rand -hex 32}"
+      # Custody posture: this stack sets no STEWARD_KMS_PROVIDER, so the vault
+      # runs in `local` mode (AES-256-GCM at rest; plaintext key in app memory at
+      # sign time). With NODE_ENV=production the vault REFUSES TO BOOT in local
+      # mode unless the operator explicitly acknowledges the posture. No default
+      # is injected here on purpose: an unacknowledged production run must fail
+      # closed, forcing a deliberate decision (set STEWARD_ACK_LOCAL_CUSTODY=true
+      # in .env to accept local custody, or set STEWARD_KMS_PROVIDER=aws|pkcs11
+      # to harden). See docs/security/custody-posture.md and .env.example.
+      STEWARD_ACK_LOCAL_CUSTODY: "${STEWARD_ACK_LOCAL_CUSTODY:-}"
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?STEWARD_AUDIT_HMAC_KEY is required - generate with: openssl rand -hex 32}"
       SIWE_ALLOWED_DOMAINS: "${SIWE_ALLOWED_DOMAINS:-}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
