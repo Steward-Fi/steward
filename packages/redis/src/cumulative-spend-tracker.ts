@@ -68,13 +68,16 @@ export interface CumulativeSpendKeyParts {
   scopeKey: string;
   /** currency/asset tag - part of the key so currencies never share a window. */
   currency: string;
+  /** trailing window length in seconds - part of the key so two rules with the
+   *  SAME scope/currency but DIFFERENT windows get INDEPENDENT buckets (no shared
+   *  double-count of the same invoke across distinct caps; codex P2). */
+  windowSeconds: number;
+  /** the cap in minor units - part of the key so two rules with the same
+   *  scope/currency/window but different maxes are independent buckets too. */
+  max: number;
 }
 
 export interface ReserveCumulativeSpendInput extends CumulativeSpendKeyParts {
-  /** trailing window length in seconds (resolved from the ISO-8601 duration). */
-  windowSeconds: number;
-  /** the cap, integer minor units (micros/cents). */
-  max: number;
   /** this invoke's spend, integer minor units. */
   amount: number;
   /** evaluation time in ms; injectable for tests. */
@@ -98,9 +101,12 @@ export interface CumulativeSpendSnapshot {
 
 function cumKey(parts: CumulativeSpendKeyParts): string {
   // scopeKey/currency are operator/adapter-derived tags; encode to keep the key
-  // delimiter-safe (no ':' collisions merging two buckets).
+  // delimiter-safe (no ':' collisions merging two buckets). windowSeconds+max are
+  // part of the identity so distinct caps never share a ZSET (codex P2).
   const enc = (s: string) => encodeURIComponent(s);
-  return `cumspend:${enc(parts.agentId)}:${parts.scope}:${enc(parts.scopeKey)}:${enc(parts.currency)}`;
+  return `cumspend:${enc(parts.agentId)}:${parts.scope}:${enc(parts.scopeKey)}:${enc(
+    parts.currency,
+  )}:${parts.windowSeconds}:${parts.max}`;
 }
 
 // ATOMIC reserve-under-limit over a rolling window.
@@ -203,7 +209,12 @@ export async function reserveCumulativeSpend(
   if (
     typeof input.windowSeconds !== "number" ||
     !Number.isSafeInteger(input.windowSeconds) ||
-    input.windowSeconds <= 0
+    input.windowSeconds <= 0 ||
+    // Over-retention windows cannot be enforced (older entries are pruned), so we
+    // REJECT rather than silently clamp - a money cap must never be quietly
+    // weakened to a shorter effective window (codex P1). The policy layer already
+    // rejects these at config time; this is the defense-in-depth floor.
+    input.windowSeconds > MAX_WINDOW_SECONDS
   ) {
     throw new Error(`invalid cumulative spend window: ${input.windowSeconds}`);
   }
@@ -215,8 +226,8 @@ export async function reserveCumulativeSpend(
   }
 
   const now = input.now ?? Date.now();
-  const effectiveWindow = Math.min(input.windowSeconds, MAX_WINDOW_SECONDS);
-  const windowStart = now - effectiveWindow * 1000;
+  // windowSeconds is guaranteed <= MAX_WINDOW_SECONDS by the guard above.
+  const windowStart = now - input.windowSeconds * 1000;
   const retentionCutoff = now - RETENTION_MS;
   const reservationId = `${now}:${nextSeq()}`;
   const member = `${reservationId}|${input.amount}|reserved`;
@@ -285,18 +296,18 @@ export async function releaseCumulativeSpend(input: {
  * so the caller fails closed (deny).
  */
 export async function getCumulativeSpendSum(
-  input: CumulativeSpendKeyParts & { windowSeconds: number; now?: number },
+  input: CumulativeSpendKeyParts & { now?: number },
 ): Promise<CumulativeSpendSnapshot | null> {
   if (
     typeof input.windowSeconds !== "number" ||
     !Number.isSafeInteger(input.windowSeconds) ||
-    input.windowSeconds <= 0
+    input.windowSeconds <= 0 ||
+    input.windowSeconds > MAX_WINDOW_SECONDS
   ) {
     return null;
   }
   const now = input.now ?? Date.now();
-  const effectiveWindow = Math.min(input.windowSeconds, MAX_WINDOW_SECONDS);
-  const windowStart = now - effectiveWindow * 1000;
+  const windowStart = now - input.windowSeconds * 1000;
   const retentionCutoff = now - RETENTION_MS;
   const key = cumKey(input);
   try {

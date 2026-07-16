@@ -40,6 +40,8 @@ import {
 } from "@stwd/db";
 import {
   composeProviderActionPolicyDecision,
+  cumulativeSpendBucketKey,
+  MAX_AGGREGATE_WINDOW_SECONDS,
   type ProviderPolicyContext,
   type ProviderPolicyEvaluationV1,
   type ProviderPolicyRule,
@@ -88,7 +90,14 @@ const POLICY_TYPE = "capability-intent" as const;
  * may have really spent).
  */
 export interface CumulativeSpendReservationHandle {
-  keyParts: { agentId: string; scope: CumulativeSpendScope; scopeKey: string; currency: string };
+  keyParts: {
+    agentId: string;
+    scope: CumulativeSpendScope;
+    scopeKey: string;
+    currency: string;
+    windowSeconds: number;
+    max: number;
+  };
   reservationId: string;
   amount: number;
 }
@@ -1014,7 +1023,7 @@ class ProviderActionService {
     spendDeclaration: { field: string; currency: string } | undefined;
     policyArgs: Record<string, unknown>;
   }): Promise<{
-    contextSums: { operation?: number; agent?: number; grant?: number } | undefined;
+    contextSums: Record<string, number> | undefined;
     reservations: CumulativeSpendReservationHandle[];
   }> {
     const governing = extractGoverningCumulativeSpend(input.rules, input.operationKey);
@@ -1022,7 +1031,7 @@ class ProviderActionService {
       return { contextSums: undefined, reservations: [] };
     }
 
-    const sums: { operation?: number; agent?: number; grant?: number } = {};
+    const sums: Record<string, number> = {};
     const reservations: CumulativeSpendReservationHandle[] = [];
 
     // Resolve this invoke's spend from the declared, validated policyArgs field.
@@ -1039,6 +1048,11 @@ class ProviderActionService {
       rawSpend >= 0;
     const thisSpend = spendValid ? (rawSpend as number) : undefined;
 
+    // DEDUPE by full cap identity (codex P2). Two governing rules that declare the
+    // SAME (scope, window, max, currency) are the SAME cap; reserving each
+    // separately would count THIS invoke twice and falsely deny. Reserve ONCE per
+    // unique bucket and feed every rule that shares it the same prior sum.
+    const seenBuckets = new Set<string>();
     for (const g of governing) {
       const scopeKey =
         g.aggregateOver === "operation"
@@ -1046,20 +1060,23 @@ class ProviderActionService {
           : g.aggregateOver === "grant"
             ? (input.grantId ?? "")
             : "";
+      const bucketKey = cumulativeSpendBucketKey({
+        aggregateOver: g.aggregateOver,
+        windowSeconds: g.windowSeconds,
+        max: g.max,
+        currency: g.currency,
+      });
+      // Already reserved this exact bucket for this invoke: reuse its sum, do NOT
+      // reserve again (that would double-count the same spend).
+      if (seenBuckets.has(bucketKey)) continue;
+      seenBuckets.add(bucketKey);
 
       // If we cannot price this invoke (no declaration / bad value / currency
-      // mismatch), do NOT reserve. Feed a prior sum so the composer's own
-      // fail-closed check fires with the correct reason (NO_SPEND_FIELD /
-      // INPUT_UNAVAILABLE / CURRENCY_MISMATCH), and DON'T leak a reservation.
+      // mismatch), do NOT reserve. Feed a prior sum of 0 so the composer reaches
+      // its OWN fail-closed check, which prioritizes NO_SPEND_FIELD /
+      // CURRENCY_MISMATCH before reading the sum, so the reason is correct.
       if (decl === undefined || thisSpend === undefined || decl.currency !== g.currency) {
-        // Leave the scope sum UNSET so the composer sees an absent aggregate only
-        // if it also lacks a declaration/currency issue; the composer prioritizes
-        // NO_SPEND_FIELD / CURRENCY_MISMATCH before the aggregate read, so the
-        // reason is correct regardless. Provide 0 so a pure INPUT_UNAVAILABLE
-        // path (declared + valid + currency-match but grant scopeKey empty) still
-        // resolves; but here at least one of decl/spend/currency failed, so the
-        // composer denies before reading the sum.
-        sums[g.aggregateOver] = sums[g.aggregateOver] ?? 0;
+        sums[bucketKey] = 0;
         continue;
       }
 
@@ -1075,41 +1092,46 @@ class ProviderActionService {
           amount: thisSpend,
         });
       } catch {
-        // A Redis/parse failure is a missing signal => deny for this scope. Feed a
-        // prior sum AT the cap so projected = cap + thisSpend > cap (thisSpend may
-        // be 0, so use cap+1 to guarantee a breach even for a zero-spend invoke).
-        sums[g.aggregateOver] = Math.max(g.max, sums[g.aggregateOver] ?? 0) + 1;
+        // A Redis/parse failure is a missing signal => deny for this bucket. Feed
+        // a prior sum AT cap+1 so projected > cap even for a zero-spend invoke.
+        sums[bucketKey] = g.max + 1;
         continue;
       }
 
       if (reserved.ok) {
         // Feed the real prior sum; the composer's projected = priorSum + thisSpend
         // matches the reservation's admitted total, so allow.
-        sums[g.aggregateOver] = reserved.priorSum;
+        sums[bucketKey] = reserved.priorSum;
         reservations.push({
           keyParts: {
             agentId: input.agentId,
             scope: g.aggregateOver,
             scopeKey,
             currency: g.currency,
+            windowSeconds: g.windowSeconds,
+            max: g.max,
           },
           reservationId: reserved.reservationId as string,
           amount: thisSpend,
         });
       } else {
-        // Rejected: feed a prior sum at the cap so the composer denies with
-        // CUMULATIVE_SPEND_CAP_EXCEEDED. +1 guarantees a breach even if thisSpend
-        // is 0. No reservation was taken.
-        sums[g.aggregateOver] = g.max + 1;
+        // Rejected: feed a prior sum at cap+1 so the composer denies with
+        // CUMULATIVE_SPEND_CAP_EXCEEDED. No reservation was taken.
+        sums[bucketKey] = g.max + 1;
       }
     }
 
-    // If ANY scope denied (sum forced over its cap), the whole invoke will deny.
-    // Release reservations taken for the OTHER (passing) scopes so a denied
-    // invoke never leaks budget. We detect a denial by re-checking each governing
-    // rule against its fed sum.
+    // If ANY bucket denied (sum forced over its cap), the whole invoke will deny.
+    // Release reservations taken for the OTHER (passing) buckets so a denied
+    // invoke never leaks budget.
     const willDeny = governing.some((g) => {
-      const priorSum = sums[g.aggregateOver];
+      const bucketKey = cumulativeSpendBucketKey({
+        aggregateOver: g.aggregateOver,
+        windowSeconds: g.windowSeconds,
+        max: g.max,
+        currency: g.currency,
+      });
+      const priorSum = sums[bucketKey];
       if (priorSum === undefined) return true; // absent => composer denies
       const spend = thisSpend ?? 0;
       return priorSum + spend > g.max || decl === undefined || decl.currency !== g.currency;
@@ -1752,7 +1774,9 @@ function parseIso8601DurationSecondsForApi(input: unknown): number | null {
   if (weeks) {
     const n = Number(weeks[1]);
     if (!Number.isSafeInteger(n) || n <= 0) return null;
-    return n * 604800;
+    const secs = n * 604800;
+    if (secs > MAX_AGGREGATE_WINDOW_SECONDS) return null;
+    return secs;
   }
   const m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(input);
   if (!m) return null;
@@ -1769,6 +1793,7 @@ function parseIso8601DurationSecondsForApi(input: unknown): number | null {
   }
   const total = days * 86400 + hours * 3600 + mins * 60 + secs;
   if (!Number.isSafeInteger(total) || total <= 0) return null;
+  if (total > MAX_AGGREGATE_WINDOW_SECONDS) return null;
   return total;
 }
 

@@ -21,11 +21,41 @@
 import { describe, expect, it } from "bun:test";
 import {
   composeProviderActionPolicyDecision,
+  cumulativeSpendBucketKey,
   PROVIDER_POLICY_REASON,
   type ProviderPolicyContext,
   type ProviderPolicyRule,
   parseCapabilityIntentConfigForTest,
 } from "../capability-intent.js";
+
+const WINDOW_24H_SECONDS = 86400;
+
+/**
+ * Build a bucket-keyed cumulativeSpend context from simple {scope,max,sum}
+ * entries. Defaults window=PT24H (86400s) + currency USD to match spendRule.
+ */
+function csSums(
+  entries: Array<{
+    scope: "operation" | "agent" | "grant";
+    max: number;
+    sum: number;
+    windowSeconds?: number;
+    currency?: string;
+  }>,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const e of entries) {
+    out[
+      cumulativeSpendBucketKey({
+        aggregateOver: e.scope,
+        windowSeconds: e.windowSeconds ?? WINDOW_24H_SECONDS,
+        max: e.max,
+        currency: e.currency ?? "USD",
+      })
+    ] = e.sum;
+  }
+  return out;
+}
 
 const OP = "wallet.transfer";
 
@@ -39,7 +69,14 @@ function ctx(overrides: Partial<ProviderPolicyContext> = {}): ProviderPolicyCont
     path: "/v1/transfer",
     invokeCount1h: 0,
     spendDeclaration: { field: "amountMicros", currency: "USD" },
-    cumulativeSpend: { operation: 0, agent: 0, grant: 0 },
+    cumulativeSpend: csSums([
+      { scope: "agent", max: 5_000_000, sum: 0 },
+      { scope: "agent", max: 1_000, sum: 0 },
+      { scope: "agent", max: 3_000_000, sum: 0 },
+      { scope: "operation", max: 5_000_000, sum: 0 },
+      { scope: "grant", max: 5_000_000, sum: 0 },
+      { scope: "agent", max: 5_000_000, sum: 0, currency: "USDC" },
+    ]),
     ...overrides,
   };
 }
@@ -70,7 +107,7 @@ describe("cumulativeSpend - under / boundary / over", () => {
   it("EXACT boundary passes (prior 4_000_000 + 1_000_000 === 5_000_000, not > max)", () => {
     const d = composeProviderActionPolicyDecision(
       [spendRule(5_000_000)],
-      ctx({ cumulativeSpend: { operation: 4_000_000, agent: 4_000_000, grant: 4_000_000 } }),
+      ctx({ cumulativeSpend: csSums([{ scope: "agent", max: 5_000_000, sum: 4_000_000 }]) }),
     );
     expect(d.effect).toBe("allow");
   });
@@ -80,7 +117,7 @@ describe("cumulativeSpend - under / boundary / over", () => {
       [spendRule(5_000_000)],
       ctx({
         args: { amountMicros: 1_000_001 },
-        cumulativeSpend: { operation: 4_000_000, agent: 4_000_000, grant: 4_000_000 },
+        cumulativeSpend: csSums([{ scope: "agent", max: 5_000_000, sum: 4_000_000 }]),
       }),
     );
     expect(d.effect).toBe("hard_deny");
@@ -93,21 +130,23 @@ describe("cumulativeSpend - under / boundary / over", () => {
     const cap = 3_000_000;
     // step 1: prior 0 + 1M = 1M <= 3M => allow
     expect(
-      composeProviderActionPolicyDecision([spendRule(cap)], ctx({ cumulativeSpend: { agent: 0 } }))
-        .effect,
+      composeProviderActionPolicyDecision(
+        [spendRule(cap)],
+        ctx({ cumulativeSpend: csSums([{ scope: "agent", max: cap, sum: 0 }]) }),
+      ).effect,
     ).toBe("allow");
     // step 2: prior 2M + 1M = 3M === cap => allow (boundary)
     expect(
       composeProviderActionPolicyDecision(
         [spendRule(cap)],
-        ctx({ cumulativeSpend: { agent: 2_000_000 } }),
+        ctx({ cumulativeSpend: csSums([{ scope: "agent", max: cap, sum: 2_000_000 }]) }),
       ).effect,
     ).toBe("allow");
     // step 3: prior 3M + 1M = 4M > cap => deny
     expect(
       composeProviderActionPolicyDecision(
         [spendRule(cap)],
-        ctx({ cumulativeSpend: { agent: 3_000_000 } }),
+        ctx({ cumulativeSpend: csSums([{ scope: "agent", max: cap, sum: 3_000_000 }]) }),
       ).effect,
     ).toBe("hard_deny");
   });
@@ -127,7 +166,7 @@ describe("cumulativeSpend - fail-closed missing signals", () => {
     // rule aggregates over "grant" but only "agent" is supplied.
     const d = composeProviderActionPolicyDecision(
       [spendRule(5_000_000, "grant")],
-      ctx({ cumulativeSpend: { agent: 0 } }),
+      ctx({ cumulativeSpend: csSums([{ scope: "agent", max: 5_000_000, sum: 0 }]) }),
     );
     expect(d.effect).toBe("hard_deny");
     expect(d.reasonCodes).toContain(PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE);
@@ -185,7 +224,10 @@ describe("cumulativeSpend - currency discipline (no FX)", () => {
 describe("cumulativeSpend - aggregateOver scope selection", () => {
   it("operation scope reads the operation sum", () => {
     const overCtx = ctx({
-      cumulativeSpend: { operation: 5_000_000, agent: 0, grant: 0 },
+      cumulativeSpend: csSums([
+        { scope: "operation", max: 5_000_000, sum: 5_000_000 },
+        { scope: "agent", max: 5_000_000, sum: 0 },
+      ]),
     });
     expect(
       composeProviderActionPolicyDecision([spendRule(5_000_000, "operation")], overCtx).effect,
@@ -198,7 +240,7 @@ describe("cumulativeSpend - aggregateOver scope selection", () => {
 
   it("grant scope reads the grant sum independently", () => {
     const overCtx = ctx({
-      cumulativeSpend: { operation: 0, agent: 0, grant: 5_000_000 },
+      cumulativeSpend: csSums([{ scope: "grant", max: 5_000_000, sum: 5_000_000 }]),
     });
     expect(
       composeProviderActionPolicyDecision([spendRule(5_000_000, "grant")], overCtx).effect,
@@ -297,6 +339,24 @@ describe("cumulativeSpend + maxCalls - store-time config validation (fail closed
     }
   });
 
+  it("rejects an OVER-RETENTION window (> 30d) at store time (codex P1)", () => {
+    // P30D is the max allowed; P31D / P5W (35d) exceed retention => reject (would
+    // silently clamp to 30d and under-enforce the cap).
+    for (const over of ["P31D", "P5W", "P60D", "PT744H"]) {
+      const r = store({
+        cumulativeSpend: { window: over, currency: "USD", max: 1, aggregateOver: "agent" },
+      });
+      expect("error" in r).toBe(true);
+    }
+    // exactly 30d is accepted.
+    expect(
+      "error" in
+        store({
+          cumulativeSpend: { window: "P30D", currency: "USD", max: 1, aggregateOver: "agent" },
+        }),
+    ).toBe(false);
+  });
+
   it("accepts valid ISO-8601 windows P/PT variants", () => {
     for (const good of ["PT1H", "PT24H", "P1D", "P7D", "PT30M", "P1W", "PT1H30M", "P1DT2H"]) {
       const r = store({
@@ -361,6 +421,76 @@ describe("cumulativeSpend + maxCalls - store-time config validation (fail closed
   it("rejects non-integer maxCalls", () => {
     expect("error" in store({ maxCalls: 1.5, callWindow: "PT1H" })).toBe(true);
     expect("error" in store({ maxCalls: -1, callWindow: "PT1H" })).toBe(true);
+  });
+});
+
+describe("cumulativeSpend - two rules on the same bucket (codex P2 dedup at composer)", () => {
+  it("two IDENTICAL cumulativeSpend allow rules both read the SAME bucket sum (no double-count)", () => {
+    // Both rules are (agent, PT24H, max 150, USD). The invoke spends 60; prior
+    // sum is 60. Each rule independently projects 60 + 60 = 120 <= 150 => allow.
+    // The composer reads the SAME bucket key for both, so neither sees the
+    // other's contribution (the invoke-layer reserves once per bucket). This is
+    // the composer-side half of the P2 fix; the reserve-once dedup is proven in
+    // the redis tracker + api E2E.
+    const bucket = csSums([{ scope: "agent", max: 150, sum: 60 }]);
+    const r1: ProviderPolicyRule = {
+      id: "dup-1",
+      type: "capability-intent",
+      enabled: true,
+      config: {
+        capabilities: [OP],
+        effect: "allow",
+        constraints: {
+          cumulativeSpend: { window: "PT24H", currency: "USD", max: 150, aggregateOver: "agent" },
+        },
+      },
+    };
+    const r2: ProviderPolicyRule = { ...r1, id: "dup-2" };
+    const d = composeProviderActionPolicyDecision(
+      [r1, r2],
+      ctx({ args: { amountMicros: 60 }, cumulativeSpend: bucket }),
+    );
+    expect(d.effect).toBe("allow");
+  });
+
+  it("two rules SAME scope but DIFFERENT windows read DIFFERENT buckets", () => {
+    // (agent, PT1H, max 100) is over (prior 90 + 60 > 100 => deny) while
+    // (agent, PT24H, max 500) is under. Deny wins. Proves the buckets are keyed
+    // by window, not just scope.
+    const sums = csSums([
+      { scope: "agent", max: 100, sum: 90, windowSeconds: 3600 },
+      { scope: "agent", max: 500, sum: 90, windowSeconds: WINDOW_24H_SECONDS },
+    ]);
+    const shortRule: ProviderPolicyRule = {
+      id: "short",
+      type: "capability-intent",
+      enabled: true,
+      config: {
+        capabilities: [OP],
+        effect: "allow",
+        constraints: {
+          cumulativeSpend: { window: "PT1H", currency: "USD", max: 100, aggregateOver: "agent" },
+        },
+      },
+    };
+    const longRule: ProviderPolicyRule = {
+      id: "long",
+      type: "capability-intent",
+      enabled: true,
+      config: {
+        capabilities: [OP],
+        effect: "allow",
+        constraints: {
+          cumulativeSpend: { window: "PT24H", currency: "USD", max: 500, aggregateOver: "agent" },
+        },
+      },
+    };
+    const d = composeProviderActionPolicyDecision(
+      [shortRule, longRule],
+      ctx({ args: { amountMicros: 60 }, cumulativeSpend: sums }),
+    );
+    expect(d.effect).toBe("hard_deny");
+    expect(d.reasonCodes).toContain(PROVIDER_POLICY_REASON.CUMULATIVE_SPEND_CAP_EXCEEDED);
   });
 });
 

@@ -112,6 +112,7 @@ describeRedis("reserveCumulativeSpend - REAL concurrency single-winner", () => {
       scopeKey: "",
       currency: "USD",
       windowSeconds: 3600,
+      max: 1_000_000,
     });
     expect(snap?.sum).toBe(1_000_000);
   });
@@ -174,7 +175,14 @@ describeRedis("release / settle lifecycle", () => {
     expect((await reserveCumulativeSpend({ ...base, amount: 1 })).ok).toBe(false);
     // release the first, budget is reclaimed.
     await releaseCumulativeSpend({
-      keyParts: { agentId: AGENT, scope: "agent", scopeKey: "", currency: "USD" },
+      keyParts: {
+        agentId: AGENT,
+        scope: "agent",
+        scopeKey: "",
+        currency: "USD",
+        windowSeconds: 3600,
+        max: 1_000_000,
+      },
       reservationId: first.reservationId as string,
       amount: 1_000_000,
     });
@@ -194,7 +202,14 @@ describeRedis("release / settle lifecycle", () => {
     };
     const r = await reserveCumulativeSpend({ ...base, amount: 600_000 });
     await settleCumulativeSpend({
-      keyParts: { agentId: AGENT, scope: "agent", scopeKey: "", currency: "USD" },
+      keyParts: {
+        agentId: AGENT,
+        scope: "agent",
+        scopeKey: "",
+        currency: "USD",
+        windowSeconds: 3600,
+        max: 1_000_000,
+      },
       reservationId: r.reservationId as string,
     });
     const snap = await getCumulativeSpendSum({
@@ -203,6 +218,7 @@ describeRedis("release / settle lifecycle", () => {
       scopeKey: "",
       currency: "USD",
       windowSeconds: 3600,
+      max: 1_000_000,
     });
     expect(snap?.sum).toBe(600_000);
   });
@@ -211,7 +227,14 @@ describeRedis("release / settle lifecycle", () => {
 describeRedis("scope + currency isolation", () => {
   test("operation / agent / grant + currency each get a distinct bucket", async () => {
     const k = (scope: "operation" | "agent" | "grant", scopeKey: string, currency: string) =>
-      cumulativeSpendKeyForTest({ agentId: AGENT, scope, scopeKey, currency });
+      cumulativeSpendKeyForTest({
+        agentId: AGENT,
+        scope,
+        scopeKey,
+        currency,
+        windowSeconds: 3600,
+        max: 5_000_000,
+      });
     // distinct keys prove no cross-contamination.
     const keys = new Set([
       k("agent", "", "USD"),
@@ -237,6 +260,7 @@ describeRedis("scope + currency isolation", () => {
       scopeKey: "",
       currency: "USD",
       windowSeconds: 3600,
+      max: 5_000_000,
     });
     expect(agentSnap?.sum).toBe(0);
   });
@@ -250,6 +274,8 @@ describeRedis("fail closed", () => {
       scope: "agent",
       scopeKey: "",
       currency: "USD",
+      windowSeconds: 3600,
+      max: 5_000_000,
     });
     // inject a member with no parseable amount.
     await redis.zadd(key, Date.now(), "garbage-no-bars");
@@ -270,6 +296,7 @@ describeRedis("fail closed", () => {
       scopeKey: "",
       currency: "USD",
       windowSeconds: 3600,
+      max: 5_000_000,
     });
     expect(snap).toBeNull();
   });
@@ -288,5 +315,55 @@ describeRedis("fail closed", () => {
     await expect(
       reserveCumulativeSpend({ ...base, amount: 1, windowSeconds: 0 }),
     ).rejects.toThrow();
+  });
+
+  test("over-retention window (> 30d) throws / sum returns null (codex P1)", async () => {
+    const base = {
+      agentId: AGENT,
+      scope: "agent" as const,
+      scopeKey: "",
+      currency: "USD",
+      max: 5_000_000,
+    };
+    // 30d + 1s is beyond retention; reserving would silently clamp => reject.
+    await expect(
+      reserveCumulativeSpend({ ...base, windowSeconds: 2_592_001, amount: 1 }),
+    ).rejects.toThrow();
+    const snap = await getCumulativeSpendSum({
+      agentId: AGENT,
+      scope: "agent",
+      scopeKey: "",
+      currency: "USD",
+      windowSeconds: 2_592_001,
+      max: 5_000_000,
+    });
+    expect(snap).toBeNull();
+    // exactly 30d is allowed.
+    const ok = await reserveCumulativeSpend({ ...base, windowSeconds: 2_592_000, amount: 1 });
+    expect(ok.ok).toBe(true);
+  });
+});
+
+describeRedis("distinct caps on the same scope are independent buckets (codex P2)", () => {
+  test("same scope+currency but different windows do NOT share a bucket", async () => {
+    // Two caps: (agent, USD, 1h, max 1M) and (agent, USD, 24h, max 1M). A reserve
+    // against the 1h cap must NOT show up in the 24h cap's sum, and vice versa.
+    const shortCap = {
+      agentId: AGENT,
+      scope: "agent" as const,
+      scopeKey: "",
+      currency: "USD",
+      windowSeconds: 3600,
+      max: 1_000_000,
+    };
+    const longCap = { ...shortCap, windowSeconds: 86400 };
+    const r = await reserveCumulativeSpend({ ...shortCap, amount: 400_000 });
+    expect(r.ok).toBe(true);
+    // the long-window cap's bucket is independent => its prior sum is still 0.
+    const longSnap = await getCumulativeSpendSum(longCap);
+    expect(longSnap?.sum).toBe(0);
+    // and the short cap sees its own 400k.
+    const shortSnap = await getCumulativeSpendSum(shortCap);
+    expect(shortSnap?.sum).toBe(400_000);
   });
 });

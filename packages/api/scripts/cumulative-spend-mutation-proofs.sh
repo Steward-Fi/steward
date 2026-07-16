@@ -87,6 +87,13 @@ proof "M5 drop reservation atomicity (cap check before add)" "$TRACKER" run_trac
   "100 parallel reserves of 100k against a 1M cap admit exactly 10" \
   's/if (sum + amount) > maxv then/if false then/'
 
+# M6: DROP THE OVER-RETENTION WINDOW REJECT (codex P1) - a window beyond the 30d
+# retention would silently clamp + under-enforce; removing the guard lets it
+# reserve, so the over-retention test no longer throws.
+proof "M6 drop over-retention window reject (P1)" "$TRACKER" run_tracker_test \
+  "over-retention window" \
+  's/input.windowSeconds > MAX_WINDOW_SECONDS/false/'
+
 echo
 echo "cumulativeSpend mutation proofs: killed=$pass_count  survived/errors=$fail_count"
-[ "$fail_count" -eq 0 ] && [ "$pass_count" -ge 5 ]
+[ "$fail_count" -eq 0 ] && [ "$pass_count" -ge 6 ]

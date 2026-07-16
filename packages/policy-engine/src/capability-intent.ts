@@ -366,8 +366,8 @@ const CUMULATIVE_SPEND_SCOPES: ReadonlySet<string> = new Set(["operation", "agen
 
 /**
  * Parse a restricted ISO-8601 duration into a positive integer number of
- * seconds, or `null` on ANY malformed / zero / negative / non-integer input
- * (fail closed).
+ * seconds, or `null` on ANY malformed / zero / negative / non-integer / OVER-
+ * RETENTION input (fail closed).
  *
  * SUPPORTED SUBSET (deliberately restricted so the parse is total + auditable):
  *   `P[nD]T[nH][nM][nS]` and the time-only `PT[nH][nM][nS]` - integer,
@@ -377,9 +377,21 @@ const CUMULATIVE_SPEND_SCOPES: ReadonlySet<string> = new Set(["operation", "agen
  *   count is not fixed, so a spend WINDOW over them would be ambiguous (a money
  *   gate must never rest on an ambiguous window length).
  *
+ * OVER-RETENTION REJECTED (codex P1): a window longer than the aggregate store's
+ * retention ({@link MAX_AGGREGATE_WINDOW_SECONDS}, 30d) would SILENTLY under-
+ * enforce - entries older than retention are pruned, so a `P90D` cap would
+ * behave like a 30d cap and let spend from days 31-90 slip. We reject such a
+ * window at parse time (store AND runtime) rather than clamp: a money cap must
+ * never be quietly weakened to a shorter effective window.
+ *
  * Examples: `PT1H`->3600, `PT24H`->86400, `P1D`->86400, `P7D`->604800,
- *           `PT30M`->1800, `P1W`->604800. `P0D`/`PT0S`/`P`/`PT`/`P1M` (month) -> null.
+ *           `PT30M`->1800, `P1W`->604800, `P30D`->2592000. `P0D`/`PT0S`/`P`/`PT`/
+ *           `P1M` (month)/`P90D` (over retention) -> null.
  */
+/** Aggregate-store retention: the longest trailing window a cumulativeSpend /
+ *  configurable count cap may declare. MUST match the redis tracker's
+ *  MAX_WINDOW_SECONDS (30d); a window beyond it cannot be enforced. */
+export const MAX_AGGREGATE_WINDOW_SECONDS = 2592000;
 function parseIso8601DurationSeconds(input: unknown): number | null {
   if (typeof input !== "string" || input.length === 0) return null;
   // Weeks form: PnW (standalone, no other components).
@@ -387,7 +399,9 @@ function parseIso8601DurationSeconds(input: unknown): number | null {
   if (weeks) {
     const n = Number(weeks[1]);
     if (!Number.isSafeInteger(n) || n <= 0) return null;
-    return n * 604800;
+    const secs = n * 604800;
+    if (secs > MAX_AGGREGATE_WINDOW_SECONDS) return null;
+    return secs;
   }
   // Date(days-only) + time form. Reject Y/M (ambiguous length) by not matching
   // them at all. Require the T section to be absent OR non-empty.
@@ -410,6 +424,8 @@ function parseIso8601DurationSeconds(input: unknown): number | null {
   }
   const total = days * 86400 + hours * 3600 + mins * 60 + secs;
   if (!Number.isSafeInteger(total) || total <= 0) return null;
+  // Over-retention windows cannot be enforced (they would silently clamp) - reject.
+  if (total > MAX_AGGREGATE_WINDOW_SECONDS) return null;
   return total;
 }
 
@@ -1295,24 +1311,41 @@ export interface ProviderPolicyContext {
     readonly currency: string;
   };
   /**
-   * Authoritative trailing-window spend aggregates (#206), keyed by the
-   * cumulativeSpend scope. Each entry is the ALREADY-COMMITTED (or
-   * reserved-and-committed) integer minor-unit sum over the rule's trailing
-   * window for that scope, in the operation's currency. The composer adds THIS
-   * invoke's spend on top and compares against the cap.
+   * Authoritative trailing-window spend aggregates (#206), keyed by a stable
+   * per-cap BUCKET key (see {@link cumulativeSpendBucketKey}). Each entry is the
+   * ALREADY-COMMITTED (or reserved-and-committed) integer minor-unit sum over the
+   * rule's trailing window for that exact cap, in the operation's currency. The
+   * composer adds THIS invoke's spend on top and compares against the cap.
    *
-   * `undefined` (the whole block OR the specific scope) => the aggregate is not
-   * wired for that scope => DENY (POLICY_INPUT_UNAVAILABLE). Steward never
-   * assumes a zero prior sum: an absent aggregate is a missing signal, not an
-   * empty window. The invoke layer supplies only the scopes its governing rules
-   * actually request, computed under the atomic reservation discipline so two
-   * concurrent invokes cannot both pass when their sum exceeds the cap.
+   * Keying by the FULL cap identity (scope + window + max + currency), NOT just
+   * the scope, lets two rules that share a scope but declare DIFFERENT windows /
+   * caps each read their OWN trailing-window sum - they never share a bucket, so
+   * the same invoke is never double-counted across distinct caps (codex P2).
+   *
+   * A missing entry for a rule's bucket => the aggregate is not wired for that
+   * cap => DENY (POLICY_INPUT_UNAVAILABLE). Steward never assumes a zero prior
+   * sum: an absent aggregate is a missing signal, not an empty window. The invoke
+   * layer supplies exactly the buckets its governing rules request, computed
+   * under the atomic reservation discipline so two concurrent invokes cannot both
+   * pass when their sum exceeds the cap.
    */
-  readonly cumulativeSpend?: {
-    readonly operation?: number;
-    readonly agent?: number;
-    readonly grant?: number;
-  };
+  readonly cumulativeSpend?: Readonly<Record<string, number>>;
+}
+
+/**
+ * Stable bucket key for a cumulativeSpend cap. Uniquely identifies the trailing-
+ * window aggregate a specific cap reads: two rules with the SAME scope but a
+ * different window or max (or currency) get DIFFERENT keys and therefore
+ * INDEPENDENT sums (no shared double-count). Callers (the invoke layer) MUST use
+ * this same function to key the sums they supply on `ctx.cumulativeSpend`.
+ */
+export function cumulativeSpendBucketKey(cap: {
+  aggregateOver: CumulativeSpendScope;
+  windowSeconds: number;
+  max: number;
+  currency: string;
+}): string {
+  return `${cap.aggregateOver}:${cap.windowSeconds}:${cap.max}:${cap.currency}`;
 }
 
 export interface ProviderPolicyRuleResult {
@@ -1579,7 +1612,8 @@ function evaluateCumulativeSpend(
   ctx: ProviderPolicyContext,
 ): string | null {
   // Re-validate the window at runtime (store-time already rejected malformed).
-  if (parseIso8601DurationSeconds(cs.window) === null) {
+  const windowSeconds = parseIso8601DurationSeconds(cs.window);
+  if (windowSeconds === null) {
     return PROVIDER_POLICY_REASON.CONFIGURATION_INVALID;
   }
   if (!isNonNegInt(cs.max)) {
@@ -1607,11 +1641,19 @@ function evaluateCumulativeSpend(
   }
   const thisSpend = rawSpend;
 
-  // The trailing-window aggregate for the configured scope. Absent block OR
-  // absent scope entry => missing signal => deny (never assume a zero window).
+  // The trailing-window aggregate for THIS cap's bucket (scope+window+max+
+  // currency). Absent block OR absent bucket entry => missing signal => deny
+  // (never assume a zero window). Keying by the full cap identity means two rules
+  // sharing a scope but with different windows/caps never collide.
   const agg = ctx.cumulativeSpend;
   if (!agg) return PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE;
-  const priorSum = agg[cs.aggregateOver];
+  const bucketKey = cumulativeSpendBucketKey({
+    aggregateOver: cs.aggregateOver,
+    windowSeconds,
+    max: cs.max,
+    currency: cs.currency,
+  });
+  const priorSum = agg[bucketKey];
   if (!isNonNegInt(priorSum)) {
     return PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE;
   }
