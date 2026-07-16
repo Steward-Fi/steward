@@ -46,6 +46,14 @@ const ALLOW_ONLY_RULES = [
 export async function seedCaseFixture(): Promise<void> {
   await seedFixture();
   const db = getDb();
+  // Give the admin user (APPROVER_2) a membership in TENANT_B too, so the
+  // N01 foreign-tenant test exercises the ROUTE-LEVEL tenant scoping (a valid
+  // admin of tenant B must get a uniform 404 for tenant A's case, not leak
+  // membership) rather than tripping tenantAuth's not-a-member 403 first.
+  await db
+    .insert(userTenants)
+    .values([{ userId: F.APPROVER_2, tenantId: F.TENANT_B, role: "admin" }])
+    .onConflictDoNothing();
   await db.insert(providerOperations).values([
     {
       id: ALLOW_ONLY_OP,

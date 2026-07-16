@@ -57,7 +57,9 @@ function fail(msg, seq) {
 
 function usage(msg) {
   console.error(`usage error: ${msg}`);
-  console.error("  node scripts/verify-evidence-bundle.mjs <bundle.json> [--expected-key-fingerprint <hex>]");
+  console.error(
+    "  node scripts/verify-evidence-bundle.mjs <bundle.json> [--expected-key-fingerprint <hex>]",
+  );
   console.error("  cat bundle.json | node scripts/verify-evidence-bundle.mjs [--fp <hex>]");
   console.error("");
   console.error("  --expected-key-fingerprint <hex>  SHA-256 of the trusted signing key SPKI PEM,");
@@ -203,7 +205,9 @@ function main() {
   // against the signed events (spec §7.4). A plain bundle behaves EXACTLY as
   // today (no regression).
   const isEvidenceEnvelope =
-    input.bundle && typeof input.bundle === "object" && input.manifest &&
+    input.bundle &&
+    typeof input.bundle === "object" &&
+    input.manifest &&
     typeof input.manifest === "object";
   const bundle = isEvidenceEnvelope ? input.bundle : input;
   const manifest = isEvidenceEnvelope ? input.manifest : null;
@@ -355,7 +359,8 @@ function main() {
   console.log(`  signature:     Ed25519 OK`);
   console.log(`  content:       SHA-256 events digest OK`);
   console.log(`  linkage:       OK`);
-  if (manifest) console.log(`  manifest:      cross-check OK (every fact backed by a signed event)`);
+  if (manifest)
+    console.log(`  manifest:      cross-check OK (every fact backed by a signed event)`);
   console.log(`  head:          ${headNote}`);
   console.log(
     `  trust root:    ${
@@ -370,7 +375,9 @@ function main() {
       "rows form an unbroken hash-chain segment; " +
       (manifest ? "every manifest fact is backed by a signed event; " : "") +
       (includesHead ? "the head matches the operator's signed checkpoint; " : "") +
-      (trustRootChecked ? "the signing key matches an auditor-supplied trusted fingerprint; " : "") +
+      (trustRootChecked
+        ? "the signing key matches an auditor-supplied trusted fingerprint; "
+        : "") +
       "the checkpoint is authentically Ed25519-signed and unaltered.",
   );
   console.log(
@@ -461,7 +468,9 @@ function verifyManifest(manifest, events, payload) {
   // Tenant cross-check (N22): manifest tenant must equal the SIGNED payload
   // tenant, so a foreign case id cannot be smuggled under one tenant's checkpoint.
   if (manifest.tenantId !== payload.tenantId) {
-    fail(`manifest tenantId (${manifest.tenantId}) != signed checkpoint tenant (${payload.tenantId})`);
+    fail(
+      `manifest tenantId (${manifest.tenantId}) != signed checkpoint tenant (${payload.tenantId})`,
+    );
   }
 
   // Build seq -> signed bundle event. (§7.4.1) Each manifest event MUST match
@@ -514,7 +523,9 @@ function verifyManifest(manifest, events, payload) {
       fail(`manifest fact ${metaKey} absent from the signed ${role} event metadata`);
     }
     if (signedVal !== manifestVal) {
-      fail(`manifest fact ${metaKey} (${manifestVal}) != signed ${role} event value (${signedVal})`);
+      fail(
+        `manifest fact ${metaKey} (${manifestVal}) != signed ${role} event value (${signedVal})`,
+      );
     }
   };
   // Genesis-backed facts (PR2 folded genesis carries action + decision hashes).
@@ -541,7 +552,8 @@ function verifyManifest(manifest, events, payload) {
       }
       if (
         manifest.execution.providerIdempotencyKeyHash &&
-        authEv.metadata?.providerIdempotencyKeyHash !== manifest.execution.providerIdempotencyKeyHash
+        authEv.metadata?.providerIdempotencyKeyHash !==
+          manifest.execution.providerIdempotencyKeyHash
       ) {
         fail("manifest providerIdempotencyKeyHash != signed exec_authorized event");
       }
@@ -568,7 +580,9 @@ function verifyManifest(manifest, events, payload) {
   const declaredMissing = new Set(manifest.missingRequiredRoles || []);
   for (const r of actuallyMissing) {
     if (!declaredMissing.has(r)) {
-      fail(`manifest omits required missing role ${r} (present in signed set? no) but did not declare it missing`);
+      fail(
+        `manifest omits required missing role ${r} (present in signed set? no) but did not declare it missing`,
+      );
     }
   }
 }

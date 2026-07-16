@@ -1,10 +1,15 @@
 /**
  * PR5 /case + /evidence route + offline-verifier round-trip.
  *
- * Seeds a real case, exports the manifest and the signed evidence bundle over
- * the HTTP routes (with a mock owner/admin+MFA gate), verifies the bundle
- * OFFLINE with scripts/verify-evidence-bundle.mjs (both with and without a
- * trusted fingerprint), and asserts each tamper fixture FAILs.
+ * Drives the REAL fully-composed app (`mod.app`) with genuinely-minted session
+ * Bearer tokens through the production middleware chain (tenantAuth ->
+ * auditOwnerAdminMfaGate) — NOT a mock app that injects context synthetically —
+ * so the route wiring itself is exercised (regression guard for the missing
+ * `/v2/provider-actions/:id/{case,evidence}` tenantAuth registration). Seeds a
+ * real case, exports the manifest and the signed evidence bundle over the HTTP
+ * routes, verifies the bundle OFFLINE with scripts/verify-evidence-bundle.mjs
+ * (both with and without a trusted fingerprint), and asserts each tamper
+ * fixture FAILs.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
@@ -13,9 +18,10 @@ import { createHash, generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { signAccessToken, signAgentToken } from "@stwd/auth";
 import { closeDb } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { Hono } from "hono";
+import type { Hono } from "hono";
 import { resetCheckpointSignerCache } from "../services/audit-checkpoint";
 import type { AppVariables } from "../services/context";
 import {
@@ -38,31 +44,58 @@ const VERIFIER = join(
   "verify-evidence-bundle.mjs",
 );
 let tmpDir: string;
-let caseRoutesModule: Awaited<typeof import("../routes/provider-case")>;
+let realApp: Hono<{ Variables: AppVariables }>;
 let expectedFp: string;
 
-function app(tenantId = F.TENANT, role: "owner" | "admin" | "member" = "admin", mfa = true) {
-  const a = new Hono<{ Variables: AppVariables }>();
-  a.use("*", async (c, next) => {
-    c.set("authType", "session-jwt");
-    c.set("tenantRole", role);
-    c.set("tenantId", tenantId);
-    if (mfa) c.set("sessionMfaVerifiedAt", Date.now());
-    await next();
-  });
-  caseRoutesModule.registerProviderCaseRoutes(a);
-  return a;
+// The fixture seeds APPROVER_2 as tenant `admin` (owner/admin gate passes) and
+// APPROVER as `member` (N06). We mint REAL session JWTs so tenantAuth resolves
+// authType/tenantRole/tenantId/sessionMfaVerifiedAt from the token, exactly as
+// production does. This is what makes the route wiring genuinely under test.
+const ADMIN_USER = F.APPROVER_2;
+const MEMBER_USER = F.APPROVER;
+
+async function sessionToken(opts: {
+  userId?: string;
+  tenantId?: string;
+  mfa?: boolean;
+}): Promise<string> {
+  const payload: Record<string, unknown> = {
+    address: `0x${(opts.userId ?? ADMIN_USER).slice(0, 8)}`,
+    tenantId: opts.tenantId ?? F.TENANT,
+    userId: opts.userId ?? ADMIN_USER,
+  };
+  if (opts.mfa !== false) payload.mfaVerifiedAt = Date.now();
+  return signAccessToken(payload as never, "10m");
 }
 
-function agentApp(tenantId = F.TENANT) {
-  const a = new Hono<{ Variables: AppVariables }>();
-  a.use("*", async (c, next) => {
-    c.set("authType", "agent-jwt");
-    c.set("tenantId", tenantId);
-    await next();
-  });
-  caseRoutesModule.registerProviderCaseRoutes(a);
-  return a;
+/**
+ * Build request options (headers) for an owner/admin session against the REAL
+ * composed app. Callers do `realApp.request(path, await authHeaders())`.
+ */
+async function authHeaders(
+  tenantId = F.TENANT,
+  role: "admin" | "member" = "admin",
+  mfa = true,
+): Promise<{ headers: Record<string, string> }> {
+  const userId = role === "member" ? MEMBER_USER : ADMIN_USER;
+  const token = await sessionToken({ userId, tenantId, mfa });
+  return {
+    headers: {
+      authorization: `Bearer ${token}`,
+      "x-steward-tenant": tenantId,
+    },
+  };
+}
+
+/** Agent-token request options (N04): must be rejected by the owner/admin gate. */
+async function agentHeaders(tenantId = F.TENANT): Promise<{ headers: Record<string, string> }> {
+  const token = await signAgentToken({ agentId: F.AGENT, tenantId, scopes: [] }, "10m");
+  return {
+    headers: {
+      authorization: `Bearer ${token}`,
+      "x-steward-tenant": tenantId,
+    },
+  };
 }
 
 function runVerifier(bundleOrEnvelope: unknown, extraArgs: string[] = []) {
@@ -78,6 +111,10 @@ describe("PR5 /case + /evidence routes + offline verifier", () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY = "0".repeat(64);
     process.env.STEWARD_MASTER_PASSWORD = "pr5-evidence-master-password";
+    // Canonical JWT secret for minting real session/agent tokens (see note in
+    // provider-case-route-wiring). Required in a clean CI env.
+    process.env.STEWARD_JWT_SECRET =
+      process.env.STEWARD_JWT_SECRET || "pr5-evidence-jwt-secret-0123456789abcdef0123456789";
     const { privateKey, publicKey } = generateKeyPairSync("ed25519");
     process.env.STEWARD_AUDIT_SIGNING_KEY = privateKey
       .export({ format: "pem", type: "pkcs8" })
@@ -88,7 +125,8 @@ describe("PR5 /case + /evidence routes + offline verifier", () => {
     resetCheckpointSignerCache();
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => client.close());
-    caseRoutesModule = await import("../routes/provider-case");
+    const mod = await import("../app");
+    realApp = mod.app as Hono<{ Variables: AppVariables }>;
   }, 120_000);
 
   afterAll(async () => {
@@ -98,6 +136,7 @@ describe("PR5 /case + /evidence routes + offline verifier", () => {
     delete process.env.STEWARD_AUDIT_HMAC_KEY;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_AUDIT_SIGNING_KEY;
+    delete process.env.STEWARD_JWT_SECRET;
     resetCheckpointSignerCache();
   });
 
@@ -108,7 +147,7 @@ describe("PR5 /case + /evidence routes + offline verifier", () => {
 
   it("GET /case returns the manifest for an owner/admin", async () => {
     const intentId = await createAllowedCase();
-    const res = await app().request(`/v2/provider-actions/${intentId}/case`);
+    const res = await realApp.request(`/v2/provider-actions/${intentId}/case`, await authHeaders());
     expect(res.status).toBe(200);
     const m = (await res.json()) as { caseId: string; schemaVersion: string };
     expect(m.caseId).toBe(intentId);
@@ -117,7 +156,10 @@ describe("PR5 /case + /evidence routes + offline verifier", () => {
 
   it("GET /evidence exports a bundle that verifies OFFLINE (clean)", async () => {
     const intentId = await createAllowedCase();
-    const res = await app().request(`/v2/provider-actions/${intentId}/evidence`);
+    const res = await realApp.request(
+      `/v2/provider-actions/${intentId}/evidence`,
+      await authHeaders(),
+    );
     expect(res.status).toBe(200);
     const envelope = await res.json();
     // No fingerprint supplied → PASS but trust-root not checked.
@@ -132,8 +174,8 @@ describe("PR5 /case + /evidence routes + offline verifier", () => {
 
   it("N17/N35: wrong fingerprint → verifier FAIL untrusted", async () => {
     const intentId = await createAllowedCase();
-    const envelope = await app()
-      .request(`/v2/provider-actions/${intentId}/evidence`)
+    const envelope = await realApp
+      .request(`/v2/provider-actions/${intentId}/evidence`, await authHeaders())
       .then((r) => r.json());
     const res = runVerifier(envelope, ["--fp", "deadbeef"]);
     expect(res.code).toBe(1);
@@ -142,8 +184,8 @@ describe("PR5 /case + /evidence routes + offline verifier", () => {
 
   it("N08: mutated manifest actionDigest → verifier FAIL not-backed", async () => {
     const intentId = await createAllowedCase();
-    const envelope = (await app()
-      .request(`/v2/provider-actions/${intentId}/evidence`)
+    const envelope = (await realApp
+      .request(`/v2/provider-actions/${intentId}/evidence`, await authHeaders())
       .then((r) => r.json())) as { manifest: { actionDigest: string } };
     envelope.manifest.actionDigest = `sha256:${"9".repeat(64)}`;
     const res = runVerifier(envelope);
@@ -153,8 +195,8 @@ describe("PR5 /case + /evidence routes + offline verifier", () => {
 
   it("N09: forged completeness (claim complete, drop required roles) → FAIL", async () => {
     const intentId = await createAllowedCase();
-    const envelope = (await app()
-      .request(`/v2/provider-actions/${intentId}/evidence`)
+    const envelope = (await realApp
+      .request(`/v2/provider-actions/${intentId}/evidence`, await authHeaders())
       .then((r) => r.json())) as {
       manifest: { terminalState: string; completeness: string; missingRequiredRoles: string[] };
     };
@@ -171,8 +213,8 @@ describe("PR5 /case + /evidence routes + offline verifier", () => {
     // Use an approved case so there are >=2 correlated events to reorder.
     const { intentId, requestHash, actionDigest } = await createPendingCase();
     await approveCase(intentId, requestHash, actionDigest);
-    const envelope = (await app()
-      .request(`/v2/provider-actions/${intentId}/evidence`)
+    const envelope = (await realApp
+      .request(`/v2/provider-actions/${intentId}/evidence`, await authHeaders())
       .then((r) => r.json())) as { bundle: { events: unknown[] } };
     if (envelope.bundle.events.length >= 2) {
       const e = envelope.bundle.events;
@@ -184,8 +226,8 @@ describe("PR5 /case + /evidence routes + offline verifier", () => {
 
   it("N12: removed genesis event → verifier FAIL (digest/linkage)", async () => {
     const intentId = await createAllowedCase();
-    const envelope = (await app()
-      .request(`/v2/provider-actions/${intentId}/evidence`)
+    const envelope = (await realApp
+      .request(`/v2/provider-actions/${intentId}/evidence`, await authHeaders())
       .then((r) => r.json())) as { bundle: { events: unknown[] } };
     envelope.bundle.events = envelope.bundle.events.slice(1);
     const res = runVerifier(envelope);
@@ -198,7 +240,10 @@ describe("PR5 /case + /evidence routes + offline verifier", () => {
     delete process.env.STEWARD_AUDIT_SIGNING_KEY;
     resetCheckpointSignerCache();
     try {
-      const res = await app().request(`/v2/provider-actions/${intentId}/evidence`);
+      const res = await realApp.request(
+        `/v2/provider-actions/${intentId}/evidence`,
+        await authHeaders(),
+      );
       expect(res.status).toBe(503);
       const body = (await res.json()) as { error: string };
       expect(body.error).toBe("CASE_EVIDENCE_SIGNING_DISABLED");
@@ -210,34 +255,45 @@ describe("PR5 /case + /evidence routes + offline verifier", () => {
 
   it("N04: agent token → 403 CASE_FORBIDDEN(generic)", async () => {
     const intentId = await createAllowedCase();
-    const res = await agentApp().request(`/v2/provider-actions/${intentId}/case`);
+    const res = await realApp.request(
+      `/v2/provider-actions/${intentId}/case`,
+      await agentHeaders(),
+    );
     expect(res.status).toBe(403);
   });
 
   it("N05: owner without recent MFA → 403", async () => {
     const intentId = await createAllowedCase();
-    const res = await app(F.TENANT, "admin", false).request(
+    const res = await realApp.request(
       `/v2/provider-actions/${intentId}/case`,
+      await authHeaders(F.TENANT, "admin", false),
     );
     expect(res.status).toBe(403);
   });
 
   it("N06: member (non-admin) role → 403", async () => {
     const intentId = await createAllowedCase();
-    const res = await app(F.TENANT, "member").request(`/v2/provider-actions/${intentId}/case`);
+    const res = await realApp.request(
+      `/v2/provider-actions/${intentId}/case`,
+      await authHeaders(F.TENANT, "member"),
+    );
     expect(res.status).toBe(403);
   });
 
   it("N01/N02/N03: foreign-tenant / foreign-workspace / nonexistent → uniform 404", async () => {
     const intentId = await createAllowedCase();
-    // N01 foreign tenant (gate sets tenant to a different one).
-    const foreignTenant = await app("tenant-b", "admin").request(
+    // N01 foreign tenant: a valid admin session for a DIFFERENT tenant must not
+    // see this tenant's case. The session token's tenantId (+ matching header)
+    // scopes the query, so the case is not found under the caller's tenant.
+    const foreignTenant = await realApp.request(
       `/v2/provider-actions/${intentId}/case`,
+      await authHeaders(F.TENANT_B, "admin"),
     );
     expect(foreignTenant.status).toBe(404);
     // N03 nonexistent id (valid shape).
-    const nonexistent = await app().request(
+    const nonexistent = await realApp.request(
       "/v2/provider-actions/pa_00000000-0000-0000-0000-000000000000/case",
+      await authHeaders(),
     );
     expect(nonexistent.status).toBe(404);
     const b1 = (await foreignTenant.json()) as { error: string };
@@ -247,13 +303,17 @@ describe("PR5 /case + /evidence routes + offline verifier", () => {
   });
 
   it("N37/N38/N39: malformed case id (traversal/nullbyte/unicode) → uniform 404", async () => {
+    const auth = await authHeaders();
     for (const bad of [
       "..%2f..%2fetc",
       "pa_x",
       "pa_00000000-0000-0000-0000-00000000000",
       "not-a-case",
     ]) {
-      const res = await app().request(`/v2/provider-actions/${encodeURIComponent(bad)}/case`);
+      const res = await realApp.request(
+        `/v2/provider-actions/${encodeURIComponent(bad)}/case`,
+        auth,
+      );
       expect(res.status).toBe(404);
     }
   });
@@ -261,8 +321,8 @@ describe("PR5 /case + /evidence routes + offline verifier", () => {
   it("N24: credential-looking comment body never appears in exported evidence", async () => {
     // The allowed op body is not included in evidence (safe summary excludes it).
     const intentId = await createAllowedCase("leak0001");
-    const envelope = await app()
-      .request(`/v2/provider-actions/${intentId}/evidence`)
+    const envelope = await realApp
+      .request(`/v2/provider-actions/${intentId}/evidence`, await authHeaders())
       .then((r) => r.text());
     // No bearer/token-looking canary and no raw provider idempotency key. (The
     // word "authorization" legitimately appears in the canonicalizationSpec text
@@ -297,12 +357,18 @@ describe("PR5 /case + /evidence routes + offline verifier", () => {
           )}, now())`,
     );
     // /case (manifest-only) still serves the manifest (marked unknown).
-    const caseRes = await app().request(`/v2/provider-actions/${intentId}/case`);
+    const caseRes = await realApp.request(
+      `/v2/provider-actions/${intentId}/case`,
+      await authHeaders(),
+    );
     expect(caseRes.status).toBe(200);
     const m = (await caseRes.json()) as { completeness: string };
     expect(m.completeness).toBe("unknown");
     // /evidence refuses to materialize the unbounded range.
-    const eviRes = await app().request(`/v2/provider-actions/${intentId}/evidence`);
+    const eviRes = await realApp.request(
+      `/v2/provider-actions/${intentId}/evidence`,
+      await authHeaders(),
+    );
     expect(eviRes.status).toBe(400);
     const body = (await eviRes.json()) as { error: string };
     expect(body.error).toBe("CASE_RANGE_TOO_LARGE");
@@ -310,8 +376,8 @@ describe("PR5 /case + /evidence routes + offline verifier", () => {
 
   it("access-denied case verifies OFFLINE and is honestly complete (genesis-only)", async () => {
     const intentId = await createAccessDeniedCase();
-    const envelope = (await app()
-      .request(`/v2/provider-actions/${intentId}/evidence`)
+    const envelope = (await realApp
+      .request(`/v2/provider-actions/${intentId}/evidence`, await authHeaders())
       .then((r) => r.json())) as { completeness: string };
     expect(envelope.completeness).toBe("complete");
     const res = runVerifier(envelope, ["--expected-key-fingerprint", expectedFp]);

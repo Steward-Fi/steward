@@ -25,7 +25,12 @@ import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { auditOwnerAdminMfaGate } from "../middleware/audit-gate";
 import { AuditSigningKeyError, isCheckpointSigningConfigured } from "../services/audit-checkpoint";
-import { type ApiResponse, type AppVariables } from "../services/context";
+import {
+  type ApiResponse,
+  type AppVariables,
+  setNoStoreHeaders,
+  tenantAuth,
+} from "../services/context";
 import {
   CaseRangeTooLargeError,
   getProviderCase,
@@ -124,7 +129,24 @@ providerCaseRoutes.get("/provider-actions/:id/evidence", async (c) => {
  * and `/v2/provider-actions/:id/evidence` win over the authority
  * `/provider-accounts/:id/...` and the `/v2/provider-actions/:id` read wildcards
  * (same collision-avoidance pattern as registerProviderActionRoutes).
+ *
+ * CRITICAL: `tenantAuth` MUST be registered on the concrete case/evidence paths
+ * directly on the app so it populates `authType`/`tenantRole`/`tenantId`/
+ * `sessionMfaVerifiedAt` BEFORE the sub-app's `auditOwnerAdminMfaGate` consumes
+ * them (identical pattern to `registerProviderApprovalRoutes` for
+ * `/v2/provider-actions/:id/{approval,execute}`). The global app.ts middleware
+ * only wires `tenantAuth` for `/v2/workspaces|provider-accounts|...` — NOT for
+ * `/v2/provider-actions/*` — so without this the gate would see an unpopulated
+ * context and reject EVERY request with 403, making the routes unreachable.
  */
 export function registerProviderCaseRoutes(app: Hono<{ Variables: AppVariables }>): void {
+  const casePaths = ["/v2/provider-actions/:id/case", "/v2/provider-actions/:id/evidence"];
+  for (const p of casePaths) {
+    app.use(p, async (c, next) => {
+      setNoStoreHeaders(c);
+      await next();
+    });
+    app.use(p, (c, next) => tenantAuth(c, next));
+  }
   app.route("/v2", providerCaseRoutes);
 }
