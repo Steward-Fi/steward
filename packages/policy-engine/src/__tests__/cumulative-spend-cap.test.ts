@@ -1,5 +1,5 @@
 /**
- * cumulative-spend-cap.test.ts — proves the #206 cumulativeSpend cap +
+ * cumulative-spend-cap.test.ts - proves the #206 cumulativeSpend cap +
  * configurable count window in capability-intent (Privy aggregate-limit parity).
  *
  * Adversarial coverage:
@@ -61,7 +61,7 @@ function spendRule(
   });
 }
 
-describe("cumulativeSpend — under / boundary / over", () => {
+describe("cumulativeSpend - under / boundary / over", () => {
   it("under-cap passes (prior 0 + 1_000_000 <= 5_000_000)", () => {
     const d = composeProviderActionPolicyDecision([spendRule(5_000_000)], ctx());
     expect(d.effect).toBe("allow");
@@ -113,7 +113,7 @@ describe("cumulativeSpend — under / boundary / over", () => {
   });
 });
 
-describe("cumulativeSpend — fail-closed missing signals", () => {
+describe("cumulativeSpend - fail-closed missing signals", () => {
   it("missing aggregate block entirely => deny (INPUT_UNAVAILABLE)", () => {
     const d = composeProviderActionPolicyDecision(
       [spendRule(5_000_000)],
@@ -163,7 +163,7 @@ describe("cumulativeSpend — fail-closed missing signals", () => {
   });
 });
 
-describe("cumulativeSpend — currency discipline (no FX)", () => {
+describe("cumulativeSpend - currency discipline (no FX)", () => {
   it("operation currency != cap currency => deny (CURRENCY_MISMATCH)", () => {
     const d = composeProviderActionPolicyDecision(
       [spendRule(5_000_000, "agent", "USD")],
@@ -182,7 +182,7 @@ describe("cumulativeSpend — currency discipline (no FX)", () => {
   });
 });
 
-describe("cumulativeSpend — aggregateOver scope selection", () => {
+describe("cumulativeSpend - aggregateOver scope selection", () => {
   it("operation scope reads the operation sum", () => {
     const overCtx = ctx({
       cumulativeSpend: { operation: 5_000_000, agent: 0, grant: 0 },
@@ -206,7 +206,7 @@ describe("cumulativeSpend — aggregateOver scope selection", () => {
   });
 });
 
-describe("cumulativeSpend — precedence (deny wins)", () => {
+describe("cumulativeSpend - precedence (deny wins)", () => {
   it("cap breach (allow rule fails hard constraint) beats a require-approval rule", () => {
     const rules: ProviderPolicyRule[] = [
       spendRule(1_000), // 0 + 1_000_000 > 1_000 => hard deny
@@ -272,7 +272,7 @@ describe("configurable count window (maxCalls + callWindow)", () => {
   });
 });
 
-describe("cumulativeSpend + maxCalls — store-time config validation (fail closed)", () => {
+describe("cumulativeSpend + maxCalls - store-time config validation (fail closed)", () => {
   const store = (constraints: Record<string, unknown>) =>
     parseCapabilityIntentConfigForTest({ capabilities: [OP], effect: "allow", constraints });
 
@@ -364,7 +364,7 @@ describe("cumulativeSpend + maxCalls — store-time config validation (fail clos
   });
 });
 
-describe("cumulativeSpend — runtime denies a hand-edited malformed window", () => {
+describe("cumulativeSpend - runtime denies a hand-edited malformed window", () => {
   it("a stored-but-malformed window denies at eval (CONFIGURATION_INVALID)", () => {
     // Bypass store-time validation to simulate a corrupt/hand-edited jsonb row:
     // the eval path must re-validate and fail closed, not pass unbounded.

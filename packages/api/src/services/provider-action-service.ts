@@ -83,7 +83,7 @@ const POLICY_TYPE = "capability-intent" as const;
 /**
  * A handle to an atomic cumulative-spend reservation (#206) so the pipeline can
  * SETTLE it (known-success) or RELEASE it (known-failure/deny). On
- * outcome_unknown the pipeline deliberately does NEITHER — the reservation ages
+ * outcome_unknown the pipeline deliberately does NEITHER - the reservation ages
  * out at the window edge (fail closed for a money cap: never free budget that
  * may have really spent).
  */
@@ -700,7 +700,7 @@ class ProviderActionService {
       // #206: reclaim any cumulative-spend reservations this decision holds. A
       // spend-cap breach already released its own reservations during eval; this
       // covers a deny for a DIFFERENT reason where a cumulativeSpend rule had
-      // passed and reserved — the action will not execute, so free its budget.
+      // passed and reserved - the action will not execute, so free its budget.
       await this.finalizeCumulativeSpend(
         (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [],
         "failure",
@@ -741,7 +741,7 @@ class ProviderActionService {
     } catch {
       // #206: OUTCOME_UNKNOWN. The stub threw AFTER we admitted + reserved; we
       // cannot prove the action did or did not spend. Deliberately DO NOT release
-      // the reservation — it ages out at the window edge. Fail closed: never free
+      // the reservation - it ages out at the window edge. Fail closed: never free
       // budget that may have really been spent (a deny-side error is safe; an
       // allow-side error is not).
       return {
@@ -1651,13 +1651,13 @@ function extractCapabilityIntentRules(
 }
 
 /**
- * Extract the operation's DECLARED spend field (#206). The OPERATION — not the
- * caller — declares which validated `policyArgs` field carries the per-invoke
+ * Extract the operation's DECLARED spend field (#206). The OPERATION - not the
+ * caller - declares which validated `policyArgs` field carries the per-invoke
  * spend amount and its currency, via
  * `request_profile.spendDeclaration: { field: string, currency: string }`.
  * Absent/malformed => undefined; a cumulativeSpend rule on such an operation
  * then fails closed (POLICY_CUMULATIVE_SPEND_NO_SPEND_FIELD) in the composer.
- * We NEVER infer a spend field — an operation that cannot move money simply
+ * We NEVER infer a spend field - an operation that cannot move money simply
  * carries no declaration and can never be governed by a spend cap by accident.
  */
 function extractSpendDeclaration(
@@ -1744,7 +1744,7 @@ function extractGoverningCumulativeSpend(
  * policy-engine parser (P[nD]T[nH][nM][nS], PnW; Y/M rejected as ambiguous).
  * Kept local to avoid a runtime import cycle; the policy engine owns the
  * canonical parser and both must agree (a divergence would let a window the
- * policy accepts fail to reserve, or vice versa — covered by an E2E).
+ * policy accepts fail to reserve, or vice versa - covered by an E2E).
  */
 function parseIso8601DurationSecondsForApi(input: unknown): number | null {
   if (typeof input !== "string" || input.length === 0) return null;

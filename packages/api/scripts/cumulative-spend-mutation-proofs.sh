@@ -58,30 +58,30 @@ proof() {
   mv "$target.bak" "$target"
 }
 
-# M1: WEAKEN THE SUM COMPARE — projected > max becomes projected > max+1, so an
+# M1: WEAKEN THE SUM COMPARE - projected > max becomes projected > max+1, so an
 # over-cap invoke (exactly one micro over) no longer denies.
 proof "M1 weaken cumulativeSpend sum compare" "$ENGINE" run_policy_test \
   "one micro over the boundary denies" \
   's/if (projected > cs.max) {/if (projected > cs.max + 1) {/'
 
-# M2: SKIP THE MISSING-AGGREGATE DENY — an absent aggregate is treated as a zero
+# M2: SKIP THE MISSING-AGGREGATE DENY - an absent aggregate is treated as a zero
 # window instead of a missing signal, so a cumulativeSpend rule silently passes.
 proof "M2 skip missing-aggregate deny" "$ENGINE" run_policy_test \
   "missing aggregate block entirely => deny" \
   's/if (!agg) return PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE;/if (!agg) return null;/'
 
-# M3: DROP THE CURRENCY CHECK — a mismatched currency no longer denies (silent FX).
+# M3: DROP THE CURRENCY CHECK - a mismatched currency no longer denies (silent FX).
 proof "M3 drop currency-mismatch deny" "$ENGINE" run_policy_test \
   "operation currency != cap currency => deny" \
   's/if (decl.currency !== cs.currency) {/if (false) {/'
 
-# M4: BREAK WINDOW AGEOUT — the reservation read uses an inclusive lower bound so
+# M4: BREAK WINDOW AGEOUT - the reservation read uses an inclusive lower bound so
 # an entry EXACTLY windowSeconds old is wrongly counted (should have aged out).
 proof "M4 break trailing-window ageout boundary" "$TRACKER" run_tracker_test \
   "boundary: an entry EXACTLY windowSeconds old has aged out" \
   "s/redis.call('ZRANGEBYSCORE', KEYS\[1\], '(' .. windowStart, now)/redis.call('ZRANGEBYSCORE', KEYS[1], windowStart, now)/g"
 
-# M5: DROP THE RESERVATION ATOMICITY GUARD — the Lua reserve no longer checks the
+# M5: DROP THE RESERVATION ATOMICITY GUARD - the Lua reserve no longer checks the
 # cap before ZADD, so concurrent reserves can collectively exceed the cap.
 proof "M5 drop reservation atomicity (cap check before add)" "$TRACKER" run_tracker_test \
   "100 parallel reserves of 100k against a 1M cap admit exactly 10" \

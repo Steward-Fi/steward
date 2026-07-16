@@ -1,12 +1,12 @@
 /**
- * cumulative-spend-tracker.test.ts — proves the #206 atomic, configurable-window
+ * cumulative-spend-tracker.test.ts - proves the #206 atomic, configurable-window
  * cumulative spend reservation against a REAL Redis (STEWARD_REDIS_TESTS=1).
  *
  * Adversarial coverage:
  *  - reserve admits under cap, rejects at/over cap (boundary is inclusive: a
  *    reserve that lands the sum EXACTLY on max is admitted; one micro over is not).
  *  - REAL concurrency: N parallel reserves that would collectively exceed the cap
- *    admit only as many as fit — the atomic Lua script is single-winner (no
+ *    admit only as many as fit - the atomic Lua script is single-winner (no
  *    read-then-check race).
  *  - window ageout: an entry older than the trailing window is excluded from the
  *    sum; a boundary entry exactly S seconds old has aged out.
@@ -52,7 +52,7 @@ afterAll(async () => {
   await disconnectRedis();
 });
 
-describeRedis("reserveCumulativeSpend — under / boundary / over", () => {
+describeRedis("reserveCumulativeSpend - under / boundary / over", () => {
   test("under cap admits and reports priorSum", async () => {
     const r = await reserveCumulativeSpend({
       agentId: AGENT,
@@ -89,7 +89,7 @@ describeRedis("reserveCumulativeSpend — under / boundary / over", () => {
   });
 });
 
-describeRedis("reserveCumulativeSpend — REAL concurrency single-winner", () => {
+describeRedis("reserveCumulativeSpend - REAL concurrency single-winner", () => {
   test("100 parallel reserves of 100k against a 1M cap admit exactly 10", async () => {
     const base = {
       agentId: AGENT,

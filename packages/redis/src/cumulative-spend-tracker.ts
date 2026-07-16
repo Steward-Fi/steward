@@ -1,6 +1,6 @@
 /**
  * Cumulative (aggregate) spend tracker with CONFIGURABLE trailing windows and
- * ATOMIC single-winner reservations — backs the policy-engine `cumulativeSpend`
+ * ATOMIC single-winner reservations - backs the policy-engine `cumulativeSpend`
  * capability-intent constraint (#206, Privy aggregate-limit parity).
  *
  * WHY A NEW TRACKER (vs spend-tracker.ts / aggregation-tracker.ts)
@@ -10,11 +10,11 @@
  *     and it scopes per-agent only.
  *   - `aggregation-tracker.ts` supports rolling windows but is READ-THEN-CHECK
  *     (record AFTER settle; the evaluator reads a snapshot). Two concurrent
- *     invokes can both read the same prior sum and both pass — unacceptable for a
+ *     invokes can both read the same prior sum and both pass - unacceptable for a
  *     hard money cap (#206 req 4).
  * This tracker combines both: a sorted-set rolling window (any windowSeconds) +
  * a single Lua script that prunes, sums, checks `sum + amount <= max`, and only
- * then appends the reservation — so concurrent reservers can never collectively
+ * then appends the reservation - so concurrent reservers can never collectively
  * cross the cap (TOCTOU-free).
  *
  * SCOPES (mirror the cumulativeSpend `aggregateOver`):
@@ -22,7 +22,7 @@
  *   - "agent":     per agent                    key discriminator = ""
  *   - "grant":     per grant                     key discriminator = grantId
  *
- * MONEY MATH: integer minor units only (micros/cents — the caller's convention,
+ * MONEY MATH: integer minor units only (micros/cents - the caller's convention,
  * matching the policy `max`). No floats, no FX. A currency is part of the key so
  * two currencies never share a window.
  *
@@ -36,7 +36,7 @@
  *      returns a reservationId. The reserved amount is IMMEDIATELY part of the
  *      window sum, so a concurrent invoke sees it.
  *   2. On a KNOWN-SUCCESS outcome, settleCumulativeSpend(...) keeps the entry
- *      (it stays counted for the rest of the window) — a no-op mark, present for
+ *      (it stays counted for the rest of the window) - a no-op mark, present for
  *      symmetry + auditability.
  *   3. On a KNOWN-FAILURE outcome, releaseCumulativeSpend(...) removes the entry
  *      so the budget is reclaimed.
@@ -45,7 +45,7 @@
  *      naturally at the window edge. This is fail-CLOSED for a money cap: an
  *      unknown outcome must never free budget it may have actually spent. The
  *      honest cost is a possible transient over-count for one window if the
- *      action in fact never spent — acceptable for a guardrail (deny-side error
+ *      action in fact never spent - acceptable for a guardrail (deny-side error
  *      is safe; allow-side error is not).
  *
  * PER-PROCESS CAVEAT: correctness under concurrency is guaranteed by the atomic
@@ -57,7 +57,7 @@ import { getRedis } from "./client.js";
 
 export type CumulativeSpendScope = "operation" | "agent" | "grant";
 
-/** Max window we retain reservation entries for (30d — matches other trackers). */
+/** Max window we retain reservation entries for (30d - matches other trackers). */
 const MAX_WINDOW_SECONDS = 2592000;
 const RETENTION_MS = MAX_WINDOW_SECONDS * 1000;
 
@@ -66,7 +66,7 @@ export interface CumulativeSpendKeyParts {
   scope: CumulativeSpendScope;
   /** operationKey for "operation" scope, grantId for "grant" scope, "" for "agent". */
   scopeKey: string;
-  /** currency/asset tag — part of the key so currencies never share a window. */
+  /** currency/asset tag - part of the key so currencies never share a window. */
   currency: string;
 }
 
@@ -263,7 +263,7 @@ export async function settleCumulativeSpend(_input: {
 /**
  * Release a reservation on a KNOWN-FAILURE outcome, reclaiming its budget. Safe
  * to call at most once per reservationId; a second call is a no-op (ZREM of an
- * absent member). NEVER call this on outcome_unknown — an unconfirmed action may
+ * absent member). NEVER call this on outcome_unknown - an unconfirmed action may
  * have really spent, and freeing its budget would be an allow-side error.
  */
 export async function releaseCumulativeSpend(input: {

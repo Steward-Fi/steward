@@ -92,13 +92,13 @@ export type CapabilityIntentEffect = "allow" | "deny" | "require-approval";
 // ─── Cumulative spend caps (#206, Privy aggregate-limit parity) ───────────────
 //
 // A `cumulativeSpend` constraint bounds the TOTAL money an agent may move through
-// a capability over a trailing time window — the canonical agentic-wallet
+// a capability over a trailing time window - the canonical agentic-wallet
 // guardrail a call-count cap cannot express (10 calls moving $1M each pass
 // `maxCallsPerHour: 20`). It mirrors the permissioned-X spend cap already in this
 // file (accumulated window spend + this action's cost, integer micros, deny on
 // breach) but generalizes it to:
 //   - a CONFIGURABLE trailing window (ISO-8601 duration, not a hardcoded hour),
-//   - a declared CURRENCY (no FX — a currency mismatch denies),
+//   - a declared CURRENCY (no FX - a currency mismatch denies),
 //   - a selectable AGGREGATION SCOPE (operation / agent / grant),
 //   - a per-operation spend value derived ONLY from validated `policyArgs` via a
 //     declared, typed field (never raw JSON; an operation without the declared
@@ -119,11 +119,11 @@ export type CumulativeSpendScope = "operation" | "agent" | "grant";
  *     fail-closed to a positive integer number of seconds; a malformed or
  *     zero/negative duration is a config error (deny at store AND at runtime).
  *   - `currency`: opaque currency/asset tag (e.g. `USD`, `USDC`). Compared
- *     verbatim against the operation's spend currency — NO FX conversion. A
+ *     verbatim against the operation's spend currency - NO FX conversion. A
  *     mismatch denies with a stable code.
- *   - `max`: the cap, an INTEGER in the currency's minor unit (micros/cents —
+ *   - `max`: the cap, an INTEGER in the currency's minor unit (micros/cents -
  *     the caller's convention). No floats. Non-negative.
- *   - `aggregateOver`: which trailing-window sum to compare against — the
+ *   - `aggregateOver`: which trailing-window sum to compare against - the
  *     per-operation sum, the whole-agent sum, or the per-grant sum.
  */
 export interface CumulativeSpendConstraint {
@@ -370,7 +370,7 @@ const CUMULATIVE_SPEND_SCOPES: ReadonlySet<string> = new Set(["operation", "agen
  * (fail closed).
  *
  * SUPPORTED SUBSET (deliberately restricted so the parse is total + auditable):
- *   `P[nD]T[nH][nM][nS]` and the time-only `PT[nH][nM][nS]` — integer,
+ *   `P[nD]T[nH][nM][nS]` and the time-only `PT[nH][nM][nS]` - integer,
  *   non-negative components; at least one component must be present and the
  *   total must be > 0. Weeks (`PnW`) are also accepted as a standalone form.
  *   Years/months (`PnY`, `PnM` in the DATE position) are REJECTED: their second
@@ -1277,8 +1277,8 @@ export interface ProviderPolicyContext {
     readonly nowMinuteUtc?: number;
   };
   /**
-   * The operation's DECLARED spend field (#206). The operation — not the caller
-   * — declares which validated `policyArgs` field carries the per-invoke spend
+   * The operation's DECLARED spend field (#206). The operation - not the caller
+   * - declares which validated `policyArgs` field carries the per-invoke spend
    * amount and what currency it is denominated in. The composer reads the amount
    * ONLY from `args[spendDeclaration.field]` (validated scalars, never raw JSON).
    *
@@ -1599,7 +1599,7 @@ function evaluateCumulativeSpend(
   }
 
   // Spend derives ONLY from the validated policyArgs field the operation
-  // declared — never from raw JSON. Absent / non-integer / negative => fail
+  // declared - never from raw JSON. Absent / non-integer / negative => fail
   // closed (we cannot price the action, so we cannot let it through a spend cap).
   const rawSpend = Object.hasOwn(ctx.args, decl.field) ? ctx.args[decl.field] : undefined;
   if (!isNonNegInt(rawSpend)) {

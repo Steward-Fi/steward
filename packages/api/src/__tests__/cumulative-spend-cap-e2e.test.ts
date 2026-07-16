@@ -1,5 +1,5 @@
 /**
- * cumulative-spend-cap-e2e.test.ts — #206 C-DRIFT-2 full-chain E2Es.
+ * cumulative-spend-cap-e2e.test.ts - #206 C-DRIFT-2 full-chain E2Es.
  *
  * These run through the REAL providerActionService against a REAL PGLite DB AND
  * a REAL Redis (the atomic cumulative-spend reservation store). No stubbed
@@ -12,7 +12,7 @@
  * Each governed invoke therefore "spends" its tweet's byte length; a SEQUENCE of
  * invokes accumulates until the trailing-window cap is crossed, at which point
  * the service denies with the structured reason POLICY_CUMULATIVE_SPEND_CAP_EXCEEDED.
- * (Bytes are a legitimate integer spend proxy here — the point is the real
+ * (Bytes are a legitimate integer spend proxy here - the point is the real
  * aggregate wiring + atomic reservation + structured deny, not the currency.)
  *
  * E2E #1: a sequence of allow invokes crosses the agent-scoped cap; the crossing
@@ -211,7 +211,7 @@ async function seed(opts: {
       tenantId: CS.TENANT,
       workspaceId: CS.WORKSPACE,
       adapterKey: "x",
-      // account provider handle reference — plain scalar.
+      // account provider handle reference - plain scalar.
       externalRef: "8888",
       displayName: "@cs",
       credentialSecretId: CS.SECRET,
@@ -276,7 +276,7 @@ async function proposeTweet(text: string, seed: string) {
   });
 }
 
-describeRedis("#206 cumulativeSpend cap — full-chain E2E (real service + real Redis)", () => {
+describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Redis)", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY ||= "0".repeat(64);
@@ -313,7 +313,7 @@ describeRedis("#206 cumulativeSpend cap — full-chain E2E (real service + real 
       expect(t3.code).toBe(PROVIDER_POLICY_REASON.CUMULATIVE_SPEND_CAP_EXCEEDED);
     }
 
-    // A smaller tweet that still fits (200 + 40 = 240 <= 250) is admitted — the
+    // A smaller tweet that still fits (200 + 40 = 240 <= 250) is admitted - the
     // denied invoke did NOT consume budget (its reservation was released).
     const t4 = await proposeTweet("d".repeat(40), "cs-e2e-1d");
     expect(t4.kind).toBe("allowed");
