@@ -82,6 +82,10 @@ const TOP_LEVEL_KEYS = new Set([
   "operationKey",
   "arguments",
   "idempotencyKey",
+  // #201: for config-driven (generic-http) operations the caller supplies the
+  // HTTP method explicitly (the descriptor may allow several); adapter-fixed
+  // github/x operations ignore it (their method is fixed by the operation key).
+  "method",
 ]);
 
 function deny(c: RouteContext, code: string, status: number) {
@@ -237,6 +241,7 @@ async function handleCreateProviderAction(c: RouteContext) {
   const operationKey = body.operationKey;
   const idempotencyKey = body.idempotencyKey;
   const args = body.arguments;
+  const method = body.method;
 
   if (
     workspaceId === undefined ||
@@ -268,11 +273,26 @@ async function handleCreateProviderAction(c: RouteContext) {
   let build: import("../services/provider-action-service").ProviderActionBuild;
   try {
     if (isGithubOperationKey(operationKey)) {
+      if (method !== undefined) return deny(c, "CANON_UNKNOWN_FIELD", 400);
       build = buildGithubAction(operationKey, args);
     } else if (isXOperationKey(operationKey)) {
+      if (method !== undefined) return deny(c, "CANON_UNKNOWN_FIELD", 400);
       build = buildXAction(operationKey, args);
     } else {
-      return deny(c, "CANON_PROFILE_UNSUPPORTED", 400);
+      // #201: any operation key not owned by an adapter-fixed profile is a
+      // candidate config-driven (generic-http) operation. We cannot build it
+      // here because the operator-authored descriptor lives on the resolved
+      // provider_operations row; defer the build to the service, which loads +
+      // validates the descriptor after scope resolution and fails closed on an
+      // unregistered/invalid profile. Method is caller-supplied for generic-http.
+      if (method !== undefined && typeof method !== "string")
+        return deny(c, "CANON_METHOD_INVALID", 400);
+      build = {
+        kind: "deferred-generic",
+        operationKey,
+        method: method as string | undefined,
+        args,
+      };
     }
   } catch (e) {
     if (isCanonError(e)) return deny(c, e.code, e.httpStatus);
