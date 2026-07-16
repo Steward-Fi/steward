@@ -21,16 +21,18 @@ export {
   isKnownHost,
 } from "./cost-estimator.js";
 export {
-  type CumulativeSpendKeyParts,
+  type CumulativeSpendCap,
   type CumulativeSpendScope,
   type CumulativeSpendSnapshot,
+  type CumulativeSpendStream,
   getCumulativeSpendSum,
   getWindowedInvokeCount,
   type ReserveCumulativeSpendInput,
   type ReserveCumulativeSpendResult,
-  recordWindowedInvoke,
   releaseCumulativeSpend,
+  releaseWindowedInvoke,
   reserveCumulativeSpend,
+  reserveWindowedInvoke,
   settleCumulativeSpend,
 } from "./cumulative-spend-tracker.js";
 export {

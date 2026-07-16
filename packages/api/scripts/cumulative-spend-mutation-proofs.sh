@@ -81,8 +81,8 @@ proof "M4 break trailing-window ageout boundary" "$TRACKER" run_tracker_test \
   "boundary: an entry EXACTLY windowSeconds old has aged out" \
   "s/redis.call('ZRANGEBYSCORE', KEYS\[1\], '(' .. windowStart, now)/redis.call('ZRANGEBYSCORE', KEYS[1], windowStart, now)/g"
 
-# M5: DROP THE RESERVATION ATOMICITY GUARD - the Lua reserve no longer checks the
-# cap before ZADD, so concurrent reserves can collectively exceed the cap.
+# M5: DROP THE RESERVATION ATOMICITY GUARD - the Lua reserve no longer flags a
+# cap breach before ZADD, so concurrent reserves can collectively exceed the cap.
 proof "M5 drop reservation atomicity (cap check before add)" "$TRACKER" run_tracker_test \
   "100 parallel reserves of 100k against a 1M cap admit exactly 10" \
   's/if (sum + amount) > maxv then/if false then/'
@@ -92,7 +92,7 @@ proof "M5 drop reservation atomicity (cap check before add)" "$TRACKER" run_trac
 # reserve, so the over-retention test no longer throws.
 proof "M6 drop over-retention window reject (P1)" "$TRACKER" run_tracker_test \
   "over-retention window" \
-  's/input.windowSeconds > MAX_WINDOW_SECONDS/false/'
+  's/w > 0 \&\& w <= MAX_WINDOW_SECONDS/w > 0/'
 
 echo
 echo "cumulativeSpend mutation proofs: killed=$pass_count  survived/errors=$fail_count"

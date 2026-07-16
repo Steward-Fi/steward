@@ -13,18 +13,34 @@
  *     invokes can both read the same prior sum and both pass - unacceptable for a
  *     hard money cap (#206 req 4).
  * This tracker combines both: a sorted-set rolling window (any windowSeconds) +
- * a single Lua script that prunes, sums, checks `sum + amount <= max`, and only
- * then appends the reservation - so concurrent reservers can never collectively
- * cross the cap (TOCTOU-free).
+ * a single Lua script that prunes, sums, checks EACH cap's `sum + amount <= max`
+ * over its own window, and only then appends the reservation - so concurrent
+ * reservers can never collectively cross any cap (TOCTOU-free).
+ *
+ * STREAM KEY vs CAP THRESHOLDS (codex P1 fix)
+ * -------------------------------------------
+ * The Redis ZSET (the "spend stream") is keyed ONLY by the spend-stream identity
+ * `(agentId, scope, scopeKey, currency)` - NOT by the cap's window/max. Editing a
+ * cap (lowering a 24h limit, changing a window) MUST re-evaluate against the SAME
+ * accumulated history, never a fresh empty bucket. Cap thresholds are supplied as
+ * check parameters per reserve, not baked into the key.
+ *
+ * MULTIPLE CAPS ON ONE STREAM (codex P2 fix)
+ * ------------------------------------------
+ * A single invoke that is governed by several caps on the same stream (e.g. a 1h
+ * AND a 24h cap, or two rules) is reserved ONCE: the atomic script checks ALL
+ * supplied (window, max) pairs against the shared stream and only adds the entry
+ * if EVERY cap holds. The invoke is therefore counted exactly once, never
+ * double-counted across caps, and no cap can be crossed by a concurrent burst.
  *
  * SCOPES (mirror the cumulativeSpend `aggregateOver`):
- *   - "operation": per (agent, operationKey)  key discriminator = operationKey
- *   - "agent":     per agent                    key discriminator = ""
- *   - "grant":     per grant                     key discriminator = grantId
+ *   - "operation": per (agent, operationKey)  scopeKey = operationKey
+ *   - "agent":     per agent                    scopeKey = ""
+ *   - "grant":     per grant                     scopeKey = grantId
  *
  * MONEY MATH: integer minor units only (micros/cents - the caller's convention,
- * matching the policy `max`). No floats, no FX. A currency is part of the key so
- * two currencies never share a window.
+ * matching the policy `max`). No floats, no FX. Currency is part of the stream
+ * key so two currencies never share a window.
  *
  * WINDOW BOUNDARY (matches the policy evaluator + aggregation-tracker): a window
  * of S seconds at time `now` covers the HALF-OPEN interval `(now - S*1000, now]`.
@@ -34,19 +50,12 @@
  * RESERVATION LIFECYCLE + HONEST SEMANTICS:
  *   1. reserveCumulativeSpend(...) atomically admits (or rejects) an invoke and
  *      returns a reservationId. The reserved amount is IMMEDIATELY part of the
- *      window sum, so a concurrent invoke sees it.
- *   2. On a KNOWN-SUCCESS outcome, settleCumulativeSpend(...) keeps the entry
- *      (it stays counted for the rest of the window) - a no-op mark, present for
- *      symmetry + auditability.
+ *      stream, so a concurrent invoke sees it.
+ *   2. On a KNOWN-SUCCESS outcome, settleCumulativeSpend(...) keeps the entry.
  *   3. On a KNOWN-FAILURE outcome, releaseCumulativeSpend(...) removes the entry
  *      so the budget is reclaimed.
- *   4. On outcome_unknown (a crash/timeout after admission, or a settle we can't
- *      confirm), the reservation is DELIBERATELY LEFT IN PLACE and ages out
- *      naturally at the window edge. This is fail-CLOSED for a money cap: an
- *      unknown outcome must never free budget it may have actually spent. The
- *      honest cost is a possible transient over-count for one window if the
- *      action in fact never spent - acceptable for a guardrail (deny-side error
- *      is safe; allow-side error is not).
+ *   4. On outcome_unknown, the reservation is LEFT in place and ages out at the
+ *      window edge - fail-CLOSED for a money cap (never free maybe-spent budget).
  *
  * PER-PROCESS CAVEAT: correctness under concurrency is guaranteed by the atomic
  * Redis script, so it holds across processes sharing one Redis. It does NOT
@@ -57,31 +66,37 @@ import { getRedis } from "./client.js";
 
 export type CumulativeSpendScope = "operation" | "agent" | "grant";
 
-/** Reserved currency tag for the #206 windowed invoke-count bucket (never a real
- *  asset), so a count bucket can never collide with a spend bucket. */
+/** Reserved currency tag for the #206 windowed invoke-count stream (never a real
+ *  asset), so a count stream can never collide with a spend stream. */
 const WINDOWED_INVOKE_CURRENCY = "__calls__";
 
 /** Max window we retain reservation entries for (30d - matches other trackers). */
 const MAX_WINDOW_SECONDS = 2592000;
 const RETENTION_MS = MAX_WINDOW_SECONDS * 1000;
 
-export interface CumulativeSpendKeyParts {
+/** The spend-stream identity. Editing a cap does NOT change this key, so history
+ *  persists across cap edits (codex P1). */
+export interface CumulativeSpendStream {
   agentId: string;
   scope: CumulativeSpendScope;
   /** operationKey for "operation" scope, grantId for "grant" scope, "" for "agent". */
   scopeKey: string;
-  /** currency/asset tag - part of the key so currencies never share a window. */
+  /** currency/asset tag - part of the key so currencies never share a stream. */
   currency: string;
-  /** trailing window length in seconds - part of the key so two rules with the
-   *  SAME scope/currency but DIFFERENT windows get INDEPENDENT buckets (no shared
-   *  double-count of the same invoke across distinct caps; codex P2). */
+}
+
+/** A single trailing-window cap to enforce against a stream. */
+export interface CumulativeSpendCap {
+  /** trailing window length in seconds (resolved from the ISO-8601 duration). */
   windowSeconds: number;
-  /** the cap in minor units - part of the key so two rules with the same
-   *  scope/currency/window but different maxes are independent buckets too. */
+  /** the cap, integer minor units (micros/cents). */
   max: number;
 }
 
-export interface ReserveCumulativeSpendInput extends CumulativeSpendKeyParts {
+export interface ReserveCumulativeSpendInput {
+  stream: CumulativeSpendStream;
+  /** every cap governing this invoke on this stream; ALL are checked atomically. */
+  caps: CumulativeSpendCap[];
   /** this invoke's spend, integer minor units. */
   amount: number;
   /** evaluation time in ms; injectable for tests. */
@@ -89,10 +104,11 @@ export interface ReserveCumulativeSpendInput extends CumulativeSpendKeyParts {
 }
 
 export interface ReserveCumulativeSpendResult {
-  /** true when admitted (sum + amount <= max), false when it would breach. */
+  /** true when admitted (every cap holds), false when any cap would breach. */
   ok: boolean;
-  /** the trailing-window sum BEFORE this invoke (integer minor units). */
-  priorSum: number;
+  /** the trailing-window sums BEFORE this invoke, one per input cap (same order).
+   *  Feeds the policy composer's per-cap prior-sum signal. */
+  priorSums: number[];
   /** opaque id to settle/release this reservation; only set when ok. */
   reservationId?: string;
 }
@@ -103,60 +119,60 @@ export interface CumulativeSpendSnapshot {
   sum: number;
 }
 
-function cumKey(parts: CumulativeSpendKeyParts): string {
+function streamKey(s: CumulativeSpendStream): string {
   // scopeKey/currency are operator/adapter-derived tags; encode to keep the key
-  // delimiter-safe (no ':' collisions merging two buckets). windowSeconds+max are
-  // part of the identity so distinct caps never share a ZSET (codex P2).
-  const enc = (s: string) => encodeURIComponent(s);
-  return `cumspend:${enc(parts.agentId)}:${parts.scope}:${enc(parts.scopeKey)}:${enc(
-    parts.currency,
-  )}:${parts.windowSeconds}:${parts.max}`;
+  // delimiter-safe. Deliberately NO window/max in the key (codex P1): the stream
+  // identity is the spend history, not the current cap threshold.
+  const enc = (v: string) => encodeURIComponent(v);
+  return `cumspend:${enc(s.agentId)}:${s.scope}:${enc(s.scopeKey)}:${enc(s.currency)}`;
 }
 
-// ATOMIC reserve-under-limit over a rolling window.
-//   KEYS[1] = bucket key
-//   ARGV: now, windowStartExclusive, retentionCutoff, amount, max, ttlMs, member
-// Prune aged-out + retention-expired members, sum the survivors' amounts, and
-// only ZADD the new reservation if (sum + amount) <= max. Returns {ok, priorSum}.
-// The sum is parsed from the "|amount|" segment of each member. Because prune +
-// sum + conditional-add happen in ONE script, two concurrent reservers cannot
-// both pass when their combined sum would exceed max.
+// ATOMIC multi-cap reserve over a rolling stream.
+//   KEYS[1] = stream key
+//   ARGV[1]=now ARGV[2]=retentionCutoff ARGV[3]=amount ARGV[4]=ttlMs
+//   ARGV[5]=member ARGV[6]=nCaps then nCaps pairs of (windowStartExclusive, max)
+// Prune retention-expired, then for EACH cap compute the sum over its window and
+// verify sum+amount <= max. Only if ALL caps hold, ZADD the entry ONCE. Returns
+// {ok, priorSum_1, priorSum_2, ...}. ok=-1 => corrupt member (fail closed).
 const RESERVE_LUA = `
 local now = tonumber(ARGV[1])
-local windowStart = tonumber(ARGV[2])
-local retentionCutoff = tonumber(ARGV[3])
-local amount = tonumber(ARGV[4])
-local maxv = tonumber(ARGV[5])
-local ttl = tonumber(ARGV[6])
-local member = ARGV[7]
--- prune retention-expired first (bounds the set), then read the live window.
+local retentionCutoff = tonumber(ARGV[2])
+local amount = tonumber(ARGV[3])
+local ttl = tonumber(ARGV[4])
+local member = ARGV[5]
+local nCaps = tonumber(ARGV[6])
 redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, retentionCutoff)
-local members = redis.call('ZRANGEBYSCORE', KEYS[1], '(' .. windowStart, now)
-local sum = 0
-for i = 1, #members do
-  local m = members[i]
-  -- member format: "{ts}:{seq}|{amount}|{state}"
-  local firstBar = string.find(m, '|', 1, true)
-  if firstBar then
-    local rest = string.sub(m, firstBar + 1)
-    local secondBar = string.find(rest, '|', 1, true)
-    local amtStr = secondBar and string.sub(rest, 1, secondBar - 1) or rest
-    local amt = tonumber(amtStr)
-    if amt == nil then
-      -- corrupt member -> fail closed (signal caller with a sentinel).
-      return {-1, 0}
+local out = {1}
+local base = 6
+for c = 1, nCaps do
+  local windowStart = tonumber(ARGV[base + (c-1)*2 + 1])
+  local maxv = tonumber(ARGV[base + (c-1)*2 + 2])
+  local members = redis.call('ZRANGEBYSCORE', KEYS[1], '(' .. windowStart, now)
+  local sum = 0
+  for i = 1, #members do
+    local m = members[i]
+    local firstBar = string.find(m, '|', 1, true)
+    if firstBar then
+      local rest = string.sub(m, firstBar + 1)
+      local secondBar = string.find(rest, '|', 1, true)
+      local amtStr = secondBar and string.sub(rest, 1, secondBar - 1) or rest
+      local amt = tonumber(amtStr)
+      if amt == nil then return {-1} end
+      sum = sum + amt
+    else
+      return {-1}
     end
-    sum = sum + amt
-  else
-    return {-1, 0}
+  end
+  out[c + 1] = sum
+  if (sum + amount) > maxv then
+    out[1] = 0
   end
 end
-if (sum + amount) > maxv then
-  return {0, sum}
+if out[1] == 1 then
+  redis.call('ZADD', KEYS[1], now, member)
+  redis.call('PEXPIRE', KEYS[1], ttl)
 end
-redis.call('ZADD', KEYS[1], now, member)
-redis.call('PEXPIRE', KEYS[1], ttl)
-return {1, sum}
+return out
 `;
 
 // Read-only window sum (advisory). Prune retention-expired, sum the live window.
@@ -188,6 +204,10 @@ function isNonNegInt(v: number): boolean {
   return typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 0;
 }
 
+function isValidWindow(w: number): boolean {
+  return typeof w === "number" && Number.isSafeInteger(w) && w > 0 && w <= MAX_WINDOW_SECONDS;
+}
+
 let seq = 0;
 function nextSeq(): string {
   seq = (seq + 1) % 1_000_000;
@@ -195,47 +215,48 @@ function nextSeq(): string {
 }
 
 /**
- * Atomically reserve this invoke's spend against the trailing-window cap. When
- * `ok` is false the caller MUST deny (the cap would be breached). When `ok` is
- * true the reservation is already part of the window sum for any concurrent
- * invoke, and the caller must later settle (success) or release (failure).
+ * Atomically reserve this invoke's spend against EVERY cap on the stream. When
+ * `ok` is false the caller MUST deny (some cap would breach). When `ok` is true
+ * the reservation is already part of the window sums for any concurrent invoke,
+ * and the caller must later settle (success) or release (failure).
  *
- * Fail-closed inputs: a non-integer/negative amount/max or a non-positive window
- * throws (a bad spend must never silently become free budget). A corrupt member
- * in the bucket throws (never sum past garbage).
+ * The invoke is added to the stream EXACTLY ONCE (never double-counted across
+ * caps). `priorSums[i]` is the trailing-window sum for `caps[i]` BEFORE this
+ * invoke - fed to the policy composer so its per-cap check agrees.
+ *
+ * Fail-closed inputs: a non-integer/negative amount/max, an empty caps list, or
+ * an out-of-range window throws (a bad spend must never become free budget). A
+ * corrupt member in the stream throws (never sum past garbage).
  */
 export async function reserveCumulativeSpend(
   input: ReserveCumulativeSpendInput,
 ): Promise<ReserveCumulativeSpendResult> {
   if (!isNonNegInt(input.amount))
     throw new Error(`invalid cumulative spend amount: ${input.amount}`);
-  if (!isNonNegInt(input.max)) throw new Error(`invalid cumulative spend max: ${input.max}`);
-  if (
-    typeof input.windowSeconds !== "number" ||
-    !Number.isSafeInteger(input.windowSeconds) ||
-    input.windowSeconds <= 0 ||
-    // Over-retention windows cannot be enforced (older entries are pruned), so we
-    // REJECT rather than silently clamp - a money cap must never be quietly
-    // weakened to a shorter effective window (codex P1). The policy layer already
-    // rejects these at config time; this is the defense-in-depth floor.
-    input.windowSeconds > MAX_WINDOW_SECONDS
-  ) {
-    throw new Error(`invalid cumulative spend window: ${input.windowSeconds}`);
+  if (!Array.isArray(input.caps) || input.caps.length === 0)
+    throw new Error("cumulative spend reserve requires at least one cap");
+  for (const cap of input.caps) {
+    if (!isNonNegInt(cap.max)) throw new Error(`invalid cumulative spend max: ${cap.max}`);
+    if (!isValidWindow(cap.windowSeconds))
+      throw new Error(`invalid cumulative spend window: ${cap.windowSeconds}`);
   }
-  if (typeof input.agentId !== "string" || input.agentId.length === 0) {
+  const { stream } = input;
+  if (typeof stream.agentId !== "string" || stream.agentId.length === 0)
     throw new Error("cumulative spend reserve requires agentId");
-  }
-  if (typeof input.currency !== "string" || input.currency.length === 0) {
+  if (typeof stream.currency !== "string" || stream.currency.length === 0)
     throw new Error("cumulative spend reserve requires currency");
-  }
 
   const now = input.now ?? Date.now();
-  // windowSeconds is guaranteed <= MAX_WINDOW_SECONDS by the guard above.
-  const windowStart = now - input.windowSeconds * 1000;
   const retentionCutoff = now - RETENTION_MS;
   const reservationId = `${now}:${nextSeq()}`;
   const member = `${reservationId}|${input.amount}|reserved`;
-  const key = cumKey(input);
+  const key = streamKey(stream);
+
+  const capArgs: string[] = [];
+  for (const cap of input.caps) {
+    capArgs.push(String(now - cap.windowSeconds * 1000)); // windowStart (exclusive)
+    capArgs.push(String(cap.max));
+  }
 
   const redis = getRedis();
   const res = (await redis.eval(
@@ -243,23 +264,22 @@ export async function reserveCumulativeSpend(
     1,
     key,
     String(now),
-    String(windowStart),
     String(retentionCutoff),
     String(input.amount),
-    String(input.max),
     String(RETENTION_MS),
     member,
-  )) as [number, number];
+    String(input.caps.length),
+    ...capArgs,
+  )) as number[];
 
-  const [ok, sum] = res;
-  if (ok === -1) {
-    // Corrupt member in the window -> fail closed.
-    throw new Error("cumulative spend bucket contained a corrupt member");
+  if (res[0] === -1) {
+    throw new Error("cumulative spend stream contained a corrupt member");
   }
-  if (ok === 1) {
-    return { ok: true, priorSum: sum, reservationId };
+  const priorSums = res.slice(1);
+  if (res[0] === 1) {
+    return { ok: true, priorSums, reservationId };
   }
-  return { ok: false, priorSum: sum };
+  return { ok: false, priorSums };
 }
 
 /**
@@ -268,7 +288,7 @@ export async function reserveCumulativeSpend(
  * symmetric lifecycle + future per-state auditing. Never frees budget.
  */
 export async function settleCumulativeSpend(_input: {
-  keyParts: CumulativeSpendKeyParts;
+  stream: CumulativeSpendStream;
   reservationId: string;
 }): Promise<void> {
   // Intentionally a no-op: a settled reservation must remain in the window sum.
@@ -282,38 +302,31 @@ export async function settleCumulativeSpend(_input: {
  * have really spent, and freeing its budget would be an allow-side error.
  */
 export async function releaseCumulativeSpend(input: {
-  keyParts: CumulativeSpendKeyParts;
+  stream: CumulativeSpendStream;
   reservationId: string;
   amount: number;
 }): Promise<void> {
   if (!isNonNegInt(input.amount)) return;
-  const key = cumKey(input.keyParts);
+  const key = streamKey(input.stream);
   const member = `${input.reservationId}|${input.amount}|reserved`;
   const redis = getRedis();
   await redis.zrem(key, member);
 }
 
 /**
- * Advisory read of the trailing-window sum (committed + reserved). Enforcement
- * MUST use reserveCumulativeSpend (atomic); this is for the policy context's
- * prior-sum signal and for observability. Returns null on any I/O/parse failure
+ * Advisory read of the trailing-window sum (committed + reserved) for a single
+ * cap window. Enforcement MUST use reserveCumulativeSpend (atomic); this is for
+ * observability + the windowed-count read. Returns null on any I/O/parse failure
  * so the caller fails closed (deny).
  */
 export async function getCumulativeSpendSum(
-  input: CumulativeSpendKeyParts & { now?: number },
+  input: CumulativeSpendStream & { windowSeconds: number; now?: number },
 ): Promise<CumulativeSpendSnapshot | null> {
-  if (
-    typeof input.windowSeconds !== "number" ||
-    !Number.isSafeInteger(input.windowSeconds) ||
-    input.windowSeconds <= 0 ||
-    input.windowSeconds > MAX_WINDOW_SECONDS
-  ) {
-    return null;
-  }
+  if (!isValidWindow(input.windowSeconds)) return null;
   const now = input.now ?? Date.now();
   const windowStart = now - input.windowSeconds * 1000;
   const retentionCutoff = now - RETENTION_MS;
-  const key = cumKey(input);
+  const key = streamKey(input);
   try {
     const redis = getRedis();
     const res = (await redis.eval(
@@ -333,78 +346,84 @@ export async function getCumulativeSpendSum(
 }
 
 /**
- * #206 configurable count cap (maxCalls + callWindow): read the trailing-window
- * INVOKE COUNT for an agent+operation over `windowSeconds`. Implemented as the
- * cardinality of the same rolling ZSET the spend tracker uses, denominated in a
- * reserved `__calls__` currency + a per-cap `max` so it never collides with a
- * real spend bucket. This is a READ used to populate the policy context's
- * `windowedInvokeCount`; the enforcing add happens via {@link recordWindowedInvoke}
- * AFTER an allow, mirroring how invoke counters are written post-decision.
- *
- * Returns the count, or null on any I/O/parse failure (caller fails closed).
+ * #206 configurable count cap (maxCalls + callWindow): ATOMICALLY reserve ONE
+ * invoke against the trailing-window count. Returns ok=false when the count is
+ * already at the cap (single-winner: concurrent invokes cannot collectively
+ * exceed maxCalls). Implemented over the same stream machinery in a reserved
+ * `__calls__` currency, amount=1. Returns the reservationId so a failed outcome
+ * can release the slot. Returns { ok:false } on a Redis error (fail closed).
  */
-export async function getWindowedInvokeCount(input: {
+export async function reserveWindowedInvoke(input: {
   agentId: string;
   operationKey: string;
   windowSeconds: number;
   max: number;
   now?: number;
-}): Promise<number | null> {
-  if (
-    typeof input.windowSeconds !== "number" ||
-    !Number.isSafeInteger(input.windowSeconds) ||
-    input.windowSeconds <= 0 ||
-    input.windowSeconds > MAX_WINDOW_SECONDS
-  ) {
-    return null;
+}): Promise<{ ok: boolean; priorCount: number; reservationId?: string }> {
+  if (!isValidWindow(input.windowSeconds) || !isNonNegInt(input.max)) {
+    return { ok: false, priorCount: 0 };
   }
+  try {
+    const res = await reserveCumulativeSpend({
+      stream: {
+        agentId: input.agentId,
+        scope: "operation",
+        scopeKey: input.operationKey,
+        currency: WINDOWED_INVOKE_CURRENCY,
+      },
+      caps: [{ windowSeconds: input.windowSeconds, max: input.max }],
+      amount: 1,
+      now: input.now,
+    });
+    return {
+      ok: res.ok,
+      priorCount: res.priorSums[0] ?? 0,
+      ...(res.reservationId !== undefined ? { reservationId: res.reservationId } : {}),
+    };
+  } catch {
+    return { ok: false, priorCount: 0 };
+  }
+}
+
+/**
+ * Release a windowed-invoke reservation slot (KNOWN-FAILURE outcome only).
+ */
+export async function releaseWindowedInvoke(input: {
+  agentId: string;
+  operationKey: string;
+  reservationId: string;
+}): Promise<void> {
+  await releaseCumulativeSpend({
+    stream: {
+      agentId: input.agentId,
+      scope: "operation",
+      scopeKey: input.operationKey,
+      currency: WINDOWED_INVOKE_CURRENCY,
+    },
+    reservationId: input.reservationId,
+    amount: 1,
+  }).catch(() => undefined);
+}
+
+/**
+ * Advisory read of the trailing-window invoke count for observability/tests.
+ * Enforcement is reserveWindowedInvoke (atomic). Returns null on failure.
+ */
+export async function getWindowedInvokeCount(input: {
+  agentId: string;
+  operationKey: string;
+  windowSeconds: number;
+  now?: number;
+}): Promise<number | null> {
   const snap = await getCumulativeSpendSum({
     agentId: input.agentId,
     scope: "operation",
     scopeKey: input.operationKey,
     currency: WINDOWED_INVOKE_CURRENCY,
     windowSeconds: input.windowSeconds,
-    max: input.max,
     now: input.now,
   });
   return snap === null ? null : snap.sum;
 }
 
-/**
- * Record ONE invoke into the trailing-window count bucket (AFTER an allow that
- * passed a maxCalls cap). Each invoke contributes 1 to the window cardinality.
- * Fire-and-forget-safe: a failure here does not undo the decision, but the
- * counter may under-count by one on a transient Redis error (bounded, and the
- * next read fails closed if Redis is down).
- */
-export async function recordWindowedInvoke(input: {
-  agentId: string;
-  operationKey: string;
-  windowSeconds: number;
-  max: number;
-  now?: number;
-}): Promise<void> {
-  if (
-    typeof input.windowSeconds !== "number" ||
-    !Number.isSafeInteger(input.windowSeconds) ||
-    input.windowSeconds <= 0 ||
-    input.windowSeconds > MAX_WINDOW_SECONDS
-  ) {
-    return;
-  }
-  // Reserve amount=1 with a very high max so the add always succeeds (the cap is
-  // enforced by the policy read, not this write). We reuse the atomic reserve to
-  // keep the same rolling-window + TTL semantics.
-  await reserveCumulativeSpend({
-    agentId: input.agentId,
-    scope: "operation",
-    scopeKey: input.operationKey,
-    currency: WINDOWED_INVOKE_CURRENCY,
-    windowSeconds: input.windowSeconds,
-    max: input.max,
-    amount: 1,
-    now: input.now,
-  }).catch(() => undefined);
-}
-
-export { cumKey as cumulativeSpendKeyForTest };
+export { streamKey as cumulativeSpendStreamKeyForTest };
