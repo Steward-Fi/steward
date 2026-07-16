@@ -147,11 +147,59 @@ describe("x.tweet.create", () => {
     const b = buildXAction("x.tweet.create", { text: "hello", replyToTweetId: "9" });
     expect(b.policyArgs).toEqual({
       isReply: true,
+      hasUrl: false,
+      summoned: false,
       textCodePointLength: 5,
       textByteLength: 5,
       replyToTweetId: "9",
     });
+    // policyArgs is scalar/boolean only — NEVER the raw tweet text.
     expect(JSON.stringify(b.policyArgs)).not.toContain("hello");
+    // The raw text lives ONLY on the separate, non-persisted policyText channel.
+    expect(b.policyText).toBe("hello");
+  });
+
+  it("derives hasUrl (content + spend signal) and summoned policy args", () => {
+    const plain = buildXAction("x.tweet.create", { text: "gm frens" });
+    expect(plain.policyArgs.hasUrl).toBe(false);
+    expect(plain.policyArgs.summoned).toBe(false);
+
+    const withUrl = buildXAction("x.tweet.create", { text: "check https://example.com/x" });
+    expect(withUrl.policyArgs.hasUrl).toBe(true);
+    expect(withUrl.safeSummary.hasUrl).toBe(true);
+
+    const bareHost = buildXAction("x.tweet.create", { text: "see example.com for more" });
+    expect(bareHost.policyArgs.hasUrl).toBe(true);
+
+    const bareWww = buildXAction("x.tweet.create", { text: "visit www.foo.io today" });
+    expect(bareWww.policyArgs.hasUrl).toBe(true);
+
+    // prose with a period must NOT be misread as a URL
+    const prose = buildXAction("x.tweet.create", { text: "i.e. this is fine. really." });
+    expect(prose.policyArgs.hasUrl).toBe(false);
+
+    const summoned = buildXAction("x.tweet.create", {
+      text: "thanks!",
+      replyToTweetId: "9",
+      summoned: true,
+    });
+    expect(summoned.policyArgs.summoned).toBe(true);
+    expect(summoned.policyArgs.isReply).toBe(true);
+  });
+
+  it("rejects a non-boolean summoned arg (fail closed on type)", () => {
+    expectCanon(
+      () => buildXAction("x.tweet.create", { text: "hi", summoned: "yes" }),
+      "CANON_FIELD_TYPE_INVALID",
+    );
+  });
+
+  it("safe_summary carries hasUrl + summoned booleans but no text slice", () => {
+    const b = buildXAction("x.tweet.create", { text: "launch https://waifu.fun now" });
+    expect(b.safeSummary.hasUrl).toBe(true);
+    expect(b.safeSummary.summoned).toBe(false);
+    expect(JSON.stringify(b.safeSummary)).not.toContain("waifu");
+    expect("policyText" in b.safeSummary).toBe(false);
   });
 
   it("rejects empty/whitespace-only, unknown fields, missing required, bad types", () => {
