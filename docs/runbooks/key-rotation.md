@@ -23,13 +23,15 @@ This runbook is for self-hosted Steward operators. It describes behavior present
 | `STEWARD_AUDIT_HMAC_KEY` | Database audit-chain links and HMAC checkpoints | No keyring and no transparent rotation | Historical chain requires old key. A direct replacement creates an unverifiable boundary |
 | `STEWARD_AUDIT_SIGNING_KEY` | Ed25519 offline evidence bundle signatures | Restart cutover with external public-key trust overlap | Old evidence requires old public key forever |
 | `STEWARD_PROXY_REQUEST_SIGNING_SECRETS` (singular fallback also consumed) | Proxy request HMAC authentication | Comma-separated overlap, as parsed by proxy middleware | Requests signed by removed roots fail |
+| `STEWARD_REQUEST_SIGNING_SECRETS` (singular fallback also consumed) | API authorization-signature HMAC authentication | Comma-separated overlap | Requests signed by removed roots fail |
 | Tenant request-signing keys | Encrypted DB keys accepted in `active` or `retiring` state | Online per-key overlap through tenant config API | Revoked or expired keys stop verifying |
-| `GOOGLE_CLIENT_SECRET`, `DISCORD_CLIENT_SECRET`, `X_CLIENT_SECRET`, and other provider OAuth client secrets | OAuth code exchange and refresh at each provider | Provider-dependent overlap, Steward restart required | Existing tokens are not guaranteed to survive. Test the provider rather than assuming |
-| Webhook signing secrets | Per-webhook outbound signatures, encrypted in DB | Replace configuration and coordinate receiver overlap | Receivers that trust only the old value reject new deliveries |
+| OAuth client secrets: `APPLE_CLIENT_SECRET`, `DISCORD_CLIENT_SECRET`, `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_SECRET`, `INSTAGRAM_CLIENT_SECRET`, `LINE_CLIENT_SECRET`, `LINKEDIN_CLIENT_SECRET`, `SPOTIFY_CLIENT_SECRET`, `TIKTOK_CLIENT_SECRET`, `TWITCH_CLIENT_SECRET`, `TWITTER_CLIENT_SECRET`, and `X_CLIENT_SECRET` | OAuth or OIDC code exchange and refresh | Provider-dependent overlap, Steward restart required | Existing tokens are not guaranteed to survive. Test the provider rather than assuming |
+| `TELEGRAM_BOT_TOKEN`, `TWILIO_AUTH_TOKEN` | Telegram login proof and Twilio SMS authentication | Coordinated provider update and restart, no Steward keyring | Login or delivery fails on mismatch |
+| Webhook signing secrets, including optional `WAIFU_WEBHOOK_SECRET` integration | Outbound or integration signatures, encrypted in DB for core webhooks | Replace configuration and coordinate receiver overlap | Receivers that trust only the old value reject new deliveries |
 | `STEWARD_METRICS_TOKEN` | Optional security metrics endpoint bearer auth | Restart cutover, no server keyring | Old token stops immediately |
-| `STEWARD_PLATFORM_KEY(S)`, `STEWARD_DEFAULT_TENANT_KEY` | Platform and tenant API authentication | Use multiple platform entries where configured; default tenant key has no overlap | Removed key stops immediately |
-| `MONERO_WALLET_RPC_PASSWORD` | Optional Monero wallet RPC sidecar login | Sidecar and Steward coordinated restart | In-flight RPC calls fail |
-| Optional KMS/HSM, database, Redis, S3, SMTP, and provider credentials | Their named external service | Controlled by that backend, not Steward | Follow backend procedure and restart consumers |
+| `STEWARD_PLATFORM_KEY(S)`, `STEWARD_DEFAULT_TENANT_KEY`, client `STEWARD_TOKEN`/`STEWARD_API_TOKEN` | Platform, tenant, and CLI API authentication | Use multiple platform entries where configured; default tenant and client token have no overlap | Removed key stops immediately |
+| `MONERO_WALLET_RPC_PASSWORD`, `POLYMARKET_SIGNING_SERVER_TOKEN` | Optional signing sidecar authentication | Sidecar and Steward coordinated restart | In-flight sidecar calls fail |
+| Optional KMS/HSM, database, Upstash/Redis, S3, SMTP, and provider credentials | Their named external service | Controlled by that backend, not Steward | Follow backend procedure and restart consumers |
 
 ## Master password and KDF rotation
 
@@ -136,9 +138,9 @@ The old private key can be destroyed after policy permits, but the old public ke
 
 ## Request-signing roots
 
-### Proxy request signing environment keyring
+### Proxy and API request-signing environment keyrings
 
-The proxy parser accepts comma-separated secrets from `STEWARD_PROXY_REQUEST_SIGNING_SECRETS`, with singular `STEWARD_PROXY_REQUEST_SIGNING_SECRET` as fallback. Add the new root while retaining old, update clients to sign with new, observe old-key usage reach zero, then remove old and restart. This keyring has no key IDs, so verification tries configured roots. Roll back by re-adding old.
+The proxy parser accepts comma-separated secrets from `STEWARD_PROXY_REQUEST_SIGNING_SECRETS`, with singular `STEWARD_PROXY_REQUEST_SIGNING_SECRET` as fallback. API authorization-signature middleware separately accepts `STEWARD_REQUEST_SIGNING_SECRETS` and its singular fallback. Add the new root to the relevant list while retaining old, update clients to sign with new, observe old-key usage reach zero, then remove old and restart. These keyrings have no key IDs, so verification tries configured roots. Roll back by re-adding old. Rotating one family does not rotate the other.
 
 ### Tenant request-signing keys
 
@@ -146,7 +148,7 @@ Create a new tenant request-signing key, distribute it, and leave the old row `r
 
 ## OAuth client secrets
 
-Steward directly consumes `GOOGLE_CLIENT_SECRET`, `DISCORD_CLIENT_SECRET`, and `X_CLIENT_SECRET` with their matching client IDs. Other configured providers follow the same pattern.
+Steward consumes the OAuth client-secret variables enumerated in the matrix with their matching client IDs. `X_CLIENT_SECRET` belongs to provider-account X connect, while `TWITTER_CLIENT_SECRET` belongs to the login provider.
 
 1. Confirm the provider supports two simultaneously valid client secrets. If not, schedule downtime.
 2. Create the new provider-side secret without revoking old.
@@ -164,4 +166,6 @@ For `STEWARD_METRICS_TOKEN`, update scraper and server during one restart window
 
 For platform keys, use the multiple-entry form where available: add new, migrate callers, then remove old. `STEWARD_DEFAULT_TENANT_KEY` has no overlap facility and requires coordinated downtime. These are authentication credentials, not encryption roots.
 
-For `MONERO_WALLET_RPC_PASSWORD`, stop Steward calls, change sidecar authentication, update `STEWARD_MONERO_WALLET_RPC_LOGIN`/password source, restart sidecar and Steward, and perform a read-only RPC health check before signing. Database, Redis, SMTP, S3, KMS, HSM, and other optional provider credentials are rotated at their owning service. Confirm actual overlap support there and restart every Steward consumer. Doctor does not prove external-service authentication.
+For `TELEGRAM_BOT_TOKEN` and `TWILIO_AUTH_TOKEN`, create or rotate the provider credential, update every API replica together, then test a disposable login or message. Neither has a Steward overlap keyring. Rollback is provider-dependent and compromise response must not restore a compromised token.
+
+For `MONERO_WALLET_RPC_PASSWORD` or `POLYMARKET_SIGNING_SERVER_TOKEN`, stop Steward calls, change sidecar authentication, update Steward, restart sidecar and Steward, and perform a read-only health check before signing. In-flight calls are the blast radius. Database, Upstash/Redis, SMTP, S3, KMS, HSM, and other optional provider credentials are rotated at their owning service. Confirm actual overlap support there and restart every Steward consumer. `STEWARD_TOKEN`/`STEWARD_API_TOKEN` are CLI-side bearer credentials: issue a replacement server credential first, update the client, prove a harmless authenticated read, then revoke old. Doctor does not prove external-service authentication.
