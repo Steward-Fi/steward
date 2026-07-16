@@ -41,9 +41,11 @@ import {
   workspaces,
 } from "@stwd/db";
 import {
+  assertRegisteredProfile,
   buildProviderExecutionCommitmentV2,
   computeActionDigest,
   computeApprovalCommitmentHash,
+  isUnregisteredProfileError,
   computeProviderExecutionCommitmentHash,
   decodeUtf8Strict,
   type GithubCanonicalActionV1,
@@ -313,6 +315,21 @@ export async function dispatchGovernedExecution(
     return deny("EXEC_AUTH_STALE_DEPENDENCY", 409, intentId, {
       executionId: loaded.executionId,
     });
+  }
+
+  // #201 fail-closed consumption site (proxy dispatch): the persisted canonical
+  // action's profile MUST be a registered profile before we dispatch it
+  // outbound. This is the last authority boundary; an unregistered profile in a
+  // stored binding (corruption / a de-registered profile) is refused rather than
+  // dispatched. github/x/generic-http all pass; anything else denies.
+  try {
+    assertRegisteredProfile(loaded.canonicalAction.profile);
+  } catch (e) {
+    if (isUnregisteredProfileError(e))
+      return deny("EXEC_AUTH_STALE_DEPENDENCY", 409, intentId, {
+        executionId: loaded.executionId,
+      });
+    throw e;
   }
 
   // Recompute the v2 commitment from the persisted approval + canonical action +
