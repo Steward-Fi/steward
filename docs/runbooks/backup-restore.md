@@ -63,8 +63,8 @@ The current `steward doctor` and Compose production roots are:
 
 Also escrow every enabled deployment-specific credential that is needed after a
 restore, including `STEWARD_PLATFORM_KEYS`, tenant API keys returned only once,
-proxy request-signing secrets, OAuth client secrets, email credentials, webhook
-key overrides, and optional sidecar credentials. Their loss has the effect of
+`STEWARD_PROXY_REQUEST_SIGNING_SECRETS`, OAuth client secrets, email credentials,
+webhook key overrides, and optional sidecar credentials. Their loss has the effect of
 that subsystem's documented rotation or re-enrollment path, not database
 decryption. `STEWARD_PLATFORM_KEYS` and raw tenant API keys are not recoverable
 from stored hashes.
@@ -277,21 +277,34 @@ Using a dedicated test tenant/agent, perform a read/decrypt/sign smoke test that
 does not broadcast value, plus an OAuth/secret decrypt test for each enabled
 backend. Failure means keep ingress closed.
 
-For every tenant, call the existing authenticated `POST /audit/verify` endpoint
-from sequence 1 with `requireHead=true`, paging ranges if needed. It recomputes
-the HMAC chain and checks the in-database high-water mark. Keep authentication in
-a protected curl config or operator client, not command history. A valid result
-must report the expected range and no break. This check requires the original
+For every tenant, read the expected head while writers remain frozen:
+
+```sql
+SELECT tenant_id, expected_seq, expected_count, floor_seq,
+       encode(head_hmac, 'hex') AS head_hmac
+FROM audit_chain_heads
+ORDER BY tenant_id;
+```
+
+Call the existing authenticated `POST /audit/verify` endpoint starting at
+`fromSeq=1`, with `requireHead=true`. The endpoint accepts at most 10,000 rows,
+so use contiguous ranges and set the final `toSeq` to that tenant's exact
+`expected_seq`; do not use a guessed upper bound. It recomputes the HMAC chain
+and checks the in-database high-water mark. Keep authentication in a protected
+curl config or operator client, not command history. Every result must be valid,
+cover the requested range, and report no break. This check requires the original
 `STEWARD_AUDIT_HMAC_KEY`.
 
-Then create and verify a signed evidence bundle with the existing CLI/offline
+Then create and verify signed evidence bundles with the existing CLI/offline
 verifier. The CLI invokes `scripts/verify-evidence-bundle.mjs` when `--verify` is
-set:
+set. Export contiguous ranges of at most 10,000 events, ending the final range at
+the exact head sequence:
 
 ```bash
 umask 077
-bun packages/cli/src/index.ts audit bundle --from 1 --to LAST_SEQUENCE \
-  --out /secure/steward-backups/post-restore-audit.json --verify
+bun packages/cli/src/index.ts audit bundle \
+  --from FIRST_SEQUENCE --to LAST_SEQUENCE_IN_RANGE \
+  --out /secure/steward-backups/post-restore-audit-RANGE.json --verify
 ```
 
 This requires tenant authentication configured for the CLI and the restored

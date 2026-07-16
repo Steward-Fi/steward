@@ -14,6 +14,14 @@ function doctorRequiredNames(source: string): string[] {
   return [...block.matchAll(/"([A-Z][A-Z0-9_]*)"/g)].map((match) => match[1]);
 }
 
+function doctorSecretNames(source: string): string[] {
+  const required = doctorRequiredNames(source);
+  const strictSecrets = [
+    ...source.matchAll(/env\.(STEWARD_[A-Z0-9_]*(?:SECRET|SECRETS|KEY|KEYS))/g),
+  ].map((match) => match[1]);
+  return [...required, ...strictSecrets];
+}
+
 function composeRequiredNames(source: string): string[] {
   return [...source.matchAll(/\$\{([A-Z][A-Z0-9_]*):\?/g)].map((match) => match[1]);
 }
@@ -24,8 +32,9 @@ describe("backup/restore documentation contract", () => {
 
   test("mentions every root configuration value required by doctor or Compose", () => {
     const names = new Set([
-      ...doctorRequiredNames(read("packages/cli/src/doctor.ts")),
+      ...doctorSecretNames(read("packages/cli/src/doctor.ts")),
       ...composeRequiredNames(read("docker-compose.yml")),
+      ...composeRequiredNames(read("deploy/docker-compose.yml")),
     ]);
 
     expect(names.size).toBeGreaterThan(0);
