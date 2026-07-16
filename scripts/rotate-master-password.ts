@@ -15,7 +15,7 @@
  *      with the wrong context/domain fails the GCM auth-tag check, so this tool
  *      reconstructs, per row, the exact context + domain the encryptor used:
  *        - encrypted_keys / encrypted_chain_keys (wallet signing keys):
- *          signing-vault root (no KDF domain — matches Vault) + context
+ *          signing-vault root (no KDF domain, matches Vault) + context
  *          { tenantId, agentId, chainFamily, venue }. The legacy encrypted_keys
  *          ciphertext is byte-identical to the NULL-venue encrypted_chain_keys
  *          row for the same agent, and its chainFamily AAD is whatever chainType
@@ -27,14 +27,10 @@
  *        - accounts (OAuth provider tokens): legacy contextless/undomained root
  *          (matches encryptOAuthProviderTokens in packages/api auth.ts).
  *
- *   2. Idempotent + resumable. Each row is first probed against the NEW
- *      keystore; if it already verifies, the row is already rotated and is
- *      skipped. So a run that aborts midway (DB error, OOM, kill) is recovered
- *      simply by re-running — already-NEW rows are no-ops and the tool resumes
- *      on the remainder. A single undecryptable row is recorded and skipped
- *      (record-and-continue); the run finishes and exits non-zero with a summary
- *      naming the failed rows rather than aborting the whole table and leaving a
- *      split old/new dataset.
+ *   2. Idempotent and transactional. Every inventory class is authenticated in
+ *      a complete no-write preflight. Write mode repeats that preflight, then
+ *      updates all classes in one database transaction. Any failure rolls back
+ *      all writes. Rows already under the NEW root are skipped.
  *
  *   3. No silent data loss. secrets rotation includes soft-deleted versions
  *      (deleted_at IS NOT NULL): SecretVault soft-deletes prior versions rather
@@ -50,14 +46,14 @@
  *
  * Flags:
  *   --dry-run            decrypt only, no writes (still verifies every row)
- *   --table <name>       restrict to one table (encrypted_keys |
- *                        encrypted_chain_keys | secrets | accounts)
+ *   --confirm            required for complete-inventory write mode
+ *   --table <name>       restrict dry-run diagnostics to one inventory class
  *
- * Exit code is non-zero if any row could not be decrypted under either the OLD
- * or the NEW keystore; such rows are listed so an operator can investigate
- * without the run corrupting or half-rotating the rest of the dataset.
+ * Exit code is non-zero if any row cannot authenticate under OLD or NEW. Write
+ * mode never starts when preflight finds such a row.
  */
 
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 import { writeAuditEvent } from "../packages/api/src/services/audit";
 import {
   accounts,
@@ -68,36 +64,54 @@ import {
   eq,
   getDb,
   gt,
+  pendingProxyRequests,
   secrets as secretsTable,
   sql,
+  tenantConfigs,
+  tenantRequestSigningKeys,
+  webhookConfigs,
 } from "../packages/db/src/index";
 import { type EncryptedKey, KeyStore, type KeyStoreDomain } from "../packages/vault/src/keystore";
 import type { KeystoreContext } from "../packages/vault/src/keystore-backend";
 
 type Db = ReturnType<typeof createDb>["db"] | ReturnType<typeof getDb>;
 
-export type TableName = "encrypted_keys" | "encrypted_chain_keys" | "secrets" | "accounts";
+export type TableName =
+  | "encrypted_keys"
+  | "encrypted_chain_keys"
+  | "secrets"
+  | "accounts"
+  | "tenant_request_signing_keys"
+  | "pending_proxy_requests"
+  | "tenant_email_configs"
+  | "webhook_configs";
 export const ALL_TABLES: TableName[] = [
   "encrypted_keys",
   "encrypted_chain_keys",
   "secrets",
   "accounts",
+  "tenant_request_signing_keys",
+  "pending_proxy_requests",
+  "tenant_email_configs",
+  "webhook_configs",
 ];
 
 const BATCH = 100;
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 const LOCK_KEY_SQL = sql`hashtext('steward_rotation')::bigint`;
 
-interface Args {
+export interface Args {
   dryRun: boolean;
+  confirm: boolean;
   table?: TableName;
 }
 
-function parseArgs(argv: string[]): Args {
-  const out: Args = { dryRun: false };
+export function parseArgs(argv: string[]): Args {
+  const out: Args = { dryRun: false, confirm: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dry-run") out.dryRun = true;
+    else if (a === "--confirm") out.confirm = true;
     else if (a === "--table") {
       const t = argv[++i] as TableName;
       if (!ALL_TABLES.includes(t)) {
@@ -109,6 +123,15 @@ function parseArgs(argv: string[]): Args {
     }
   }
   return out;
+}
+
+export function validateArgs(args: Args): void {
+  if (!args.dryRun && !args.confirm) {
+    throw new Error("write mode requires --confirm after a successful --dry-run");
+  }
+  if (!args.dryRun && args.table) {
+    throw new Error("write mode cannot use --table; complete inventory rotation is mandatory");
+  }
 }
 
 function requireEnv(name: string): string {
@@ -199,7 +222,7 @@ function resolveRow(
     decryptWithCandidates(roots.new, enc, candidates);
     return { status: "already" };
   } catch {
-    // Not yet rotated (expected for the common path) — fall through to OLD.
+    // Not yet rotated (expected for the common path), fall through to OLD.
   }
 
   const { plaintext, context } = decryptWithCandidates(roots.old, enc, candidates);
@@ -364,7 +387,7 @@ export async function rotateEncryptedChainKeys(
 // Secret-vault domain root + context { tenantId, name, version }. Includes
 // soft-deleted versions so prior-version ciphertext is not orphaned under the
 // old password. Falls back to the legacy (undomained) root for secrets written
-// before domain separation — mirrors SecretVault.decryptSecret.
+// before domain separation, mirrors SecretVault.decryptSecret.
 export async function rotateSecrets(
   db: Db,
   domainRoots: RootKeystores,
@@ -374,7 +397,7 @@ export async function rotateSecrets(
   const result = emptyResult("secrets");
   let cursor = ZERO_UUID;
   while (true) {
-    // NOTE: no `deleted_at IS NULL` filter — soft-deleted versions must rotate
+    // NOTE: no `deleted_at IS NULL` filter, soft-deleted versions must rotate
     // too, otherwise they become permanently undecryptable after the old
     // password is decommissioned.
     const rows = await db
@@ -589,10 +612,216 @@ function pickToken(
   return { ciphertext, iv, tag, salt };
 }
 
+// Request-signing roots are secret-vault-domain ciphertext with stable AAD.
+export async function rotateTenantRequestSigningKeys(
+  db: Db,
+  roots: RootKeystores,
+  dryRun: boolean,
+): Promise<RotateResult> {
+  const result = emptyResult("tenant_request_signing_keys");
+  const rows = await db
+    .select()
+    .from(tenantRequestSigningKeys)
+    .orderBy(tenantRequestSigningKeys.id);
+  for (const row of rows) {
+    if (result.firstId === null) result.firstId = row.id;
+    result.lastId = row.id;
+    try {
+      const resolved = resolveRow(
+        roots,
+        {
+          ciphertext: row.secretCiphertext,
+          iv: row.secretIv,
+          tag: row.secretAuthTag,
+          salt: row.secretSalt,
+        },
+        [{ tenantId: row.tenantId, name: `request-signing-key:${row.id}`, version: 1 }],
+      );
+      if (resolved.status === "already") result.alreadyRotated += 1;
+      else {
+        if (!dryRun) {
+          await db
+            .update(tenantRequestSigningKeys)
+            .set({
+              secretCiphertext: resolved.enc.ciphertext,
+              secretIv: resolved.enc.iv,
+              secretAuthTag: resolved.enc.tag,
+              secretSalt: resolved.enc.salt,
+            })
+            .where(eq(tenantRequestSigningKeys.id, row.id));
+        }
+        result.rotated += 1;
+      }
+    } catch {
+      result.failed.push(`id=${row.id}: authentication failed`);
+    }
+  }
+  return result;
+}
+
+// Pending approval bodies are short-lived but must remain decryptable across a
+// planned cutover. The request digest is part of their production AAD.
+export async function rotatePendingProxyRequests(
+  db: Db,
+  roots: RootKeystores,
+  dryRun: boolean,
+): Promise<RotateResult> {
+  const result = emptyResult("pending_proxy_requests");
+  const rows = await db.select().from(pendingProxyRequests).orderBy(pendingProxyRequests.id);
+  for (const row of rows) {
+    if (result.firstId === null) result.firstId = row.id;
+    result.lastId = row.id;
+    try {
+      const resolved = resolveRow(
+        roots,
+        {
+          ciphertext: row.bodyCiphertext,
+          iv: row.bodyIv,
+          tag: row.bodyAuthTag,
+          salt: row.bodySalt,
+        },
+        [
+          {
+            tenantId: row.tenantId,
+            agentId: row.agentId,
+            name: `pending-proxy:${row.requestDigest}`,
+          },
+        ],
+      );
+      if (resolved.status === "already") result.alreadyRotated += 1;
+      else {
+        if (!dryRun) {
+          await db
+            .update(pendingProxyRequests)
+            .set({
+              bodyCiphertext: resolved.enc.ciphertext,
+              bodyIv: resolved.enc.iv,
+              bodyAuthTag: resolved.enc.tag,
+              bodySalt: resolved.enc.salt,
+            })
+            .where(eq(pendingProxyRequests.id, row.id));
+        }
+        result.rotated += 1;
+      }
+    } catch {
+      result.failed.push(`id=${row.id}: authentication failed`);
+    }
+  }
+  return result;
+}
+
+// Per-tenant email API keys are JSON-serialized, contextless legacy KeyStore
+// payloads nested in tenant_configs.email_config.
+export async function rotateTenantEmailConfigs(
+  db: Db,
+  roots: RootKeystores,
+  dryRun: boolean,
+): Promise<RotateResult> {
+  const result = emptyResult("tenant_email_configs");
+  const rows = await db.select().from(tenantConfigs).orderBy(tenantConfigs.tenantId);
+  for (const row of rows) {
+    const encryptedJson = row.emailConfig?.apiKeyEncrypted;
+    if (!encryptedJson) continue;
+    if (result.firstId === null) result.firstId = row.tenantId;
+    result.lastId = row.tenantId;
+    try {
+      const encrypted = JSON.parse(encryptedJson) as EncryptedKey;
+      const resolved = resolveRow(roots, encrypted, [undefined]);
+      if (resolved.status === "already") result.alreadyRotated += 1;
+      else {
+        if (!dryRun) {
+          await db
+            .update(tenantConfigs)
+            .set({
+              emailConfig: { ...row.emailConfig, apiKeyEncrypted: JSON.stringify(resolved.enc) },
+            })
+            .where(eq(tenantConfigs.tenantId, row.tenantId));
+        }
+        result.rotated += 1;
+      }
+    } catch {
+      result.failed.push(`tenant_id=${row.tenantId}: authentication failed`);
+    }
+  }
+  return result;
+}
+
+const WEBHOOK_PREFIX = "stwd_whsec_v1:";
+
+type WebhookRoots = RotationKeystores["webhook"];
+
+function webhookRoot(password: string, salt: string): Buffer {
+  const saltBytes = salt ? Buffer.from(salt, "hex") : Buffer.from("steward-webhook-secret-v1");
+  return scryptSync(password, saltBytes, 32) as Buffer;
+}
+
+function decryptWebhook(value: string, password: string, configuredSalt: string): string {
+  if (!value.startsWith(WEBHOOK_PREFIX)) {
+    throw new Error("plaintext webhook secret requires separate migration before root rotation");
+  }
+  const payload = JSON.parse(value.slice(WEBHOOK_PREFIX.length)) as EncryptedKey;
+  const key = scryptSync(
+    webhookRoot(password, configuredSalt),
+    Buffer.from(payload.salt, "hex"),
+    32,
+  );
+  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(payload.iv, "hex"));
+  decipher.setAuthTag(Buffer.from(payload.tag, "hex"));
+  return decipher.update(payload.ciphertext, "hex", "utf8") + decipher.final("utf8");
+}
+
+function encryptWebhook(value: string, password: string, configuredSalt: string): string {
+  const iv = randomBytes(16);
+  const salt = randomBytes(16);
+  const key = scryptSync(webhookRoot(password, configuredSalt), salt, 32);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = cipher.update(value, "utf8", "hex") + cipher.final("hex");
+  return `${WEBHOOK_PREFIX}${JSON.stringify({
+    ciphertext,
+    iv: iv.toString("hex"),
+    tag: cipher.getAuthTag().toString("hex"),
+    salt: salt.toString("hex"),
+  })}`;
+}
+
+export async function rotateWebhookConfigs(
+  db: Db,
+  roots: WebhookRoots,
+  dryRun: boolean,
+): Promise<RotateResult> {
+  const result = emptyResult("webhook_configs");
+  const rows = await db.select().from(webhookConfigs).orderBy(webhookConfigs.id);
+  for (const row of rows) {
+    if (result.firstId === null) result.firstId = row.id;
+    result.lastId = row.id;
+    try {
+      try {
+        decryptWebhook(row.secret, roots.newPassword, roots.newSalt);
+        result.alreadyRotated += 1;
+        continue;
+      } catch {
+        // Expected before cutover. Authenticate with the old root next.
+      }
+      const plaintext = decryptWebhook(row.secret, roots.oldPassword, roots.oldSalt);
+      const encrypted = encryptWebhook(plaintext, roots.newPassword, roots.newSalt);
+      if (!dryRun) {
+        await db
+          .update(webhookConfigs)
+          .set({ secret: encrypted })
+          .where(eq(webhookConfigs.id, row.id));
+      }
+      result.rotated += 1;
+    } catch {
+      result.failed.push(`id=${row.id}: authentication failed`);
+    }
+  }
+  return result;
+}
+
 // ─────────────────────────────── shared helpers ──────────────────────────────
 
 function errMsg(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  return err instanceof Error ? err.message : "non-Error thrown";
 }
 
 // ───────────────────────────── root construction ─────────────────────────────
@@ -618,12 +847,13 @@ export function buildRoots(
 }
 
 export interface RotationKeystores {
-  /** Wallet signing-vault root (no KDF domain — matches Vault). */
+  /** Wallet signing-vault root (no KDF domain, matches Vault). */
   signing: RootKeystores;
   /** Secret-vault domain root (matches SecretVault primary). */
   secretDomain: RootKeystores;
   /** Legacy undomained root (OAuth tokens + pre-separation secrets). */
   legacy: RootKeystores;
+  webhook: { oldPassword: string; oldSalt: string; newPassword: string; newSalt: string };
 }
 
 export function buildRotationKeystores(
@@ -632,14 +862,27 @@ export function buildRotationKeystores(
   newPw: string,
   newSalt: string,
 ): RotationKeystores {
+  const runtimeEnv: Record<string, string | undefined> = process.env;
   return {
-    // Vault encrypts wallet keys with `new KeyStore(masterPassword, salt)` — no
+    // Vault encrypts wallet keys with `new KeyStore(masterPassword, salt)`, no
     // domain label. (vault.ts constructor.)
     signing: buildRoots(oldPw, oldSalt, newPw, newSalt),
     // SecretVault primary root is domain "secret-vault". (secret-vault.ts:205.)
     secretDomain: buildRoots(oldPw, oldSalt, newPw, newSalt, "secret-vault"),
     // SecretVault legacy fallback + OAuth tokens use the undomained root.
     legacy: buildRoots(oldPw, oldSalt, newPw, newSalt),
+    webhook: {
+      oldPassword: runtimeEnv.STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY ?? oldPw,
+      oldSalt: runtimeEnv.STEWARD_WEBHOOK_SECRET_KDF_SALT ?? oldSalt ?? "",
+      newPassword:
+        runtimeEnv.STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY_NEW ??
+        runtimeEnv.STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY ??
+        newPw,
+      newSalt:
+        runtimeEnv.STEWARD_WEBHOOK_SECRET_KDF_SALT_NEW ??
+        runtimeEnv.STEWARD_WEBHOOK_SECRET_KDF_SALT ??
+        newSalt,
+    },
   };
 }
 
@@ -663,6 +906,14 @@ export async function rotateTable(
       return rotateSecrets(db, ks.secretDomain, ks.legacy, dryRun);
     case "accounts":
       return rotateAccounts(db, ks.legacy, dryRun);
+    case "tenant_request_signing_keys":
+      return rotateTenantRequestSigningKeys(db, ks.secretDomain, dryRun);
+    case "pending_proxy_requests":
+      return rotatePendingProxyRequests(db, ks.secretDomain, dryRun);
+    case "tenant_email_configs":
+      return rotateTenantEmailConfigs(db, ks.legacy, dryRun);
+    case "webhook_configs":
+      return rotateWebhookConfigs(db, ks.webhook, dryRun);
   }
 }
 
@@ -685,8 +936,10 @@ async function main() {
   const newSalt = requireEnv("STEWARD_KDF_SALT_NEW");
 
   if (newPw === oldPw && newSalt === oldSalt) {
-    throw new Error("NEW password+salt are identical to OLD — nothing to rotate");
+    throw new Error("NEW password+salt are identical to OLD, nothing to rotate");
   }
+
+  validateArgs(args);
 
   const ks = buildRotationKeystores(oldPw, oldSalt, newPw, newSalt);
   const tables: TableName[] = args.table ? [args.table] : ALL_TABLES;
@@ -704,39 +957,49 @@ async function main() {
     }
     lockHeld = true;
 
+    // Complete preflight happens before the first mutation. This prevents a bad
+    // old password or one malformed inventory row from creating a mixed-key DB.
+    const preflight: RotateResult[] = [];
     for (const table of tables) {
-      await writeAuditEvent({
-        tenantId: "system",
-        actorType: "system",
-        action: "system.master_password_rotation.start",
-        resourceType: "table",
-        resourceId: table,
-        metadata: { table, dryRun: args.dryRun },
-      });
+      const res = await rotateTable(table, db, ks, true);
+      preflight.push(res);
+      console.log(summarize(res, true));
+      for (const failure of res.failed) failures.push(`${table}: ${failure}`);
+    }
+    if (failures.length > 0) {
+      throw new Error(
+        `preflight failed for ${failures.length} encrypted item(s); no writes performed`,
+      );
+    }
 
-      const res = await rotateTable(table, db, ks, args.dryRun);
+    if (!args.dryRun) {
+      // One DB transaction is the journal. Any write error rolls every class
+      // back, so an interrupted invocation can be rerun safely.
+      await db.transaction(async (tx) => {
+        for (const table of tables) {
+          const res = await rotateTable(table, tx as Db, ks, false);
+          if (res.failed.length > 0) {
+            throw new Error(`${table} changed after preflight; transaction rolled back`);
+          }
+          console.log(summarize(res, false));
+        }
+      });
 
       await writeAuditEvent({
         tenantId: "system",
         actorType: "system",
         action: "system.master_password_rotation.complete",
-        resourceType: "table",
-        resourceId: table,
+        resourceType: "encrypted_inventory",
+        resourceId: "all",
         metadata: {
-          table,
-          dryRun: args.dryRun,
-          rotated: res.rotated,
-          alreadyRotated: res.alreadyRotated,
-          failedCount: res.failed.length,
-          firstId: res.firstId,
-          lastId: res.lastId,
+          tables,
+          preflightCounts: preflight.map((result) => ({
+            table: result.table,
+            rotated: result.rotated,
+            alreadyRotated: result.alreadyRotated,
+          })),
         },
       });
-      console.log(summarize(res, args.dryRun));
-      for (const f of res.failed) {
-        failures.push(`${table}: ${f}`);
-        console.error(`[rotate] UNDECRYPTABLE ${table}: ${f}`);
-      }
     }
   } catch (err) {
     console.error(`ROTATION ABORTED: ${errMsg(err)}`);

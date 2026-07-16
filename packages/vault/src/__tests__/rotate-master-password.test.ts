@@ -13,7 +13,7 @@
  *   - soft-deleted secret versions are rotated (not skipped);
  *   - a re-run is fully idempotent (every row already-rotated, zero re-encrypts).
  *
- * No DATABASE_URL required — PGLite runs Postgres in-process via WASM, exactly
+ * No DATABASE_URL required, PGLite runs Postgres in-process via WASM, exactly
  * like the other vault DB tests (venue-scoping, secret-vault-lifecycle).
  */
 
@@ -24,21 +24,24 @@ import {
   encryptedChainKeys,
   encryptedKeys,
   getDb,
+  pendingProxyRequests,
   secrets as secretsTable,
+  tenantConfigs,
+  tenantRequestSigningKeys,
   tenants,
   users,
+  webhookConfigs,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, eq, isNotNull } from "drizzle-orm";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import {
+  ALL_TABLES,
   buildRotationKeystores,
-  rotateAccounts,
   rotateEncryptedChainKeys,
-  rotateEncryptedKeys,
-  rotateSecrets,
   rotateTable,
 } from "../../../../scripts/rotate-master-password";
+import { decryptWebhookSecret, encryptWebhookSecret } from "../../../webhooks/src/secret-codec";
 import { type EncryptedKey, KeyStore } from "../keystore";
 import { SecretVault } from "../secret-vault";
 import { Vault } from "../vault";
@@ -55,12 +58,15 @@ const NEW_SALT = "bb".repeat(16);
 const TENANT_ID = "tenant-rotate";
 let openClient: { close: () => Promise<void> } | undefined;
 let savedKdfSalt: string | undefined;
+let savedMasterPassword: string | undefined;
 
 beforeAll(async () => {
   // Vault/SecretVault read STEWARD_KDF_SALT at construction. Pin it to OLD_SALT
   // so the seeded ciphertext is derived from the OLD root.
   savedKdfSalt = process.env.STEWARD_KDF_SALT;
+  savedMasterPassword = process.env.STEWARD_MASTER_PASSWORD;
   process.env.STEWARD_KDF_SALT = OLD_SALT;
+  process.env.STEWARD_MASTER_PASSWORD = OLD_PW;
   process.env.STEWARD_PGLITE_MEMORY = "true";
 
   const { db, client } = await createPGLiteDb("memory://");
@@ -78,6 +84,8 @@ afterAll(async () => {
   await openClient?.close().catch(() => {});
   if (savedKdfSalt === undefined) delete process.env.STEWARD_KDF_SALT;
   else process.env.STEWARD_KDF_SALT = savedKdfSalt;
+  if (savedMasterPassword === undefined) delete process.env.STEWARD_MASTER_PASSWORD;
+  else process.env.STEWARD_MASTER_PASSWORD = savedMasterPassword;
   delete process.env.STEWARD_PGLITE_MEMORY;
 });
 
@@ -165,6 +173,58 @@ describe("master-password rotation (DB-backed, real encrypt paths)", () => {
       refreshTokenSalt: encRefresh.salt,
     });
 
+    const requestKeyId = "00000000-0000-4000-8000-000000000210";
+    const requestKey = new KeyStore(OLD_PW, OLD_SALT, "secret-vault").encrypt(
+      "request-signing-plaintext",
+      { tenantId: TENANT_ID, name: `request-signing-key:${requestKeyId}`, version: 1 },
+    );
+    await db.insert(tenantRequestSigningKeys).values({
+      id: requestKeyId,
+      tenantId: TENANT_ID,
+      name: "rotation test",
+      secretCiphertext: requestKey.ciphertext,
+      secretIv: requestKey.iv,
+      secretAuthTag: requestKey.tag,
+      secretSalt: requestKey.salt,
+      secretPrefix: "stw_sig_test",
+    });
+
+    const emailKey = oauthKs.encrypt("resend-test-plaintext");
+    await db.insert(tenantConfigs).values({
+      tenantId: TENANT_ID,
+      emailConfig: {
+        provider: "resend",
+        from: "rotate@example.com",
+        apiKeyEncrypted: JSON.stringify(emailKey),
+      },
+    });
+
+    const digest = "7".repeat(64);
+    const pendingBody = new KeyStore(OLD_PW, OLD_SALT, "secret-vault").encrypt(
+      "pending-body-plaintext",
+      { tenantId: TENANT_ID, agentId: "agent-a", name: `pending-proxy:${digest}` },
+    );
+    await db.insert(pendingProxyRequests).values({
+      tenantId: TENANT_ID,
+      agentId: "agent-a",
+      routeId: "00000000-0000-4000-8000-000000000211",
+      method: "POST",
+      targetHost: "example.com",
+      targetPath: "/rotate",
+      requestDigest: digest,
+      bodyCiphertext: pendingBody.ciphertext,
+      bodyIv: pendingBody.iv,
+      bodyAuthTag: pendingBody.tag,
+      bodySalt: pendingBody.salt,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+
+    await db.insert(webhookConfigs).values({
+      tenantId: TENANT_ID,
+      url: "https://example.com/rotation-hook",
+      secret: encryptWebhookSecret("webhook-test-plaintext"),
+    });
+
     // Capture pre-rotation ciphertext so we can prove the rows actually changed.
     const beforeChainKeys = await db
       .select()
@@ -180,6 +240,10 @@ describe("master-password rotation (DB-backed, real encrypt paths)", () => {
       "encrypted_chain_keys",
       "secrets",
       "accounts",
+      "tenant_request_signing_keys",
+      "pending_proxy_requests",
+      "tenant_email_configs",
+      "webhook_configs",
     ] as const) {
       results.push(await rotateTable(table, db, ks, false));
     }
@@ -229,7 +293,7 @@ describe("master-password rotation (DB-backed, real encrypt paths)", () => {
       expect(decryptsUnder(NEW.signing, enc, ctx)).toBe(true);
       // OLD root no longer authenticates (ciphertext was re-rooted).
       expect(decryptsUnder(OLD.signing, enc, ctx)).toBe(false);
-      // Wrong AAD (no context) also fails — proves binding survived rotation.
+      // Wrong AAD (no context) also fails, proves binding survived rotation.
       expect(decryptsUnder(NEW.signing, enc, undefined)).toBe(false);
     }
 
@@ -283,7 +347,7 @@ describe("master-password rotation (DB-backed, real encrypt paths)", () => {
         },
       );
       expect(pt).toBe(importedPk);
-      // The derived address is unchanged — proves the plaintext key is intact.
+      // The derived address is unchanged, proves the plaintext key is intact.
       expect(privateKeyToAccount(pt as `0x${string}`).address).toBe(
         privateKeyToAccount(importedPk).address,
       );
@@ -304,7 +368,7 @@ describe("master-password rotation (DB-backed, real encrypt paths)", () => {
         salt: row.salt,
       };
       const ctx = { tenantId: row.tenantId, name: row.name, version: row.version };
-      // NEW domain root + correct context authenticates — even soft-deleted rows.
+      // NEW domain root + correct context authenticates, even soft-deleted rows.
       expect(decryptsUnder(NEW.secretDomain, enc, ctx)).toBe(true);
       // OLD domain root fails.
       expect(decryptsUnder(OLD.secretDomain, enc, ctx)).toBe(false);
@@ -346,6 +410,55 @@ describe("master-password rotation (DB-backed, real encrypt paths)", () => {
     expect(NEW.legacy.decrypt(encRefreshAfter)).toBe(refreshPt);
     expect(decryptsUnder(OLD.legacy, encAccessAfter, undefined)).toBe(false);
     expect(decryptsUnder(OLD.legacy, encRefreshAfter, undefined)).toBe(false);
+
+    const [requestRow] = await db.select().from(tenantRequestSigningKeys);
+    expect(
+      NEW.secretDomain.decrypt(
+        {
+          ciphertext: requestRow.secretCiphertext,
+          iv: requestRow.secretIv,
+          tag: requestRow.secretAuthTag,
+          salt: requestRow.secretSalt,
+        },
+        {
+          tenantId: requestRow.tenantId,
+          name: `request-signing-key:${requestRow.id}`,
+          version: 1,
+        },
+      ),
+    ).toBe("request-signing-plaintext");
+    expect(requestRow.name).toBe("rotation test");
+    expect(requestRow.secretPrefix).toBe("stw_sig_test");
+
+    const [pendingRow] = await db.select().from(pendingProxyRequests);
+    expect(
+      NEW.secretDomain.decrypt(
+        {
+          ciphertext: pendingRow.bodyCiphertext,
+          iv: pendingRow.bodyIv,
+          tag: pendingRow.bodyAuthTag,
+          salt: pendingRow.bodySalt,
+        },
+        {
+          tenantId: pendingRow.tenantId,
+          agentId: pendingRow.agentId,
+          name: `pending-proxy:${pendingRow.requestDigest}`,
+        },
+      ),
+    ).toBe("pending-body-plaintext");
+    expect(pendingRow.targetPath).toBe("/rotate");
+
+    const [configRow] = await db.select().from(tenantConfigs);
+    const encryptedEmail = JSON.parse(configRow.emailConfig?.apiKeyEncrypted ?? "") as EncryptedKey;
+    expect(NEW.legacy.decrypt(encryptedEmail)).toBe("resend-test-plaintext");
+    expect(configRow.emailConfig?.from).toBe("rotate@example.com");
+
+    const [webhookRow] = await db.select().from(webhookConfigs);
+    process.env.STEWARD_KDF_SALT = NEW_SALT;
+    process.env.STEWARD_MASTER_PASSWORD = NEW_PW;
+    expect(decryptWebhookSecret(webhookRow.secret)).toBe("webhook-test-plaintext");
+    process.env.STEWARD_KDF_SALT = OLD_SALT;
+    process.env.STEWARD_MASTER_PASSWORD = OLD_PW;
   });
 
   it("is fully idempotent on a re-run (all rows already-rotated, zero re-encrypts)", async () => {
@@ -358,12 +471,10 @@ describe("master-password rotation (DB-backed, real encrypt paths)", () => {
       .from(encryptedChainKeys)
       .orderBy(encryptedChainKeys.id);
 
-    const second = [
-      await rotateEncryptedKeys(db, ks.signing, false),
-      await rotateEncryptedChainKeys(db, ks.signing, false),
-      await rotateSecrets(db, ks.secretDomain, ks.legacy, false),
-      await rotateAccounts(db, ks.legacy, false),
-    ];
+    const second = [];
+    for (const table of ALL_TABLES) {
+      second.push(await rotateTable(table, db, ks, false));
+    }
 
     for (const res of second) {
       expect(res.rotated).toBe(0);
@@ -375,6 +486,56 @@ describe("master-password rotation (DB-backed, real encrypt paths)", () => {
     // would otherwise churn IV/salt on every run).
     const after = await db
       .select({ id: encryptedChainKeys.id, ct: encryptedChainKeys.ciphertext })
+      .from(encryptedChainKeys)
+      .orderBy(encryptedChainKeys.id);
+    expect(after).toEqual(before);
+  });
+
+  it("fails closed with a wrong old password and performs no writes", async () => {
+    const db = getDb();
+    const before = await db
+      .select({ id: encryptedChainKeys.id, ciphertext: encryptedChainKeys.ciphertext })
+      .from(encryptedChainKeys)
+      .orderBy(encryptedChainKeys.id);
+    const wrong = buildRotationKeystores(
+      "wrong-old-password-dddddddddddddddddddd",
+      OLD_SALT,
+      "unrelated-new-password-eeeeeeeeeeeeeeee",
+      "ee".repeat(16),
+    );
+    const result = await rotateTable("encrypted_chain_keys", db, wrong, true);
+    expect(result.failed.length).toBe(before.length);
+    const after = await db
+      .select({ id: encryptedChainKeys.id, ciphertext: encryptedChainKeys.ciphertext })
+      .from(encryptedChainKeys)
+      .orderBy(encryptedChainKeys.id);
+    expect(after).toEqual(before);
+  });
+
+  it("rolls back all writes when a transaction fails mid-flight", async () => {
+    const db = getDb();
+    const before = await db
+      .select({ id: encryptedChainKeys.id, ciphertext: encryptedChainKeys.ciphertext })
+      .from(encryptedChainKeys)
+      .orderBy(encryptedChainKeys.id);
+    const thirdSalt = "cc".repeat(16);
+    const ks = buildRotationKeystores(
+      NEW_PW,
+      NEW_SALT,
+      "third-master-password-cccccccccccc",
+      thirdSalt,
+    );
+
+    await expect(
+      db.transaction(async (tx) => {
+        const result = await rotateTable("encrypted_chain_keys", tx as never, ks, false);
+        expect(result.failed).toEqual([]);
+        throw new Error("injected mid-flight failure");
+      }),
+    ).rejects.toThrow("injected mid-flight failure");
+
+    const after = await db
+      .select({ id: encryptedChainKeys.id, ciphertext: encryptedChainKeys.ciphertext })
       .from(encryptedChainKeys)
       .orderBy(encryptedChainKeys.id);
     expect(after).toEqual(before);

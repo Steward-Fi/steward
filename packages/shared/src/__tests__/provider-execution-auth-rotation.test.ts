@@ -60,8 +60,7 @@ describe("execution authorization v2 key rotation", () => {
     const oldCommitment = commitment("old");
     const oldSignature = signProviderExecutionCommitmentV2(oldCommitment);
 
-    process.env.STEWARD_EXECUTION_AUTH_SECRET =
-      "new:new-secret-material,old:old-secret-material";
+    process.env.STEWARD_EXECUTION_AUTH_SECRET = "new:new-secret-material,old:old-secret-material";
     expect(verifyProviderExecutionCommitmentV2(oldCommitment, oldSignature)).toBe(true);
     expect(() => signProviderExecutionCommitmentV2(oldCommitment)).toThrow(
       "commitment keyId does not match the active signing key",
