@@ -305,6 +305,21 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
     expect(b.status).not.toBe("stub_succeeded");
   });
 
+  test.each([
+    ["bare IPv4", "visit 192.168.1.1/x now", "ipdeny01"],
+    ["zero-width split TLD", "visit evil.c\u200Bom now", "zwdeny01"],
+  ])("contentPolicy allowUrls=false denies %s through providerActionService", async (_case, text, nonce) => {
+    await seed([
+      allowRule("11111111-1111-4111-8111-1111111111a1", { contentPolicy: { allowUrls: false } }),
+    ]);
+    const out = await propose({ text }, nonce);
+    expect(out.kind).toBe("policy_denied");
+    if (out.kind !== "policy_denied") throw new Error(`got ${out.kind}`);
+    expect(out.code).toBe("POLICY_X_URL_FORBIDDEN");
+    const b = await bindingRow(out.intentId);
+    expect(b.status).not.toBe("stub_succeeded");
+  });
+
   test("contentPolicy allowUrls=false: a plain post is allowed", async () => {
     await seed([
       allowRule("11111111-1111-4111-8111-1111111111a1", { contentPolicy: { allowUrls: false } }),
