@@ -946,19 +946,9 @@ async function main() {
   const ks = buildRotationKeystores(oldPw, oldSalt, newPw, newSalt);
   const tables: TableName[] = args.table ? [args.table] : ALL_TABLES;
   const { client, db } = createDb();
-  let lockHeld = false;
   const failures: string[] = [];
 
   try {
-    const lockRows = (await db.execute(
-      sql`SELECT pg_try_advisory_lock(${LOCK_KEY_SQL}) AS got`,
-    )) as unknown as Array<{ got: boolean }>;
-    const got = Array.isArray(lockRows) ? lockRows[0]?.got : undefined;
-    if (!got) {
-      throw new Error("Another rotation run holds the steward_rotation advisory lock");
-    }
-    lockHeld = true;
-
     // Complete preflight happens before the first mutation. This prevents a bad
     // old password or one malformed inventory row from creating a mixed-key DB.
     const preflight: RotateResult[] = [];
@@ -978,6 +968,10 @@ async function main() {
       // One DB transaction is the journal. Any write error rolls every class
       // back, so an interrupted invocation can be rerun safely.
       await db.transaction(async (tx) => {
+        // A transaction-scoped lock stays on the same PostgreSQL connection and
+        // is always released on commit or rollback. Session locks are unsafe on
+        // a pooled client because unlock can run on a different connection.
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(${LOCK_KEY_SQL})`);
         for (const table of tables) {
           const res = await rotateTable(table, tx as Db, ks, false);
           if (res.failed.length > 0) {
@@ -1007,19 +1001,7 @@ async function main() {
     console.error(`ROTATION ABORTED: ${errMsg(err)}`);
     process.exitCode = 1;
   } finally {
-    if (lockHeld) {
-      await db.execute(sql`SELECT pg_advisory_unlock(${LOCK_KEY_SQL})`).catch(() => {});
-    }
     await client.end();
-  }
-
-  if (failures.length > 0) {
-    console.error(
-      `ROTATION COMPLETED WITH ${failures.length} UNDECRYPTABLE ROW(S). ` +
-        `These rows were left untouched (no data loss) and must be investigated:`,
-    );
-    for (const f of failures) console.error(`  - ${f}`);
-    process.exitCode = 1;
   }
 }
 

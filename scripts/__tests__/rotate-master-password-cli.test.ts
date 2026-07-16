@@ -26,7 +26,7 @@ describe("master-password rotation command contract", () => {
     const transaction = source.indexOf("await db.transaction", preflight);
     expect(preflight).toBeGreaterThan(0);
     expect(transaction).toBeGreaterThan(preflight);
-    expect(source.match(/if \(failures\.length > 0\)/g)?.length).toBe(2);
+    expect(source.match(/if \(failures\.length > 0\)/g)?.length).toBe(1);
     expect(source).toContain("await db.transaction");
     expect(source).toContain("transaction rolled back");
     expect(source).not.toMatch(/console\.(?:log|error)\([^\n]*(?:plaintext|oldPw|newPw)/);
