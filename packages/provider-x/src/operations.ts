@@ -61,6 +61,16 @@ export interface XActionBuild {
   safeSummary: Record<string, unknown>;
   /** Validated arguments a provider policy may read. Never raw JSON. */
   policyArgs: Record<string, unknown>;
+  /**
+   * IN-MEMORY-ONLY text channel for content-pattern policy matching
+   * (`contentPolicy.blockedPatterns`). Present ONLY for text-bearing operations
+   * (x.tweet.create). It is DELIBERATELY separate from {@link policyArgs} so the
+   * "policyArgs = validated scalars, never raw text" contract holds: the composer
+   * reads `policyText` during evaluation and it is NEVER persisted to the
+   * decision doc, the safe-summary, or the audit event. See
+   * docs/security/permissioned-x.mdx "Text availability".
+   */
+  policyText?: string;
 }
 
 const JSON_CONTENT_TYPE = "application/json";
@@ -121,6 +131,61 @@ function assertNoLoneSurrogate(v: string, label: string): void {
 }
 
 /**
+ * Detect whether tweet text contains a URL. Used ONLY to derive the `hasUrl`
+ * policy arg (which is BOTH a content signal and a spend signal: a URL post
+ * costs $0.20 vs $0.015 for a plain post — see docs/security/permissioned-x.mdx
+ * and X_POST_PRICE_TABLE_V1). This is deliberately BROADER-or-equal to X's own
+ * t.co URL detection: we match `scheme://` URLs, bare `www.` hosts, and bare
+ * `host.tld` / `host.tld/path` forms. Over-detection is the SAFE direction for a
+ * no-URL policy (a false positive denies a borderline post; a false negative
+ * would let an expensive/forbidden URL through). It is a policy signal only — it
+ * never alters the tweet body or the canonical action digest.
+ *
+ * The detection is intentionally simple + deterministic (re-derivable offline).
+ * It does NOT attempt X's exact weighted URL model.
+ */
+function textHasUrl(text: string): boolean {
+  // scheme://... (http, https, ftp, etc.)
+  if (/[a-z][a-z0-9+.-]*:\/\/\S/i.test(text)) return true;
+  // bare www. host
+  if (/\bwww\.[^\s.]+\.[^\s]/i.test(text)) return true;
+  // bare host.tld optionally with a path. We OVER-DETECT here (fail toward
+  // treating an ambiguous token as a URL), because a false negative would let a
+  // `contentPolicy.allowUrls:false` / URL-spend / URL-approval policy be BYPASSED
+  // by a real bare domain on an uncommon TLD (e.g. `example.social`, `foo.shop`).
+  // A false positive only denies/escalates a borderline post, which is the safe
+  // direction (codex P2, PR review). We therefore treat ANY `label.tld` token
+  // (tld = 2+ ASCII letters) with a path OR a plausible domain shape as a URL,
+  // and EXCLUDE only a small deny-list of common English abbreviations that
+  // appear as `word.word` in ordinary prose.
+  //
+  // The dot must be immediately followed by 2+ ASCII letters (`\.[a-z]{2,}`), so
+  // ordinary prose with a space after the period ("fine. really") does NOT match
+  // — only a glued `label.tld` token does. Common English abbreviations with a
+  // single-letter right side ("e.g", "i.e", "p.m", "a.m", "u.s", "u.k") also do
+  // not match (1-letter tld). What remains are host-shaped tokens, which we
+  // OVER-DETECT as URLs regardless of TLD (a path is not required). We keep a
+  // tiny deny-list only for the rare glued 2+-letter-tld prose abbreviations.
+  const PROSE_ABBREVIATIONS: ReadonlySet<string> = new Set([
+    "etc.al", // "etc.al" style typo runs
+    "vs.the",
+  ]);
+  const hostRe = /\b([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\.([a-z]{2,})((?:\/\S*)?)/gi;
+  for (const m of text.matchAll(hostRe)) {
+    const label = m[1].toLowerCase();
+    const tld = m[2].toLowerCase();
+    const hasPath = m[3].length > 0;
+    // A path always makes it a URL.
+    if (hasPath) return true;
+    // Skip a couple of glued prose abbreviations; everything else host-shaped is
+    // over-detected as a URL (safe direction for a no-URL / spend policy).
+    if (PROSE_ABBREVIATIONS.has(`${label}.${tld}`)) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
  * Trim leading/trailing whitespace then validate the tweet text length by
  * Unicode code points (see the module-level simplification note). Returns the
  * TRIMMED text (the trimmed value is authoritative: it is what goes in the body).
@@ -140,7 +205,17 @@ function validateTweetText(v: unknown): string {
 
 // ─── x.tweet.create ───────────────────────────────────────────────────────────
 
-const TWEET_CREATE_KEYS = new Set(["text", "replyToTweetId"]);
+// `summoned` is a POLICY-ONLY hint (the caller asserts the account was
+// @mentioned/quoted by the post being replied to — the Feb-2026 anti-spam
+// precondition for a programmatic reply). It NEVER enters the tweet body or the
+// canonical action digest; it only flows to policyArgs so `replyPolicy:
+// summoned-only` can gate. It is validated as a strict boolean.
+const TWEET_CREATE_KEYS = new Set(["text", "replyToTweetId", "summoned"]);
+
+function validateBool(v: unknown, name: string): boolean {
+  if (typeof v !== "boolean") fieldError(`${name} must be a boolean`);
+  return v;
+}
 
 function buildTweetCreate(rawArgs: unknown): XActionBuild {
   const args = asObject(rawArgs);
@@ -152,6 +227,16 @@ function buildTweetCreate(rawArgs: unknown): XActionBuild {
   if ("replyToTweetId" in args && args.replyToTweetId !== undefined) {
     replyToTweetId = validateId(args.replyToTweetId, "replyToTweetId");
   }
+
+  // `summoned` defaults to false (fail-closed for summoned-only reply policy:
+  // an unasserted reply is treated as NOT summoned). Only meaningful on a reply,
+  // but accepted+validated regardless so the arg shape is stable.
+  let summoned = false;
+  if ("summoned" in args && args.summoned !== undefined) {
+    summoned = validateBool(args.summoned, "summoned");
+  }
+
+  const hasUrl = textHasUrl(text);
 
   // Body: {text} plus a nested reply object only when replying. The shared JCS
   // sorts object keys, so insertion order here is irrelevant to the digest.
@@ -179,14 +264,24 @@ function buildTweetCreate(rawArgs: unknown): XActionBuild {
   const safeSummary: Record<string, unknown> = {
     operation: "x.tweet.create",
     isReply: replyToTweetId !== undefined,
+    // Booleans/lengths only — NEVER any slice of the text. `hasUrl` is a
+    // derived boolean signal (content + spend), safe to surface.
+    hasUrl,
+    summoned,
     textCodePointLength: codePointLength,
     textByteLength: byteLength,
     textSha256,
   };
   if (replyToTweetId !== undefined) safeSummary.replyToTweetId = replyToTweetId;
 
+  // policyArgs carries ONLY validated scalars/booleans the composer gates on —
+  // NEVER raw text (that contract is asserted by the operations test). The raw
+  // text for blockedPatterns matching travels on the SEPARATE, non-persisted
+  // `policyText` field of the build (see XActionBuild.policyText).
   const policyArgs: Record<string, unknown> = {
     isReply: replyToTweetId !== undefined,
+    hasUrl,
+    summoned,
     textCodePointLength: codePointLength,
     textByteLength: byteLength,
   };
@@ -199,6 +294,7 @@ function buildTweetCreate(rawArgs: unknown): XActionBuild {
     action,
     safeSummary,
     policyArgs,
+    policyText: text,
   };
 }
 

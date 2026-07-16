@@ -929,6 +929,12 @@ class ProviderActionService {
     // no governing rules (default deny).
     const rules = extractCapabilityIntentRules(operation.requestProfile);
 
+    // The in-memory-only tweet-text channel for X contentPolicy.blockedPatterns.
+    // Present ONLY on a text-bearing X build; NEVER persisted (the decision doc,
+    // safe-summary, and audit event stay text-free). A github build has no
+    // policyText, so this is undefined and any content-pattern rule fails closed.
+    const policyText = "policyText" in build ? build.policyText : undefined;
+
     const context: ProviderPolicyContext = {
       operationKey: operation.operationKey,
       args: build.policyArgs,
@@ -941,6 +947,15 @@ class ProviderActionService {
       // Trailing-hour count is not wired in PR2; rules that require it will
       // fail closed (POLICY_INPUT_UNAVAILABLE) exactly as specified.
       invokeCount1h: undefined,
+      ...(policyText !== undefined ? { policyText } : {}),
+      // Permissioned-X authoritative inputs (post count / accumulated spend /
+      // now-minute) are NOT wired into the service in Phase 1 — exactly the same
+      // posture as invokeCount1h above. A permissioned-X rule that REQUIRES one
+      // of these inputs (maxPostsPerWindow / spendPolicy / quietHours) therefore
+      // fails closed (POLICY_INPUT_UNAVAILABLE) until the trailing-window
+      // accumulator lands. Content/reply/URL rules need no external input and are
+      // fully live now.
+      x: undefined,
     };
 
     const evaluation = composeProviderActionPolicyDecision(rules, context);
