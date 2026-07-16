@@ -43,6 +43,7 @@ import {
   PROVIDER_APPROVAL_AUDIT_SCHEMA,
   type ProviderApprovalAuditPayloadV1,
   type ProviderApprovalCommitmentV1,
+  isRegisteredProfile,
   sha256HexPrefixed,
 } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";
@@ -166,6 +167,14 @@ export async function buildApprovalArm(args: {
   quorum?: { threshold: number; eligibleApproverUserIds: string[] };
 }): Promise<{ queueId: string; commitmentHash: string; commitment: ProviderApprovalCommitmentV1 }> {
   const tx = args.tx;
+
+  // #201 fail-closed consumption site: the canonical profile bound into the
+  // approval commitment MUST be a registered profile. An unregistered value
+  // fails the approval arm (creation fails closed) rather than committing an
+  // unknown profile into the durable evidence surface.
+  if (!isRegisteredProfile(args.canonicalProfile)) {
+    throw new ApprovalArmError("APPROVAL_PROFILE_UNREGISTERED");
+  }
 
   // Route + credential dependencies MUST exist (spec §5.2). Missing => throw so
   // creation fails closed.
