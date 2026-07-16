@@ -45,12 +45,27 @@ import {
   type ProviderPolicyRule,
 } from "@stwd/policy-engine";
 import type { GithubActionBuild } from "@stwd/provider-github";
+import type { XActionBuild } from "@stwd/provider-x";
 import {
   type GithubCanonicalActionV1,
   jcsStringify,
   type ProviderRequestEnvelopeV1,
   sha256HexPrefixed,
+  type XCanonicalActionV1,
 } from "@stwd/shared";
+
+/**
+ * The provider-action pipeline is adapter-agnostic: it reads only the generic
+ * canonical-action fields (profile/method/origin/normalizedPath/query/headers/
+ * body), the validated `policyArgs`, and the `safeSummary`. github and X builds
+ * are structurally compatible on all of those, so the pipeline accepts either.
+ * Adding a new adapter is a matter of extending this union, never forking the
+ * pipeline.
+ */
+export type ProviderActionBuild = GithubActionBuild | XActionBuild;
+/** The structurally-shared canonical action shape both adapters emit. */
+type AnyCanonicalActionV1 = GithubCanonicalActionV1 | XCanonicalActionV1;
+
 import { and, eq, sql } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import { appendAuditEvent, withTenantAuditQueue, writeAuditEvent } from "./audit";
@@ -127,7 +142,7 @@ export interface CreateProviderActionInput {
   workspaceId: string;
   providerAccountId: string;
   operationKey: string;
-  build: GithubActionBuild;
+  build: ProviderActionBuild;
   idempotencyKeyHash: string;
   requestedAt: string;
   expiresAt: string;
@@ -501,6 +516,9 @@ class ProviderActionService {
             requesterSeparation: extractRequesterSeparation(txOperation.requestProfile),
             requestedAt: input.requestedAt,
             expiresAt: input.expiresAt,
+            // Bind the adapter profile from the validated build, never a
+            // hardcoded provider (so X actions commit x.provider-action.v1).
+            canonicalProfile: build.action.profile,
           });
           approvalQueueId = arm.queueId;
           approvalCommitmentHash = arm.commitmentHash;
@@ -892,7 +910,7 @@ class ProviderActionService {
     workspaceId: string;
     actorAgentId: string;
     operation: typeof providerOperations.$inferSelect;
-    build: GithubActionBuild;
+    build: ProviderActionBuild;
     intentId: string;
     requestHash: string;
     actionDigest: string;
@@ -915,7 +933,10 @@ class ProviderActionService {
       operationKey: operation.operationKey,
       args: build.policyArgs,
       method: build.method,
-      host: "api.github.com",
+      // Host is carried context only (the composer never gates on it); derive it
+      // from the adapter's canonical origin so X actions report api.x.com and
+      // github actions report api.github.com, never a hardcoded provider.
+      host: hostFromOrigin(build.action.origin),
       path: build.action.normalizedPath,
       // Trailing-hour count is not wired in PR2; rules that require it will
       // fail closed (POLICY_INPUT_UNAVAILABLE) exactly as specified.
@@ -1098,7 +1119,7 @@ class ProviderActionService {
   }
 
   // ── helpers ──
-  private canonicalActionObject(a: GithubCanonicalActionV1): Record<string, unknown> {
+  private canonicalActionObject(a: AnyCanonicalActionV1): Record<string, unknown> {
     return {
       profile: a.profile,
       method: a.method,
@@ -1269,6 +1290,19 @@ class ProviderActionService {
 }
 
 // ── module-scope helpers ──
+
+/**
+ * Extract the host from a canonical origin like `https://api.x.com`. The origin
+ * is already canonicalized by the adapter (scheme https, no port, no path), so a
+ * simple prefix strip is sufficient and total; a malformed origin (never emitted
+ * by the adapters) falls back to the raw value rather than throwing, since this
+ * value is non-authoritative policy context only.
+ */
+function hostFromOrigin(origin: string): string {
+  const withoutScheme = origin.replace(/^https:\/\//, "");
+  const slash = withoutScheme.indexOf("/");
+  return slash === -1 ? withoutScheme : withoutScheme.slice(0, slash);
+}
 
 function activeAtRow(
   row: {

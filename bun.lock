@@ -58,6 +58,7 @@
         "@stwd/plugin-trading": "workspace:*",
         "@stwd/policy-engine": "workspace:*",
         "@stwd/provider-github": "workspace:*",
+        "@stwd/provider-x": "workspace:*",
         "@stwd/redis": "workspace:*",
         "@stwd/shared": "workspace:*",
         "@stwd/vault": "workspace:*",
