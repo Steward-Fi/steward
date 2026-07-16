@@ -65,6 +65,7 @@ import {
 export type ProviderActionBuild = GithubActionBuild | XActionBuild;
 /** The structurally-shared canonical action shape both adapters emit. */
 type AnyCanonicalActionV1 = GithubCanonicalActionV1 | XCanonicalActionV1;
+
 import { and, eq, sql } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import { appendAuditEvent, withTenantAuditQueue, writeAuditEvent } from "./audit";
