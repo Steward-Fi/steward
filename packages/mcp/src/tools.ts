@@ -2,7 +2,7 @@ import { StewardApiError, type StewardClient } from "@stwd/sdk";
 import { describeThrown } from "@stwd/shared";
 import { z } from "zod";
 import type { StewardMcpConfig } from "./config.js";
-import { ProviderApiError, sanitizeProviderPayload, type ProviderApi } from "./provider-api.js";
+import { type ProviderApi, ProviderApiError, sanitizeProviderPayload } from "./provider-api.js";
 
 /**
  * Minimal shape of an MCP tool result. Matches the `content` + `isError`
@@ -75,7 +75,11 @@ function errorResult(message: string): ToolResult {
  */
 export function toErrorResult(err: unknown): ToolResult {
   if (err instanceof ProviderApiError) {
-    const detail = sanitizeProviderPayload({ error: err.message, status: err.status, data: err.data });
+    const detail = sanitizeProviderPayload({
+      error: err.message,
+      status: err.status,
+      data: err.data,
+    });
     return {
       content: [{ type: "text", text: `Steward provider API error: ${jsonText(detail)}` }],
       structuredContent: detail as Record<string, unknown>,
@@ -83,9 +87,18 @@ export function toErrorResult(err: unknown): ToolResult {
     };
   }
   if (err instanceof StewardApiError) {
-    const detail = sanitizeProviderPayload({ error: err.message, status: err.status, data: err.data });
+    const rawData =
+      err.data && typeof err.data === "object" ? (err.data as { results?: unknown }) : undefined;
+    const detail = sanitizeProviderPayload({
+      error: err.message,
+      status: err.status,
+      data: err.data,
+      ...(rawData?.results !== undefined ? { policyResults: rawData.results } : {}),
+    });
     return {
-      content: [{ type: "text", text: `Steward API error: ${jsonText(detail)}` }],
+      content: [
+        { type: "text", text: `Steward API error (HTTP ${err.status}): ${jsonText(detail)}` },
+      ],
       structuredContent: detail as Record<string, unknown>,
       isError: true,
     };
@@ -188,13 +201,23 @@ const hexData = z.string().regex(/^0x[0-9a-fA-F]*$/, "must be 0x-prefixed hex");
 const decimalString = z.string().regex(/^\d+$/, "must be a base-10 integer string");
 
 const positiveInt = z.number().int().positive();
-const boundedId = z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:-]+$/, "contains unsupported characters");
-const providerCaseId = z.string().max(128).regex(/^pa_[0-9a-fA-F-]{36}$/, "must be a provider action id");
-const idempotencyKey = z.string().min(8).max(255).regex(/^[\x21-\x7e]+$/, "must contain visible ASCII only");
-const providerArguments = z.record(z.string(), z.unknown()).refine(
-  (value) => JSON.stringify(value).length <= 256 * 1024,
-  "arguments exceed 256 KiB",
-);
+const boundedId = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9_.:-]+$/, "contains unsupported characters");
+const providerCaseId = z
+  .string()
+  .max(128)
+  .regex(/^pa_[0-9a-fA-F-]{36}$/, "must be a provider action id");
+const idempotencyKey = z
+  .string()
+  .min(8)
+  .max(255)
+  .regex(/^[\x21-\x7e]+$/, "must contain visible ASCII only");
+const providerArguments = z
+  .record(z.string(), z.unknown())
+  .refine((value) => JSON.stringify(value).length <= 256 * 1024, "arguments exceed 256 KiB");
 
 /**
  * Build the full set of Steward MCP tools bound to a client + config.
@@ -214,8 +237,12 @@ export function buildTools(ctx: ToolContext): StewardTool[] {
           workspaceId: boundedId.describe("Workspace id within the authenticated tenant."),
           providerAccountId: boundedId.describe("Provider account id within that workspace."),
           operationKey: boundedId.describe("Registered provider operation key."),
-          arguments: providerArguments.describe("Operation arguments validated by the provider adapter."),
-          idempotencyKey: idempotencyKey.describe("Caller idempotency key, validated again by Steward."),
+          arguments: providerArguments.describe(
+            "Operation arguments validated by the provider adapter.",
+          ),
+          idempotencyKey: idempotencyKey.describe(
+            "Caller idempotency key, validated again by Steward.",
+          ),
         })
         .strict(),
       readOnly: false,
@@ -232,7 +259,8 @@ export function buildTools(ctx: ToolContext): StewardTool[] {
         "Fetch the current provider-action intent from the existing GET /intents/:intentId route. Tenant visibility is determined only by the configured Steward credentials.",
       schema: z.object({ actionId: providerCaseId }).strict(),
       readOnly: true,
-      run: ({ actionId }) => requireProviderApi(ctx).request(`/intents/${encodeURIComponent(actionId)}`),
+      run: ({ actionId }) =>
+        requireProviderApi(ctx).request(`/intents/${encodeURIComponent(actionId)}`),
     }),
     defineTool(ctx, {
       name: "provider_action_approval",
@@ -241,7 +269,9 @@ export function buildTools(ctx: ToolContext): StewardTool[] {
       schema: z.object({ actionId: providerCaseId }).strict(),
       readOnly: true,
       run: ({ actionId }) =>
-        requireProviderApi(ctx).request(`/v2/provider-actions/${encodeURIComponent(actionId)}/approval`),
+        requireProviderApi(ctx).request(
+          `/v2/provider-actions/${encodeURIComponent(actionId)}/approval`,
+        ),
     }),
     defineTool(ctx, {
       name: "provider_action_case",
@@ -250,7 +280,9 @@ export function buildTools(ctx: ToolContext): StewardTool[] {
       schema: z.object({ actionId: providerCaseId }).strict(),
       readOnly: true,
       run: ({ actionId }) =>
-        requireProviderApi(ctx).request(`/v2/provider-actions/${encodeURIComponent(actionId)}/case`),
+        requireProviderApi(ctx).request(
+          `/v2/provider-actions/${encodeURIComponent(actionId)}/case`,
+        ),
     }),
     defineTool(ctx, {
       name: "provider_action_evidence",
@@ -259,7 +291,9 @@ export function buildTools(ctx: ToolContext): StewardTool[] {
       schema: z.object({ actionId: providerCaseId }).strict(),
       readOnly: true,
       run: ({ actionId }) =>
-        requireProviderApi(ctx).request(`/v2/provider-actions/${encodeURIComponent(actionId)}/evidence`),
+        requireProviderApi(ctx).request(
+          `/v2/provider-actions/${encodeURIComponent(actionId)}/evidence`,
+        ),
     }),
     defineTool(ctx, {
       name: "list_wallets",

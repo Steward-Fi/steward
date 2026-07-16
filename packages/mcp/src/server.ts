@@ -34,7 +34,8 @@ export function createStewardMcpServer(options: CreateServerOptions): CreateServ
   });
 
   const providerApi =
-    options.providerApi ?? (options.config.baseUrl ? createProviderApi(options.config as StewardMcpConfig) : undefined);
+    options.providerApi ??
+    (options.config.baseUrl ? createProviderApi(options.config as StewardMcpConfig) : undefined);
   const tools = buildTools({ client: options.client, providerApi, config: options.config });
 
   for (const tool of tools) {

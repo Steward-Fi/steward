@@ -15,7 +15,9 @@ export function sanitizeProviderPayload(value: unknown, depth = 0): unknown {
   if (value && typeof value === "object") {
     const clean: Record<string, unknown> = {};
     for (const [key, nested] of Object.entries(value)) {
-      clean[key] = SENSITIVE_KEY.test(key) ? "[redacted]" : sanitizeProviderPayload(nested, depth + 1);
+      clean[key] = SENSITIVE_KEY.test(key)
+        ? "[redacted]"
+        : sanitizeProviderPayload(nested, depth + 1);
     }
     return clean;
   }
@@ -63,7 +65,9 @@ export function createProviderApi(config: StewardMcpConfig): ProviderApi {
       const clean = sanitizeProviderPayload(payload);
       if (!response.ok) {
         const message =
-          clean && typeof clean === "object" && typeof (clean as Record<string, unknown>).error === "string"
+          clean &&
+          typeof clean === "object" &&
+          typeof (clean as Record<string, unknown>).error === "string"
             ? ((clean as Record<string, unknown>).error as string)
             : `Provider API request failed with HTTP ${response.status}`;
         throw new ProviderApiError(message, response.status, clean);

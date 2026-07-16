@@ -7,18 +7,18 @@ export {
   type StewardMcpConfig,
 } from "./config.js";
 export {
+  createProviderApi,
+  type ProviderApi,
+  ProviderApiError,
+  sanitizeProviderPayload,
+} from "./provider-api.js";
+export {
   type CreateServerOptions,
   type CreateServerResult,
   createStewardMcpServer,
   SERVER_NAME,
   SERVER_VERSION,
 } from "./server.js";
-export {
-  createProviderApi,
-  ProviderApiError,
-  sanitizeProviderPayload,
-  type ProviderApi,
-} from "./provider-api.js";
 export {
   buildTools,
   type StewardTool,
