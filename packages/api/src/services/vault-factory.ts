@@ -6,6 +6,35 @@ const require = createRequire(import.meta.url);
 
 export type VaultMode = "local" | "kms-envelope:aws" | "kms-envelope:pkcs11";
 
+/**
+ * Explicit acknowledgement that this deployment runs the weakest custody
+ * posture (`local`: AES-256-GCM at rest, plaintext key bytes in application
+ * memory at sign time) in production. Set to `"true"` to proceed.
+ *
+ * This mirrors the adapter-registry `STEWARD_ALLOW_MOCK_ADAPTERS` gate: a silent
+ * weak default in production becomes a deliberate, recorded operator decision.
+ * Unlike the `STEWARD_ALLOW_*` family (which unblocks an otherwise-refused
+ * capability), this flag does not change WHAT local mode can do — it only forces
+ * the operator to acknowledge the posture before the root of trust boots.
+ *
+ * See docs/security/custody-posture.md for the full threat model.
+ */
+export const LOCAL_CUSTODY_ACK_ENV = "STEWARD_ACK_LOCAL_CUSTODY";
+
+export class LocalCustodyAcknowledgementRequiredError extends Error {
+  readonly code = "local_custody_acknowledgement_required";
+  constructor() {
+    super(
+      "Refusing to boot: NODE_ENV=production with local plaintext custody " +
+        "(mode=local). In local mode the private key is decrypted to plaintext in " +
+        "application memory at sign time, so a memory-scrape of this process " +
+        `exposes every key. Acknowledge this posture explicitly by setting ${LOCAL_CUSTODY_ACK_ENV}=true, ` +
+        "or move to a stronger backend (STEWARD_KMS_PROVIDER=aws|pkcs11, or an " +
+        "third-party-custody provider). See docs/security/custody-posture.md.",
+    );
+  }
+}
+
 export const VAULT_SIGNING_CAPABILITIES = Object.freeze([
   "sign_transaction",
   "sign_message",
@@ -69,6 +98,56 @@ function requireKmsConfiguration(provider: "aws" | "pkcs11"): void {
   }
 }
 
+/**
+ * True when the resolved custody mode materializes plaintext private-key bytes
+ * in this process's memory at sign time. This is the honest boundary from
+ * VISION.md: `local` AND both `kms-envelope:*` modes decrypt the key to a
+ * plaintext string in-process before signing. Only an third-party-custody provider
+ * (wired via VaultConfig.third-partyKeyCustodyProvider, not a vault-factory mode)
+ * keeps plaintext out of this process entirely.
+ *
+ * The acknowledgement gate below is scoped narrowly to `local` — the weakest
+ * mode, where the key is ALSO plaintext at rest inside the app's own DB unless
+ * an operator adds a KMS/HSM wrap. KMS-envelope modes already require explicit
+ * KMS configuration, which is itself a deliberate operator decision.
+ */
+export function modeExposesPlaintextAtSignTime(mode: VaultMode): boolean {
+  // Every vault-factory mode currently decrypts to plaintext in-process before
+  // signing. Enumerated (not a blanket `true`) so a future signing-in-HSM mode
+  // must be added here deliberately rather than defaulting into "safe".
+  switch (mode) {
+    case "local":
+    case "kms-envelope:aws":
+    case "kms-envelope:pkcs11":
+      return true;
+    default: {
+      // Unknown mode: fail closed (treat as plaintext-exposing).
+      const _exhaustive: never = mode;
+      return true;
+    }
+  }
+}
+
+function localCustodyAcknowledged(): boolean {
+  return process.env[LOCAL_CUSTODY_ACK_ENV] === "true";
+}
+
+/**
+ * Fail closed if this deployment would silently boot the weakest custody
+ * posture in production. The root of trust must never boot weak SILENTLY:
+ * production + local plaintext custody + no explicit acknowledgement => throw.
+ *
+ * Development/test ergonomics are unchanged (the gate only fires when
+ * NODE_ENV === "production"). Stronger modes (KMS-envelope) pass without the
+ * ack because selecting them is already an explicit configuration decision.
+ */
+export function assertProductionCustodyAcknowledged(mode: VaultMode): void {
+  if (process.env.NODE_ENV !== "production") return;
+  if (mode !== "local") return;
+  if (localCustodyAcknowledged()) return;
+  throw new LocalCustodyAcknowledgementRequiredError();
+}
+
 function configuredMode(): VaultMode {
   const provider = configuredKmsProvider();
   if (!provider) return "local";
@@ -110,6 +189,8 @@ function resolveMasterPassword(options: ConfiguredVaultOptions): string {
 
 export function createConfiguredVault(options: ConfiguredVaultOptions = {}): Vault {
   const mode = configuredMode();
+  // Root-of-trust gate: never silently boot local plaintext custody in prod.
+  assertProductionCustodyAcknowledged(mode);
   const masterPassword = resolveMasterPassword(options);
   return new Vault({
     masterPassword,
@@ -134,7 +215,19 @@ export function getConfiguredVault(options: ConfiguredVaultOptions = {}): Vault 
 export function configuredVaultStartupLogLine(): string {
   const provider = configuredKmsProvider();
   const mode: VaultMode = provider ? `kms-envelope:${provider}` : "local";
-  return `[steward] vault mode=${mode} capabilities=${VAULT_SIGNING_CAPABILITIES.join(",")}`;
+  const plaintextAtSignTime = modeExposesPlaintextAtSignTime(mode);
+  // In production, local mode only reaches this point when the operator has
+  // explicitly acknowledged the weak posture (see assertProductionCustodyAcknowledged).
+  // Surface that acknowledgement in the boot log so it is auditable. Never emit
+  // key material, KMS key ids, or the master password here.
+  const ack =
+    mode === "local" && process.env.NODE_ENV === "production"
+      ? ` local_custody_acknowledged=${localCustodyAcknowledged()}`
+      : "";
+  return (
+    `[steward] vault mode=${mode} plaintext_at_sign_time=${plaintextAtSignTime}${ack} ` +
+    `capabilities=${VAULT_SIGNING_CAPABILITIES.join(",")}`
+  );
 }
 
 export function _clearConfiguredVaultsForTests(): void {
