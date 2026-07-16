@@ -35,7 +35,12 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { buildGithubAction } from "@stwd/provider-github";
-import { computeActionDigest } from "@stwd/shared";
+import {
+  __resetSecurityMetricsForTests,
+  __setSecurityMetricsObserverFailureForTests,
+  computeActionDigest,
+  renderSecurityMetrics,
+} from "@stwd/shared";
 import { eq, sql } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import { providerActionService } from "../services/provider-action-service";
@@ -243,6 +248,7 @@ describe("provider-action service pipeline", () => {
   });
 
   beforeEach(async () => {
+    __resetSecurityMetricsForTests();
     const db = getDb();
     await db.delete(providerActionAuditOutbox);
     await db.delete(providerActionBindings);
@@ -267,6 +273,19 @@ describe("provider-action service pipeline", () => {
     expect(await auditCount()).toBe(before + 1);
   });
 
+  test("metrics observer failure cannot change a real governed denial decision", async () => {
+    __setSecurityMetricsObserverFailureForTests(true);
+    const before = await auditCount();
+    const out = await providerActionService.createProviderAction(
+      input({
+        operationKey: "github.issue.list",
+        providerAccountId: "30000000-0000-4000-8000-0000000000ff",
+      }),
+    );
+    expect(out.kind).toBe("scope_not_found");
+    expect(await auditCount()).toBe(before + 1);
+  });
+
   test("access deny (no grant): creates intent + binding with policy not_evaluated", async () => {
     const out = await providerActionService.createProviderAction(input());
     expect(out.kind).toBe("access_denied");
@@ -283,6 +302,12 @@ describe("provider-action service pipeline", () => {
     // access + policy decision documents are DISTINCT: policy is null here.
     expect(b.policyDecision).toBeNull();
     expect(b.accessDecisionHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    // The real composed service -> outbox -> durable audit path feeds only the
+    // bounded reason class, never the raw grant reason or principal metadata.
+    const metrics = renderSecurityMetrics();
+    expect(metrics).toContain('reason_class="access"} 1');
+    expect(metrics).not.toContain("GRANT_ABSENT");
+    expect(metrics).not.toContain(AGENT);
   });
 
   test("allow: grant present, no governing policy denies (default deny) unless allow rule present", async () => {
