@@ -4,12 +4,13 @@ A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that
 exposes [Steward](https://steward.fi) agent-wallet and auth operations as tools
 that AI agents and MCP-aware IDEs (Claude Code, Cursor, etc.) can call.
 
-The server is a **thin, authenticated client**. It calls the Steward API through
-the official [`@stwd/sdk`](../sdk) `StewardClient` and never reimplements HTTP,
-holds private keys, or bypasses policy. Every signing or transfer tool is
-evaluated by Steward's policy engine server-side — a request may be signed,
-broadcast, rejected, or queued for human approval, and this server cannot
-override that decision.
+The server is a **thin, authenticated client**. Wallet tools call the Steward API
+through the official [`@stwd/sdk`](../sdk) `StewardClient`. Provider-action tools
+use a narrow internal HTTP transport for the existing v2 routes. Both transports
+use only server configuration. Tool arguments cannot choose a tenant, credential,
+host, or URL. The package holds no provider credentials, private keys, or policy
+authority. Steward evaluates every action server-side, and this server cannot
+override the result.
 
 ## Install
 
@@ -100,6 +101,11 @@ structured content; Steward API errors surface their HTTP status and any policy
 
 | Tool | Kind | SDK method | Description |
 | --- | --- | --- | --- |
+| `provider_action_invoke` | write (destructive) | `POST /v2/provider-actions` | Submit an action for provider authorization and policy evaluation. |
+| `provider_action_status` | read | `GET /intents/:id` | Fetch current action intent status through the API's existing status route. |
+| `provider_action_approval` | read | `GET /v2/provider-actions/:id/approval` | Fetch approval state. The API requires an eligible human session and recent MFA. |
+| `provider_action_case` | read | `GET /v2/provider-actions/:id/case` | Fetch the correlated case manifest. |
+| `provider_action_evidence` | read | `GET /v2/provider-actions/:id/evidence` | Fetch the correlated signed evidence bundle. |
 | `list_wallets` | read | `listAgents` | List all agent wallets visible to the credentials. |
 | `get_wallet` | read | `getAgent` | Fetch a single agent wallet's identity. |
 | `create_wallet` | write | `createWallet` | Provision a new agent wallet (keys stay in Steward). |
@@ -111,6 +117,26 @@ structured content; Steward API errors surface their HTTP status and any policy
 | `get_policy` | read | `getPolicyRule` | A single policy rule by id. |
 | `list_pending_approvals` | read | `listApprovals` | Transactions awaiting human approval. |
 | `get_audit_log` | read | `getAuditLog` | Paginated tenant audit log with filters. |
+
+### Authorization boundary
+
+Provider tools send the same configured Steward credential and optional tenant
+header as the existing MCP client. They do not accept tenant, actor, bearer,
+provider credential, URL, or host arguments. Approval, case, and evidence reads
+retain the API's human-session, MFA, role, workspace, and tenant gates. In
+particular, an agent JWT cannot use MCP to impersonate a human approver.
+
+The current API intentionally has split auth modes. Invocation requires an agent
+JWT. The existing status route (`GET /intents/:id`) requires a tenant API key or
+owner/admin session. Approval, case, and evidence reads require eligible human
+sessions and recent MFA, with case and evidence further limited to owner/admin.
+A single agent-JWT MCP process can invoke but receives honest authorization
+errors from those human or tenant-level read routes. No agent-readable v2 status
+route exists on the current API, and this package does not invent one or weaken
+the API gates.
+
+These tools **do not implement MCP OAuth 2.1 resource-server semantics**. That
+separate authorization-layer work is tracked by issue #219.
 
 ## Development
 

@@ -190,6 +190,7 @@
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@stwd/sdk": "workspace:*",
+        "@stwd/shared": "workspace:*",
         "zod": "^4.3.6",
       },
       "devDependencies": {

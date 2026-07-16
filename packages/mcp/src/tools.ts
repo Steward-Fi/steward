@@ -1,6 +1,8 @@
 import { StewardApiError, type StewardClient } from "@stwd/sdk";
+import { describeThrown } from "@stwd/shared";
 import { z } from "zod";
 import type { StewardMcpConfig } from "./config.js";
+import { type ProviderApi, ProviderApiError, sanitizeProviderPayload } from "./provider-api.js";
 
 /**
  * Minimal shape of an MCP tool result. Matches the `content` + `isError`
@@ -42,6 +44,7 @@ export interface StewardTool {
 /** Context shared by all tool factories. */
 export interface ToolContext {
   client: StewardClient;
+  providerApi?: ProviderApi;
   config: Pick<StewardMcpConfig, "defaultAgentId">;
 }
 
@@ -71,20 +74,40 @@ function errorResult(message: string): ToolResult {
  * pending approval) without leaking transport internals.
  */
 export function toErrorResult(err: unknown): ToolResult {
+  if (err instanceof ProviderApiError) {
+    const detail = sanitizeProviderPayload({
+      error: err.message,
+      status: err.status,
+      data: err.data,
+    });
+    return {
+      content: [{ type: "text", text: `Steward provider API error: ${jsonText(detail)}` }],
+      structuredContent: detail as Record<string, unknown>,
+      isError: true,
+    };
+  }
   if (err instanceof StewardApiError) {
-    const detail: Record<string, unknown> = { error: err.message, status: err.status };
-    if (err.data && typeof err.data === "object") {
-      const data = err.data as { results?: unknown };
-      if (data.results !== undefined) detail.policyResults = data.results;
-    }
-    return errorResult(`Steward API error (HTTP ${err.status}): ${jsonText(detail)}`);
+    const rawData =
+      err.data && typeof err.data === "object" ? (err.data as { results?: unknown }) : undefined;
+    const detail = sanitizeProviderPayload({
+      error: err.message,
+      status: err.status,
+      data: err.data,
+      ...(rawData?.results !== undefined ? { policyResults: rawData.results } : {}),
+    });
+    return {
+      content: [
+        { type: "text", text: `Steward API error (HTTP ${err.status}): ${jsonText(detail)}` },
+      ],
+      structuredContent: detail as Record<string, unknown>,
+      isError: true,
+    };
   }
   if (err instanceof z.ZodError) {
     const issues = err.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`);
     return errorResult(`Invalid tool input: ${issues.join("; ")}`);
   }
-  if (err instanceof Error) return errorResult(err.message);
-  return errorResult(String(err));
+  return errorResult(sanitizeProviderPayload(describeThrown(err)) as string);
 }
 
 /**
@@ -149,6 +172,11 @@ function defineTool<S extends z.ZodObject<z.ZodRawShape>>(
   };
 }
 
+function requireProviderApi(ctx: ToolContext): ProviderApi {
+  if (!ctx.providerApi) throw new Error("Provider API transport is not configured");
+  return ctx.providerApi;
+}
+
 function titleCase(name: string): string {
   return name
     .split("_")
@@ -173,6 +201,23 @@ const hexData = z.string().regex(/^0x[0-9a-fA-F]*$/, "must be 0x-prefixed hex");
 const decimalString = z.string().regex(/^\d+$/, "must be a base-10 integer string");
 
 const positiveInt = z.number().int().positive();
+const boundedId = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9_.:-]+$/, "contains unsupported characters");
+const providerCaseId = z
+  .string()
+  .max(128)
+  .regex(/^pa_[0-9a-fA-F-]{36}$/, "must be a provider action id");
+const idempotencyKey = z
+  .string()
+  .min(8)
+  .max(255)
+  .regex(/^[\x21-\x7e]+$/, "must contain visible ASCII only");
+const providerArguments = z
+  .record(z.string(), z.unknown())
+  .refine((value) => JSON.stringify(value).length <= 256 * 1024, "arguments exceed 256 KiB");
 
 /**
  * Build the full set of Steward MCP tools bound to a client + config.
@@ -183,6 +228,73 @@ const positiveInt = z.number().int().positive();
  */
 export function buildTools(ctx: ToolContext): StewardTool[] {
   return [
+    defineTool(ctx, {
+      name: "provider_action_invoke",
+      description:
+        "Submit a governed provider action to POST /v2/provider-actions. Steward derives tenant and actor from the configured agent JWT and evaluates policy server-side. Pending and denied results remain structured.",
+      schema: z
+        .object({
+          workspaceId: boundedId.describe("Workspace id within the authenticated tenant."),
+          providerAccountId: boundedId.describe("Provider account id within that workspace."),
+          operationKey: boundedId.describe("Registered provider operation key."),
+          arguments: providerArguments.describe(
+            "Operation arguments validated by the provider adapter.",
+          ),
+          idempotencyKey: idempotencyKey.describe(
+            "Caller idempotency key, validated again by Steward.",
+          ),
+        })
+        .strict(),
+      readOnly: false,
+      destructive: true,
+      run: (input) =>
+        requireProviderApi(ctx).request("/v2/provider-actions", {
+          method: "POST",
+          body: JSON.stringify(input),
+        }),
+    }),
+    defineTool(ctx, {
+      name: "provider_action_status",
+      description:
+        "Fetch the current provider-action intent from the existing GET /intents/:intentId route. This real API route requires tenant-level credentials and rejects agent JWTs; MCP preserves that gate.",
+      schema: z.object({ actionId: providerCaseId }).strict(),
+      readOnly: true,
+      run: ({ actionId }) =>
+        requireProviderApi(ctx).request(`/intents/${encodeURIComponent(actionId)}`),
+    }),
+    defineTool(ctx, {
+      name: "provider_action_approval",
+      description:
+        "Fetch approval state from GET /v2/provider-actions/:id/approval. The real API requires an eligible human session and recent MFA, so an agent-token MCP server receives the API's honest authorization error rather than bypassing that gate.",
+      schema: z.object({ actionId: providerCaseId }).strict(),
+      readOnly: true,
+      run: ({ actionId }) =>
+        requireProviderApi(ctx).request(
+          `/v2/provider-actions/${encodeURIComponent(actionId)}/approval`,
+        ),
+    }),
+    defineTool(ctx, {
+      name: "provider_action_case",
+      description:
+        "Fetch the correlated case manifest from GET /v2/provider-actions/:id/case. The API enforces owner/admin, recent-MFA, and tenant scope.",
+      schema: z.object({ actionId: providerCaseId }).strict(),
+      readOnly: true,
+      run: ({ actionId }) =>
+        requireProviderApi(ctx).request(
+          `/v2/provider-actions/${encodeURIComponent(actionId)}/case`,
+        ),
+    }),
+    defineTool(ctx, {
+      name: "provider_action_evidence",
+      description:
+        "Fetch the correlated signed evidence bundle from GET /v2/provider-actions/:id/evidence. The API enforces owner/admin, recent-MFA, and tenant scope.",
+      schema: z.object({ actionId: providerCaseId }).strict(),
+      readOnly: true,
+      run: ({ actionId }) =>
+        requireProviderApi(ctx).request(
+          `/v2/provider-actions/${encodeURIComponent(actionId)}/evidence`,
+        ),
+    }),
     defineTool(ctx, {
       name: "list_wallets",
       description:
