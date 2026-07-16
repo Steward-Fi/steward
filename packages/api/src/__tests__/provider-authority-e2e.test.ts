@@ -65,7 +65,14 @@ let seedCaseFixture: CaseFixture["seedCaseFixture"];
 let wipeCase: CaseFixture["wipeCase"];
 const READ_OP_KEY = "github.issue.list";
 
-const MASTER = "steward-api-test-suite-master-password"; // matches test-preload.ts
+// Encrypt with the SAME master the proxy decrypt path (getSecretVault) uses at
+// runtime. On PGLite this is test-preload's default; under the real-Postgres CI
+// job the workflow sets STEWARD_MASTER_PASSWORD to a different value BEFORE
+// test-preload's `??=`, so a hardcoded constant would mint a credential the
+// server-side vault cannot decrypt ("Unsupported state or unable to authenticate
+// data"), diverging the governed dispatch and breaking M18. Read the live env so
+// the test's KeyStore matches the vault regardless of environment.
+const MASTER = process.env.STEWARD_MASTER_PASSWORD ?? "steward-api-test-suite-master-password";
 const GITHUB_TOKEN_SENTINEL = "ghp_SENTINEL_credential_never_leaks_0123456789ABCD";
 
 let fake: FakeProviderTransport;
