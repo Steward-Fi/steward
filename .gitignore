@@ -50,3 +50,4 @@ docker-compose.override.yml
 *.tar.gz
 web/test-results/
 .claude/
+artifacts/
