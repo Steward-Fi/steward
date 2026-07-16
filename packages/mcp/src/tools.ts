@@ -256,7 +256,7 @@ export function buildTools(ctx: ToolContext): StewardTool[] {
     defineTool(ctx, {
       name: "provider_action_status",
       description:
-        "Fetch the current provider-action intent from the existing GET /intents/:intentId route. Tenant visibility is determined only by the configured Steward credentials.",
+        "Fetch the current provider-action intent from the existing GET /intents/:intentId route. This real API route requires tenant-level credentials and rejects agent JWTs; MCP preserves that gate.",
       schema: z.object({ actionId: providerCaseId }).strict(),
       readOnly: true,
       run: ({ actionId }) =>

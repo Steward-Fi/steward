@@ -126,6 +126,15 @@ provider credential, URL, or host arguments. Approval, case, and evidence reads
 retain the API's human-session, MFA, role, workspace, and tenant gates. In
 particular, an agent JWT cannot use MCP to impersonate a human approver.
 
+The current API intentionally has split auth modes. Invocation requires an agent
+JWT. The existing status route (`GET /intents/:id`) requires a tenant API key or
+owner/admin session. Approval, case, and evidence reads require eligible human
+sessions and recent MFA, with case and evidence further limited to owner/admin.
+A single agent-JWT MCP process can invoke but receives honest authorization
+errors from those human or tenant-level read routes. No agent-readable v2 status
+route exists on the current API, and this package does not invent one or weaken
+the API gates.
+
 These tools **do not implement MCP OAuth 2.1 resource-server semantics**. That
 separate authorization-layer work is tracked by issue #219.
 
