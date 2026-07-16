@@ -12,6 +12,7 @@
  */
 
 import { signAgentToken } from "@stwd/auth";
+import { secretRoutes, secrets } from "@stwd/db";
 import {
   CAPABILITY_INTENT_RULE_TYPE,
   composeCapabilityIntentDecision,
@@ -120,6 +121,100 @@ function readProxyEnv(env: NodeJS.ProcessEnv = process.env): ProxyEnv | null {
   ).trim();
   if (!proxyUrl || !signingSecret) return null;
   return { proxyUrl, signingSecret };
+}
+
+// Minimal host/path matchers mirroring @stwd/proxy matching.ts (that package is
+// not a dependency here). Used ONLY to detect whether a governed route claims
+// this capability's surface so we can fail closed — a broad match is acceptable
+// because it only ever DENIES (never grants).
+function pluginMatchHost(pattern: string, host: string): boolean {
+  if (pattern === host) return true;
+  if (pattern.startsWith("*.")) {
+    const suffix = pattern.slice(1);
+    return host.endsWith(suffix) && host.length > suffix.length;
+  }
+  return false;
+}
+function pluginMatchPath(pattern: string | null | undefined, path: string): boolean {
+  const p = pattern ?? "/*";
+  if (p === "/*" || p === "*") return true;
+  if (p === path) return true;
+  if (p.endsWith("/*")) return path.startsWith(p.slice(0, -1));
+  return false;
+}
+
+/**
+ * True when the resolved capability maps to a `governed_v2` secret route for this
+ * tenant/agent (matched by host + path + method). Governed routes must NOT be
+ * invokable through the plugin (spec §5.2, P03/P04). Throws are treated as
+ * fail-closed by the caller.
+ */
+async function capabilityMapsToGovernedRoute(
+  db: StewardAppContext["db"],
+  tenantId: string,
+  agentId: string,
+  cap: Capability,
+): Promise<boolean> {
+  const { and, eq, gt, isNull, or } = await import("drizzle-orm");
+  const now = new Date();
+  // Mirror the proxy's route SELECTION (codex P2): only ENABLED governed routes
+  // whose backing secret is currently active (not deleted, not expired) can ever
+  // be selected by the proxy, so only those should gate the plugin. A disabled
+  // governed route or one backed by a deleted/expired secret is unselectable and
+  // must NOT block an otherwise-valid plugin invocation (rollback/cutover leaves
+  // such stale rows). Join secrets exactly like findMatchingRoute.
+  const rows = await (
+    db as unknown as {
+      select: (c: Record<string, unknown>) => {
+        from: (t: unknown) => {
+          innerJoin: (
+            t: unknown,
+            on: unknown,
+          ) => {
+            where: (w: unknown) => Promise<
+              Array<{
+                hostPattern: string;
+                pathPattern: string | null;
+                method: string | null;
+                authorityMode: string | null;
+              }>
+            >;
+          };
+        };
+      };
+    }
+  )
+    .select({
+      hostPattern: secretRoutes.hostPattern,
+      pathPattern: secretRoutes.pathPattern,
+      method: secretRoutes.method,
+      authorityMode: secretRoutes.authorityMode,
+    })
+    .from(secretRoutes)
+    .innerJoin(
+      secrets,
+      and(
+        eq(secrets.id, secretRoutes.secretId),
+        eq(secrets.tenantId, tenantId),
+        isNull(secrets.deletedAt),
+        or(isNull(secrets.expiresAt), gt(secrets.expiresAt, now)),
+      ),
+    )
+    .where(
+      and(
+        eq(secretRoutes.tenantId, tenantId),
+        eq(secretRoutes.agentId, agentId),
+        eq(secretRoutes.authorityMode, "governed_v2"),
+        eq(secretRoutes.enabled, true),
+      ),
+    );
+  const capMethod = cap.method.toUpperCase();
+  return rows.some(
+    (r) =>
+      pluginMatchHost(r.hostPattern, cap.host) &&
+      pluginMatchPath(r.pathPattern, cap.pathPattern) &&
+      (!r.method || r.method === "*" || r.method.toUpperCase() === capMethod),
+  );
 }
 
 function buildProxyPath(cap: Capability, query: Record<string, string> | undefined): string {
@@ -351,6 +446,43 @@ export async function invokeCapabilityThroughProxy(
       decision: "error",
       status: 503,
       payload: { ok: false, error: "capability delegation unavailable" } satisfies ApiResponse,
+    });
+  }
+
+  // ── PR4 governed-route plugin gate (spec §5.2, X1, P03/P04) ────────────────
+  // A governed_v2 route/operation cannot be invoked through the capability alias
+  // or the OpenAI-compat adapter: the plugin's URLSearchParams path (G4) cannot
+  // faithfully represent a governed action's duplicate-query semantics, and
+  // governed actions must go through /v2/provider-actions (PR2), never a minted
+  // proxy token. If the resolved capability maps to a governed route, the plugin
+  // must NOT mint a proxy token; it denies with GOVERNED_ROUTE_PLUGIN_DENIED.
+  try {
+    const governed = await capabilityMapsToGovernedRoute(ctx.db, tenantId, agentId, cap);
+    if (governed) {
+      return recordAndJson(store, {
+        tenantId,
+        agentId,
+        capabilityId: cap.id,
+        decision: "deny",
+        status: 403,
+        payload: {
+          ok: false,
+          error: "GOVERNED_ROUTE_PLUGIN_DENIED",
+        } satisfies ApiResponse,
+      });
+    }
+  } catch {
+    // Fail closed: if we cannot prove the route is NOT governed, deny (X7).
+    return recordAndJson(store, {
+      tenantId,
+      agentId,
+      capabilityId: cap.id,
+      decision: "deny",
+      status: 403,
+      payload: {
+        ok: false,
+        error: "GOVERNED_ROUTE_PLUGIN_DENIED",
+      } satisfies ApiResponse,
     });
   }
 

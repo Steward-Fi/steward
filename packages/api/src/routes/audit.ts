@@ -5,32 +5,23 @@
  * Mount: app.route("/audit", auditRoutes)
  */
 
-import { auditCheckpoints, proxyAuditLog } from "@stwd/db";
+import { proxyAuditLog } from "@stwd/db";
 import { and, count, desc, eq, gte, inArray, lte, type SQL, sql } from "drizzle-orm";
-import { type Context, Hono } from "hono";
+import { Hono } from "hono";
+import { auditOwnerAdminMfaGate } from "../middleware/audit-gate";
 import {
   type AuditBundleData,
-  type BundleEvent,
   readAuditBundleData,
+  signAuditBundle,
   verifyAuditChain,
 } from "../services/audit";
+import { AuditSigningKeyError, isCheckpointSigningConfigured } from "../services/audit-checkpoint";
 import {
-  AuditSigningKeyError,
-  type CheckpointEventContent,
-  type CheckpointPayload,
-  eventsContentDigest,
-  getCheckpointSigner,
-  isCheckpointSigningConfigured,
-  type SignedCheckpoint,
-} from "../services/audit-checkpoint";
-import {
-  API_VERSION,
   type ApiResponse,
   type AppVariables,
   agents,
   approvalQueue,
   db,
-  setNoStoreHeaders,
   transactions,
 } from "../services/context";
 
@@ -42,52 +33,17 @@ const MAX_AUDIT_VERIFY_RANGE = 10_000;
 // An evidence bundle inlines every event in the range as JSON; cap it so a
 // single request can't materialize an unbounded chain in memory.
 const MAX_AUDIT_BUNDLE_EVENTS = 10_000;
-// The canonicalization the offline verifier must reproduce for each event.
-// Bumped only alongside a verifier change.
-const BUNDLE_CANONICALIZATION_SPEC =
-  "steward-audit-hmac-chain/v1: hmac = HMAC-SHA256(key, prev_hash_bytes || " +
-  "canonical_json(event)); canonical_json sorts object keys, drops whitespace, " +
-  "encodes null for absent fields and ISO-8601 for timestamps. Offline verifier " +
-  "checks event linkage (each prevHash === prior hmac) + head == checkpoint, and " +
-  "the Ed25519 signature over the canonical checkpoint payload. Per-row HMAC " +
-  "recomputation requires the operator's secret key and is NOT part of offline " +
-  "verification.";
+// BUNDLE_CANONICALIZATION_SPEC now lives in services/audit (single source of
+// truth, spec §6.2) and is imported above.
 const MAX_AUDIT_EXPORT_RANGE_MS = 31 * 24 * 60 * 60 * 1000;
-const AUDIT_READ_MFA_MAX_AGE_MS = 5 * 60_000;
 const MAX_AUDIT_METADATA_FILTERS = 5;
 const AUDIT_ACTION_FILTER_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 const AUDIT_METADATA_PATH_PART_PATTERN = /^[A-Za-z0-9_]{1,64}$/;
 const MAX_AUDIT_METADATA_VALUE_LENGTH = 256;
 
-function hasRecentSessionMfa(
-  c: Context<{ Variables: AppVariables }>,
-  maxAgeMs = AUDIT_READ_MFA_MAX_AGE_MS,
-) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
-}
-
-auditRoutes.use("*", async (c, next) => {
-  const role = c.get("tenantRole");
-  if (c.get("authType") !== "session-jwt" || (role !== "owner" && role !== "admin")) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Audit routes require owner or admin session" },
-      403,
-    );
-  }
-  if (!hasRecentSessionMfa(c)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Audit routes require recent MFA verification" },
-      403,
-    );
-  }
-  setNoStoreHeaders(c);
-  return next();
-});
+// Owner/admin + recent-MFA gate, shared with the PR5 case/evidence routes so
+// both surfaces enforce an IDENTICAL posture (spec §6.3).
+auditRoutes.use("*", auditOwnerAdminMfaGate);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -226,16 +182,6 @@ function rowsFromExecute<T>(result: unknown): T[] {
     return (result as { rows: T[] }).rows;
   }
   return [];
-}
-
-// Node's `Buffer` is shadowed by @cloudflare/workers-types in this package, so
-// decode hex to a Uint8Array for the bytea column by hand.
-function hexToBytes(hex: string): Uint8Array {
-  const out = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < out.length; i++) {
-    out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return out;
 }
 
 /** Resolve the set of agentIds belonging to the authenticated tenant. */
@@ -932,50 +878,13 @@ auditRoutes.get("/bundle", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Failed to read audit chain" }, 500);
   }
 
-  const { head, events } = bundleData;
-
-  // Sign a checkpoint over the CHAIN head (the newest event overall), not the
-  // bundle's upper bound — the checkpoint attests to the full head so a partial
-  // export can still be tied to the operator's committed head. The verifier only
-  // enforces head==checkpoint when the export INCLUDES the head event.
-  // Content commitment over EVERY exported event's canonical fields (not just
-  // the chain pointers). Signing this authenticates each event to an offline
-  // auditor who lacks the HMAC key: any post-export field mutation breaks the
-  // signature. The verifier recomputes this digest independently.
-  const digestEvents: CheckpointEventContent[] = events.map((ev) => ({
-    tenantId,
-    seq: ev.seq,
-    actorType: ev.actorType,
-    actorId: ev.actorId,
-    action: ev.action,
-    resourceType: ev.resourceType,
-    resourceId: ev.resourceId,
-    metadata: ev.metadata,
-    ipAddress: ev.ipAddress,
-    userAgent: ev.userAgent,
-    requestId: ev.requestId,
-    createdAt: ev.createdAt,
-  }));
-
-  let checkpointPayload: CheckpointPayload;
-  let signed: SignedCheckpoint;
+  // Single source of signing truth (spec §6.2): the checkpoint sign + content
+  // digest + best-effort persistence live in services/audit.signAuditBundle, so
+  // /audit/bundle and /v2/provider-actions/:id/evidence produce byte-identical
+  // envelopes. No behavior change to this route.
   try {
-    const signer = getCheckpointSigner();
-    const nowIso = new Date().toISOString();
-    checkpointPayload = {
-      v: 1,
-      tenantId,
-      seq: head?.expectedSeq ?? 0,
-      headHmac: head?.headHmac ?? "",
-      expectedCount: head?.expectedCount ?? 0,
-      floorSeq: head?.floorSeq ?? 0,
-      timestamp: nowIso,
-      softwareVersion: API_VERSION,
-      eventsDigest: eventsContentDigest(digestEvents),
-      eventsFromSeq: events.length > 0 ? events[0].seq : 0,
-      eventsToSeq: events.length > 0 ? events[events.length - 1].seq : 0,
-    };
-    signed = signer.sign(checkpointPayload);
+    const bundle = await signAuditBundle(tenantId, fromSeq, toSeq, bundleData);
+    return c.json(bundle);
   } catch (err) {
     if (err instanceof AuditSigningKeyError) {
       return c.json<ApiResponse>({ ok: false, error: err.message }, 503);
@@ -983,44 +892,6 @@ auditRoutes.get("/bundle", async (c) => {
     console.error(`[audit] checkpoint signing failed for tenant ${tenantId}:`, err);
     return c.json<ApiResponse>({ ok: false, error: "Failed to sign checkpoint" }, 500);
   }
-
-  // Persist the checkpoint (append-only provenance). Best-effort: a persistence
-  // failure must not deny the auditor their signed bundle, which is fully
-  // self-contained. head may be null for a tenant with zero events.
-  if (head) {
-    try {
-      await db.insert(auditCheckpoints).values({
-        tenantId,
-        seq: checkpointPayload.seq,
-        headHmac: hexToBytes(checkpointPayload.headHmac),
-        payload: checkpointPayload as unknown as Record<string, unknown>,
-        signature: signed.signature,
-        publicKey: signed.publicKey,
-      });
-    } catch (err) {
-      console.error(`[audit] checkpoint persistence failed for tenant ${tenantId}:`, err);
-    }
-  }
-
-  const bundleEvents: BundleEvent[] = events;
-  const includesHead =
-    head != null &&
-    bundleData.bundleHeadSeq != null &&
-    bundleData.bundleHeadSeq === head.expectedSeq;
-
-  return c.json({
-    version: 1 as const,
-    tenantId,
-    range: { from: fromSeq, to: toSeq, includesHead },
-    canonicalizationSpec: BUNDLE_CANONICALIZATION_SPEC,
-    events: bundleEvents,
-    checkpoint: {
-      payload: signed.payload,
-      signature: signed.signature,
-      publicKey: signed.publicKey,
-    },
-    generatedAt: new Date().toISOString(),
-  });
 });
 
 function csvRow(fields: string[]): string {

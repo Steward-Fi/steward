@@ -44,6 +44,12 @@ process.env.STEWARD_MASTER_PASSWORD ??= "steward-api-test-suite-master-password"
 process.env.STEWARD_JWT_SECRET ??=
   "steward-api-test-suite-shared-jwt-secret-with-enough-entropy-0123456789";
 process.env.STEWARD_AUDIT_HMAC_KEY ??= "a".repeat(64);
+// PR4 execution authorization v2 key. Separate from STEWARD_JWT_SECRET (X7,
+// never a fallback). A `keyId:secret` rotation list; the first key signs. Tests
+// that assert the fail-closed absent-key path (P48/P49/F06) delete this env in
+// their own setup, so the default here must NOT clobber an explicit unset.
+process.env.STEWARD_EXECUTION_AUTH_SECRET ??=
+  "v2-test-1:steward-api-test-suite-execution-auth-secret-with-entropy-01234";
 
 // Only bootstrap PGLite when no real database is configured. This branch is the
 // normal local/CI test path; a real DATABASE_URL (e.g. integration CI) is left

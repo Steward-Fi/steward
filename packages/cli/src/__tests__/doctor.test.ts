@@ -48,6 +48,7 @@ describe("steward doctor secret redaction", () => {
       const secrets: Record<string, string> = {
         STEWARD_MASTER_PASSWORD: randomBytes(32).toString("hex"),
         STEWARD_JWT_SECRET: randomBytes(32).toString("hex"),
+        STEWARD_EXECUTION_AUTH_SECRET: `v1:${randomBytes(32).toString("hex")}`,
         STEWARD_KDF_SALT: randomBytes(32).toString("hex"),
         STEWARD_AUDIT_HMAC_KEY: randomBytes(32).toString("hex"),
         STEWARD_AUDIT_SIGNING_KEY: randomBytes(32).toString("hex"),

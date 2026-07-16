@@ -32,7 +32,11 @@ export interface ProviderApprovalCommitmentV1 {
     key: string;
     revision: number;
     riskClass: string;
-    canonicalProfile: "github.provider-action.v1";
+    // Adapter canonical profile. Widened from the github literal so the same
+    // commitment schema binds X (`x.provider-action.v1`) and future adapters.
+    // JCS hashes whatever string is present, so this is behavior-neutral for the
+    // existing github digest corpus (the string value is unchanged there).
+    canonicalProfile: "github.provider-action.v1" | "x.provider-action.v1";
   };
   requestHash: string;
   actionDigest: string;

@@ -41,6 +41,14 @@ export interface CreateSecretOptions {
   expiresAt?: Date;
 }
 
+/**
+ * A drizzle executor (the top-level db OR an open transaction) accepted by the
+ * *WithinTx helpers so a caller can rotate a secret inside its OWN transaction
+ * without a nested `db.transaction` (which deadlocks single-connection PGLite).
+ */
+type SecretTxExecutor = DbBase | Parameters<Parameters<DbBase["transaction"]>[0]>[0];
+type DbBase = ReturnType<typeof getDb>;
+
 export class SecretVault {
   private keyStore: KeyStore;
   // Legacy root (no domain label) — secrets encrypted before domain separation
@@ -131,19 +139,25 @@ export class SecretVault {
     if (!row) {
       throw new Error(`Secret ${secretId} not found for tenant ${tenantId}`);
     }
+    return this.decryptSecretRow(tenantId, row);
+  }
 
-    // Check expiration
+  /**
+   * Decrypt a secret row already read from the DB (e.g. inside a caller's
+   * transaction, so no fresh `getDb()` read is issued that would block on a
+   * single-connection PGLite while an outer transaction holds the connection).
+   * NEVER expose the plaintext via API.
+   */
+  decryptSecretRow(tenantId: string, row: Secret): string {
     if (row.expiresAt && row.expiresAt < new Date()) {
-      throw new Error(`Secret ${secretId} has expired`);
+      throw new Error(`Secret ${row.id} has expired`);
     }
-
     const encrypted: EncryptedKey = {
       ciphertext: row.ciphertext,
       iv: row.iv,
       tag: row.authTag,
       salt: row.salt,
     };
-
     const context = { tenantId, name: row.name, version: row.version };
     try {
       return this.keyStore.decrypt(encrypted, context);
@@ -152,6 +166,63 @@ export class SecretVault {
       // legacy (shared) root. New secrets always use the domain-separated root above.
       return this.legacyKeyStore.decrypt(encrypted, context);
     }
+  }
+
+  /**
+   * Rotate a secret WITHIN a caller-provided transaction. Identical to
+   * {@link rotateSecret} but reuses the caller's `tx` instead of opening its own
+   * `db.transaction`, so it can run inside an outer transaction (e.g. a per-
+   * account refresh that holds a SELECT ... FOR UPDATE lock) without a nested
+   * transaction. The single-flight/atomicity guarantee is the CALLER's outer
+   * transaction; this method only appends the new version + repoints routes +
+   * soft-deletes the prior version.
+   */
+  async rotateSecretWithinTx(
+    tx: SecretTxExecutor,
+    tenantId: string,
+    name: string,
+    newValue: string,
+  ): Promise<SecretMetadata> {
+    const [current] = await tx
+      .select()
+      .from(secrets)
+      .where(and(eq(secrets.tenantId, tenantId), eq(secrets.name, name), isNull(secrets.deletedAt)))
+      .orderBy(desc(secrets.version))
+      .limit(1);
+    if (!current) {
+      throw new Error(`Secret "${name}" not found for tenant ${tenantId}`);
+    }
+    const newVersion = current.version + 1;
+    const encrypted = this.keyStore.encrypt(newValue, { tenantId, name, version: newVersion });
+    const now = new Date();
+
+    const [row] = await tx
+      .insert(secrets)
+      .values({
+        tenantId,
+        name,
+        description: current.description,
+        ciphertext: encrypted.ciphertext,
+        iv: encrypted.iv,
+        authTag: encrypted.tag,
+        salt: encrypted.salt,
+        version: newVersion,
+        rotatedAt: now,
+        expiresAt: current.expiresAt,
+      })
+      .returning();
+
+    await tx
+      .update(secretRoutes)
+      .set({ secretId: row.id })
+      .where(and(eq(secretRoutes.tenantId, tenantId), eq(secretRoutes.secretId, current.id)));
+
+    await tx
+      .update(secrets)
+      .set({ deletedAt: now, updatedAt: now })
+      .where(and(eq(secrets.id, current.id), eq(secrets.tenantId, tenantId)));
+
+    return this.toMetadata(row);
   }
 
   /**

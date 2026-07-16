@@ -17,6 +17,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { buildGithubAction, isGithubOperationKey } from "@stwd/provider-github";
+import { buildXAction, isXOperationKey } from "@stwd/provider-x";
 import { CanonError, decodeUtf8Strict, isCanonError, strictParseJson } from "@stwd/shared";
 import type { Context } from "hono";
 import { Hono } from "hono";
@@ -192,14 +193,19 @@ async function handleCreateProviderAction(c: RouteContext) {
   if (!IDEM_KEY_RE.test(idempotencyKey)) {
     return deny(c, "CANON_FIELD_TYPE_INVALID", 400);
   }
-  if (!isGithubOperationKey(operationKey)) {
-    return deny(c, "CANON_PROFILE_UNSUPPORTED", 400);
-  }
-
-  // ── Adapter: validate + canonicalize the operation arguments. ──
-  let build: ReturnType<typeof buildGithubAction>;
+  // ── Adapter dispatch: resolve the operation to its owning provider adapter
+  // and validate + canonicalize the arguments. Both adapters emit a
+  // structurally-compatible build the pipeline accepts uniformly. An operation
+  // key belonging to no registered adapter is an unsupported profile. ──
+  let build: import("../services/provider-action-service").ProviderActionBuild;
   try {
-    build = buildGithubAction(operationKey, args);
+    if (isGithubOperationKey(operationKey)) {
+      build = buildGithubAction(operationKey, args);
+    } else if (isXOperationKey(operationKey)) {
+      build = buildXAction(operationKey, args);
+    } else {
+      return deny(c, "CANON_PROFILE_UNSUPPORTED", 400);
+    }
   } catch (e) {
     if (isCanonError(e)) return deny(c, e.code, e.httpStatus);
     // Never surface an arbitrary thrown value as a 500.
