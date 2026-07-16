@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { StewardClient } from "@stwd/sdk";
 import type { StewardMcpConfig } from "./config.js";
+import { createProviderApi, type ProviderApi } from "./provider-api.js";
 import { buildTools, type StewardTool } from "./tools.js";
 
 /** Package identity advertised to MCP clients during initialization. */
@@ -9,7 +10,8 @@ export const SERVER_VERSION = "0.1.0";
 
 export interface CreateServerOptions {
   client: StewardClient;
-  config: Pick<StewardMcpConfig, "defaultAgentId">;
+  config: Pick<StewardMcpConfig, "defaultAgentId"> & Partial<StewardMcpConfig>;
+  providerApi?: ProviderApi;
   name?: string;
   version?: string;
 }
@@ -31,7 +33,9 @@ export function createStewardMcpServer(options: CreateServerOptions): CreateServ
     version: options.version ?? SERVER_VERSION,
   });
 
-  const tools = buildTools({ client: options.client, config: options.config });
+  const providerApi =
+    options.providerApi ?? (options.config.baseUrl ? createProviderApi(options.config as StewardMcpConfig) : undefined);
+  const tools = buildTools({ client: options.client, providerApi, config: options.config });
 
   for (const tool of tools) {
     server.registerTool(

@@ -14,6 +14,12 @@ export {
   SERVER_VERSION,
 } from "./server.js";
 export {
+  createProviderApi,
+  ProviderApiError,
+  sanitizeProviderPayload,
+  type ProviderApi,
+} from "./provider-api.js";
+export {
   buildTools,
   type StewardTool,
   type ToolContext,
