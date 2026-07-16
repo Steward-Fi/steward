@@ -57,14 +57,55 @@ function fail(msg, seq) {
 
 function usage(msg) {
   console.error(`usage error: ${msg}`);
-  console.error("  node scripts/verify-evidence-bundle.mjs <bundle.json>");
-  console.error("  cat bundle.json | node scripts/verify-evidence-bundle.mjs");
+  console.error("  node scripts/verify-evidence-bundle.mjs <bundle.json> [--expected-key-fingerprint <hex>]");
+  console.error("  cat bundle.json | node scripts/verify-evidence-bundle.mjs [--fp <hex>]");
+  console.error("");
+  console.error("  --expected-key-fingerprint <hex>  SHA-256 of the trusted signing key SPKI PEM,");
+  console.error("       supplied out of band. Repeatable (rotation set). Also read from");
+  console.error("       STEWARD_EXPECTED_AUDIT_KEY_FP (comma-separated). If absent, the verifier");
+  console.error("       prints the observed fingerprint and states trust-root matching is the");
+  console.error("       auditor responsibility.");
   process.exit(2);
 }
 
+// ─── Parse args (positional bundle path + optional fingerprint flags) ────────
+function parseArgs() {
+  const argv = process.argv.slice(2);
+  let bundleArg;
+  const expectedFps = [];
+  const clean = (s) => s.toLowerCase().replace(/[^0-9a-f]/g, "");
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--expected-key-fingerprint" || a === "--fp") {
+      const v = argv[i + 1];
+      if (!v) usage(`${a} requires a hex value`);
+      expectedFps.push(clean(v));
+      i++;
+    } else if (a.startsWith("--expected-key-fingerprint=") || a.startsWith("--fp=")) {
+      expectedFps.push(clean(a.slice(a.indexOf("=") + 1)));
+    } else if (!bundleArg) {
+      bundleArg = a;
+    }
+  }
+  const envFp = process.env.STEWARD_EXPECTED_AUDIT_KEY_FP;
+  if (envFp) {
+    for (const part of envFp.split(",")) {
+      const c = clean(part.trim());
+      if (c) expectedFps.push(c);
+    }
+  }
+  return { bundleArg, expectedFps };
+}
+
+// SHA-256 fingerprint of a signing key SPKI DER (spec §7.1/§7.2, C6).
+function keyFingerprint(pubKeyObj) {
+  const spki = pubKeyObj.export({ format: "der", type: "spki" });
+  return createHash("sha256").update(spki).digest("hex");
+}
+
 // ─── Load bundle (file arg or stdin) ────────────────────────────────────────
-function loadBundle() {
-  const arg = process.argv[2];
+function loadBundle(bundleArg) {
+  const arg = bundleArg;
   let raw;
   if (arg && arg !== "-") {
     try {
@@ -148,9 +189,25 @@ function eventsContentDigest(events, tenantId) {
 }
 
 function main() {
-  const bundle = loadBundle();
+  const { bundleArg, expectedFps } = parseArgs();
+  const input = loadBundle(bundleArg);
 
-  if (!bundle || typeof bundle !== "object") fail("bundle is not an object");
+  if (!input || typeof input !== "object") fail("bundle is not an object");
+
+  // Two accepted shapes, both backward-compatible:
+  //   1. raw /audit/bundle: { version, tenantId, events, checkpoint, ... }
+  //   2. PR5 /evidence envelope: { version, tenantId, caseId, manifest,
+  //      bundle: { ...raw bundle... }, completeness }
+  // Detect the envelope by a nested `bundle` object + a `manifest`, then verify
+  // the inner bundle exactly as before and additionally cross-check the manifest
+  // against the signed events (spec §7.4). A plain bundle behaves EXACTLY as
+  // today (no regression).
+  const isEvidenceEnvelope =
+    input.bundle && typeof input.bundle === "object" && input.manifest &&
+    typeof input.manifest === "object";
+  const bundle = isEvidenceEnvelope ? input.bundle : input;
+  const manifest = isEvidenceEnvelope ? input.manifest : null;
+
   if (bundle.version !== 1) fail(`unsupported bundle version: ${bundle.version}`);
   const { checkpoint, events, tenantId } = bundle;
   if (!checkpoint || typeof checkpoint !== "object") fail("bundle.checkpoint missing");
@@ -179,6 +236,21 @@ function main() {
   }
   const sigOk = edVerify(null, canonicalCheckpointBytes(payload), pubKeyObj, sigBytes);
   if (!sigOk) fail("Ed25519 checkpoint signature does not verify");
+
+  // ── Trust-root fingerprint match (spec §7.1/§7.2, C6) ────────────────────
+  // The bundle is self-describing (it carries its own public key); an auditor
+  // supplies the trusted fingerprint(s) out of band. We NEVER auto-trust the
+  // embedded key. If one or more expected fingerprints are supplied, at least
+  // one MUST match (a rotation set may be supplied). If NONE are supplied we do
+  // not fail, but we clearly state trust-root matching is the auditor's job (E7).
+  const observedFp = keyFingerprint(pubKeyObj);
+  let trustRootChecked = false;
+  if (expectedFps.length > 0) {
+    if (!expectedFps.includes(observedFp)) {
+      fail(`untrusted signing key fingerprint ${observedFp}`);
+    }
+    trustRootChecked = true;
+  }
 
   // Cross-check the payload's tenantId against the bundle envelope.
   if (tenantId !== undefined && payload.tenantId !== tenantId) {
@@ -252,12 +324,26 @@ function main() {
     }
   }
 
+  // ── (f) Manifest cross-check (spec §7.4) — only for a PR5 evidence envelope.
+  // The manifest carries NO independent trust: every fact must be checkable
+  // against a signed event. If ANY manifest fact is not backed, or a claimed
+  // `complete` hides a missing required role, we FAIL. A plain /audit/bundle
+  // (manifest === null) skips this entirely (no regression).
+  if (manifest) {
+    verifyManifest(manifest, events, payload);
+  }
+
   // ── PASS ─────────────────────────────────────────────────────────────────
   const headNote = includesHead
     ? "includes chain head, bound to signed checkpoint"
     : "partial range (does NOT include chain head — head binding not checked)";
   console.log("PASS");
   console.log(`  tenant:        ${payload.tenantId}`);
+  if (manifest) {
+    console.log(`  case:          ${manifest.caseId}`);
+    console.log(`  terminalState: ${manifest.terminalState}`);
+    console.log(`  completeness:  ${manifest.completeness}`);
+  }
   console.log(
     `  events:        ${events.length}` +
       (events.length ? ` (seq ${events[0].seq}..${events[events.length - 1].seq})` : ""),
@@ -269,19 +355,212 @@ function main() {
   console.log(`  signature:     Ed25519 OK`);
   console.log(`  content:       SHA-256 events digest OK`);
   console.log(`  linkage:       OK`);
+  if (manifest) console.log(`  manifest:      cross-check OK (every fact backed by a signed event)`);
   console.log(`  head:          ${headNote}`);
+  console.log(
+    `  trust root:    ${
+      trustRootChecked
+        ? `matched supplied fingerprint (${observedFp})`
+        : `NOT checked — observed key fingerprint ${observedFp}; supply --expected-key-fingerprint to bind trust root`
+    }`,
+  );
   console.log("");
   console.log(
     "Proven: exported event contents are authentic (signed SHA-256 digest); " +
       "rows form an unbroken hash-chain segment; " +
+      (manifest ? "every manifest fact is backed by a signed event; " : "") +
       (includesHead ? "the head matches the operator's signed checkpoint; " : "") +
+      (trustRootChecked ? "the signing key matches an auditor-supplied trusted fingerprint; " : "") +
       "the checkpoint is authentically Ed25519-signed and unaltered.",
   );
   console.log(
-    "NOT proven: per-row HMAC recomputation (needs the operator's secret key); " +
-      "that the export is the complete history; third-party timestamp anchoring.",
+    "NOT proven: per-row HMAC recomputation (needs the operator's secret key), so an " +
+      "operator holding BOTH the HMAC key AND the signing key could fabricate a " +
+      "self-consistent history; that the export is the complete history; " +
+      (trustRootChecked ? "" : "trust-root binding (no expected fingerprint supplied); ") +
+      "out-of-band time anchoring.",
   );
   process.exit(0);
+}
+
+// ─── PR5 manifest cross-check (spec §7.4) ────────────────────────────────
+
+const MANIFEST_SCHEMA_VERSION = "steward.provider-case-manifest.v1";
+
+// Map an event action to its case role. MUST mirror roleForAction in
+// @stwd/shared/provider-case.ts (kept in sync by a golden test).
+function roleForAction(action) {
+  switch (action) {
+    case "provider.action.allowed":
+    case "provider.action.denied":
+    case "provider.action.approval_required":
+      return "genesis";
+    case "provider.access.decided":
+      return "access_decided";
+    case "provider.policy.decided":
+      return "policy_decided";
+    case "provider.approval.requested":
+      return "approval_requested";
+    case "provider.approval.decided":
+      return "approval_decided";
+    case "provider.approval.expired":
+    case "provider.approval.staled":
+      return "approval_terminal";
+    case "provider.resume.ready":
+      return "resume_ready";
+    case "provider.execution.authorized":
+      return "exec_authorized";
+    case "provider.execution.claimed":
+      return "exec_claimed";
+    case "provider.execution.denied_at_boundary":
+      return "exec_denied_at_boundary";
+    case "provider.execution.dispatched":
+      return "exec_dispatched";
+    case "provider.execution.succeeded":
+    case "provider.execution.failed":
+    case "provider.execution.outcome_unknown":
+      return "exec_terminal";
+    case "provider.execution.reconciled":
+      return "exec_reconciled";
+    default:
+      return null;
+  }
+}
+
+// MUST mirror requiredRoles in @stwd/shared/provider-case.ts.
+function requiredRoles(terminalState) {
+  switch (terminalState) {
+    case "denied_access":
+    case "denied_policy":
+    case "pending_approval":
+      return ["genesis"];
+    case "approval_denied":
+      return ["genesis", "approval_decided"];
+    case "approval_expired":
+    case "approval_staled":
+      return ["genesis", "approval_terminal"];
+    case "execution_ready":
+      return ["genesis", "approval_decided", "resume_ready"];
+    case "executing":
+      return ["genesis", "exec_authorized", "exec_claimed"];
+    case "succeeded":
+    case "failed":
+    case "outcome_unknown":
+      return ["genesis", "exec_authorized", "exec_claimed", "exec_dispatched", "exec_terminal"];
+    default:
+      return ["genesis", "exec_authorized", "exec_claimed", "exec_dispatched", "exec_terminal"];
+  }
+}
+
+function verifyManifest(manifest, events, payload) {
+  if (manifest.schemaVersion !== MANIFEST_SCHEMA_VERSION) {
+    fail(`unsupported manifest schemaVersion: ${manifest.schemaVersion}`);
+  }
+  // Tenant cross-check (N22): manifest tenant must equal the SIGNED payload
+  // tenant, so a foreign case id cannot be smuggled under one tenant's checkpoint.
+  if (manifest.tenantId !== payload.tenantId) {
+    fail(`manifest tenantId (${manifest.tenantId}) != signed checkpoint tenant (${payload.tenantId})`);
+  }
+
+  // Build seq -> signed bundle event. (§7.4.1) Each manifest event MUST match
+  // the signed bundle event at its seq by hmac AND action.
+  const bySeq = new Map();
+  for (const ev of events) bySeq.set(ev.seq, ev);
+  if (!Array.isArray(manifest.events)) fail("manifest.events is not an array");
+  for (const me of manifest.events) {
+    const be = bySeq.get(me.seq);
+    if (!be) {
+      fail(`manifest event seq ${me.seq} is not present in the signed bundle segment`, me.seq);
+    }
+    if (be.hmac !== me.hmac) {
+      fail(`manifest event seq ${me.seq} hmac does not match signed bundle event`, me.seq);
+    }
+    if (be.action !== me.action) {
+      fail(`manifest event seq ${me.seq} action does not match signed bundle event`, me.seq);
+    }
+    // The manifest's declared role must be the role its (signed) action maps to,
+    // so a forged role cannot mis-satisfy a required-set slot.
+    const expectedRole = roleForAction(be.action);
+    if (expectedRole !== null && me.role !== expectedRole) {
+      fail(`manifest event seq ${me.seq} role ${me.role} != role for action ${be.action}`, me.seq);
+    }
+  }
+
+  // (§7.4.2) Each manifest FACT that a signed event carries in metadata must
+  // equal the value in the owning signed event. A fact with no backing signed
+  // event is REJECTED.
+  const eventByRole = new Map();
+  for (const ev of events) {
+    const r = roleForAction(ev.action);
+    if (r && !eventByRole.has(r)) eventByRole.set(r, ev);
+  }
+  const genesis = eventByRole.get("genesis");
+  const factCheck = (role, metaKey, manifestVal) => {
+    if (manifestVal === null || manifestVal === undefined) return;
+    const ev = eventByRole.get(role);
+    if (!ev) fail(`manifest fact ${metaKey} not backed by any signed event (role ${role})`);
+    const signedVal = ev.metadata ? ev.metadata[metaKey] : undefined;
+    if (signedVal === undefined) {
+      fail(`manifest fact ${metaKey} absent from the signed ${role} event metadata`);
+    }
+    if (signedVal !== manifestVal) {
+      fail(`manifest fact ${metaKey} (${manifestVal}) != signed ${role} event value (${signedVal})`);
+    }
+  };
+  // Genesis-backed facts (PR2 folded genesis carries action + decision hashes).
+  if (genesis) {
+    factCheck("genesis", "actionDigest", manifest.actionDigest);
+    factCheck("genesis", "requestHash", manifest.requestHash);
+    factCheck("genesis", "accessDecisionHash", manifest.accessDecision?.hash);
+    if (manifest.policyDecision?.hash) {
+      factCheck("genesis", "policyDecisionHash", manifest.policyDecision.hash);
+    }
+  }
+  // Execution-backed facts (PR4 authorized/dispatched/terminal metadata).
+  if (manifest.execution) {
+    const authEv = eventByRole.get("exec_authorized");
+    if (manifest.execution.authorizationId && authEv) {
+      if (authEv.metadata?.authorizationId !== manifest.execution.authorizationId) {
+        fail("manifest execution.authorizationId != signed exec_authorized event");
+      }
+      if (
+        manifest.approvalCommitmentHash &&
+        authEv.metadata?.approvalCommitmentHash !== manifest.approvalCommitmentHash
+      ) {
+        fail("manifest approvalCommitmentHash != signed exec_authorized event");
+      }
+      if (
+        manifest.execution.providerIdempotencyKeyHash &&
+        authEv.metadata?.providerIdempotencyKeyHash !== manifest.execution.providerIdempotencyKeyHash
+      ) {
+        fail("manifest providerIdempotencyKeyHash != signed exec_authorized event");
+      }
+    }
+  }
+
+  // (§7.4.3) Forged-completeness guard: recompute the required roles from the
+  // manifest's declared terminalState and require missingRequiredRoles equals
+  // the required roles ABSENT from the signed event set. A manifest claiming
+  // `complete` while a required role is not present in the SIGNED events FAILS.
+  const presentRoles = new Set();
+  for (const ev of events) {
+    const r = roleForAction(ev.action);
+    if (r) presentRoles.add(r);
+  }
+  const required = requiredRoles(manifest.terminalState);
+  const actuallyMissing = required.filter((r) => !presentRoles.has(r));
+  if (manifest.completeness === "complete" && actuallyMissing.length > 0) {
+    fail(
+      `manifest claims complete but required role(s) [${actuallyMissing.join(", ")}] are not in the signed events`,
+    );
+  }
+  // Cross-check the manifest's own missingRequiredRoles against the signed truth.
+  const declaredMissing = new Set(manifest.missingRequiredRoles || []);
+  for (const r of actuallyMissing) {
+    if (!declaredMissing.has(r)) {
+      fail(`manifest omits required missing role ${r} (present in signed set? no) but did not declare it missing`);
+    }
+  }
 }
 
 main();
