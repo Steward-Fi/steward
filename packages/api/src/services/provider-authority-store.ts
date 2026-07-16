@@ -255,6 +255,49 @@ export class ProviderAuthorityStore {
     return this.ensureTenantState(tenantId);
   }
 
+  /**
+   * Provider-account CONNECT authority (issue #195 workstream A): a caller may
+   * initiate/complete/disconnect an X (or other provider) OAuth connection when
+   * they are a tenant authority admin OR hold an active workspace_admin /
+   * workspace_approver binding for the target workspace (environment + temporal
+   * validity enforced). Mirrors the admin-OR-approver gate of PR3's
+   * hasWorkspaceRoleAuthority, scoped to the connect surface.
+   */
+  async canConnectProviderAccounts(
+    tenantId: string,
+    workspaceId: string,
+    userId: string,
+    tenantRole: string,
+  ): Promise<boolean> {
+    const ctx = { tenantId, actorUserId: userId, tenantRole };
+    if (await this.hasTenantAdmin(ctx)) return true;
+    if (!(await this.membership(tenantId, userId))) return false;
+    const [workspace] = await this.db()
+      .select({ environment: workspaces.environment, status: workspaces.status })
+      .from(workspaces)
+      .where(and(eq(workspaces.tenantId, tenantId), eq(workspaces.id, workspaceId)))
+      .limit(1);
+    if (!workspace || workspace.status !== "active") return false;
+    const rows = await this.db()
+      .select()
+      .from(providerRoleBindings)
+      .where(
+        and(
+          eq(providerRoleBindings.tenantId, tenantId),
+          eq(providerRoleBindings.workspaceId, workspaceId),
+          eq(providerRoleBindings.principalType, "human"),
+          eq(providerRoleBindings.principalId, userId),
+          eq(providerRoleBindings.status, "active"),
+        ),
+      );
+    const now = new Date();
+    return rows.some(
+      (row) =>
+        (row.roleKey === "workspace_admin" || row.roleKey === "workspace_approver") &&
+        activeAt(row, now, workspace.environment),
+    );
+  }
+
   async createWorkspace(
     ctx: MutationContext,
     input: { key: string; name: string; environment: ProviderEnvironment },

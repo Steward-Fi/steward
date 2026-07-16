@@ -206,7 +206,27 @@ function sha256Hex(value: string): string {
 }
 
 function base64url(buf: Buffer): string {
-  return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  // The bun-types Buffer encoding union is narrower than Node's; encode base64url
+  // via btoa over a binary string to stay within the allowed surface (matches
+  // packages/auth oauth.ts uint8ArrayToBase64url).
+  const binary = Array.from(buf, (byte) => String.fromCharCode(byte)).join("");
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64ToUtf8(b64: string): string {
+  // Decode a base64url string to utf8 without relying on Buffer's base64url
+  // encoding (unavailable in the bun-types union).
+  const normalized = b64.replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(normalized);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+function utf8ToBase64(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  const binary = Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
+  return btoa(binary);
 }
 
 /** RFC 7636 §4.1: high-entropy verifier (43-128 unreserved chars). */
@@ -346,7 +366,7 @@ export interface ParsedConnectToken {
 
 export function parseConnectToken(token: string): ParsedConnectToken | null {
   try {
-    const json = Buffer.from(token, "base64url").toString("utf8");
+    const json = base64ToUtf8(token);
     const parsed = JSON.parse(json) as ParsedConnectToken;
     if (typeof parsed.state !== "string" || typeof parsed.verifier !== "string") {
       return null;
@@ -535,7 +555,7 @@ async function exchangeAuthorizationCode(input: ExchangeInput): Promise<XTokenRe
 /** X token endpoint accepts confidential-client creds via HTTP Basic. */
 function basicAuthHeader(config: XConnectConfig): string {
   const raw = `${config.clientId}:${config.clientSecret}`;
-  return `Basic ${Buffer.from(raw, "utf8").toString("base64")}`;
+  return `Basic ${utf8ToBase64(raw)}`;
 }
 
 // ── Persist / reconnect ───────────────────────────────────────────────────────
@@ -581,7 +601,7 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
           eq(providerAccounts.tenantId, input.tenantId),
           eq(providerAccounts.workspaceId, input.workspaceId),
           eq(providerAccounts.adapterKey, X_ADAPTER_KEY),
-          eq(providerAccounts.third-partyRef, input.identity.id),
+          eq(providerAccounts.externalRef, input.identity.id),
         ),
       )
       .limit(1)
@@ -626,7 +646,7 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
           tenantId: input.tenantId,
           workspaceId: input.workspaceId,
           adapterKey: X_ADAPTER_KEY,
-          third-partyRef: input.identity.id,
+          externalRef: input.identity.id,
           displayName,
           status: "active",
           credentialSecretId: meta.id,
@@ -767,7 +787,7 @@ export async function refreshXProviderCredential(input: RefreshInput): Promise<R
         resourceId: account.id,
         metadata: {
           workspaceId: account.workspaceId,
-          xUserId: account.third-partyRef,
+          xUserId: account.externalRef,
           previousRevision: account.revision,
           newRevision: degraded?.revision ?? null,
           requestId: input.requestId ?? null,
@@ -828,7 +848,7 @@ export async function refreshXProviderCredential(input: RefreshInput): Promise<R
       resourceId: account.id,
       metadata: {
         workspaceId: account.workspaceId,
-        xUserId: account.third-partyRef,
+        xUserId: account.externalRef,
         credentialSecretId: meta.id,
         credentialVersion: meta.version,
         requestId: input.requestId ?? null,
@@ -1011,7 +1031,7 @@ export async function disconnectXProviderCredential(
       resourceId: account.id,
       metadata: {
         workspaceId: input.workspaceId,
-        xUserId: account.third-partyRef,
+        xUserId: account.externalRef,
         revokedAtUpstream,
         previousRevision: account.revision,
         newRevision: degraded.revision,
