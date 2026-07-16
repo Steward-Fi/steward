@@ -185,9 +185,7 @@ export interface XConnectConfig {
  * user-auth `TWITTER_CLIENT_ID` / `TWITTER_CLIENT_SECRET` (login plane). See
  * .env.example for the separation rationale.
  */
-export function resolveXConnectConfig(
-  env: NodeJS.ProcessEnv = process.env,
-): XConnectConfig {
+export function resolveXConnectConfig(env: NodeJS.ProcessEnv = process.env): XConnectConfig {
   const clientId = env.X_CLIENT_ID?.trim();
   const clientSecret = env.X_CLIENT_SECRET?.trim();
   if (!clientId || !clientSecret) {
@@ -317,11 +315,7 @@ export async function initiateXConnect(
     createdAt: new Date().toISOString(),
   };
 
-  await input.store.set(
-    stateStoreKey(state),
-    JSON.stringify(record),
-    X_CONNECT_STATE_TTL_MS,
-  );
+  await input.store.set(stateStoreKey(state), JSON.stringify(record), X_CONNECT_STATE_TTL_MS);
 
   const params = new URLSearchParams({
     response_type: "code",
@@ -333,9 +327,7 @@ export async function initiateXConnect(
     code_challenge_method: "S256",
   });
 
-  const connectToken = base64url(
-    Buffer.from(JSON.stringify({ state, verifier }), "utf8"),
-  );
+  const connectToken = base64url(Buffer.from(JSON.stringify({ state, verifier }), "utf8"));
 
   return {
     authorizeUrl: `${X_AUTHORIZE_URL}?${params.toString()}`,
@@ -607,9 +599,7 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
       .limit(1)
       .for("update");
 
-    const displayName = input.identity.username
-      ? `@${input.identity.username}`
-      : input.identity.id;
+    const displayName = input.identity.username ? `@${input.identity.username}` : input.identity.id;
 
     let providerAccountId: string;
     let reconnected: boolean;
@@ -742,11 +732,7 @@ export async function refreshXProviderCredential(input: RefreshInput): Promise<R
     }
 
     // Load the CURRENT credential under the lock.
-    const current = await loadCredential(
-      input.vault,
-      input.tenantId,
-      account.credentialSecretId,
-    );
+    const current = await loadCredential(input.vault, input.tenantId, account.credentialSecretId);
 
     // Single-flight fast path: a concurrent winner already rotated us to a fresh
     // token while we waited for the lock. If not forced and the token is still
@@ -991,11 +977,7 @@ export async function disconnectXProviderCredential(
     let revokedAtUpstream = false;
     if (account.credentialSecretId) {
       try {
-        const cred = await loadCredential(
-          input.vault,
-          input.tenantId,
-          account.credentialSecretId,
-        );
+        const cred = await loadCredential(input.vault, input.tenantId, account.credentialSecretId);
         revokedAtUpstream = await revokeUpstreamBestEffort(
           input.config,
           cred.payload.accessToken,
