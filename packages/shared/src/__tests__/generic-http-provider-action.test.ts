@@ -198,6 +198,12 @@ describe("descriptor validation", () => {
     );
   });
 
+  it("rejects a host with an invalid DNS label (underscore)", () => {
+    expect(descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://api_example.com" })).toBe(
+      "CANON_DESCRIPTOR_ORIGIN_INVALID",
+    );
+  });
+
   it("rejects a credential header in the allowlist", () => {
     for (const bad of [
       "authorization",
@@ -391,8 +397,10 @@ describe("generic-http argument adversarial", () => {
     } catch (e) {
       if (e instanceof CanonError) code = e.code;
     }
-    // Either the proto key is rejected as a forbidden arg key or as unknown.
-    expect(["CANON_JSON_SHAPE_INVALID", "CANON_UNKNOWN_FIELD"]).toContain(code);
+    // The proto key MUST be rejected up front by the dedicated proto-pollution
+    // arg guard (CANON_JSON_SHAPE_INVALID), NOT merely fall through to the
+    // unknown-arg path (which would leave a window where the key was processed).
+    expect(code).toBe("CANON_JSON_SHAPE_INVALID");
   });
 
   it("rejects a body field failing its schema", () => {
@@ -406,6 +414,45 @@ describe("generic-http argument adversarial", () => {
     expect(buildDenies(B, "POST", { title: "x", priority: 1, urgent: true, estimate: "1.2.3" })).toBe(
       "CANON_DECIMAL_STRING_INVALID",
     );
+  });
+
+  // Dedicated mutation-target: a permissive dot-allowing pattern still cannot
+  // smuggle a `.`/`..` dot-segment (assertSafeSegmentValue is the guard).
+  it("dot-segment value denied even under a dot-allowing pattern", () => {
+    const dotDesc = validateGenericHttpDescriptor({
+      ...A,
+      pathTemplate: [
+        { literal: "v1" },
+        { param: { name: "org", type: "string", pattern: "^[a-z.]{1,10}$" } },
+        { literal: "items" },
+      ],
+      query: [],
+      projection: { policyArgs: ["org"], safeSummary: ["org"] },
+    });
+    let code = "";
+    try {
+      buildGenericHttpAction("op.key", dotDesc, "GET", { org: ".." });
+    } catch (e) {
+      if (e instanceof CanonError) code = e.code;
+    }
+    expect(code).toBe("CANON_PATH_TRAVERSAL");
+  });
+
+  // Dedicated mutation-target: a space in a segment value MUST be percent-encoded
+  // (skipping the encode would let a forbidden raw byte reach normalizePath).
+  it("space in a segment value is percent-encoded (encode is load-bearing)", () => {
+    const spaceDesc = validateGenericHttpDescriptor({
+      ...A,
+      pathTemplate: [
+        { literal: "v1" },
+        { param: { name: "org", type: "string", pattern: "^[a-z ]{1,10}$" } },
+        { literal: "items" },
+      ],
+      query: [],
+      projection: { policyArgs: ["org"], safeSummary: ["org"] },
+    });
+    const b = buildGenericHttpAction("op.key", spaceDesc, "GET", { org: "a b" });
+    expect(b.action.normalizedPath).toBe("/v1/a%20b/items");
   });
 
   it("credential header can never enter selectedHeaders / digest", () => {
