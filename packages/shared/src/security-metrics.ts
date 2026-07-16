@@ -1,5 +1,3 @@
-import { timingSafeEqual } from "node:crypto";
-
 /**
  * Process-local, bounded security metrics. This module intentionally has no I/O:
  * metrics can never participate in an authority decision or make it fail.
@@ -198,7 +196,12 @@ export function metricsTokenIsValid(
   if (!configured || configured.length < 32 || !candidate) return false;
   const expected = new TextEncoder().encode(configured);
   const actual = new TextEncoder().encode(candidate);
-  return expected.length === actual.length && timingSafeEqual(expected, actual);
+  if (expected.length !== actual.length) return false;
+  let difference = 0;
+  for (let index = 0; index < expected.length; index += 1) {
+    difference |= expected[index] ^ actual[index];
+  }
+  return difference === 0;
 }
 
 export function __setSecurityMetricsObserverFailureForTests(enabled: boolean): void {
