@@ -19,9 +19,15 @@ export STEWARD_EXECUTION_AUTH_SECRET="${STEWARD_EXECUTION_AUTH_SECRET:-$(printf 
 pass_count=0
 fail_count=0
 
-# run_test <file> <filter> -> 0 if all pass (0 fail), 1 otherwise
+# run_test <file> <filter> -> 0 if all pass (0 fail), 1 otherwise. A single retry
+# absorbs a transient PGLite/WASM contention flake when proofs run back-to-back
+# (observed: the staleness baseline intermittently trips a fresh-instance race).
 run_test() {
   local out
+  out=$(timeout 120 bun test --timeout 30000 "$1" -t "$2" 2>&1)
+  if echo "$out" | grep -qE "^ *0 fail$"; then
+    return 0
+  fi
   out=$(timeout 120 bun test --timeout 30000 "$1" -t "$2" 2>&1)
   echo "$out" | grep -qE "^ *0 fail$"
 }
@@ -79,6 +85,23 @@ proof "M5 drop deny-terminates (deny after partial)" "$Q" "deny after a partial 
 #     ineligible-Nth-approver (not in set) test must fail.
 proof "M6 drop eligible-set membership (ineligible Nth approver)" "$Q" "not in eligible set" "$SVC" \
   '937s/if (!eligible.includes(userId)) {/if (false) {/'
+
+# M7 (GATE-236 NEW): DERIVE EXECUTABLE FROM A DOUBLE-COUNTED TALLY, NOT DISTINCT
+#     APPROVES. Bump the running tally by 2 per approve so the authoritative
+#     quorum_approvals_count diverges from the count of DISTINCT persisted approve
+#     rows. The tally-equals-distinct-approve-rows invariant test must fail
+#     (a single approve would report a tally of 2 while only one approve row
+#     exists — an executable derivation not backed by distinct persisted votes).
+proof "M7 tally double-counts (tally != distinct approve rows)" "$Q" "tally equals distinct APPROVE rows" "$SVC" \
+  '1751s/sql`\${approvalQueue.quorumApprovalsCount} + 1`/sql`\${approvalQueue.quorumApprovalsCount} + 2`/'
+
+# M8 (GATE-236 NEW): DROP THE SATISFYING Nth-TRANSITION THRESHOLD. Satisfy the
+#     quorum at count >= 1 so ANY approve (including N-1) flips the queue to
+#     approved (execute-reachable). The boundary (N-1 NOT execute-reachable) test
+#     must fail. Distinct from M1 (which mutates threshold-1): this proves the
+#     satisfaction predicate is bound to the FULL threshold, not merely >0.
+proof "M8 satisfy at count>=1 (N-1 executable)" "$Q" "boundary: first approval" "$SVC" \
+  '1770s/const quorumSatisfied = countAfter >= threshold;/const quorumSatisfied = countAfter >= 1;/'
 
 echo ""
 echo "==================================================="

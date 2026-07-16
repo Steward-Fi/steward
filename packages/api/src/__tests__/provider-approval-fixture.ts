@@ -279,6 +279,23 @@ export async function approvalRowCount(intentId: string): Promise<number> {
   return Number((arr[0] as { n: number }).n);
 }
 
+/**
+ * Count of DISTINCT persisted APPROVE decision rows for an intent. The
+ * authoritative executable-derivation invariant is that this equals the queue's
+ * quorum_approvals_count (the tally can never diverge from the distinct approve
+ * votes actually committed). Deny rows are excluded, so a mixed approve/deny
+ * corpus can prove the tally counts approvals only.
+ */
+export async function approveRowCount(intentId: string): Promise<number> {
+  const rows = await getDb().execute(
+    sql`SELECT count(*)::int AS n FROM provider_action_approvals paa
+        JOIN approval_queue aq ON aq.id = paa.approval_queue_id
+        WHERE aq.intent_id = ${intentId} AND paa.decision = 'approve'`,
+  );
+  const arr = Array.isArray(rows) ? rows : ((rows as { rows?: unknown[] }).rows ?? []);
+  return Number((arr[0] as { n: number }).n);
+}
+
 /** Create an approval-required provider action and return its intentId. */
 export async function createApprovalRequired(idem = "aaaaaaaa"): Promise<{
   intentId: string;

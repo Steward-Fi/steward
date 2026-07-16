@@ -43,6 +43,7 @@ import {
 import { providerApprovalService } from "../services/provider-approval";
 import {
   approvalRowCount,
+  approveRowCount,
   bindingRow,
   correlatedAudit,
   createApprovalRequired,
@@ -180,6 +181,87 @@ describe.skipIf(SKIP)("#205 quorum Nth-approval race (real PG)", () => {
     expect(await approvalRowCount(intentId)).toBe(3);
     const b = await bindingRow(intentId);
     expect(b.status).toBe("approved");
+  });
+
+  // GATE-236 adversarial interleaving: at N-1, a concurrent approve (which would
+  // satisfy the quorum) races a deny (which must terminate). The terminal state
+  // must be UNAMBIGUOUS and fail-closed: EITHER approved OR denied, never a torn
+  // state where the queue is denied but the binding approved (or vice-versa),
+  // and NEVER an orphan approve tally left on a denied queue. Deny-wins is the
+  // desired posture, but the hard invariant the gate enforces is single-terminal
+  // consistency: the queue, binding, and intent agree, and no execute-reachable
+  // transition coexists with a deny.
+  test("concurrent approve+deny at N-1 => single consistent terminal, no torn state", async () => {
+    const { intentId, requestHash, actionDigest } = await createApprovalRequired();
+    // Bring the tally to N-1 = 1 (2-of-3).
+    await decide(intentId, requestHash, actionDigest, F.APPROVER, "ad-a1");
+
+    // APPROVER_2 approves (would satisfy) and APPROVER_3 denies, concurrently on
+    // separate pooled connections.
+    const [approveRes, denyRes] = await Promise.all([
+      decide(intentId, requestHash, actionDigest, F.APPROVER_2, "ad-a2"),
+      providerApprovalService.decide({
+        intentId,
+        tenantId: F.TENANT,
+        authenticatedUserId: F.APPROVER_3,
+        sessionMfaVerifiedAt: freshMfa(),
+        decision: "deny" as const,
+        expectedVersion: 1,
+        expectedRequestHash: requestHash,
+        expectedActionDigest: actionDigest,
+        reasonCode: "approver_manual_deny",
+        reason: null,
+        idempotencyKey: "ad-deny",
+      }),
+    ]);
+
+    // At most one of the two racers may report a fresh terminal success; the
+    // loser rolls back with a state conflict (never two committed terminals).
+    const terminalOks = [approveRes, denyRes].filter(
+      (r) =>
+        r.ok &&
+        ((r as { status?: string }).status === "approved" ||
+          (r as { status?: string }).status === "approval_denied"),
+    );
+    expect(terminalOks.length).toBe(1);
+
+    const b = await bindingRow(intentId);
+    const q = await queueRow(intentId);
+    const decided = (await correlatedAudit(intentId)).filter(
+      (e) => e.action === "provider.approval.decided",
+    );
+
+    // Single consistent terminal: the binding + queue + intent agree on ONE
+    // outcome. Exactly one of the two racers won the terminal transition; the
+    // loser rolled back (its non-counted evidence row is never committed).
+    if (b.status === "approval_denied") {
+      // Deny won (or deny raced in after the approve): queue rejected, no orphan
+      // approve tally left dangling above what actually counted, and NO
+      // execute-reachable transition was fabricated.
+      expect(q.status).toBe("rejected");
+      // The winning terminal decision emitted exactly one decided event for it.
+      // The approve loser, if it lost the pending->approved CAS, rolled back and
+      // recorded no vote (QuorumStateConflictError).
+      expect(b.status).not.toBe("approved");
+    } else {
+      // Approve won the race and satisfied the quorum: the deny then lost against
+      // the already-approved queue (terminated approve lineage). The binding is
+      // approved and the deny did not tear it back to denied.
+      expect(b.status).toBe("approved");
+      expect(q.status).toBe("approved");
+      // The approve tally equals the distinct persisted approve rows (never torn
+      // by the racing deny).
+      expect(q.quorumApprovalsCount).toBe(await approveRowCount(intentId));
+    }
+
+    // No matter who won: at most one terminal decided event (the winner). The
+    // loser's row rolled back, so it produced no committed decided event.
+    const terminalDecided = decided.filter((e) => e.action === "provider.approval.decided");
+    // a1 (partial approve) + exactly one terminal (approve-satisfy or deny).
+    expect(terminalDecided.length).toBe(2);
+    // The approve tally never exceeds the distinct approve rows regardless of
+    // the winner (no request-count-based inflation under the race).
+    expect(q.quorumApprovalsCount).toBe(await approveRowCount(intentId));
   });
 
   test("concurrent same-approver double-submit counts exactly once (distinctness under race)", async () => {

@@ -48,6 +48,7 @@ import { eq } from "drizzle-orm";
 import { providerApprovalService } from "../services/provider-approval";
 import {
   approvalRowCount,
+  approveRowCount,
   bindingRow,
   correlatedAudit,
   createApprovalRequired,
@@ -295,6 +296,61 @@ describe("#205 M-of-N quorum approval", () => {
       expect(bad.code).toBe("APPROVAL_NOT_ELIGIBLE_APPROVER");
       const q = await queueRow(intentId);
       expect(q.quorumApprovalsCount).toBe(1);
+    });
+
+    // GATE-236 adversarial add: the executable tally must be derived from the
+    // DISTINCT APPROVE decision rows in the DB, never inflated by a deny row or
+    // by the raw decision-request count. A deny at N-1 terminates AND leaves the
+    // approve tally == the count of persisted approve rows (1), never 2.
+    test("tally equals distinct APPROVE rows; a deny never inflates the count", async () => {
+      const { intentId, requestHash, actionDigest } = await createApprovalRequired();
+      await decide(intentId, requestHash, actionDigest, F.APPROVER, "inv-a1");
+      // A deny row is inserted but must NOT bump the approve tally (deny wins,
+      // terminates). The approve tally stays 1; the distinct approve-row count
+      // stays 1; the deny added exactly one non-approve row.
+      const deny = await decide(intentId, requestHash, actionDigest, F.APPROVER_2, "inv-deny", {
+        decision: "deny",
+        reasonCode: "approver_manual_deny",
+      });
+      expect(deny.ok).toBe(true);
+      const q = await queueRow(intentId);
+      // The authoritative tally never counted the deny.
+      expect(q.quorumApprovalsCount).toBe(1);
+      // The tally equals the number of DISTINCT persisted APPROVE rows.
+      expect(await approveRowCount(intentId)).toBe(q.quorumApprovalsCount);
+      // Total decision rows = 1 approve + 1 deny.
+      expect(await approvalRowCount(intentId)).toBe(2);
+      // Terminal denied: no execute-reachable transition was fabricated.
+      const b = await bindingRow(intentId);
+      expect(b.status).toBe("approval_denied");
+    });
+
+    // GATE-236 adversarial add: at exactly N-1 collected approvals, a deny by a
+    // DIFFERENT eligible approver must terminate the whole approval (deny wins
+    // even when a single further approve would have satisfied the quorum). A
+    // subsequent approve by the last eligible approver cannot resurrect it.
+    test("deny at N-1 terminates even though one more approve would satisfy quorum", async () => {
+      const { intentId, requestHash, actionDigest } = await createApprovalRequired();
+      // Collect N-1 = 1 approval (2-of-3).
+      await decide(intentId, requestHash, actionDigest, F.APPROVER, "nm-a1");
+      const qBefore = await queueRow(intentId);
+      expect(qBefore.quorumApprovalsCount).toBe(1);
+      // A deny from a second distinct eligible approver terminates.
+      const deny = await decide(intentId, requestHash, actionDigest, F.APPROVER_2, "nm-deny", {
+        decision: "deny",
+        reasonCode: "approver_manual_deny",
+      });
+      expect(deny.ok).toBe(true);
+      if (!deny.ok) throw new Error("deny failed");
+      expect(deny.status).toBe("approval_denied");
+      // The last eligible approver's approve cannot revive the terminated action
+      // (it would otherwise have been the satisfying Nth approve).
+      const late = await decide(intentId, requestHash, actionDigest, F.APPROVER_3, "nm-a3");
+      expect(late.ok).toBe(false);
+      const b = await bindingRow(intentId);
+      expect(b.status).toBe("approval_denied");
+      const i = await intentRow(intentId);
+      expect(i.status).toBe("rejected");
     });
 
     test("ineligible-by-lost-role Nth approver cannot complete the quorum", async () => {

@@ -1,10 +1,10 @@
-# M-of-N Quorum Approval (issue #205) — Design
+# M-of-N Quorum Approval (issue #205): Design
 
 ## Goal
 Generalize the single-approver provider-action approval lifecycle to N-of-M quorum,
 while keeping the absent-quorum path byte-for-byte identical to today.
 
-## Config source (NO capability-intent.ts edit — avoids #206 collision)
+## Config source (NO capability-intent.ts edit, avoids #206 collision)
 Quorum config is read from the operation's `request_profile.approvalRequirements.quorum`,
 the SAME place `extractRequesterSeparation` already reads. Shape:
 
@@ -26,7 +26,7 @@ bound into the approval commitment at create time, exactly like requesterSeparat
    - `quorum_threshold integer` (NULL = single-approver)
    - `quorum_eligible_user_ids uuid[] NOT NULL DEFAULT '{}'`
    - `quorum_approvals_count integer NOT NULL DEFAULT 0`
-2. New table `provider_action_approvals` — one row per DISTINCT approver decision.
+2. New table `provider_action_approvals`: one row per DISTINCT approver decision.
    - PK id uuid
    - approval_queue_id FK -> approval_queue.id (cascade)
    - intent_id, tenant_id, workspace_id
