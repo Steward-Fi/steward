@@ -42,7 +42,10 @@ export const F = {
   GRANTOR: "10000000-0000-4000-8000-000000000001",
   APPROVER: "80000000-0000-4000-8000-000000000001",
   APPROVER_2: "80000000-0000-4000-8000-000000000002",
+  APPROVER_3: "80000000-0000-4000-8000-000000000003",
   APPROVER_BINDING: "90000000-0000-4000-8000-000000000001",
+  APPROVER_BINDING_2: "90000000-0000-4000-8000-000000000002",
+  APPROVER_BINDING_3: "90000000-0000-4000-8000-000000000003",
   GRANT: "a0000000-0000-4000-8000-000000000001",
 };
 
@@ -80,7 +83,21 @@ export const APPROVAL_RULES = [
   },
 ];
 
-export async function seedFixture(opts: { requesterSeparation?: boolean } = {}) {
+export interface QuorumFixtureConfig {
+  threshold: number;
+  eligibleApproverUserIds: string[];
+}
+
+export async function seedFixture(
+  opts: {
+    requesterSeparation?: boolean;
+    quorum?: QuorumFixtureConfig;
+    /** Set the agent owner (defaults to AGENT_OWNER when requesterSeparation is
+     *  on). Use this to make the requester an eligible-listed approver so the
+     *  requester-as-approver quorum guard can be exercised. */
+    agentOwnerUserId?: string;
+  } = {},
+) {
   const db = getDb();
   await db.insert(tenants).values([
     { id: F.TENANT, name: "Appr", apiKeyHash: "h" },
@@ -90,11 +107,13 @@ export async function seedFixture(opts: { requesterSeparation?: boolean } = {}) 
     { id: F.GRANTOR, email: "g@t.test" },
     { id: F.APPROVER, email: "approver@t.test" },
     { id: F.APPROVER_2, email: "approver2@t.test" },
+    { id: F.APPROVER_3, email: "approver3@t.test" },
     { id: F.AGENT_OWNER, email: "owner@t.test" },
   ]);
   await db.insert(userTenants).values([
     { userId: F.APPROVER, tenantId: F.TENANT, role: "member" },
     { userId: F.APPROVER_2, tenantId: F.TENANT, role: "admin" },
+    { userId: F.APPROVER_3, tenantId: F.TENANT, role: "member" },
     { userId: F.AGENT_OWNER, tenantId: F.TENANT, role: "member" },
   ]);
   await db.insert(agents).values([
@@ -103,7 +122,7 @@ export async function seedFixture(opts: { requesterSeparation?: boolean } = {}) 
       tenantId: F.TENANT,
       name: "A",
       walletAddress: "0x1",
-      ownerUserId: opts.requesterSeparation ? F.AGENT_OWNER : null,
+      ownerUserId: opts.agentOwnerUserId ?? (opts.requesterSeparation ? F.AGENT_OWNER : null),
     },
   ]);
   await db.insert(secrets).values([
@@ -171,8 +190,15 @@ export async function seedFixture(opts: { requesterSeparation?: boolean } = {}) 
       secretRouteId: F.ROUTE,
       requestProfile: {
         policyRules: APPROVAL_RULES,
-        ...(opts.requesterSeparation
-          ? { approvalRequirements: { requesterSeparation: true } }
+        ...(opts.requesterSeparation || opts.quorum
+          ? {
+              approvalRequirements: {
+                ...(opts.requesterSeparation ? { requesterSeparation: true } : {}),
+                // Pass the quorum config through VERBATIM (including any extra
+                // keys) so malformed-config store-time rejection can be tested.
+                ...(opts.quorum ? { quorum: opts.quorum } : {}),
+              },
+            }
           : {}),
       },
     },
@@ -191,8 +217,11 @@ export async function seedFixture(opts: { requesterSeparation?: boolean } = {}) 
       reason: "test",
     },
   ]);
-  // Eligible human workspace_approver for the exact workspace.
-  await db.insert(providerRoleBindings).values([
+  // Eligible human workspace_approver for the exact workspace. The single
+  // APPROVER is always bound. APPROVER_2 / APPROVER_3 get workspace_approver
+  // bindings ONLY for quorum fixtures, so the single-approver negative matrix
+  // (which relies on APPROVER_2 having NO approver binding) is unaffected.
+  const bindings: Array<typeof providerRoleBindings.$inferInsert> = [
     {
       id: F.APPROVER_BINDING,
       tenantId: F.TENANT,
@@ -206,7 +235,65 @@ export async function seedFixture(opts: { requesterSeparation?: boolean } = {}) 
       grantedByUserId: F.GRANTOR,
       reason: "approver",
     },
-  ]);
+  ];
+  if (opts.quorum) {
+    bindings.push(
+      {
+        id: F.APPROVER_BINDING_2,
+        tenantId: F.TENANT,
+        workspaceId: F.WORKSPACE,
+        principalType: "human",
+        principalId: F.APPROVER_2,
+        roleKey: "workspace_approver",
+        operationKeys: [],
+        environment: "production",
+        status: "active",
+        grantedByUserId: F.GRANTOR,
+        reason: "approver-2",
+      },
+      {
+        id: F.APPROVER_BINDING_3,
+        tenantId: F.TENANT,
+        workspaceId: F.WORKSPACE,
+        principalType: "human",
+        principalId: F.APPROVER_3,
+        roleKey: "workspace_approver",
+        operationKeys: [],
+        environment: "production",
+        status: "active",
+        grantedByUserId: F.GRANTOR,
+        reason: "approver-3",
+      },
+    );
+  }
+  await db.insert(providerRoleBindings).values(bindings);
+}
+
+export async function approvalRowCount(intentId: string): Promise<number> {
+  const rows = await getDb().execute(
+    sql`SELECT count(*)::int AS n FROM provider_action_approvals paa
+        JOIN approval_queue aq ON aq.id = paa.approval_queue_id
+        WHERE aq.intent_id = ${intentId}`,
+  );
+  const arr = Array.isArray(rows) ? rows : ((rows as { rows?: unknown[] }).rows ?? []);
+  return Number((arr[0] as { n: number }).n);
+}
+
+/**
+ * Count of DISTINCT persisted APPROVE decision rows for an intent. The
+ * authoritative executable-derivation invariant is that this equals the queue's
+ * quorum_approvals_count (the tally can never diverge from the distinct approve
+ * votes actually committed). Deny rows are excluded, so a mixed approve/deny
+ * corpus can prove the tally counts approvals only.
+ */
+export async function approveRowCount(intentId: string): Promise<number> {
+  const rows = await getDb().execute(
+    sql`SELECT count(*)::int AS n FROM provider_action_approvals paa
+        JOIN approval_queue aq ON aq.id = paa.approval_queue_id
+        WHERE aq.intent_id = ${intentId} AND paa.decision = 'approve'`,
+  );
+  const arr = Array.isArray(rows) ? rows : ((rows as { rows?: unknown[] }).rows ?? []);
+  return Number((arr[0] as { n: number }).n);
 }
 
 /** Create an approval-required provider action and return its intentId. */

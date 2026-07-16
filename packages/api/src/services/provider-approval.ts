@@ -26,6 +26,7 @@ import {
   getDb,
   intents,
   providerAccounts,
+  providerActionApprovals,
   providerActionBindings,
   providerGrants,
   providerOperations,
@@ -155,6 +156,14 @@ export async function buildApprovalArm(args: {
    * validated action build, never hardcoded per provider.
    */
   canonicalProfile: ProviderApprovalCommitmentV1["operation"]["canonicalProfile"];
+  /**
+   * #205 flat M-of-N quorum config (already fail-closed-validated by the caller's
+   * extractQuorumConfig). `undefined` => single-approver legacy path: the queue
+   * row's quorum columns stay NULL/empty/0 and the commitment omits the quorum
+   * member (byte-identical commitment to pre-#205). When present it is
+   * re-validated here as defense in depth before it is committed/persisted.
+   */
+  quorum?: { threshold: number; eligibleApproverUserIds: string[] };
 }): Promise<{ queueId: string; commitmentHash: string; commitment: ProviderApprovalCommitmentV1 }> {
   const tx = args.tx;
 
@@ -176,6 +185,92 @@ export async function buildApprovalArm(args: {
   const secretVersion = args.account.credentialVersion;
   if (!secretId || secretVersion == null) {
     throw new ApprovalArmError("APPROVAL_CREDENTIAL_UNAVAILABLE");
+  }
+
+  // #205 defense-in-depth: re-validate the quorum config shape at commit time so
+  // a malformed quorum can never be persisted even if a future caller forgets
+  // extractQuorumConfig (spec §7 fail-closed at store time). Distinctness of the
+  // eligible set + threshold reachability are re-checked here.
+  const quorum = args.quorum;
+  if (quorum) {
+    const ids = quorum.eligibleApproverUserIds;
+    if (
+      !Number.isInteger(quorum.threshold) ||
+      quorum.threshold < 1 ||
+      !Array.isArray(ids) ||
+      ids.length === 0 ||
+      !ids.every((u) => typeof u === "string" && u.length > 0) ||
+      new Set(ids).size !== ids.length ||
+      quorum.threshold > ids.length
+    ) {
+      throw new ApprovalArmError("APPROVAL_QUORUM_CONFIG_INVALID");
+    }
+
+    // FAIL CLOSED AT STORE TIME on an UNREACHABLE quorum (codex P2): a
+    // structurally-valid eligible set can still be unsatisfiable if some listed
+    // ids are not real workspace_approvers, are not tenant members, or is the
+    // requester (agent owner), all of whom are rejected at decide time. Compute
+    // the count of ids that are ACTUALLY able to vote right now (distinct tenant
+    // member + active in-window workspace_approver role for this workspace, and
+    // NOT the requesting agent's owner) and require it to be >= threshold. This
+    // makes it impossible to persist a quorum that can never complete.
+    const [wsRow] = await tx
+      .select({ environment: workspaces.environment })
+      .from(workspaces)
+      .where(and(eq(workspaces.tenantId, args.tenantId), eq(workspaces.id, args.workspaceId)))
+      .limit(1);
+    if (!wsRow) {
+      throw new ApprovalArmError("APPROVAL_QUORUM_CONFIG_INVALID");
+    }
+    const [ownerRow] = await tx
+      .select({ ownerUserId: agents.ownerUserId })
+      .from(agents)
+      .where(and(eq(agents.tenantId, args.tenantId), eq(agents.id, args.actorAgentId)))
+      .limit(1);
+    const requesterOwner = ownerRow?.ownerUserId ?? null;
+    const now = new Date();
+    let eligibleVoters = 0;
+    for (const uid of ids) {
+      // Requester (agent owner) can never count toward the quorum.
+      if (requesterOwner && uid === requesterOwner) continue;
+      // Must be a tenant member.
+      const [membership] = await tx
+        .select({ id: userTenants.id })
+        .from(userTenants)
+        .where(and(eq(userTenants.userId, uid), eq(userTenants.tenantId, args.tenantId)))
+        .limit(1);
+      if (!membership) continue;
+      // Must hold an active, in-window workspace_approver role for THIS workspace
+      // and its current environment.
+      const roleRows = await tx
+        .select({
+          roleKey: providerRoleBindings.roleKey,
+          notBefore: providerRoleBindings.notBefore,
+          expiresAt: providerRoleBindings.expiresAt,
+          environment: providerRoleBindings.environment,
+        })
+        .from(providerRoleBindings)
+        .where(
+          and(
+            eq(providerRoleBindings.tenantId, args.tenantId),
+            eq(providerRoleBindings.workspaceId, args.workspaceId),
+            eq(providerRoleBindings.principalType, "human"),
+            eq(providerRoleBindings.principalId, uid),
+            eq(providerRoleBindings.status, "active"),
+          ),
+        );
+      const canVote = roleRows.some(
+        (r) =>
+          r.roleKey === "workspace_approver" &&
+          (!r.notBefore || r.notBefore <= now) &&
+          (!r.expiresAt || r.expiresAt > now) &&
+          (!r.environment || r.environment === wsRow.environment),
+      );
+      if (canVote) eligibleVoters += 1;
+    }
+    if (eligibleVoters < quorum.threshold) {
+      throw new ApprovalArmError("APPROVAL_QUORUM_CONFIG_INVALID");
+    }
   }
 
   const commitment: ProviderApprovalCommitmentV1 = {
@@ -220,6 +315,16 @@ export async function buildApprovalArm(args: {
       requesterSeparation: args.requesterSeparation,
       maxMfaAgeSeconds: 300,
       requiredMfaAssurance: "current-session-mfa",
+      // Additive: emitted ONLY when a quorum is configured, so the single-approver
+      // commitment is byte-identical to pre-#205.
+      ...(quorum
+        ? {
+            quorum: {
+              threshold: quorum.threshold,
+              eligibleApproverUserIds: quorum.eligibleApproverUserIds,
+            },
+          }
+        : {}),
     },
     requestedAt: args.requestedAt,
     expiresAt: args.expiresAt,
@@ -245,6 +350,13 @@ export async function buildApprovalArm(args: {
     approvalCommitmentHash: commitmentHash,
     expectedBindingRevision: 1,
     expiresAt: new Date(args.expiresAt),
+    // #205 quorum config columns. NULL/empty/0 for the single-approver path (the
+    // CHECK in 0083 enforces this shape). When a quorum is set, the eligible set
+    // + threshold are persisted here so decide() can re-validate against the
+    // frozen set even if the commitment doc were ever tampered.
+    quorumThreshold: quorum ? quorum.threshold : null,
+    quorumEligibleUserIds: quorum ? quorum.eligibleApproverUserIds : [],
+    quorumApprovalsCount: 0,
   });
 
   return { queueId, commitmentHash, commitment };
@@ -796,6 +908,40 @@ class ProviderApprovalService {
       }
     }
 
+    // #205 quorum: the requester (agent owner) can NEVER count toward the
+    // quorum, generalizing requester-separation to the M-of-N case regardless of
+    // whether requesterSeparation was independently set. And the approver MUST be
+    // a member of the frozen eligible set. Both checks fail closed if the
+    // eligible set is malformed/empty at decide time (spec §7 eval-time).
+    if (queue.quorumThreshold != null) {
+      const [agent] = await tx
+        .select({ ownerUserId: agents.ownerUserId })
+        .from(agents)
+        .where(and(eq(agents.tenantId, tenantId), eq(agents.id, binding.actorAgentId)))
+        .limit(1);
+      if (agent?.ownerUserId && agent.ownerUserId === userId) {
+        return { ok: false, code: "APPROVAL_REQUESTER_SEPARATION_REQUIRED", httpStatus: 403 };
+      }
+      const eligible = queue.quorumEligibleUserIds ?? [];
+      // Fail closed on a malformed persisted config (defense in depth; the
+      // create-time CHECK + validation should make this unreachable).
+      if (
+        !Number.isInteger(queue.quorumThreshold) ||
+        queue.quorumThreshold < 1 ||
+        eligible.length === 0 ||
+        queue.quorumThreshold > eligible.length ||
+        new Set(eligible).size !== eligible.length
+      ) {
+        return { ok: false, code: "APPROVAL_QUORUM_CONFIG_INVALID", httpStatus: 422 };
+      }
+      if (!eligible.includes(userId)) {
+        // Not in the eligible set: same 403 posture as a missing role (an
+        // eligible-role holder who is nonetheless not on THIS action's approver
+        // list cannot vote).
+        return { ok: false, code: "APPROVAL_NOT_ELIGIBLE_APPROVER", httpStatus: 403 };
+      }
+    }
+
     // Recent MFA (only enforced at decision time, not resume — §9). At resume we
     // only require the approver still be eligible (checked above).
     if (!atResume) {
@@ -832,7 +978,13 @@ class ProviderApprovalService {
     const { binding, queue } = loaded;
     // DB time. drizzle's tx.execute returns either an array (postgres-js) or a
     // { rows } object (pglite/neon), so normalize.
-    const dueRes = await tx.execute(sql`SELECT (${queue.expiresAt} <= now()) AS due`);
+    // Explicit ::timestamptz cast + ISO-string param so the comparison type is
+    // unambiguous on postgres-js (which otherwise sends a bare Date param with an
+    // unknown type OID, and PG cannot infer `$1 <= now()`). PGLite already
+    // tolerated the untyped form; the cast is behavior-neutral there.
+    const dueRes = await tx.execute(
+      sql`SELECT (${queue.expiresAt?.toISOString() ?? null}::timestamptz <= now()) AS due`,
+    );
     const dueRows = (
       Array.isArray(dueRes) ? dueRes : ((dueRes as { rows?: unknown[] }).rows ?? [])
     ) as Array<{ due: boolean }>;
@@ -1167,6 +1319,27 @@ class ProviderApprovalService {
         const mfaVerifiedAt = new Date(input.sessionMfaVerifiedAt as number);
         const mfaAgeMs = Date.now() - (input.sessionMfaVerifiedAt as number);
 
+        // ── #205 QUORUM PATH ──────────────────────────────────────────────
+        // A configured quorum threshold flips both approve and deny into the
+        // multi-approver lifecycle. Absent quorum (threshold NULL) falls through
+        // to the single-approver code below, byte-for-byte unchanged.
+        if (queue.quorumThreshold != null) {
+          return await this.decideQuorum({
+            tx,
+            append,
+            binding,
+            queue,
+            input,
+            before,
+            after,
+            nowTs,
+            mfaVerifiedAt,
+            mfaAgeMs,
+            idemHash,
+            decisionReqHash,
+          });
+        }
+
         if (input.decision === "approve") {
           const upd = await tx
             .update(approvalQueue)
@@ -1336,8 +1509,367 @@ class ProviderApprovalService {
     } catch (e) {
       if (e instanceof AuditUnavailableError)
         return fail("EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE", 503);
+      // #205: a quorum loser that rolled back its non-counted evidence row.
+      if (e instanceof QuorumStateConflictError) return fail("APPROVAL_STATE_CONFLICT", 409);
       return fail("APPROVAL_PERSISTENCE_FAILED", 503);
     }
+  }
+
+  // ── #205 QUORUM DECISION (approve collects N distinct; single deny terminates)
+  //
+  // Called from decide() ONLY when queue.quorumThreshold != null, after all the
+  // shared gates (idempotency, expiry, terminal-state, optimistic-lock echoes,
+  // integrity, dependency re-eval, approver eligibility + MFA + eligible-set
+  // membership + requester-separation). Runs inside the SAME audited tx with the
+  // rows already FOR UPDATE-locked by loadCase.
+  //
+  // Invariants enforced here:
+  //  - DENY WINS IMMEDIATELY: the first deny terminates the whole approval
+  //    (pending -> rejected), regardless of collected approvals.
+  //  - DISTINCTNESS: a provider_action_approvals UNIQUE(queue, approver) makes a
+  //    second decision by the same approver a loud 409. Requester can never vote
+  //    (checked upstream). N distinct users required.
+  //  - EXACT-BIND per approval: every row stores request_hash/action_digest/
+  //    commitment hash + the binding_revision it was cast at, so a later
+  //    staleness (which bumps binding_revision and flips the queue to a terminal
+  //    stale) invalidates the entire collected set.
+  //  - SINGLE-WINNER Nth transition: the pending -> approved flip is a guarded
+  //    CAS (WHERE status='pending' AND quorum_approvals_count>=threshold) so two
+  //    concurrent Nth approvals produce exactly one execute-reachable transition.
+  private async decideQuorum(ctx: {
+    tx: DbExecutor;
+    append: ApprovalAuditAppend;
+    binding: BindingRow;
+    queue: QueueRow;
+    input: DecideInput;
+    before: number;
+    after: number;
+    nowTs: Date;
+    mfaVerifiedAt: Date;
+    mfaAgeMs: number;
+    idemHash: string;
+    decisionReqHash: string;
+  }): Promise<ApprovalResult> {
+    const { tx, append, binding, queue, input, before, after, nowTs } = ctx;
+    const threshold = queue.quorumThreshold as number;
+    const userId = input.authenticatedUserId;
+
+    // Per-approver idempotency + distinctness replay: if this exact approver
+    // already recorded a decision on THIS queue, an exact retry (same idem key +
+    // same decision-request-hash) replays; a different decision or different
+    // request-hash is a loud conflict (they cannot change their vote).
+    const [existing] = await tx
+      .select()
+      .from(providerActionApprovals)
+      .where(
+        and(
+          eq(providerActionApprovals.approvalQueueId, queue.id),
+          eq(providerActionApprovals.approverUserId, userId),
+        ),
+      )
+      .limit(1);
+    if (existing) {
+      if (
+        existing.decisionIdempotencyKeyHash === ctx.idemHash &&
+        existing.decisionRequestHash === ctx.decisionReqHash
+      ) {
+        // Exact retry of the same vote by the same approver. Report the CURRENT
+        // queue state (the vote already counted).
+        return {
+          ok: true,
+          httpStatus: 200,
+          id: binding.intentId,
+          status: binding.status,
+          version: binding.bindingRevision,
+          requestHash: binding.requestHash,
+          actionDigest: binding.actionDigest,
+          replayed: true,
+        };
+      }
+      // A second, DIFFERENT decision by the same approver is rejected loudly.
+      return fail("APPROVAL_DUPLICATE_APPROVER", 409);
+    }
+
+    // Cross-action decision-idempotency-key reuse guard (mirrors the queue-row
+    // guard): the same approver reusing this decision key on a DIFFERENT quorum
+    // action would violate provider_action_approvals_idem_uniq and surface as an
+    // opaque 503. Detect it and return the precise 409 instead.
+    const [idemConflict] = await tx
+      .select({ id: providerActionApprovals.id, queueId: providerActionApprovals.approvalQueueId })
+      .from(providerActionApprovals)
+      .where(
+        and(
+          eq(providerActionApprovals.tenantId, input.tenantId),
+          eq(providerActionApprovals.approverUserId, userId),
+          eq(providerActionApprovals.decisionIdempotencyKeyHash, ctx.idemHash),
+        ),
+      )
+      .limit(1);
+    if (idemConflict && idemConflict.queueId !== queue.id) {
+      return fail("APPROVAL_IDEMPOTENCY_CONFLICT", 409);
+    }
+
+    // Record this distinct decision row bound to the CURRENT binding revision.
+    // A concurrent duplicate loses the UNIQUE(queue, approver) race -> caught as
+    // APPROVAL_DUPLICATE_APPROVER by the outer catch (it maps the unique
+    // violation). We insert first so the tally can never exceed the distinct
+    // decision count.
+    try {
+      await tx.insert(providerActionApprovals).values({
+        approvalQueueId: queue.id,
+        intentId: binding.intentId,
+        tenantId: input.tenantId,
+        workspaceId: binding.workspaceId,
+        approverUserId: userId,
+        decision: input.decision,
+        bindingRevisionAtDecision: before,
+        requestHash: binding.requestHash,
+        actionDigest: binding.actionDigest,
+        approvalCommitmentHash: queue.approvalCommitmentHash ?? "",
+        decisionIdempotencyKeyHash: ctx.idemHash,
+        decisionRequestHash: ctx.decisionReqHash,
+        mfaVerifiedAt: ctx.mfaVerifiedAt,
+        mfaAgeMsAtDecision: ctx.mfaAgeMs,
+        reasonCode: input.reasonCode ?? null,
+        reason: input.reason ?? null,
+      });
+    } catch (e) {
+      // Distinctness / cross-action idem races land here.
+      const code = (e as { code?: string } | null)?.code;
+      if (code === "23505") {
+        // Determine which unique index tripped by re-reading.
+        const [dup] = await tx
+          .select({ id: providerActionApprovals.id })
+          .from(providerActionApprovals)
+          .where(
+            and(
+              eq(providerActionApprovals.approvalQueueId, queue.id),
+              eq(providerActionApprovals.approverUserId, userId),
+            ),
+          )
+          .limit(1);
+        if (dup) return fail("APPROVAL_DUPLICATE_APPROVER", 409);
+        return fail("APPROVAL_IDEMPOTENCY_CONFLICT", 409);
+      }
+      throw e;
+    }
+
+    if (input.decision === "deny") {
+      // DENY WINS IMMEDIATELY: terminate the whole approval regardless of tally.
+      const upd = await tx
+        .update(approvalQueue)
+        .set({
+          status: "rejected",
+          decision: "deny",
+          resolvedAt: nowTs,
+          resolvedByType: "user",
+          resolvedById: userId,
+          resolvedBy: userId,
+          mfaVerifiedAt: ctx.mfaVerifiedAt,
+          mfaAgeMsAtDecision: ctx.mfaAgeMs,
+          reasonCode: input.reasonCode ?? null,
+          reason: input.reason ?? null,
+          decisionIdempotencyKeyHash: ctx.idemHash,
+          decisionRequestHash: ctx.decisionReqHash,
+        })
+        .where(and(eq(approvalQueue.id, queue.id), eq(approvalQueue.status, "pending")))
+        .returning({ id: approvalQueue.id });
+      // Post-insert conflict: roll back the evidence row we just wrote (throw,
+      // don't return) so a non-counted deny row is never committed.
+      if (upd.length === 0) throw new QuorumStateConflictError();
+
+      await tx
+        .update(providerActionBindings)
+        .set({
+          status: "approval_denied",
+          bindingRevision: after,
+          approvalActorUserId: userId,
+          deniedAt: nowTs,
+          updatedAt: nowTs,
+        })
+        .where(
+          and(
+            eq(providerActionBindings.intentId, binding.intentId),
+            eq(providerActionBindings.status, "pending_approval"),
+            eq(providerActionBindings.bindingRevision, before),
+          ),
+        );
+      await tx
+        .update(intents)
+        .set({
+          status: "rejected",
+          rejectedBy: `user:${userId}`,
+          rejectedAt: nowTs,
+          rejectionReason: input.reasonCode ?? null,
+          updatedAt: nowTs,
+        })
+        .where(eq(intents.id, binding.intentId));
+
+      const payload = buildAuditPayload(binding, queue, {
+        approvalActorUserId: userId,
+        resumeActor: null,
+        bindingRevisionBefore: before,
+        bindingRevisionAfter: after,
+        fromStatus: "pending_approval",
+        toStatus: "approval_denied",
+        reasonCode: input.reasonCode ?? "approver_manual_deny",
+        resumeAttemptId: null,
+      });
+      payload.quorumThreshold = threshold;
+      payload.quorumApprovalsCount = queue.quorumApprovalsCount;
+      await this.hook("beforeAudit");
+      await append({
+        tenantId: binding.tenantId,
+        actorType: "user",
+        actorId: userId,
+        action: "provider.approval.decided",
+        resourceType: "provider_action",
+        resourceId: binding.intentId,
+        metadata: payload as unknown as Record<string, unknown>,
+        ipAddress: input.ipAddress ?? null,
+        userAgent: input.userAgent ?? null,
+        requestId: input.requestId ?? null,
+      });
+      await this.hook("afterAudit");
+
+      return {
+        ok: true,
+        httpStatus: 200,
+        id: binding.intentId,
+        status: "approval_denied",
+        version: after,
+        requestHash: binding.requestHash,
+        actionDigest: binding.actionDigest,
+      };
+    }
+
+    // APPROVE: increment the guarded tally. The CAS increments only while the
+    // queue is pending AND the tally is below threshold, so it can never exceed
+    // the threshold. countAfter is the authoritative post-increment tally.
+    const bumped = await tx
+      .update(approvalQueue)
+      .set({ quorumApprovalsCount: sql`${approvalQueue.quorumApprovalsCount} + 1` })
+      .where(
+        and(
+          eq(approvalQueue.id, queue.id),
+          eq(approvalQueue.status, "pending"),
+          sql`${approvalQueue.quorumApprovalsCount} < ${threshold}`,
+        ),
+      )
+      .returning({ count: approvalQueue.quorumApprovalsCount });
+    if (bumped.length === 0) {
+      // The queue is no longer pending or already at threshold: a concurrent
+      // winner completed (or terminated) the quorum. Roll back the evidence row
+      // we just inserted (throw, don't return) so a vote that did not advance the
+      // tally is never committed, so the approvals table stays consistent with the
+      // queue tally + terminal state.
+      throw new QuorumStateConflictError();
+    }
+    const countAfter = bumped[0].count as number;
+
+    const quorumSatisfied = countAfter >= threshold;
+    const toStatus = quorumSatisfied ? "approved" : "pending_approval";
+    // Only the SATISFYING Nth approval advances the binding + intent + queue
+    // decision. Partial approvals leave the binding pending_approval (execute
+    // unreachable) and only bump the tally.
+    let bindingRevisionAfter = before;
+    if (quorumSatisfied) {
+      bindingRevisionAfter = after;
+      const qUpd = await tx
+        .update(approvalQueue)
+        .set({
+          status: "approved",
+          decision: "approve",
+          resolvedAt: nowTs,
+          resolvedByType: "user",
+          resolvedById: userId,
+          resolvedBy: userId,
+          mfaVerifiedAt: ctx.mfaVerifiedAt,
+          mfaAgeMsAtDecision: ctx.mfaAgeMs,
+          reasonCode: input.reasonCode ?? null,
+          reason: input.reason ?? null,
+          decisionIdempotencyKeyHash: ctx.idemHash,
+          decisionRequestHash: ctx.decisionReqHash,
+        })
+        .where(
+          and(
+            eq(approvalQueue.id, queue.id),
+            eq(approvalQueue.status, "pending"),
+            sql`${approvalQueue.quorumApprovalsCount} >= ${threshold}`,
+          ),
+        )
+        .returning({ id: approvalQueue.id });
+      // Guarded single-winner: if a concurrent Nth approval already flipped the
+      // queue to approved, this loses. Roll back the whole tx (throw) so neither
+      // the tally bump nor the evidence row is committed by the loser.
+      if (qUpd.length === 0) throw new QuorumStateConflictError();
+
+      const bUpd = await tx
+        .update(providerActionBindings)
+        .set({
+          status: "approved",
+          bindingRevision: after,
+          approvalActorUserId: userId,
+          approvedAt: nowTs,
+          updatedAt: nowTs,
+        })
+        .where(
+          and(
+            eq(providerActionBindings.intentId, binding.intentId),
+            eq(providerActionBindings.status, "pending_approval"),
+            eq(providerActionBindings.bindingRevision, before),
+          ),
+        )
+        .returning({ intentId: providerActionBindings.intentId });
+      if (bUpd.length === 0) throw new QuorumStateConflictError();
+
+      await tx
+        .update(intents)
+        .set({
+          status: "authorized",
+          authorizedBy: `user:${userId}`,
+          authorizedAt: nowTs,
+          updatedAt: nowTs,
+        })
+        .where(eq(intents.id, binding.intentId));
+    }
+
+    const payload = buildAuditPayload(binding, queue, {
+      approvalActorUserId: userId,
+      resumeActor: null,
+      bindingRevisionBefore: before,
+      bindingRevisionAfter,
+      fromStatus: "pending_approval",
+      toStatus: quorumSatisfied ? "approved" : "pending_approval",
+      reasonCode: input.reasonCode ?? "approver_manual_approve",
+      resumeAttemptId: null,
+    });
+    payload.quorumThreshold = threshold;
+    payload.quorumApprovalsCount = countAfter;
+    await this.hook("beforeAudit");
+    await append({
+      tenantId: binding.tenantId,
+      actorType: "user",
+      actorId: userId,
+      action: "provider.approval.decided",
+      resourceType: "provider_action",
+      resourceId: binding.intentId,
+      metadata: payload as unknown as Record<string, unknown>,
+      ipAddress: input.ipAddress ?? null,
+      userAgent: input.userAgent ?? null,
+      requestId: input.requestId ?? null,
+    });
+    await this.hook("afterAudit");
+
+    return {
+      ok: true,
+      httpStatus: 200,
+      id: binding.intentId,
+      status: toStatus,
+      version: bindingRevisionAfter,
+      requestHash: binding.requestHash,
+      actionDigest: binding.actionDigest,
+    };
   }
 
   private decisionReplay(binding: BindingRow, queue: QueueRow, replayed = false): ApprovalResult {
@@ -1700,6 +2232,21 @@ class ProviderApprovalService {
 // ── module helpers ──
 
 class AuditUnavailableError extends Error {}
+
+/**
+ * #205: thrown from the quorum decide path AFTER the provider_action_approvals
+ * evidence row has been inserted, when the guarded queue transition (tally CAS /
+ * pending->approved / deny) loses to a concurrent winner. Throwing (rather than
+ * returning fail()) rolls back the whole transaction so the non-counted evidence
+ * row is NEVER committed, so the approvals table stays consistent with the queue
+ * tally and terminal state. The outer catch maps it to APPROVAL_STATE_CONFLICT.
+ */
+class QuorumStateConflictError extends Error {
+  constructor() {
+    super("APPROVAL_STATE_CONFLICT");
+    this.name = "QuorumStateConflictError";
+  }
+}
 
 type ApprovalAuditAppend = (event: { tenantId: string } & Record<string, unknown>) => Promise<void>;
 

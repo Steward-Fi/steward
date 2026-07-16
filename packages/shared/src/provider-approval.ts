@@ -66,6 +66,20 @@ export interface ProviderApprovalCommitmentV1 {
     requesterSeparation: boolean;
     maxMfaAgeSeconds: 300;
     requiredMfaAssurance: "current-session-mfa" | "phishing-resistant";
+    /**
+     * #205 flat M-of-N quorum. ABSENT (undefined) => single-approver legacy path;
+     * the commitment is then byte-for-byte identical to pre-quorum actions
+     * because JCS omits an undefined member (verified by the single-approver
+     * regression corpus). When present, `threshold` DISTINCT eligible approvals
+     * are required. `eligibleApproverUserIds` is the frozen, workspace_approver
+     * -scoped eligible set (UUIDs). The requester (agent owner) is never eligible
+     * (enforced at decide time, generalizing requesterSeparation). Nested quorums
+     * are OUT OF SCOPE (flat N-of-M only).
+     */
+    quorum?: {
+      threshold: number;
+      eligibleApproverUserIds: string[];
+    };
   };
   requestedAt: string;
   expiresAt: string;
@@ -138,6 +152,20 @@ export function canonicalApprovalCommitmentObject(
       requesterSeparation: c.approvalRequirements.requesterSeparation,
       maxMfaAgeSeconds: c.approvalRequirements.maxMfaAgeSeconds,
       requiredMfaAssurance: c.approvalRequirements.requiredMfaAssurance,
+      // Additive quorum member. Emitted ONLY when configured, so an absent
+      // quorum yields a canonical object byte-identical to the pre-#205 shape.
+      // The eligible-approver set is sorted (UUID-byte order) because JCS
+      // preserves array order and the commitment must be deterministic.
+      ...(c.approvalRequirements.quorum
+        ? {
+            quorum: {
+              threshold: c.approvalRequirements.quorum.threshold,
+              eligibleApproverUserIds: [
+                ...c.approvalRequirements.quorum.eligibleApproverUserIds,
+              ].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+            },
+          }
+        : {}),
     },
     requestedAt: c.requestedAt,
     expiresAt: c.expiresAt,
@@ -215,6 +243,16 @@ export interface ProviderApprovalAuditPayloadV1 {
   reasonCode: string;
   resumeAttemptId: string | null;
   occurredAt: string;
+  /**
+   * #205 quorum progress. ABSENT for single-approver actions (byte-for-byte
+   * unchanged audit payloads). When present, `quorumThreshold` is the required
+   * DISTINCT-approval count and `quorumApprovalsCount` is the tally AFTER this
+   * decision (so a partial-quorum approve carries count < threshold and the
+   * satisfying Nth approve carries count === threshold). No second evidence
+   * system: quorum progress rides the existing provider.approval.decided events.
+   */
+  quorumThreshold?: number;
+  quorumApprovalsCount?: number;
 }
 
 // ─── Decision request body (public API shape, spec §8.2) ──────────────────────
