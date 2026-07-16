@@ -70,6 +70,8 @@ type AnyCanonicalActionV1 = GithubCanonicalActionV1 | XCanonicalActionV1;
 
 import {
   type CumulativeSpendScope,
+  getWindowedInvokeCount,
+  recordWindowedInvoke,
   releaseCumulativeSpend,
   reserveCumulativeSpend,
   settleCumulativeSpend,
@@ -320,6 +322,7 @@ type PolicyResult = {
   evaluation: ProviderPolicyEvaluationV1;
   decisionId: string;
   cumulativeSpendReservations: CumulativeSpendReservationHandle[];
+  windowedCountCap?: { windowSeconds: number; max: number };
 };
 
 class ProviderActionService {
@@ -765,6 +768,20 @@ class ProviderActionService {
     // #206: known outcome. stub_succeeded => settle (keep counted); stub_failed
     // => release (reclaim budget, the action did not spend).
     await this.finalizeCumulativeSpend(csReservations, stub.ok ? "success" : "failure");
+    // #206 configurable count cap: record ONE invoke into the trailing-window
+    // count ONLY on a known-success allow (a failed stub did not consume a call
+    // slot). The read side (getWindowedInvokeCount) enforces the cap; this write
+    // advances the counter. A transient Redis failure here under-counts by one
+    // (bounded) and never blocks the response.
+    const countCap = (policy as PolicyResult | null)?.windowedCountCap;
+    if (stub.ok && countCap) {
+      await recordWindowedInvoke({
+        agentId: actorAgentId,
+        operationKey: input.operationKey,
+        windowSeconds: countCap.windowSeconds,
+        max: countCap.max,
+      }).catch(() => undefined);
+    }
     // Record the narrow allowed_stub -> stub_succeeded|stub_failed transition.
     await this.db()
       .update(providerActionBindings)
@@ -1194,6 +1211,9 @@ class ProviderActionService {
     /** Atomic cumulative-spend reservations taken during this evaluation. Settle
      *  on known-success, release on known-failure/deny, leave on outcome_unknown. */
     cumulativeSpendReservations: CumulativeSpendReservationHandle[];
+    /** The governing configurable count cap (if any) so the caller can record
+     *  this invoke into the trailing-window count AFTER a known-success allow. */
+    windowedCountCap?: { windowSeconds: number; max: number };
   }> {
     const decidedAt = new Date().toISOString();
     const decisionId = randomUUID();
@@ -1230,6 +1250,23 @@ class ProviderActionService {
       policyArgs: build.policyArgs,
     });
 
+    // #206 configurable count cap (maxCalls + callWindow): read the trailing-
+    // window invoke count for this operation so the composer can enforce it.
+    // Absent count (no governing maxCalls rule, or a Redis read failure) leaves
+    // windowedInvokeCount undefined => a maxCalls rule fails closed
+    // (POLICY_INPUT_UNAVAILABLE), mirroring the maxCallsPerHour posture.
+    const govMaxCalls = extractGoverningMaxCalls(rules, operation.operationKey);
+    let windowedInvokeCount: number | undefined;
+    if (govMaxCalls) {
+      const count = await getWindowedInvokeCount({
+        agentId: args.actorAgentId,
+        operationKey: operation.operationKey,
+        windowSeconds: govMaxCalls.windowSeconds,
+        max: govMaxCalls.max,
+      }).catch(() => null);
+      windowedInvokeCount = count ?? undefined;
+    }
+
     const context: ProviderPolicyContext = {
       operationKey: operation.operationKey,
       args: build.policyArgs,
@@ -1242,6 +1279,9 @@ class ProviderActionService {
       // Trailing-hour count is not wired in PR2; rules that require it will
       // fail closed (POLICY_INPUT_UNAVAILABLE) exactly as specified.
       invokeCount1h: undefined,
+      // #206 configurable count cap: the trailing-window invoke count (undefined
+      // when unwired => a maxCalls rule fails closed).
+      ...(windowedInvokeCount !== undefined ? { windowedInvokeCount } : {}),
       ...(policyText !== undefined ? { policyText } : {}),
       // #206 cumulative-spend aggregate + declaration. spendDeclaration absent =>
       // a cumulativeSpend rule fails closed (NO_SPEND_FIELD). cumulativeSpend
@@ -1326,6 +1366,7 @@ class ProviderActionService {
       evaluation,
       decisionId,
       cumulativeSpendReservations: cumulative.reservations,
+      ...(govMaxCalls !== undefined ? { windowedCountCap: govMaxCalls } : {}),
     };
   }
 
@@ -1496,6 +1537,23 @@ class ProviderActionService {
     };
   }
 
+  /**
+   * Idempotent replay path: reconstruct the outcome from an existing binding.
+   *
+   * #206 RESERVATION REPLAY CAVEAT (codex P2, honest gap): cumulative-spend
+   * reservation handles are in-memory to the ORIGINAL create call and are NOT
+   * persisted on the binding. A replay here (or a crash between the binding
+   * commit and the original finalize) therefore has no handle to settle/release.
+   * This is deliberately FAIL-CLOSED, not a silent leak: on the original call a
+   * crash after commit leaves the reservation as `outcome_unknown` (documented:
+   * it ages out at the window edge, never freeing maybe-spent budget). A replay
+   * that resolves to stub_succeeded is a real spend and SHOULD stay counted, so
+   * not releasing is correct. A replay that resolves to stub_failed is the only
+   * case where budget could be transiently over-counted for one window; that is
+   * a bounded DENY-side error (safe), never an allow-side one. Crash-durable
+   * reservation handles (persisted per binding + reconciled by the C2 sweeper)
+   * are the follow-up; this lane does not add a migration for it.
+   */
   private async outcomeFromBinding(
     b: typeof providerActionBindings.$inferSelect,
   ): Promise<ProviderActionOutcome> {
@@ -1759,6 +1817,41 @@ function extractGoverningCumulativeSpend(
     });
   }
   return out;
+}
+
+/**
+ * Extract the governing configurable count cap (maxCalls + callWindow) for an
+ * operation, if exactly one well-formed one exists. Returns the resolved window
+ * seconds + max, or undefined when none govern. A malformed one is left to the
+ * composer to hard-deny. (Multiple count caps would each read the same window
+ * bucket; we resolve the FIRST well-formed one to feed the shared count signal -
+ * the composer still evaluates every rule against that count.)
+ */
+function extractGoverningMaxCalls(
+  rules: ProviderPolicyRule[],
+  operationKey: string,
+): { windowSeconds: number; max: number } | undefined {
+  for (const r of rules) {
+    if (!r.enabled) continue;
+    if (!capabilitySelectorMatches(r.config, operationKey)) continue;
+    const constraints = (r.config as { constraints?: unknown }).constraints;
+    if (typeof constraints !== "object" || constraints === null) continue;
+    const c = constraints as Record<string, unknown>;
+    if (c.maxCalls === undefined && c.callWindow === undefined) continue;
+    const windowSeconds = parseIso8601DurationSecondsForApi(c.callWindow);
+    if (
+      typeof c.maxCalls !== "number" ||
+      !Number.isInteger(c.maxCalls) ||
+      c.maxCalls < 0 ||
+      typeof c.callWindow !== "string" ||
+      windowSeconds === null
+    ) {
+      // Malformed: leave it to the composer to hard-deny. Do NOT read a count.
+      continue;
+    }
+    return { windowSeconds, max: c.maxCalls };
+  }
+  return undefined;
 }
 
 /**

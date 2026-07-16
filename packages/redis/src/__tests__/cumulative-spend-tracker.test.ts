@@ -21,6 +21,8 @@ import { disconnectRedis, getRedis } from "../client.js";
 import {
   cumulativeSpendKeyForTest,
   getCumulativeSpendSum,
+  getWindowedInvokeCount,
+  recordWindowedInvoke,
   releaseCumulativeSpend,
   reserveCumulativeSpend,
   settleCumulativeSpend,
@@ -341,6 +343,51 @@ describeRedis("fail closed", () => {
     // exactly 30d is allowed.
     const ok = await reserveCumulativeSpend({ ...base, windowSeconds: 2_592_000, amount: 1 });
     expect(ok.ok).toBe(true);
+  });
+});
+
+describeRedis("windowed invoke count (#206 maxCalls + callWindow wiring)", () => {
+  test("count starts at 0, increments per recorded invoke, and reads back", async () => {
+    const base = {
+      agentId: AGENT,
+      operationKey: "wallet.transfer",
+      windowSeconds: 3600,
+      max: 3,
+    };
+    expect(await getWindowedInvokeCount(base)).toBe(0);
+    await recordWindowedInvoke(base);
+    expect(await getWindowedInvokeCount(base)).toBe(1);
+    await recordWindowedInvoke(base);
+    await recordWindowedInvoke(base);
+    expect(await getWindowedInvokeCount(base)).toBe(3);
+    // At the cap, a further record does not grow the count past max (reserve
+    // rejects), and the read reports max so the policy denies.
+    await recordWindowedInvoke(base);
+    expect(await getWindowedInvokeCount(base)).toBe(3);
+  });
+
+  test("count ages out at the window edge", async () => {
+    const base = {
+      agentId: AGENT,
+      operationKey: "wallet.transfer",
+      windowSeconds: 100,
+      max: 10,
+    };
+    const t0 = Date.now();
+    await recordWindowedInvoke({ ...base, now: t0 - 101_000 });
+    // 101s old => aged out => count at t0 is 0.
+    expect(await getWindowedInvokeCount({ ...base, now: t0 })).toBe(0);
+  });
+
+  test("over-retention count window returns null (fail closed)", async () => {
+    expect(
+      await getWindowedInvokeCount({
+        agentId: AGENT,
+        operationKey: "wallet.transfer",
+        windowSeconds: 2_592_001,
+        max: 3,
+      }),
+    ).toBeNull();
   });
 });
 

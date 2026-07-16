@@ -57,6 +57,10 @@ import { getRedis } from "./client.js";
 
 export type CumulativeSpendScope = "operation" | "agent" | "grant";
 
+/** Reserved currency tag for the #206 windowed invoke-count bucket (never a real
+ *  asset), so a count bucket can never collide with a spend bucket. */
+const WINDOWED_INVOKE_CURRENCY = "__calls__";
+
 /** Max window we retain reservation entries for (30d - matches other trackers). */
 const MAX_WINDOW_SECONDS = 2592000;
 const RETENTION_MS = MAX_WINDOW_SECONDS * 1000;
@@ -326,6 +330,81 @@ export async function getCumulativeSpendSum(
   } catch {
     return null;
   }
+}
+
+/**
+ * #206 configurable count cap (maxCalls + callWindow): read the trailing-window
+ * INVOKE COUNT for an agent+operation over `windowSeconds`. Implemented as the
+ * cardinality of the same rolling ZSET the spend tracker uses, denominated in a
+ * reserved `__calls__` currency + a per-cap `max` so it never collides with a
+ * real spend bucket. This is a READ used to populate the policy context's
+ * `windowedInvokeCount`; the enforcing add happens via {@link recordWindowedInvoke}
+ * AFTER an allow, mirroring how invoke counters are written post-decision.
+ *
+ * Returns the count, or null on any I/O/parse failure (caller fails closed).
+ */
+export async function getWindowedInvokeCount(input: {
+  agentId: string;
+  operationKey: string;
+  windowSeconds: number;
+  max: number;
+  now?: number;
+}): Promise<number | null> {
+  if (
+    typeof input.windowSeconds !== "number" ||
+    !Number.isSafeInteger(input.windowSeconds) ||
+    input.windowSeconds <= 0 ||
+    input.windowSeconds > MAX_WINDOW_SECONDS
+  ) {
+    return null;
+  }
+  const snap = await getCumulativeSpendSum({
+    agentId: input.agentId,
+    scope: "operation",
+    scopeKey: input.operationKey,
+    currency: WINDOWED_INVOKE_CURRENCY,
+    windowSeconds: input.windowSeconds,
+    max: input.max,
+    now: input.now,
+  });
+  return snap === null ? null : snap.sum;
+}
+
+/**
+ * Record ONE invoke into the trailing-window count bucket (AFTER an allow that
+ * passed a maxCalls cap). Each invoke contributes 1 to the window cardinality.
+ * Fire-and-forget-safe: a failure here does not undo the decision, but the
+ * counter may under-count by one on a transient Redis error (bounded, and the
+ * next read fails closed if Redis is down).
+ */
+export async function recordWindowedInvoke(input: {
+  agentId: string;
+  operationKey: string;
+  windowSeconds: number;
+  max: number;
+  now?: number;
+}): Promise<void> {
+  if (
+    typeof input.windowSeconds !== "number" ||
+    !Number.isSafeInteger(input.windowSeconds) ||
+    input.windowSeconds <= 0 ||
+    input.windowSeconds > MAX_WINDOW_SECONDS
+  ) {
+    return;
+  }
+  // Reserve amount=1 with a very high max so the add always succeeds (the cap is
+  // enforced by the policy read, not this write). We reuse the atomic reserve to
+  // keep the same rolling-window + TTL semantics.
+  await reserveCumulativeSpend({
+    agentId: input.agentId,
+    scope: "operation",
+    scopeKey: input.operationKey,
+    currency: WINDOWED_INVOKE_CURRENCY,
+    windowSeconds: input.windowSeconds,
+    max: input.max,
+    amount: 1,
+    now: input.now,
+  }).catch(() => undefined);
 }
 
 export { cumKey as cumulativeSpendKeyForTest };

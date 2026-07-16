@@ -124,6 +124,22 @@ function spendCapRules(opKey: string, maxBytes: number, currency = "BYTES") {
   ];
 }
 
+/** allow rule + a configurable count cap (maxCalls + callWindow). */
+function countCapRules(opKey: string, maxCalls: number, callWindow = "PT24H") {
+  return [
+    {
+      id: "c2222222-2222-4222-8222-2222222222f2",
+      type: "capability-intent",
+      enabled: true,
+      config: {
+        capabilities: [opKey],
+        effect: "allow",
+        constraints: { maxCalls, callWindow },
+      },
+    },
+  ];
+}
+
 async function cleanupRedis() {
   const redis = getRedis();
   let cursor = "0";
@@ -162,6 +178,7 @@ async function seed(opts: {
   capCurrency?: string;
   declaredCurrency?: string;
   declareSpendField?: boolean;
+  countCapMaxCalls?: number;
 }) {
   const db = getDb();
   await db.insert(tenants).values([{ id: CS.TENANT, name: "CS", apiKeyHash: "hcs" }]);
@@ -219,9 +236,12 @@ async function seed(opts: {
     },
   ]);
   const requestProfile: Record<string, unknown> = {
-    policyRules: spendCapRules(OP_TWEET_KEY, opts.maxBytes, opts.capCurrency ?? "BYTES"),
+    policyRules:
+      opts.countCapMaxCalls !== undefined
+        ? countCapRules(OP_TWEET_KEY, opts.countCapMaxCalls)
+        : spendCapRules(OP_TWEET_KEY, opts.maxBytes, opts.capCurrency ?? "BYTES"),
   };
-  if (opts.declareSpendField !== false) {
+  if (opts.countCapMaxCalls === undefined && opts.declareSpendField !== false) {
     requestProfile.spendDeclaration = {
       field: "textByteLength",
       currency: opts.declaredCurrency ?? "BYTES",
@@ -336,6 +356,22 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     expect(t.kind).toBe("policy_denied");
     if (t.kind === "policy_denied") {
       expect(t.code).toBe(PROVIDER_POLICY_REASON.CUMULATIVE_SPEND_NO_SPEND_FIELD);
+    }
+  });
+
+  test("E2E #3: configurable count cap (maxCalls+callWindow) denies the invoke past the cap", async () => {
+    // maxCalls=2 over PT24H. Two allowed invokes record, the third denies with a
+    // structured INPUT-independent cap reason (HARD_DENY). Proves the count cap
+    // is WIRED end-to-end (read windowedInvokeCount + record on success).
+    await seed({ maxBytes: 0, countCapMaxCalls: 2 });
+    const c1 = await proposeTweet("one", "cs-e2e-3a");
+    expect(c1.kind).toBe("allowed"); // count 0 < 2
+    const c2 = await proposeTweet("two", "cs-e2e-3b");
+    expect(c2.kind).toBe("allowed"); // count 1 < 2
+    const c3 = await proposeTweet("three", "cs-e2e-3c");
+    expect(c3.kind).toBe("policy_denied"); // count 2 >= 2 => deny
+    if (c3.kind === "policy_denied") {
+      expect(c3.code).toBe(PROVIDER_POLICY_REASON.HARD_DENY);
     }
   });
 });
