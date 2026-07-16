@@ -364,46 +364,117 @@ describe("policy rule validation", () => {
     ).toBeNull();
   });
 
-  it("rejects malformed typed-data configs", () => {
+  it("accepts every typed-data message operator with evaluator-parity shapes", () => {
+    const address = "0x752B7AaD0089286EB7b553d84D05233d80c9FCB4";
     expect(
       getPolicyRulesValidationError([
         {
-          id: "td",
-          type: "typed-data",
-          enabled: true,
-          config: { verifyingContractAllowlist: ["not-an-address"] },
-        },
-      ]),
-    ).toContain("typed-data.verifyingContractAllowlist");
-
-    expect(
-      getPolicyRulesValidationError([
-        { id: "td", type: "typed-data", enabled: true, config: { allowedChainIds: [0] } },
-      ]),
-    ).toContain("typed-data.allowedChainIds");
-
-    expect(
-      getPolicyRulesValidationError([
-        {
-          id: "td",
+          id: "td-operators",
           type: "typed-data",
           enabled: true,
           config: {
-            messageConditions: [{ field: "value", operator: "uint_maximum", value: "1" }],
+            messageConditions: [
+              { field: "details.to", operator: "address_in", values: [address, address] },
+              { field: "from", operator: "address_not_in", values: [address] },
+              { field: "memo", operator: "eq", value: "" },
+              { field: "nonce", operator: "in", values: ["1", "01"] },
+              { field: "state", operator: "not_in", values: ["cancelled"] },
+              {
+                field: "amount",
+                operator: "uint_max",
+                value: ` 0x${"0".repeat(80)}ffff `,
+              },
+            ],
           },
         },
       ]),
-    ).toContain("typed-data.messageConditions");
+    ).toBeNull();
+  });
 
+  it("rejects typed-data values whose evaluator meaning would be absent or ambiguous", () => {
+    const invalidConfigs: unknown[] = [
+      { verifyingContractAllowlist: [] },
+      { verifyingContractBlocklist: [] },
+      { allowedChainIds: [] },
+      { allowedChainIds: [0] },
+      { allowedChainIds: [-1] },
+      { allowedChainIds: [1.5] },
+      { allowedChainIds: [Number.MAX_SAFE_INTEGER + 1] },
+      { allowedChainIds: ["8453"] },
+      { allowedDomainNames: [] },
+      { allowedDomainNames: [""] },
+      { allowedDomainNames: ["   "] },
+      { allowedDomainNames: [" Permit2 "] },
+      { allowedPrimaryTypes: [] },
+      { allowedPrimaryTypes: [""] },
+      { allowedPrimaryTypes: ["Permit Type"] },
+      { messageConditions: [] },
+      { messageConditions: [{ field: "to", operator: "address_in", values: [] }] },
+      { messageConditions: [{ field: "to", operator: "address_not_in", values: [] }] },
+      { messageConditions: [{ field: "state", operator: "in", values: [] }] },
+      { messageConditions: [{ field: "state", operator: "not_in", values: [] }] },
+      { messageConditions: [{ field: "amount", operator: "uint_max", value: "-1" }] },
+      { messageConditions: [{ field: "amount", operator: "uint_max", value: "1.5" }] },
+      {
+        messageConditions: [
+          {
+            field: "amount",
+            operator: "uint_max",
+            value: "115792089237316195423570985008687907853269984665640564039457584007913129639936",
+          },
+        ],
+      },
+    ];
+
+    for (const config of invalidConfigs) {
+      expect(
+        getPolicyRulesValidationError([
+          { id: "td-invalid", type: "typed-data", enabled: true, config },
+        ]),
+      ).toContain("typed-data");
+    }
+  });
+
+  it("rejects unknown keys, wrong operator shapes, unsafe paths, and malformed addresses", () => {
+    const address = "0x752B7AaD0089286EB7b553d84D05233d80c9FCB4";
+    const invalidConfigs: unknown[] = [
+      { allowedChainId: [8453] },
+      { verifyingContractAllowlist: ["not-an-address"] },
+      { verifyingContractAllowlist: [`${address}00`] },
+      { messageConditions: [{ field: "to", operator: "unknown", value: "x" }] },
+      { messageConditions: [{ field: "to", operator: "address_in", value: address }] },
+      {
+        messageConditions: [
+          { field: "to", operator: "address_in", values: [address], value: address },
+        ],
+      },
+      { messageConditions: [{ field: "memo", operator: "eq", values: ["x"] }] },
+      { messageConditions: [{ field: "memo", operator: "eq", value: "x", ignored: true }] },
+      { messageConditions: [{ field: "", operator: "eq", value: "x" }] },
+      { messageConditions: [{ field: "details..to", operator: "eq", value: "x" }] },
+      { messageConditions: [{ field: "__proto__.admin", operator: "eq", value: "true" }] },
+      { messageConditions: [{ field: "constructor.prototype", operator: "eq", value: "x" }] },
+    ];
+
+    for (const config of invalidConfigs) {
+      expect(
+        getPolicyRulesValidationError([
+          { id: "td-invalid", type: "typed-data", enabled: true, config },
+        ]),
+      ).toContain("typed-data");
+    }
+  });
+
+  it("rejects oversized typed-data strings at the policy-list boundary", () => {
     expect(
       getPolicyRulesValidationError([
         {
-          id: "td",
+          id: "td-large",
           type: "typed-data",
           enabled: true,
-          config: { messageConditions: [{ field: "to", operator: "address_in" }] },
+          config: { allowedDomainNames: ["x".repeat(70_000)] },
         },
       ]),
-    ).toContain("typed-data.messageConditions");
+    ).toContain("65536 bytes");
   });
 });
