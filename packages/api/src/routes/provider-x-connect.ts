@@ -40,6 +40,7 @@ import {
   X_CONNECT_STATE_TTL_MS,
   XConnectError,
 } from "../services/provider-x-connect";
+import { assertAllowedOAuthRedirectUri } from "./auth";
 
 type RouteContext = Context<{ Variables: AppVariables }>;
 
@@ -128,6 +129,18 @@ const handleInitiate = async (c: RouteContext): Promise<Response> => {
   const gate = await requireConnectAuthority(c, workspaceId);
   if (gate instanceof Response) return gate;
 
+  // The redirect_uri is where X sends the authorization code; it MUST be on the
+  // tenant allowlist so an authorized-but-hostile workspace member cannot direct
+  // the code to an attacker endpoint. Same gate as the user-auth OAuth flow.
+  try {
+    await assertAllowedOAuthRedirectUri(redirectUri, c.get("tenantId"));
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "Invalid redirect_uri" },
+      400,
+    );
+  }
+
   try {
     const config = resolveXConnectConfig();
     const store = await getConnectStore();
@@ -184,6 +197,17 @@ const handleCallback = async (c: RouteContext): Promise<Response> => {
 
   const gate = await requireConnectAuthority(c, workspaceId);
   if (gate instanceof Response) return gate;
+
+  // Re-assert the redirect_uri allowlist on callback too (defence in depth; the
+  // service also binds the state's stored redirect_uri to this value).
+  try {
+    await assertAllowedOAuthRedirectUri(redirectUri, c.get("tenantId"));
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "Invalid redirect_uri" },
+      400,
+    );
+  }
 
   try {
     const config = resolveXConnectConfig();
