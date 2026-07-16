@@ -29,7 +29,9 @@ describe("GET /metrics exposure guard", () => {
     process.env.STEWARD_METRICS_ENABLED = "true";
     process.env.STEWARD_METRICS_TOKEN = token;
     expect((await app.request("/metrics")).status).toBe(401);
-    expect((await app.request("/metrics", { headers: { Authorization: "Bearer wrong" } })).status).toBe(401);
+    expect(
+      (await app.request("/metrics", { headers: { Authorization: "Bearer wrong" } })).status,
+    ).toBe(401);
   });
 
   test("returns Prometheus text without audit metadata", async () => {
