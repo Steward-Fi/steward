@@ -69,9 +69,7 @@ export function isRegisteredProfile(profile: unknown): profile is string {
 }
 
 /** Resolve the descriptor for a registered profile, or `undefined`. */
-export function getProfileDescriptor(
-  profile: unknown,
-): ProviderProfileDescriptor | undefined {
+export function getProfileDescriptor(profile: unknown): ProviderProfileDescriptor | undefined {
   return typeof profile === "string" ? REGISTRY.get(profile) : undefined;
 }
 

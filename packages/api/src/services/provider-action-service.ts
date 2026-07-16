@@ -54,9 +54,9 @@ import {
   buildGenericHttpAction,
   CanonError,
   computeProviderPolicyInputDigest,
+  GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
   type GenericHttpActionBuild,
   type GenericHttpCanonicalActionV1,
-  GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
   type GithubCanonicalActionV1,
   isConfigDrivenProfile,
   isGenericDescriptorError,
@@ -82,10 +82,7 @@ import {
  * pipeline reads (action.profile/method/origin/path/query/headers/body,
  * policyArgs, safeSummary), so the pipeline consumes them uniformly.
  */
-export type ConcreteProviderActionBuild =
-  | GithubActionBuild
-  | XActionBuild
-  | GenericHttpActionBuild;
+export type ConcreteProviderActionBuild = GithubActionBuild | XActionBuild | GenericHttpActionBuild;
 
 /**
  * #201: a DEFERRED build for a config-driven (generic-http) operation. The route
