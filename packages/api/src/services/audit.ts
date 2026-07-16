@@ -21,14 +21,45 @@ import {
   type AuditEventInput,
   appendAuditEvent,
   appendAuditEventWithinTx,
+  auditCheckpoints,
   getDb,
   withTenantAuditedTransaction,
   withTenantAuditQueue,
   writeAuditEvent,
 } from "@stwd/db";
 import { sql } from "drizzle-orm";
+import { API_VERSION } from "./context";
+import {
+  type CheckpointEventContent,
+  type CheckpointPayload,
+  eventsContentDigest,
+  getCheckpointSigner,
+} from "./audit-checkpoint";
+
+/**
+ * The canonicalization contract an offline verifier must reproduce per event.
+ * Single source of truth (spec §6.2): the route re-exports this. Bumped only
+ * alongside a verifier change.
+ */
+export const BUNDLE_CANONICALIZATION_SPEC =
+  "steward-audit-hmac-chain/v1: hmac = HMAC-SHA256(key, prev_hash_bytes || " +
+  "canonical_json(event)); canonical_json sorts object keys, drops whitespace, " +
+  "encodes null for absent fields and ISO-8601 for timestamps. Offline verifier " +
+  "checks event linkage (each prevHash === prior hmac) + head == checkpoint, and " +
+  "the Ed25519 signature over the canonical checkpoint payload. Per-row HMAC " +
+  "recomputation requires the operator's secret key and is NOT part of offline " +
+  "verification.";
 
 export type { AuditActorType as ActorType } from "@stwd/db";
+
+/**
+ * Minimal read surface a snapshot transaction (or the db) must expose so the
+ * PR5 case correlator can run `verifyAuditChain` + `readAuditBundleData` inside
+ * ONE coherent snapshot. Both the Drizzle db and a Drizzle tx satisfy this; we
+ * alias to the db's own type so the internal `.execute(sql\`...\`)` calls keep
+ * their existing typing when an executor is supplied.
+ */
+export type AuditReadExecutor = Pick<ReturnType<typeof getDb>, "execute">;
 // The tamper-evident audit-chain WRITE core (append/transaction primitives, the
 // HMAC key handling, and metadata redaction) now lives in `@stwd/db` so the
 // proxy package can extend the chain atomically without importing `@stwd/api`
@@ -181,10 +212,21 @@ export function trackAuditEvent(ev: AuditEventInput): void {
  */
 export async function verifyAuditChain(
   tenantId: string,
-  opts: { fromSeq?: number; toSeq?: number; requireHead?: boolean } = {},
+  opts: {
+    fromSeq?: number;
+    toSeq?: number;
+    requireHead?: boolean;
+    /**
+     * Optional read executor (a snapshot transaction) so callers can verify a
+     * chain segment WITHIN a single coherent snapshot alongside other reads
+     * (PR5 §4.1/§4.3 KC06). Defaults to `getDb()`; behavior is otherwise
+     * identical. Must expose `.execute(sql)` like the Drizzle db/tx.
+     */
+    executor?: AuditReadExecutor;
+  } = {},
 ): Promise<{ valid: true; count: number } | { valid: false; brokenAt: number }> {
   const key = getHmacKey();
-  const db = getDb();
+  const db = opts.executor ?? getDb();
   const requestedFromSeq = opts.fromSeq ?? 1;
   const toSeq = opts.toSeq;
 
@@ -393,8 +435,9 @@ export async function readAuditBundleData(
   tenantId: string,
   fromSeq: number,
   toSeq: number,
+  executor?: AuditReadExecutor,
 ): Promise<AuditBundleData> {
-  const db = getDb();
+  const db = executor ?? getDb();
 
   const headRows = rowsFromExecute<{
     expected_seq: number | string;
@@ -468,4 +511,129 @@ export async function readAuditBundleData(
     bundleHeadHmac: last ? last.hmac : null,
     bundleHeadSeq: last ? last.seq : null,
   };
+}
+
+// ─── Signed bundle assembly (single source of signing truth) ──────────────────
+
+/**
+ * The self-contained, offline-verifiable signed bundle envelope shared by
+ * `/audit/bundle` and PR5's `/v2/provider-actions/:id/evidence`. Factored out of
+ * the route (spec §6.2) so both surfaces sign identically — one signing path,
+ * one checkpoint-persistence policy, one canonicalization contract.
+ */
+export interface SignedAuditBundle {
+  version: 1;
+  tenantId: string;
+  range: { from: number; to: number; includesHead: boolean };
+  canonicalizationSpec: string;
+  events: BundleEvent[];
+  checkpoint: {
+    payload: CheckpointPayload;
+    signature: string;
+    publicKey: string;
+  };
+  generatedAt: string;
+}
+
+/**
+ * Sign a checkpoint over the chain head + a content digest over exactly the
+ * bundle's events, persist the checkpoint best-effort (provenance only; the
+ * bundle is authoritative regardless, PR5 C4), and return the self-contained
+ * signed bundle envelope.
+ *
+ * `bundleData` MUST come from `readAuditBundleData(tenantId, from, to)` (ideally
+ * within the SAME snapshot executor as the caller's other reads). `from`/`to`
+ * are the requested range bounds used only for the advisory `range` field; the
+ * signed digest brackets the events actually present.
+ *
+ * Throws `AuditSigningKeyError` if the signing key is unavailable (the caller
+ * maps it to 503). All other signing failures throw a generic Error.
+ */
+export async function signAuditBundle(
+  tenantId: string,
+  from: number,
+  to: number,
+  bundleData: AuditBundleData,
+): Promise<SignedAuditBundle> {
+  // Imported lazily-at-module-eval via require-style static imports below.
+  const { head, events } = bundleData;
+
+  const digestEvents: CheckpointEventContent[] = events.map((ev) => ({
+    tenantId,
+    seq: ev.seq,
+    actorType: ev.actorType,
+    actorId: ev.actorId,
+    action: ev.action,
+    resourceType: ev.resourceType,
+    resourceId: ev.resourceId,
+    metadata: ev.metadata,
+    ipAddress: ev.ipAddress,
+    userAgent: ev.userAgent,
+    requestId: ev.requestId,
+    createdAt: ev.createdAt,
+  }));
+
+  const signer = getCheckpointSigner();
+  const nowIso = new Date().toISOString();
+  const checkpointPayload: CheckpointPayload = {
+    v: 1,
+    tenantId,
+    seq: head?.expectedSeq ?? 0,
+    headHmac: head?.headHmac ?? "",
+    expectedCount: head?.expectedCount ?? 0,
+    floorSeq: head?.floorSeq ?? 0,
+    timestamp: nowIso,
+    softwareVersion: API_VERSION,
+    eventsDigest: eventsContentDigest(digestEvents),
+    eventsFromSeq: events.length > 0 ? events[0].seq : 0,
+    eventsToSeq: events.length > 0 ? events[events.length - 1].seq : 0,
+  };
+  const signed = signer.sign(checkpointPayload);
+
+  // Persist the checkpoint (append-only provenance). Best-effort: a persistence
+  // failure must not deny the auditor their signed bundle (self-contained).
+  if (head) {
+    try {
+      await getDb()
+        .insert(auditCheckpoints)
+        .values({
+          tenantId,
+          seq: checkpointPayload.seq,
+          headHmac: hexToBytesLocal(checkpointPayload.headHmac),
+          payload: checkpointPayload as unknown as Record<string, unknown>,
+          signature: signed.signature,
+          publicKey: signed.publicKey,
+        });
+    } catch (err) {
+      console.error(`[audit] checkpoint persistence failed for tenant ${tenantId}:`, err);
+    }
+  }
+
+  const includesHead =
+    head != null &&
+    bundleData.bundleHeadSeq != null &&
+    bundleData.bundleHeadSeq === head.expectedSeq;
+
+  return {
+    version: 1,
+    tenantId,
+    range: { from, to, includesHead },
+    canonicalizationSpec: BUNDLE_CANONICALIZATION_SPEC,
+    events,
+    checkpoint: {
+      payload: signed.payload,
+      signature: signed.signature,
+      publicKey: signed.publicKey,
+    },
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+function hexToBytesLocal(hex: string): Uint8Array {
+  const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
 }
