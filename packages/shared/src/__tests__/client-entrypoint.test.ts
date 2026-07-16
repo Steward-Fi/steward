@@ -21,8 +21,9 @@
  * FAILURE, never a skip.
  */
 
-import { describe, expect, it } from "bun:test";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { beforeAll, describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { builtinModules } from "node:module";
 import { dirname, join, resolve } from "node:path";
 
@@ -151,6 +152,18 @@ function formatViolations(violations: GraphViolation[]): string {
 }
 
 describe("@stwd/shared/client entrypoint contract (issue #231)", () => {
+  beforeAll(() => {
+    // On a clean checkout dist/ is untracked; build it so the emitted-graph
+    // assertions can run. FAIL-CLOSED: a failed build fails the suite, the
+    // dist checks are never skipped.
+    if (!existsSync(DIST_ENTRY)) {
+      const result = spawnSync("bunx", ["tsc"], { cwd: SHARED_ROOT, stdio: "inherit" });
+      if (result.status !== 0) {
+        throw new Error(`building @stwd/shared dist failed (exit ${String(result.status)})`);
+      }
+    }
+  });
+
   it("source graph of src/client.ts contains no node builtins or server-only modules", () => {
     const { visited, violations } = walkGraph(SRC_ENTRY);
     expect(visited.size).toBeGreaterThan(1);
