@@ -201,6 +201,30 @@ describe("x.tweet.create", () => {
     expect(summoned.policyArgs.isReply).toBe(true);
   });
 
+  it("detects bare IPv4 and control-obfuscated URLs without changing canonical text", () => {
+    const urlCorpus = [
+      "visit 192.168.1.1 now",
+      "go 8.8.8.8/x",
+      "even 999.999.999.999 is conservatively URL-shaped",
+      "evil.c\u200Bom",
+      "evil.c\u200Com/path",
+      "evil.c\u200Dom",
+      "evil.c\uFEFFom",
+      "evil.c\u2060om",
+      "evil.c\u202Eom",
+      "evil.c\u2066om",
+      "HTTPS://EXAMPLE.COM/X",
+      "www.example.com",
+      "xn--bcher-kva.example/path",
+    ];
+    for (const text of urlCorpus) {
+      const build = buildXAction("x.tweet.create", { text });
+      expect(build.policyArgs.hasUrl, text).toBe(true);
+      expect(build.action.body).toEqual({ text });
+      expect(build.policyText).toBe(text);
+    }
+  });
+
   it("rejects a non-boolean summoned arg (fail closed on type)", () => {
     expectCanon(
       () => buildXAction("x.tweet.create", { text: "hi", summoned: "yes" }),
