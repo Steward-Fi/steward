@@ -44,7 +44,7 @@ This runbook is for self-hosted Steward operators. It describes behavior present
 - `tenant_request_signing_keys`
 - encrypted `pending_proxy_requests` bodies
 - JSON-wrapped Resend keys in `tenant_configs.email_config`
-- `webhook_configs.secret`
+- `webhook_configs.secret`, including supported legacy plaintext rows which are encrypted during write mode
 
 It first authenticates the complete selected inventory without writes. Write mode repeats that preflight, then re-encrypts all classes in one database transaction. Any authentication or write failure rolls back the transaction. Repeated invocation is idempotent because ciphertext that authenticates under the new root is skipped. Output contains table names, row identifiers, and counts only, never plaintext or root values. AEAD metadata is regenerated while each row's production AAD is preserved.
 

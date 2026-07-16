@@ -756,9 +756,7 @@ function webhookRoot(password: string, salt: string): Buffer {
 }
 
 function decryptWebhook(value: string, password: string, configuredSalt: string): string {
-  if (!value.startsWith(WEBHOOK_PREFIX)) {
-    throw new Error("plaintext webhook secret requires separate migration before root rotation");
-  }
+  if (!value.startsWith(WEBHOOK_PREFIX)) return value;
   const payload = JSON.parse(value.slice(WEBHOOK_PREFIX.length)) as EncryptedKey;
   const key = scryptSync(
     webhookRoot(password, configuredSalt),
@@ -795,13 +793,17 @@ export async function rotateWebhookConfigs(
     if (result.firstId === null) result.firstId = row.id;
     result.lastId = row.id;
     try {
-      try {
-        decryptWebhook(row.secret, roots.newPassword, roots.newSalt);
-        result.alreadyRotated += 1;
-        continue;
-      } catch {
-        // Expected before cutover. Authenticate with the old root next.
+      if (row.secret.startsWith(WEBHOOK_PREFIX)) {
+        try {
+          decryptWebhook(row.secret, roots.newPassword, roots.newSalt);
+          result.alreadyRotated += 1;
+          continue;
+        } catch {
+          // Expected before cutover. Authenticate with the old root next.
+        }
       }
+      // The runtime supports legacy plaintext rows and lazily encrypts them on
+      // dispatch. Rotation eagerly migrates them inside the same transaction.
       const plaintext = decryptWebhook(row.secret, roots.oldPassword, roots.oldSalt);
       const encrypted = encryptWebhook(plaintext, roots.newPassword, roots.newSalt);
       if (!dryRun) {

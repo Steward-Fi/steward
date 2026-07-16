@@ -219,11 +219,18 @@ describe("master-password rotation (DB-backed, real encrypt paths)", () => {
       expiresAt: new Date(Date.now() + 60_000),
     });
 
-    await db.insert(webhookConfigs).values({
-      tenantId: TENANT_ID,
-      url: "https://example.com/rotation-hook",
-      secret: encryptWebhookSecret("webhook-test-plaintext"),
-    });
+    await db.insert(webhookConfigs).values([
+      {
+        tenantId: TENANT_ID,
+        url: "https://example.com/rotation-hook",
+        secret: encryptWebhookSecret("webhook-test-plaintext"),
+      },
+      {
+        tenantId: TENANT_ID,
+        url: "https://example.com/legacy-plaintext-hook",
+        secret: "legacy-webhook-test-plaintext",
+      },
+    ]);
 
     // Capture pre-rotation ciphertext so we can prove the rows actually changed.
     const beforeChainKeys = await db
@@ -453,10 +460,14 @@ describe("master-password rotation (DB-backed, real encrypt paths)", () => {
     expect(NEW.legacy.decrypt(encryptedEmail)).toBe("resend-test-plaintext");
     expect(configRow.emailConfig?.from).toBe("rotate@example.com");
 
-    const [webhookRow] = await db.select().from(webhookConfigs);
+    const webhookRows = await db.select().from(webhookConfigs).orderBy(webhookConfigs.url);
     process.env.STEWARD_KDF_SALT = NEW_SALT;
     process.env.STEWARD_MASTER_PASSWORD = NEW_PW;
-    expect(decryptWebhookSecret(webhookRow.secret)).toBe("webhook-test-plaintext");
+    expect(webhookRows.every((row) => row.secret.startsWith("stwd_whsec_v1:"))).toBe(true);
+    expect(webhookRows.map((row) => decryptWebhookSecret(row.secret)).sort()).toEqual([
+      "legacy-webhook-test-plaintext",
+      "webhook-test-plaintext",
+    ]);
     process.env.STEWARD_KDF_SALT = OLD_SALT;
     process.env.STEWARD_MASTER_PASSWORD = OLD_PW;
   });
