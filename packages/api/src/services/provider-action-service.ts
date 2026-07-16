@@ -755,21 +755,30 @@ class ProviderActionService {
       };
     }
     if (effects.policy === "approval_required") {
-      // #206 (codex P1): the approval EXECUTE path (provider-approval) mints the
-      // persisted commitment and does NOT re-run evaluatePolicy or re-reserve
-      // these Redis caps. If we released the reservation here, an approved action
-      // could later execute WITHOUT consuming the spend/count budget, letting
-      // approved bursts exceed the cap. So we KEEP the reservation (settle-like):
-      // the budget is consumed at DECISION time, which is fail-closed - an
-      // approval that is ultimately rejected/expired over-counts by one invoke
-      // for one window at worst (bounded deny-side error), never an allow-side
-      // bypass. (A future approval-plane re-reservation is the follow-up; it is
-      // in provider-approval.ts, outside this lane's scope fence.)
+      // #206 KNOWN LIMITATION (codex P1, honest gap): a cumulativeSpend / maxCalls
+      // cap combined with an approval rule is NOT enforced across the approval
+      // lifecycle by THIS lane. The action does not execute now (it awaits a human
+      // decision + a separate execute path in provider-approval.ts, which is
+      // OUTSIDE this lane's scope fence and does NOT re-run evaluatePolicy or
+      // re-reserve). Two imperfect create-time choices exist, neither correct
+      // without touching the approval-execute path:
+      //   - KEEP the reservation: it is pinned to DECISION time and ages out at
+      //     the window edge, so an approval executed near/after that edge is
+      //     UNDER-counted (allow-side error).
+      //   - RELEASE the reservation: the queued action consumes no budget, and
+      //     the execute path re-reserves nothing, so the cap is not enforced on
+      //     the approval path AT ALL.
+      // We RELEASE here so an action that is ultimately rejected/expired never
+      // holds phantom budget that would wrongly DENY unrelated invokes
+      // (over-enforcement of the immediate plane is the worse day-to-day failure).
+      // Correct enforcement requires the approval-execute path to re-reserve at
+      // EXECUTION time; that is a documented follow-up filed against the approval
+      // plane (provider-approval.ts). See the PR honest-gaps section.
       await this.finalizeCumulativeSpend(
         (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [],
-        "success",
+        "failure",
       );
-      await this.finalizeWindowedInvoke(windowedInvokeReservation, "success");
+      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
       return {
         kind: "approval_required",
         code: "APPROVAL_REQUIRED",
