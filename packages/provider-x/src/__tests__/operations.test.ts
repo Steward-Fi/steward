@@ -220,7 +220,7 @@ describe("x.tweet.create", () => {
     for (const text of urlCorpus) {
       const build = buildXAction("x.tweet.create", { text });
       expect(build.policyArgs.hasUrl, text).toBe(true);
-      expect(build.action.body).toEqual({ text });
+      expect(build.action.canonicalBody).toEqual({ text });
       expect(build.policyText).toBe(text);
     }
   });
