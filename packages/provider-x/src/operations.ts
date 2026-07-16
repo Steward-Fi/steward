@@ -149,7 +149,7 @@ function textHasUrl(text: string): boolean {
   // token seen by the detector. This normalized copy is used only for the
   // derived policy signal. The posted text and canonical digest remain exact.
   // Include bidi embedding/override/isolate controls as the fail-safe choice.
-  const detectionText = text.replace(/[\u200b-\u200d\u202a-\u202e\u2060\u2066-\u2069\ufeff]/gi, "");
+  const detectionText = text.replace(/\p{Cf}/gu, "");
   // scheme://... (http, https, ftp, etc.)
   if (/[a-z][a-z0-9+.-]*:\/\/\S/i.test(detectionText)) return true;
   // bare www. host
