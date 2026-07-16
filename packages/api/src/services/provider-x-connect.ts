@@ -707,55 +707,129 @@ export interface RefreshResult {
  * pointing at a superseded (already-rotated-away) refresh token.
  */
 export async function refreshXProviderCredential(input: RefreshInput): Promise<RefreshResult> {
-  return withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
-    const tx = txRaw as DbExecutor;
+  // The tx returns a discriminated outcome. A `revoked` outcome COMMITS the
+  // degrade + audit, then we throw AFTER the commit so the failure signal does
+  // not roll back the very degrade it is reporting (fail closed + durable).
+  type Outcome = { kind: "ok"; result: RefreshResult } | { kind: "revoked" };
+  const outcome = await withTenantAuditedTransaction<Outcome>(
+    input.tenantId,
+    async (txRaw, append) => {
+      const tx = txRaw as DbExecutor;
 
-    // Acquire the per-account row lock first. Everything below runs under it.
-    const [account] = await tx
-      .select()
-      .from(providerAccounts)
-      .where(
-        and(
-          eq(providerAccounts.tenantId, input.tenantId),
-          eq(providerAccounts.id, input.accountId),
-        ),
-      )
-      .limit(1)
-      .for("update");
+      // Acquire the per-account row lock first. Everything below runs under it.
+      const [account] = await tx
+        .select()
+        .from(providerAccounts)
+        .where(
+          and(
+            eq(providerAccounts.tenantId, input.tenantId),
+            eq(providerAccounts.id, input.accountId),
+          ),
+        )
+        .limit(1)
+        .for("update");
 
-    if (!account) throw new XConnectError("X_ACCOUNT_NOT_FOUND", 404, "provider account not found");
-    if (account.adapterKey !== X_ADAPTER_KEY) {
-      throw new XConnectError("X_ACCOUNT_NOT_X", 400, "provider account is not an X account");
-    }
-    if (!account.credentialSecretId || account.credentialVersion == null) {
-      throw new XConnectError("X_REFRESH_TOKEN_MISSING", 409, "account has no credential");
-    }
+      if (!account)
+        throw new XConnectError("X_ACCOUNT_NOT_FOUND", 404, "provider account not found");
+      if (account.adapterKey !== X_ADAPTER_KEY) {
+        throw new XConnectError("X_ACCOUNT_NOT_X", 400, "provider account is not an X account");
+      }
+      if (!account.credentialSecretId || account.credentialVersion == null) {
+        throw new XConnectError("X_REFRESH_TOKEN_MISSING", 409, "account has no credential");
+      }
 
-    // Load the CURRENT credential under the lock.
-    const current = await loadCredential(input.vault, input.tenantId, account.credentialSecretId);
+      // Load the CURRENT credential under the lock.
+      const current = await loadCredential(
+        input.vault,
+        input.tenantId,
+        account.credentialSecretId,
+        tx,
+      );
 
-    // Single-flight fast path: a concurrent winner already rotated us to a fresh
-    // token while we waited for the lock. If not forced and the token is still
-    // valid, skip the network call entirely.
-    if (!input.force && !isNearExpiry(current.expiresAt)) {
-      return {
-        refreshed: false,
-        credentialVersion: account.credentialVersion,
-        expiresAt: current.expiresAt,
+      // Single-flight fast path: a concurrent winner already rotated us to a fresh
+      // token while we waited for the lock. If not forced and the token is still
+      // valid, skip the network call entirely.
+      if (!input.force && !isNearExpiry(current.expiresAt)) {
+        return {
+          kind: "ok",
+          result: {
+            refreshed: false,
+            credentialVersion: account.credentialVersion,
+            expiresAt: current.expiresAt,
+          },
+        };
+      }
+
+      if (!current.refreshToken) {
+        throw new XConnectError("X_REFRESH_TOKEN_MISSING", 409, "no refresh token on record");
+      }
+
+      // Spend the rotating refresh token exactly once (still holding the lock).
+      const tokenRes = await refreshUpstream(input.config, current.refreshToken);
+
+      if (tokenRes.revoked) {
+        const [degraded] = await tx
+          .update(providerAccounts)
+          .set({ status: "revoked", revision: account.revision + 1, updatedAt: new Date() })
+          .where(
+            and(
+              eq(providerAccounts.tenantId, input.tenantId),
+              eq(providerAccounts.id, account.id),
+              eq(providerAccounts.revision, account.revision),
+            ),
+          )
+          .returning();
+        await append({
+          tenantId: input.tenantId,
+          actorType: input.actorId ? "user" : "system",
+          actorId: input.actorId ?? "system",
+          action: "provider.x.refresh.revoked",
+          resourceType: "provider_account",
+          resourceId: account.id,
+          metadata: {
+            workspaceId: account.workspaceId,
+            xUserId: account.externalRef,
+            previousRevision: account.revision,
+            newRevision: degraded?.revision ?? null,
+            requestId: input.requestId ?? null,
+          },
+        });
+        // COMMIT the degrade + audit; the caller-facing failure is thrown below.
+        return { kind: "revoked" };
+      }
+
+      // Rotate the vault secret to a new version with the freshly issued tokens.
+      const obtainedAt = new Date();
+      const expiresAt =
+        typeof tokenRes.expiresIn === "number"
+          ? new Date(obtainedAt.getTime() + tokenRes.expiresIn * 1000)
+          : null;
+      const newPayload: XCredentialPayload = {
+        ...current.payload,
+        accessToken: tokenRes.accessToken,
+        // X rotates the refresh token; fall back to the prior one only if upstream
+        // omits it (should not happen with offline.access).
+        refreshToken: tokenRes.refreshToken ?? current.refreshToken,
+        scopesGranted: tokenRes.scopes ?? current.payload.scopesGranted,
+        obtainedAt: obtainedAt.toISOString(),
+        expiresAt: expiresAt ? expiresAt.toISOString() : null,
       };
-    }
+      const meta = await input.vault.rotateSecretWithinTx(
+        tx,
+        input.tenantId,
+        current.secretName,
+        JSON.stringify(newPayload),
+      );
 
-    if (!current.refreshToken) {
-      throw new XConnectError("X_REFRESH_TOKEN_MISSING", 409, "no refresh token on record");
-    }
-
-    // Spend the rotating refresh token exactly once (still holding the lock).
-    const tokenRes = await refreshUpstream(input.config, current.refreshToken);
-
-    if (tokenRes.revoked) {
-      const [degraded] = await tx
+      const [updated] = await tx
         .update(providerAccounts)
-        .set({ status: "revoked", revision: account.revision + 1, updatedAt: new Date() })
+        .set({
+          credentialSecretId: meta.id,
+          credentialVersion: meta.version,
+          status: "active",
+          revision: account.revision + 1,
+          updatedAt: new Date(),
+        })
         .where(
           and(
             eq(providerAccounts.tenantId, input.tenantId),
@@ -764,89 +838,41 @@ export async function refreshXProviderCredential(input: RefreshInput): Promise<R
           ),
         )
         .returning();
+      if (!updated) {
+        throw new XConnectError("X_REFRESH_FAILED", 409, "account revision conflict on refresh");
+      }
+
       await append({
         tenantId: input.tenantId,
         actorType: input.actorId ? "user" : "system",
         actorId: input.actorId ?? "system",
-        action: "provider.x.refresh.revoked",
+        action: "provider.x.refresh.completed",
         resourceType: "provider_account",
         resourceId: account.id,
         metadata: {
           workspaceId: account.workspaceId,
           xUserId: account.externalRef,
-          previousRevision: account.revision,
-          newRevision: degraded?.revision ?? null,
+          credentialSecretId: meta.id,
+          credentialVersion: meta.version,
           requestId: input.requestId ?? null,
         },
       });
-      throw new XConnectError("X_REFRESH_REVOKED", 409, "X refresh token revoked");
-    }
 
-    // Rotate the vault secret to a new version with the freshly issued tokens.
-    const obtainedAt = new Date();
-    const expiresAt =
-      typeof tokenRes.expiresIn === "number"
-        ? new Date(obtainedAt.getTime() + tokenRes.expiresIn * 1000)
-        : null;
-    const newPayload: XCredentialPayload = {
-      ...current.payload,
-      accessToken: tokenRes.accessToken,
-      // X rotates the refresh token; fall back to the prior one only if upstream
-      // omits it (should not happen with offline.access).
-      refreshToken: tokenRes.refreshToken ?? current.refreshToken,
-      scopesGranted: tokenRes.scopes ?? current.payload.scopesGranted,
-      obtainedAt: obtainedAt.toISOString(),
-      expiresAt: expiresAt ? expiresAt.toISOString() : null,
-    };
-    const meta = await input.vault.rotateSecret(
-      input.tenantId,
-      current.secretName,
-      JSON.stringify(newPayload),
-    );
+      return {
+        kind: "ok",
+        result: {
+          refreshed: true,
+          credentialVersion: meta.version,
+          expiresAt: newPayload.expiresAt,
+        },
+      };
+    },
+  );
 
-    const [updated] = await tx
-      .update(providerAccounts)
-      .set({
-        credentialSecretId: meta.id,
-        credentialVersion: meta.version,
-        status: "active",
-        revision: account.revision + 1,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(providerAccounts.tenantId, input.tenantId),
-          eq(providerAccounts.id, account.id),
-          eq(providerAccounts.revision, account.revision),
-        ),
-      )
-      .returning();
-    if (!updated) {
-      throw new XConnectError("X_REFRESH_FAILED", 409, "account revision conflict on refresh");
-    }
-
-    await append({
-      tenantId: input.tenantId,
-      actorType: input.actorId ? "user" : "system",
-      actorId: input.actorId ?? "system",
-      action: "provider.x.refresh.completed",
-      resourceType: "provider_account",
-      resourceId: account.id,
-      metadata: {
-        workspaceId: account.workspaceId,
-        xUserId: account.externalRef,
-        credentialSecretId: meta.id,
-        credentialVersion: meta.version,
-        requestId: input.requestId ?? null,
-      },
-    });
-
-    return {
-      refreshed: true,
-      credentialVersion: meta.version,
-      expiresAt: newPayload.expiresAt,
-    };
-  });
+  if (outcome.kind === "revoked") {
+    throw new XConnectError("X_REFRESH_REVOKED", 409, "X refresh token revoked");
+  }
+  return outcome.result;
 }
 
 interface LoadedCredential {
@@ -860,15 +886,18 @@ async function loadCredential(
   vault: SecretVault,
   tenantId: string,
   secretId: string,
+  executor?: DbExecutor,
 ): Promise<LoadedCredential> {
-  const db = getDb();
+  const db = (executor ?? getDb()) as DbExecutor;
   const [row] = (await db
     .select()
     .from(secrets)
     .where(and(eq(secrets.tenantId, tenantId), eq(secrets.id, secretId)))
     .limit(1)) as Secret[];
   if (!row) throw new XConnectError("X_REFRESH_TOKEN_MISSING", 409, "credential secret missing");
-  const decrypted = await vault.decryptSecret(tenantId, secretId);
+  // Decrypt from the ALREADY-READ row so we do not issue a second getDb() read
+  // that would block behind an outer transaction on single-connection PGLite.
+  const decrypted = vault.decryptSecretRow(tenantId, row);
   const payload = JSON.parse(decrypted) as XCredentialPayload;
   return {
     secretName: row.name,
@@ -977,7 +1006,12 @@ export async function disconnectXProviderCredential(
     let revokedAtUpstream = false;
     if (account.credentialSecretId) {
       try {
-        const cred = await loadCredential(input.vault, input.tenantId, account.credentialSecretId);
+        const cred = await loadCredential(
+          input.vault,
+          input.tenantId,
+          account.credentialSecretId,
+          tx,
+        );
         revokedAtUpstream = await revokeUpstreamBestEffort(
           input.config,
           cred.payload.accessToken,
