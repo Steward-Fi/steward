@@ -40,9 +40,12 @@ import {
 } from "@stwd/db";
 import {
   composeProviderActionPolicyDecision,
+  cumulativeSpendBucketKey,
+  MAX_AGGREGATE_WINDOW_SECONDS,
   type ProviderPolicyContext,
   type ProviderPolicyEvaluationV1,
   type ProviderPolicyRule,
+  windowedInvokeBucketKey,
 } from "@stwd/policy-engine";
 import type { GithubActionBuild } from "@stwd/provider-github";
 import type { XActionBuild } from "@stwd/provider-x";
@@ -66,6 +69,14 @@ export type ProviderActionBuild = GithubActionBuild | XActionBuild;
 /** The structurally-shared canonical action shape both adapters emit. */
 type AnyCanonicalActionV1 = GithubCanonicalActionV1 | XCanonicalActionV1;
 
+import {
+  type CumulativeSpendScope,
+  releaseCumulativeSpend,
+  releaseWindowedInvoke,
+  reserveCumulativeSpend,
+  reserveWindowedInvoke,
+  settleCumulativeSpend,
+} from "@stwd/redis";
 import { and, eq, sql } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import { appendAuditEvent, withTenantAuditQueue, writeAuditEvent } from "./audit";
@@ -73,6 +84,33 @@ import { ApprovalArmError, buildApprovalArm } from "./provider-approval";
 
 const EVALUATOR_VERSION = "provider-action.v1";
 const POLICY_TYPE = "capability-intent" as const;
+
+/**
+ * A handle to an atomic cumulative-spend reservation (#206) so the pipeline can
+ * SETTLE it (known-success) or RELEASE it (known-failure/deny). On
+ * outcome_unknown the pipeline deliberately does NEITHER - the reservation ages
+ * out at the window edge (fail closed for a money cap: never free budget that
+ * may have really spent).
+ */
+export interface CumulativeSpendReservationHandle {
+  /** the spend-STREAM identity (scope+scopeKey+currency); NOT the cap threshold
+   *  (cap edits must not orphan a reservation). */
+  stream: {
+    agentId: string;
+    scope: CumulativeSpendScope;
+    scopeKey: string;
+    currency: string;
+  };
+  reservationId: string;
+  amount: number;
+}
+
+/** A handle to an atomic windowed-invoke (maxCalls) reservation (#206). */
+export interface WindowedInvokeReservationHandle {
+  agentId: string;
+  operationKey: string;
+  reservationId: string;
+}
 
 // ─── Public result envelope ───────────────────────────────────────────────────
 
@@ -291,6 +329,8 @@ type PolicyResult = {
   doc: PersistedPolicyDecisionV1;
   evaluation: ProviderPolicyEvaluationV1;
   decisionId: string;
+  cumulativeSpendReservations: CumulativeSpendReservationHandle[];
+  windowedInvokeReservation?: WindowedInvokeReservationHandle;
 };
 
 class ProviderActionService {
@@ -381,6 +421,10 @@ class ProviderActionService {
     // Outer-scope handles the tx fills so the post-commit branching can read them.
     let access!: { effect: "allow" | "deny"; doc: PersistedAccessDecisionV1 };
     let policy: PolicyResult | null = null;
+    // #206: hoisted so the catch/drain-failure paths can reclaim reservations
+    // even where TS narrows `policy` to never inside the tx-callback flow.
+    let cumulativeSpendReservations: CumulativeSpendReservationHandle[] = [];
+    let windowedInvokeReservation: WindowedInvokeReservationHandle | undefined;
     let requestHash = "";
     const effects: {
       access: "allow" | "deny";
@@ -455,8 +499,15 @@ class ProviderActionService {
                 intentId,
                 requestHash,
                 actionDigest,
+                // grant-scope cumulativeSpend aggregates over the matched grant
+                // (deterministic: matchedGrantIds is sorted). Absent => grant
+                // scope resolves to "" and the composer fails closed if a rule
+                // aggregates over grant without one.
+                grantId: access.doc.matchedGrantIds[0] ?? null,
               })
             : null;
+        cumulativeSpendReservations = policy?.cumulativeSpendReservations ?? [];
+        windowedInvokeReservation = policy?.windowedInvokeReservation;
 
         effects.access = access.effect;
         effects.policy =
@@ -605,6 +656,13 @@ class ProviderActionService {
         });
       });
     } catch (e) {
+      // #206: the decision transaction failed to persist, so the action WILL NOT
+      // execute (the stub is never reached). Reclaim any cumulative-spend
+      // reservations taken during eval so a persistence failure does not leak
+      // budget. This is a KNOWN non-execution (distinct from the stub-threw
+      // outcome_unknown), so release is correct + fail-closed on the deny side.
+      await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
+      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
       // A missing PR1 execution dependency (route/credential) fails approval
       // creation CLOSED (spec §5.2) — surfaced as an evidence failure so no
       // partial approval arm is ever visible.
@@ -639,6 +697,20 @@ class ProviderActionService {
     // ── Step 3: drain the required-audit outbox before the stub can run. ──
     const drained = await this.drainAuditOutbox(tenantId, intentId).catch(() => false);
     if (!drained) {
+      // #206 (codex P1): the binding ALREADY committed. If its status is an
+      // allow-committed `allowed_stub`, a later idempotent replay WILL execute it
+      // via outcomeFromBinding WITHOUT re-evaluating or re-reserving. Releasing
+      // the reservations here would then let that replay bypass the spend/count
+      // cap entirely (durable row authorizes the stub while Redis no longer holds
+      // the reservation). So for a replayable allow we DELIBERATELY DO NOT
+      // release - the reservation is treated as outcome_unknown and ages out
+      // (fail closed). For a denied/approval-committed binding the stub will
+      // never run on replay, so we DO reclaim. `effects.status === "allowed_stub"`
+      // is exactly the replayable-execute case.
+      if (effects.status !== "allowed_stub") {
+        await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
+        await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
+      }
       return {
         kind: "evidence_failure",
         code: "EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE",
@@ -649,6 +721,10 @@ class ProviderActionService {
 
     // ── Terminal outcomes for deny / approval. ──
     if (effects.access === "deny") {
+      // Access denied => policy never ran => no reservations to release, but be
+      // defensive in case a future path reserves before access resolves.
+      await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
+      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
       return {
         kind: "access_denied",
         code: access.doc.reasonCode,
@@ -659,6 +735,15 @@ class ProviderActionService {
       };
     }
     if (effects.policy === "hard_deny") {
+      // #206: reclaim any cumulative-spend reservations this decision holds. A
+      // spend-cap breach already released its own reservations during eval; this
+      // covers a deny for a DIFFERENT reason where a cumulativeSpend rule had
+      // passed and reserved - the action will not execute, so free its budget.
+      await this.finalizeCumulativeSpend(
+        (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [],
+        "failure",
+      );
+      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
       const code = (policy as PolicyResult | null)?.doc.reasonCodes[0] ?? "POLICY_HARD_DENY";
       return {
         kind: "policy_denied",
@@ -670,6 +755,30 @@ class ProviderActionService {
       };
     }
     if (effects.policy === "approval_required") {
+      // #206 KNOWN LIMITATION (codex P1, honest gap): a cumulativeSpend / maxCalls
+      // cap combined with an approval rule is NOT enforced across the approval
+      // lifecycle by THIS lane. The action does not execute now (it awaits a human
+      // decision + a separate execute path in provider-approval.ts, which is
+      // OUTSIDE this lane's scope fence and does NOT re-run evaluatePolicy or
+      // re-reserve). Two imperfect create-time choices exist, neither correct
+      // without touching the approval-execute path:
+      //   - KEEP the reservation: it is pinned to DECISION time and ages out at
+      //     the window edge, so an approval executed near/after that edge is
+      //     UNDER-counted (allow-side error).
+      //   - RELEASE the reservation: the queued action consumes no budget, and
+      //     the execute path re-reserves nothing, so the cap is not enforced on
+      //     the approval path AT ALL.
+      // We RELEASE here so an action that is ultimately rejected/expired never
+      // holds phantom budget that would wrongly DENY unrelated invokes
+      // (over-enforcement of the immediate plane is the worse day-to-day failure).
+      // Correct enforcement requires the approval-execute path to re-reserve at
+      // EXECUTION time; that is a documented follow-up filed against the approval
+      // plane (provider-approval.ts). See the PR honest-gaps section.
+      await this.finalizeCumulativeSpend(
+        (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [],
+        "failure",
+      );
+      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
       return {
         kind: "approval_required",
         code: "APPROVAL_REQUIRED",
@@ -681,10 +790,16 @@ class ProviderActionService {
     }
 
     // ── Step 4: allow — call the in-process stub, then record the transition. ──
+    const csReservations = (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [];
     let stub: ProviderActionStubResult;
     try {
       stub = await executeProviderActionStub(intentId);
     } catch {
+      // #206: OUTCOME_UNKNOWN. The stub threw AFTER we admitted + reserved; we
+      // cannot prove the action did or did not spend. Deliberately DO NOT release
+      // the spend OR the maxCalls reservation - both age out at the window edge.
+      // Fail closed: never free a slot/budget that may have really been consumed
+      // (a deny-side error is safe; an allow-side error is not).
       return {
         kind: "backend_unavailable",
         code: "BACKEND_STUB_UNAVAILABLE",
@@ -694,6 +809,15 @@ class ProviderActionService {
         actionDigest,
       };
     }
+    // #206: known outcome. stub_succeeded => settle (keep counted); stub_failed
+    // => release (reclaim spend budget + the maxCalls slot, the action did not
+    // consume one).
+    const outcome = stub.ok ? "success" : "failure";
+    await this.finalizeCumulativeSpend(csReservations, outcome);
+    await this.finalizeWindowedInvoke(
+      (policy as PolicyResult | null)?.windowedInvokeReservation,
+      outcome,
+    );
     // Record the narrow allowed_stub -> stub_succeeded|stub_failed transition.
     await this.db()
       .update(providerActionBindings)
@@ -923,6 +1047,241 @@ class ProviderActionService {
     };
   }
 
+  /**
+   * #206: atomically reserve this invoke's spend for every governing
+   * cumulativeSpend rule, and return the per-scope prior sums to feed the policy
+   * composer.
+   *
+   * SINGLE-WINNER CONCURRENCY: each reservation is a single Redis Lua script
+   * that prunes the trailing window, sums the survivors, and only admits when
+   * `sum + amount <= max`. Two concurrent invokes therefore cannot both pass a
+   * cap. The composer re-derives the same verdict from `priorSum` so the
+   * persisted decision doc matches the reservation; on a REJECTED reservation we
+   * feed a `priorSum` AT the cap so the composer's projected sum breaches and the
+   * decision is a hard deny (reason POLICY_CUMULATIVE_SPEND_CAP_EXCEEDED).
+   *
+   * FAIL CLOSED: if the operation declares no spend field, or the declared field
+   * is absent/non-integer, or the currency mismatches, we do NOT reserve and
+   * leave the composer to deny (NO_SPEND_FIELD / INPUT_UNAVAILABLE /
+   * CURRENCY_MISMATCH). A Redis error while reserving is treated as a breach for
+   * that scope (deny), never a silent pass. Reservations already taken for OTHER
+   * scopes on the same invoke are RELEASED if a later scope denies, so a denied
+   * invoke never leaks budget.
+   */
+  private async reserveCumulativeSpendForInvoke(input: {
+    rules: ProviderPolicyRule[];
+    operationKey: string;
+    agentId: string;
+    grantId: string | null;
+    spendDeclaration: { field: string; currency: string } | undefined;
+    policyArgs: Record<string, unknown>;
+  }): Promise<{
+    contextSums: Record<string, number> | undefined;
+    reservations: CumulativeSpendReservationHandle[];
+  }> {
+    const governing = extractGoverningCumulativeSpend(input.rules, input.operationKey);
+    if (governing.length === 0) {
+      return { contextSums: undefined, reservations: [] };
+    }
+
+    const sums: Record<string, number> = {};
+    const reservations: CumulativeSpendReservationHandle[] = [];
+
+    // Resolve this invoke's spend from the declared, validated policyArgs field.
+    // Absent declaration or bad value => do NOT reserve; the composer fails closed.
+    const decl = input.spendDeclaration;
+    const rawSpend =
+      decl && Object.hasOwn(input.policyArgs, decl.field)
+        ? input.policyArgs[decl.field]
+        : undefined;
+    const spendValid =
+      decl !== undefined &&
+      typeof rawSpend === "number" &&
+      Number.isInteger(rawSpend) &&
+      rawSpend >= 0;
+    const thisSpend = spendValid ? (rawSpend as number) : undefined;
+
+    // Compute the bucket key (scope+window+max+currency) the COMPOSER reads for a
+    // given cap, and the STREAM key (scope+scopeKey+currency) the Redis reservation
+    // uses (codex P1: history keyed by stream, not cap threshold).
+    const scopeKeyOf = (scope: "operation" | "agent" | "grant") =>
+      scope === "operation" ? input.operationKey : scope === "grant" ? (input.grantId ?? "") : "";
+    const bucketKeyOf = (g: (typeof governing)[number]) =>
+      cumulativeSpendBucketKey({
+        aggregateOver: g.aggregateOver,
+        windowSeconds: g.windowSeconds,
+        max: g.max,
+        currency: g.currency,
+      });
+
+    // If we cannot price this invoke (no declaration / bad value / currency
+    // mismatch on ANY governing cap), do NOT reserve at all: feed prior sum 0 for
+    // every bucket so the composer reaches its OWN fail-closed check (which
+    // prioritizes NO_SPEND_FIELD / CURRENCY_MISMATCH before reading the sum).
+    const currencyMismatch =
+      decl !== undefined && governing.some((g) => g.currency !== decl.currency);
+    if (decl === undefined || thisSpend === undefined || currencyMismatch) {
+      for (const g of governing) sums[bucketKeyOf(g)] = 0;
+      return { contextSums: sums, reservations: [] };
+    }
+
+    // FAIL CLOSED on a grant-scoped cap with NO grant identity (codex P1): access
+    // can be allowed via a role binding with an empty matchedGrantIds, in which
+    // case a `grant`-scoped rule has no grant to scope to. Reserving against a
+    // shared empty scopeKey would let unrelated agents share one fake bucket and
+    // slip the cap. Deny instead: feed the bucket AT cap+1 so the composer
+    // hard-denies (CUMULATIVE_SPEND_CAP_EXCEEDED), and take NO reservation.
+    const grantScopedWithoutGrant = governing.some(
+      (g) => g.aggregateOver === "grant" && (input.grantId === null || input.grantId.length === 0),
+    );
+    if (grantScopedWithoutGrant) {
+      for (const g of governing) {
+        sums[bucketKeyOf(g)] =
+          g.aggregateOver === "grant" && (input.grantId === null || input.grantId.length === 0)
+            ? g.max + 1
+            : 0;
+      }
+      return { contextSums: sums, reservations: [] };
+    }
+
+    // GROUP caps by STREAM (scope+scopeKey+currency). A single invoke governed by
+    // several caps on the same stream (e.g. a 1h AND a 24h cap, or two rules) is
+    // reserved ONCE against that stream with ALL its caps checked atomically (the
+    // invoke is counted once, never double-counted; codex P2). priorSums come back
+    // per cap in the order supplied, which we map to each cap's bucket key.
+    const streams = new Map<
+      string,
+      {
+        stream: {
+          agentId: string;
+          scope: "operation" | "agent" | "grant";
+          scopeKey: string;
+          currency: string;
+        };
+        caps: Array<{ windowSeconds: number; max: number; bucketKey: string }>;
+      }
+    >();
+    for (const g of governing) {
+      const scopeKey = scopeKeyOf(g.aggregateOver);
+      const streamId = `${g.aggregateOver}|${scopeKey}|${g.currency}`;
+      let entry = streams.get(streamId);
+      if (!entry) {
+        entry = {
+          stream: {
+            agentId: input.agentId,
+            scope: g.aggregateOver,
+            scopeKey,
+            currency: g.currency,
+          },
+          caps: [],
+        };
+        streams.set(streamId, entry);
+      }
+      const bucketKey = bucketKeyOf(g);
+      // Dedupe identical caps within a stream (same window+max => same bucket).
+      if (!entry.caps.some((c) => c.bucketKey === bucketKey)) {
+        entry.caps.push({ windowSeconds: g.windowSeconds, max: g.max, bucketKey });
+      }
+    }
+
+    let anyDeny = false;
+    for (const { stream, caps } of streams.values()) {
+      let reserved: Awaited<ReturnType<typeof reserveCumulativeSpend>>;
+      try {
+        reserved = await reserveCumulativeSpend({
+          stream,
+          caps: caps.map((c) => ({ windowSeconds: c.windowSeconds, max: c.max })),
+          amount: thisSpend,
+        });
+      } catch {
+        // Redis/parse failure => deny for every cap on this stream (missing
+        // signal). Feed cap+1 so the composer denies with CAP_EXCEEDED.
+        for (const c of caps) sums[c.bucketKey] = c.max + 1;
+        anyDeny = true;
+        continue;
+      }
+      // Map each cap's prior sum back to its bucket key.
+      caps.forEach((c, i) => {
+        sums[c.bucketKey] = reserved.priorSums[i] ?? c.max + 1;
+      });
+      if (reserved.ok) {
+        reservations.push({
+          stream,
+          reservationId: reserved.reservationId as string,
+          amount: thisSpend,
+        });
+      } else {
+        // Rejected: at least one cap on this stream breached. Force those buckets
+        // over their cap so the composer denies.
+        caps.forEach((c, i) => {
+          const prior = reserved.priorSums[i] ?? c.max + 1;
+          if (prior + thisSpend > c.max) sums[c.bucketKey] = c.max + 1;
+        });
+        anyDeny = true;
+      }
+    }
+
+    // If ANY stream denied, release the reservations we DID take so a denied
+    // invoke never leaks budget.
+    if (anyDeny && reservations.length > 0) {
+      await Promise.all(
+        reservations.map((r) =>
+          releaseCumulativeSpend({
+            stream: r.stream,
+            reservationId: r.reservationId,
+            amount: r.amount,
+          }).catch(() => undefined),
+        ),
+      );
+      return { contextSums: sums, reservations: [] };
+    }
+
+    return { contextSums: sums, reservations };
+  }
+
+  /**
+   * Settle (success) or release (failure) the cumulative-spend reservations a
+   * decision took. On outcome_unknown the caller passes neither and the
+   * reservations age out at the window edge (fail closed). Safe on an empty list.
+   */
+  private async finalizeCumulativeSpend(
+    reservations: CumulativeSpendReservationHandle[],
+    outcome: "success" | "failure",
+  ): Promise<void> {
+    if (reservations.length === 0) return;
+    await Promise.all(
+      reservations.map((r) =>
+        (outcome === "success"
+          ? settleCumulativeSpend({ stream: r.stream, reservationId: r.reservationId })
+          : releaseCumulativeSpend({
+              stream: r.stream,
+              reservationId: r.reservationId,
+              amount: r.amount,
+            })
+        ).catch(() => undefined),
+      ),
+    );
+  }
+
+  /**
+   * Settle (success => keep the slot counted) or release (failure => reclaim the
+   * slot) an atomic windowed-invoke (maxCalls) reservation. On outcome_unknown
+   * the caller passes neither and the slot ages out (fail closed). No-op when no
+   * slot was taken.
+   */
+  private async finalizeWindowedInvoke(
+    reservation: WindowedInvokeReservationHandle | undefined,
+    outcome: "success" | "failure",
+  ): Promise<void> {
+    if (!reservation) return;
+    if (outcome === "success") return; // keep the slot counted for its windows
+    await releaseWindowedInvoke({
+      agentId: reservation.agentId,
+      operationKey: reservation.operationKey,
+      reservationId: reservation.reservationId,
+    }).catch(() => undefined);
+  }
+
   // ── Policy evaluation (spec §6.2 / §6.3) ──
   private async evaluatePolicy(args: {
     tenantId: string;
@@ -933,10 +1292,18 @@ class ProviderActionService {
     intentId: string;
     requestHash: string;
     actionDigest: string;
+    grantId?: string | null;
   }): Promise<{
     doc: PersistedPolicyDecisionV1;
     evaluation: ProviderPolicyEvaluationV1;
     decisionId: string;
+    /** Atomic cumulative-spend reservations taken during this evaluation. Settle
+     *  on known-success, release on known-failure/deny, leave on outcome_unknown. */
+    cumulativeSpendReservations: CumulativeSpendReservationHandle[];
+    /** The atomic windowed-invoke (maxCalls) reservation slot (one per invoke,
+     *  covering ALL count windows). Settle (keep) on known-success, release on
+     *  deny/failure, leave on outcome_unknown. */
+    windowedInvokeReservation?: WindowedInvokeReservationHandle;
   }> {
     const decidedAt = new Date().toISOString();
     const decisionId = randomUUID();
@@ -954,6 +1321,71 @@ class ProviderActionService {
     // policyText, so this is undefined and any content-pattern rule fails closed.
     const policyText = "policyText" in build ? build.policyText : undefined;
 
+    // -- #206: cumulative-spend aggregate wiring + atomic reservation. --
+    // Resolve the operation's declared spend field/currency and, for each
+    // governing cumulativeSpend rule, ATOMICALLY reserve this invoke's spend
+    // against the trailing-window cap. The reservation is the authoritative,
+    // TOCTOU-free gate. The reserved priorSum is fed to the composer so its
+    // in-policy check agrees with the reservation; a REJECTED reservation feeds a
+    // prior sum AT the cap so the composer's projected sum breaches and denies. A
+    // missing declaration / absent aggregate is left to the composer to fail
+    // closed exactly as specified.
+    const spendDeclaration = extractSpendDeclaration(operation.requestProfile);
+    const cumulative = await this.reserveCumulativeSpendForInvoke({
+      rules,
+      operationKey: operation.operationKey,
+      agentId: args.actorAgentId,
+      grantId: args.grantId ?? null,
+      spendDeclaration,
+      policyArgs: build.policyArgs,
+    });
+
+    // #206 configurable count cap (maxCalls + callWindow): ATOMICALLY reserve one
+    // invoke slot against the trailing-window count so concurrent invokes cannot
+    // collectively exceed maxCalls (single-winner, like the spend path; codex P2).
+    // The reserved priorCount is fed to the composer so its check agrees; a
+    // REJECTED reservation feeds a count AT the cap so the composer denies. Absent
+    // reservation (no governing maxCalls rule, or a Redis failure) leaves
+    // windowedInvokeCount undefined => a maxCalls rule fails closed
+    // (POLICY_INPUT_UNAVAILABLE). The slot is settled (kept) on a known-success
+    // allow and released on any deny/failure below.
+    // #206 configurable count caps: ATOMICALLY reserve ONE invoke slot against
+    // ALL count windows at once (a single invoke is counted ONCE across an hourly
+    // AND a daily cap; codex P2). Each window's count is fed to the composer keyed
+    // by its own bucket. A rejection on ANY window denies (no slot taken); a
+    // Redis failure feeds every cap AT its max so the composer fails closed.
+    const govMaxCalls = extractGoverningMaxCalls(rules, operation.operationKey);
+    let windowedInvokeCounts: Record<string, number> | undefined;
+    let windowedInvokeReservation: WindowedInvokeReservationHandle | undefined;
+    if (govMaxCalls.length > 0) {
+      const counts: Record<string, number> = {};
+      windowedInvokeCounts = counts;
+      const wr = await reserveWindowedInvoke({
+        agentId: args.actorAgentId,
+        operationKey: operation.operationKey,
+        caps: govMaxCalls.map((c) => ({ windowSeconds: c.windowSeconds, max: c.max })),
+      });
+      govMaxCalls.forEach((cap, i) => {
+        const bucketKey = windowedInvokeBucketKey({
+          windowSeconds: cap.windowSeconds,
+          max: cap.max,
+        });
+        // On success feed the real prior count; on rejection/absence feed AT the
+        // cap so the composer denies (count >= maxCalls) for the breaching cap.
+        const prior = wr.priorCounts[i];
+        counts[bucketKey] = wr.ok && typeof prior === "number" ? prior : (prior ?? cap.max);
+      });
+      if (wr.ok && wr.reservationId !== undefined) {
+        windowedInvokeReservation = {
+          agentId: args.actorAgentId,
+          operationKey: operation.operationKey,
+          reservationId: wr.reservationId,
+        };
+      }
+      // A rejected multi-cap reserve takes NO slot, so there is nothing to
+      // release here; the composer will deny from the fed counts.
+    }
+
     const context: ProviderPolicyContext = {
       operationKey: operation.operationKey,
       args: build.policyArgs,
@@ -966,7 +1398,16 @@ class ProviderActionService {
       // Trailing-hour count is not wired in PR2; rules that require it will
       // fail closed (POLICY_INPUT_UNAVAILABLE) exactly as specified.
       invokeCount1h: undefined,
+      // #206 configurable count caps: per-cap trailing-window counts (undefined
+      // when unwired => a maxCalls rule fails closed).
+      ...(windowedInvokeCounts !== undefined ? { windowedInvokeCounts } : {}),
       ...(policyText !== undefined ? { policyText } : {}),
+      // #206 cumulative-spend aggregate + declaration. spendDeclaration absent =>
+      // a cumulativeSpend rule fails closed (NO_SPEND_FIELD). cumulativeSpend
+      // carries the reserved priorSum per scope; absent scope => fail closed
+      // (INPUT_UNAVAILABLE). See reserveCumulativeSpendForInvoke.
+      ...(spendDeclaration !== undefined ? { spendDeclaration } : {}),
+      ...(cumulative.contextSums !== undefined ? { cumulativeSpend: cumulative.contextSums } : {}),
       // Permissioned-X authoritative inputs (post count / accumulated spend /
       // now-minute) are NOT wired into the service in Phase 1 — exactly the same
       // posture as invokeCount1h above. A permissioned-X rule that REQUIRES one
@@ -1039,7 +1480,13 @@ class ProviderActionService {
       evaluatorVersion: EVALUATOR_VERSION,
       decidedAt,
     };
-    return { doc, evaluation, decisionId };
+    return {
+      doc,
+      evaluation,
+      decisionId,
+      cumulativeSpendReservations: cumulative.reservations,
+      ...(windowedInvokeReservation !== undefined ? { windowedInvokeReservation } : {}),
+    };
   }
 
   /**
@@ -1209,6 +1656,23 @@ class ProviderActionService {
     };
   }
 
+  /**
+   * Idempotent replay path: reconstruct the outcome from an existing binding.
+   *
+   * #206 RESERVATION REPLAY CAVEAT (codex P2, honest gap): cumulative-spend
+   * reservation handles are in-memory to the ORIGINAL create call and are NOT
+   * persisted on the binding. A replay here (or a crash between the binding
+   * commit and the original finalize) therefore has no handle to settle/release.
+   * This is deliberately FAIL-CLOSED, not a silent leak: on the original call a
+   * crash after commit leaves the reservation as `outcome_unknown` (documented:
+   * it ages out at the window edge, never freeing maybe-spent budget). A replay
+   * that resolves to stub_succeeded is a real spend and SHOULD stay counted, so
+   * not releasing is correct. A replay that resolves to stub_failed is the only
+   * case where budget could be transiently over-counted for one window; that is
+   * a bounded DENY-side error (safe), never an allow-side one. Crash-durable
+   * reservation handles (persisted per binding + reconciled by the C2 sweeper)
+   * are the follow-up; this lane does not add a migration for it.
+   */
   private async outcomeFromBinding(
     b: typeof providerActionBindings.$inferSelect,
   ): Promise<ProviderActionOutcome> {
@@ -1383,6 +1847,173 @@ function extractCapabilityIntentRules(
     });
   }
   return rules;
+}
+
+/**
+ * Extract the operation's DECLARED spend field (#206). The OPERATION - not the
+ * caller - declares which validated `policyArgs` field carries the per-invoke
+ * spend amount and its currency, via
+ * `request_profile.spendDeclaration: { field: string, currency: string }`.
+ * Absent/malformed => undefined; a cumulativeSpend rule on such an operation
+ * then fails closed (POLICY_CUMULATIVE_SPEND_NO_SPEND_FIELD) in the composer.
+ * We NEVER infer a spend field - an operation that cannot move money simply
+ * carries no declaration and can never be governed by a spend cap by accident.
+ */
+function extractSpendDeclaration(
+  requestProfile: Record<string, unknown>,
+): { field: string; currency: string } | undefined {
+  const raw = (requestProfile as { spendDeclaration?: unknown }).spendDeclaration;
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const decl = raw as Record<string, unknown>;
+  if (
+    typeof decl.field !== "string" ||
+    decl.field.length === 0 ||
+    typeof decl.currency !== "string" ||
+    decl.currency.length === 0
+  ) {
+    return undefined;
+  }
+  return { field: decl.field, currency: decl.currency };
+}
+
+/**
+ * The governing cumulativeSpend rules for an operation, with each rule's
+ * resolved window seconds + scope + cap. Used to drive the atomic reservations
+ * and the policy context's prior-sum signal.
+ */
+interface GoverningCumulativeSpend {
+  ruleId: string;
+  window: string;
+  windowSeconds: number;
+  currency: string;
+  max: number;
+  aggregateOver: "operation" | "agent" | "grant";
+}
+
+/**
+ * Extract the governing cumulativeSpend constraints from the operation's enabled
+ * capability-intent rules that name this operation. Only WELL-FORMED
+ * cumulativeSpend blocks are returned; a malformed one is left to the composer
+ * (which hard-denies on a malformed governing config), so we never silently
+ * skip a broken cap. Returns [] when none govern.
+ */
+function extractGoverningCumulativeSpend(
+  rules: ProviderPolicyRule[],
+  operationKey: string,
+): GoverningCumulativeSpend[] {
+  const out: GoverningCumulativeSpend[] = [];
+  for (const r of rules) {
+    if (!r.enabled) continue;
+    if (!capabilitySelectorMatches(r.config, operationKey)) continue;
+    const constraints = (r.config as { constraints?: unknown }).constraints;
+    if (typeof constraints !== "object" || constraints === null) continue;
+    const cs = (constraints as { cumulativeSpend?: unknown }).cumulativeSpend;
+    if (typeof cs !== "object" || cs === null) continue;
+    const block = cs as Record<string, unknown>;
+    const windowSeconds = parseIso8601DurationSecondsForApi(block.window);
+    if (
+      typeof block.window !== "string" ||
+      windowSeconds === null ||
+      typeof block.currency !== "string" ||
+      block.currency.length === 0 ||
+      typeof block.max !== "number" ||
+      !Number.isInteger(block.max) ||
+      block.max < 0 ||
+      (block.aggregateOver !== "operation" &&
+        block.aggregateOver !== "agent" &&
+        block.aggregateOver !== "grant")
+    ) {
+      // Malformed cap: leave it to the composer to hard-deny. Do NOT reserve.
+      continue;
+    }
+    out.push({
+      ruleId: r.id,
+      window: block.window,
+      windowSeconds,
+      currency: block.currency,
+      max: block.max,
+      aggregateOver: block.aggregateOver,
+    });
+  }
+  return out;
+}
+
+/**
+ * Extract the governing configurable count cap (maxCalls + callWindow) for an
+ * operation, if exactly one well-formed one exists. Returns the resolved window
+ * seconds + max, or undefined when none govern. A malformed one is left to the
+ * composer to hard-deny. (Multiple count caps would each read the same window
+ * bucket; we resolve the FIRST well-formed one to feed the shared count signal -
+ * the composer still evaluates every rule against that count.)
+ */
+function extractGoverningMaxCalls(
+  rules: ProviderPolicyRule[],
+  operationKey: string,
+): Array<{ windowSeconds: number; max: number }> {
+  const out: Array<{ windowSeconds: number; max: number }> = [];
+  const seen = new Set<string>();
+  for (const r of rules) {
+    if (!r.enabled) continue;
+    if (!capabilitySelectorMatches(r.config, operationKey)) continue;
+    const constraints = (r.config as { constraints?: unknown }).constraints;
+    if (typeof constraints !== "object" || constraints === null) continue;
+    const c = constraints as Record<string, unknown>;
+    if (c.maxCalls === undefined && c.callWindow === undefined) continue;
+    const windowSeconds = parseIso8601DurationSecondsForApi(c.callWindow);
+    if (
+      typeof c.maxCalls !== "number" ||
+      !Number.isInteger(c.maxCalls) ||
+      c.maxCalls < 0 ||
+      typeof c.callWindow !== "string" ||
+      windowSeconds === null
+    ) {
+      // Malformed: leave it to the composer to hard-deny. Do NOT read a count.
+      continue;
+    }
+    // Each DISTINCT (window, max) is an independent count cap with its own count
+    // (codex P2). Dedupe identical caps.
+    const key = `${windowSeconds}:${c.maxCalls}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ windowSeconds, max: c.maxCalls });
+  }
+  return out;
+}
+
+/**
+ * Restricted ISO-8601 duration -> positive integer seconds, mirroring the
+ * policy-engine parser (P[nD]T[nH][nM][nS], PnW; Y/M rejected as ambiguous).
+ * Kept local to avoid a runtime import cycle; the policy engine owns the
+ * canonical parser and both must agree (a divergence would let a window the
+ * policy accepts fail to reserve, or vice versa - covered by an E2E).
+ */
+function parseIso8601DurationSecondsForApi(input: unknown): number | null {
+  if (typeof input !== "string" || input.length === 0) return null;
+  const weeks = /^P(\d+)W$/.exec(input);
+  if (weeks) {
+    const n = Number(weeks[1]);
+    if (!Number.isSafeInteger(n) || n <= 0) return null;
+    const secs = n * 604800;
+    if (secs > MAX_AGGREGATE_WINDOW_SECONDS) return null;
+    return secs;
+  }
+  const m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(input);
+  if (!m) return null;
+  const [, dStr, hStr, mStr, sStr] = m;
+  if (dStr === undefined && hStr === undefined && mStr === undefined && sStr === undefined) {
+    return null;
+  }
+  const days = dStr === undefined ? 0 : Number(dStr);
+  const hours = hStr === undefined ? 0 : Number(hStr);
+  const mins = mStr === undefined ? 0 : Number(mStr);
+  const secs = sStr === undefined ? 0 : Number(sStr);
+  for (const n of [days, hours, mins, secs]) {
+    if (!Number.isSafeInteger(n) || n < 0) return null;
+  }
+  const total = days * 86400 + hours * 3600 + mins * 60 + secs;
+  if (!Number.isSafeInteger(total) || total <= 0) return null;
+  if (total > MAX_AGGREGATE_WINDOW_SECONDS) return null;
+  return total;
 }
 
 /**
