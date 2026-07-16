@@ -32,11 +32,15 @@ export interface ProviderApprovalCommitmentV1 {
     key: string;
     revision: number;
     riskClass: string;
-    // Adapter canonical profile. Widened from the github literal so the same
-    // commitment schema binds X (`x.provider-action.v1`) and future adapters.
-    // JCS hashes whatever string is present, so this is behavior-neutral for the
-    // existing github digest corpus (the string value is unchanged there).
-    canonicalProfile: "github.provider-action.v1" | "x.provider-action.v1";
+    // Adapter canonical profile. Widened from the closed github|x literal to a
+    // registry-validated `string` (issue #201): the value MUST be a member of
+    // the provider-profile-registry (`assertRegisteredProfile`) at every
+    // consumption site, so an unregistered profile is rejected fail-closed
+    // rather than admitted by a loose type. JCS hashes whatever string is
+    // present, so this is behavior-neutral for the existing github/x digest
+    // corpus (the string values are unchanged there); only the closed union is
+    // opened so `generic-http.provider-action.v1` and future profiles compose.
+    canonicalProfile: string;
   };
   requestHash: string;
   actionDigest: string;
