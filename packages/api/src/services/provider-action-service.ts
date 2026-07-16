@@ -953,7 +953,7 @@ class ProviderActionService {
       // posture as invokeCount1h above. A permissioned-X rule that REQUIRES one
       // of these inputs (maxPostsPerWindow / spendPolicy / quietHours) therefore
       // fails closed (POLICY_INPUT_UNAVAILABLE) until the trailing-window
-      // accumulator lands. Content/reply/URL rules need no third-party input and are
+      // accumulator lands. Content/reply/URL rules need no external input and are
       // fully live now.
       x: undefined,
     };
