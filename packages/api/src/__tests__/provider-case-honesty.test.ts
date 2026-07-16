@@ -84,6 +84,22 @@ describe("PR5 case honesty + chain integrity", () => {
     expect(m.incompletenessReasons).not.toContain("authorization_row_absent_for_execution_path");
   });
 
+  test("codex-P2: an unknown-action correlated event maps to unclassified, never satisfies genesis", async () => {
+    const intentId = await createAllowedCase();
+    // Replace the real genesis event's ACTION with an unknown one (keep the
+    // correlation fields). The role must become `unclassified`, so the genesis
+    // required-role is now UNMET and the case can never be `complete`.
+    await getDb().execute(
+      sql`UPDATE audit_events SET action = 'provider.something.unknown'
+          WHERE tenant_id = ${F.TENANT} AND resource_type = 'provider_action' AND resource_id = ${intentId}`,
+    );
+    const m = (await getProviderCase(F.TENANT, intentId, ALL_WS))!.manifest;
+    expect(m.events.length).toBe(1);
+    expect(m.events[0].role).toBe("unclassified");
+    expect(m.missingRequiredRoles).toContain("genesis");
+    expect(m.completeness).not.toBe("complete");
+  });
+
   test("access-deny reason code surfaces on the manifest (denied_access, effect deny)", async () => {
     const { intentId } = await createPendingCase();
     // Force the binding into a denied access shape is non-trivial via trigger;

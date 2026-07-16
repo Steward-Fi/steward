@@ -70,6 +70,19 @@ const MAX_MANIFEST_BYTES = 256 * 1024;
 const MAX_CASE_SEGMENT_EVENTS = 10_000;
 
 /**
+ * Thrown by `getProviderCaseEvidence` when a case's contiguous chain segment
+ * exceeds `MAX_CASE_SEGMENT_EVENTS`. The route maps it to 400
+ * `CASE_RANGE_TOO_LARGE` (spec §5.4/KC15) so a pathological interleave cannot
+ * materialize/sign an unbounded audit range. `/case` (manifest-only) still works.
+ */
+export class CaseRangeTooLargeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CaseRangeTooLargeError";
+  }
+}
+
+/**
  * PGLite runtime detection (mirrors the private helper in @stwd/db
  * audit-chain.ts, which is not exported). On PGLite the per-tenant writer queue
  * serializes appends so a plain tx read is coherent; on real Postgres we
@@ -343,6 +356,18 @@ export async function getProviderCaseEvidence(
     };
     bundle = await signAuditBundle(tenantId, 0, 0, empty);
   } else {
+    // Enforce the segment cap BEFORE reading the range (codex P2): a case whose
+    // contiguous span exceeds MAX_CASE_SEGMENT_EVENTS (pathological same-tenant
+    // interleave, KC15) must NOT materialize/sign an unbounded range of
+    // unrelated audit rows via /evidence. Fail closed with a typed error the
+    // route maps to 400 CASE_RANGE_TOO_LARGE (§5.4); the manifest already
+    // carries `unknown` + a size-exceeded reason, and /case (manifest-only)
+    // still works for triage.
+    if (segmentTo - segmentFrom + 1 > MAX_CASE_SEGMENT_EVENTS) {
+      throw new CaseRangeTooLargeError(
+        `case segment [${segmentFrom},${segmentTo}] exceeds ${MAX_CASE_SEGMENT_EVENTS} events`,
+      );
+    }
     const bundleData = await readAuditBundleData(tenantId, segmentFrom, segmentTo);
     bundle = await signAuditBundle(tenantId, segmentFrom, segmentTo, bundleData);
   }
@@ -445,7 +470,11 @@ function buildManifest(args: BuildManifestArgs): ProviderCaseAssembly {
   const events: ProviderCaseManifestEvent[] = correlated.map((ev) => ({
     seq: ev.seq,
     action: ev.action,
-    role: roleForAction(ev.action) ?? "genesis",
+    // Unknown/drifted actions map to `unclassified`, NEVER `genesis`, so a
+    // corrupted or taxonomy-drifted event can never mis-satisfy a required role
+    // and falsely upgrade a case to `complete` (codex P2). Linkage is still
+    // proven (the seq+hmac stays in the index).
+    role: roleForAction(ev.action) ?? "unclassified",
     hmac: ev.hmac,
   }));
 

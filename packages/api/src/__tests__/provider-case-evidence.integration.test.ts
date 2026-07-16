@@ -274,6 +274,40 @@ describe("PR5 /case + /evidence routes + offline verifier", () => {
     expect(envelope).not.toMatch(/Bearer\s+[A-Za-z0-9._-]{10,}/);
   });
 
+  it("KC15/codex-P2: over-cap case segment → /evidence 400 CASE_RANGE_TOO_LARGE, /case still works", async () => {
+    const { getDb } = await import("@stwd/db");
+    const { sql } = await import("drizzle-orm");
+    const intentId = await createAllowedCase();
+    // Stretch the case's own correlated span past MAX_CASE_SEGMENT_EVENTS by
+    // adding a second correlated event ~10_001 seqs above genesis (simulates a
+    // long-lived case in a busy tenant). We only need the case's min/max seqs to
+    // be >10k apart; the row need not be chain-valid because the over-cap branch
+    // short-circuits BEFORE the chain verify.
+    const rows = await getDb().execute(
+      sql`SELECT MAX(seq) AS m FROM audit_events WHERE tenant_id = ${F.TENANT}`,
+    );
+    const arr = Array.isArray(rows) ? rows : ((rows as { rows?: unknown[] }).rows ?? []);
+    const base = Number((arr[0] as { m: number | string }).m);
+    const bigSeq = base + 10_002;
+    const zero = `\\x${"00".repeat(32)}`;
+    await getDb().execute(
+      sql`INSERT INTO audit_events (tenant_id, seq, prev_hash, hmac, actor_type, actor_id, action, resource_type, resource_id, metadata, created_at)
+          VALUES (${F.TENANT}, ${bigSeq}, ${sql.raw(`'${zero}'::bytea`)}, ${sql.raw(`'${zero}'::bytea`)}, 'system', 'x', 'provider.execution.dispatched', 'provider_action', ${intentId}, ${sql.raw(
+            `'{"intentId":"${intentId}"}'::jsonb`,
+          )}, now())`,
+    );
+    // /case (manifest-only) still serves the manifest (marked unknown).
+    const caseRes = await app().request(`/v2/provider-actions/${intentId}/case`);
+    expect(caseRes.status).toBe(200);
+    const m = (await caseRes.json()) as { completeness: string };
+    expect(m.completeness).toBe("unknown");
+    // /evidence refuses to materialize the unbounded range.
+    const eviRes = await app().request(`/v2/provider-actions/${intentId}/evidence`);
+    expect(eviRes.status).toBe(400);
+    const body = (await eviRes.json()) as { error: string };
+    expect(body.error).toBe("CASE_RANGE_TOO_LARGE");
+  });
+
   it("access-denied case verifies OFFLINE and is honestly complete (genesis-only)", async () => {
     const intentId = await createAccessDeniedCase();
     const envelope = (await app()

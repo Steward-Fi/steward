@@ -26,7 +26,11 @@ import { Hono } from "hono";
 import { auditOwnerAdminMfaGate } from "../middleware/audit-gate";
 import { AuditSigningKeyError, isCheckpointSigningConfigured } from "../services/audit-checkpoint";
 import { type ApiResponse, type AppVariables } from "../services/context";
-import { getProviderCase, getProviderCaseEvidence } from "../services/provider-case";
+import {
+  CaseRangeTooLargeError,
+  getProviderCase,
+  getProviderCaseEvidence,
+} from "../services/provider-case";
 
 export const providerCaseRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -98,6 +102,11 @@ providerCaseRoutes.get("/provider-actions/:id/evidence", async (c) => {
   } catch (err) {
     if (err instanceof AuditSigningKeyError) {
       return c.json<ApiResponse>({ ok: false, error: "CASE_EVIDENCE_SIGNING_DISABLED" }, 503);
+    }
+    if (err instanceof CaseRangeTooLargeError) {
+      // Pathological same-tenant interleave (KC15): the case segment is too
+      // large to export as one signed bundle. /case still serves the manifest.
+      return c.json<ApiResponse>({ ok: false, error: "CASE_RANGE_TOO_LARGE" }, 400);
     }
     console.error(`[provider-case] /evidence read failed for ${tenantId}/${caseId}:`, err);
     return c.json<ApiResponse>({ ok: false, error: "CASE_CHAIN_UNAVAILABLE" }, 500);

@@ -423,7 +423,9 @@ function roleForAction(action) {
     case "provider.execution.reconciled":
       return "exec_reconciled";
     default:
-      return null;
+      // Unknown/drifted action: classified but role NEVER satisfies a required
+      // slot (mirrors @stwd/shared roleForAction fallback in the manifest).
+      return "unclassified";
   }
 }
 

@@ -36,7 +36,11 @@ export type ProviderCaseEventRole =
   | "exec_denied_at_boundary"
   | "exec_dispatched"
   | "exec_terminal"
-  | "exec_reconciled";
+  | "exec_reconciled"
+  // A correlated event whose action is not in the known taxonomy. It is listed
+  // in the event index (linkage still proven) but NEVER satisfies a required
+  // role, so an unknown/drifted action can never mis-satisfy completeness.
+  | "unclassified";
 
 /** Terminal state of a case, resolved from the authoritative binding columns. */
 export type ProviderCaseTerminalState =
