@@ -1,0 +1,94 @@
+---
+title: "Provider Authority — Operations Runbook"
+description: "Enrollment, rollback-to-legacy, key rotation, and evidence export/verify runbooks for governed provider routes."
+---
+
+# Provider Authority — Operations Runbook
+
+Operational procedures for a governed provider route. Every procedure fails
+closed: a missing secret, a stale dependency, or an unverified fingerprint is a
+hard stop, never a silent pass.
+
+## Prerequisites
+
+A governed provider dispatch requires all four key materials present on the
+Steward deployment:
+
+| Env | Purpose |
+|---|---|
+| `STEWARD_JWT_SECRET` | session/agent auth |
+| `STEWARD_EXECUTION_AUTH_SECRET` | PR4 execution-authorization v2 (mint + claim) |
+| `STEWARD_AUDIT_HMAC_KEY` | audit chain HMAC |
+| `STEWARD_AUDIT_SIGNING_KEY` | PR5 evidence bundle signing |
+
+Verify readiness:
+
+```bash
+steward doctor --strict
+# strict:governed-route-prerequisites must be OK.
+```
+
+These are wired into `steward init`, `docker-compose.yml`, and the doctor
+required-env list already; the doctor check **verifies** presence and does not
+regenerate anything.
+
+## Enrollment (test/sandbox tenant only in this slice)
+
+Enrollment flips a secret route to `authority_mode = 'governed_v2'` pointing at a
+provider operation, scoped to a single tenant. In this slice enrollment is done
+via the same mutation matrix the golden path uses, scoped to the test/sandbox
+tenant. **Do not enroll a production route from this runbook** — production
+enrollment tooling is a later step.
+
+## Rollback to legacy
+
+To disable governed dispatch for a route, flip it back to `authority_mode =
+'legacy'`. Any in-flight v2 authorization is frozen/revoked and its claim fails;
+no dispatch occurs after the rollback commits. Rollback is a route-revision
+change, so any minted-but-unclaimed nonce becomes stale at claim time.
+
+## Key rotation
+
+- **`STEWARD_EXECUTION_AUTH_SECRET`** is a `keyId:secret` rotation list; the
+  first entry signs. Add a new key to the front, keep the old for a grace window
+  so in-flight nonces still verify, then drop the old key. It never falls back to
+  `STEWARD_JWT_SECRET`.
+- **`STEWARD_AUDIT_SIGNING_KEY`** rotation changes the evidence signing key
+  fingerprint. Publish the new fingerprint out-of-band so verifiers can bind
+  trust to it; keep the old fingerprint documented for previously-signed bundles.
+- **Provider credential (`secrets`)** rotation bumps `secrets.version`; a
+  minted-but-unclaimed nonce bound to the old version fails stale at claim
+  (`EXEC_AUTH_STALE_SECRET`), never dispatching with a rotated credential.
+
+## Evidence export & verify
+
+```bash
+# Export a case's signed bundle.
+steward provider-action evidence --id <caseId> --out bundle.json
+
+# Verify offline, binding trust to your out-of-band signing-key fingerprint.
+steward provider-action evidence --id <caseId> --out bundle.json \
+  --verify --fp <sha256-of-trusted-SPKI-PEM>
+# or directly:
+node scripts/verify-evidence-bundle.mjs bundle.json \
+  --expected-key-fingerprint <fingerprint>
+```
+
+If the fingerprint is omitted the verifier warns loudly and proves
+self-consistency only. A case whose `completeness` is `incomplete`/`unknown`
+must be treated as such; never promote it to verified.
+
+## Incident: `outcome_unknown` dispatch
+
+A dispatch that timed out after the request was sent is recorded as
+`outcome_unknown`. Do **not** re-dispatch. Reconcile via the provider idempotency
+artifact (for GitHub, the created comment matching the bound marker). If the
+provider cannot support a safe bounded reconciliation for the operation, record
+the stop condition honestly.
+
+## Incident: missing secret at dispatch
+
+An absent `STEWARD_EXECUTION_AUTH_SECRET` fails closed at mint/claim
+(`EXEC_AUTH_KEY_UNAVAILABLE`, 503); an absent `STEWARD_AUDIT_SIGNING_KEY` fails
+closed at `/evidence` (`CASE_EVIDENCE_SIGNING_DISABLED`, 503). Restore the secret
+and retry; a golden-path run marks these as FAIL, never a skip.

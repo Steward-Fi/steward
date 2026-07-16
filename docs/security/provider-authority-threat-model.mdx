@@ -1,0 +1,69 @@
+---
+title: "Provider Authority — Threat Model & Honest Claims"
+description: "What the governed-provider proof establishes, what it does NOT, and the operator-key trust limit."
+---
+
+# Provider Authority — Threat Model & Honest Claims
+
+This document states, in pre-real-proof wording, exactly what the governed
+provider-execution proof establishes and — just as importantly — what it does
+**not**. It is written to the claims discipline the master plan requires: no
+aspirational language is presented as a shipped guarantee.
+
+## What is proven (fake CI proof)
+
+- **Single authority path.** A governed provider route is reachable only through
+  `dispatchGovernedExecution`: an atomic single-winner claim that re-checks every
+  bound fact at DB time, then decrypts + injects the credential (verifier-only)
+  and forwards. Direct `/proxy`, named aliases, capability-plugin mints, and
+  forged claim headers are denied.
+- **The agent never sees the credential.** The injected credential exists only
+  at the terminal forwarder layer; it is never returned to the agent, never in
+  the approval detail, the case manifest, the evidence bundle, error bodies, or
+  CI logs. A canary sweep asserts this across every enumerated surface.
+- **Honest evidence.** The case manifest renders `completeness`
+  (`complete`/`incomplete`/`unknown`) and `incompletenessReasons` mechanically
+  against the landed code. An `outcome_unknown` case is never rendered complete.
+- **No blind retry.** A post-dispatch timeout yields `outcome_unknown` and is
+  never auto-retried; reconciliation is bounded to a provider idempotency
+  artifact with an operator fallback.
+- **The test transport cannot leak into production.** The fake forwarder is
+  injected only through a module-private, `__`-prefixed test seam; it sits behind
+  all SSRF/DNS/public-HTTPS guards; a static inventory test proves no production
+  module imports it.
+
+## The operator-key trust limit (E7)
+
+A valid signature on an evidence bundle proves the audit chain is **internally
+consistent under the operator's own signing key**. It does **not** prove the
+operator did not author or alter events before signing. Evidence should be
+verified against a signing-key fingerprint obtained out-of-band; verifying
+against the embedded key proves self-consistency only.
+
+## What is NOT claimed (pre-real-proof)
+
+This proof is against a deterministic in-process fake transport plus a documented
+(not-yet-recorded) real GitHub sandbox run. Until a real sandbox artifact is
+recorded, the following are explicitly **not** claimed:
+
+- It is **not** a proof against a real provider in production.
+- It is **not** an operator-integrity proof (see the operator-key trust limit).
+- It is **not** exactly-once execution. It is single-winner dispatch with honest
+  `outcome_unknown` + bounded reconciliation.
+- It does **not** use MPC or any threshold-signing scheme for provider
+  credentials.
+- It is **not** a SOC2 (or any third-party) attestation.
+- It does **not** enroll any production route or assert product-wide
+  enforcement; enrollment is a separate, later step.
+
+## Residual risks / open questions
+
+- The real GitHub sandbox run is documented but not yet recorded here; the
+  golden-path manifest keeps the pre-real-proof wording until it is.
+- A render-based accessibility (axe) scan of the two trust surfaces is deferred
+  until the web package adopts a component-render test harness; the current
+  guard is a structural source scan.
+- Reconciliation for consequential writes depends on a Steward-chosen comment
+  marker; if a provider cannot support a safe bounded reconciliation for an
+  operation, that operation must be recorded as a stop condition, not papered
+  over.
