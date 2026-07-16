@@ -1646,8 +1646,8 @@ export class Vault {
    * Get SPL token balances for an agent's Solana wallet.
    *
    * This uses parsed Solana RPC token-account reads. It does not require or
-   * imply a production portfolio indexer, and therefore does not infer token
-   * ticker metadata beyond the mint address.
+   * imply a production portfolio indexer; only mints in Steward's audited local
+   * token registry receive a ticker label.
    */
   async getSplTokenBalances(
     tenantId: string,
@@ -1668,7 +1668,7 @@ export class Vault {
     }
     const rpcUrl = this.config.rpcUrl ?? resolveSolanaRpc(resolvedChainId);
 
-    return fetchSplTokenBalances(solanaAddress, rpcUrl);
+    return fetchSplTokenBalances(solanaAddress, rpcUrl, resolvedChainId);
   }
 
   async buildSolanaSplTransferTransaction(request: {

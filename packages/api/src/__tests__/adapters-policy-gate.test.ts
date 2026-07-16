@@ -3,9 +3,26 @@
  * trade route uses BEFORE returning any signable artifact, and that non-fund
  * read endpoints + the custodial signer behave fail-closed.
  */
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { agents, closeDb, getDb, tenantAppClients, tenants, users, userTenants } from "@stwd/db";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import {
+  adapterRegistry,
+  type BridgeAdapter,
+  type BridgeHandoff,
+  type BridgeQuote,
+  MockBridgeAdapter,
+} from "@stwd/adapters";
+import {
+  agents,
+  auditEvents,
+  closeDb,
+  getDb,
+  tenantAppClients,
+  tenants,
+  users,
+  userTenants,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { and, desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { initRedis } from "../middleware/redis";
 import type { AppVariables } from "../services/context";
@@ -38,6 +55,14 @@ afterAll(async () => {
   await closeDb();
 });
 
+afterEach(() => {
+  // Custom handoff adapters are process-global in this route-level test. Force
+  // the next test back through the built-in mock and invalidate the registry's
+  // cached bridge resolution so later boundary tests remain hermetic.
+  process.env.STEWARD_BRIDGE_ADAPTER = "mock";
+  adapterRegistry.register("bridge", "policy-test-reset", new MockBridgeAdapter());
+});
+
 const AGENT_WALLET = "0x1111111111111111111111111111111111111111";
 const USER_1 = "00000000-0000-4000-8000-000000000001";
 const USER_EXCHANGE = "00000000-0000-4000-8000-000000000002";
@@ -49,6 +74,57 @@ const WETH = {
   symbol: "WETH",
   decimals: 18,
 };
+const NATIVE_XMR_RECIPIENT =
+  "45AmZ2FRjuqZts5NGzb7ZXSNRuwS9MUqEeakpyEeSHsB5mywLwBzzq2cTsbJzTVUuLSHxtbfgKyZJVBqPffpP8fm79sjAcK";
+
+function externalHandoff(overrides: Partial<BridgeHandoff> = {}): BridgeHandoff {
+  return {
+    kind: "external-handoff",
+    category: "bridge",
+    provider: "test-handoff",
+    quoteId: "test-handoff-quote",
+    direction: "solana-to-monero",
+    url: "https://wxmr.io/",
+    fromChainId: 101,
+    toChainId: 301,
+    amountIn: "1000000000000",
+    estimatedUsd: 500,
+    recipient: NATIVE_XMR_RECIPIENT,
+    recipientSensitive: true,
+    expiresAt: Date.now() + 60_000,
+    feeBps: 10,
+    feeScope: "owner-observed",
+    feeObservedSlot: 123_456,
+    feeObservedAt: Date.now(),
+    notices: ["Complete this bridge interactively at wxmr.io."],
+    ...overrides,
+  };
+}
+
+function selectBridgeAdapter(
+  provider: string,
+  buildResult: BridgeHandoff | Record<string, unknown>,
+): void {
+  const adapter: BridgeAdapter = {
+    category: "bridge",
+    provider,
+    enabled: true,
+    async getQuote(): Promise<BridgeQuote> {
+      throw new Error("not used in bridge build tests");
+    },
+    async buildBridge() {
+      return buildResult as BridgeHandoff;
+    },
+    async createSession() {
+      throw new Error("not used in bridge build tests");
+    },
+    async getSession() {
+      return null;
+    },
+  };
+  process.env.STEWARD_BRIDGE_ADAPTER = provider;
+  adapterRegistry.register("bridge", provider, adapter);
+}
 
 async function makeApp(tenantId: string, options?: { userId?: string }) {
   await getDb()
@@ -285,6 +361,133 @@ describe("adapter fund-moving policy gate", () => {
     const body = (await buildRes.json()) as Record<string, unknown>;
     expect(body.code).toBe("policy-violation");
     expect(body.unsignedIntent).toBeUndefined();
+  });
+
+  it("uses the server-derived handoff notional so callers cannot understate bridge policy spend", async () => {
+    process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "100";
+    process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "1000";
+    const tenantId = `tenant-adapter-handoff-deny-${Date.now()}`;
+    const { app, agentId } = await makeApp(tenantId);
+    const provider = `test-handoff-deny-${Date.now()}`;
+    selectBridgeAdapter(provider, externalHandoff({ provider, estimatedUsd: 500 }));
+
+    const buildRes = await app.request("/adapters/bridge/build", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        owner: AGENT_WALLET,
+        quote: { quoteId: "test-handoff-quote" },
+        // A malicious caller tries to stay under the $100 policy cap.
+        estimatedUsd: 1,
+      }),
+    });
+
+    expect(buildRes.status).toBe(400);
+    const body = (await buildRes.json()) as Record<string, unknown>;
+    expect(body.code).toBe("policy-violation");
+    expect(body.handoff).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain(NATIVE_XMR_RECIPIENT);
+
+    const [audit] = await getDb()
+      .select({ metadata: auditEvents.metadata })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, tenantId),
+          eq(auditEvents.action, "adapter.bridge.policy-rejected"),
+        ),
+      )
+      .orderBy(desc(auditEvents.seq))
+      .limit(1);
+    expect(audit?.metadata.estimatedUsd).toBe(500);
+    expect(JSON.stringify(audit?.metadata)).not.toContain(NATIVE_XMR_RECIPIENT);
+  });
+
+  it("returns a validated external handoff but never persists the sensitive XMR recipient", async () => {
+    process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "1000";
+    process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "10000";
+    const tenantId = `tenant-adapter-handoff-allow-${Date.now()}`;
+    const { app, agentId } = await makeApp(tenantId);
+    const provider = `test-handoff-allow-${Date.now()}`;
+    selectBridgeAdapter(provider, externalHandoff({ provider, estimatedUsd: 500 }));
+
+    const buildRes = await app.request("/adapters/bridge/build", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        owner: AGENT_WALLET,
+        quote: { quoteId: "test-handoff-quote" },
+        estimatedUsd: 1,
+      }),
+    });
+
+    expect(buildRes.status).toBe(200);
+    expect(buildRes.headers.get("cache-control")).toContain("no-store");
+    const body = (await buildRes.json()) as {
+      ok: boolean;
+      data: { handoff: BridgeHandoff; unsignedIntent?: unknown };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.unsignedIntent).toBeUndefined();
+    expect(body.data.handoff).toMatchObject({
+      kind: "external-handoff",
+      category: "bridge",
+      provider,
+      url: "https://wxmr.io/",
+      recipient: NATIVE_XMR_RECIPIENT,
+      recipientSensitive: true,
+      estimatedUsd: 500,
+    });
+
+    const [audit] = await getDb()
+      .select({ metadata: auditEvents.metadata })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, tenantId),
+          eq(auditEvents.action, "adapter.bridge.handoff.authorized"),
+        ),
+      )
+      .orderBy(desc(auditEvents.seq))
+      .limit(1);
+    expect(audit?.metadata).toMatchObject({
+      provider,
+      direction: "solana-to-monero",
+      estimatedUsd: 500,
+      handoffOrigin: "https://wxmr.io",
+    });
+    expect(audit?.metadata).not.toHaveProperty("recipient");
+    expect(JSON.stringify(audit?.metadata)).not.toContain(NATIVE_XMR_RECIPIENT);
+  });
+
+  it("rejects an external handoff containing any signable transaction field", async () => {
+    process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "1000";
+    process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "10000";
+    const { app, agentId } = await makeApp(`tenant-adapter-handoff-unsafe-${Date.now()}`);
+    const provider = `test-handoff-unsafe-${Date.now()}`;
+    selectBridgeAdapter(provider, {
+      ...externalHandoff({ provider }),
+      signedTx: "secret-broadcastable-payload",
+    });
+
+    const buildRes = await app.request("/adapters/bridge/build", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        owner: AGENT_WALLET,
+        quote: { quoteId: "test-handoff-quote" },
+      }),
+    });
+
+    expect(buildRes.status).toBe(501);
+    const body = (await buildRes.json()) as Record<string, unknown>;
+    expect(body.ok).toBe(false);
+    expect(String(body.error)).toContain("unsafe handoff");
+    expect(body.handoff).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain("secret-broadcastable-payload");
   });
 
   it("creates Spark BTC/Lightning mock DTOs and reads wallet balance", async () => {

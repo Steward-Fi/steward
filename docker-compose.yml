@@ -54,6 +54,8 @@ services:
       AGENT_TOKEN_EXPIRY: "${AGENT_TOKEN_EXPIRY:-24h}"
       RPC_URL: "${RPC_URL:-https://mainnet.base.org}"
       CHAIN_ID: "${CHAIN_ID:-8453}"
+      STEWARD_PLUGINS: "${STEWARD_PLUGINS:-}"
+      WXMR_SOLANA_RPC_URL: "${WXMR_SOLANA_RPC_URL:-}"
       REDIS_URL: "redis://redis:6379"
       RESEND_API_KEY: "${RESEND_API_KEY:-}"
       EMAIL_FROM: "${EMAIL_FROM:-login@steward.fi}"
