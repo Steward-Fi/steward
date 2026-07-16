@@ -1010,3 +1010,126 @@ export function genericHttpCanonicalActionBytes(a: GenericHttpCanonicalActionV1)
 export function computeGenericHttpActionDigest(a: GenericHttpCanonicalActionV1): string {
   return sha256HexPrefixed(genericHttpCanonicalActionBytes(a));
 }
+
+// ───────────────────────────────────────────────────────────
+// Golden corpus - authoritative generic-http vectors, imported by every suite.
+//
+// Byte-exact canonical action bytes + digests for a GET (typed segments +
+// query) and a POST (JSON body) operation, plus the omitted-query and
+// partial-body edge cases. Tests assert both that OUR canonicalizer reproduces
+// `canonicalActionBytes` AND that the recorded digests match, so a byte
+// corruption in either direction fails. Shared by the API + proxy sides so the
+// digest is proven stable across serialization order on both.
+// ───────────────────────────────────────────────────────────
+
+export interface GenericHttpGoldenVector {
+  id: string;
+  description: string;
+  /** The descriptor input (unvalidated) the vector is built from. */
+  descriptor: unknown;
+  method: string;
+  args: Record<string, unknown>;
+  canonicalActionBytes: string;
+  actionDigest: string;
+  policyArgs: Record<string, unknown>;
+  safeSummary: Record<string, unknown>;
+}
+
+/** Descriptor A: GET list op, typed string/uuid segments + typed query. */
+export const GENERIC_GOLDEN_DESCRIPTOR_A = {
+  profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+  origin: "https://api.example.com",
+  methods: ["GET"],
+  pathTemplate: [
+    { literal: "v1" },
+    { literal: "orgs" },
+    { param: { name: "org", type: "string", pattern: "^[a-z0-9-]{1,40}$" } },
+    { literal: "projects" },
+    { param: { name: "projectId", type: "uuid" } },
+    { literal: "items" },
+  ],
+  query: [
+    { name: "state", type: "string", pattern: "^(open|closed|all)$" },
+    { name: "perPage", type: "int", min: 1, max: 100 },
+  ],
+  headers: [{ name: "accept", value: "application/json" }],
+  projection: { policyArgs: ["org", "projectId", "state"], safeSummary: ["org", "state"] },
+} as const;
+
+/** Descriptor B: POST create op, JSON body with the four scalar field kinds. */
+export const GENERIC_GOLDEN_DESCRIPTOR_B = {
+  profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+  origin: "https://api.example.com",
+  methods: ["POST"],
+  pathTemplate: [{ literal: "v1" }, { literal: "tickets" }],
+  body: {
+    contentType: "application/json",
+    fields: [
+      { name: "title", type: "string", pattern: "^.{1,200}$", maxBytes: 4096 },
+      { name: "priority", type: "int", min: 1, max: 5 },
+      { name: "urgent", type: "bool" },
+      { name: "estimate", type: "decimal-string" },
+    ],
+  },
+  projection: { policyArgs: ["priority", "urgent"], safeSummary: ["title", "priority"] },
+} as const;
+
+export const GENERIC_HTTP_GOLDEN_VECTORS: GenericHttpGoldenVector[] = [
+  {
+    id: "GHV-01",
+    description: "GET typed segments + query, sorted",
+    descriptor: GENERIC_GOLDEN_DESCRIPTOR_A,
+    method: "GET",
+    args: {
+      org: "acme-inc",
+      projectId: "11111111-1111-4111-8111-111111111111",
+      state: "open",
+      perPage: 30,
+    },
+    canonicalActionBytes:
+      '{"canonicalBody":null,"method":"GET","normalizedPath":"/v1/orgs/acme-inc/projects/11111111-1111-4111-8111-111111111111/items","orderedQueryPairs":[["perPage","30"],["state","open"]],"origin":"https://api.example.com","profile":"generic-http.provider-action.v1","selectedHeaders":[["accept","application/json"]]}',
+    actionDigest: "sha256:a67533bf964045aecf3ef33674d2ec31dd049e75b080e304e796ae81436da38a",
+    policyArgs: {
+      org: "acme-inc",
+      projectId: "11111111-1111-4111-8111-111111111111",
+      state: "open",
+    },
+    safeSummary: { operation: "op.key", method: "GET", org: "acme-inc", state: "open" },
+  },
+  {
+    id: "GHV-02",
+    description: "GET optional query omitted",
+    descriptor: GENERIC_GOLDEN_DESCRIPTOR_A,
+    method: "GET",
+    args: { org: "acme-inc", projectId: "22222222-2222-4222-8222-222222222222" },
+    canonicalActionBytes:
+      '{"canonicalBody":null,"method":"GET","normalizedPath":"/v1/orgs/acme-inc/projects/22222222-2222-4222-8222-222222222222/items","orderedQueryPairs":[],"origin":"https://api.example.com","profile":"generic-http.provider-action.v1","selectedHeaders":[["accept","application/json"]]}',
+    actionDigest: "sha256:ca941d86f497097550f3392ff286a74582ed32a5f590cf50180c9dfe7719e3bf",
+    policyArgs: { org: "acme-inc", projectId: "22222222-2222-4222-8222-222222222222" },
+    safeSummary: { operation: "op.key", method: "GET", org: "acme-inc" },
+  },
+  {
+    id: "GHV-03",
+    description: "POST JSON body, JCS key-sorted",
+    descriptor: GENERIC_GOLDEN_DESCRIPTOR_B,
+    method: "POST",
+    args: { title: "fix login", priority: 2, urgent: true, estimate: "12.50" },
+    canonicalActionBytes:
+      '{"canonicalBody":{"estimate":"12.50","priority":2,"title":"fix login","urgent":true},"method":"POST","normalizedPath":"/v1/tickets","orderedQueryPairs":[],"origin":"https://api.example.com","profile":"generic-http.provider-action.v1","selectedHeaders":[["content-type","application/json"]]}',
+    actionDigest: "sha256:af69137c8608e0a147d1f26e65fe0b386c9504debb01d6fceb9da92adbf1ca8b",
+    policyArgs: { priority: 2, urgent: true },
+    safeSummary: { operation: "op.key", method: "POST", title: "fix login", priority: 2 },
+  },
+  {
+    id: "GHV-04",
+    description: "POST unicode body, decimal-string preserved",
+    descriptor: GENERIC_GOLDEN_DESCRIPTOR_B,
+    method: "POST",
+    args: { title: "café ☕ ticket", priority: 5, urgent: false, estimate: "0" },
+    canonicalActionBytes:
+      '{"canonicalBody":{"estimate":"0","priority":5,"title":"café ☕ ticket","urgent":false},"method":"POST","normalizedPath":"/v1/tickets","orderedQueryPairs":[],"origin":"https://api.example.com","profile":"generic-http.provider-action.v1","selectedHeaders":[["content-type","application/json"]]}',
+    actionDigest: "sha256:752177b236026961eae086d4a65b1e147fd015c8a595baa2d9f8769521736675",
+    policyArgs: { priority: 5, urgent: false },
+    safeSummary: { operation: "op.key", method: "POST", title: "café ☕ ticket", priority: 5 },
+  },
+];
