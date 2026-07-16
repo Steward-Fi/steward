@@ -55,6 +55,8 @@ export type {
   BatchAgentSpec,
   BatchCreateResult,
   BridgeBuildInput,
+  BridgeBuildResult,
+  BridgeHandoff,
   BridgeQuote,
   BridgeQuoteInput,
   BridgeSession,

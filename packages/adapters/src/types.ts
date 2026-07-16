@@ -126,3 +126,21 @@ export class AdapterUnavailableError extends Error {
     this.category = category;
   }
 }
+
+/**
+ * Thrown when a configured real provider is temporarily unreachable or returns
+ * an unverifiable response. Unlike {@link AdapterUnavailableError}, the
+ * operation exists and may succeed when the provider recovers, so routes map
+ * this to HTTP 503.
+ */
+export class AdapterProviderError extends Error {
+  readonly category: AdapterCategory;
+  readonly provider: string;
+
+  constructor(category: AdapterCategory, provider: string, message: string) {
+    super(message);
+    this.name = "AdapterProviderError";
+    this.category = category;
+    this.provider = provider;
+  }
+}

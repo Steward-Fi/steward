@@ -11,6 +11,7 @@ import {
   Transaction,
   type TransactionInstruction,
 } from "@solana/web3.js";
+import { getKnownToken } from "@stwd/shared";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
@@ -561,7 +562,7 @@ export async function getSolanaBalance(
 export interface SplTokenBalance {
   mint: string;
   token: string;
-  symbol: "SPL";
+  symbol: string;
   balance: string;
   formatted: string;
   decimals: number;
@@ -578,12 +579,15 @@ function formatBaseUnits(amount: string, decimals: number): string {
 /**
  * Query parsed SPL Token and Token-2022 balances owned by a Solana address.
  *
- * This is a direct wallet RPC read, not an indexed portfolio source; token
- * metadata such as ticker symbols is intentionally not inferred here.
+ * This is a direct wallet RPC read, not an indexed portfolio source. Steward
+ * labels only assets in its audited local token registry; unknown mints remain
+ * `SPL` rather than trusting mutable, remote token metadata. `chainId` defaults
+ * to Solana mainnet (101), so devnet callers must pass 102 explicitly.
  */
 export async function getSplTokenBalances(
   address: string,
   rpcUrl: string,
+  chainId = 101,
 ): Promise<SplTokenBalance[]> {
   const connection = new Connection(rpcUrl, "confirmed");
   const owner = new PublicKey(address);
@@ -613,13 +617,15 @@ export async function getSplTokenBalances(
     .filter(([, value]) => value.balance > 0n)
     .map(([mint, value]) => {
       const balance = value.balance.toString();
+      const knownToken = getKnownToken(chainId, mint);
+      const decimals = knownToken?.decimals ?? value.decimals;
       return {
         mint,
         token: mint,
-        symbol: "SPL",
+        symbol: knownToken?.symbol ?? "SPL",
         balance,
-        formatted: formatBaseUnits(balance, value.decimals),
-        decimals: value.decimals,
+        formatted: formatBaseUnits(balance, decimals),
+        decimals,
       };
     });
 }
