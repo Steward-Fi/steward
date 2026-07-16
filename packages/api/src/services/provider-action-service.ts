@@ -109,8 +109,6 @@ export interface CumulativeSpendReservationHandle {
 export interface WindowedInvokeReservationHandle {
   agentId: string;
   operationKey: string;
-  windowSeconds: number;
-  max: number;
   reservationId: string;
 }
 
@@ -332,7 +330,7 @@ type PolicyResult = {
   evaluation: ProviderPolicyEvaluationV1;
   decisionId: string;
   cumulativeSpendReservations: CumulativeSpendReservationHandle[];
-  windowedInvokeReservations: WindowedInvokeReservationHandle[];
+  windowedInvokeReservation?: WindowedInvokeReservationHandle;
 };
 
 class ProviderActionService {
@@ -426,7 +424,7 @@ class ProviderActionService {
     // #206: hoisted so the catch/drain-failure paths can reclaim reservations
     // even where TS narrows `policy` to never inside the tx-callback flow.
     let cumulativeSpendReservations: CumulativeSpendReservationHandle[] = [];
-    let windowedInvokeReservations: WindowedInvokeReservationHandle[] = [];
+    let windowedInvokeReservation: WindowedInvokeReservationHandle | undefined;
     let requestHash = "";
     const effects: {
       access: "allow" | "deny";
@@ -509,7 +507,7 @@ class ProviderActionService {
               })
             : null;
         cumulativeSpendReservations = policy?.cumulativeSpendReservations ?? [];
-        windowedInvokeReservations = policy?.windowedInvokeReservations ?? [];
+        windowedInvokeReservation = policy?.windowedInvokeReservation;
 
         effects.access = access.effect;
         effects.policy =
@@ -664,7 +662,7 @@ class ProviderActionService {
       // budget. This is a KNOWN non-execution (distinct from the stub-threw
       // outcome_unknown), so release is correct + fail-closed on the deny side.
       await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
-      await this.finalizeWindowedInvoke(windowedInvokeReservations, "failure");
+      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
       // A missing PR1 execution dependency (route/credential) fails approval
       // creation CLOSED (spec §5.2) — surfaced as an evidence failure so no
       // partial approval arm is ever visible.
@@ -711,7 +709,7 @@ class ProviderActionService {
       // is exactly the replayable-execute case.
       if (effects.status !== "allowed_stub") {
         await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
-        await this.finalizeWindowedInvoke(windowedInvokeReservations, "failure");
+        await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
       }
       return {
         kind: "evidence_failure",
@@ -726,7 +724,7 @@ class ProviderActionService {
       // Access denied => policy never ran => no reservations to release, but be
       // defensive in case a future path reserves before access resolves.
       await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
-      await this.finalizeWindowedInvoke(windowedInvokeReservations, "failure");
+      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
       return {
         kind: "access_denied",
         code: access.doc.reasonCode,
@@ -745,7 +743,7 @@ class ProviderActionService {
         (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [],
         "failure",
       );
-      await this.finalizeWindowedInvoke(windowedInvokeReservations, "failure");
+      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
       const code = (policy as PolicyResult | null)?.doc.reasonCodes[0] ?? "POLICY_HARD_DENY";
       return {
         kind: "policy_denied",
@@ -764,7 +762,7 @@ class ProviderActionService {
         (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [],
         "failure",
       );
-      await this.finalizeWindowedInvoke(windowedInvokeReservations, "failure");
+      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
       return {
         kind: "approval_required",
         code: "APPROVAL_REQUIRED",
@@ -801,7 +799,7 @@ class ProviderActionService {
     const outcome = stub.ok ? "success" : "failure";
     await this.finalizeCumulativeSpend(csReservations, outcome);
     await this.finalizeWindowedInvoke(
-      (policy as PolicyResult | null)?.windowedInvokeReservations ?? [],
+      (policy as PolicyResult | null)?.windowedInvokeReservation,
       outcome,
     );
     // Record the narrow allowed_stub -> stub_succeeded|stub_failed transition.
@@ -1237,20 +1235,16 @@ class ProviderActionService {
    * slot was taken.
    */
   private async finalizeWindowedInvoke(
-    reservations: WindowedInvokeReservationHandle[],
+    reservation: WindowedInvokeReservationHandle | undefined,
     outcome: "success" | "failure",
   ): Promise<void> {
-    if (reservations.length === 0) return;
-    if (outcome === "success") return; // keep every slot counted for its window
-    await Promise.all(
-      reservations.map((r) =>
-        releaseWindowedInvoke({
-          agentId: r.agentId,
-          operationKey: r.operationKey,
-          reservationId: r.reservationId,
-        }).catch(() => undefined),
-      ),
-    );
+    if (!reservation) return;
+    if (outcome === "success") return; // keep the slot counted for its windows
+    await releaseWindowedInvoke({
+      agentId: reservation.agentId,
+      operationKey: reservation.operationKey,
+      reservationId: reservation.reservationId,
+    }).catch(() => undefined);
   }
 
   // ── Policy evaluation (spec §6.2 / §6.3) ──
@@ -1271,10 +1265,10 @@ class ProviderActionService {
     /** Atomic cumulative-spend reservations taken during this evaluation. Settle
      *  on known-success, release on known-failure/deny, leave on outcome_unknown. */
     cumulativeSpendReservations: CumulativeSpendReservationHandle[];
-    /** The atomic windowed-invoke (maxCalls) reservation slots, one per count cap.
-     *  Settle (keep) on known-success, release on deny/failure, leave on
-     *  outcome_unknown. */
-    windowedInvokeReservations: WindowedInvokeReservationHandle[];
+    /** The atomic windowed-invoke (maxCalls) reservation slot (one per invoke,
+     *  covering ALL count windows). Settle (keep) on known-success, release on
+     *  deny/failure, leave on outcome_unknown. */
+    windowedInvokeReservation?: WindowedInvokeReservationHandle;
   }> {
     const decidedAt = new Date().toISOString();
     const decisionId = randomUUID();
@@ -1320,55 +1314,41 @@ class ProviderActionService {
     // windowedInvokeCount undefined => a maxCalls rule fails closed
     // (POLICY_INPUT_UNAVAILABLE). The slot is settled (kept) on a known-success
     // allow and released on any deny/failure below.
+    // #206 configurable count caps: ATOMICALLY reserve ONE invoke slot against
+    // ALL count windows at once (a single invoke is counted ONCE across an hourly
+    // AND a daily cap; codex P2). Each window's count is fed to the composer keyed
+    // by its own bucket. A rejection on ANY window denies (no slot taken); a
+    // Redis failure feeds every cap AT its max so the composer fails closed.
     const govMaxCalls = extractGoverningMaxCalls(rules, operation.operationKey);
     let windowedInvokeCounts: Record<string, number> | undefined;
-    const windowedInvokeReservations: WindowedInvokeReservationHandle[] = [];
+    let windowedInvokeReservation: WindowedInvokeReservationHandle | undefined;
     if (govMaxCalls.length > 0) {
-      windowedInvokeCounts = {};
-      let anyCountDeny = false;
-      for (const cap of govMaxCalls) {
+      const counts: Record<string, number> = {};
+      windowedInvokeCounts = counts;
+      const wr = await reserveWindowedInvoke({
+        agentId: args.actorAgentId,
+        operationKey: operation.operationKey,
+        caps: govMaxCalls.map((c) => ({ windowSeconds: c.windowSeconds, max: c.max })),
+      });
+      govMaxCalls.forEach((cap, i) => {
         const bucketKey = windowedInvokeBucketKey({
           windowSeconds: cap.windowSeconds,
           max: cap.max,
         });
-        const wr = await reserveWindowedInvoke({
+        // On success feed the real prior count; on rejection/absence feed AT the
+        // cap so the composer denies (count >= maxCalls) for the breaching cap.
+        const prior = wr.priorCounts[i];
+        counts[bucketKey] = wr.ok && typeof prior === "number" ? prior : (prior ?? cap.max);
+      });
+      if (wr.ok && wr.reservationId !== undefined) {
+        windowedInvokeReservation = {
           agentId: args.actorAgentId,
           operationKey: operation.operationKey,
-          windowSeconds: cap.windowSeconds,
-          max: cap.max,
-        });
-        if (wr.ok) {
-          windowedInvokeCounts[bucketKey] = wr.priorCount;
-          if (wr.reservationId !== undefined) {
-            windowedInvokeReservations.push({
-              agentId: args.actorAgentId,
-              operationKey: operation.operationKey,
-              windowSeconds: cap.windowSeconds,
-              max: cap.max,
-              reservationId: wr.reservationId,
-            });
-          }
-        } else {
-          // Rejected at the cap (or Redis failure): feed a count AT the cap so the
-          // composer denies (count >= maxCalls). No slot was taken for this cap.
-          windowedInvokeCounts[bucketKey] = cap.max;
-          anyCountDeny = true;
-        }
+          reservationId: wr.reservationId,
+        };
       }
-      // If ANY count cap denied, release the slots we DID take on the OTHER caps
-      // so a denied invoke never consumes a call slot.
-      if (anyCountDeny && windowedInvokeReservations.length > 0) {
-        await Promise.all(
-          windowedInvokeReservations.map((r) =>
-            releaseWindowedInvoke({
-              agentId: r.agentId,
-              operationKey: r.operationKey,
-              reservationId: r.reservationId,
-            }).catch(() => undefined),
-          ),
-        );
-        windowedInvokeReservations.length = 0;
-      }
+      // A rejected multi-cap reserve takes NO slot, so there is nothing to
+      // release here; the composer will deny from the fed counts.
     }
 
     const context: ProviderPolicyContext = {
@@ -1470,7 +1450,7 @@ class ProviderActionService {
       evaluation,
       decisionId,
       cumulativeSpendReservations: cumulative.reservations,
-      windowedInvokeReservations,
+      ...(windowedInvokeReservation !== undefined ? { windowedInvokeReservation } : {}),
     };
   }
 

@@ -255,31 +255,82 @@ describeRedis("fail closed", () => {
 
 describeRedis("windowed invoke count (#206 maxCalls atomic reservation)", () => {
   test("reserve admits under cap, rejects at cap (single-winner)", async () => {
-    const base = { agentId: AGENT, operationKey: "wallet.transfer", windowSeconds: 3600, max: 2 };
+    const base = {
+      agentId: AGENT,
+      operationKey: "wallet.transfer",
+      caps: [{ windowSeconds: 3600, max: 2 }],
+    };
     const r1 = await reserveWindowedInvoke(base);
     expect(r1.ok).toBe(true);
-    expect(r1.priorCount).toBe(0);
+    expect(r1.priorCounts[0]).toBe(0);
     const r2 = await reserveWindowedInvoke(base);
     expect(r2.ok).toBe(true);
-    expect(r2.priorCount).toBe(1);
-    // third is at the cap => reject.
+    expect(r2.priorCounts[0]).toBe(1);
     const r3 = await reserveWindowedInvoke(base);
     expect(r3.ok).toBe(false);
-    expect(r3.priorCount).toBe(2);
-    expect(await getWindowedInvokeCount(base)).toBe(2);
+    expect(r3.priorCounts[0]).toBe(2);
+    expect(
+      await getWindowedInvokeCount({
+        agentId: AGENT,
+        operationKey: "wallet.transfer",
+        windowSeconds: 3600,
+      }),
+    ).toBe(2);
+  });
+
+  test("multi-window: one invoke counted ONCE across an hourly AND daily cap (codex P2)", async () => {
+    const caps = [
+      { windowSeconds: 3600, max: 2 },
+      { windowSeconds: 86400, max: 10 },
+    ];
+    const base = { agentId: AGENT, operationKey: "op.multi", caps };
+    const r1 = await reserveWindowedInvoke(base);
+    expect(r1.ok).toBe(true);
+    expect(r1.priorCounts).toEqual([0, 0]);
+    // second invoke: the SAME single prior entry is seen by BOTH windows (1, 1),
+    // not (2, 1) - the invoke was counted once, not once per cap.
+    const r2 = await reserveWindowedInvoke(base);
+    expect(r2.ok).toBe(true);
+    expect(r2.priorCounts).toEqual([1, 1]);
+    // third: hourly at cap 2 => reject even though daily has room.
+    const r3 = await reserveWindowedInvoke(base);
+    expect(r3.ok).toBe(false);
+    expect(r3.priorCounts[0]).toBe(2);
+    // the stream holds exactly 2 entries.
+    expect(
+      await getWindowedInvokeCount({
+        agentId: AGENT,
+        operationKey: "op.multi",
+        windowSeconds: 86400,
+      }),
+    ).toBe(2);
   });
 
   test("100 parallel invoke reserves against maxCalls=10 admit exactly 10", async () => {
-    const base = { agentId: AGENT, operationKey: "op.race", windowSeconds: 3600, max: 10 };
+    const base = {
+      agentId: AGENT,
+      operationKey: "op.race",
+      caps: [{ windowSeconds: 3600, max: 10 }],
+    };
     const results = await Promise.all(
       Array.from({ length: 100 }, () => reserveWindowedInvoke(base)),
     );
     expect(results.filter((r) => r.ok).length).toBe(10);
-    expect(await getWindowedInvokeCount(base)).toBe(10);
+    expect(
+      await getWindowedInvokeCount({
+        agentId: AGENT,
+        operationKey: "op.race",
+        windowSeconds: 3600,
+      }),
+    ).toBe(10);
   });
 
   test("release reclaims an invoke slot", async () => {
-    const base = { agentId: AGENT, operationKey: "op.rel", windowSeconds: 3600, max: 1 };
+    const base = {
+      agentId: AGENT,
+      operationKey: "op.rel",
+      caps: [{ windowSeconds: 3600, max: 1 }],
+    };
     const r = await reserveWindowedInvoke(base);
     expect(r.ok).toBe(true);
     expect((await reserveWindowedInvoke(base)).ok).toBe(false); // cap full
@@ -295,8 +346,7 @@ describeRedis("windowed invoke count (#206 maxCalls atomic reservation)", () => 
     const r = await reserveWindowedInvoke({
       agentId: AGENT,
       operationKey: "op.big",
-      windowSeconds: 2_592_001,
-      max: 3,
+      caps: [{ windowSeconds: 2_592_001, max: 3 }],
     });
     expect(r.ok).toBe(false);
   });

@@ -347,21 +347,26 @@ export async function getCumulativeSpendSum(
 
 /**
  * #206 configurable count cap (maxCalls + callWindow): ATOMICALLY reserve ONE
- * invoke against the trailing-window count. Returns ok=false when the count is
- * already at the cap (single-winner: concurrent invokes cannot collectively
- * exceed maxCalls). Implemented over the same stream machinery in a reserved
- * `__calls__` currency, amount=1. Returns the reservationId so a failed outcome
- * can release the slot. Returns { ok:false } on a Redis error (fail closed).
+ * invoke against EVERY count window governing the operation. The invoke is added
+ * to the operation-level `__calls__` stream EXACTLY ONCE (amount=1), and each
+ * cap's window is checked atomically - so combining an hourly AND a daily cap
+ * never double-counts a single invoke (codex P2), and concurrent invokes cannot
+ * collectively exceed any cap (single-winner). Returns ok=false when ANY cap is
+ * at its limit, plus the per-cap prior counts (same order as `caps`). Returns
+ * { ok:false } on a Redis error (fail closed).
  */
 export async function reserveWindowedInvoke(input: {
   agentId: string;
   operationKey: string;
-  windowSeconds: number;
-  max: number;
+  caps: CumulativeSpendCap[];
   now?: number;
-}): Promise<{ ok: boolean; priorCount: number; reservationId?: string }> {
-  if (!isValidWindow(input.windowSeconds) || !isNonNegInt(input.max)) {
-    return { ok: false, priorCount: 0 };
+}): Promise<{ ok: boolean; priorCounts: number[]; reservationId?: string }> {
+  if (
+    !Array.isArray(input.caps) ||
+    input.caps.length === 0 ||
+    input.caps.some((c) => !isValidWindow(c.windowSeconds) || !isNonNegInt(c.max))
+  ) {
+    return { ok: false, priorCounts: [] };
   }
   try {
     const res = await reserveCumulativeSpend({
@@ -371,17 +376,17 @@ export async function reserveWindowedInvoke(input: {
         scopeKey: input.operationKey,
         currency: WINDOWED_INVOKE_CURRENCY,
       },
-      caps: [{ windowSeconds: input.windowSeconds, max: input.max }],
+      caps: input.caps,
       amount: 1,
       now: input.now,
     });
     return {
       ok: res.ok,
-      priorCount: res.priorSums[0] ?? 0,
+      priorCounts: res.priorSums,
       ...(res.reservationId !== undefined ? { reservationId: res.reservationId } : {}),
     };
   } catch {
-    return { ok: false, priorCount: 0 };
+    return { ok: false, priorCounts: [] };
   }
 }
 
