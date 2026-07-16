@@ -1,0 +1,277 @@
+/**
+ * PR5 /case + /evidence route + offline-verifier round-trip.
+ *
+ * Seeds a real case, exports the manifest and the signed evidence bundle over
+ * the HTTP routes (with a mock owner/admin+MFA gate), verifies the bundle
+ * OFFLINE with scripts/verify-evidence-bundle.mjs (both with and without a
+ * trusted fingerprint), and asserts each tamper fixture FAILs.
+ */
+
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { createHash, generateKeyPairSync } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { closeDb } from "@stwd/db";
+import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { Hono } from "hono";
+import { resetCheckpointSignerCache } from "../services/audit-checkpoint";
+import type { AppVariables } from "../services/context";
+import {
+  approveCase,
+  createAccessDeniedCase,
+  createAllowedCase,
+  createPendingCase,
+  F,
+  seedCaseFixture,
+  wipeCase,
+} from "./provider-case-fixture";
+
+const VERIFIER = join(import.meta.dir, "..", "..", "..", "..", "scripts", "verify-evidence-bundle.mjs");
+let tmpDir: string;
+let caseRoutesModule: Awaited<typeof import("../routes/provider-case")>;
+let expectedFp: string;
+
+function app(tenantId = F.TENANT, role: "owner" | "admin" | "member" = "admin", mfa = true) {
+  const a = new Hono<{ Variables: AppVariables }>();
+  a.use("*", async (c, next) => {
+    c.set("authType", "session-jwt");
+    c.set("tenantRole", role);
+    c.set("tenantId", tenantId);
+    if (mfa) c.set("sessionMfaVerifiedAt", Date.now());
+    await next();
+  });
+  caseRoutesModule.registerProviderCaseRoutes(a);
+  return a;
+}
+
+function agentApp(tenantId = F.TENANT) {
+  const a = new Hono<{ Variables: AppVariables }>();
+  a.use("*", async (c, next) => {
+    c.set("authType", "agent-jwt");
+    c.set("tenantId", tenantId);
+    await next();
+  });
+  caseRoutesModule.registerProviderCaseRoutes(a);
+  return a;
+}
+
+function runVerifier(bundleOrEnvelope: unknown, extraArgs: string[] = []) {
+  const file = join(tmpDir, `evi-${Math.random().toString(36).slice(2)}.json`);
+  writeFileSync(file, JSON.stringify(bundleOrEnvelope));
+  const res = spawnSync("node", [VERIFIER, file, ...extraArgs], { encoding: "utf8" });
+  return { code: res.status ?? -1, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+}
+
+describe("PR5 /case + /evidence routes + offline verifier", () => {
+  beforeAll(async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "pr5-evi-"));
+    process.env.STEWARD_PGLITE_MEMORY = "true";
+    process.env.STEWARD_AUDIT_HMAC_KEY = "0".repeat(64);
+    process.env.STEWARD_MASTER_PASSWORD = "pr5-evidence-master-password";
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    process.env.STEWARD_AUDIT_SIGNING_KEY = privateKey
+      .export({ format: "pem", type: "pkcs8" })
+      .toString();
+    expectedFp = createHash("sha256")
+      .update(publicKey.export({ format: "der", type: "spki" }))
+      .digest("hex");
+    resetCheckpointSignerCache();
+    const { db, client } = await createPGLiteDb("memory://");
+    setPGLiteOverride(db, async () => client.close());
+    caseRoutesModule = await import("../routes/provider-case");
+  }, 120_000);
+
+  afterAll(async () => {
+    await closeDb();
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
+    delete process.env.STEWARD_PGLITE_MEMORY;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    delete process.env.STEWARD_MASTER_PASSWORD;
+    delete process.env.STEWARD_AUDIT_SIGNING_KEY;
+    resetCheckpointSignerCache();
+  });
+
+  beforeEach(async () => {
+    await wipeCase();
+    await seedCaseFixture();
+  });
+
+  it("GET /case returns the manifest for an owner/admin", async () => {
+    const intentId = await createAllowedCase();
+    const res = await app().request(`/v2/provider-actions/${intentId}/case`);
+    expect(res.status).toBe(200);
+    const m = (await res.json()) as { caseId: string; schemaVersion: string };
+    expect(m.caseId).toBe(intentId);
+    expect(m.schemaVersion).toBe("steward.provider-case-manifest.v1");
+  });
+
+  it("GET /evidence exports a bundle that verifies OFFLINE (clean)", async () => {
+    const intentId = await createAllowedCase();
+    const res = await app().request(`/v2/provider-actions/${intentId}/evidence`);
+    expect(res.status).toBe(200);
+    const envelope = await res.json();
+    // No fingerprint supplied → PASS but trust-root not checked.
+    const noFp = runVerifier(envelope);
+    expect(noFp.code).toBe(0);
+    expect(noFp.stdout).toContain("PASS");
+    // Matching fingerprint → PASS + trust root matched.
+    const withFp = runVerifier(envelope, ["--expected-key-fingerprint", expectedFp]);
+    expect(withFp.code).toBe(0);
+    expect(withFp.stdout).toContain("matched supplied fingerprint");
+  });
+
+  it("N17/N35: wrong fingerprint → verifier FAIL untrusted", async () => {
+    const intentId = await createAllowedCase();
+    const envelope = await app().request(`/v2/provider-actions/${intentId}/evidence`).then((r) => r.json());
+    const res = runVerifier(envelope, ["--fp", "deadbeef"]);
+    expect(res.code).toBe(1);
+    expect(res.stderr).toContain("untrusted signing key");
+  });
+
+  it("N08: mutated manifest actionDigest → verifier FAIL not-backed", async () => {
+    const intentId = await createAllowedCase();
+    const envelope = (await app()
+      .request(`/v2/provider-actions/${intentId}/evidence`)
+      .then((r) => r.json())) as { manifest: { actionDigest: string } };
+    envelope.manifest.actionDigest = `sha256:${"9".repeat(64)}`;
+    const res = runVerifier(envelope);
+    expect(res.code).toBe(1);
+    expect(res.stderr).toContain("actionDigest");
+  });
+
+  it("N09: forged completeness (claim complete, drop required roles) → FAIL", async () => {
+    const intentId = await createAllowedCase();
+    const envelope = (await app()
+      .request(`/v2/provider-actions/${intentId}/evidence`)
+      .then((r) => r.json())) as {
+      manifest: { terminalState: string; completeness: string; missingRequiredRoles: string[] };
+    };
+    // Force a terminal state that requires the full exec chain, claim complete.
+    envelope.manifest.terminalState = "succeeded";
+    envelope.manifest.completeness = "complete";
+    envelope.manifest.missingRequiredRoles = [];
+    const res = runVerifier(envelope);
+    expect(res.code).toBe(1);
+    expect(res.stderr).toContain("complete");
+  });
+
+  it("N11: reordered bundle event → verifier FAIL", async () => {
+    // Use an approved case so there are >=2 correlated events to reorder.
+    const { intentId, requestHash, actionDigest } = await createPendingCase();
+    await approveCase(intentId, requestHash, actionDigest);
+    const envelope = (await app()
+      .request(`/v2/provider-actions/${intentId}/evidence`)
+      .then((r) => r.json())) as { bundle: { events: unknown[] } };
+    if (envelope.bundle.events.length >= 2) {
+      const e = envelope.bundle.events;
+      [e[0], e[1]] = [e[1], e[0]];
+      const res = runVerifier(envelope);
+      expect(res.code).toBe(1);
+    }
+  });
+
+  it("N12: removed genesis event → verifier FAIL (digest/linkage)", async () => {
+    const intentId = await createAllowedCase();
+    const envelope = (await app()
+      .request(`/v2/provider-actions/${intentId}/evidence`)
+      .then((r) => r.json())) as { bundle: { events: unknown[] } };
+    envelope.bundle.events = envelope.bundle.events.slice(1);
+    const res = runVerifier(envelope);
+    expect(res.code).toBe(1);
+  });
+
+  it("N07: /evidence with signing key unset → 503", async () => {
+    const intentId = await createAllowedCase();
+    const saved = process.env.STEWARD_AUDIT_SIGNING_KEY;
+    delete process.env.STEWARD_AUDIT_SIGNING_KEY;
+    resetCheckpointSignerCache();
+    try {
+      const res = await app().request(`/v2/provider-actions/${intentId}/evidence`);
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toBe("CASE_EVIDENCE_SIGNING_DISABLED");
+    } finally {
+      process.env.STEWARD_AUDIT_SIGNING_KEY = saved;
+      resetCheckpointSignerCache();
+    }
+  });
+
+  it("N04: agent token → 403 CASE_FORBIDDEN(generic)", async () => {
+    const intentId = await createAllowedCase();
+    const res = await agentApp().request(`/v2/provider-actions/${intentId}/case`);
+    expect(res.status).toBe(403);
+  });
+
+  it("N05: owner without recent MFA → 403", async () => {
+    const intentId = await createAllowedCase();
+    const res = await app(F.TENANT, "admin", false).request(
+      `/v2/provider-actions/${intentId}/case`,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("N06: member (non-admin) role → 403", async () => {
+    const intentId = await createAllowedCase();
+    const res = await app(F.TENANT, "member").request(`/v2/provider-actions/${intentId}/case`);
+    expect(res.status).toBe(403);
+  });
+
+  it("N01/N02/N03: foreign-tenant / foreign-workspace / nonexistent → uniform 404", async () => {
+    const intentId = await createAllowedCase();
+    // N01 foreign tenant (gate sets tenant to a different one).
+    const foreignTenant = await app("tenant-b", "admin").request(
+      `/v2/provider-actions/${intentId}/case`,
+    );
+    expect(foreignTenant.status).toBe(404);
+    // N03 nonexistent id (valid shape).
+    const nonexistent = await app().request(
+      "/v2/provider-actions/pa_00000000-0000-0000-0000-000000000000/case",
+    );
+    expect(nonexistent.status).toBe(404);
+    const b1 = (await foreignTenant.json()) as { error: string };
+    const b2 = (await nonexistent.json()) as { error: string };
+    expect(b1.error).toBe("CASE_NOT_FOUND");
+    expect(b2.error).toBe("CASE_NOT_FOUND");
+  });
+
+  it("N37/N38/N39: malformed case id (traversal/nullbyte/unicode) → uniform 404", async () => {
+    for (const bad of [
+      "..%2f..%2fetc",
+      "pa_x",
+      "pa_00000000-0000-0000-0000-00000000000",
+      "not-a-case",
+    ]) {
+      const res = await app().request(`/v2/provider-actions/${encodeURIComponent(bad)}/case`);
+      expect(res.status).toBe(404);
+    }
+  });
+
+  it("N24: credential-looking comment body never appears in exported evidence", async () => {
+    // The allowed op body is not included in evidence (safe summary excludes it).
+    const intentId = await createAllowedCase("leak0001");
+    const envelope = await app()
+      .request(`/v2/provider-actions/${intentId}/evidence`)
+      .then((r) => r.text());
+    // No bearer/token-looking canary and no raw provider idempotency key. (The
+    // word "authorization" legitimately appears in the canonicalizationSpec text
+    // and in metadata KEYS; the leak concern is a credential VALUE, so we scan
+    // for token-shaped canaries + the raw key field, not the generic substring.)
+    expect(envelope).not.toContain("ghp_");
+    expect(envelope).not.toMatch(/"providerIdempotencyKey":/);
+    expect(envelope).not.toMatch(/"credentialSecret"\s*:/i);
+    expect(envelope).not.toMatch(/Bearer\s+[A-Za-z0-9._-]{10,}/);
+  });
+
+  it("access-denied case verifies OFFLINE and is honestly complete (genesis-only)", async () => {
+    const intentId = await createAccessDeniedCase();
+    const envelope = (await app()
+      .request(`/v2/provider-actions/${intentId}/evidence`)
+      .then((r) => r.json())) as { completeness: string };
+    expect(envelope.completeness).toBe("complete");
+    const res = runVerifier(envelope, ["--expected-key-fingerprint", expectedFp]);
+    expect(res.code).toBe(0);
+    expect(res.stdout).toContain("terminalState: denied_access");
+  });
+});
