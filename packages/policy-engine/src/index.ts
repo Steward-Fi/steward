@@ -34,6 +34,7 @@ export {
   PROVIDER_POLICY_REASON,
   parseCapabilityIntentConfigForTest,
   parseIso8601DurationSecondsForTest,
+  windowedInvokeBucketKey,
   X_POST_PRICE_TABLE_V1,
   X_POST_PRICE_TABLE_VERSION,
 } from "./capability-intent";

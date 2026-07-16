@@ -1261,14 +1261,15 @@ export interface ProviderPolicyContext {
    *  unavailable => fail closed (hard_deny, POLICY_INPUT_UNAVAILABLE). */
   readonly invokeCount1h?: number;
   /**
-   * Authoritative invoke count over the rule's configurable `callWindow` (#206),
-   * supplied by the invoke layer for the exact window the rule declares.
-   * `undefined` when a `maxCalls` rule is present but the count is unwired =>
-   * fail closed (POLICY_INPUT_UNAVAILABLE). Kept separate from `invokeCount1h`
-   * so the hardcoded-hour cap and the configurable-window cap never borrow each
-   * other's counter.
+   * Authoritative invoke counts for configurable count caps (#206), keyed by the
+   * per-cap bucket key ({@link windowedInvokeBucketKey}: window+max). Two
+   * `maxCalls` rules with DIFFERENT windows each read their OWN count, so a daily
+   * cap can never be evaluated against an hourly count (codex P2). A missing
+   * entry for a rule's bucket => fail closed (POLICY_INPUT_UNAVAILABLE). Kept
+   * separate from `invokeCount1h` so the hardcoded-hour cap and the configurable
+   * caps never borrow each other's counter.
    */
-  readonly windowedInvokeCount?: number;
+  readonly windowedInvokeCounts?: Readonly<Record<string, number>>;
   /**
    * IN-MEMORY-ONLY tweet text for `contentPolicy.blockedPatterns` matching.
    * Deliberately NOT part of {@link args} (which is validated scalars only) and
@@ -1346,6 +1347,15 @@ export function cumulativeSpendBucketKey(cap: {
   currency: string;
 }): string {
   return `${cap.aggregateOver}:${cap.windowSeconds}:${cap.max}:${cap.currency}`;
+}
+
+/**
+ * Stable bucket key for a configurable count cap (maxCalls). Two maxCalls rules
+ * with different windows (or maxes) get different keys and therefore independent
+ * counts. Callers (the invoke layer) MUST use this to key `windowedInvokeCounts`.
+ */
+export function windowedInvokeBucketKey(cap: { windowSeconds: number; max: number }): string {
+  return `${cap.windowSeconds}:${cap.max}`;
 }
 
 export interface ProviderPolicyRuleResult {
@@ -1566,18 +1576,23 @@ function evaluateProviderConstraints(
   }
 
   // Configurable count cap (#206): maxCalls over the trailing callWindow. The
-  // invoke layer supplies the count for THAT window via ctx.windowedInvokeCount;
-  // absent => fail closed (same discipline as maxCallsPerHour). A malformed
-  // callWindow is already rejected at store time, but re-validate at runtime so a
-  // hand-edited row cannot slip an unbounded window past the gate.
+  // invoke layer supplies the count for THIS EXACT cap (window+max) via
+  // ctx.windowedInvokeCounts, keyed by windowedInvokeBucketKey - so two maxCalls
+  // rules with DIFFERENT windows each read their own count (codex P2). Absent =>
+  // fail closed (same discipline as maxCallsPerHour). A malformed callWindow is
+  // rejected at store time, but re-validate at runtime so a hand-edited row
+  // cannot slip an unbounded window past the gate.
   if (constraints.maxCalls !== undefined) {
-    if (
-      typeof constraints.callWindow !== "string" ||
-      parseIso8601DurationSeconds(constraints.callWindow) === null
-    ) {
+    const windowSeconds =
+      typeof constraints.callWindow === "string"
+        ? parseIso8601DurationSeconds(constraints.callWindow)
+        : null;
+    if (windowSeconds === null) {
       return PROVIDER_POLICY_REASON.CONFIGURATION_INVALID;
     }
-    const count = ctx.windowedInvokeCount;
+    const counts = ctx.windowedInvokeCounts;
+    if (!counts) return PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE;
+    const count = counts[windowedInvokeBucketKey({ windowSeconds, max: constraints.maxCalls })];
     if (typeof count !== "number" || !Number.isFinite(count))
       return PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE;
     if (count >= constraints.maxCalls) return PROVIDER_POLICY_REASON.HARD_DENY;

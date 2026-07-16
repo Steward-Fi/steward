@@ -26,6 +26,7 @@ import {
   type ProviderPolicyContext,
   type ProviderPolicyRule,
   parseCapabilityIntentConfigForTest,
+  windowedInvokeBucketKey,
 } from "../capability-intent.js";
 
 const WINDOW_24H_SECONDS = 86400;
@@ -288,29 +289,75 @@ describe("configurable count window (maxCalls + callWindow)", () => {
     expect(d.reasonCodes).toContain(PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE);
   });
 
-  it("maxCalls+callWindow reads windowedInvokeCount, denies at cap", () => {
+  it("maxCalls+callWindow reads the per-cap count, denies at cap", () => {
     const r = rule({
       capabilities: [OP],
       effect: "allow",
       constraints: { maxCalls: 3, callWindow: "P1D" },
     });
-    expect(composeProviderActionPolicyDecision([r], ctx({ windowedInvokeCount: 2 })).effect).toBe(
-      "allow",
-    );
-    expect(composeProviderActionPolicyDecision([r], ctx({ windowedInvokeCount: 3 })).effect).toBe(
-      "hard_deny",
-    );
+    const k = windowedInvokeBucketKey({ windowSeconds: 86400, max: 3 });
+    expect(
+      composeProviderActionPolicyDecision([r], ctx({ windowedInvokeCounts: { [k]: 2 } })).effect,
+    ).toBe("allow");
+    expect(
+      composeProviderActionPolicyDecision([r], ctx({ windowedInvokeCounts: { [k]: 3 } })).effect,
+    ).toBe("hard_deny");
   });
 
-  it("maxCalls set but windowedInvokeCount absent => deny (INPUT_UNAVAILABLE)", () => {
+  it("maxCalls set but the count map is absent => deny (INPUT_UNAVAILABLE)", () => {
     const r = rule({
       capabilities: [OP],
       effect: "allow",
       constraints: { maxCalls: 3, callWindow: "PT1H" },
     });
-    const d = composeProviderActionPolicyDecision([r], ctx({ windowedInvokeCount: undefined }));
+    const d = composeProviderActionPolicyDecision([r], ctx({ windowedInvokeCounts: undefined }));
     expect(d.effect).toBe("hard_deny");
     expect(d.reasonCodes).toContain(PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE);
+  });
+
+  it("two maxCalls rules with DIFFERENT windows each read their OWN count (codex P2)", () => {
+    // 10/PT1H and 20/P1D. The hourly count is 10 (at cap) while the daily is 5.
+    // The hourly rule denies; the daily would pass. Deny wins, and crucially the
+    // daily rule is NOT evaluated against the hourly count.
+    const hourly = rule({
+      capabilities: [OP],
+      effect: "allow",
+      constraints: { maxCalls: 10, callWindow: "PT1H" },
+    });
+    const daily = rule({
+      capabilities: [OP],
+      effect: "allow",
+      constraints: { maxCalls: 20, callWindow: "P1D" },
+    });
+    const counts = {
+      [windowedInvokeBucketKey({ windowSeconds: 3600, max: 10 })]: 10,
+      [windowedInvokeBucketKey({ windowSeconds: 86400, max: 20 })]: 5,
+    };
+    expect(
+      composeProviderActionPolicyDecision([hourly, daily], ctx({ windowedInvokeCounts: counts }))
+        .effect,
+    ).toBe("hard_deny");
+
+    // Now invert: hourly under (5), daily AT cap (20). The daily rule must deny
+    // using ITS OWN count, not the hourly one.
+    const counts2 = {
+      [windowedInvokeBucketKey({ windowSeconds: 3600, max: 10 })]: 5,
+      [windowedInvokeBucketKey({ windowSeconds: 86400, max: 20 })]: 20,
+    };
+    expect(
+      composeProviderActionPolicyDecision([hourly, daily], ctx({ windowedInvokeCounts: counts2 }))
+        .effect,
+    ).toBe("hard_deny");
+
+    // Both under => allow.
+    const counts3 = {
+      [windowedInvokeBucketKey({ windowSeconds: 3600, max: 10 })]: 5,
+      [windowedInvokeBucketKey({ windowSeconds: 86400, max: 20 })]: 5,
+    };
+    expect(
+      composeProviderActionPolicyDecision([hourly, daily], ctx({ windowedInvokeCounts: counts3 }))
+        .effect,
+    ).toBe("allow");
   });
 });
 

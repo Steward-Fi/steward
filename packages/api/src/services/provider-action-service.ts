@@ -45,6 +45,7 @@ import {
   type ProviderPolicyContext,
   type ProviderPolicyEvaluationV1,
   type ProviderPolicyRule,
+  windowedInvokeBucketKey,
 } from "@stwd/policy-engine";
 import type { GithubActionBuild } from "@stwd/provider-github";
 import type { XActionBuild } from "@stwd/provider-x";
@@ -108,6 +109,8 @@ export interface CumulativeSpendReservationHandle {
 export interface WindowedInvokeReservationHandle {
   agentId: string;
   operationKey: string;
+  windowSeconds: number;
+  max: number;
   reservationId: string;
 }
 
@@ -329,7 +332,7 @@ type PolicyResult = {
   evaluation: ProviderPolicyEvaluationV1;
   decisionId: string;
   cumulativeSpendReservations: CumulativeSpendReservationHandle[];
-  windowedInvokeReservation?: WindowedInvokeReservationHandle;
+  windowedInvokeReservations: WindowedInvokeReservationHandle[];
 };
 
 class ProviderActionService {
@@ -423,7 +426,7 @@ class ProviderActionService {
     // #206: hoisted so the catch/drain-failure paths can reclaim reservations
     // even where TS narrows `policy` to never inside the tx-callback flow.
     let cumulativeSpendReservations: CumulativeSpendReservationHandle[] = [];
-    let windowedInvokeReservation: WindowedInvokeReservationHandle | undefined;
+    let windowedInvokeReservations: WindowedInvokeReservationHandle[] = [];
     let requestHash = "";
     const effects: {
       access: "allow" | "deny";
@@ -506,7 +509,7 @@ class ProviderActionService {
               })
             : null;
         cumulativeSpendReservations = policy?.cumulativeSpendReservations ?? [];
-        windowedInvokeReservation = policy?.windowedInvokeReservation;
+        windowedInvokeReservations = policy?.windowedInvokeReservations ?? [];
 
         effects.access = access.effect;
         effects.policy =
@@ -661,7 +664,7 @@ class ProviderActionService {
       // budget. This is a KNOWN non-execution (distinct from the stub-threw
       // outcome_unknown), so release is correct + fail-closed on the deny side.
       await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
-      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
+      await this.finalizeWindowedInvoke(windowedInvokeReservations, "failure");
       // A missing PR1 execution dependency (route/credential) fails approval
       // creation CLOSED (spec §5.2) — surfaced as an evidence failure so no
       // partial approval arm is ever visible.
@@ -696,10 +699,20 @@ class ProviderActionService {
     // ── Step 3: drain the required-audit outbox before the stub can run. ──
     const drained = await this.drainAuditOutbox(tenantId, intentId).catch(() => false);
     if (!drained) {
-      // #206: audit unavailable => the stub will NOT run (known non-execution).
-      // Reclaim the reservation so a required-audit outage does not leak budget.
-      await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
-      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
+      // #206 (codex P1): the binding ALREADY committed. If its status is an
+      // allow-committed `allowed_stub`, a later idempotent replay WILL execute it
+      // via outcomeFromBinding WITHOUT re-evaluating or re-reserving. Releasing
+      // the reservations here would then let that replay bypass the spend/count
+      // cap entirely (durable row authorizes the stub while Redis no longer holds
+      // the reservation). So for a replayable allow we DELIBERATELY DO NOT
+      // release - the reservation is treated as outcome_unknown and ages out
+      // (fail closed). For a denied/approval-committed binding the stub will
+      // never run on replay, so we DO reclaim. `effects.status === "allowed_stub"`
+      // is exactly the replayable-execute case.
+      if (effects.status !== "allowed_stub") {
+        await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
+        await this.finalizeWindowedInvoke(windowedInvokeReservations, "failure");
+      }
       return {
         kind: "evidence_failure",
         code: "EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE",
@@ -713,7 +726,7 @@ class ProviderActionService {
       // Access denied => policy never ran => no reservations to release, but be
       // defensive in case a future path reserves before access resolves.
       await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
-      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
+      await this.finalizeWindowedInvoke(windowedInvokeReservations, "failure");
       return {
         kind: "access_denied",
         code: access.doc.reasonCode,
@@ -732,7 +745,7 @@ class ProviderActionService {
         (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [],
         "failure",
       );
-      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
+      await this.finalizeWindowedInvoke(windowedInvokeReservations, "failure");
       const code = (policy as PolicyResult | null)?.doc.reasonCodes[0] ?? "POLICY_HARD_DENY";
       return {
         kind: "policy_denied",
@@ -751,7 +764,7 @@ class ProviderActionService {
         (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [],
         "failure",
       );
-      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
+      await this.finalizeWindowedInvoke(windowedInvokeReservations, "failure");
       return {
         kind: "approval_required",
         code: "APPROVAL_REQUIRED",
@@ -788,7 +801,7 @@ class ProviderActionService {
     const outcome = stub.ok ? "success" : "failure";
     await this.finalizeCumulativeSpend(csReservations, outcome);
     await this.finalizeWindowedInvoke(
-      (policy as PolicyResult | null)?.windowedInvokeReservation,
+      (policy as PolicyResult | null)?.windowedInvokeReservations ?? [],
       outcome,
     );
     // Record the narrow allowed_stub -> stub_succeeded|stub_failed transition.
@@ -1224,16 +1237,20 @@ class ProviderActionService {
    * slot was taken.
    */
   private async finalizeWindowedInvoke(
-    reservation: WindowedInvokeReservationHandle | undefined,
+    reservations: WindowedInvokeReservationHandle[],
     outcome: "success" | "failure",
   ): Promise<void> {
-    if (!reservation) return;
-    if (outcome === "success") return; // keep the slot counted for the window
-    await releaseWindowedInvoke({
-      agentId: reservation.agentId,
-      operationKey: reservation.operationKey,
-      reservationId: reservation.reservationId,
-    }).catch(() => undefined);
+    if (reservations.length === 0) return;
+    if (outcome === "success") return; // keep every slot counted for its window
+    await Promise.all(
+      reservations.map((r) =>
+        releaseWindowedInvoke({
+          agentId: r.agentId,
+          operationKey: r.operationKey,
+          reservationId: r.reservationId,
+        }).catch(() => undefined),
+      ),
+    );
   }
 
   // ── Policy evaluation (spec §6.2 / §6.3) ──
@@ -1254,9 +1271,10 @@ class ProviderActionService {
     /** Atomic cumulative-spend reservations taken during this evaluation. Settle
      *  on known-success, release on known-failure/deny, leave on outcome_unknown. */
     cumulativeSpendReservations: CumulativeSpendReservationHandle[];
-    /** The atomic windowed-invoke (maxCalls) reservation slot, if taken. Settle
-     *  (keep) on known-success, release on deny/failure, leave on outcome_unknown. */
-    windowedInvokeReservation?: WindowedInvokeReservationHandle;
+    /** The atomic windowed-invoke (maxCalls) reservation slots, one per count cap.
+     *  Settle (keep) on known-success, release on deny/failure, leave on
+     *  outcome_unknown. */
+    windowedInvokeReservations: WindowedInvokeReservationHandle[];
   }> {
     const decidedAt = new Date().toISOString();
     const decisionId = randomUUID();
@@ -1303,28 +1321,53 @@ class ProviderActionService {
     // (POLICY_INPUT_UNAVAILABLE). The slot is settled (kept) on a known-success
     // allow and released on any deny/failure below.
     const govMaxCalls = extractGoverningMaxCalls(rules, operation.operationKey);
-    let windowedInvokeCount: number | undefined;
-    let windowedInvokeReservation: WindowedInvokeReservationHandle | undefined;
-    if (govMaxCalls) {
-      const wr = await reserveWindowedInvoke({
-        agentId: args.actorAgentId,
-        operationKey: operation.operationKey,
-        windowSeconds: govMaxCalls.windowSeconds,
-        max: govMaxCalls.max,
-      });
-      if (wr.ok) {
-        windowedInvokeCount = wr.priorCount;
-        if (wr.reservationId !== undefined) {
-          windowedInvokeReservation = {
-            agentId: args.actorAgentId,
-            operationKey: operation.operationKey,
-            reservationId: wr.reservationId,
-          };
+    let windowedInvokeCounts: Record<string, number> | undefined;
+    const windowedInvokeReservations: WindowedInvokeReservationHandle[] = [];
+    if (govMaxCalls.length > 0) {
+      windowedInvokeCounts = {};
+      let anyCountDeny = false;
+      for (const cap of govMaxCalls) {
+        const bucketKey = windowedInvokeBucketKey({
+          windowSeconds: cap.windowSeconds,
+          max: cap.max,
+        });
+        const wr = await reserveWindowedInvoke({
+          agentId: args.actorAgentId,
+          operationKey: operation.operationKey,
+          windowSeconds: cap.windowSeconds,
+          max: cap.max,
+        });
+        if (wr.ok) {
+          windowedInvokeCounts[bucketKey] = wr.priorCount;
+          if (wr.reservationId !== undefined) {
+            windowedInvokeReservations.push({
+              agentId: args.actorAgentId,
+              operationKey: operation.operationKey,
+              windowSeconds: cap.windowSeconds,
+              max: cap.max,
+              reservationId: wr.reservationId,
+            });
+          }
+        } else {
+          // Rejected at the cap (or Redis failure): feed a count AT the cap so the
+          // composer denies (count >= maxCalls). No slot was taken for this cap.
+          windowedInvokeCounts[bucketKey] = cap.max;
+          anyCountDeny = true;
         }
-      } else if (wr.reservationId === undefined) {
-        // Rejected at the cap (or Redis failure): feed a count AT the cap so the
-        // composer denies (count >= maxCalls). No slot was taken.
-        windowedInvokeCount = govMaxCalls.max;
+      }
+      // If ANY count cap denied, release the slots we DID take on the OTHER caps
+      // so a denied invoke never consumes a call slot.
+      if (anyCountDeny && windowedInvokeReservations.length > 0) {
+        await Promise.all(
+          windowedInvokeReservations.map((r) =>
+            releaseWindowedInvoke({
+              agentId: r.agentId,
+              operationKey: r.operationKey,
+              reservationId: r.reservationId,
+            }).catch(() => undefined),
+          ),
+        );
+        windowedInvokeReservations.length = 0;
       }
     }
 
@@ -1340,9 +1383,9 @@ class ProviderActionService {
       // Trailing-hour count is not wired in PR2; rules that require it will
       // fail closed (POLICY_INPUT_UNAVAILABLE) exactly as specified.
       invokeCount1h: undefined,
-      // #206 configurable count cap: the trailing-window invoke count (undefined
+      // #206 configurable count caps: per-cap trailing-window counts (undefined
       // when unwired => a maxCalls rule fails closed).
-      ...(windowedInvokeCount !== undefined ? { windowedInvokeCount } : {}),
+      ...(windowedInvokeCounts !== undefined ? { windowedInvokeCounts } : {}),
       ...(policyText !== undefined ? { policyText } : {}),
       // #206 cumulative-spend aggregate + declaration. spendDeclaration absent =>
       // a cumulativeSpend rule fails closed (NO_SPEND_FIELD). cumulativeSpend
@@ -1427,7 +1470,7 @@ class ProviderActionService {
       evaluation,
       decisionId,
       cumulativeSpendReservations: cumulative.reservations,
-      ...(windowedInvokeReservation !== undefined ? { windowedInvokeReservation } : {}),
+      windowedInvokeReservations,
     };
   }
 
@@ -1891,7 +1934,9 @@ function extractGoverningCumulativeSpend(
 function extractGoverningMaxCalls(
   rules: ProviderPolicyRule[],
   operationKey: string,
-): { windowSeconds: number; max: number } | undefined {
+): Array<{ windowSeconds: number; max: number }> {
+  const out: Array<{ windowSeconds: number; max: number }> = [];
+  const seen = new Set<string>();
   for (const r of rules) {
     if (!r.enabled) continue;
     if (!capabilitySelectorMatches(r.config, operationKey)) continue;
@@ -1910,9 +1955,14 @@ function extractGoverningMaxCalls(
       // Malformed: leave it to the composer to hard-deny. Do NOT read a count.
       continue;
     }
-    return { windowSeconds, max: c.maxCalls };
+    // Each DISTINCT (window, max) is an independent count cap with its own count
+    // (codex P2). Dedupe identical caps.
+    const key = `${windowSeconds}:${c.maxCalls}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ windowSeconds, max: c.maxCalls });
   }
-  return undefined;
+  return out;
 }
 
 /**
