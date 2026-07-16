@@ -3,7 +3,7 @@ import { PublicKey } from "@solana/web3.js";
 import { AdapterProviderError, AdapterValidationError, type BridgeQuote } from "@stwd/adapters";
 import { MONERO_ON_SOLANA } from "@stwd/shared";
 import bs58 from "bs58";
-import { wxmrPlugin } from "../index";
+import { resolveRpcUrl, wxmrPlugin } from "../index";
 import {
   WXMR_BRIDGE_CONFIG_ACCOUNT,
   WXMR_BRIDGE_PROGRAM_ID,
@@ -576,6 +576,50 @@ describe("WxmrBridgeAdapter", () => {
     );
     expect(() => new WxmrBridgeAdapter({ rpcUrl: "http://127.0.0.1:8899" })).not.toThrow();
     expect(() => new WxmrBridgeAdapter({ rpcUrl: "http://localhost:8899" })).not.toThrow();
+  });
+
+  test("resolves the operator RPC in priority order and treats blank env values as unset", () => {
+    const original = {
+      wxmr: process.env.WXMR_SOLANA_RPC_URL,
+      solana: process.env.SOLANA_RPC_URL,
+    };
+    try {
+      // Both unset -> undefined so the adapter falls back to the public default.
+      process.env.WXMR_SOLANA_RPC_URL = undefined;
+      process.env.SOLANA_RPC_URL = undefined;
+      delete process.env.WXMR_SOLANA_RPC_URL;
+      delete process.env.SOLANA_RPC_URL;
+      expect(resolveRpcUrl()).toBeUndefined();
+
+      // The wxmr-specific var wins when it is a real value.
+      process.env.WXMR_SOLANA_RPC_URL = "https://wxmr-rpc.example.test";
+      process.env.SOLANA_RPC_URL = "https://shared-rpc.example.test";
+      expect(resolveRpcUrl()).toBe("https://wxmr-rpc.example.test");
+
+      // REGRESSION: Docker Compose passes `WXMR_SOLANA_RPC_URL: "${WXMR_SOLANA_RPC_URL:-}"`,
+      // so an operator who configures only SOLANA_RPC_URL receives a blank string
+      // here. A bare `??` would select "" and silently drop the operator RPC in
+      // favor of the public default; resolveRpcUrl must fall through instead.
+      process.env.WXMR_SOLANA_RPC_URL = "";
+      process.env.SOLANA_RPC_URL = "https://shared-rpc.example.test";
+      expect(resolveRpcUrl()).toBe("https://shared-rpc.example.test");
+
+      // Whitespace-only is likewise treated as unset, and a whitespace-padded
+      // real value is trimmed before it reaches the URL validator.
+      process.env.WXMR_SOLANA_RPC_URL = "   ";
+      process.env.SOLANA_RPC_URL = "  https://shared-rpc.example.test  ";
+      expect(resolveRpcUrl()).toBe("https://shared-rpc.example.test");
+
+      // Both blank -> undefined (fall back to the default, never to "").
+      process.env.WXMR_SOLANA_RPC_URL = "";
+      process.env.SOLANA_RPC_URL = "   ";
+      expect(resolveRpcUrl()).toBeUndefined();
+    } finally {
+      if (original.wxmr === undefined) delete process.env.WXMR_SOLANA_RPC_URL;
+      else process.env.WXMR_SOLANA_RPC_URL = original.wxmr;
+      if (original.solana === undefined) delete process.env.SOLANA_RPC_URL;
+      else process.env.SOLANA_RPC_URL = original.solana;
+    }
   });
 
   test("exports an opt-in bridge adapter contribution with pinned identity", () => {

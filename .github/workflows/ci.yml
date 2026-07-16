@@ -49,6 +49,7 @@ jobs:
           - packages/webhooks
           - packages/db
           - packages/shared
+          - packages/plugin-wxmr
 
     steps:
       - name: Checkout
