@@ -107,13 +107,16 @@ function main() {
       schemaVersion: 1,
       mode: "preflight",
       generatedAt: new Date().toISOString(),
-      target: `${process.env.STEWARD_SANDBOX_GITHUB_OWNER}/${process.env.STEWARD_SANDBOX_GITHUB_REPO}`,
+      // biome-ignore lint/suspicious/noUndeclaredEnvVars: sandbox vars are read by design (validated in requireEnv)
+      target: `${process.env["STEWARD_SANDBOX_GITHUB_OWNER"]}/${process.env["STEWARD_SANDBOX_GITHUB_REPO"]}`,
       forwarder: "default (forwardWithVettedDns) — real DNS-vetted terminal I/O",
       credentialsPresent: true,
       note: "Env validated. No consequential write performed. Run without --preflight (against a live installation) to produce the real matrix artifact.",
     };
     writeFileSync(join(OUT_DIR, "preflight.json"), `${JSON.stringify(receipt, null, 2)}\n`);
-    console.log(`[sandbox] preflight OK — env validated, no write performed. Receipt: ${OUT_DIR}/preflight.json`);
+    console.log(
+      `[sandbox] preflight OK — env validated, no write performed. Receipt: ${OUT_DIR}/preflight.json`,
+    );
     return;
   }
 

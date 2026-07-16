@@ -47,8 +47,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT_DIR = join(ROOT, "artifacts", "provider-authority", "fake");
 
 const E2E_TEST = "src/__tests__/provider-authority-e2e.test.ts";
-const INVENTORY_TEST =
-  "packages/proxy/src/__tests__/fake-provider-transport-inventory.test.ts";
+const INVENTORY_TEST = "packages/proxy/src/__tests__/fake-provider-transport-inventory.test.ts";
 
 // The pre-real-proof claim wording (U8). This is the ONLY wording the artifact
 // uses until a recorded real-sandbox run exists (scripts/provider-authority-sandbox.mjs).
@@ -133,7 +132,10 @@ function main() {
     happyPathDispatch: allGreen ? 1 : null,
     denialDispatch: 0,
   };
-  writeFileSync(join(OUT_DIR, "dispatch-count.json"), `${JSON.stringify(dispatchCount, null, 2)}\n`);
+  writeFileSync(
+    join(OUT_DIR, "dispatch-count.json"),
+    `${JSON.stringify(dispatchCount, null, 2)}\n`,
+  );
 
   // 5) verifier-report.txt — the E2E's evidence round-trip (M09/M15) runs the
   //    offline verifier for the clean + tamper cases. We surface a summary; the

@@ -97,9 +97,7 @@ describe("PR6 fake-transport static inventory (U1)", () => {
     // rebinding path was introduced — classify it (must be test-only).
     expect(bareAssignments.length).toBe(1);
     // And the setter that contains it is the `__` test seam.
-    const setterBody = proxy.slice(
-      proxy.indexOf("__setForwardProxyRequestForTests"),
-    );
+    const setterBody = proxy.slice(proxy.indexOf("__setForwardProxyRequestForTests"));
     expect(/forwardProxyRequestForHandler\s*=\s*forwarder\b/.test(setterBody)).toBe(true);
 
     // The setter is `__`-prefixed and test-only-named.

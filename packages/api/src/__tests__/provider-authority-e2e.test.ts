@@ -23,7 +23,6 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import { createHash } from "node:crypto";
 import {
   closeDb,
   executionAuthorizationNonces,
@@ -229,7 +228,9 @@ afterEach(async () => {
   // operation, adding an FK (secret_routes -> provider_operations) that
   // wipeCase's delete order (operations before routes) would violate. Break the
   // link first so wipeCase's ordered deletes succeed.
-  await getDb().execute(sql`UPDATE secret_routes SET provider_operation_id = NULL, authority_mode = 'legacy'`);
+  await getDb().execute(
+    sql`UPDATE secret_routes SET provider_operation_id = NULL, authority_mode = 'legacy'`,
+  );
   await wipeCase();
   fake.reset();
 });

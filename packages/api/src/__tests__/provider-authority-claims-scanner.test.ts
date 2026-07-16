@@ -12,9 +12,9 @@
  * is exactly-once") must fail this test.
  */
 
+import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
 
 const DOCS_ROOT = join(import.meta.dir, "..", "..", "..", "..", "docs");
 const PR6_DOCS = [

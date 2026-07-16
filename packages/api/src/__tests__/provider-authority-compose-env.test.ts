@@ -8,9 +8,9 @@
  * dispatch secret. This test fails closed on that regression.
  */
 
+import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
 
 const ROOT = join(import.meta.dir, "..", "..", "..", "..");
 const COMPOSE = join(ROOT, "deploy", "enterprise-reference", "docker-compose.yml");
@@ -21,8 +21,12 @@ describe("PR6 governed-route env wiring (verify-only, G2)", () => {
   test("compose declares the PR4 exec-auth + PR5 audit signing secrets as REQUIRED", () => {
     const compose = readFileSync(COMPOSE, "utf8");
     // The `${VAR:?required}` form fails compose boot loudly if unset (U10).
-    expect(compose).toContain('STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?required}"');
-    expect(compose).toContain('STEWARD_AUDIT_SIGNING_KEY: "${STEWARD_AUDIT_SIGNING_KEY:?required}"');
+    expect(compose).toContain(
+      'STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?required}"',
+    );
+    expect(compose).toContain(
+      'STEWARD_AUDIT_SIGNING_KEY: "${STEWARD_AUDIT_SIGNING_KEY:?required}"',
+    );
   });
 
   test("steward init generates the PR4 execution-auth secret", () => {

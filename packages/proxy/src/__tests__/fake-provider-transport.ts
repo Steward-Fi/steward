@@ -107,7 +107,10 @@ export class FakeProviderTransport {
   private releaseBarrier: (() => void) | null = null;
 
   /** Script a response for a canonical outbound tuple. */
-  script(match: { method: string; path: string; bodyHash?: string | null }, entry: FakeScript): this {
+  script(
+    match: { method: string; path: string; bodyHash?: string | null },
+    entry: FakeScript,
+  ): this {
     this.scripts.set(this.keyOf(match.method, match.path, match.bodyHash ?? null), entry);
     return this;
   }
@@ -191,9 +194,7 @@ export class FakeProviderTransport {
       });
 
       const entry =
-        this.scripts.get(key) ??
-        this.scripts.get(this.keyOf(method, path, null)) ??
-        this.fallback;
+        this.scripts.get(key) ?? this.scripts.get(this.keyOf(method, path, null)) ?? this.fallback;
 
       if (this.barrier) {
         // Hold until released; models a controllable post-dispatch stall.
@@ -215,11 +216,7 @@ export class FakeProviderTransport {
   }
 }
 
-function jsonResponse(
-  status: number,
-  json: unknown,
-  headers?: Record<string, string>,
-): Response {
+function jsonResponse(status: number, json: unknown, headers?: Record<string, string>): Response {
   return new Response(JSON.stringify(json), {
     status,
     headers: { "content-type": "application/json", ...(headers ?? {}) },
