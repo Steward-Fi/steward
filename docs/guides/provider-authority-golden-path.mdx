@@ -1,9 +1,9 @@
 ---
-title: "Provider Authority — Golden Path"
+title: "Provider Authority: Golden Path"
 description: "Single-command fake proof and the separate real GitHub sandbox run for the governed-provider thesis."
 ---
 
-# Provider Authority — Golden Path
+# Provider Authority: Golden Path
 
 This is the exact workflow that reproduces the six-PR governed-provider thesis:
 a **single-command fake CI proof** that runs the whole matrix against a
@@ -32,7 +32,7 @@ No new authority is introduced by the golden path. It exercises PR1–PR5 only.
 ## 1. The fake CI proof (every PR, credential-free)
 
 ```bash
-# From the repo root — deterministic, zero network egress, zero credentials.
+# From the repo root, deterministic, zero network egress, zero credentials.
 node scripts/provider-authority-golden-path.mjs
 ```
 
@@ -61,7 +61,7 @@ The command fails closed on any test failure or credential-canary hit.
 
 The real run proves the abstraction survives real GitHub semantics
 (idempotency-artifact shape, rate limits, timeouts). It uses the **default**
-DNS-vetted forwarder — the same code path, real terminal I/O.
+DNS-vetted forwarder, the same code path, real terminal I/O.
 
 ```bash
 # Supply sandbox credentials OUT-OF-BAND (never commit them).
@@ -104,10 +104,10 @@ trust to a known root. Always supply the fingerprint.
 
 ## 4. Trust surfaces (dashboard)
 
-- `dashboard/approvals/[id]` — the approval detail: equal-weight approve/deny, a
+- `dashboard/approvals/[id]`, the approval detail: equal-weight approve/deny, a
   required typed reason, the exact action as a safe summary + digests (never
   canonical bytes), honest terminal states.
-- `dashboard/actions/[id]` — the case/evidence surface: PR5 `completeness` and
+- `dashboard/actions/[id]`, the case/evidence surface: PR5 `completeness` and
   `incompletenessReasons` rendered verbatim, the operator-key trust limit
   stated, the signed bundle download + the exact offline verify command.
 

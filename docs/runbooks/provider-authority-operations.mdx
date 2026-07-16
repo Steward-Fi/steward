@@ -1,9 +1,9 @@
 ---
-title: "Provider Authority — Operations Runbook"
+title: "Provider Authority: Operations Runbook"
 description: "Enrollment, rollback-to-legacy, key rotation, and evidence export/verify runbooks for governed provider routes."
 ---
 
-# Provider Authority — Operations Runbook
+# Provider Authority: Operations Runbook
 
 Operational procedures for a governed provider route. Every procedure fails
 closed: a missing secret, a stale dependency, or an unverified fingerprint is a
@@ -37,7 +37,7 @@ regenerate anything.
 Enrollment flips a secret route to `authority_mode = 'governed_v2'` pointing at a
 provider operation, scoped to a single tenant. In this slice enrollment is done
 via the same mutation matrix the golden path uses, scoped to the test/sandbox
-tenant. **Do not enroll a production route from this runbook** — production
+tenant. **Do not enroll a production route from this runbook**, production
 enrollment tooling is a later step.
 
 ## Rollback to legacy

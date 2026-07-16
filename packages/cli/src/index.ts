@@ -251,15 +251,22 @@ async function providerActionCommand(action: string | undefined, ctx: CommandCon
     const actionId = required(stringFlag(ctx.flags, "id"), "id");
     const idempotencyKey =
       stringFlag(ctx.flags, "idempotency-key") ?? `decide-${action}-${actionId}`.slice(0, 255);
-    return ctx.api.request("POST", `/v2/provider-actions/${id()}/approval`, {
+    // Build the decide body with OPTIONAL fields OMITTED (not null): the route's
+    // strict schema rejects a `reasonCode: null` via isApprovalReasonCode(null)
+    // (only a valid code string, or an ABSENT key, is accepted). Sending null
+    // when --reason-code is unset would fail APPROVAL_FIELD_INVALID for the
+    // common approve/deny case.
+    const decideBody: Record<string, unknown> = {
       decision: action === "approve" ? "approve" : "deny",
       reason,
-      reasonCode: stringFlag(ctx.flags, "reason-code") ?? null,
       expectedVersion: intFlag(ctx.flags, "expected-version"),
       expectedRequestHash: stringFlag(ctx.flags, "expected-request-hash"),
       expectedActionDigest: stringFlag(ctx.flags, "expected-action-digest"),
       idempotencyKey,
-    });
+    };
+    const reasonCode = stringFlag(ctx.flags, "reason-code");
+    if (reasonCode !== undefined) decideBody.reasonCode = reasonCode;
+    return ctx.api.request("POST", `/v2/provider-actions/${id()}/approval`, decideBody);
   }
   if (action === "execute") {
     // Typed system resume (PR3). Body carries ONLY idempotencyKey; actor/action

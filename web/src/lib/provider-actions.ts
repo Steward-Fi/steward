@@ -94,7 +94,7 @@ function unwrap<T>(payload: unknown): T {
   return payload as T;
 }
 
-/** GET /v2/provider-actions/:id/approval (PR3) — approval detail. */
+/** GET /v2/provider-actions/:id/approval (PR3): approval detail. */
 export async function getApprovalDetail(
   id: string,
   token: string | null,
@@ -106,7 +106,7 @@ export async function getApprovalDetail(
   return unwrap<ApprovalDetail>(await readJsonOrThrow(res));
 }
 
-/** POST /v2/provider-actions/:id/approval (PR3) — approve/deny with typed reason. */
+/** POST /v2/provider-actions/:id/approval (PR3): approve/deny with typed reason. */
 export async function decideApproval(
   id: string,
   input: {
@@ -146,7 +146,7 @@ export async function decideApproval(
   return readJsonOrThrow(res);
 }
 
-/** GET /v2/provider-actions/:id/case (PR5) — case manifest. */
+/** GET /v2/provider-actions/:id/case (PR5): case manifest. */
 export async function getCase(
   id: string,
   token: string | null,
@@ -160,7 +160,7 @@ export async function getCase(
   return (payload as { manifest?: CaseManifest }).manifest ?? (payload as CaseManifest);
 }
 
-/** GET /v2/provider-actions/:id/evidence (PR5) — signed bundle for offline verify. */
+/** GET /v2/provider-actions/:id/evidence (PR5): signed bundle for offline verify. */
 export async function getEvidence(
   id: string,
   token: string | null,

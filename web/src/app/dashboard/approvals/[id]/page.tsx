@@ -63,7 +63,7 @@ export default function ProviderApprovalDetailPage() {
   }, [id, load]);
 
   async function decide(decision: "approve" | "deny") {
-    // Client-side reason gate (the server ALSO enforces this — U4/PR3 §9.2).
+    // Client-side reason gate (the server ALSO enforces this, U4/PR3 §9.2).
     if (reason.trim().length === 0) {
       setReasonError("A typed reason is required for both approve and deny.");
       return;
@@ -130,7 +130,7 @@ export default function ProviderApprovalDetailPage() {
               role="status"
               className="border border-warning/40 bg-warning/5 text-warning px-4 py-3 mb-6"
             >
-              This action is <strong>{detail.status}</strong>. Decision controls are disabled — its
+              This action is <strong>{detail.status}</strong>. Decision controls are disabled; its
               lifecycle is already terminal.
             </div>
           )}
@@ -154,13 +154,13 @@ export default function ProviderApprovalDetailPage() {
               <dt className="text-text-tertiary">Request hash</dt>
               <dd className="font-mono break-all">{detail.requestHash}</dd>
               <dt className="text-text-tertiary">Expires</dt>
-              <dd className="font-mono">{detail.expiresAt ?? "—"}</dd>
+              <dd className="font-mono">{detail.expiresAt ?? "n/a"}</dd>
             </dl>
 
             {detail.safeSummary && (
               <div className="mt-4">
                 <h3 className="text-text-tertiary text-xs uppercase tracking-wide mb-2">
-                  Safe summary (redacted — never full request bytes)
+                  Safe summary (redacted, never full request bytes)
                 </h3>
                 <pre className="bg-bg-surface border border-border-subtle p-3 text-xs overflow-x-auto">
                   {JSON.stringify(detail.safeSummary, null, 2)}

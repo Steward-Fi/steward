@@ -166,12 +166,12 @@ export default function ProviderActionCasePage() {
                   <dt className="text-text-tertiary">Dispatch state</dt>
                   <dd className="font-mono">{manifest.execution.dispatchState}</dd>
                   <dt className="text-text-tertiary">Upstream status</dt>
-                  <dd className="font-mono">{manifest.execution.upstreamStatusCode ?? "—"}</dd>
+                  <dd className="font-mono">{manifest.execution.upstreamStatusCode ?? "n/a"}</dd>
                   <dt className="text-text-tertiary">Reconciled</dt>
                   <dd className="font-mono">{String(manifest.execution.reconciled)}</dd>
                   <dt className="text-text-tertiary">Provider idempotency (hash)</dt>
                   <dd className="font-mono break-all">
-                    {manifest.execution.providerIdempotencyKeyHash ?? "—"}
+                    {manifest.execution.providerIdempotencyKeyHash ?? "n/a"}
                   </dd>
                 </>
               )}
