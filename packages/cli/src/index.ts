@@ -27,6 +27,15 @@ Usage:
   steward policy set --name NAME --rules '[...]' [--description TEXT] [--agent-id ID]
   steward approvals list|stats|approve|deny ...
   steward audit bundle [--from 1] [--to N] [--out bundle.json] [--verify]
+  steward provider-action create --workspace-id ID --account-id ID --operation KEY --action '{...}'
+  steward provider-action get|approval|case --id ID
+  steward provider-action approve|deny --id ID --reason TEXT
+  steward provider-action execute --id ID [--idempotency-key KEY]
+  steward provider-action evidence --id ID [--out bundle.json] [--verify --fp HEX]
+
+provider-action commands are thin wrappers over the PR2-PR5 governed routes
+(convenience only; the authoritative proof is
+scripts/provider-authority-golden-path.mjs). No new authority is introduced.
 
 Auth:
   --api-url, --tenant-id, --token, --tenant-key, and --platform-key override
@@ -203,6 +212,88 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
   return out ? { wrote: out, verified: boolFlag(ctx.flags, "verify"), bundle } : bundle;
 }
 
+/**
+ * PR6 provider-action command group — thin convenience wrappers over the
+ * pre-existing PR2-PR5 governed-provider routes. Distribution is unsettled
+ * (§5.4), so these are convenience only: the AUTHORITATIVE proof is
+ * `scripts/provider-authority-golden-path.mjs`. No new route or authority is
+ * introduced; each subcommand maps 1:1 to an existing route. Consequential
+ * writes are gated by the SAME approval/execute lifecycle regardless of caller.
+ */
+async function providerActionCommand(action: string | undefined, ctx: CommandContext) {
+  if (action === "create") {
+    // Create a provider action (PR2). `--action` is the canonical action JSON
+    // (as produced by the adapter builder); the API re-canonicalizes + digests.
+    return ctx.api.request("POST", "/v2/provider-actions", {
+      workspaceId: required(stringFlag(ctx.flags, "workspace-id"), "workspace-id"),
+      providerAccountId: required(stringFlag(ctx.flags, "account-id"), "account-id"),
+      operationKey: required(stringFlag(ctx.flags, "operation"), "operation"),
+      action: parseJsonFlag(ctx.flags, "action", undefined),
+      idempotencyKeyHash: stringFlag(ctx.flags, "idempotency-key-hash"),
+    });
+  }
+  const id = () => encodeURIComponent(required(stringFlag(ctx.flags, "id"), "id"));
+  if (action === "get") {
+    return ctx.api.request("GET", `/v2/provider-actions/${id()}`);
+  }
+  if (action === "approval") {
+    // The approval DETAIL (PR3) — requires a human session + recent MFA.
+    return ctx.api.request("GET", `/v2/provider-actions/${id()}/approval`);
+  }
+  if (action === "approve" || action === "deny") {
+    // A typed reason is REQUIRED for BOTH decisions (equal-weight, U4/PR3 §9.2).
+    const reason = required(stringFlag(ctx.flags, "reason"), "reason");
+    return ctx.api.request("POST", `/v2/provider-actions/${id()}/approval`, {
+      decision: action === "approve" ? "approve" : "deny",
+      reason,
+      reasonCode: stringFlag(ctx.flags, "reason-code"),
+      expectedVersion: intFlag(ctx.flags, "expected-version"),
+      expectedRequestHash: stringFlag(ctx.flags, "expected-request-hash"),
+      expectedActionDigest: stringFlag(ctx.flags, "expected-action-digest"),
+    });
+  }
+  if (action === "execute") {
+    // Typed system resume (PR3). Body carries ONLY idempotencyKey; actor/action
+    // substitution is rejected server-side (RESUME_ACTOR_SUBSTITUTION_FORBIDDEN).
+    const idempotencyKey = stringFlag(ctx.flags, "idempotency-key");
+    return ctx.api.request(
+      "POST",
+      `/v2/provider-actions/${id()}/execute`,
+      idempotencyKey ? { idempotencyKey } : undefined,
+    );
+  }
+  if (action === "case") {
+    // The case manifest (PR5) — owner/admin + recent MFA.
+    return ctx.api.request("GET", `/v2/provider-actions/${id()}/case`);
+  }
+  if (action === "evidence") {
+    // The signed evidence bundle (PR5). Optionally write + offline-verify with a
+    // trusted key fingerprint (E7): --out bundle.json [--verify --fp <hex>].
+    const bundle = await ctx.api.request("GET", `/v2/provider-actions/${id()}/evidence`);
+    const out = stringFlag(ctx.flags, "out");
+    if (out) writeFileSync(out, JSON.stringify(bundle, null, 2));
+    if (boolFlag(ctx.flags, "verify")) {
+      if (!out) throw new Error("--verify requires --out so the offline verifier has a file");
+      const fp = stringFlag(ctx.flags, "fp") ?? stringFlag(ctx.flags, "expected-key-fingerprint");
+      const args = ["scripts/verify-evidence-bundle.mjs", out];
+      // E7 / M09: bind trust to an out-of-band fingerprint. Warn loudly if absent
+      // (verifying against the embedded key proves self-consistency ONLY).
+      if (fp) args.push("--expected-key-fingerprint", fp);
+      else
+        console.error(
+          "WARNING: no --fp supplied; verifying against the EMBEDDED key proves " +
+            "self-consistency only, NOT trust to a known signing root (PR5 E7).",
+        );
+      const result = spawnSync("node", args, { cwd: process.cwd(), stdio: "inherit" });
+      if (result.status !== 0) throw new Error("Offline evidence bundle verification failed");
+    }
+    return out ? { wrote: out, verified: boolFlag(ctx.flags, "verify"), bundle } : bundle;
+  }
+  throw new Error(
+    "Supported provider-action commands: create|get|approval|approve|deny|execute|case|evidence",
+  );
+}
+
 async function main(argv: string[]) {
   const parsed = parseArgs(argv);
   const [command, action] = parsed.positional;
@@ -247,6 +338,7 @@ async function main(argv: string[]) {
     policy: policyCommand,
     approvals: approvalsCommand,
     audit: auditCommand,
+    "provider-action": providerActionCommand,
   };
   const handler = handlers[command];
   if (!handler) throw new Error(`Unknown command '${command}'. Run steward help.`);
