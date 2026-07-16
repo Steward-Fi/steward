@@ -58,6 +58,7 @@ const APPROVER = "10000000-0000-4000-8000-0000000000a2";
 const VIEWER = "10000000-0000-4000-8000-0000000000a3";
 const OUTSIDER = "10000000-0000-4000-8000-0000000000a4";
 const WORKSPACE = "20000000-0000-4000-8000-0000000000b1";
+const WORKSPACE_OTHER = "20000000-0000-4000-8000-0000000000b2";
 const ADMIN_BINDING = "30000000-0000-4000-8000-0000000000c1";
 const APPROVER_BINDING = "30000000-0000-4000-8000-0000000000c2";
 const VIEWER_BINDING = "30000000-0000-4000-8000-0000000000c3";
@@ -213,6 +214,14 @@ async function seed() {
       tenantId: TENANT,
       key: "client-x",
       name: "Client X",
+      environment: "production",
+      createdBy: ADMIN,
+    },
+    {
+      id: WORKSPACE_OTHER,
+      tenantId: TENANT,
+      key: "client-x-other",
+      name: "Client X Other",
       environment: "production",
       createdBy: ADMIN,
     },
@@ -605,6 +614,7 @@ describe("refresh", () => {
     const fake = installFakeX();
     const result = await refreshXProviderCredential({
       tenantId: TENANT,
+      workspaceId: WORKSPACE,
       accountId: completed.providerAccountId,
       vault,
       config: CONFIG,
@@ -663,12 +673,14 @@ describe("refresh", () => {
     const [r1, r2] = await Promise.all([
       refreshXProviderCredential({
         tenantId: TENANT,
+        workspaceId: WORKSPACE,
         accountId: completed.providerAccountId,
         vault,
         config: CONFIG,
       }),
       refreshXProviderCredential({
         tenantId: TENANT,
+        workspaceId: WORKSPACE,
         accountId: completed.providerAccountId,
         vault,
         config: CONFIG,
@@ -692,6 +704,7 @@ describe("refresh", () => {
     const fake = installFakeX();
     const result = await refreshXProviderCredential({
       tenantId: TENANT,
+      workspaceId: WORKSPACE,
       accountId: completed.providerAccountId,
       vault,
       config: CONFIG,
@@ -711,6 +724,7 @@ describe("refresh", () => {
     await expect(
       refreshXProviderCredential({
         tenantId: TENANT,
+        workspaceId: WORKSPACE,
         accountId: completed.providerAccountId,
         vault,
         config: CONFIG,
@@ -746,12 +760,78 @@ describe("refresh", () => {
     await expect(
       refreshXProviderCredential({
         tenantId: TENANT,
+        workspaceId: WORKSPACE,
         accountId: row.id,
         vault,
         config: CONFIG,
         force: true,
       }),
     ).rejects.toMatchObject({ code: "X_ACCOUNT_NOT_X" });
+    fake.restore();
+  });
+
+  test("cross-workspace IDOR: refreshing an account from another workspace => X_ACCOUNT_NOT_FOUND", async () => {
+    // Connect an X account in WORKSPACE, then attempt to refresh it while
+    // claiming authority over WORKSPACE_OTHER. The account does not belong to
+    // WORKSPACE_OTHER, so the workspace-binding guard must reject it (404).
+    //
+    // Mutation check: drop the `account.workspaceId !== input.workspaceId` guard
+    // and this refresh succeeds against another workspace's credential.
+    const store = new MemoryConnectStore();
+    const { completed } = await connectHappy(store);
+    const fake = installFakeX();
+    await expect(
+      refreshXProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE_OTHER,
+        accountId: completed.providerAccountId,
+        vault,
+        config: CONFIG,
+        force: true,
+      }),
+    ).rejects.toMatchObject({ code: "X_ACCOUNT_NOT_FOUND" });
+    expect(fake.counters.refresh).toBe(0);
+    fake.restore();
+  });
+
+  test("refresh does NOT resurrect a locally revoked account (reconnect required)", async () => {
+    // Connect, then disconnect (status -> revoked), then a forced refresh must
+    // fail closed instead of reactivating the account.
+    //
+    // Mutation check: drop the `account.status !== "active"` guard and the
+    // refresh reactivates a disconnected account without a fresh OAuth connect.
+    const store = new MemoryConnectStore();
+    const { completed } = await connectHappy(store);
+    const disc = installFakeX();
+    await disconnectXProviderCredential({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      accountId: completed.providerAccountId,
+      callerUserId: ADMIN,
+      vault,
+      config: CONFIG,
+    });
+    disc.restore();
+
+    const fake = installFakeX();
+    await expect(
+      refreshXProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        vault,
+        config: CONFIG,
+        force: true,
+      }),
+    ).rejects.toMatchObject({ code: "X_REFRESH_REVOKED" });
+    expect(fake.counters.refresh).toBe(0);
+
+    const db = getDb();
+    const [acct] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(acct.status).toBe("revoked");
     fake.restore();
   });
 });

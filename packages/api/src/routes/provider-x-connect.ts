@@ -244,6 +244,7 @@ const handleRefresh = async (c: RouteContext): Promise<Response> => {
     const config = resolveXConnectConfig();
     const result = await refreshXProviderCredential({
       tenantId: c.get("tenantId"),
+      workspaceId,
       accountId,
       vault: getVault(),
       config,

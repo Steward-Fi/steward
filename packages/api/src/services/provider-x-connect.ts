@@ -679,6 +679,13 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
 // ── Refresh (single-flight, rotating token) ───────────────────────────────────
 export interface RefreshInput {
   tenantId: string;
+  /**
+   * The workspace the CALLER was authorized for. The account MUST belong to it,
+   * or refresh fails closed with X_ACCOUNT_NOT_FOUND. Prevents a cross-workspace
+   * IDOR where a user authorized for workspace A passes an account id from
+   * workspace B.
+   */
+  workspaceId: string;
   accountId: string;
   vault: SecretVault;
   config: XConnectConfig;
@@ -731,8 +738,25 @@ export async function refreshXProviderCredential(input: RefreshInput): Promise<R
 
       if (!account)
         throw new XConnectError("X_ACCOUNT_NOT_FOUND", 404, "provider account not found");
+      // Cross-workspace IDOR guard: the account MUST belong to the workspace the
+      // caller was authorized for. 404 (not 403) so account existence in another
+      // workspace does not leak.
+      if (account.workspaceId !== input.workspaceId) {
+        throw new XConnectError("X_ACCOUNT_NOT_FOUND", 404, "provider account not found");
+      }
       if (account.adapterKey !== X_ADAPTER_KEY) {
         throw new XConnectError("X_ACCOUNT_NOT_X", 400, "provider account is not an X account");
+      }
+      // Do NOT resurrect a locally revoked/disconnected account via refresh. A
+      // revoked account requires a fresh OAuth connect to become active again;
+      // silently reactivating it (especially after a best-effort upstream revoke
+      // failed) would restore an account the operator intended to kill.
+      if (account.status !== "active") {
+        throw new XConnectError(
+          "X_REFRESH_REVOKED",
+          409,
+          "provider account is not active; reconnect required",
+        );
       }
       if (!account.credentialSecretId || account.credentialVersion == null) {
         throw new XConnectError("X_REFRESH_TOKEN_MISSING", 409, "account has no credential");
