@@ -1,6 +1,6 @@
 {
   "steward": {
-    "apiUrl": "https://api.steward.fi",
+    "apiUrl": "http://localhost:3200",
     "tenantId": "waifu.fun",
     "apiKey": "your-api-key"
   },

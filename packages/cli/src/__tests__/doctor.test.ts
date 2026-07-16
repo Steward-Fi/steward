@@ -1,0 +1,112 @@
+import { describe, expect, test } from "bun:test";
+import { randomBytes } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { StewardApiClient } from "../api";
+import { runDoctor } from "../doctor";
+import { describeSecret } from "../format";
+
+// A fake API client that never touches the network. runDoctor only calls
+// `.request`; give it a harmless stub so the checks resolve deterministically.
+function stubApi(): StewardApiClient {
+  return {
+    baseUrl: "http://stub.local",
+    request: async () => ({ ok: true }),
+  } as unknown as StewardApiClient;
+}
+
+/** All contiguous substrings of length >= 4 of `value`. */
+function substringsOf(value: string, min = 4): string[] {
+  const out: string[] = [];
+  for (let len = min; len <= value.length; len++) {
+    for (let i = 0; i + len <= value.length; i++) out.push(value.slice(i, i + len));
+  }
+  return out;
+}
+
+describe("describeSecret", () => {
+  test("reports missing for empty/undefined and never emits value substrings", () => {
+    expect(describeSecret(undefined)).toBe("missing");
+    expect(describeSecret("")).toBe("missing");
+    const secret = randomBytes(32).toString("hex");
+    const desc = describeSecret(secret);
+    expect(desc).toBe("present (64 bytes)");
+    // No 4+ char substring of the secret may appear in the description.
+    for (const sub of [secret.slice(0, 6), secret.slice(-6), secret.slice(10, 20)]) {
+      expect(desc.includes(sub)).toBe(false);
+    }
+  });
+});
+
+describe("steward doctor secret redaction", () => {
+  test("no >=4-char substring of any secret appears in pretty or JSON output", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "steward-doctor-"));
+    try {
+      // Realistic high-entropy secrets (random hex), so accidental overlaps with
+      // field names / static detail strings don't create false positives.
+      const secrets: Record<string, string> = {
+        STEWARD_MASTER_PASSWORD: randomBytes(32).toString("hex"),
+        STEWARD_JWT_SECRET: randomBytes(32).toString("hex"),
+        STEWARD_EXECUTION_AUTH_SECRET: `v1:${randomBytes(32).toString("hex")}`,
+        STEWARD_KDF_SALT: randomBytes(32).toString("hex"),
+        STEWARD_AUDIT_HMAC_KEY: randomBytes(32).toString("hex"),
+        STEWARD_AUDIT_SIGNING_KEY: randomBytes(32).toString("hex"),
+      };
+      const pgPassword = randomBytes(24).toString("hex");
+      const databaseUrl = `postgresql://steward:${pgPassword}@postgres:5432/steward`;
+
+      const envPath = join(dir, ".env");
+      writeFileSync(
+        envPath,
+        [
+          `DATABASE_URL=${databaseUrl}`,
+          ...Object.entries(secrets).map(([k, v]) => `${k}=${v}`),
+        ].join("\n") + "\n",
+      );
+
+      const result = await runDoctor({ envPath, api: stubApi() });
+
+      const pretty = result.checks.map((c) => `${c.name} ${c.ok} ${c.detail}`).join("\n");
+      const jsonOut = JSON.stringify(result);
+
+      const secretValues = [...Object.values(secrets), pgPassword];
+      for (const value of secretValues) {
+        for (const sub of substringsOf(value)) {
+          expect(pretty.includes(sub)).toBe(false);
+          expect(jsonOut.includes(sub)).toBe(false);
+        }
+      }
+
+      // Sanity: the checks still report presence + byte length.
+      const master = result.checks.find((c) => c.name === "env:STEWARD_MASTER_PASSWORD");
+      expect(master?.ok).toBe(true);
+      expect(master?.detail).toBe("present (64 bytes)");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("reports missing required secrets without leaking the ones present", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "steward-doctor-"));
+    try {
+      const present = randomBytes(32).toString("hex");
+      const envPath = join(dir, ".env");
+      // Only one required secret present; the rest missing.
+      writeFileSync(envPath, `STEWARD_MASTER_PASSWORD=${present}\n`);
+
+      const result = await runDoctor({ envPath, api: stubApi() });
+      const jsonOut = JSON.stringify(result);
+
+      const jwt = result.checks.find((c) => c.name === "env:STEWARD_JWT_SECRET");
+      expect(jwt?.ok).toBe(false);
+      expect(jwt?.detail).toBe("missing");
+
+      for (const sub of substringsOf(present)) {
+        expect(jsonOut.includes(sub)).toBe(false);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

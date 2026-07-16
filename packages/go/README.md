@@ -4,7 +4,7 @@ First-pass Go backend SDK for Steward API integrations.
 
 ```go
 client, err := steward.NewClient(steward.Config{
-    BaseURL:     "https://api.steward.fi",
+    BaseURL:     "http://localhost:3200",
     PlatformKey: "steward_platform_...",
 })
 if err != nil {

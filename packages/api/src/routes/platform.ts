@@ -74,6 +74,7 @@ import {
   publicTestAccount,
   redactedTestAccount,
 } from "../services/test-account-credentials";
+import { getConfiguredVault } from "../services/vault-factory";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 import { getEmailAuthForTenant, invalidateEmailAuthForTenant } from "./auth";
 
@@ -304,35 +305,15 @@ function platformIdentityMigrationDisabledResponse(c: Context) {
   );
 }
 
-// ─── Vault singleton ──────────────────────────────────────────────────────────
-// Platform routes share the same vault as the main API.
+// ─── Vault access ─────────────────────────────────────────────────────────────
+// Platform routes use the shared configured-vault factory.
 
 function getVault(): Vault {
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
-  if (!masterPassword) {
-    if (!isDevSecretAllowed()) {
-      throw new Error(
-        "⛔ STEWARD_MASTER_PASSWORD must be set. For local development only, opt in to the " +
-          "insecure dev fallback with STEWARD_ALLOW_DEV_SECRETS=true.",
-      );
-    }
-    console.warn(
-      "⚠️  [DEV ONLY] Using insecure 'dev-secret' as vault master password. Set STEWARD_MASTER_PASSWORD before going to production!",
-    );
-  }
-  return new Vault({
-    masterPassword: masterPassword || "dev-secret",
-    rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
-    chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
-  });
+  return getConfiguredVault({ allowDevSecretFallback: true });
 }
 
-// Lazily-initialised vault (avoids instantiating when the module is just
-// imported during type-checking / tree-shaking).
-let _vault: Vault | undefined;
 function vault(): Vault {
-  if (!_vault) _vault = getVault();
-  return _vault;
+  return getVault();
 }
 
 let _platformKeyStore: KeyStore | undefined;

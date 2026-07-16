@@ -66,6 +66,8 @@ const SECRET_ROUTE_UPDATE_KEYS = new Set([
   "injectFormat",
   "priority",
   "enabled",
+  "requiresApproval",
+  "approvalConfig",
 ]);
 
 type SecretRouteUpdate = Partial<{
@@ -78,6 +80,8 @@ type SecretRouteUpdate = Partial<{
   injectFormat: string;
   priority: number;
   enabled: boolean;
+  requiresApproval: boolean;
+  approvalConfig: Record<string, unknown>;
 }>;
 
 type SecretRouteCreate = {
@@ -91,6 +95,8 @@ type SecretRouteCreate = {
   injectFormat?: string;
   priority?: number;
   enabled?: boolean;
+  requiresApproval?: boolean;
+  approvalConfig?: Record<string, unknown>;
 };
 
 function parseSecretRouteUpdate(body: Record<string, unknown>):
@@ -149,6 +155,22 @@ function parseSecretRouteUpdate(body: Record<string, unknown>):
     }
     update.enabled = body.enabled;
   }
+  if (body.requiresApproval !== undefined) {
+    if (typeof body.requiresApproval !== "boolean") {
+      return { ok: false, error: "'requiresApproval' must be a boolean" };
+    }
+    update.requiresApproval = body.requiresApproval;
+  }
+  if (body.approvalConfig !== undefined) {
+    if (
+      typeof body.approvalConfig !== "object" ||
+      body.approvalConfig === null ||
+      Array.isArray(body.approvalConfig)
+    ) {
+      return { ok: false, error: "'approvalConfig' must be an object" };
+    }
+    update.approvalConfig = body.approvalConfig as Record<string, unknown>;
+  }
 
   if (Object.keys(update).length === 0) {
     return { ok: false, error: "At least one route field is required" };
@@ -192,6 +214,17 @@ function parseSecretRouteCreate(
   if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
     return { ok: false, error: "'enabled' must be a boolean" };
   }
+  if (body.requiresApproval !== undefined && typeof body.requiresApproval !== "boolean") {
+    return { ok: false, error: "'requiresApproval' must be a boolean" };
+  }
+  if (
+    body.approvalConfig !== undefined &&
+    (typeof body.approvalConfig !== "object" ||
+      body.approvalConfig === null ||
+      Array.isArray(body.approvalConfig))
+  ) {
+    return { ok: false, error: "'approvalConfig' must be an object" };
+  }
   return {
     ok: true,
     value: {
@@ -205,6 +238,8 @@ function parseSecretRouteCreate(
       injectFormat: body.injectFormat as string | undefined,
       priority: body.priority as number | undefined,
       enabled: body.enabled as boolean | undefined,
+      requiresApproval: body.requiresApproval as boolean | undefined,
+      approvalConfig: body.approvalConfig as Record<string, unknown> | undefined,
     },
   };
 }
@@ -389,6 +424,8 @@ secretsRoutes.post("/routes", async (c) => {
     injectFormat?: string;
     priority?: number;
     enabled?: boolean;
+    requiresApproval?: boolean;
+    approvalConfig?: Record<string, unknown>;
   }>(c);
 
   if (!body) {
@@ -429,6 +466,8 @@ secretsRoutes.post("/routes", async (c) => {
         injectKey: routeInput.injectKey,
         priority: routeInput.priority ?? 0,
         enabled: routeInput.enabled ?? true,
+        requiresApproval: routeInput.requiresApproval ?? false,
+        approvalConfig: routeInput.approvalConfig ?? {},
       },
     });
     const route = await sv.createRoute(tenantId, routeInput.secretId, {
@@ -441,6 +480,8 @@ secretsRoutes.post("/routes", async (c) => {
       injectFormat: routeInput.injectFormat,
       priority: routeInput.priority,
       enabled: routeInput.enabled,
+      requiresApproval: routeInput.requiresApproval,
+      approvalConfig: routeInput.approvalConfig,
     });
     try {
       await writeSecretsAudit(c, {
@@ -460,6 +501,8 @@ secretsRoutes.post("/routes", async (c) => {
           injectKey: routeInput.injectKey,
           priority: routeInput.priority ?? 0,
           enabled: routeInput.enabled ?? true,
+          requiresApproval: routeInput.requiresApproval ?? false,
+          approvalConfig: routeInput.approvalConfig ?? {},
         },
       });
     } catch (err) {
@@ -595,6 +638,8 @@ secretsRoutes.put("/routes/:id", async (c) => {
         injectFormat: existing.injectFormat,
         priority: existing.priority,
         enabled: existing.enabled,
+        requiresApproval: existing.requiresApproval,
+        approvalConfig: existing.approvalConfig,
         createdAt: existing.createdAt,
       })
       .where(and(eq(secretRouteRows.id, routeId), eq(secretRouteRows.tenantId, tenantId)));

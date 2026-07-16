@@ -31,7 +31,7 @@ GET /approvals?status=pending&limit=50&offset=0
 ```
 
 ```bash
-curl https://api.steward.fi/approvals \
+curl http://localhost:3200/approvals \
   -H "X-Steward-Key: your-tenant-key"
 ```
 
@@ -98,7 +98,7 @@ POST /approvals/:id/approve
 ```
 
 ```bash
-curl -X POST https://api.steward.fi/approvals/appr_550e8400-.../approve \
+curl -X POST http://localhost:3200/approvals/appr_550e8400-.../approve \
   -H "X-Steward-Key: your-tenant-key"
 ```
 
@@ -126,7 +126,7 @@ POST /approvals/:id/deny
 ```
 
 ```bash
-curl -X POST https://api.steward.fi/approvals/appr_550e8400-.../deny \
+curl -X POST http://localhost:3200/approvals/appr_550e8400-.../deny \
   -H "X-Steward-Key: your-tenant-key" \
   -H "Content-Type: application/json" \
   -d '{ "reason": "Amount too large for current market conditions" }'
@@ -211,7 +211,7 @@ Configure a `tx.pending` webhook to get notified when transactions need review:
 
 ```typescript
 // Register webhook
-await fetch("https://api.steward.fi/webhooks", {
+await fetch("http://localhost:3200/webhooks", {
   method: "POST",
   headers: { "X-Steward-Key": apiKey, "Content-Type": "application/json" },
   body: JSON.stringify({

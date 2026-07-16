@@ -6,7 +6,7 @@ runtime compatibility.
 ```csharp
 var client = new StewardClient(new StewardClientConfig
 {
-    BaseUrl = "https://api.steward.fi",
+    BaseUrl = "http://localhost:3200",
     PlatformKey = "steward_platform_..."
 });
 

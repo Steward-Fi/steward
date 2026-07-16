@@ -26,7 +26,7 @@ message if required values are missing.
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `STEWARD_URL` (or `STEWARD_BASE_URL`) | yes | Steward API base URL, e.g. `https://api.steward.fi`. `http://` is rejected for non-localhost hosts. |
+| `STEWARD_URL` (or `STEWARD_BASE_URL`) | yes | Steward API base URL, e.g. `http://localhost:3200`. `http://` is rejected for non-localhost hosts. |
 | `STEWARD_API_KEY` | one of | Tenant API key. |
 | `STEWARD_JWT` (or `STEWARD_BEARER_TOKEN`) | one of | Agent-scoped bearer token. Preferred over `STEWARD_API_KEY` when both are set. |
 | `STEWARD_TENANT_ID` | no | Tenant id scoping requests. |
@@ -48,7 +48,7 @@ At least one credential (`STEWARD_API_KEY` or a bearer token) must be provided.
 
 ```bash
 claude mcp add steward \
-  --env STEWARD_URL=https://api.steward.fi \
+  --env STEWARD_URL=http://localhost:3200 \
   --env STEWARD_API_KEY=sk_live_... \
   --env STEWARD_TENANT_ID=your_tenant \
   --env STEWARD_AGENT_ID=your_default_agent \
@@ -66,7 +66,7 @@ Add an entry to your MCP config (`~/.cursor/mcp.json`, or
     "steward": {
       "command": "stwd-mcp",
       "env": {
-        "STEWARD_URL": "https://api.steward.fi",
+        "STEWARD_URL": "http://localhost:3200",
         "STEWARD_API_KEY": "sk_live_...",
         "STEWARD_TENANT_ID": "your_tenant",
         "STEWARD_AGENT_ID": "your_default_agent"
@@ -84,7 +84,7 @@ If the package is not installed globally, use `bunx`/`npx`:
     "steward": {
       "command": "npx",
       "args": ["-y", "@stwd/mcp"],
-      "env": { "STEWARD_URL": "https://api.steward.fi", "STEWARD_API_KEY": "sk_live_..." }
+      "env": { "STEWARD_URL": "http://localhost:3200", "STEWARD_API_KEY": "sk_live_..." }
     }
   }
 }

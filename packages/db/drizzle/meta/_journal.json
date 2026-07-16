@@ -393,6 +393,55 @@
       "when": 1780137000000,
       "tag": "0075_monero_chain_family",
       "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1780137600000,
+      "tag": "0076_audit_checkpoints",
+      "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "7",
+      "when": 1780137900000,
+      "tag": "0077_proxy_approvals",
+      "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1780138200000,
+      "tag": "0078_execution_authorization_nonces",
+      "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "7",
+      "when": 1784050800000,
+      "tag": "0079_workspace_provider_authority",
+      "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1784054400000,
+      "tag": "0080_provider_action_bindings",
+      "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "7",
+      "when": 1784140800000,
+      "tag": "0081_exact_approval_binding",
+      "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1784227200000,
+      "tag": "0082_execution_authorization_v2",
+      "breakpoints": true
     }
   ]
 }

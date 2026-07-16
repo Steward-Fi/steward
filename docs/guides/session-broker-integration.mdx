@@ -9,16 +9,16 @@ A **session broker** is an third-party service that turns a stored session (a co
 jar, an OAuth session, a headless-browser session) into a small, scoped HTTP API:
 the agent asks the broker to `list`, `fetch`, or `render` something on a site that
 only has an unofficial web API, and the broker replies with structured JSON. The
-broker holds the live session; the agent never does.
+broker holds the live session; the supported agent integration does not receive that session.
 
-Steward is the governance layer in front of that broker. This guide wires an agent
+Steward can provide a configured credential and policy boundary in front of that broker. This guide wires an agent
 to a session broker **config-only** — no product-code changes — so that:
 
 - the broker's scoped token is stored as an encrypted Steward **secret** and
-  injected on the outbound request by the **proxy** (the agent never sees it),
+  injected on the outbound request by the **proxy** instead of returned to the supported agent caller,
 - a **capability** + **grant** + an **allow policy** decide, per agent, whether a
   given broker call is permitted (deny-by-default),
-- every attempt writes one durable **audit** row (allow / deny / approval / error).
+- instrumented attempts write an **audit** row for allow, deny, approval, or error outcomes.
 
 The moving parts mirror the reference implementation in
 [teleport-computer/oauth3-server](https://github.com/teleport-computer/oauth3-server):
@@ -102,7 +102,7 @@ STEWARD_PROXY_UPSTREAM_TIMEOUT_MS=120000
 The scoped broker token is stored encrypted. It is never returned in any response.
 
 ```bash
-curl -X POST https://api.steward.fi/secrets \
+curl -X POST http://localhost:3200/secrets \
   -H "X-Steward-Key: your-tenant-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -123,7 +123,7 @@ secret-route rules (host must be allowlisted, `injectAs` is header-only, framing
 headers are blocked).
 
 ```bash
-curl -X POST https://api.steward.fi/capabilities \
+curl -X POST http://localhost:3200/capabilities \
   -H "X-Steward-Key: your-tenant-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -160,7 +160,7 @@ A capability is inert until an agent is granted it. Grants are per-agent and may
 carry an optional expiry.
 
 ```bash
-curl -X POST https://api.steward.fi/capabilities/<capabilityId>/grants \
+curl -X POST http://localhost:3200/capabilities/<capabilityId>/grants \
   -H "X-Steward-Key: your-tenant-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -180,7 +180,7 @@ whose patterns govern the capability name. Policies are set with the full-set
 `PUT` (it **replaces** the agent's policy set — include every rule).
 
 ```bash
-curl -X PUT https://api.steward.fi/agents/my-agent/policies \
+curl -X PUT http://localhost:3200/agents/my-agent/policies \
   -H "X-Steward-Key: your-tenant-key" \
   -H "Content-Type: application/json" \
   -d '[
@@ -216,7 +216,7 @@ The agent calls the invoke route with its **agent token** (not the tenant key). 
 agent never references the broker token — the proxy attaches it.
 
 ```bash
-curl -X POST https://api.steward.fi/capabilities/broker.session.render/invoke \
+curl -X POST http://localhost:3200/capabilities/broker.session.render/invoke \
   -H "Authorization: Bearer <agent-token>" \
   -H "Content-Type: application/json" \
   -d '{

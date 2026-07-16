@@ -1,5 +1,10 @@
 # @stwd/sdk Changelog
 
+## Unreleased
+
+### Docs
+- Point example `baseUrl` values at a self-hosted instance (`http://localhost:3200`) instead of a hosted `api.steward.fi` URL. Steward is self-host-first today; there is no shared hosted API. JSDoc/README/test-fixture only, no runtime or API change (the SDK `baseUrl` remains a required field with no default).
+
 ## 0.10.1
 
 - chainId threaded through SIWE/SIWS sign-in (signInWithSIWE/signInWithSolana accept the connected chain).

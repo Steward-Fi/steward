@@ -106,7 +106,7 @@ class TestStorage implements SessionStorage {
 
 // ─── Test Setup ───────────────────────────────────────────────────────────
 
-const BASE_URL = "https://api.steward.fi";
+const BASE_URL = "http://localhost:3200";
 
 let storage: TestStorage;
 let auth: StewardAuth;

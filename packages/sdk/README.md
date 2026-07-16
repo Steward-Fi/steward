@@ -16,7 +16,8 @@ npm install @stwd/sdk
 import { StewardClient } from '@stwd/sdk';
 
 const steward = new StewardClient({
-  baseUrl: 'https://api.steward.fi',
+  // point this at your self-hosted Steward instance
+  baseUrl: 'http://localhost:3200',
   tenantId: 'my-platform',
   apiKey: 'sk-...',
 });
@@ -50,7 +51,7 @@ new StewardClient(config: StewardClientConfig)
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `baseUrl` | `string` | ✅ | Base URL of the Steward API (e.g. `https://api.steward.fi`) |
+| `baseUrl` | `string` | ✅ | Base URL of your self-hosted Steward API (e.g. `http://localhost:3200`) |
 | `apiKey` | `string` | — | API key sent as `X-Steward-Key` header |
 | `tenantId` | `string` | — | Tenant ID sent as `X-Steward-Tenant` header |
 

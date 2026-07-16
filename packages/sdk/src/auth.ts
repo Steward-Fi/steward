@@ -7,7 +7,7 @@
  *   - SIWE (Sign-In With Ethereum) — browser + Node
  *
  * Usage:
- *   const auth = new StewardAuth({ baseUrl: "https://api.steward.fi" });
+ *   const auth = new StewardAuth({ baseUrl: "http://localhost:3200" });
  *   const { token, user } = await auth.signInWithPasskey("me@example.com");
  *   const client = new StewardClient({ baseUrl, bearerToken: auth.getToken() });
  */

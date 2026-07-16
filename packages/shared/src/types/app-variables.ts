@@ -11,6 +11,33 @@
 
 import type { Tenant, TenantConfig } from "../index.js";
 
+/**
+ * The verified agent principal a provider-action route reads to derive the
+ * immutable request actor. It is written ONLY by the agent-jwt authenticator
+ * (`installAgentJwtContext`) after JWKS/RS256 verification; a request header can
+ * never set it. It is deliberately runtime-neutral (no Steward-specific scope
+ * meaning): `scopes` are evidence only and MUST NOT be read as provider
+ * authority — provider access is decided by bindings/grants, never token scope.
+ *
+ * PR2 (§7.1): the provider-action route resolves `tenantId`/`actorAgentId` from
+ * this value, never from request data. Mirrors `ProviderPrincipalV1` in
+ * `provider-principal.ts`; kept here (in @stwd/shared) so plugins can type the
+ * context without importing @stwd/api.
+ */
+export type VerifiedAgentPrincipal = {
+  type: "agent";
+  agentId: string;
+  tenantId: string;
+  platformId: string | null;
+  issuer: string;
+  subject: string;
+  tokenId: string | null;
+  scopes: readonly string[];
+  authenticatedAt: string;
+  expiresAt: string | null;
+  authnMethod: "agent-jwt-rs256";
+};
+
 export type AppVariables = {
   tenant: Tenant;
   tenantConfig: TenantConfig;
@@ -22,6 +49,12 @@ export type AppVariables = {
   agentScope?: string;
   agentSubject?: string;
   agentScopes?: string[];
+  /**
+   * Set ONLY by the agent-jwt authenticator after RS256/JWKS verification.
+   * Headers cannot set it. Provider-action routes read this to derive the
+   * immutable actor; provider authority is NOT derived from its `scopes`.
+   */
+  verifiedAgentPrincipal?: VerifiedAgentPrincipal;
   authType?:
     | "api-key"
     | "app-secret"

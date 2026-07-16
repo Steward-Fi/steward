@@ -16,6 +16,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { ContributedPolicyResult, PolicyRule, SignRequest } from "@stwd/shared";
+import { UNPRINTABLE_THROWN_VALUE } from "@stwd/shared";
 import { type EvaluatorContext, evaluatePolicy } from "../evaluators";
 import {
   CORE_POLICY_RULE_TYPES,
@@ -154,6 +155,94 @@ describe("evaluatePolicy — plugin rule fallthrough (uses the process-wide regi
     const result = await evaluatePolicy(makeRule("throwing-rule"), makeContext());
     expect(result.passed).toBe(false);
     expect(result.reason).toContain("threw");
+  });
+
+  // ROUND-2 P0: the generic engine catch used
+  //   `error instanceof Error ? error.message : String(error)`
+  // to build the deny reason. A thrown value whose toString/valueOf/
+  // Symbol.toPrimitive (or a Proxy `.message` getter) THROWS made the catch
+  // block itself throw, escaping the registry dispatch as a raw exception (500).
+  // These assert the generic dispatch NEVER throws and ALWAYS fails closed for
+  // an evaluator that throws an unprintable value.
+  it("fails CLOSED (deny), NO exception, when an evaluator throws a value with a throwing toString", async () => {
+    policyRuleRegistry.register({
+      type: "hostile-tostring-rule",
+      pluginName: "hostile",
+      evaluate: () => {
+        // intentional hostile throw: a non-Error value whose toString throws
+        const hostile = {
+          toString() {
+            throw new Error("secondary stringify failure");
+          },
+        };
+        throw hostile;
+      },
+    });
+    let result: Awaited<ReturnType<typeof evaluatePolicy>> | undefined;
+    await expect(
+      (async () => {
+        result = await evaluatePolicy(makeRule("hostile-tostring-rule"), makeContext());
+      })(),
+    ).resolves.toBeUndefined();
+    expect(result?.passed).toBe(false);
+    expect(result?.reason).toContain("threw");
+  });
+
+  it("fails CLOSED (deny), NO exception, when toString AND valueOf AND Symbol.toPrimitive all throw", async () => {
+    policyRuleRegistry.register({
+      type: "hostile-all-coercion-rule",
+      pluginName: "hostile",
+      evaluate: () => {
+        throw {
+          toString() {
+            throw new Error("toString throws");
+          },
+          valueOf() {
+            throw new Error("valueOf throws");
+          },
+          [Symbol.toPrimitive]() {
+            throw new Error("toPrimitive throws");
+          },
+        };
+      },
+    });
+    let result: Awaited<ReturnType<typeof evaluatePolicy>> | undefined;
+    await expect(
+      (async () => {
+        result = await evaluatePolicy(makeRule("hostile-all-coercion-rule"), makeContext());
+      })(),
+    ).resolves.toBeUndefined();
+    expect(result?.passed).toBe(false);
+    // Static unprintable fallback is embedded; never leaked / never threw.
+    expect(result?.reason).toContain(UNPRINTABLE_THROWN_VALUE);
+  });
+
+  it("fails CLOSED (deny), NO exception, when the evaluator throws a Proxy(Error) with a throwing `.message` getter", async () => {
+    policyRuleRegistry.register({
+      type: "hostile-proxy-error-rule",
+      pluginName: "hostile",
+      evaluate: () => {
+        throw new Proxy(new Error("real"), {
+          get(_t, prop) {
+            if (prop === "message") throw new Error("hostile message getter");
+            if (prop === "toString" || prop === Symbol.toPrimitive || prop === "valueOf") {
+              return () => {
+                throw new Error("hostile coercion");
+              };
+            }
+            return undefined;
+          },
+        });
+      },
+    });
+    let result: Awaited<ReturnType<typeof evaluatePolicy>> | undefined;
+    await expect(
+      (async () => {
+        result = await evaluatePolicy(makeRule("hostile-proxy-error-rule"), makeContext());
+      })(),
+    ).resolves.toBeUndefined();
+    expect(result?.passed).toBe(false);
+    expect(result?.reason).toContain(UNPRINTABLE_THROWN_VALUE);
   });
 
   it("pins policyId/type to the rule so a plugin can't mislabel the verdict", async () => {

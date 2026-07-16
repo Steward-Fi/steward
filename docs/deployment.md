@@ -131,7 +131,7 @@ Configure the Railway service with the normal production environment plus Railwa
 
 Run the proxy as a separate Railway service/process using the same image and command `bun run packages/proxy/src/index.ts`, with `STEWARD_PROXY_PORT` set to the port Railway expects for that service.
 
-A hosted instance at `api.steward.fi` is run by the project for trusted testers. Self-hosted deployments should not depend on it for operator workflows.
+Steward is self-hosted. Run your own instance with the Docker and Compose steps above, then point clients at that deployment URL.
 
 ### Automated Railway deploys via GitHub Actions (optional)
 
@@ -198,7 +198,7 @@ any other operator's instance.
 | `STEWARD_AGENT_TOKEN` | Agent token for web/server-side routes | none | Required only by app paths that call Steward as an agent. |
 | `SKIP_MIGRATIONS` | Disable API startup migrations | false | Set `true` or `1` only when another process applies migrations. |
 | `STEWARD_MONERO_WALLET_RPC_URL` | monero-wallet-rpc sidecar endpoint | none | Empty disables Monero: every Monero endpoint fails closed with 503. In Compose use `http://monero-wallet-rpc:18083/json_rpc`. |
-| `MONERO_WALLET_RPC_PASSWORD` | Password for the sidecar's `--rpc-login` (username `steward`) | none | Required when the `monero` Compose profile is enabled; Compose derives `STEWARD_MONERO_WALLET_RPC_LOGIN` from it. |
+| `MONERO_WALLET_RPC_PASSWORD` | Password for the sidecar's `--rpc-login` (username `steward`) | none | Required when the `monero` Compose profile is enabled; Compose mounts it into the sidecar as a secret and derives `STEWARD_MONERO_WALLET_RPC_LOGIN` from it. |
 | `STEWARD_MONERO_DAEMON_URL` | Remote Monero daemon used for chain height at wallet creation | `http://node.sethforprivacy.com:18089` | Restricted public RPC is sufficient; keys never reach the daemon. Stagenet: `:38089`. |
 | `MONERO_DAEMON_ADDRESS` | Daemon `host:port` the sidecar syncs wallets against | `node.sethforprivacy.com:18089` | Keep consistent with `STEWARD_MONERO_DAEMON_URL`. A public node operator can correlate your IP with wallet activity — run your own daemon or Tor if that matters. |
 | `STEWARD_MONERO_NETWORK` | Monero network of the sidecar | `mainnet` | `mainnet` or `stagenet`; must match the sidecar's flags (add `--stagenet` there for stagenet). |

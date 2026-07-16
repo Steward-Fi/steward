@@ -34,7 +34,7 @@ POST /webhooks
 ```
 
 ```bash
-curl -X POST https://api.steward.fi/webhooks \
+curl -X POST http://localhost:3200/webhooks \
   -H "X-Steward-Key: your-tenant-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -88,7 +88,7 @@ GET /webhooks
 ```
 
 ```bash
-curl https://api.steward.fi/webhooks \
+curl http://localhost:3200/webhooks \
   -H "X-Steward-Key: your-tenant-key"
 ```
 
@@ -103,7 +103,7 @@ PUT /webhooks/:id
 ```
 
 ```bash
-curl -X PUT https://api.steward.fi/webhooks/wh_550e8400-... \
+curl -X PUT http://localhost:3200/webhooks/wh_550e8400-... \
   -H "X-Steward-Key: your-tenant-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -123,7 +123,7 @@ DELETE /webhooks/:id
 ```
 
 ```bash
-curl -X DELETE https://api.steward.fi/webhooks/wh_550e8400-... \
+curl -X DELETE http://localhost:3200/webhooks/wh_550e8400-... \
   -H "X-Steward-Key: your-tenant-key"
 ```
 

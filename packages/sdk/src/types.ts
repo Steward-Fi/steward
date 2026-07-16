@@ -2078,6 +2078,8 @@ export interface RouteRecord {
   bodyPath?: string;
   priority?: number;
   enabled?: boolean;
+  requiresApproval?: boolean;
+  approvalConfig?: Record<string, unknown>;
   createdAt: string;
 }
 
@@ -2099,6 +2101,31 @@ export interface CreateRoutePayload {
   bodyPath?: string;
   priority?: number;
   enabled?: boolean;
+  requiresApproval?: boolean;
+  approvalConfig?: Record<string, unknown>;
+}
+
+export type PendingProxyRequestStatus =
+  | "pending"
+  | "approved"
+  | "denied"
+  | "executing"
+  | "executed"
+  | "expired"
+  | "failed";
+export interface PendingProxyRequest {
+  id: string;
+  agentId: string;
+  routeId: string;
+  method: string;
+  targetHost: string;
+  targetPath: string;
+  preview: Record<string, unknown>;
+  status: PendingProxyRequestStatus;
+  expiresAt: string;
+  createdAt?: string;
+  executionStatusCode?: number | null;
+  executionError?: string | null;
 }
 
 export type UpdateRoutePayload = Partial<Omit<CreateRoutePayload, "secretId">>;

@@ -56,7 +56,7 @@ import {
 import type { PluginMigrationSource, StewardPlugin } from "@stwd/shared";
 import { WebhookEventRegistry } from "@stwd/shared";
 import type { Hono } from "hono";
-import { requireAgentJwt } from "./middleware/agent-jwt";
+import { requireAgentJwt, requireProviderAgentJwt } from "./middleware/agent-jwt";
 import { operatorAuth } from "./middleware/operator-auth";
 import { getRedisClient } from "./middleware/redis";
 import { getAgentTokenStatus } from "./services/agent-token-status";
@@ -163,6 +163,12 @@ export interface StewardAppContext {
   getAgentTokenStatus: typeof getAgentTokenStatus;
   getRedisClient: typeof getRedisClient;
   requireAgentJwt: typeof requireAgentJwt;
+  /**
+   * PR2 provider-action authenticator: verifies the agent JWT and installs the
+   * runtime-neutral principal WITHOUT a trading/proxy scope check. Provider-action
+   * routes use this; it is a NEW field and does NOT replace `requireAgentJwt`.
+   */
+  requireProviderAgentJwt: typeof requireProviderAgentJwt;
   operatorAuth: typeof operatorAuth;
   tenantAuth: typeof tenantAuth;
   /**
@@ -204,6 +210,7 @@ export function buildPluginContext(): StewardAppContext {
     getAgentTokenStatus,
     getRedisClient,
     requireAgentJwt,
+    requireProviderAgentJwt,
     operatorAuth,
     tenantAuth,
     adapterRegistry,

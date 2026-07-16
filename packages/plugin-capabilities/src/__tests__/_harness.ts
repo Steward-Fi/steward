@@ -12,7 +12,7 @@
 import { fileURLToPath } from "node:url";
 import { agents, runPluginMigrations, secretRoutes, secrets, tenants } from "@stwd/db";
 import { createPGLiteDb } from "@stwd/db/pglite";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql as rawSql } from "drizzle-orm";
 import { migrate as pgliteMigrate } from "drizzle-orm/pglite/migrator";
 
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("../../drizzle", import.meta.url));
@@ -100,4 +100,74 @@ export async function totalRouteCount(db: TestDb, tenantId: string): Promise<num
 export async function getRoute(db: TestDb, id: string) {
   const [row] = await db.select().from(secretRoutes).where(eq(secretRoutes.id, id));
   return row ?? null;
+}
+
+/**
+ * PR4: seed a `governed_v2` secret route for the plugin governed-gate tests
+ * (spec §5.2, P03/P04). Builds the minimal provider-authority chain the governed
+ * CHECK requires: a user (workspace.created_by), a workspace, a provider account,
+ * a legacy secret_route, a provider_operation pointing at that route, then flips
+ * the route to governed_v2 with provider_operation_id set (the circular route<->
+ * operation FK is why we insert the route legacy-first, then wire + flip). Uses
+ * raw SQL so the fixture never depends on the API service layer.
+ *
+ * Returns the governed route id. The route matches host/pathPattern/method so
+ * `capabilityMapsToGovernedRoute` in invoke.ts detects it and denies the plugin.
+ */
+export async function ensureGovernedRoute(
+  db: TestDb,
+  tenantId: string,
+  agentId: string,
+  secretId: string,
+  opts: {
+    hostPattern: string;
+    pathPattern: string;
+    method: string;
+    injectAs?: string;
+    injectKey?: string;
+  },
+): Promise<string> {
+  const q = async (query: ReturnType<typeof rawSql>): Promise<Array<Record<string, unknown>>> => {
+    const res = (await (db as { execute: (s: unknown) => Promise<unknown> }).execute(query)) as
+      | { rows?: Array<Record<string, unknown>> }
+      | Array<Record<string, unknown>>;
+    return Array.isArray(res) ? res : (res.rows ?? []);
+  };
+
+  const injectAs = opts.injectAs ?? "header";
+  const injectKey = opts.injectKey ?? "authorization";
+  const userRows = await q(
+    rawSql`INSERT INTO users (email) VALUES (${`gov-${tenantId}@test.local`}) RETURNING id`,
+  );
+  const userId = userRows[0].id as string;
+  const wsRows = await q(
+    rawSql`INSERT INTO workspaces (tenant_id, key, name, environment, created_by)
+           VALUES (${tenantId}, ${`ws-${agentId}`}, 'ws', 'production', ${userId}) RETURNING id`,
+  );
+  const workspaceId = wsRows[0].id as string;
+  const accRows = await q(
+    rawSql`INSERT INTO provider_accounts (tenant_id, workspace_id, adapter_key, external_ref, display_name)
+           VALUES (${tenantId}, ${workspaceId}, 'github', ${`ref-${agentId}`}, 'gh') RETURNING id`,
+  );
+  const accountId = accRows[0].id as string;
+  // Legacy route first (governed CHECK forbids provider_operation_id on legacy).
+  const routeRows = await q(
+    rawSql`INSERT INTO secret_routes
+             (tenant_id, agent_id, secret_id, host_pattern, path_pattern, method, inject_as, inject_key, authority_mode)
+           VALUES (${tenantId}, ${agentId}, ${secretId}, ${opts.hostPattern}, ${opts.pathPattern},
+                   ${opts.method}, ${injectAs}, ${injectKey}, 'legacy') RETURNING id`,
+  );
+  const routeId = routeRows[0].id as string;
+  const opRows = await q(
+    rawSql`INSERT INTO provider_operations
+             (tenant_id, workspace_id, provider_account_id, operation_key, risk_class, secret_route_id)
+           VALUES (${tenantId}, ${workspaceId}, ${accountId}, ${`op-${agentId}`}, 'consequential', ${routeId}) RETURNING id`,
+  );
+  const operationId = opRows[0].id as string;
+  // Flip to governed_v2 (now that the operation exists to name).
+  await q(
+    rawSql`UPDATE secret_routes SET authority_mode = 'governed_v2', provider_operation_id = ${operationId}
+           WHERE id = ${routeId}`,
+  );
+  return routeId;
 }

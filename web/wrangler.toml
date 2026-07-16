@@ -25,13 +25,14 @@ custom_domain = true
 [observability]
 enabled = true
 
-# Public build-time var: the dashboard API origin (Steward API on Railway, a
-# separate service). This is the only LIVE origin right now ({"name":"steward"}
-# responds there); it is build-time only and not rendered in any user-facing UI.
+# Public build-time var: the dashboard API origin. This build targets the
+# elizacloud-hosted Steward instance (eliza.steward.fi), which is elizacloud's
+# own self-hosted deployment, not a shared Steward hosted API. It is build-time
+# only and not rendered in any user-facing UI.
 #
-# TODO: move this to a vanity api.steward.fi once that DNS record exists and
-# points at the Railway service. Do not swap the value before then: api.steward.fi
-# has no DNS record yet (the in-code default of https://api.steward.fi is
-# currently dead), so changing it now would break the live dashboard's API calls.
+# NOTE: Steward is self-host-first today; there is no public api.steward.fi
+# hosted API. The in-code fallback default is http://localhost:3200 (the local
+# compose profile). Keep this var pointed at whatever Steward instance this
+# dashboard build should talk to.
 [vars]
 NEXT_PUBLIC_STEWARD_API_URL = "https://eliza.steward.fi"

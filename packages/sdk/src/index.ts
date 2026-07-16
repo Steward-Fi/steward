@@ -200,6 +200,8 @@ export type {
   IntentListOptions,
   IntentStatus,
   IntentType,
+  PendingProxyRequest,
+  PendingProxyRequestStatus,
   PlatformLinkAccountResult,
   PlatformLinkedAccount,
   PlatformTenantInvitation,

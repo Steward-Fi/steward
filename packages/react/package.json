@@ -1,7 +1,7 @@
 {
   "name": "@stwd/react",
   "version": "0.10.0",
-  "description": "Embeddable React components for Steward agent wallet management",
+  "description": "React components for Steward authentication, wallets, policies, and approvals",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

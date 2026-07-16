@@ -42,6 +42,10 @@ services:
       DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
+      # PR4 execution authorization v2 key (keyId:secret,... rotation list).
+      # SEPARATE from STEWARD_JWT_SECRET; governed provider actions fail closed
+      # if unset. Both api (mint) and proxy (claim/verify) require it.
+      STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?STEWARD_EXECUTION_AUTH_SECRET is required - generate with: printf 'v1:%s' \"$(openssl rand -hex 32)\"}"
       STEWARD_PLATFORM_KEYS: "${STEWARD_PLATFORM_KEYS:-}"
       STEWARD_PLATFORM_KEY_SCOPES: "${STEWARD_PLATFORM_KEY_SCOPES:-}"
       ALLOW_USER_TENANT_CREATION: "${ALLOW_USER_TENANT_CREATION:-}"
@@ -112,7 +116,16 @@ services:
       DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
+      # PR4 execution authorization v2 key (keyId:secret,... rotation list).
+      # SEPARATE from STEWARD_JWT_SECRET; governed provider actions fail closed
+      # if unset. Both api (mint) and proxy (claim/verify) require it.
+      STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?STEWARD_EXECUTION_AUTH_SECRET is required - generate with: printf 'v1:%s' \"$(openssl rand -hex 32)\"}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?STEWARD_KDF_SALT is required - generate with: openssl rand -hex 32}"
+      # Proxy-side approval expiry now extends the tamper-evident audit chain
+      # (release.ts -> withTenantAuditedTransaction), so the audit HMAC key is
+      # required here just like on the api service, or expired-approval polls
+      # fail closed with a 5xx in production.
+      STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?STEWARD_AUDIT_HMAC_KEY is required - generate with: openssl rand -hex 32}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
       REDIS_URL: "redis://redis:6379"
     ports:
@@ -149,23 +162,37 @@ services:
   #   STEWARD_MONERO_WALLET_RPC_URL=http://monero-wallet-rpc:18083/json_rpc in .env
   monero-wallet-rpc:
     # Pinned to the Monero release this integration was validated against.
-    image: ghcr.io/sethforprivacy/simple-monero-wallet-rpc:v0.18.5.0
+    image: ghcr.io/sethforprivacy/simple-monero-wallet-rpc:v0.18.5.0@sha256:7ed1d6c565313de6a8afc33f75f7b1ca31aebd15f59558428d2bbc6b6de16950
     container_name: steward-monero-wallet-rpc
     profiles: ["monero"]
     restart: unless-stopped
+    entrypoint: ["/bin/sh", "-ec"]
     command:
-      - "--daemon-address=${MONERO_DAEMON_ADDRESS:-node.sethforprivacy.com:18089}"
-      - "--untrusted-daemon"
-      # The image runs as monero:monero and prepares /home/monero/wallet —
-      # mounting the volume anywhere else leaves it root-owned and unwritable.
-      - "--wallet-dir=/home/monero/wallet"
-      - "--rpc-bind-ip=0.0.0.0"
-      - "--rpc-bind-port=18083"
-      - "--confirm-external-bind"
-      - "--rpc-login=steward:${MONERO_WALLET_RPC_PASSWORD:?MONERO_WALLET_RPC_PASSWORD must be set when the monero profile is enabled}"
-      - "--log-level=0"
+      - |
+        secret_file=/run/secrets/monero_wallet_rpc_password
+        if [ ! -r "$$secret_file" ]; then
+          echo "MONERO_WALLET_RPC_PASSWORD must be set and non-empty when the monero profile is enabled" >&2
+          exit 1
+        fi
+        password=$$(cat "$$secret_file")
+        if [ -z "$$password" ]; then
+          echo "MONERO_WALLET_RPC_PASSWORD must be set and non-empty when the monero profile is enabled" >&2
+          exit 1
+        fi
+        exec /entrypoint.sh \
+          "--daemon-address=${MONERO_DAEMON_ADDRESS:-node.sethforprivacy.com:18089}" \
+          "--untrusted-daemon" \
+          "--wallet-dir=/home/monero/wallet" \
+          "--rpc-bind-ip=0.0.0.0" \
+          "--rpc-bind-port=18083" \
+          "--confirm-external-bind" \
+          "--rpc-login=steward:$$password" \
+          "--log-level=0"
     volumes:
       - monero-wallet-cache:/home/monero/wallet
+    secrets:
+      - source: monero-wallet-rpc-password
+        target: monero_wallet_rpc_password
     # Dual-homed like steward-api: `backend` is internal-only (so only
     # steward-api can reach the RPC port), `public` provides egress to the
     # remote daemon. No host port is published.
@@ -241,6 +268,11 @@ volumes:
   # Disposable Monero wallet scan cache (canonical keys live in Postgres).
   monero-wallet-cache:
     driver: local
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+secrets:
+  monero-wallet-rpc-password:
+    environment: MONERO_WALLET_RPC_PASSWORD
 
 # ── Networks ──────────────────────────────────────────────────────────────────
 networks:

@@ -13,7 +13,7 @@ ERC-8004 uses CREATE2 deterministic deployment — the same contract address exi
 - **Primary registry:** Base (cheap gas, sub-cent per registration)
 - **Mirror registries:** Ethereum + BSC + Arbitrum (for platforms on those chains)
 - **Cross-chain attestation:** When an agent registers on Base, steward can optionally mirror the registration to other chains via a batch relay
-- **Reputation aggregation:** Reputation signals from ALL chains feed into a unified score
+- **Reputation aggregation:** Configured reputation signals feed into a unified score
 
 | Chain | Registry Address | Gas Cost | Use Case |
 |-------|-----------------|----------|----------|

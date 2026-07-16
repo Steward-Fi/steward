@@ -4,7 +4,7 @@ First-pass Ruby backend SDK for Steward API integrations.
 
 ```ruby
 client = Steward::Client.new(
-  base_url: "https://api.steward.fi",
+  base_url: "http://localhost:3200",
   platform_key: "steward_platform_..."
 )
 

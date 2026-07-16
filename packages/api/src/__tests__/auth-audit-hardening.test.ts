@@ -6,6 +6,11 @@ const apiRoot = join(import.meta.dir, "..");
 const authSource = readFileSync(join(apiRoot, "routes", "auth.ts"), "utf8");
 const userSource = readFileSync(join(apiRoot, "routes", "user.ts"), "utf8");
 const auditRouteSource = readFileSync(join(apiRoot, "routes", "audit.ts"), "utf8");
+// The owner/admin + recent-MFA gate was factored out of routes/audit.ts into a
+// shared middleware (middleware/audit-gate.ts) so /audit/* and the PR5
+// /v2/provider-actions/:id/{case,evidence} routes enforce an IDENTICAL gate.
+// The gate literals now live there; audit.ts wires it via `.use("*", ...)`.
+const auditGateSource = readFileSync(join(apiRoot, "middleware", "audit-gate.ts"), "utf8");
 const auditServiceSource = readFileSync(join(apiRoot, "services", "audit.ts"), "utf8");
 const authStoreSource = readFileSync(
   join(apiRoot, "..", "..", "auth", "src", "store-backends.ts"),
@@ -125,10 +130,17 @@ describe("auth and audit hardening", () => {
   });
 
   it("requires owner/admin session for audit routes and verifies bounded ranges", () => {
-    expect(auditRouteSource).toContain('c.get("authType") !== "session-jwt"');
-    expect(auditRouteSource).toContain('role !== "owner" && role !== "admin"');
-    expect(auditRouteSource).toContain("sessionMfaVerifiedAt");
-    expect(auditRouteSource).toContain("Audit routes require recent MFA verification");
+    // audit.ts must WIRE the shared gate on every audit route...
+    expect(auditRouteSource).toContain(
+      'import { auditOwnerAdminMfaGate } from "../middleware/audit-gate"',
+    );
+    expect(auditRouteSource).toContain('auditRoutes.use("*", auditOwnerAdminMfaGate)');
+    // ...and the gate itself must still enforce session-jwt + owner/admin +
+    // recent-MFA (moved verbatim from audit.ts into the shared middleware).
+    expect(auditGateSource).toContain('c.get("authType") !== "session-jwt"');
+    expect(auditGateSource).toContain('role !== "owner" && role !== "admin"');
+    expect(auditGateSource).toContain("sessionMfaVerifiedAt");
+    expect(auditGateSource).toContain("Audit routes require recent MFA verification");
     expect(auditServiceSource).toContain("seq = ${effectiveFromSeq - 1}");
     expect(auditServiceSource).toContain("seq BETWEEN ${effectiveFromSeq} AND ${toSeq}");
     expect(auditServiceSource).not.toContain("const fromSeq = 1");

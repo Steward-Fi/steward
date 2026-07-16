@@ -7,15 +7,21 @@
 
 import { proxyAuditLog } from "@stwd/db";
 import { and, count, desc, eq, gte, inArray, lte, type SQL, sql } from "drizzle-orm";
-import { type Context, Hono } from "hono";
-import { verifyAuditChain } from "../services/audit";
+import { Hono } from "hono";
+import { auditOwnerAdminMfaGate } from "../middleware/audit-gate";
+import {
+  type AuditBundleData,
+  readAuditBundleData,
+  signAuditBundle,
+  verifyAuditChain,
+} from "../services/audit";
+import { AuditSigningKeyError, isCheckpointSigningConfigured } from "../services/audit-checkpoint";
 import {
   type ApiResponse,
   type AppVariables,
   agents,
   approvalQueue,
   db,
-  setNoStoreHeaders,
   transactions,
 } from "../services/context";
 
@@ -24,42 +30,20 @@ export const auditRoutes = new Hono<{ Variables: AppVariables }>();
 const MAX_AUDIT_PAGE = 5_000;
 const MAX_AUDIT_OFFSET = 1_000_000;
 const MAX_AUDIT_VERIFY_RANGE = 10_000;
+// An evidence bundle inlines every event in the range as JSON; cap it so a
+// single request can't materialize an unbounded chain in memory.
+const MAX_AUDIT_BUNDLE_EVENTS = 10_000;
+// BUNDLE_CANONICALIZATION_SPEC now lives in services/audit (single source of
+// truth, spec §6.2) and is imported above.
 const MAX_AUDIT_EXPORT_RANGE_MS = 31 * 24 * 60 * 60 * 1000;
-const AUDIT_READ_MFA_MAX_AGE_MS = 5 * 60_000;
 const MAX_AUDIT_METADATA_FILTERS = 5;
 const AUDIT_ACTION_FILTER_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 const AUDIT_METADATA_PATH_PART_PATTERN = /^[A-Za-z0-9_]{1,64}$/;
 const MAX_AUDIT_METADATA_VALUE_LENGTH = 256;
 
-function hasRecentSessionMfa(
-  c: Context<{ Variables: AppVariables }>,
-  maxAgeMs = AUDIT_READ_MFA_MAX_AGE_MS,
-) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
-}
-
-auditRoutes.use("*", async (c, next) => {
-  const role = c.get("tenantRole");
-  if (c.get("authType") !== "session-jwt" || (role !== "owner" && role !== "admin")) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Audit routes require owner or admin session" },
-      403,
-    );
-  }
-  if (!hasRecentSessionMfa(c)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Audit routes require recent MFA verification" },
-      403,
-    );
-  }
-  setNoStoreHeaders(c);
-  return next();
-});
+// Owner/admin + recent-MFA gate, shared with the PR5 case/evidence routes so
+// both surfaces enforce an IDENTICAL posture (spec §6.3).
+auditRoutes.use("*", auditOwnerAdminMfaGate);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -817,6 +801,97 @@ auditRoutes.post("/verify", async (c) => {
           : "Partial verification is anchored to the stored predecessor hash and is not proof that earlier audit rows are intact.",
     },
   });
+});
+
+// ─── GET /audit/bundle ────────────────────────────────────────────────────
+//
+// Offline-verifiable evidence bundle. Returns the tenant's audit events in the
+// requested seq range plus an Ed25519-signed checkpoint over the chain head, so
+// an third-party auditor can verify the export offline (no Steward access, no
+// secret) with scripts/verify-evidence-bundle.mjs. The signature commits to the
+// head HMAC; the event list lets the verifier confirm linkage and that the head
+// row matches the signed checkpoint.
+auditRoutes.get("/bundle", async (c) => {
+  const tenantId = c.get("tenantId");
+
+  if (!isCheckpointSigningConfigured()) {
+    if (process.env.NODE_ENV === "production") {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            "Offline evidence bundles require STEWARD_AUDIT_SIGNING_KEY. Generate an " +
+            "Ed25519 key (openssl genpkey -algorithm ed25519) and configure it.",
+        },
+        503,
+      );
+    }
+    console.warn(
+      "⚠️ [audit] STEWARD_AUDIT_SIGNING_KEY not set — /audit/bundle disabled. " +
+        "Set it to produce offline-verifiable evidence bundles.",
+    );
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "Offline evidence bundles are disabled: STEWARD_AUDIT_SIGNING_KEY is not " +
+          "configured (development).",
+      },
+      503,
+    );
+  }
+
+  const parsedFromSeq = parsePositiveIntegerParam(
+    c.req.query("from"),
+    "from",
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (!parsedFromSeq.ok) {
+    return c.json<ApiResponse>({ ok: false, error: parsedFromSeq.error }, 400);
+  }
+  const fromSeq = parsedFromSeq.value;
+  const toRaw = c.req.query("to");
+  const parsedToSeq = toRaw
+    ? parsePositiveIntegerParam(toRaw, "to", fromSeq, Number.MAX_SAFE_INTEGER)
+    : ({ ok: true, value: undefined } as const);
+  if (!parsedToSeq.ok) {
+    return c.json<ApiResponse>({ ok: false, error: parsedToSeq.error }, 400);
+  }
+  const requestedToSeq = parsedToSeq.value;
+  const toSeq = requestedToSeq ?? fromSeq + MAX_AUDIT_BUNDLE_EVENTS - 1;
+  if (toSeq < fromSeq) {
+    return c.json<ApiResponse>({ ok: false, error: "to must be greater than from" }, 400);
+  }
+  if (toSeq - fromSeq + 1 > MAX_AUDIT_BUNDLE_EVENTS) {
+    return c.json<ApiResponse>(
+      { ok: false, error: `audit bundle range must not exceed ${MAX_AUDIT_BUNDLE_EVENTS} events` },
+      400,
+    );
+  }
+
+  let bundleData: AuditBundleData;
+  try {
+    bundleData = await readAuditBundleData(tenantId, fromSeq, toSeq);
+  } catch (err) {
+    console.error(`[audit] bundle read failed for tenant ${tenantId}:`, err);
+    return c.json<ApiResponse>({ ok: false, error: "Failed to read audit chain" }, 500);
+  }
+
+  // Single source of signing truth (spec §6.2): the checkpoint sign + content
+  // digest + best-effort persistence live in services/audit.signAuditBundle, so
+  // /audit/bundle and /v2/provider-actions/:id/evidence produce byte-identical
+  // envelopes. No behavior change to this route.
+  try {
+    const bundle = await signAuditBundle(tenantId, fromSeq, toSeq, bundleData);
+    return c.json(bundle);
+  } catch (err) {
+    if (err instanceof AuditSigningKeyError) {
+      return c.json<ApiResponse>({ ok: false, error: err.message }, 503);
+    }
+    console.error(`[audit] checkpoint signing failed for tenant ${tenantId}:`, err);
+    return c.json<ApiResponse>({ ok: false, error: "Failed to sign checkpoint" }, 500);
+  }
 });
 
 function csvRow(fields: string[]): string {

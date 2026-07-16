@@ -1,0 +1,16 @@
+{
+  "name": "@stwd/provider-x",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "dev": "tsc --watch",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@stwd/shared": "workspace:*"
+  },
+  "description": "X (Twitter) provider-action adapter — operation argument schemas + canonical action construction over the x.provider-action.v1 profile"
+}

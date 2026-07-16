@@ -4,9 +4,9 @@
  * Mount: app.route("/approvals", approvalRoutes)
  */
 
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
-import { writeAuditEvent } from "../services/audit";
+import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
@@ -14,12 +14,25 @@ import {
   approvalQueue,
   autoApprovalRules,
   db,
+  pendingProxyRequests,
   requireTenantLevel,
   safeJsonParse,
   setNoStoreHeaders,
   transactions,
 } from "../services/context";
 import { dispatchWebhook } from "../services/webhook-dispatch";
+
+/**
+ * Internal sentinel used to roll back an in-progress audited transaction when
+ * the target transaction was resolved concurrently (guarded-update loser).
+ * Throwing it rolls back the whole unit; the route maps it to a 409.
+ */
+class ApprovalAlreadyResolvedError extends Error {
+  constructor() {
+    super("Approval transaction already resolved");
+    this.name = "ApprovalAlreadyResolvedError";
+  }
+}
 
 export const approvalRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -162,18 +175,23 @@ function parseBoundedText(value: unknown, required = false): string | null {
   return trimmed;
 }
 
-async function writeApprovalAudit(
-  c: Context<{ Variables: AppVariables }>,
-  event: {
-    action: string;
-    resourceType: string;
-    resourceId: string;
-    metadata: Record<string, unknown>;
-  },
-): Promise<void> {
-  await writeAuditEvent({
+type ApprovalAuditEvent = {
+  action: string;
+  resourceType: string;
+  resourceId: string;
+  metadata: Record<string, unknown>;
+};
+
+/**
+ * Build the audit-event input for an approval-control-plane mutation from the
+ * request context. Kept separate from the writer so the exact same event can be
+ * appended either standalone (`writeApprovalAudit`) or atomically inside a
+ * caller's transaction (`appendRequiredAudit` from `withTenantAuditedTransaction`).
+ */
+function approvalAuditEvent(c: Context<{ Variables: AppVariables }>, event: ApprovalAuditEvent) {
+  return {
     tenantId: c.get("tenantId"),
-    actorType: "user",
+    actorType: "user" as const,
     actorId: approvalActor(c),
     action: event.action,
     resourceType: event.resourceType,
@@ -182,7 +200,14 @@ async function writeApprovalAudit(
     ipAddress: c.req.header("x-forwarded-for") ?? null,
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
-  });
+  };
+}
+
+async function writeApprovalAudit(
+  c: Context<{ Variables: AppVariables }>,
+  event: ApprovalAuditEvent,
+): Promise<void> {
+  await writeAuditEvent(approvalAuditEvent(c, event));
 }
 
 // ─── List pending approvals for a tenant ──────────────────────────────────────
@@ -299,6 +324,312 @@ approvalRoutes.get("/stats", async (c) => {
       avgWaitSeconds: Number(stats?.avgWaitSeconds ?? 0),
     },
   });
+});
+
+// ─── Approval-gated proxy requests ───────────────────────────────────────────
+
+async function requireProxyOperator(
+  c: Context<{ Variables: AppVariables }>,
+): Promise<Response | null> {
+  if (!requireTenantLevel(c) || !requireHumanApprover(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Proxy approvals require an owner or admin user session" },
+      403,
+    );
+  }
+  if (!hasRecentSessionMfa(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Proxy approvals require recent MFA verification" },
+      403,
+    );
+  }
+  return null;
+}
+
+async function expireProxyApprovals(tenantId: string): Promise<void> {
+  // Atomicity: the expiry state transition for every row and its
+  // `proxy.approval.expired` audit event commit in ONE transaction. Previously
+  // the bulk UPDATE committed first and the per-row audits were written after in
+  // separate transactions, so a crash mid-loop left expired rows with no audit
+  // record (spec section 11 item #10). Now a crash before commit leaves nothing
+  // expired and the next sweep/API call retries the whole batch idempotently
+  // (the `status IN ('pending','approved')` guard means already-expired rows are
+  // not re-selected and cannot be double-audited).
+  await withTenantAuditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
+    const dbTx = tx as typeof db;
+    const expired = await dbTx
+      .update(pendingProxyRequests)
+      .set({ status: "expired", updatedAt: new Date() })
+      .where(
+        and(
+          eq(pendingProxyRequests.tenantId, tenantId),
+          inArray(pendingProxyRequests.status, ["pending", "approved"]),
+          sql`${pendingProxyRequests.expiresAt} <= now()`,
+        ),
+      )
+      .returning();
+    for (const row of expired) {
+      await appendRequiredAudit({
+        tenantId,
+        actorType: "system",
+        actorId: "proxy-approval-expirer",
+        action: "proxy.approval.expired",
+        resourceType: "pending_proxy_request",
+        resourceId: row.id,
+        metadata: { agentId: row.agentId, routeId: row.routeId },
+      });
+    }
+  });
+}
+
+approvalRoutes.get("/proxy", async (c) => {
+  const denied = await requireProxyOperator(c);
+  if (denied) return denied;
+  const tenantId = c.get("tenantId");
+  await expireProxyApprovals(tenantId);
+  const status = c.req.query("status");
+  const valid = [
+    "pending",
+    "approved",
+    "denied",
+    "executing",
+    "executed",
+    "expired",
+    "failed",
+  ] as const;
+  if (status && !valid.includes(status as (typeof valid)[number]))
+    return c.json<ApiResponse>({ ok: false, error: "Invalid status" }, 400);
+  const rows = await db
+    .select({
+      id: pendingProxyRequests.id,
+      agentId: pendingProxyRequests.agentId,
+      routeId: pendingProxyRequests.routeId,
+      method: pendingProxyRequests.method,
+      targetHost: pendingProxyRequests.targetHost,
+      targetPath: pendingProxyRequests.targetPath,
+      preview: pendingProxyRequests.preview,
+      status: pendingProxyRequests.status,
+      expiresAt: pendingProxyRequests.expiresAt,
+      createdAt: pendingProxyRequests.createdAt,
+      executionStatusCode: pendingProxyRequests.executionStatusCode,
+    })
+    .from(pendingProxyRequests)
+    .where(
+      and(
+        eq(pendingProxyRequests.tenantId, tenantId),
+        status ? eq(pendingProxyRequests.status, status as (typeof valid)[number]) : undefined,
+      ),
+    )
+    .orderBy(desc(pendingProxyRequests.createdAt))
+    .limit(200);
+  return c.json<ApiResponse>({ ok: true, data: rows });
+});
+
+approvalRoutes.get("/proxy/:id", async (c) => {
+  const denied = await requireProxyOperator(c);
+  if (denied) return denied;
+  const tenantId = c.get("tenantId");
+  await expireProxyApprovals(tenantId);
+  const [row] = await db
+    .select({
+      id: pendingProxyRequests.id,
+      agentId: pendingProxyRequests.agentId,
+      routeId: pendingProxyRequests.routeId,
+      method: pendingProxyRequests.method,
+      targetHost: pendingProxyRequests.targetHost,
+      targetPath: pendingProxyRequests.targetPath,
+      preview: pendingProxyRequests.preview,
+      status: pendingProxyRequests.status,
+      expiresAt: pendingProxyRequests.expiresAt,
+      executionStatusCode: pendingProxyRequests.executionStatusCode,
+      executionError: pendingProxyRequests.executionError,
+    })
+    .from(pendingProxyRequests)
+    .where(
+      and(
+        eq(pendingProxyRequests.id, c.req.param("id")),
+        eq(pendingProxyRequests.tenantId, tenantId),
+      ),
+    )
+    .limit(1);
+  if (!row)
+    return c.json<ApiResponse>({ ok: false, error: "Pending proxy request not found" }, 404);
+  return c.json<ApiResponse>({ ok: true, data: row });
+});
+
+approvalRoutes.post("/proxy/:id/approve", async (c) => {
+  const denied = await requireProxyOperator(c);
+  if (denied) return denied;
+  const tenantId = c.get("tenantId");
+  await expireProxyApprovals(tenantId);
+  const actor = approvalActor(c);
+  // Atomicity: the pending -> approved transition and its
+  // `proxy.approval.approved` audit event commit in ONE transaction. Previously
+  // the UPDATE committed first and the audit was written in a separate
+  // transaction, so an audit failure or crash between them could leave an
+  // approved request with no audit record (spec section 11 item #10, invariant
+  // I14). The guarded `status = 'pending'` predicate keeps a retry after a crash
+  // idempotent: only one transaction can flip the row, and a replayed approve of
+  // an already-approved row returns 409 without a second transition or audit.
+  const row = await withTenantAuditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
+    const dbTx = tx as typeof db;
+    const [updated] = await dbTx
+      .update(pendingProxyRequests)
+      .set({
+        status: "approved",
+        approvedAt: new Date(),
+        approvedBy: actor,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(pendingProxyRequests.id, c.req.param("id")),
+          eq(pendingProxyRequests.tenantId, tenantId),
+          eq(pendingProxyRequests.status, "pending"),
+          sql`${pendingProxyRequests.expiresAt} > now()`,
+        ),
+      )
+      .returning();
+    if (!updated) return null;
+    await appendRequiredAudit(
+      approvalAuditEvent(c, {
+        action: "proxy.approval.approved",
+        resourceType: "pending_proxy_request",
+        resourceId: updated.id,
+        metadata: {
+          agentId: updated.agentId,
+          routeId: updated.routeId,
+          requestDigest: updated.requestDigest,
+        },
+      }),
+    );
+    return updated;
+  });
+  if (!row)
+    return c.json<ApiResponse>(
+      { ok: false, error: "Pending proxy request was not found, already resolved, or expired" },
+      409,
+    );
+  return c.json<ApiResponse>({ ok: true, data: { id: row.id, status: row.status } });
+});
+
+approvalRoutes.post("/proxy/:id/deny", async (c) => {
+  const denied = await requireProxyOperator(c);
+  if (denied) return denied;
+  const tenantId = c.get("tenantId");
+  const body = await safeJsonParse<{ reason?: string }>(c);
+  const reason = parseBoundedText(body?.reason);
+  if (reason === null)
+    return c.json<ApiResponse>(
+      { ok: false, error: `reason must be at most ${MAX_APPROVAL_TEXT_LENGTH} characters` },
+      400,
+    );
+  const actor = approvalActor(c);
+  // Atomicity + race determinism: the deny/revoke transition and its audit event
+  // commit in ONE transaction (spec section 11 item #10, invariant I14).
+  //
+  // Denying an ALREADY-APPROVED-but-unconsumed request is a deliberate,
+  // load-bearing admin action: it revokes an approval before the agent's release
+  // poll can claim+execute it (release.ts executes ONLY `status === 'approved'`;
+  // the deny-of-approved semantic was introduced and behaviorally tested in
+  // #181 / af1b330). It is therefore a DISTINCT transition from denying a
+  // still-pending request, and it emits a DISTINCT audit event
+  // (`proxy.approval.revoked` vs `proxy.approval.denied`).
+  //
+  // Splitting the guard into two exclusive CAS predicates (pending-only, then
+  // approved-only) makes a concurrent approve/deny race resolve deterministically
+  // against the single row: the approve's `WHERE status = 'pending'` and this
+  // deny's `WHERE status = 'pending'` cannot BOTH match (one flips the row; the
+  // loser matches 0 rows). If approve committed first, the pending-CAS here
+  // matches 0 and we fall through to the approved-CAS, recording a deliberate
+  // REVOKE with its own audit event — never a second conflicting `denied`
+  // decision on an approved row. A replayed deny of an already-terminal row
+  // matches neither CAS and returns 409 with no transition and no audit.
+  const outcome = await withTenantAuditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
+    const dbTx = tx as typeof db;
+
+    // 1. Deny a still-pending request -> `proxy.approval.denied`.
+    const [denied] = await dbTx
+      .update(pendingProxyRequests)
+      .set({
+        status: "denied",
+        deniedAt: new Date(),
+        deniedBy: actor,
+        denialReason: reason || null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(pendingProxyRequests.id, c.req.param("id")),
+          eq(pendingProxyRequests.tenantId, tenantId),
+          eq(pendingProxyRequests.status, "pending"),
+          sql`${pendingProxyRequests.expiresAt} > now()`,
+        ),
+      )
+      .returning();
+    if (denied) {
+      await appendRequiredAudit(
+        approvalAuditEvent(c, {
+          action: "proxy.approval.denied",
+          resourceType: "pending_proxy_request",
+          resourceId: denied.id,
+          metadata: {
+            agentId: denied.agentId,
+            routeId: denied.routeId,
+            reason: reason || undefined,
+          },
+        }),
+      );
+      return denied;
+    }
+
+    // 2. Revoke an already-approved-but-unconsumed request -> distinct
+    //    `proxy.approval.revoked` event. Row still lands in `denied` (terminal,
+    //    unchanged response shape) but the audit trail records that this was a
+    //    revoke of a live approval, not a first-time denial.
+    const [revoked] = await dbTx
+      .update(pendingProxyRequests)
+      .set({
+        status: "denied",
+        deniedAt: new Date(),
+        deniedBy: actor,
+        denialReason: reason || null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(pendingProxyRequests.id, c.req.param("id")),
+          eq(pendingProxyRequests.tenantId, tenantId),
+          eq(pendingProxyRequests.status, "approved"),
+          sql`${pendingProxyRequests.expiresAt} > now()`,
+        ),
+      )
+      .returning();
+    if (revoked) {
+      await appendRequiredAudit(
+        approvalAuditEvent(c, {
+          action: "proxy.approval.revoked",
+          resourceType: "pending_proxy_request",
+          resourceId: revoked.id,
+          metadata: {
+            agentId: revoked.agentId,
+            routeId: revoked.routeId,
+            reason: reason || undefined,
+            revokedFrom: "approved",
+          },
+        }),
+      );
+      return revoked;
+    }
+
+    return null;
+  });
+  if (!outcome)
+    return c.json<ApiResponse>(
+      { ok: false, error: "Pending proxy request was not found, already resolved, or expired" },
+      409,
+    );
+  return c.json<ApiResponse>({ ok: true, data: { id: outcome.id, status: outcome.status } });
 });
 
 // ─── Approve transaction ──────────────────────────────────────────────────────
@@ -471,64 +802,61 @@ approvalRoutes.post("/:txId/deny", async (c) => {
     },
   });
 
-  const [updated] = await db
-    .transaction(async (tx) => {
-      const updatedRows = await tx
-        .update(approvalQueue)
-        .set({
-          status: "rejected",
-          resolvedAt: new Date(),
-          resolvedBy: `${resolvedBy}: ${reason}`,
-          resolvedByType: principal.type,
-          resolvedById: principal.id,
-        })
-        .where(and(eq(approvalQueue.id, entry.id), eq(approvalQueue.status, "pending")))
-        .returning();
-      if (updatedRows[0]) {
-        const transactionRows = await tx
-          .update(transactions)
-          .set({ status: "rejected" })
-          .where(
-            and(
-              eq(transactions.id, txId),
-              eq(transactions.agentId, entry.agentId),
-              eq(transactions.status, "pending"),
-            ),
-          )
-          .returning({ id: transactions.id });
-        if (!transactionRows[0]) throw new Error("Approval transaction already resolved");
-      }
-      return updatedRows;
-    })
-    .catch((error: unknown) => {
-      if (error instanceof Error && error.message === "Approval transaction already resolved") {
-        return [];
-      }
-      throw error;
-    });
+  // Atomicity: the queue+transaction rejection AND its completion
+  // `approval.deny` audit event commit in ONE transaction (invariant I14).
+  // Previously the state change committed in its own transaction and the
+  // completion audit was written afterwards, guarded only by a best-effort
+  // compensating rollback — a crash between the state commit and either the
+  // audit or the compensation left a rejected transaction with no completion
+  // audit and no rollback. Folding the audit into the same transaction removes
+  // that window entirely; the pre-mutation `approval.deny.authorized` intent log
+  // above is still written first as a durable record that the decision was
+  // attempted. The guarded `status = 'pending'` predicates keep a retry after a
+  // crash idempotent (already-rejected rows are not re-selected).
+  const updated = await withTenantAuditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
+    const dbTx = tx as typeof db;
+    const updatedRows = await dbTx
+      .update(approvalQueue)
+      .set({
+        status: "rejected",
+        resolvedAt: new Date(),
+        resolvedBy: `${resolvedBy}: ${reason}`,
+        resolvedByType: principal.type,
+        resolvedById: principal.id,
+      })
+      .where(and(eq(approvalQueue.id, entry.id), eq(approvalQueue.status, "pending")))
+      .returning();
+    if (!updatedRows[0]) return null;
+    const transactionRows = await dbTx
+      .update(transactions)
+      .set({ status: "rejected" })
+      .where(
+        and(
+          eq(transactions.id, txId),
+          eq(transactions.agentId, entry.agentId),
+          eq(transactions.status, "pending"),
+        ),
+      )
+      .returning({ id: transactions.id });
+    // Transaction already resolved out from under us: roll back the WHOLE unit
+    // (the queue rejection just applied above included) by throwing. Nothing —
+    // not the queue update, not the audit — commits.
+    if (!transactionRows[0]) throw new ApprovalAlreadyResolvedError();
+    await appendRequiredAudit(
+      approvalAuditEvent(c, {
+        action: "approval.deny",
+        resourceType: "transaction",
+        resourceId: txId,
+        metadata: { approvalId: entry.id, agentId: entry.agentId, reason },
+      }),
+    );
+    return updatedRows[0];
+  }).catch((error: unknown) => {
+    if (error instanceof ApprovalAlreadyResolvedError) return null;
+    throw error;
+  });
   if (!updated) {
     return c.json<ApiResponse>({ ok: false, error: "Approval already resolved" }, 409);
-  }
-
-  try {
-    await writeApprovalAudit(c, {
-      action: "approval.deny",
-      resourceType: "transaction",
-      resourceId: txId,
-      metadata: { approvalId: entry.id, agentId: entry.agentId, reason },
-    });
-  } catch (err) {
-    await db.transaction(async (tx) => {
-      await tx
-        .update(approvalQueue)
-        .set({ status: "pending", resolvedAt: null, resolvedBy: null })
-        .where(eq(approvalQueue.id, entry.id));
-      await tx
-        .update(transactions)
-        .set({ status: "pending" })
-        .where(and(eq(transactions.id, txId), eq(transactions.agentId, entry.agentId)));
-    });
-    throw err;
   }
 
   dispatchWebhook(tenantId, entry.agentId, "tx.denied", {

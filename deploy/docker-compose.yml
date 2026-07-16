@@ -26,6 +26,12 @@ services:
       DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@steward-db:5432/steward}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?Set STEWARD_MASTER_PASSWORD in .env}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:-}"
+      STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?Set STEWARD_EXECUTION_AUTH_SECRET in .env - PR4 governed provider actions fail closed if unset - generate: printf 'v1:%s' \"$(openssl rand -hex 32)\"}"
+      # The API writes required audit-chain events (approval / vault / policy
+      # routes via writeAuditEvent / withTenantAuditedTransaction), so it needs
+      # the same audit HMAC key as the proxy. Provisioned into .env by
+      # deploy/provision-steward-node.sh.
+      STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?Set STEWARD_AUDIT_HMAC_KEY in .env - generate with: openssl rand -hex 32}"
       STEWARD_PLATFORM_KEYS: "${STEWARD_PLATFORM_KEYS:-}"
       RPC_URL: "${RPC_URL:-https://mainnet.base.org}"
       CHAIN_ID: "${CHAIN_ID:-8453}"
@@ -61,6 +67,11 @@ services:
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?Set STEWARD_MASTER_PASSWORD in .env}"
       # JWT secret is required in production (auth verifyToken refuses dev fallback).
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?Set STEWARD_JWT_SECRET in .env}"
+      STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?Set STEWARD_EXECUTION_AUTH_SECRET in .env}"
+      # Proxy-side approval expiry extends the tamper-evident audit chain
+      # (release.ts -> withTenantAuditedTransaction); the audit HMAC key is
+      # required here or expired-approval polls fail closed in production.
+      STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?Set STEWARD_AUDIT_HMAC_KEY in .env - generate with: openssl rand -hex 32}"
       # NODE_ENV=production makes request signing + Redis enforcement fail CLOSED,
       # so both REDIS_URL and a request-signing secret are REQUIRED here. Without
       # them the proxy returns 500/429 on 100% of traffic. See deploy/DEPLOYMENT.md.

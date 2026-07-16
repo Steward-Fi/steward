@@ -5,42 +5,8 @@ date: 2026-04-24
 ---
 
 {/*
-VISION.md lines that are directly contradicted by this threat model and
-should be toned down in a follow-up PR (NOT this PR):
-
-  • Line 5:  "Every agent deserves a bank account it can't be robbed of."
-             → aspirational; overclaims absolute security. Suggest:
-               "Every agent deserves strong, policy-bounded custody."
-
-  • Line 9:  "Steward exists to make that impossible. Not through trust,
-             through architecture: … policy enforcement at the signing
-             layer …"
-             → "impossible" is wrong. Policies are enforced in the API
-               process, not the signing layer. See ADR-0004. Suggest:
-               "Steward reduces the blast radius of prompt injection and
-               credential leakage by enforcing operator-defined policies
-               before every signing operation, and by isolating
-               credentials behind a proxy."
-
-  • Line 44: "Policy enforcement | Rules enforced at the vault, not the
-             application layer."
-             → Factually inaccurate today. Rules are enforced at the API
-               layer, which then calls the vault. See ADR-0004.
-               Suggest: "Rules enforced in the API signing path, not in
-               user application code."
-
-  • Line 99: "Policy is architecture, not advice. Rules are enforced at
-             the cryptographic signing layer. Not in middleware. Not in
-             application code. Not as suggestions. If the policy says
-             no, the vault won't sign it."
-             → Overstated. Policies are in-process middleware, not a
-               cryptographic layer. The vault itself will sign anything
-               the API asks it to. Suggest:
-               "Policy is first-class. Every signing API in Steward
-               evaluates policies before calling the vault, and a
-               failed policy stops the request before any key is
-               decrypted. Future versions will move this enforcement
-               into a separate signer process (see ADR-0004)."
+This document describes route-specific boundaries. It must not be read as a
+claim that every signing, proxy, or plugin execution path is governed.
 */}
 
 # Steward Threat Model
@@ -62,7 +28,7 @@ right and this document is wrong. Please file an issue.
   that Steward holds keys for.
 - **Tenant:** an organizational boundary in Steward. A tenant owns
   agents, policies, secrets, and API keys. In a self-hosted deploy,
-  typically one tenant. In the hosted tier, many tenants share
+  typically one tenant. In a multi-tenant self-hosted deployment, many tenants share
   infrastructure.
 - **Operator:** the human/team running Steward. Owns
   `STEWARD_MASTER_PASSWORD`, `STEWARD_SESSION_SECRET`,
@@ -93,11 +59,15 @@ If any of these fails, the threat model below does not hold.
    provides limited defense.
 6. **Tenant operators are trusted with their own tenant.** A tenant
    admin can read the policies, approvals, and audit log for their
-   tenant. They cannot read another tenant's data (isolation is
-   row-level + enforced by the API). In self-hosted mode this is
-   trivially true (there's one tenant). In hosted multi-tenant mode,
-   the hosting operator trusts the tenant owner with their own tenant
-   scope.
+   tenant. They cannot read another tenant's data. Isolation is
+   enforced at the service layer: every tenant-scoped query filters
+   on `tenantId` and rows carry a composite foreign key to their
+   tenant. It is NOT database row-level security (RLS is not
+   implemented). Steward ships self-hosted only, and the expected
+   topology is one tenant per deployment, where this is trivially
+   true. An operator who chooses to run multiple tenants in a single
+   self-hosted deployment relies on that service-layer scoping and
+   trusts each tenant owner with their own scope.
 7. **TLS is terminated in front of Steward.** The Compose file binds
    the API to `127.0.0.1`; the expected topology has Caddy / nginx /
    Traefik handling TLS. Steward does not itself terminate TLS in the
@@ -120,9 +90,8 @@ problem is semantic, not authentication.
 
 **What Steward defends:**
 
-- Policy engine evaluates every signing call
-  (`packages/api/src/routes/vault.ts` lines ~115, ~597, ~808) and
-  rejects anything outside `spending-limit`, `approved-addresses`,
+- Governed wallet routes evaluate policy before their signing calls and
+  reject requests outside `spending-limit`, `approved-addresses`,
   `rate-limit`, `time-window`, `auto-approve-threshold`, and
   `allowed-chains` rules.
 - Auto-approve thresholds queue high-value transactions for human
@@ -175,8 +144,8 @@ including the Steward API credentials the operator provisioned.
   The agent sees responses but not the API key the proxy used. So
   malware in the agent cannot exfiltrate, e.g., the OpenAI key
   directly — it can only cause the proxy to use it.
-- Audit logs record every signing call and every proxy call, tagged
-  with the agent identity. Exfiltration leaves a trail.
+- Instrumented signing and proxy routes emit audit events tagged with the
+  agent identity. Coverage remains route-specific.
 
 **What Steward does NOT defend:**
 
@@ -195,11 +164,13 @@ including the Steward API credentials the operator provisioned.
 
 ---
 
-### 3. Malicious co-tenant in hosted deploy
+### 3. Malicious co-tenant in a multi-tenant self-hosted deploy
 
-**Capability.** On the hosted `steward.fi` tier, another tenant on the
-same infrastructure is adversarial. They try to read, modify, or
-exhaust resources belonging to another tenant.
+**Capability.** There is no hosted `steward.fi` service; Steward ships
+self-hosted only. This adversary applies when an operator chooses to
+run multiple tenants in a single self-hosted deployment. Another
+tenant on the same infrastructure is adversarial and tries to read,
+modify, or exhaust resources belonging to another tenant.
 
 **What Steward defends:**
 
@@ -225,9 +196,9 @@ exhaust resources belonging to another tenant.
 **Mitigation (for self-hosters):** run one tenant per deploy. The
 isolation claim is stronger when there's no multi-tenancy to test.
 
-**Mitigation (for hosted tier operator — us, eventually):**
-per-tenant rate limits, per-tenant DB connection pool caps,
-workload-isolation plans.
+**Mitigation for multi-tenant self-hosters:** use per-tenant rate limits,
+per-tenant database connection-pool caps, and deployment-level workload
+isolation appropriate to the operator's threat model.
 
 ---
 
@@ -342,10 +313,10 @@ turns malicious, or has their session token stolen.
 
 **What Steward defends:**
 
-- Audit log records admin actions: policy changes, API key
-  creation, approval decisions. Not tamper-evident (admin can
-  likely also delete audit rows via DB access), but useful for
-  detection.
+- Instrumented admin actions enter the tenant-scoped HMAC chain and signed
+  evidence exports. Verification detects modification relative to the public key carried in the bundle. Operators must separately
+  match that key to an out-of-band trusted signing key or fingerprint. An operator controlling all relevant keys
+  can still fabricate a self-consistent history.
 - API key creation requires authenticated admin.
 - Every signed transaction has a policy-evaluation record
   attached (`transactions.policyResults`).
@@ -411,14 +382,18 @@ adversary defeats the entire architecture.
   / JSC heap until garbage collection. We do not hold it longer than
   needed (`vault.ts` line ~324 comment) but we cannot guarantee
   erasure. This affects any attacker with a memory-dump primitive.
-- **No HSM / KMS integration in v1.** Planned (VISION.md roadmap).
+- **Custody backends have distinct trust limits.** AWS KMS envelope wrapping
+  and an operator-supplied PKCS#11 wrapping adapter are available, but the
+  application still sees plaintext key material at sign time in local and KMS
+  envelope modes. Steward does not claim native HSM signing.
 - **Default `STEWARD_KDF_SALT` is weak** if the operator doesn't
   override it. Loud warning; should be an error in v2.
 - **Migrations run at startup with no leader lock.** Not safe for
   multi-replica rolling deploys.
-- **No tamper-evident audit log.** An attacker with DB write can
-  rewrite the audit trail. Options under consideration: HMAC chain,
-  third-party write-only log (e.g., Loki / Vector → S3 WORM).
+- **Audit evidence is not operator-proof.** The tenant-scoped HMAC chain,
+  Ed25519 checkpoints, and offline verifier detect modification relative to the public key carried in the bundle. Operators must separately
+  match that key to an out-of-band trusted signing key or fingerprint. An operator controlling all
+  relevant keys can still fabricate a self-consistent history.
 - **No rate limiting on read endpoints.** Rate limits apply to
   signing and auth; general read traffic is not rate-capped beyond
   whatever the reverse proxy enforces.

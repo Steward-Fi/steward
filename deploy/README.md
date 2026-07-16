@@ -177,7 +177,7 @@ ssh root@${NODE_IP} "
 
 ## Nginx Reverse Proxy (TLS Termination)
 
-The `deploy/nginx.conf` proxies `api.steward.fi → :3200` and `proxy.steward.fi → :8080`.
+The `deploy/nginx.conf` proxies `api.example.com → :3200` and `proxy.example.com → :8080`. Replace `api.example.com` / `proxy.example.com` with the domains you control (Steward is self-host-first; there is no shared hosted API yet).
 
 ```bash
 # On the node with nginx installed
@@ -198,7 +198,7 @@ sudo ln -s /etc/nginx/sites-available/steward /etc/nginx/sites-enabled/steward
 sudo nginx -t && sudo systemctl reload nginx
 
 # Get TLS certificates
-sudo certbot --nginx -d api.steward.fi -d proxy.steward.fi
+sudo certbot --nginx -d api.example.com -d proxy.example.com
 ```
 
 ---

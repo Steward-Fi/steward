@@ -226,6 +226,7 @@ jobs:
           STEWARD_PLATFORM_KEY_SCOPES: '{"ci-platform-key":["platform:*"]}'
           ALLOW_USER_TENANT_CREATION: "true"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
           # The whole api suite drives this one server from a single IP; the
@@ -267,6 +268,7 @@ jobs:
           STEWARD_PLATFORM_KEY_SCOPES: '{"ci-platform-key":["platform:*"]}'
           ALLOW_USER_TENANT_CREATION: "true"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
 
@@ -316,6 +318,7 @@ jobs:
           STEWARD_PLATFORM_KEY_SCOPES: '{"ci-platform-key":["platform:*"]}'
           ALLOW_USER_TENANT_CREATION: "true"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
         run: |
@@ -364,6 +367,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Validate Monero compose profile contract
+        run: scripts/test-compose-monero.sh
+
       - name: Start compose stack
         env:
           POSTGRES_DB: "steward_test"
@@ -375,6 +381,7 @@ jobs:
           STEWARD_PLATFORM_KEY_SCOPES: '{"ci-platform-key":["platform:*"]}'
           ALLOW_USER_TENANT_CREATION: "true"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           STEWARD_KDF_SALT: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
           STEWARD_ALLOW_INSECURE_DB: "true"
@@ -411,6 +418,7 @@ jobs:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_KDF_SALT: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
           # docker compose interpolates the full compose env even for logs/down,
           # so every required variable from the up step must be present here too
