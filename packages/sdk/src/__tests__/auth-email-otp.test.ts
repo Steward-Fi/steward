@@ -86,6 +86,17 @@ beforeEach(() => {
   captured = [];
   originalFetch = global.fetch;
   routes = {
+    "/auth/email/send": () =>
+      jsonResponse({
+        ok: true,
+        data: {
+          expiresAt: "2026-01-01T00:10:00Z",
+          challengeId: "challenge-public",
+          pollSecret: "poll-secret",
+        },
+      }),
+    "/auth/email/code/verify": () => jsonResponse(VERIFY_RESPONSE),
+    "/auth/email/status": () => jsonResponse({ ok: true, data: { status: "pending" } }),
     "/auth/email/otp/send": () =>
       jsonResponse({ ok: true, data: { expiresAt: "2026-01-01T00:00:00Z" } }),
     "/auth/email/otp/verify": () =>
@@ -100,6 +111,52 @@ beforeEach(() => {
 afterEach(() => {
   global.fetch = originalFetch;
   restoreBrowserShim();
+});
+
+describe("StewardAuth email magic-link companion code", () => {
+  it("unwraps challenge polling fields from signInWithEmail", async () => {
+    const auth = new StewardAuth({ baseUrl: "https://api.example.test", tenantId: "elizacloud" });
+    const res = await auth.signInWithEmail("new@user.test", "captcha-123");
+
+    expect(captured[0]?.url).toBe("https://api.example.test/auth/email/send");
+    expect(captured[0]?.body).toMatchObject({
+      email: "new@user.test",
+      tenantId: "elizacloud",
+      captchaToken: "captcha-123",
+    });
+    expect(res).toMatchObject({
+      ok: true,
+      expiresAt: "2026-01-01T00:10:00Z",
+      challengeId: "challenge-public",
+      pollSecret: "poll-secret",
+    });
+  });
+
+  it("verifies the login companion code against the additive endpoint", async () => {
+    const auth = new StewardAuth({ baseUrl: "https://api.example.test", tenantId: "elizacloud" });
+    const res = await auth.verifyEmailSignInCode("new@user.test", "123456");
+
+    expect(captured[0]?.url).toBe("https://api.example.test/auth/email/code/verify");
+    expect(captured[0]?.body).toMatchObject({
+      email: "new@user.test",
+      code: "123456",
+      tenantId: "elizacloud",
+    });
+    expect("token" in res || "mfaRequired" in res).toBe(true);
+  });
+
+  it("polls email sign-in status with challenge id and poll secret", async () => {
+    const auth = new StewardAuth({ baseUrl: "https://api.example.test", tenantId: "elizacloud" });
+    const res = await auth.pollEmailSignInStatus("challenge-public", "poll-secret");
+
+    expect(captured[0]?.url).toBe("https://api.example.test/auth/email/status");
+    expect(captured[0]?.body).toMatchObject({
+      challengeId: "challenge-public",
+      pollSecret: "poll-secret",
+      tenantId: "elizacloud",
+    });
+    expect(res).toMatchObject({ ok: true, status: "pending" });
+  });
 });
 
 describe("StewardAuth.sendEmailOtp", () => {

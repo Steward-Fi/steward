@@ -42,6 +42,7 @@ services:
       DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
+      STEWARD_EMAIL_CODE_SECRET: "${STEWARD_EMAIL_CODE_SECRET:?STEWARD_EMAIL_CODE_SECRET is required}"
       # PR4 execution authorization v2 key (keyId:secret,... rotation list).
       # SEPARATE from STEWARD_JWT_SECRET; governed provider actions fail closed
       # if unset. Both api (mint) and proxy (claim/verify) require it.
@@ -132,6 +133,7 @@ services:
       DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
+      STEWARD_EMAIL_CODE_SECRET: "${STEWARD_EMAIL_CODE_SECRET:?STEWARD_EMAIL_CODE_SECRET is required}"
       # PR4 execution authorization v2 key (keyId:secret,... rotation list).
       # SEPARATE from STEWARD_JWT_SECRET; governed provider actions fail closed
       # if unset. Both api (mint) and proxy (claim/verify) require it.

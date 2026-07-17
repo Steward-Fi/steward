@@ -18,6 +18,8 @@
  *
  * POST /email/send                  — { email } → { ok, expiresAt }
  * POST /email/verify                — { token, email } → { token (JWT), user }
+ * POST /email/code/verify           — { email, code } → { token (JWT), user }
+ * POST /email/status                — { challengeId, pollSecret } → status only
  * GET  /callback/email              — ?token=...&email=... → 302 redirect with session tokens
  *
  * Tenant context
@@ -7987,13 +7989,13 @@ auth.post("/email/send", async (c) => {
     );
   }
   const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
-  const { expiresAt } = await emailAuth.sendMagicLink(email, {
+  const { expiresAt, challengeId, pollSecret } = await emailAuth.sendMagicLink(email, {
     tenantId: resolvedTenantId,
   });
 
-  return c.json<ApiResponse<{ expiresAt: string }>>({
+  return c.json<ApiResponse<{ expiresAt: string; challengeId: string; pollSecret: string }>>({
     ok: true,
-    data: { expiresAt: expiresAt.toISOString() },
+    data: { expiresAt: expiresAt.toISOString(), challengeId, pollSecret },
   });
 });
 
@@ -8042,7 +8044,7 @@ auth.get("/callback/email", async (c) => {
   let result: Awaited<ReturnType<EmailAuth["verifyMagicLink"]>>;
   try {
     const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
-    result = await emailAuth.verifyMagicLink(token);
+    result = await emailAuth.verifyMagicLink(token, email, resolvedTenantId);
   } catch {
     return redirectEmailAuthFailure(c, "invalid_link");
   }
@@ -8115,7 +8117,16 @@ auth.post("/email/verify", async (c) => {
   }
 
   const email = body.email.toLowerCase().trim();
-  const resolvedTenantId = c.req.header("X-Steward-Tenant") || body.tenantId || _DEFAULT_TENANT_ID;
+  const headerTenantId = c.req.header("X-Steward-Tenant")?.trim();
+  const bodyTenantId = body.tenantId?.trim();
+  const resolvedTenantId = headerTenantId || bodyTenantId || _DEFAULT_TENANT_ID;
+  const tenantHintError = await validateExplicitAuthTenantHint(
+    resolvedTenantId,
+    Boolean(headerTenantId || bodyTenantId),
+  );
+  if (tenantHintError) {
+    return c.json<ApiResponse>({ ok: false, error: tenantHintError }, 404);
+  }
   const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "email");
   if (methodResponse) return methodResponse;
   const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
@@ -8139,7 +8150,7 @@ auth.post("/email/verify", async (c) => {
     );
   }
   const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
-  const result = await emailAuth.verifyMagicLink(body.token);
+  const result = await emailAuth.verifyMagicLink(body.token, email, resolvedTenantId);
 
   if (!result.valid || result.email.toLowerCase().trim() !== email) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired magic link" }, 401);
@@ -8156,6 +8167,105 @@ auth.post("/email/verify", async (c) => {
   return authExchangeJson(c, authResult.response);
 });
 
+auth.post("/email/code/verify", async (c) => {
+  const rl = await checkAuthRateLimit(c, "email-code-verify", 60_000, 10);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many verification attempts. Try again later." },
+      429,
+    );
+  }
+
+  const body = await safeJsonParse<{ email: string; code: string; tenantId?: string }>(c);
+  if (!body?.email || !body?.code) {
+    return c.json<ApiResponse>({ ok: false, error: "email and code are required" }, 400);
+  }
+
+  const email = body.email.toLowerCase().trim();
+  const code = body.code.trim();
+  const resolvedTenantId = c.req.header("X-Steward-Tenant") || body.tenantId || _DEFAULT_TENANT_ID;
+  const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "email");
+  if (methodResponse) return methodResponse;
+  const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
+    c,
+    resolvedTenantId,
+    email,
+    "Email",
+  );
+  if (ssoRequiredResponse) return ssoRequiredResponse;
+  const attemptRl = await checkAuthRateLimit(
+    c,
+    "email-code-verify-target",
+    10 * 60_000,
+    5,
+    `${resolvedTenantId}:${hashSha256Hex(email)}`,
+  );
+  if (!attemptRl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many verification attempts. Try again later." },
+      429,
+    );
+  }
+
+  const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
+  const result = await emailAuth.verifyEmailLoginCode(email, code, resolvedTenantId);
+  if (!result.valid) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          result.reason === "locked"
+            ? "Too many verification attempts. Try again later."
+            : "Invalid or expired code",
+      },
+      result.reason === "locked" ? 429 : 401,
+    );
+  }
+
+  const authResult = await completeEmailAuth(c, email, body.tenantId);
+  if (!authResult.ok) {
+    return c.json<ApiResponse>({ ok: false, error: authResult.error }, authResult.status);
+  }
+  return authExchangeJson(c, authResult.response);
+});
+
+auth.post("/email/status", async (c) => {
+  const rl = await checkAuthRateLimit(c, "email-status", 60_000, 60);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
+  }
+  const body = await safeJsonParse<{ challengeId: string; pollSecret: string; tenantId?: string }>(
+    c,
+  );
+  if (!body?.challengeId || !body?.pollSecret) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "challengeId and pollSecret are required" },
+      400,
+    );
+  }
+  const headerTenantId = c.req.header("X-Steward-Tenant")?.trim();
+  const bodyTenantId = body.tenantId?.trim();
+  const resolvedTenantId = headerTenantId || bodyTenantId || _DEFAULT_TENANT_ID;
+  const tenantHintError = await validateExplicitAuthTenantHint(
+    resolvedTenantId,
+    Boolean(headerTenantId || bodyTenantId),
+  );
+  if (tenantHintError) {
+    return c.json<ApiResponse>({ ok: false, error: tenantHintError }, 404);
+  }
+  const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
+  const status = await emailAuth.getEmailLoginStatus(body.challengeId, body.pollSecret);
+  return c.json<ApiResponse<{ status: string; expiresAt?: string }>>({
+    ok: true,
+    data: {
+      status: status.status,
+      ...(status.status === "pending" ? { expiresAt: status.expiresAt } : {}),
+    },
+  });
+});
 // ── Email OTP (Privy-style verified signup) ───────────────────────────────
 //
 // POST /auth/email/otp/send    — email a 6-digit one-time code.

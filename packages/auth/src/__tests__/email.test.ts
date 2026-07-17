@@ -2,6 +2,42 @@ import { describe, expect, it, mock } from "bun:test";
 
 import { EmailAuth } from "../email";
 import type { EmailProvider } from "../email-provider";
+import type { StoreBackend } from "../store-backends";
+import { TokenStore } from "../token-store";
+
+class CapturingBackend implements StoreBackend {
+  values = new Map<string, { value: string; expiresAt: number }>();
+
+  async set(key: string, value: string, ttlMs: number): Promise<void> {
+    this.values.set(key, { value, expiresAt: Date.now() + ttlMs });
+  }
+
+  async setIfNotExists(key: string, value: string, ttlMs: number): Promise<boolean> {
+    if (await this.get(key)) return false;
+    await this.set(key, value, ttlMs);
+    return true;
+  }
+
+  async get(key: string): Promise<string | null> {
+    const entry = this.values.get(key);
+    if (!entry) return null;
+    if (Date.now() > entry.expiresAt) {
+      this.values.delete(key);
+      return null;
+    }
+    return entry.value;
+  }
+
+  async consume(key: string): Promise<string | null> {
+    const value = await this.get(key);
+    this.values.delete(key);
+    return value;
+  }
+
+  async delete(key: string): Promise<void> {
+    this.values.delete(key);
+  }
+}
 
 describe("EmailAuth.sendMagicLink", () => {
   it("calls the template renderer with the agreed magic-link payload", async () => {
@@ -28,6 +64,7 @@ describe("EmailAuth.sendMagicLink", () => {
     expect(templateId).toBe("customer-template");
     expect(data).toMatchObject({
       email: "user@example.com",
+      code: expect.stringMatching(/^\d{6}$/),
       expiresInMinutes: 10,
       tenantName: undefined,
     });
@@ -96,6 +133,120 @@ describe("EmailAuth.sendMagicLink", () => {
     expect(text).toContain("tenantId=tenant-1");
     expect(text).toContain(`token=${"a".repeat(64)}`);
     expect(html).toContain("Accept invitation");
+
+    auth.destroy();
+  });
+
+  it("sends one message with a shared link and six-digit sign-in code", async () => {
+    const sent = mock(async () => undefined);
+    const provider: EmailProvider = { send: sent };
+    const auth = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider,
+    });
+
+    const result = await auth.sendMagicLink("user@example.com", { tenantId: "tenant-a" });
+
+    expect(result.challengeId).toMatch(/^[A-Za-z0-9_-]{32,}$/);
+    expect(result.pollSecret).toMatch(/^[A-Za-z0-9_-]{32,}$/);
+    expect(sent).toHaveBeenCalledTimes(1);
+    const [, , text, html] = sent.mock.calls[0]!;
+    expect(text).toContain("https://steward.fi/auth/callback/email?");
+    expect(text).toMatch(/\b\d{6}\b/);
+    expect(html).toMatch(/\b\d{6}\b/);
+
+    auth.destroy();
+  });
+
+  it("lets either link or code redeem the shared challenge exactly once", async () => {
+    let text = "";
+    const auth = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider: { send: async (_to, _subject, body) => void (text = body) },
+    });
+
+    await auth.sendMagicLink("user@example.com", { tenantId: "tenant-a" });
+    const token = text.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
+    const link = await auth.verifyMagicLink(token, "user@example.com", "tenant-a");
+    expect(link.valid).toBe(true);
+    const codeAfterLink = await auth.verifyEmailLoginCode("user@example.com", code, "tenant-a");
+    expect(codeAfterLink.valid).toBe(false);
+
+    await auth.sendMagicLink("user@example.com", { tenantId: "tenant-a" });
+    const token2 = text.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    const code2 = text.match(/\b(\d{6})\b/)?.[1] ?? "";
+    const codeFirst = await auth.verifyEmailLoginCode("user@example.com", code2, "tenant-a");
+    expect(codeFirst.valid).toBe(true);
+    const linkAfterCode = await auth.verifyMagicLink(token2, "user@example.com", "tenant-a");
+    expect(linkAfterCode.valid).toBe(false);
+
+    auth.destroy();
+  });
+
+  it("hard locks the active challenge after five wrong code attempts", async () => {
+    let text = "";
+    const auth = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider: { send: async (_to, _subject, body) => void (text = body) },
+    });
+    await auth.sendMagicLink("lock@example.com", { tenantId: "tenant-a" });
+    const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
+    const wrongCode = code === "000000" ? "111111" : "000000";
+
+    for (let i = 0; i < 5; i++) {
+      const result = await auth.verifyEmailLoginCode("lock@example.com", wrongCode, "tenant-a");
+      expect(result.valid).toBe(false);
+    }
+    const afterLock = await auth.verifyEmailLoginCode("lock@example.com", code, "tenant-a");
+    expect(afterLock.valid).toBe(false);
+
+    auth.destroy();
+  });
+
+  it("reports consumed through polling after either credential redeems", async () => {
+    let text = "";
+    const auth = new EmailAuth({
+      from: "login.fi",
+      baseUrl: "https://steward.fi",
+      provider: { send: async (_to, _subject, body) => void (text = body) },
+    });
+    const issued = await auth.sendMagicLink("poll.com", { tenantId: "tenant-a" });
+    const token = text.match(/[?&]token=([a-f0-9]{64})/i)?.[1] ?? "";
+    expect(await auth.getEmailLoginStatus(issued.challengeId, issued.pollSecret)).toMatchObject({
+      status: "pending",
+    });
+    await auth.verifyMagicLink(token, "poll.com", "tenant-a");
+    expect(await auth.getEmailLoginStatus(issued.challengeId, issued.pollSecret)).toEqual({
+      status: "consumed",
+    });
+    expect(await auth.getEmailLoginStatus(issued.challengeId, "wrong-secret")).toEqual({
+      status: "invalid",
+    });
+    auth.destroy();
+  });
+
+  it("does not persist raw magic-link token, code, or poll secret in pending challenge records", async () => {
+    const backend = new CapturingBackend();
+    let text = "";
+    const auth = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider: { send: async (_to, _subject, body) => void (text = body) },
+      tokenStore: new TokenStore({ backend }),
+      codeVerifierSecret: "test-secret",
+    });
+    const issued = await auth.sendMagicLink("secret@example.com", { tenantId: "tenant-a" });
+    const token = text.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
+    const persisted = [...backend.values.values()].map((entry) => entry.value).join("\n");
+
+    expect(persisted).not.toContain(token);
+    expect(persisted).not.toContain(code);
+    expect(persisted).not.toContain(issued.pollSecret);
 
     auth.destroy();
   });

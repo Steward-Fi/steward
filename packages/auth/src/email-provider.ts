@@ -58,7 +58,7 @@ export class ResendProvider implements EmailProvider {
 }
 
 // ---------------------------------------------------------------------------
-// ConsoleProvider — development / testing provider (logs to stdout)
+// ConsoleProvider — redacted development delivery receipt (never logs credentials)
 // ---------------------------------------------------------------------------
 
 export class ConsoleProvider implements EmailProvider {
@@ -73,11 +73,8 @@ export class ConsoleProvider implements EmailProvider {
       [
         "─────────────────────────────────────────",
         `[ConsoleProvider] Magic link email`,
-        `To:      ${to}`,
-        `Subject: ${subject}`,
-        ...(options?.replyTo ? [`Reply-To: ${options.replyTo}`] : []),
+        `To:      [redacted]`,
         "",
-        text,
         "─────────────────────────────────────────",
       ].join("\n"),
     );
