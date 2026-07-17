@@ -8662,7 +8662,9 @@ auth.post("/guest/upgrade", async (c) => {
   const email = rawEmail.toLowerCase();
 
   const emailAuth = await getEmailAuthForTenant(tenantId);
-  const result = await emailAuth.verifyMagicLink(magicLinkToken);
+  // The shared link+code challenge binds each token to {email, tenant}; pass
+  // both so verification enforces the binding (token-only calls fail closed).
+  const result = await emailAuth.verifyMagicLink(magicLinkToken, email, tenantId);
   if (!result.valid || result.email.toLowerCase().trim() !== email) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired magic link" }, 401);
   }
