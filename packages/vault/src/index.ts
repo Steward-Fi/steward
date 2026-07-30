@@ -114,6 +114,15 @@ export {
 } from "./secret-route-validator";
 export type { CreateSecretOptions, SecretMetadata } from "./secret-vault";
 export { SecretVault } from "./secret-vault";
+export type {
+  SignerBackend,
+  SignerBackendCapabilities,
+  ThresholdGenerateParams,
+  ThresholdKeyRef,
+  ThresholdScheme,
+  ThresholdSignature,
+} from "./signer-backend";
+export { assertNoRawKeyExport } from "./signer-backend";
 export {
   assertVaultSigningActive,
   isVaultSigningFrozenError,

@@ -65,6 +65,7 @@ import { registerProviderApprovalRoutes } from "./routes/provider-approvals";
 import { providerAuthorityRoutes } from "./routes/provider-authority";
 import { registerProviderCaseRoutes } from "./routes/provider-case";
 import { registerProviderXConnectRoutes } from "./routes/provider-x-connect";
+import { quoteRoutes } from "./routes/quote";
 import { secretsRoutes } from "./routes/secrets";
 import { tenantConfigRoutes } from "./routes/tenant-config";
 import { tenantRoutes } from "./routes/tenants";
@@ -224,6 +225,7 @@ export function mountCoreIdempotencyAndRoutes(
     }),
   );
   app.route("/metrics", metricsRoutes);
+  app.route("/quote", quoteRoutes);
 
   // ─── Route modules ──────────────────────────────────────────────────────────
 
