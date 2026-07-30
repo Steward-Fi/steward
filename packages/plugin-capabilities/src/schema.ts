@@ -20,6 +20,7 @@
 
 import { relations, sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   check,
   index,
@@ -73,6 +74,14 @@ export const capabilityGrants = pgTable(
     // grant is being torn down / for a route that failed to materialize (never
     // left as an orphaned enabled route - see the lifecycle in store.ts + tests).
     secretRouteId: uuid("secret_route_id"),
+    // the per-grant POLICY document (C1): constraints evaluated at invoke time
+    // by @stwd/policy-engine's grant-policy module (rate / amount / venue / time
+    // / approval). New rows default to the EXPLICIT permissive plain-secret
+    // policy (exactly pre-policy behavior, but written down); migration 0002
+    // backfills existing rows the same way. Kept NULLABLE so strict mode
+    // (STEWARD_GRANT_POLICY_STRICT=true) has a fail-closed target for rows
+    // written outside the migrated path: NULL denies under strict mode.
+    policy: jsonb("policy").default(sql`'{"version":1,"class":"plain-secret"}'::jsonb`),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     status: text("status").notNull().default("active"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -119,6 +128,18 @@ export const capabilityInvocations = pgTable(
     // capability's id.
     capabilityId: uuid("capability_id"),
     decision: text("decision").notNull(),
+    // policy VERDICT audit (C1): which rule decided this invoke (e.g.
+    // "grant-policy:amount.perInvokeMax", "capability-intent:allow",
+    // "no-usable-grant") + the human-readable reason. nullable: rows predating
+    // the policy engine carry no verdict.
+    verdictRule: text("verdict_rule"),
+    verdictReason: text("verdict_reason"),
+    // the extracted per-invoke amount (integer micros) for value-bearing
+    // invokes. summed over decision IN ('allow','approval','error') rows as the
+    // rolling-window cumulative amount source (pending approvals and post-
+    // authorization infra errors RESERVE spend so the window can never be
+    // under-counted).
+    amountMicros: bigint("amount_micros", { mode: "number" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

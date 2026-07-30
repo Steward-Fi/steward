@@ -17,7 +17,12 @@ import {
   CAPABILITY_INTENT_RULE_TYPE,
   composeCapabilityIntentDecision,
   type EvaluatorContext,
+  evaluateGrantPolicy,
+  type GrantPolicyVerdict,
+  grantPolicySignals,
+  noPolicyVerdict,
   PolicyEngine,
+  parseGrantPolicy,
 } from "@stwd/policy-engine";
 import { StewardProxyClient } from "@stwd/proxy-client";
 import type { ApiResponse, AppVariables, PolicyRule, SignRequest } from "@stwd/shared";
@@ -30,6 +35,18 @@ import { CapabilityStore } from "./store";
 const PROXY_SCOPE = "api:proxy";
 /** short-lived: the token only needs to survive the single proxied call. */
 const PROXY_TOKEN_TTL = "2m";
+
+/**
+ * Strict grant-policy mode (C1, flag-gated): when enabled, a grant with NO
+ * policy document (NULL column — only possible for rows written outside the
+ * migrated path) DENIES instead of falling back to the explicit permissive
+ * default. Migration 0002 backfills every existing grant with
+ * `{version:1, class:"plain-secret"}` and new rows get the same DB default, so
+ * flipping this on is safe once the migration has run.
+ */
+function isGrantPolicyStrict(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.STEWARD_GRANT_POLICY_STRICT ?? "").trim().toLowerCase() === "true";
+}
 
 interface ProxyEnv {
   proxyUrl: string;
@@ -252,6 +269,12 @@ async function recordAndJson(
     decision: InvocationDecision;
     status: number;
     payload: ApiResponse;
+    /** which policy rule decided this outcome (C1 verdict audit). */
+    verdictRule?: string;
+    /** the verdict's human-readable reason (C1 verdict audit). */
+    verdictReason?: string;
+    /** extracted per-invoke amount (micros) when an amount block evaluated. */
+    amountMicros?: number;
   },
 ): Promise<Response> {
   try {
@@ -260,6 +283,9 @@ async function recordAndJson(
       agentId: args.agentId,
       capabilityId: args.capabilityId,
       decision: args.decision,
+      verdictRule: args.verdictRule,
+      verdictReason: args.verdictReason,
+      amountMicros: args.amountMicros,
     });
   } catch {
     // audit write failed: do NOT block the already fail-closed decision.
@@ -293,9 +319,106 @@ export async function invokeCapabilityThroughProxy(
       decision: "deny",
       status: 403,
       payload: { ok: false, error: "capability not available to agent" } satisfies ApiResponse,
+      verdictRule: "no-usable-grant",
+      verdictReason: "capability not available to agent",
     });
   }
   const cap = match.capability;
+
+  // ── GRANT-POLICY LAYER (C1) ────────────────────────────────────────
+  // The per-grant policy document evaluated BEFORE the tenant capability-intent
+  // set. Precedence across the two layers: a DENY from either layer denies; an
+  // approval from either layer (with no deny) is a 202; only allow+allow
+  // forwards. The grant layer can only NARROW the tenant layer, never widen it.
+  //
+  // Fail-closed rules:
+  //   - a MALFORMED policy document on the grant => deny (never ignored),
+  //   - a NULL policy => strict mode denies; compatibility mode allows with an
+  //     explicit audited "no-policy.permissive" verdict (pre-policy behavior),
+  //   - a required trailing-window counter that cannot be fetched => deny.
+  let grantVerdict: GrantPolicyVerdict;
+  const rawPolicy = match.grant.policy;
+  if (rawPolicy === null || rawPolicy === undefined) {
+    grantVerdict = noPolicyVerdict(isGrantPolicyStrict());
+  } else {
+    const parsedPolicy = parseGrantPolicy(rawPolicy);
+    if (!parsedPolicy.ok) {
+      return recordAndJson(store, {
+        tenantId,
+        agentId,
+        capabilityId: cap.id,
+        decision: "deny",
+        status: 403,
+        payload: { ok: false, error: parsedPolicy.error } satisfies ApiResponse,
+        verdictRule: "grant-policy:malformed",
+        verdictReason: parsedPolicy.error,
+      });
+    }
+    // fetch exactly the trailing-window counters this policy needs. a counter
+    // failure is a missing REQUIRED signal: deny (a cap that cannot be checked
+    // cannot pass).
+    const signals = grantPolicySignals(parsedPolicy.policy);
+    let invokesInWindow: number | undefined;
+    let allowedAmountMicrosInWindow: number | undefined;
+    try {
+      if (signals.rateWindowSeconds !== undefined) {
+        invokesInWindow = await store.countInvocationsInWindow(
+          agentId,
+          cap.id,
+          signals.rateWindowSeconds,
+        );
+      }
+      if (signals.amountWindowSeconds !== undefined) {
+        allowedAmountMicrosInWindow = await store.sumAmountMicrosInWindow(
+          agentId,
+          cap.id,
+          signals.amountWindowSeconds,
+        );
+      }
+    } catch {
+      return recordAndJson(store, {
+        tenantId,
+        agentId,
+        capabilityId: cap.id,
+        decision: "deny",
+        status: 403,
+        payload: { ok: false, error: "policy evaluation unavailable" } satisfies ApiResponse,
+        verdictRule: "grant-policy:signals-unavailable",
+        verdictReason: "trailing-window counters unavailable",
+      });
+    }
+    // evaluateGrantPolicy is non-throwing by contract, but this is a security
+    // gate in front of live credentials: translate ANY escape into a deny.
+    try {
+      grantVerdict = evaluateGrantPolicy(parsedPolicy.policy, {
+        now: new Date(),
+        capability: { name: cap.name, host: cap.host, path: cap.pathPattern, method: cap.method },
+        args: invokeArgs,
+        invokesInWindow,
+        allowedAmountMicrosInWindow,
+      });
+    } catch {
+      grantVerdict = {
+        effect: "deny",
+        rule: "grant-policy:evaluator-error",
+        reason: "grant policy evaluation failed",
+      };
+    }
+  }
+
+  if (grantVerdict.effect === "deny") {
+    return recordAndJson(store, {
+      tenantId,
+      agentId,
+      capabilityId: cap.id,
+      decision: "deny",
+      status: 403,
+      payload: { ok: false, error: grantVerdict.reason } satisfies ApiResponse,
+      verdictRule: `grant-policy:${grantVerdict.rule}`,
+      verdictReason: grantVerdict.reason,
+      amountMicros: grantVerdict.amountMicros,
+    });
+  }
 
   let count1h: number;
   try {
@@ -308,6 +431,8 @@ export async function invokeCapabilityThroughProxy(
       decision: "deny",
       status: 403,
       payload: { ok: false, error: "policy evaluation unavailable" } satisfies ApiResponse,
+      verdictRule: "capability-intent:signals-unavailable",
+      verdictReason: "trailing-hour invoke count unavailable",
     });
   }
 
@@ -330,6 +455,8 @@ export async function invokeCapabilityThroughProxy(
       decision: "deny",
       status: 403,
       payload: { ok: false, error: "policy evaluation unavailable" } satisfies ApiResponse,
+      verdictRule: "capability-intent:policy-set-unavailable",
+      verdictReason: "tenant policy set unavailable",
     });
   }
   const capRules = policySet.filter((r) => isCapabilityIntentRule(r) && r.enabled !== false);
@@ -393,6 +520,8 @@ export async function invokeCapabilityThroughProxy(
       decision: "deny",
       status: 403,
       payload: { ok: false, error: "policy evaluation failed" } satisfies ApiResponse,
+      verdictRule: "capability-intent:evaluator-error",
+      verdictReason: "policy evaluation failed",
     });
   }
 
@@ -407,10 +536,24 @@ export async function invokeCapabilityThroughProxy(
         ok: false,
         error: decision.reason,
       } satisfies ApiResponse,
+      verdictRule: "capability-intent:hard_deny",
+      verdictReason: decision.reason,
+      amountMicros: grantVerdict.amountMicros,
     });
   }
 
-  if (decision.effect === "approval_required") {
+  // CROSS-LAYER APPROVAL COMPOSITION: an approval from EITHER layer (grant
+  // policy or tenant capability-intent) routes to the 202 pending flow — but
+  // only now, after BOTH layers have proven no hard deny applies (a deny from
+  // either layer can never be softened into an approval). The approval row
+  // carries the verdict + the reserved amountMicros so parallel pending
+  // approvals count against the rolling amount window.
+  if (grantVerdict.effect === "approval_required" || decision.effect === "approval_required") {
+    const fromGrant = grantVerdict.effect === "approval_required";
+    const verdictRule = fromGrant
+      ? `grant-policy:${grantVerdict.rule}`
+      : "capability-intent:approval_required";
+    const verdictReason = fromGrant ? grantVerdict.reason : decision.reason;
     let approvalId: string | null = null;
     try {
       approvalId = await store.recordInvocation({
@@ -418,6 +561,9 @@ export async function invokeCapabilityThroughProxy(
         agentId,
         capabilityId: cap.id,
         decision: "approval",
+        verdictRule,
+        verdictReason,
+        amountMicros: grantVerdict.amountMicros,
       });
     } catch {
       approvalId = null;
@@ -430,12 +576,14 @@ export async function invokeCapabilityThroughProxy(
         decision: "deny",
         status: 403,
         payload: { ok: false, error: "approval enqueue failed" } satisfies ApiResponse,
+        verdictRule: "approval-enqueue-failed",
+        verdictReason: "approval enqueue failed",
       });
     }
     return jsonResponse({ ok: true, data: { approvalId, status: "pending" } }, 202);
   }
 
-  // decision.effect === "allow": proceed to proxy delegation.
+  // both layers allow: proceed to proxy delegation.
 
   const proxyEnv = readProxyEnv();
   if (!proxyEnv) {
@@ -446,6 +594,14 @@ export async function invokeCapabilityThroughProxy(
       decision: "error",
       status: 503,
       payload: { ok: false, error: "capability delegation unavailable" } satisfies ApiResponse,
+      // decision='error' records the INFRA outcome; the verdict columns record
+      // the POLICY decision that had already authorized the forward. Both policy
+      // layers allowed, so the row carries the grant verdict + reserves the
+      // authorized amount in the rolling window (fail-closed for money — see
+      // sumAmountMicrosInWindow).
+      verdictRule: `grant-policy:${grantVerdict.rule}`,
+      verdictReason: "authorized; capability delegation unavailable",
+      amountMicros: grantVerdict.amountMicros,
     });
   }
 
@@ -469,6 +625,8 @@ export async function invokeCapabilityThroughProxy(
           ok: false,
           error: "GOVERNED_ROUTE_PLUGIN_DENIED",
         } satisfies ApiResponse,
+        verdictRule: "governed-route-plugin-denied",
+        verdictReason: "capability maps to a governed_v2 route",
       });
     }
   } catch {
@@ -483,6 +641,8 @@ export async function invokeCapabilityThroughProxy(
         ok: false,
         error: "GOVERNED_ROUTE_PLUGIN_DENIED",
       } satisfies ApiResponse,
+      verdictRule: "governed-route-plugin-denied",
+      verdictReason: "governed-route check unavailable (fail closed)",
     });
   }
 
@@ -522,11 +682,26 @@ export async function invokeCapabilityThroughProxy(
       decision: "error",
       status: 502,
       payload: { ok: false, error: "capability delegation failed" } satisfies ApiResponse,
+      // a 502 AFTER authorization is ambiguous (the upstream call may have gone
+      // through): record the policy verdict that authorized it and reserve the
+      // amount — over-counting a money window is acceptable, under-counting is
+      // not.
+      verdictRule: `grant-policy:${grantVerdict.rule}`,
+      verdictReason: "authorized; capability delegation failed",
+      amountMicros: grantVerdict.amountMicros,
     });
   }
 
   try {
-    await store.recordInvocation({ tenantId, agentId, capabilityId: cap.id, decision: "allow" });
+    await store.recordInvocation({
+      tenantId,
+      agentId,
+      capabilityId: cap.id,
+      decision: "allow",
+      verdictRule: `grant-policy:${grantVerdict.rule}`,
+      verdictReason: grantVerdict.reason,
+      amountMicros: grantVerdict.amountMicros,
+    });
   } catch {
     // audit write failed: do NOT block the already-authorized upstream response.
   }
