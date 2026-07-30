@@ -5,6 +5,7 @@
     "": {
       "name": "steward",
       "dependencies": {
+        "@stwd/attestation": "workspace:*",
         "@stwd/venue-hyperliquid": "workspace:*",
         "@stwd/venue-polymarket": "workspace:*",
         "ioredis": "^5.10.1",
@@ -52,6 +53,7 @@
         "@aws-sdk/client-kms": "^3.700.0",
         "@hono/zod-openapi": "^1.4.0",
         "@stwd/adapters": "workspace:*",
+        "@stwd/attestation": "workspace:*",
         "@stwd/auth": "workspace:*",
         "@stwd/db": "workspace:*",
         "@stwd/plugin-capabilities": "workspace:*",
@@ -76,9 +78,18 @@
         "@cloudflare/workers-types": "^4.20241218.0",
         "@scure/btc-signer": "^2.2.0",
         "@stwd/proxy": "workspace:*",
+        "@stwd/sdk": "workspace:*",
         "@types/node": "^25.5.0",
         "openapi-typescript": "^7.13.0",
         "wrangler": "^4.0.0",
+      },
+    },
+    "packages/attestation": {
+      "name": "@stwd/attestation",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@types/bun": "latest",
+        "@types/node": "^25.5.0",
       },
     },
     "packages/auth": {
@@ -1683,6 +1694,8 @@
     "@stwd/agent-trader": ["@stwd/agent-trader@workspace:packages/agent-trader"],
 
     "@stwd/api": ["@stwd/api@workspace:packages/api"],
+
+    "@stwd/attestation": ["@stwd/attestation@workspace:packages/attestation"],
 
     "@stwd/auth": ["@stwd/auth@workspace:packages/auth"],
 
