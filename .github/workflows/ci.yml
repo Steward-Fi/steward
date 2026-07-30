@@ -330,6 +330,9 @@ jobs:
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
           STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+          # Dummy HMAC root so the required compose var interpolates; production
+          # supplies a real value. Does not weaken fail-closed behavior.
+          STEWARD_PROXY_REQUEST_SIGNING_SECRET: "ci-proxy-signing-secret-must-be-at-least-32-bytes"
           STEWARD_KDF_SALT: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
           STEWARD_ALLOW_INSECURE_DB: "true"
           # Run the stack in non-prod mode for the functional e2e flow: the e2e
@@ -367,6 +370,7 @@ jobs:
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
           STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "ci-audit-hmac-key-must-be-at-least-32-bytes-long"
+          STEWARD_PROXY_REQUEST_SIGNING_SECRET: "ci-proxy-signing-secret-must-be-at-least-32-bytes"
           STEWARD_KDF_SALT: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
           POSTGRES_DB: "steward_test"
           POSTGRES_USER: "steward"

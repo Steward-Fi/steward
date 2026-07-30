@@ -188,12 +188,12 @@ Steward backup.
 | `WXMR_SOLANA_RPC_URL` | Solana mainnet RPC used to verify the wxmr bridge's global and connected-wallet withdrawal fees | `SOLANA_RPC_URL`, then Solana's public mainnet endpoint | Optional; use a reliable operator-controlled HTTPS RPC in production. Plain HTTP is accepted only on loopback. Only used when the `wxmr` plugin is enabled. |
 | `REDIS_URL` | Redis for rate limiting, token/challenge stores, proxy spend tracking/cache | none | Optional, but recommended for production. Without it some stores are in-memory or Postgres-backed depending on startup state. |
 | `RESEND_API_KEY` | Email magic-link delivery | none | If absent, email auth logs/dev-returns tokens instead of sending mail. |
-| `EMAIL_FROM` | Magic-link sender | `login@steward.fi` | Must be accepted by Resend when email delivery is enabled. |
-| `APP_URL` | Public base URL for auth links/callbacks | `https://steward.fi` | Set to your app/API-facing URL for magic links. |
+| `EMAIL_FROM` | Magic-link sender | `login@localhost` in `.env.example`/Compose; code fallback is `login@steward.fi` | Must be accepted by your mail provider when email delivery is enabled. |
+| `APP_URL` | Public base URL for auth links/callbacks | `http://localhost:3200` in `.env.example`/Compose; production OAuth requires an explicit public value | Set to your app/API-facing URL for magic links. |
 | `EMAIL_AUTH_REDIRECT_BASE_URL` | Redirect base used by one email-auth callback path | `https://www.elizacloud.ai` | Set if using that callback flow. |
 | `PASSKEY_RP_NAME` | WebAuthn relying-party display name | `Steward` | Browser-visible string. |
-| `PASSKEY_RP_ID` | WebAuthn relying-party domain | `steward.fi` | Must match the registration/authentication domain. |
-| `PASSKEY_ORIGIN` | Expected WebAuthn origin | `https://steward.fi` | Must match browser origin. |
+| `PASSKEY_RP_ID` | WebAuthn relying-party domain | `localhost` in `.env.example`/Compose; code fallback is `steward.fi` | Must match the registration/authentication domain. |
+| `PASSKEY_ORIGIN` | Expected WebAuthn origin | `http://localhost:3200` in `.env.example`/Compose; code fallback is `https://steward.fi` | Must match browser origin. |
 | `PASSKEY_ALLOWED_ORIGINS` | Additional comma-separated passkey origins | falls back to `PASSKEY_ORIGIN` | Must contain exact origins. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth | none | Required only for Google OAuth. |
 | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | Discord OAuth | none | Required only for Discord OAuth. |
@@ -203,7 +203,8 @@ Steward backup.
 | `STEWARD_PROXY_PORT` | Proxy listen port | `8080` | Must parse as an integer. Compose exposes `127.0.0.1:8080` by default. |
 | `NEXT_PUBLIC_STEWARD_API_URL` | Browser-facing API URL for the Next.js web app | `http://localhost:3200` | Used by `web/`, not the API process. |
 | `NEXT_PUBLIC_WC_PROJECT_ID` | WalletConnect project id for the web app | none | Used by `web/`. |
-| `STEWARD_PROXY_URL` | Proxy URL used by web/server-side app code | `http://localhost:8080` in local Compose | Should match the exposed proxy URL. |
+| `STEWARD_PROXY_URL` | Proxy URL used by API invoke paths and web/server-side app code | `http://steward-proxy:8080` in root Compose (`http://localhost:8080` for host-side clients) | Use the compose-internal URL inside containers and the published URL outside containers. |
+| `STEWARD_PROXY_REQUEST_SIGNING_SECRET` / `_SECRETS` | HMAC root used by API invoke paths/clients to sign proxy requests and by the proxy to verify them | none | Required for the full API+proxy Compose stack; generate a value distinct from JWT/audit/master secrets. Use plural `_SECRETS` for rotation where supported. |
 | `STEWARD_AGENT_TOKEN` | Agent token for web/server-side routes | none | Required only by app paths that call Steward as an agent. |
 | `SKIP_MIGRATIONS` | Disable API startup migrations | false | Set `true` or `1` only when another process applies migrations. |
 | `STEWARD_MONERO_WALLET_RPC_URL` | monero-wallet-rpc sidecar endpoint | none | Empty disables Monero: every Monero endpoint fails closed with 503. In Compose use `http://monero-wallet-rpc:18083/json_rpc`. |

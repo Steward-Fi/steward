@@ -219,12 +219,14 @@ sudo certbot --nginx -d api.example.com -d proxy.example.com
 | `CHAIN_ID` | No | `84532` | Default chain ID (84532 = Base Sepolia, 8453 = Base mainnet). |
 | `REDIS_URL` | No | — | Redis connection string. Enables persistent rate limiting + spend tracking. Without it, falls back to in-memory (resets on restart). |
 | `RESEND_API_KEY` | No | — | Resend API key for magic link emails. Without it, tokens print to console (dev mode). |
-| `EMAIL_FROM` | No | `login@steward.fi` | From address for magic links. |
-| `APP_URL` | No | `https://steward.fi` | Base URL for magic link callbacks. |
+| `EMAIL_FROM` | No | `login@localhost` in root Compose; code fallback `login@steward.fi` | From address for magic links. |
+| `APP_URL` | No | `http://localhost:3200` in root Compose; set a public URL for production/OAuth | Base URL for magic link callbacks. |
 | `PASSKEY_RP_NAME` | No | `Steward` | WebAuthn relying party display name. |
-| `PASSKEY_RP_ID` | No | `steward.fi` | WebAuthn relying party ID (must match serving domain). |
-| `PASSKEY_ORIGIN` | No | `https://steward.fi` | Allowed WebAuthn origin. |
+| `PASSKEY_RP_ID` | No | `localhost` in root Compose; code fallback `steward.fi` | WebAuthn relying party ID (must match serving domain). |
+| `PASSKEY_ORIGIN` | No | `http://localhost:3200` in root Compose; code fallback `https://steward.fi` | Allowed WebAuthn origin. |
 | `STEWARD_PROXY_PORT` | No | `8080` | Port the proxy gateway listens on. |
+| `STEWARD_PROXY_URL` | No | `http://steward-proxy:8080` in root Compose | Proxy URL used inside the API container; host-side clients normally use `http://localhost:8080`. |
+| `STEWARD_PROXY_REQUEST_SIGNING_SECRET` / `_SECRETS` | **Yes for full API+proxy Compose** | — | Shared HMAC root for signed proxy requests. Generate with `openssl rand -hex 32`; keep distinct from JWT/audit/master secrets. |
 | `STEWARD_DB_MODE` | No | — | Set to `pglite` for embedded DB (no Postgres needed). For local dev only. |
 | `POSTGRES_USER` | No | `steward` | Postgres user (Docker Compose internal DB). |
 | `POSTGRES_PASSWORD` | No | `changeme` | Postgres password (Docker Compose internal DB). Change this! |
