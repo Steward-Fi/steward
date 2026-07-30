@@ -1,0 +1,37 @@
+# ██████████████████████████████████████████████████████████████████████████████
+# ██  LOCAL DEVELOPMENT ONLY — NO TEE, NO ATTESTATION, NO CUSTODY GUARANTEES  ██
+# ██████████████████████████████████████████████████████████████████████████████
+#
+# This override swaps the attestation provider to `noop-dev` so the SAME compose
+# topology (api + proxy + verifier sidecar + db + redis) can be exercised on a
+# laptop with no TDX hardware and no dstack guest agent.
+#
+#   docker compose \
+#     -f deploy/dstack/docker-compose.dstack.yml \
+#     -f deploy/dstack/docker-compose.dstack.dev.yml \
+#     up -d
+#
+# What this changes, explicitly:
+#   * STEWARD_ATTESTATION_PROVIDER=noop-dev + STEWARD_ATTESTATION_NOOP_ALLOW=true
+#     with NODE_ENV=development. The noop provider REFUSES explicit allow when
+#     NODE_ENV=production (enforced in @stwd/attestation), so this override
+#     cannot be silently promoted to a production posture.
+#   * The /var/run/dstack.sock bind mount is dropped (no guest agent locally).
+#   * /quote will serve provider=noop-dev quotes that clearly state they prove
+#     nothing. Any client pinning real measurements will (correctly) reject them.
+#
+# NEVER deploy this override to dstack. The production app-compose.json embeds
+# ONLY docker-compose.dstack.yml; this file is not part of the measured app.
+
+services:
+  steward-api:
+    volumes: !override []
+    environment:
+      NODE_ENV: "development"
+      STEWARD_ATTESTATION_PROVIDER: "noop-dev"
+      STEWARD_ATTESTATION_NOOP_ALLOW: "true"
+      STEWARD_DSTACK_VERIFIER_URL: ""
+
+  steward-proxy:
+    environment:
+      NODE_ENV: "development"

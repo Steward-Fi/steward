@@ -92,6 +92,8 @@ bun run scripts/check-attestation.ts
 
 The script fetches `/quote`, verifies the dstack evidence with the configured verifier, validates the registry signatures, and fails if the served measurement differs from the registry.
 
+For the full dstack deployment packaging (compose app, sealed-secret env contract, app-compose manifest, boot gate, rollback), see `docs/DSTACK-DEPLOY.md`.
+
 ## Self-host measurement registration
 
 1. Deploy Steward with images pinned by digest in your dstack compose file.

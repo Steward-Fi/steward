@@ -1,0 +1,245 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Steward — dstack CVM Docker Compose (Intel TDX confidential VM)
+#
+# This file is EMBEDDED VERBATIM into app-compose.json (see make-app-compose.ts).
+# The sha256 of app-compose.json is the dstack compose_hash: it is measured into
+# the CVM's attestation quote, so every byte of this file is attested. Because of
+# that:
+#
+#   * Images are pinned BY DIGEST. A tag-only reference would let the registry
+#     swap content without changing the measurement.
+#   * No secret value may ever appear here. Secrets arrive exclusively through
+#     dstack's KMS-encrypted environment (encrypted on the operator machine,
+#     released only to a CVM whose measurement is authorized). The
+#     `${VAR:?...}` interpolations below are satisfied from that sealed env;
+#     the names must be listed in app-compose.json `allowed_envs`.
+#   * STEWARD_ATTESTATION_PROVIDER is hardcoded to dstack-tdx. The API boots
+#     through the attestation boot gate (packages/api/src/services/
+#     attestation-boot-gate.ts) and exits non-zero if its own quote cannot be
+#     generated AND verified. There is no fallback to noop inside this file.
+#
+# Env contract (all values via dstack sealed env — NEVER plaintext here):
+#   Required:
+#     POSTGRES_PASSWORD                      internal postgres superuser password
+#     STEWARD_MASTER_PASSWORD                vault master password
+#     STEWARD_JWT_SECRET                     JWT signing secret (>=32 chars)
+#     STEWARD_EXECUTION_AUTH_SECRET          execution-auth key list (keyId:secret,...)
+#     STEWARD_KDF_SALT                       KDF salt (openssl rand -hex 32)
+#     STEWARD_AUDIT_HMAC_KEY                 audit chain HMAC key (>=32 bytes)
+#     STEWARD_PROXY_REQUEST_SIGNING_SECRET   api→proxy request signing root
+#   Optional:
+#     DATABASE_URL              third-party Postgres (defaults to in-CVM postgres;
+#                               the in-CVM data volume sits on dstack's encrypted
+#                               root filesystem). When set to an third-party DB the
+#                               in-CVM postgres service is simply unused.
+#     STEWARD_PLATFORM_KEYS / STEWARD_PLATFORM_KEY_SCOPES
+#     STEWARD_ACK_LOCAL_CUSTODY  custody-posture acknowledgement. Inside a TDX
+#                               CVM, `local` vault custody is the intended
+#                               baseline (AES at rest + dstack FDE + TEE memory
+#                               isolation); acknowledge deliberately via sealed
+#                               env, it is NOT auto-set here.
+#     APP_URL / PASSKEY_* / SIWE_ALLOWED_DOMAINS / RESEND_API_KEY / EMAIL_FROM
+#     GOOGLE_CLIENT_ID/SECRET, DISCORD_CLIENT_ID/SECRET
+#
+# Local development NEVER uses this file directly — use the loudly-labeled
+# docker-compose.dstack.dev.yml override (noop-dev provider, no TEE claims).
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Steward API (attested) ──────────────────────────────────────────────────
+  steward-api:
+    # UPDATE THIS DIGEST when releasing: it must point at a release that
+    # contains @stwd/attestation + the boot gate. Re-run make-app-compose.ts and
+    # pin-measurement.ts afterwards (compose_hash changes with every edit here).
+    image: ghcr.io/steward-fi/steward:0.4.5@sha256:d5e1adc30fe6fec652d3a3c0fa51925a9942315908467f81130e88f8c561bb71
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      dstack-verifier:
+        condition: service_started
+    volumes:
+      # dstack guest agent socket: quote generation + sealed key derivation.
+      - /var/run/dstack.sock:/var/run/dstack.sock:ro
+    environment:
+      PORT: "3200"
+      STEWARD_BIND_HOST: "0.0.0.0"
+      NODE_ENV: "production"
+      # ── Attestation: hardcoded, fail-closed. Not operator-overridable. ──
+      STEWARD_ATTESTATION_PROVIDER: "dstack-tdx"
+      DSTACK_SOCKET_PATH: "/var/run/dstack.sock"
+      STEWARD_DSTACK_VERIFIER_URL: "http://dstack-verifier:8080"
+      # Boot gate tuning: absorb verifier sidecar cold start inside the CVM.
+      STEWARD_ATTESTATION_BOOT_ATTEMPTS: "20"
+      STEWARD_ATTESTATION_BOOT_DELAY_MS: "3000"
+      # ── Data plane ──
+      DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must arrive via dstack sealed env}@postgres:5432/steward}"
+      REDIS_URL: "redis://redis:6379"
+      # ── Secrets (dstack sealed env only) ──
+      STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?must arrive via dstack sealed env}"
+      STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?must arrive via dstack sealed env}"
+      STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?must arrive via dstack sealed env}"
+      STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?must arrive via dstack sealed env}"
+      STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?must arrive via dstack sealed env}"
+      STEWARD_PROXY_REQUEST_SIGNING_SECRET: "${STEWARD_PROXY_REQUEST_SIGNING_SECRET:?must arrive via dstack sealed env}"
+      STEWARD_PROXY_URL: "http://steward-proxy:8080"
+      # ── Custody posture (see env contract header) ──
+      STEWARD_ACK_LOCAL_CUSTODY: "${STEWARD_ACK_LOCAL_CUSTODY:-}"
+      # ── Optional platform config ──
+      STEWARD_PLATFORM_KEYS: "${STEWARD_PLATFORM_KEYS:-}"
+      STEWARD_PLATFORM_KEY_SCOPES: "${STEWARD_PLATFORM_KEY_SCOPES:-}"
+      ALLOW_USER_TENANT_CREATION: "${ALLOW_USER_TENANT_CREATION:-}"
+      AGENT_TOKEN_EXPIRY: "${AGENT_TOKEN_EXPIRY:-24h}"
+      RPC_URL: "${RPC_URL:-https://mainnet.base.org}"
+      CHAIN_ID: "${CHAIN_ID:-8453}"
+      STEWARD_PLUGINS: "${STEWARD_PLUGINS:-}"
+      APP_URL: "${APP_URL:-http://localhost:3200}"
+      RESEND_API_KEY: "${RESEND_API_KEY:-}"
+      EMAIL_FROM: "${EMAIL_FROM:-login@localhost}"
+      PASSKEY_RP_NAME: "${PASSKEY_RP_NAME:-Steward}"
+      PASSKEY_RP_ID: "${PASSKEY_RP_ID:-localhost}"
+      PASSKEY_ORIGIN: "${PASSKEY_ORIGIN:-http://localhost:3200}"
+      GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:-}"
+      GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
+      DISCORD_CLIENT_ID: "${DISCORD_CLIENT_ID:-}"
+      DISCORD_CLIENT_SECRET: "${DISCORD_CLIENT_SECRET:-}"
+      SIWE_ALLOWED_DOMAINS: "${SIWE_ALLOWED_DOMAINS:-}"
+    ports:
+      # In-CVM bind; third-party exposure is governed by dstack port mapping /
+      # gateway configuration at deploy time, not by this file.
+      - "3200:3200"
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r=await fetch('http://127.0.0.1:3200/ready');process.exit(r.ok?0:1)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    networks:
+      - public
+      - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ── Steward Proxy (attested, same image) ────────────────────────────────────
+  steward-proxy:
+    image: ghcr.io/steward-fi/steward:0.4.5@sha256:d5e1adc30fe6fec652d3a3c0fa51925a9942315908467f81130e88f8c561bb71
+    restart: unless-stopped
+    depends_on:
+      steward-api:
+        condition: service_healthy
+    command: ["bun", "run", "packages/proxy/src/index.ts"]
+    environment:
+      STEWARD_PROXY_PORT: "8080"
+      NODE_ENV: "production"
+      DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must arrive via dstack sealed env}@postgres:5432/steward}"
+      REDIS_URL: "redis://redis:6379"
+      STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?must arrive via dstack sealed env}"
+      STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?must arrive via dstack sealed env}"
+      STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?must arrive via dstack sealed env}"
+      STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?must arrive via dstack sealed env}"
+      STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?must arrive via dstack sealed env}"
+      STEWARD_PROXY_REQUEST_SIGNING_SECRET: "${STEWARD_PROXY_REQUEST_SIGNING_SECRET:?must arrive via dstack sealed env}"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r=await fetch('http://127.0.0.1:8080/health');process.exit(r.ok?0:1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    networks:
+      - public
+      - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ── dstack verifier sidecar ─────────────────────────────────────────────────
+  # Performs DCAP/collateral verification of this CVM's own quotes so /quote can
+  # serve `verified:true` results and the boot gate can prove the runtime.
+  # OUTSIDE PARTIES MUST NOT trust this sidecar: they run their own verifier
+  # against the raw quote (see docs/DSTACK-DEPLOY.md, verification section).
+  dstack-verifier:
+    image: dstacktee/dstack-verifier:0.5.11@sha256:06a20b777e59196c7f54b0cd02ffe567df6d05ae39a0b2fea9cb0642fb23c1fd
+    restart: unless-stopped
+    networks:
+      - public
+      - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ── PostgreSQL 16 (in-CVM default; unused when DATABASE_URL is third-party) ────
+  postgres:
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "steward"
+      POSTGRES_USER: "steward"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must arrive via dstack sealed env}"
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      # Sits on the CVM's dstack-encrypted root filesystem.
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U steward -d steward"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+    networks:
+      - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ── Redis 7 ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+    networks:
+      - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+
+networks:
+  public:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true

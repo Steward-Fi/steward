@@ -20,6 +20,10 @@ import { composeApp } from "./compose";
 import { initRedis, shutdownRedis } from "./middleware/redis";
 import { getAuthStoreSources, initAuthStores } from "./routes/auth";
 import {
+  AttestationBootGateError,
+  enforceAttestationBootGate,
+} from "./services/attestation-boot-gate";
+import {
   API_VERSION,
   type ApiResponse,
   nonceCleanupTimer,
@@ -211,6 +215,19 @@ if (migrationsRan) {
 // initialize throws here, so production never falls back to local AES.
 getConfiguredVault();
 console.log(configuredVaultStartupLogLine());
+
+// Attestation boot gate (fail-closed): when STEWARD_ATTESTATION_PROVIDER is
+// dstack-tdx, the API must generate + verify its own TDX quote before serving
+// traffic. Verification failure aborts boot; there is no noop fallback.
+try {
+  await enforceAttestationBootGate();
+} catch (err) {
+  if (err instanceof AttestationBootGateError) {
+    console.error(`[steward] ${err.message}`);
+    process.exit(1);
+  }
+  throw err;
+}
 
 // ─── Redis + auth store initialization (non-blocking) ───────────────────────
 

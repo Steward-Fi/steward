@@ -17,7 +17,8 @@
       "!**/next-env.d.ts",
       "!**/*.html",
       "!**/generated",
-      "!**/openapi.json"
+      "!**/openapi.json",
+      "!deploy/dstack/app-compose.json"
     ]
   },
   "assist": {

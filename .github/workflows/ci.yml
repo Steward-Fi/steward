@@ -317,6 +317,9 @@ jobs:
       - name: Validate Monero compose profile contract
         run: scripts/test-compose-monero.sh
 
+      - name: Validate dstack compose packaging contract
+        run: scripts/test-compose-dstack.sh
+
       - name: Start compose stack
         env:
           POSTGRES_DB: "steward_test"
