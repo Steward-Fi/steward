@@ -45,6 +45,7 @@ RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web
 COPY packages/adapters/package.json          packages/adapters/package.json
 COPY packages/agent-trader/package.json      packages/agent-trader/package.json
 COPY packages/api/package.json               packages/api/package.json
+COPY packages/attestation/package.json       packages/attestation/package.json
 COPY packages/auth/package.json              packages/auth/package.json
 COPY packages/db/package.json                packages/db/package.json
 COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
@@ -82,6 +83,7 @@ COPY package.json bun.lock turbo.json tsconfig.json ./
 COPY packages/adapters/package.json          packages/adapters/package.json
 COPY packages/agent-trader/package.json      packages/agent-trader/package.json
 COPY packages/api/package.json               packages/api/package.json
+COPY packages/attestation/package.json       packages/attestation/package.json
 COPY packages/auth/package.json              packages/auth/package.json
 COPY packages/db/package.json                packages/db/package.json
 COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
@@ -116,6 +118,7 @@ RUN BUN_FROZEN_LOCKFILE=0 bun install --no-frozen-lockfile --ignore-scripts
 # Copy full source for all packages needed by api + proxy
 COPY packages/adapters    packages/adapters
 COPY packages/api         packages/api
+COPY packages/attestation packages/attestation
 COPY packages/auth        packages/auth
 COPY packages/db          packages/db
 COPY packages/plugin-capabilities packages/plugin-capabilities
@@ -138,6 +141,7 @@ COPY packages/webhooks    packages/webhooks
 # Create workspace symlinks (Bun 1.3 doesn't auto-link in Docker)
 RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/adapters      node_modules/@stwd/adapters && \
+    ln -sf ../../../packages/attestation   node_modules/@stwd/attestation && \
     ln -sf ../../../packages/shared        node_modules/@stwd/shared && \
     ln -sf ../../../packages/sdk           node_modules/@stwd/sdk && \
     ln -sf ../../../packages/auth          node_modules/@stwd/auth && \
@@ -177,6 +181,7 @@ RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web
 COPY packages/adapters/package.json          packages/adapters/package.json
 COPY packages/agent-trader/package.json      packages/agent-trader/package.json
 COPY packages/api/package.json               packages/api/package.json
+COPY packages/attestation/package.json       packages/attestation/package.json
 COPY packages/auth/package.json              packages/auth/package.json
 COPY packages/db/package.json                packages/db/package.json
 COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
@@ -208,6 +213,7 @@ RUN BUN_FROZEN_LOCKFILE=0 bun install --production --no-frozen-lockfile --ignore
 # Copy compiled output from build stage
 COPY --from=build /app/packages/adapters    packages/adapters
 COPY --from=build /app/packages/api         packages/api
+COPY --from=build /app/packages/attestation packages/attestation
 COPY --from=build /app/packages/auth        packages/auth
 COPY --from=build /app/packages/db          packages/db
 COPY --from=build /app/packages/plugin-capabilities packages/plugin-capabilities
@@ -230,6 +236,7 @@ COPY --from=build /app/packages/webhooks    packages/webhooks
 # Create workspace symlinks manually — bun 1.3 doesn't auto-link workspace packages
 RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/adapters      node_modules/@stwd/adapters && \
+    ln -sf ../../../packages/attestation   node_modules/@stwd/attestation && \
     ln -sf ../../../packages/shared        node_modules/@stwd/shared && \
     ln -sf ../../../packages/sdk           node_modules/@stwd/sdk && \
     ln -sf ../../../packages/auth          node_modules/@stwd/auth && \

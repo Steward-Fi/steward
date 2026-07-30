@@ -5,6 +5,7 @@
     "": {
       "name": "steward",
       "dependencies": {
+        "@stwd/attestation": "workspace:*",
         "@stwd/venue-hyperliquid": "workspace:*",
         "@stwd/venue-polymarket": "workspace:*",
         "ioredis": "^5.10.1",
@@ -52,6 +53,7 @@
         "@aws-sdk/client-kms": "^3.700.0",
         "@hono/zod-openapi": "^1.4.0",
         "@stwd/adapters": "workspace:*",
+        "@stwd/attestation": "workspace:*",
         "@stwd/auth": "workspace:*",
         "@stwd/db": "workspace:*",
         "@stwd/plugin-capabilities": "workspace:*",
@@ -76,9 +78,18 @@
         "@cloudflare/workers-types": "^4.20241218.0",
         "@scure/btc-signer": "^2.2.0",
         "@stwd/proxy": "workspace:*",
+        "@stwd/sdk": "workspace:*",
         "@types/node": "^25.5.0",
         "openapi-typescript": "^7.13.0",
         "wrangler": "^4.0.0",
+      },
+    },
+    "packages/attestation": {
+      "name": "@stwd/attestation",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@types/bun": "latest",
+        "@types/node": "^25.5.0",
       },
     },
     "packages/auth": {
@@ -451,6 +462,16 @@
       "version": "0.2.0",
       "devDependencies": {
         "@types/bun": "latest",
+      },
+    },
+    "packages/signer-frost": {
+      "name": "@stwd/signer-frost",
+      "version": "0.1.0",
+      "dependencies": {
+        "@stwd/vault": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^25.5.0",
       },
     },
     "packages/trade-sessions": {
@@ -1674,6 +1695,8 @@
 
     "@stwd/api": ["@stwd/api@workspace:packages/api"],
 
+    "@stwd/attestation": ["@stwd/attestation@workspace:packages/attestation"],
+
     "@stwd/auth": ["@stwd/auth@workspace:packages/auth"],
 
     "@stwd/cli": ["@stwd/cli@workspace:packages/cli"],
@@ -1721,6 +1744,8 @@
     "@stwd/seed": ["@stwd/seed@workspace:packages/seed"],
 
     "@stwd/shared": ["@stwd/shared@workspace:packages/shared"],
+
+    "@stwd/signer-frost": ["@stwd/signer-frost@workspace:packages/signer-frost"],
 
     "@stwd/trade-sessions": ["@stwd/trade-sessions@workspace:packages/trade-sessions"],
 
