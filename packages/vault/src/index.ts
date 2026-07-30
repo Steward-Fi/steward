@@ -61,6 +61,15 @@ export { KeyStore } from "./keystore";
 export type { KeystoreBackend, KeystoreContext } from "./keystore-backend";
 export { backendFromKeyStore } from "./keystore-backend";
 export type {
+  SignerBackend,
+  SignerBackendCapabilities,
+  ThresholdGenerateParams,
+  ThresholdKeyRef,
+  ThresholdScheme,
+  ThresholdSignature,
+} from "./signer-backend";
+export { assertNoRawKeyExport } from "./signer-backend";
+export type {
   AwsKmsClientLike,
   AwsKmsEnvelopeOptions,
   KmsEnvelopeOptions,
