@@ -112,6 +112,21 @@ export {
   STRICT_HOSTS,
   validateSecretRouteConfig,
 } from "./secret-route-validator";
+export type {
+  SecretStoreBackend,
+  SecretStoreEntryMetadata,
+  SecretStorePutOptions,
+} from "./secret-store";
+export {
+  assertValidSecretPath,
+  SecretAlreadyExistsError,
+  SecretNotFoundError,
+} from "./secret-store";
+export type {
+  AgeFileSecretStoreConfig,
+  AgeIdentitySource,
+} from "./secret-store-age";
+export { AgeFileSecretStore, sealToRecipient } from "./secret-store-age";
 export type { CreateSecretOptions, SecretMetadata } from "./secret-vault";
 export { SecretVault } from "./secret-vault";
 export {

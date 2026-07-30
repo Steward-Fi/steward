@@ -20,6 +20,7 @@
     "@solana/web3.js": "^1",
     "@stwd/db": "workspace:*",
     "@stwd/shared": "workspace:*",
+    "age-encryption": "^0.3.0",
     "drizzle-orm": "^0.44.5",
     "viem": "^2.30.0"
   },

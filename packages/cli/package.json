@@ -11,7 +11,9 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test src/__tests__"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@stwd/vault": "workspace:*"
+  },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/node": "^25.5.0",

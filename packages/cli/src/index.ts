@@ -7,6 +7,7 @@ import { boolFlag, intFlag, parseArgs, parseJsonFlag, required, stringFlag } fro
 import { runDoctor } from "./doctor";
 import { type OutputFormat, printResult } from "./format";
 import { runInit } from "./init";
+import { secretsStoreCommand } from "./secrets-store";
 
 type CommandContext = {
   api: StewardApiClient;
@@ -23,6 +24,13 @@ Usage:
   steward agent create --name NAME [--id ID]
   steward agent token --agent-id ID [--expires-in 24h] [--scopes agent,api:proxy]
   steward secret add --name NAME --value VALUE [--description TEXT]
+  steward secrets init [--store DIR]
+  steward secrets recipient [--store DIR]
+  steward secrets put <path> [--store DIR] [--file F] [--desc TEXT] [--overwrite]   (plaintext via --file or stdin; NEVER a flag)
+  steward secrets rotate <path> [--store DIR] [--file F]
+  steward secrets list [--store DIR]
+  steward secrets rm <path> [--store DIR]
+  (sealed age-file store: write + exercise only, NO read-back 'get' by design)
   steward route add --secret-id ID --agent-id ID --host HOST --path PATH --method METHOD --inject-as header --inject-key KEY
   steward policy set --name NAME --rules '[...]' [--description TEXT] [--agent-id ID]
   steward approvals list|stats|approve|deny ...
@@ -340,6 +348,16 @@ async function main(argv: string[]) {
       }),
       ctx.format,
     );
+    return;
+  }
+
+  // `secrets` (plural) = sealed age-file SecretStore (local, no API). Distinct
+  // from `secret` (singular) which is the API-backed per-tenant SecretVault.
+  // The <path> is the third positional; stash it for the store handler.
+  if (command === "secrets") {
+    const [, , path] = parsed.positional;
+    const flags = { ...parsed.flags, ...(path ? { __path: path } : {}) };
+    printResult(await secretsStoreCommand(action, flags), ctx.format);
     return;
   }
 
