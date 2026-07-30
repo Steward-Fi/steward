@@ -176,9 +176,10 @@ describe("SecretVault no-read-back: get is impossible", () => {
 
   it("pins the full SecretVault method surface and its plaintext-capable subset", () => {
     // If this test fails because you added a method: classify it. If it can
-    // return plaintext to a caller, DO NOT add it — use exerciseSecret (use-only)
-    // instead. The direct-return decrypt methods exist solely for the pinned
-    // proxy-injection / provider-refresh callers (see the inventory test).
+    // return plaintext directly to a caller, DO NOT add it. Prefer exerciseSecret
+    // / exerciseSecretRow (use-only closures). The direct-return decrypt methods
+    // exist solely for the pinned proxy-injection / provider-refresh callers (see
+    // the inventory test).
     const methods = Object.getOwnPropertyNames(SecretVault.prototype)
       .filter((name) => name !== "constructor")
       .sort();
@@ -190,6 +191,7 @@ describe("SecretVault no-read-back: get is impossible", () => {
       "deleteRoute",
       "deleteSecret",
       "exerciseSecret",
+      "exerciseSecretRow",
       "getRoute",
       "getSecret",
       "getSecretById",
@@ -202,8 +204,14 @@ describe("SecretVault no-read-back: get is impossible", () => {
     ]);
 
     // The plaintext-capable subset is exactly these two direct-return methods
-    // plus the use-only exerciseSecret. Everything else returns metadata/routes.
-    const plaintextCapable = ["decryptSecret", "decryptSecretRow", "exerciseSecret"];
+    // plus the use-only exerciseSecret/exerciseSecretRow closures. Everything else
+    // returns metadata/routes.
+    const plaintextCapable = [
+      "decryptSecret",
+      "decryptSecretRow",
+      "exerciseSecret",
+      "exerciseSecretRow",
+    ];
     for (const name of plaintextCapable) {
       expect(methods).toContain(name);
     }
