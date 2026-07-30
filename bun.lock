@@ -78,6 +78,7 @@
         "@cloudflare/workers-types": "^4.20241218.0",
         "@scure/btc-signer": "^2.2.0",
         "@stwd/proxy": "workspace:*",
+        "@stwd/sdk": "workspace:*",
         "@types/node": "^25.5.0",
         "openapi-typescript": "^7.13.0",
         "wrangler": "^4.0.0",
@@ -461,6 +462,16 @@
       "version": "0.2.0",
       "devDependencies": {
         "@types/bun": "latest",
+      },
+    },
+    "packages/signer-frost": {
+      "name": "@stwd/signer-frost",
+      "version": "0.1.0",
+      "dependencies": {
+        "@stwd/vault": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^25.5.0",
       },
     },
     "packages/trade-sessions": {
@@ -1733,6 +1744,8 @@
     "@stwd/seed": ["@stwd/seed@workspace:packages/seed"],
 
     "@stwd/shared": ["@stwd/shared@workspace:packages/shared"],
+
+    "@stwd/signer-frost": ["@stwd/signer-frost@workspace:packages/signer-frost"],
 
     "@stwd/trade-sessions": ["@stwd/trade-sessions@workspace:packages/trade-sessions"],
 

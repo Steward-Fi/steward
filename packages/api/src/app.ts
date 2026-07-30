@@ -46,6 +46,7 @@ import { tenantCors } from "./middleware/tenant-cors";
 import { getOpenApiSpec } from "./openapi";
 import { accountRoutes } from "./routes/accounts";
 import { adapterRoutes, fiatRoutes } from "./routes/adapters";
+import { agentEnrollRoutes } from "./routes/agent-enroll";
 import { agentRoutes, createAgentBatch } from "./routes/agents";
 import { approvalRoutes } from "./routes/approvals";
 import { auditRoutes } from "./routes/audit";
@@ -56,6 +57,7 @@ import { identityDiscoveryRoutes } from "./routes/discovery";
 import { discoveryRoutes, erc8004Routes } from "./routes/erc8004";
 import { globalWalletRoutes } from "./routes/global-wallet";
 import { intentRoutes } from "./routes/intents";
+import { kmsRoutes } from "./routes/kms";
 import { metricsRoutes } from "./routes/metrics";
 import { platformRoutes } from "./routes/platform";
 import { policiesStandaloneRoutes } from "./routes/policies-standalone";
@@ -139,6 +141,9 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
   app.use("/v1/accounts", (c, next) => tenantAuth(c, next));
   app.use("/v1/accounts/*", (c, next) => tenantAuth(c, next));
   app.use("/vault/*", (c, next) => tenantAuth(c, next));
+  // KMS: tenantAuth verifies the bearer (agent tokens included); the kms router
+  // additionally REQUIRES an agent-token principal (fail-closed — see routes/kms.ts).
+  app.use("/v1/kms/*", (c, next) => tenantAuth(c, next));
   app.use("/secrets", (c, next) => tenantAuth(c, next));
   app.use("/secrets/*", (c, next) => tenantAuth(c, next));
   app.use("/tenants/:id", (c, next) => {
@@ -235,12 +240,18 @@ export function mountCoreIdempotencyAndRoutes(
   app.route("/global-wallet", globalWalletRoutes);
   app.route("/accounts", accountRoutes);
   app.route("/v1/accounts", accountRoutes);
+  // PUBLIC: keypair-only agent enrollment (no tenant/agent token yet). Mounted
+  // outside the /agents tenant gate; identity is proven by signature and the
+  // tenant is resolved server-side from agent_signers.
+  app.route("/agent-enroll", agentEnrollRoutes);
+  app.route("/v1/agent-enroll", agentEnrollRoutes);
   app.route("/agents", agentRoutes);
   app.route("/v1/agents", agentRoutes);
   app.post("/wallets/batch", createAgentBatch);
   app.post("/v1/wallets/batch", createAgentBatch);
   app.route("/vault", vaultRoutes);
   app.route("/secrets", secretsRoutes);
+  app.route("/v1/kms", kmsRoutes);
   // tenantConfigRoutes mounted FIRST so its literal `/config` discovery handler
   // is matched before tenantRoutes' `/:id` wildcard would catch "config" as an id.
   app.route("/tenants", tenantConfigRoutes);

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { StewardApiClient } from "./api";
 import { boolFlag, intFlag, parseArgs, parseJsonFlag, required, stringFlag } from "./args";
 import { runDoctor } from "./doctor";
@@ -22,7 +22,8 @@ Usage:
   steward tenant create --id ID --name NAME --api-key KEY
   steward agent create --name NAME [--id ID]
   steward agent token --agent-id ID [--expires-in 24h] [--scopes agent,api:proxy]
-  steward secret add --name NAME --value VALUE [--description TEXT]
+  steward secret add --name NAME [--file F] [--description TEXT]   (value via stdin or --file preferred; --value warns)
+  steward secret rotate --id ID [--file F]                          (value via stdin or --file preferred; --value warns)
   steward route add --secret-id ID --agent-id ID --host HOST --path PATH --method METHOD --inject-as header --inject-key KEY
   steward policy set --name NAME --rules '[...]' [--description TEXT] [--agent-id ID]
   steward approvals list|stats|approve|deny ...
@@ -98,11 +99,40 @@ async function agentCommand(action: string | undefined, ctx: CommandContext) {
   throw new Error("Supported agent commands: agent create|list|token");
 }
 
+/**
+ * Read a secret value for onboarding/rotation. Preferred sources are --file or
+ * stdin so the plaintext never lands in shell history or `ps` output. --value
+ * remains for backward compatibility but warns loudly (salvaged from the
+ * sovereign-custody A2 lane: zero-plaintext-transit onboarding).
+ */
+export function readSecretValue(flags: Record<string, string | boolean>): string {
+  const file = stringFlag(flags, "file");
+  if (file) {
+    // Strip a single trailing newline (editors add one) but keep interior bytes.
+    return readFileSync(file, "utf8").replace(/\n$/, "");
+  }
+  const flagValue = stringFlag(flags, "value");
+  if (flagValue !== undefined) {
+    console.error(
+      "[steward] WARNING: --value places the secret in shell history and process listings. " +
+        'Prefer --file <path> or stdin: printf %s "$SECRET" | steward secret add --name NAME',
+    );
+    return flagValue;
+  }
+  if (!process.stdin.isTTY) {
+    const data = readFileSync(0, "utf8").replace(/\n$/, "");
+    if (data) return data;
+  }
+  throw new Error(
+    "secret value required: pipe it on stdin, pass --file <path>, or (discouraged) --value",
+  );
+}
+
 async function secretCommand(action: string | undefined, ctx: CommandContext) {
   if (action === "add") {
     return ctx.api.request("POST", "/secrets", {
       name: required(stringFlag(ctx.flags, "name"), "name"),
-      value: required(stringFlag(ctx.flags, "value"), "value"),
+      value: readSecretValue(ctx.flags),
       description: stringFlag(ctx.flags, "description"),
       expiresAt: stringFlag(ctx.flags, "expires-at"),
     });
@@ -111,7 +141,7 @@ async function secretCommand(action: string | undefined, ctx: CommandContext) {
   if (action === "rotate") {
     const id = required(stringFlag(ctx.flags, "id"), "id");
     return ctx.api.request("PUT", `/secrets/${encodeURIComponent(id)}`, {
-      value: required(stringFlag(ctx.flags, "value"), "value"),
+      value: readSecretValue(ctx.flags),
     });
   }
   throw new Error("Supported secret commands: secret add|list|rotate");

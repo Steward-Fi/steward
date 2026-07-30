@@ -32,10 +32,41 @@ import type { AppVariables, StewardPlugin } from "@stwd/shared";
 import type { Context, Hono, Next } from "hono";
 import type { StewardAppContext } from "./context";
 import { createInvokeRoutes } from "./invoke";
+import { createManifestRoutes } from "./manifest-routes";
 import { createAgentCapabilityRoutes, createCapabilityRoutes } from "./routes";
 
 export type { StewardAppContext } from "./context";
 export { createInvokeRoutes } from "./invoke";
+export {
+  type CapabilityAuditAction,
+  type CapabilityAuditEvent,
+  type CapabilityAuditSink,
+  capabilityTokenScope,
+  clampTtlSeconds,
+  DEFAULT_ISSUE_TTL_SECONDS,
+  type IssuanceResult,
+  issueCapability,
+  MAX_ISSUE_TTL_SECONDS,
+  type ResolvedManifestEntry,
+  type ShortLivedTokenMinter,
+} from "./issuance";
+export {
+  capabilityManifestId,
+  listAgentManifest,
+  type ManifestListing,
+  resolveManifestEntry,
+} from "./manifest";
+export { createManifestRoutes } from "./manifest-routes";
+export {
+  type CapabilityMode,
+  formatManifestIdentifier,
+  type ManifestIdentifier,
+  PROVIDER_MODES,
+  type ProviderModeEntry,
+  parseManifestIdentifier,
+  providerModeEntry,
+  resolveProviderMode,
+} from "./provider-modes";
 export { createAgentCapabilityRoutes, createCapabilityRoutes } from "./routes";
 export type {
   Capability,
@@ -132,6 +163,12 @@ export const capabilitiesPlugin: StewardApiPlugin = {
     app.use("/v1/capabilities/:name/invoke", (c, next) => requireAgentJwt(c, next));
     app.use("/capabilities/:name/openai/v1/*", (c, next) => requireAgentJwt(c, next));
     app.use("/v1/capabilities/:name/openai/v1/*", (c, next) => requireAgentJwt(c, next));
+    // the agent-facing manifest + issuance/renewal surface is agent-token authed
+    // (like invoke), NOT tenant-gated.
+    app.use("/capabilities/manifest", (c, next) => requireAgentJwt(c, next));
+    app.use("/capabilities/manifest/*", (c, next) => requireAgentJwt(c, next));
+    app.use("/v1/capabilities/manifest", (c, next) => requireAgentJwt(c, next));
+    app.use("/v1/capabilities/manifest/*", (c, next) => requireAgentJwt(c, next));
     app.use("/capabilities", (c, next) => tenantAuth(c, next));
     app.use("/capabilities/*", (c, next) => tenantGateSkippingInvoke(c, next, tenantAuth));
     app.use("/v1/capabilities", (c, next) => tenantAuth(c, next));
@@ -144,8 +181,12 @@ export const capabilitiesPlugin: StewardApiPlugin = {
     // before the CRUD `/:id` matcher (hono resolves same-specificity routes in
     // registration order; the invoke handler ends the chain for that path).
     const invokeRoutes = createInvokeRoutes(ctx);
+    const manifestRoutes = createManifestRoutes(ctx);
     const capabilityRoutes = createCapabilityRoutes(ctx);
     const agentRoutes = createAgentCapabilityRoutes(ctx);
+    // manifest routes mount FIRST (before the CRUD /:id matcher), like invoke.
+    app.route("/capabilities", manifestRoutes);
+    app.route("/v1/capabilities", manifestRoutes);
     app.route("/capabilities", invokeRoutes);
     app.route("/v1/capabilities", invokeRoutes);
     app.route("/capabilities", capabilityRoutes);
@@ -157,7 +198,7 @@ export const capabilitiesPlugin: StewardApiPlugin = {
 
 /** the invoke subpath predicate: `/capabilities/<name>/invoke` (any single name segment). */
 const INVOKE_SUBPATH =
-  /\/(?:v1\/)?capabilities\/[^/]+\/(?:invoke|openai\/v1\/(?:chat\/completions|models))\/?$/;
+  /\/(?:v1\/)?capabilities\/(?:manifest(?:\/[^/]+\/(?:issue|renew))?|[^/]+\/(?:invoke|openai\/v1\/(?:chat\/completions|models)))\/?$/;
 
 /**
  * Apply the operator tenant gate to a `/capabilities/*` request UNLESS it is an
