@@ -1,10 +1,16 @@
 {
   "$schema": "https://turbo.build/schema.json",
   "globalEnv": [
+    "BSCSCAN_API_KEY",
+    "BSC_RPC_URL",
     "DATABASE_URL",
+    "ETHERSCAN_API_KEY",
+    "EXPECTED_FEE_WALLET",
     "FAKE_OAUTH_PORT",
     "MILADY_SKIP_STEWARD_FI_LIVE_SMOKE",
+    "PLATFORM_COMMISSION_RECEIVER",
     "PLATFORM_KEY",
+    "PLATFORM_RECEIVER",
     "PROXY_URL",
     "SKIP_PROXY_E2E",
     "STEWARD_ALLOW_INSECURE_DB",
@@ -18,7 +24,8 @@
     "STEWARD_PLATFORM_KEYS",
     "STEWARD_SESSION_SECRET",
     "STEWARD_SOC2_ALLOW_DEPENDENCY_SKIP",
-    "STEWARD_URL"
+    "STEWARD_URL",
+    "WAIFU_PLATFORM_FEE_WALLET"
   ],
   "tasks": {
     "build": {
