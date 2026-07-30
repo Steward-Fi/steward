@@ -63,6 +63,7 @@
         "@stwd/provider-github": "workspace:*",
         "@stwd/provider-x": "workspace:*",
         "@stwd/redis": "workspace:*",
+        "@stwd/sealed-state": "workspace:*",
         "@stwd/shared": "workspace:*",
         "@stwd/vault": "workspace:*",
         "@stwd/webhooks": "workspace:*",
@@ -445,6 +446,17 @@
       },
       "devDependencies": {
         "@simplewebauthn/browser": "^13.0.0",
+      },
+    },
+    "packages/sealed-state": {
+      "name": "@stwd/sealed-state",
+      "version": "0.1.0",
+      "dependencies": {
+        "@stwd/attestation": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
+        "@types/node": "^25.5.0",
       },
     },
     "packages/seed": {
@@ -1740,6 +1752,8 @@
     "@stwd/redis": ["@stwd/redis@workspace:packages/redis"],
 
     "@stwd/sdk": ["@stwd/sdk@workspace:packages/sdk"],
+
+    "@stwd/sealed-state": ["@stwd/sealed-state@workspace:packages/sealed-state"],
 
     "@stwd/seed": ["@stwd/seed@workspace:packages/seed"],
 

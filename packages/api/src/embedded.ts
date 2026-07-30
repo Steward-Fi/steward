@@ -14,7 +14,15 @@
  *   STEWARD_BIND_HOST     — bind host (default 127.0.0.1)
  */
 
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createPGLiteDb, getDataDir, setPGLiteOverride } from "@stwd/db/pglite";
+import {
+  DevMeasurementKeyProvider,
+  DstackSealedStateKeyProvider,
+  SealedState,
+  type SealedStateEnvelope,
+} from "@stwd/sealed-state";
+import { registerShutdownHook } from "./services/shutdown-hooks";
 
 // Force PGLite/embedded mode
 process.env.STEWARD_DB_MODE = "pglite";
@@ -45,9 +53,56 @@ async function main() {
   console.log(`Data directory: ${dataDir}`);
   console.log();
 
-  // Initialize PGLite + run migrations BEFORE the API boots
+  // Initialize PGLite + run migrations BEFORE the API boots. When configured,
+  // the production entry path keeps PGLite in memory and persists only an
+  // attestation-bound encrypted snapshot, never a plaintext data directory.
   console.log("[embedded] Initializing PGLite database...");
-  const { db, client } = await createPGLiteDb();
+  const sealedPath = process.env.STEWARD_SEALED_PGLITE_PATH;
+  let snapshot: Blob | undefined;
+  let sealedState: SealedState | undefined;
+  let measurement: { imageDigest: string; configHash: string } | undefined;
+  if (sealedPath) {
+    // First boot has no snapshot yet, so force memory explicitly as well as on restore.
+    process.env.STEWARD_PGLITE_MEMORY = "true";
+    const backend = process.env.STEWARD_SEALED_STATE_BACKEND ?? "dstack-tdx";
+    if (backend === "dstack-tdx") {
+      const keys = new DstackSealedStateKeyProvider();
+      measurement = await keys.currentMeasurement();
+      sealedState = new SealedState(keys);
+    } else if (backend === "noop-dev") {
+      const secret = process.env.STEWARD_SEALED_STATE_DEV_SECRET;
+      if (!secret)
+        throw new Error("noop-dev sealed state requires STEWARD_SEALED_STATE_DEV_SECRET");
+      measurement = {
+        imageDigest: process.env.STEWARD_DEV_MEASUREMENT_IMAGE ?? "noop-dev",
+        configHash: process.env.STEWARD_DEV_MEASUREMENT_CONFIG ?? "noop-dev",
+      };
+      sealedState = new SealedState(new DevMeasurementKeyProvider(secret));
+      console.warn(
+        "[embedded] INSECURE noop-dev sealed-state backend enabled; never use outside development",
+      );
+    } else {
+      throw new Error(`unknown sealed-state backend: ${backend}`);
+    }
+    if (existsSync(sealedPath)) {
+      const envelope = JSON.parse(readFileSync(sealedPath, "utf8")) as SealedStateEnvelope;
+      const bytes = await sealedState.unseal(envelope, measurement);
+      snapshot = new Blob([
+        bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+      ]);
+    }
+  }
+  const { db, client } = await createPGLiteDb(undefined, snapshot);
+  if (sealedPath && sealedState && measurement) {
+    registerShutdownHook(async () => {
+      const dump = await client.dumpDataDir("gzip");
+      const bytes = new Uint8Array(await dump.arrayBuffer());
+      const envelope = await sealedState.seal(bytes, measurement, "embedded-agent-state");
+      const temporary = `${sealedPath}.tmp`;
+      writeFileSync(temporary, JSON.stringify(envelope), { mode: 0o600 });
+      renameSync(temporary, sealedPath);
+    });
+  }
   console.log("[embedded] Database ready.");
 
   // Register PGLite as the backing database for getDb()/closeDb()

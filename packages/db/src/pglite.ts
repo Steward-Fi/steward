@@ -112,8 +112,11 @@ async function runPGLiteMigrations(client: PGlite): Promise<void> {
  *
  * @param dataDir - directory for persistence, or "memory://" for in-memory
  */
-export async function createPGLiteDb(dataDir?: string): Promise<{ client: PGlite; db: PGLiteDb }> {
-  const useMemory = process.env.STEWARD_PGLITE_MEMORY === "true";
+export async function createPGLiteDb(
+  dataDir?: string,
+  loadDataDir?: Blob,
+): Promise<{ client: PGlite; db: PGLiteDb }> {
+  const useMemory = process.env.STEWARD_PGLITE_MEMORY === "true" || loadDataDir !== undefined;
 
   let connectionTarget: string;
   if (useMemory) {
@@ -129,7 +132,9 @@ export async function createPGLiteDb(dataDir?: string): Promise<{ client: PGlite
   }
 
   console.log(`[pglite] Initializing PGLite at: ${connectionTarget}`);
-  const client = new PGlite(connectionTarget);
+  const client = loadDataDir
+    ? new PGlite({ dataDir: connectionTarget, loadDataDir })
+    : new PGlite(connectionTarget);
 
   // Run migrations
   await runPGLiteMigrations(client);

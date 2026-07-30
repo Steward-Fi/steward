@@ -1,0 +1,31 @@
+{
+  "name": "@stwd/sealed-state",
+  "version": "0.1.0",
+  "description": "Attestation-bound envelope encryption for Steward agent state blobs",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "bun test"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@stwd/attestation": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^25.5.0"
+  }
+}

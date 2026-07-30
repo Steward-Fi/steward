@@ -38,6 +38,7 @@
     "@stwd/provider-github": "workspace:*",
     "@stwd/provider-x": "workspace:*",
     "@stwd/redis": "workspace:*",
+    "@stwd/sealed-state": "workspace:*",
     "@stwd/shared": "workspace:*",
     "@stwd/vault": "workspace:*",
     "@stwd/webhooks": "workspace:*",

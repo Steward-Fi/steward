@@ -258,13 +258,17 @@ const shutdown = async (signal: string) => {
   if (cancelWebhookRetryScheduler) cancelWebhookRetryScheduler();
   requestLog.clear();
 
+  let exitCode = 0;
   try {
+    const { runShutdownHooks } = await import("./services/shutdown-hooks");
+    await runShutdownHooks();
     await Promise.all([closeDb(), shutdownRedis()]);
   } catch (error) {
-    console.error("Failed to close connections cleanly", error);
+    exitCode = 1;
+    console.error("Failed to persist state or close connections cleanly", error);
   }
 
-  process.exit(0);
+  process.exit(exitCode);
 };
 
 process.on("SIGINT", () => void shutdown("SIGINT"));
