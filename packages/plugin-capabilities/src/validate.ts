@@ -73,10 +73,14 @@ export const updateCapabilitySchema = z
 
 export type UpdateCapabilityBody = z.infer<typeof updateCapabilitySchema>;
 
-/** grant body: which agent, optional expiry. */
+/** grant body: which agent, optional expiry, optional per-grant policy (C1).
+ * the policy value is validated by the policy-engine's fail-closed
+ * `parseGrantPolicy` at the route layer (a zod passthrough here would duplicate
+ * that source of truth); this schema only asserts it is an object when present. */
 export const createGrantSchema = z.object({
   agentId: z.string().min(1).max(64),
   expiresAt: z.string().datetime().optional(),
+  policy: z.record(z.string(), z.unknown()).optional(),
 });
 
 export type CreateGrantBody = z.infer<typeof createGrantSchema>;

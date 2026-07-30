@@ -76,6 +76,30 @@ export type { ReputationThresholdConfig } from "./evaluators/reputation-threshol
 export { evaluateReputationThreshold } from "./evaluators/reputation-threshold";
 export type { VenueAllowlistContext } from "./evaluators/venue-allowlist";
 export { evaluateVenueAllowlist } from "./evaluators/venue-allowlist";
+export type {
+  GrantAllowedWindowUtc,
+  GrantAmountPolicy,
+  GrantAmountWindowCap,
+  GrantApprovalPolicy,
+  GrantCapabilityClass,
+  GrantPolicyEffect,
+  GrantPolicyInput,
+  GrantPolicyParseResult,
+  GrantPolicySignals,
+  GrantPolicyV1,
+  GrantPolicyVerdict,
+  GrantRateLimit,
+  GrantTimePolicy,
+  GrantVenuePolicy,
+} from "./grant-policy";
+export {
+  evaluateGrantPolicy,
+  GRANT_POLICY_VERSION,
+  grantPolicySignals,
+  LEGACY_DEFAULT_GRANT_POLICY,
+  noPolicyVerdict,
+  parseGrantPolicy,
+} from "./grant-policy";
 export type { ManualApprovalSignal } from "./manual-approval";
 export { resultRequiresManualApproval } from "./manual-approval";
 export type { RegisteredPolicyEvaluator } from "./policy-rule-registry";

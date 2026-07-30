@@ -378,6 +378,13 @@ export class CapabilityStore {
     agentId: string;
     capabilityId: string | null;
     decision: InvocationDecision;
+    /** which policy rule decided this invoke (C1 verdict audit). */
+    verdictRule?: string;
+    /** the human-readable verdict reason (C1 verdict audit). */
+    verdictReason?: string;
+    /** extracted per-invoke amount (integer micros) for value-bearing invokes;
+     *  summed by {@link sumAmountMicrosInWindow} for the rolling window cap. */
+    amountMicros?: number;
     now?: Date;
   }): Promise<string> {
     const values: Record<string, unknown> = {
@@ -386,6 +393,9 @@ export class CapabilityStore {
       capabilityId: input.capabilityId,
       decision: input.decision,
     };
+    if (input.verdictRule !== undefined) values.verdictRule = input.verdictRule;
+    if (input.verdictReason !== undefined) values.verdictReason = input.verdictReason;
+    if (input.amountMicros !== undefined) values.amountMicros = input.amountMicros;
     if (input.now) values.createdAt = input.now;
     const [row] = await this.db.insert(capabilityInvocations).values(values).returning();
     return row.id as string;
@@ -420,6 +430,60 @@ export class CapabilityStore {
     return Number(row?.n ?? 0);
   }
 
+  /**
+   * Count this agent's invocations of a capability in an ARBITRARY trailing
+   * window (seconds) — the source for the grant-policy `rate` limit (C1). Same
+   * fail-closed semantics as {@link countInvocations1h}: ALL recorded attempts
+   * consume rate (a denied probe is not free).
+   */
+  async countInvocationsInWindow(
+    agentId: string,
+    capabilityId: string,
+    windowSeconds: number,
+    now: Date = new Date(),
+  ): Promise<number> {
+    return this.countInvocations1h(agentId, capabilityId, now, windowSeconds * 1000);
+  }
+
+  /**
+   * Sum the recorded per-invoke amounts (integer micros) for this agent+
+   * capability over a trailing window — the source for the grant-policy rolling
+   * amount cap (C1). Sums decision IN ('allow','approval','error') rows:
+   *   - an APPROVAL row RESERVES its amount while pending, so parallel
+   *     over-threshold invokes cannot collectively overshoot the window cap;
+   *   - an ERROR row was AUTHORIZED before the infra failure (and for a 502 the
+   *     upstream call may actually have gone through), so it reserves too.
+   * DENY rows never count — no value moved. Over-counting a money cap is
+   * acceptable; under-counting is not (fail closed).
+   */
+  async sumAmountMicrosInWindow(
+    agentId: string,
+    capabilityId: string,
+    windowSeconds: number,
+    now: Date = new Date(),
+  ): Promise<number> {
+    const since = new Date(now.getTime() - windowSeconds * 1000);
+    const [row] = await this.db
+      .select({ total: sql<string>`coalesce(sum(${capabilityInvocations.amountMicros}), 0)::text` })
+      .from(capabilityInvocations)
+      .where(
+        and(
+          eq(capabilityInvocations.agentId, agentId),
+          eq(capabilityInvocations.capabilityId, capabilityId),
+          gte(capabilityInvocations.createdAt, since),
+          sql`${capabilityInvocations.decision} IN ('allow','approval','error')`,
+          sql`${capabilityInvocations.amountMicros} IS NOT NULL`,
+        ),
+      );
+    const total = Number(row?.total ?? 0);
+    if (!Number.isSafeInteger(total)) {
+      // a sum beyond safe-integer range cannot be compared exactly; the invoke
+      // layer treats a thrown counter as policy-unavailable (deny). fail closed.
+      throw new Error("amount window sum exceeds safe integer range");
+    }
+    return total;
+  }
+
   // ── grant create (materializes the paired route) ────────────────────────────
 
   /**
@@ -433,6 +497,11 @@ export class CapabilityStore {
     capabilityId: string;
     agentId: string;
     expiresAt: Date | null;
+    /** the per-grant policy document (C1). when ABSENT the DB default applies
+     *  (the explicit permissive plain-secret policy). the ROUTE layer validates
+     *  it via the policy-engine's fail-closed parseGrantPolicy before it gets
+     *  here — the store persists what it is given. */
+    policy?: Record<string, unknown>;
     now?: Date;
   }): Promise<{ grant: CapabilityGrant; route: SecretRoute | null } | null> {
     const now = input.now ?? new Date();
@@ -477,20 +546,39 @@ export class CapabilityStore {
         .values(routeValuesFor(input.tenantId, input.agentId, cap, routeEnabled))
         .returning();
 
-      const [grant] = await tx
-        .insert(capabilityGrants)
-        .values({
-          tenantId: input.tenantId,
-          agentId: input.agentId,
-          capabilityId: input.capabilityId,
-          secretRouteId: route.id,
-          expiresAt: input.expiresAt,
-          status: "active",
-        })
-        .returning();
+      const grantValues: Record<string, unknown> = {
+        tenantId: input.tenantId,
+        agentId: input.agentId,
+        capabilityId: input.capabilityId,
+        secretRouteId: route.id,
+        expiresAt: input.expiresAt,
+        status: "active",
+      };
+      if (input.policy !== undefined) grantValues.policy = input.policy;
+      const [grant] = await tx.insert(capabilityGrants).values(grantValues).returning();
 
       return { grant, route };
     });
+  }
+
+  /**
+   * Replace a grant's policy document (C1). The ROUTE layer validates the new
+   * policy via the policy-engine's fail-closed parseGrantPolicy before calling
+   * this. Takes effect on the NEXT invoke (the invoke path re-reads the grant
+   * row every time). Returns the updated grant, or null when the grant does not
+   * exist for the tenant.
+   */
+  async updateGrantPolicy(
+    tenantId: string,
+    grantId: string,
+    policy: Record<string, unknown>,
+  ): Promise<CapabilityGrant | null> {
+    const [updated] = await this.db
+      .update(capabilityGrants)
+      .set({ policy })
+      .where(and(eq(capabilityGrants.id, grantId), eq(capabilityGrants.tenantId, tenantId)))
+      .returning();
+    return updated ?? null;
   }
 
   // ── grant revoke (tears down the paired route) ──────────────────────────────

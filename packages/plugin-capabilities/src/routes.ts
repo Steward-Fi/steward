@@ -13,6 +13,7 @@
  * (validate.ts), so a capability can never be broader than a legal route.
  */
 
+import { parseGrantPolicy } from "@stwd/policy-engine";
 import type { ApiResponse, AppVariables } from "@stwd/shared";
 import type { Context } from "hono";
 import { Hono } from "hono";
@@ -52,6 +53,7 @@ function toGrantView(grant: CapabilityGrant) {
     capabilityId: grant.capabilityId,
     agentId: grant.agentId,
     secretRouteId: grant.secretRouteId,
+    policy: grant.policy,
     expiresAt: grant.expiresAt,
     status: grant.status,
     createdAt: grant.createdAt,
@@ -343,10 +345,20 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
         400,
       );
     }
-    const { agentId, expiresAt } = parsed.data;
+    const { agentId, expiresAt, policy } = parsed.data;
     const expires = expiresAt ? new Date(expiresAt) : null;
     if (expires && Number.isFinite(expires.getTime()) && expires.getTime() <= Date.now()) {
       return c.json<ApiResponse>({ ok: false, error: "expiresAt must be in the future" }, 400);
+    }
+
+    // per-grant policy (C1): validate through the SAME fail-closed parser the
+    // invoke path enforces with, so a policy that would deny-as-malformed at
+    // invoke time can never be stored (single source of truth, no drift).
+    if (policy !== undefined) {
+      const parsedPolicy = parseGrantPolicy(policy);
+      if (!parsedPolicy.ok) {
+        return c.json<ApiResponse>({ ok: false, error: parsedPolicy.error }, 400);
+      }
     }
 
     try {
@@ -355,6 +367,7 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
         capabilityId,
         agentId,
         expiresAt: expires,
+        policy,
       });
       if (!result) return c.json<ApiResponse>({ ok: false, error: "capability not found" }, 404);
       await audit(c, {
@@ -380,6 +393,41 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
           409,
         );
       }
+      return errorResponse(c, e);
+    }
+  });
+
+  // ── PUT /grants/:grantId/policy - replace the per-grant policy (C1) ────────
+  // same admin+MFA bar as every other grant mutation (a policy edit changes what
+  // a live credential may do). validated by the SAME fail-closed parser the
+  // invoke path enforces with. takes effect on the next invoke.
+  routes.put("/grants/:grantId/policy", async (c) => {
+    const mfa = requireCapabilityAdmin(c, "Capability grant management");
+    if (mfa) return mfa;
+    const tenantId = c.get("tenantId");
+    const grantId = c.req.param("grantId");
+
+    const body = await ctx.safeJsonParse<Record<string, unknown>>(c);
+    if (!body)
+      return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+
+    const parsedPolicy = parseGrantPolicy(body);
+    if (!parsedPolicy.ok) {
+      return c.json<ApiResponse>({ ok: false, error: parsedPolicy.error }, 400);
+    }
+
+    try {
+      const updated = await store.updateGrantPolicy(tenantId, grantId, body);
+      if (!updated) return c.json<ApiResponse>({ ok: false, error: "grant not found" }, 404);
+      await audit(c, {
+        tenantId,
+        action: "capability.grant.policy.update",
+        resourceType: "capability_grant",
+        resourceId: grantId,
+        metadata: { policy: body },
+      });
+      return c.json<ApiResponse>({ ok: true, data: toGrantView(updated) });
+    } catch (e) {
       return errorResponse(c, e);
     }
   });
