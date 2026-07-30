@@ -13,7 +13,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "AGENT-BOOTSTRAP.md"
   ],
   "scripts": {
     "build": "tsc",

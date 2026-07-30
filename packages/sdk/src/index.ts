@@ -1,3 +1,22 @@
+export {
+  AgentClient,
+  type AgentClientConfig,
+  AgentClientError,
+  type AgentClientEvent,
+  type AgentClientListener,
+  type BrokerCapability,
+  bootAgentClient,
+  type EnrollResult,
+  type InvokePendingApproval,
+  type InvokeResult,
+  type InvokeSuccess,
+  type IssuedCapability,
+  type ManifestEntry,
+  NotEnrolledError,
+  type TokenCapability,
+} from "./agent-client.ts";
+// A3 — sovereign-custody agent client (keypair-only boot → enroll → manifest → issue/invoke → renew)
+export { type AgentKeyMaterial, AgentKeypair } from "./agent-keypair.ts";
 export { StewardAuth } from "./auth.ts";
 export type {
   SessionStorage,

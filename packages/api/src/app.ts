@@ -46,6 +46,7 @@ import { tenantCors } from "./middleware/tenant-cors";
 import { getOpenApiSpec } from "./openapi";
 import { accountRoutes } from "./routes/accounts";
 import { adapterRoutes, fiatRoutes } from "./routes/adapters";
+import { agentEnrollRoutes } from "./routes/agent-enroll";
 import { agentRoutes, createAgentBatch } from "./routes/agents";
 import { approvalRoutes } from "./routes/approvals";
 import { auditRoutes } from "./routes/audit";
@@ -235,6 +236,11 @@ export function mountCoreIdempotencyAndRoutes(
   app.route("/global-wallet", globalWalletRoutes);
   app.route("/accounts", accountRoutes);
   app.route("/v1/accounts", accountRoutes);
+  // PUBLIC: keypair-only agent enrollment (no tenant/agent token yet). Mounted
+  // outside the /agents tenant gate; identity is proven by signature and the
+  // tenant is resolved server-side from agent_signers.
+  app.route("/agent-enroll", agentEnrollRoutes);
+  app.route("/v1/agent-enroll", agentEnrollRoutes);
   app.route("/agents", agentRoutes);
   app.route("/v1/agents", agentRoutes);
   app.post("/wallets/batch", createAgentBatch);
