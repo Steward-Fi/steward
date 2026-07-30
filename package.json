@@ -24,7 +24,8 @@
     "test:e2e:all": "bun run test:e2e:smoke && bun run test:e2e:auth && bun run test:e2e:integration",
     "seed": "bun packages/seed/src/index.ts",
     "start:local": "bun run scripts/start-local.ts",
-    "privy:openapi-parity": "bun run scripts/privy-openapi-parity.ts"
+    "privy:openapi-parity": "bun run scripts/privy-openapi-parity.ts",
+    "attestation:check": "bun run scripts/check-attestation.ts"
   },
   "packageManager": "bun@1.3.9",
   "devDependencies": {
@@ -35,6 +36,7 @@
     "typescript": "^5.8.0"
   },
   "dependencies": {
+    "@stwd/attestation": "workspace:*",
     "@stwd/venue-hyperliquid": "workspace:*",
     "@stwd/venue-polymarket": "workspace:*",
     "ioredis": "^5.10.1",

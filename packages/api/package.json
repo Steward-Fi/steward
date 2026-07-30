@@ -28,6 +28,7 @@
     "@aws-sdk/client-kms": "^3.700.0",
     "@hono/zod-openapi": "^1.4.0",
     "@stwd/adapters": "workspace:*",
+    "@stwd/attestation": "workspace:*",
     "@stwd/auth": "workspace:*",
     "@stwd/db": "workspace:*",
     "@stwd/plugin-capabilities": "workspace:*",
