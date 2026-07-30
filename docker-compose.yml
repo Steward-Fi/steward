@@ -57,12 +57,17 @@ services:
       STEWARD_PLUGINS: "${STEWARD_PLUGINS:-}"
       WXMR_SOLANA_RPC_URL: "${WXMR_SOLANA_RPC_URL:-}"
       REDIS_URL: "redis://redis:6379"
+      # API-side invoke paths sign requests to steward-proxy with this shared
+      # root. Keep it distinct from JWT/audit secrets; the proxy service below
+      # verifies the same value.
+      STEWARD_PROXY_URL: "${STEWARD_PROXY_URL:-http://steward-proxy:8080}"
+      STEWARD_PROXY_REQUEST_SIGNING_SECRET: "${STEWARD_PROXY_REQUEST_SIGNING_SECRET:?STEWARD_PROXY_REQUEST_SIGNING_SECRET is required - generate with: openssl rand -hex 32}"
       RESEND_API_KEY: "${RESEND_API_KEY:-}"
-      EMAIL_FROM: "${EMAIL_FROM:-login@steward.fi}"
-      APP_URL: "${APP_URL:-https://steward.fi}"
+      EMAIL_FROM: "${EMAIL_FROM:-login@localhost}"
+      APP_URL: "${APP_URL:-http://localhost:3200}"
       PASSKEY_RP_NAME: "${PASSKEY_RP_NAME:-Steward}"
-      PASSKEY_RP_ID: "${PASSKEY_RP_ID:-steward.fi}"
-      PASSKEY_ORIGIN: "${PASSKEY_ORIGIN:-https://steward.fi}"
+      PASSKEY_RP_ID: "${PASSKEY_RP_ID:-localhost}"
+      PASSKEY_ORIGIN: "${PASSKEY_ORIGIN:-http://localhost:3200}"
       GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:-}"
       GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
       DISCORD_CLIENT_ID: "${DISCORD_CLIENT_ID:-}"
@@ -138,6 +143,7 @@ services:
       # fail closed with a 5xx in production.
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?STEWARD_AUDIT_HMAC_KEY is required - generate with: openssl rand -hex 32}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
+      STEWARD_PROXY_REQUEST_SIGNING_SECRET: "${STEWARD_PROXY_REQUEST_SIGNING_SECRET:?STEWARD_PROXY_REQUEST_SIGNING_SECRET is required - generate with: openssl rand -hex 32}"
       REDIS_URL: "redis://redis:6379"
     ports:
       - "127.0.0.1:${STEWARD_PROXY_PORT:-8080}:8080"
