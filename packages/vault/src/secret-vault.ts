@@ -4,8 +4,24 @@
  * Reuses the KeyStore's AES-256-GCM encryption. Secrets are encrypted per-tenant
  * using the same master key hierarchy as wallet keys.
  *
- * Decrypted values are NEVER returned via API — only used internally for
- * credential injection into proxied requests.
+ * NO READ-BACK is a property of THIS plane (sovereign-custody Pillar A / A2):
+ *
+ *   - No HTTP route returns a plaintext secret value. The /secrets routes
+ *     return {@link SecretMetadata} only (enforced by the static route scan in
+ *     packages/api/src/__tests__/secrets-no-read-back.test.ts).
+ *   - In-process, the canonical use-only path is {@link SecretVault.exerciseSecret}:
+ *     decrypt → hand to a caller closure → drop the reference. The closure
+ *     returns a RESULT (an HTTP response, a signature), never the secret.
+ *   - The remaining direct decrypt callers ({@link decryptSecret} /
+ *     {@link decryptSecretRow}) form a CLOSED, CI-pinned set (proxy credential
+ *     injection + provider-x refresh). Adding a new caller fails the
+ *     no-read-back inventory test with a classification instruction.
+ *
+ * Custody strength is orthogonal and inherited: the master-password root can be
+ * wrapped by KMS-envelope (aws|pkcs11) via vault-factory custody modes, and the
+ * TEE path (Pillar B) swaps the master-key source for an attestation-gated
+ * release WITHOUT changing this API. There is deliberately NO parallel
+ * file-based secret store — one custody plane, one audit surface.
  */
 
 import {
@@ -125,7 +141,51 @@ export class SecretVault {
   }
 
   /**
-   * Decrypt a secret for internal use (credential injection). NEVER expose via API.
+   * Exercise a secret: decrypt it and hand the plaintext to `use`, returning
+   * the closure's RESULT. The plaintext is returned by NO public API path; it
+   * exists for the duration of the `use` callback and the reference is dropped
+   * afterwards. This is the canonical use-only consumption path for new
+   * consumers (broker a call, sign a webhook, inject a header).
+   *
+   * Fail-closed audit: pass `beforeUse` as the audit chokepoint. It runs after
+   * the secret row is located but BEFORE decryption; if it throws (e.g. the
+   * audit append failed), the secret is never decrypted and `use` never runs.
+   */
+  async exerciseSecret<T>(
+    tenantId: string,
+    secretId: string,
+    use: (plaintext: string) => T | Promise<T>,
+    options?: { beforeUse?: () => void | Promise<void> },
+  ): Promise<T> {
+    const db = getDb();
+    const [row] = await db
+      .select()
+      .from(secrets)
+      .where(
+        and(eq(secrets.id, secretId), eq(secrets.tenantId, tenantId), isNull(secrets.deletedAt)),
+      );
+    if (!row) {
+      throw new Error(`Secret ${secretId} not found for tenant ${tenantId}`);
+    }
+    // Fail-closed: audit (or any precondition) must succeed before decryption.
+    if (options?.beforeUse) await options.beforeUse();
+    let plaintext: string | undefined = this.decryptSecretRow(tenantId, row);
+    try {
+      return await use(plaintext);
+    } finally {
+      // Best-effort drop of the reference. JS strings are immutable so the
+      // bytes cannot be zeroed, but no live reference survives this method.
+      plaintext = undefined;
+      void plaintext;
+    }
+  }
+
+  /**
+   * Decrypt a secret for internal use (credential injection). NEVER expose via
+   * API. Prefer {@link exerciseSecret} for new consumers — this direct-return
+   * form exists for the proxy injection path, whose plaintext lifetime spans
+   * the outbound request build, and its caller set is pinned by the
+   * no-read-back inventory test.
    */
   async decryptSecret(tenantId: string, secretId: string): Promise<string> {
     const db = getDb();
