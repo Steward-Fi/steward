@@ -123,7 +123,9 @@ agentEnrollRoutes.post("/verify", async (c) => {
   });
 
   if (!result.ok) {
-    // Uniform generic denial (never leak which step failed).
+    // Uniform generic denial (never leak which step failed). Fail closed on
+    // evidence: if this append breaks, enrollment verification returns an error
+    // rather than producing an unaudited denial path.
     await writeAuditEvent({
       tenantId: resolvedTenant ?? "unknown",
       actorType: "agent",
@@ -132,7 +134,7 @@ agentEnrollRoutes.post("/verify", async (c) => {
       resourceType: "agent",
       resourceId: agentId,
       metadata: { decision: "deny", code: result.code },
-    }).catch(() => {});
+    });
     return c.json<ApiResponse>({ ok: false, error: "enrollment denied" }, 401);
   }
 
@@ -142,11 +144,8 @@ agentEnrollRoutes.post("/verify", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "enrollment denied" }, 401);
   }
 
-  const token = await signAgentToken(
-    { agentId, tenantId: resolvedTenant, scopes: ["agent"] },
-    ENROLL_TOKEN_TTL,
-  );
-
+  // Fail closed before minting the bearer token: no successful enrollment token
+  // leaves the server unless its evidence row was appended to the tenant chain.
   await writeAuditEvent({
     tenantId: resolvedTenant,
     actorType: "agent",
@@ -155,7 +154,12 @@ agentEnrollRoutes.post("/verify", async (c) => {
     resourceType: "agent",
     resourceId: agentId,
     metadata: { decision: "allow", ttl: ENROLL_TOKEN_TTL },
-  }).catch(() => {});
+  });
+
+  const token = await signAgentToken(
+    { agentId, tenantId: resolvedTenant, scopes: ["agent"] },
+    ENROLL_TOKEN_TTL,
+  );
 
   c.header("Cache-Control", "no-store, max-age=0");
   c.header("Pragma", "no-cache");

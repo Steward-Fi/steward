@@ -261,6 +261,7 @@ function isCapabilityIntentRule(rule: PolicyRule): boolean {
 }
 
 async function recordAndJson(
+  ctx: StewardAppContext,
   store: CapabilityStore,
   args: {
     tenantId: string;
@@ -278,7 +279,7 @@ async function recordAndJson(
   },
 ): Promise<Response> {
   try {
-    await store.recordInvocation({
+    const id = await store.recordInvocation({
       tenantId: args.tenantId,
       agentId: args.agentId,
       capabilityId: args.capabilityId,
@@ -286,6 +287,22 @@ async function recordAndJson(
       verdictRule: args.verdictRule,
       verdictReason: args.verdictReason,
       amountMicros: args.amountMicros,
+    });
+    await ctx.writeAuditEvent({
+      tenantId: args.tenantId,
+      actorType: "agent",
+      actorId: args.agentId,
+      action: "capability.invoke",
+      resourceType: "capability",
+      resourceId: args.capabilityId ?? "unresolved",
+      metadata: {
+        decision: args.decision,
+        invocationId: id,
+        verdictRule: args.verdictRule,
+        verdictReason: args.verdictReason,
+        amountMicros: args.amountMicros,
+        status: args.status,
+      },
     });
   } catch {
     // audit write failed: do NOT block the already fail-closed decision.
@@ -312,7 +329,7 @@ export async function invokeCapabilityThroughProxy(
   const usable = await store.listUsableCapabilitiesForAgent(tenantId, agentId);
   const match = usable.find((u) => u.capability.name === name);
   if (!match) {
-    return recordAndJson(store, {
+    return recordAndJson(ctx, store, {
       tenantId,
       agentId,
       capabilityId: null,
@@ -343,7 +360,7 @@ export async function invokeCapabilityThroughProxy(
   } else {
     const parsedPolicy = parseGrantPolicy(rawPolicy);
     if (!parsedPolicy.ok) {
-      return recordAndJson(store, {
+      return recordAndJson(ctx, store, {
         tenantId,
         agentId,
         capabilityId: cap.id,
@@ -376,7 +393,7 @@ export async function invokeCapabilityThroughProxy(
         );
       }
     } catch {
-      return recordAndJson(store, {
+      return recordAndJson(ctx, store, {
         tenantId,
         agentId,
         capabilityId: cap.id,
@@ -407,7 +424,7 @@ export async function invokeCapabilityThroughProxy(
   }
 
   if (grantVerdict.effect === "deny") {
-    return recordAndJson(store, {
+    return recordAndJson(ctx, store, {
       tenantId,
       agentId,
       capabilityId: cap.id,
@@ -424,7 +441,7 @@ export async function invokeCapabilityThroughProxy(
   try {
     count1h = await store.countInvocations1h(agentId, cap.id);
   } catch {
-    return recordAndJson(store, {
+    return recordAndJson(ctx, store, {
       tenantId,
       agentId,
       capabilityId: cap.id,
@@ -448,7 +465,7 @@ export async function invokeCapabilityThroughProxy(
   try {
     policySet = await ctx.getPolicySet(tenantId, agentId);
   } catch {
-    return recordAndJson(store, {
+    return recordAndJson(ctx, store, {
       tenantId,
       agentId,
       capabilityId: cap.id,
@@ -513,7 +530,7 @@ export async function invokeCapabilityThroughProxy(
     // A throw escaped the (defensively non-throwing) evaluation region. Fail
     // closed: deny, never 500. The reason is intentionally generic — it must not
     // leak internals and must not itself risk stringifying a hostile value.
-    return recordAndJson(store, {
+    return recordAndJson(ctx, store, {
       tenantId,
       agentId,
       capabilityId: cap.id,
@@ -526,7 +543,7 @@ export async function invokeCapabilityThroughProxy(
   }
 
   if (decision.effect === "hard_deny") {
-    return recordAndJson(store, {
+    return recordAndJson(ctx, store, {
       tenantId,
       agentId,
       capabilityId: cap.id,
@@ -554,32 +571,31 @@ export async function invokeCapabilityThroughProxy(
       ? `grant-policy:${grantVerdict.rule}`
       : "capability-intent:approval_required";
     const verdictReason = fromGrant ? grantVerdict.reason : decision.reason;
-    let approvalId: string | null = null;
-    try {
-      approvalId = await store.recordInvocation({
-        tenantId,
-        agentId,
-        capabilityId: cap.id,
+    const approvalId = await store.recordInvocation({
+      tenantId,
+      agentId,
+      capabilityId: cap.id,
+      decision: "approval",
+      verdictRule,
+      verdictReason,
+      amountMicros: grantVerdict.amountMicros,
+    });
+    await ctx.writeAuditEvent({
+      tenantId,
+      actorType: "agent",
+      actorId: agentId,
+      action: "capability.invoke",
+      resourceType: "capability",
+      resourceId: cap.id,
+      metadata: {
         decision: "approval",
+        invocationId: approvalId,
         verdictRule,
         verdictReason,
         amountMicros: grantVerdict.amountMicros,
-      });
-    } catch {
-      approvalId = null;
-    }
-    if (!approvalId) {
-      return recordAndJson(store, {
-        tenantId,
-        agentId,
-        capabilityId: cap.id,
-        decision: "deny",
-        status: 403,
-        payload: { ok: false, error: "approval enqueue failed" } satisfies ApiResponse,
-        verdictRule: "approval-enqueue-failed",
-        verdictReason: "approval enqueue failed",
-      });
-    }
+        status: 202,
+      },
+    });
     return jsonResponse({ ok: true, data: { approvalId, status: "pending" } }, 202);
   }
 
@@ -587,7 +603,7 @@ export async function invokeCapabilityThroughProxy(
 
   const proxyEnv = readProxyEnv();
   if (!proxyEnv) {
-    return recordAndJson(store, {
+    return recordAndJson(ctx, store, {
       tenantId,
       agentId,
       capabilityId: cap.id,
@@ -615,7 +631,7 @@ export async function invokeCapabilityThroughProxy(
   try {
     const governed = await capabilityMapsToGovernedRoute(ctx.db, tenantId, agentId, cap);
     if (governed) {
-      return recordAndJson(store, {
+      return recordAndJson(ctx, store, {
         tenantId,
         agentId,
         capabilityId: cap.id,
@@ -631,7 +647,7 @@ export async function invokeCapabilityThroughProxy(
     }
   } catch {
     // Fail closed: if we cannot prove the route is NOT governed, deny (X7).
-    return recordAndJson(store, {
+    return recordAndJson(ctx, store, {
       tenantId,
       agentId,
       capabilityId: cap.id,
@@ -675,7 +691,7 @@ export async function invokeCapabilityThroughProxy(
     upstreamContentType = res.headers.get("content-type");
     upstreamBody = await res.text();
   } catch {
-    return recordAndJson(store, {
+    return recordAndJson(ctx, store, {
       tenantId,
       agentId,
       capabilityId: cap.id,
@@ -692,19 +708,31 @@ export async function invokeCapabilityThroughProxy(
     });
   }
 
-  try {
-    await store.recordInvocation({
-      tenantId,
-      agentId,
-      capabilityId: cap.id,
+  const invocationId = await store.recordInvocation({
+    tenantId,
+    agentId,
+    capabilityId: cap.id,
+    decision: "allow",
+    verdictRule: `grant-policy:${grantVerdict.rule}`,
+    verdictReason: grantVerdict.reason,
+    amountMicros: grantVerdict.amountMicros,
+  });
+  await ctx.writeAuditEvent({
+    tenantId,
+    actorType: "agent",
+    actorId: agentId,
+    action: "capability.invoke",
+    resourceType: "capability",
+    resourceId: cap.id,
+    metadata: {
       decision: "allow",
+      invocationId,
       verdictRule: `grant-policy:${grantVerdict.rule}`,
       verdictReason: grantVerdict.reason,
       amountMicros: grantVerdict.amountMicros,
-    });
-  } catch {
-    // audit write failed: do NOT block the already-authorized upstream response.
-  }
+      upstreamStatus,
+    },
+  });
 
   // Return the upstream status/body passthrough verbatim (the proxy already
   // scrubbed the credential). Built with a raw Response so it never carries the

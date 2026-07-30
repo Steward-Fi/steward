@@ -28,6 +28,7 @@ Usage:
   steward policy set --name NAME --rules '[...]' [--description TEXT] [--agent-id ID]
   steward approvals list|stats|approve|deny ...
   steward audit bundle [--from 1] [--to N] [--out bundle.json] [--verify]
+  steward evidence verify --bundle bundle.json [--fp HEX]
   steward provider-action create --workspace-id ID --account-id ID --operation KEY --arguments '{...}' --idempotency-key KEY
   steward provider-action get|approval|case --id ID
   steward provider-action approve|deny --id ID --reason TEXT [--idempotency-key KEY]
@@ -222,6 +223,20 @@ async function approvalsCommand(action: string | undefined, ctx: CommandContext)
   throw new Error("Supported approvals commands: approvals list|stats|approve|deny");
 }
 
+function offlineVerifyArgs(bundlePath: string, fp?: string): string[] {
+  const args = ["scripts/verify-evidence-bundle.mjs", bundlePath];
+  if (fp) args.push("--fp", fp);
+  return args;
+}
+
+function runOfflineEvidenceVerifier(bundlePath: string, fp?: string): void {
+  const result = spawnSync("node", offlineVerifyArgs(bundlePath, fp), {
+    cwd: process.cwd(),
+    stdio: "inherit",
+  });
+  if (result.status !== 0) throw new Error("Offline evidence bundle verification failed");
+}
+
 async function auditCommand(action: string | undefined, ctx: CommandContext) {
   if (action !== "bundle") throw new Error("Supported audit command: audit bundle");
   const params = new URLSearchParams();
@@ -233,13 +248,19 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
   if (out) writeFileSync(out, JSON.stringify(bundle, null, 2));
   if (boolFlag(ctx.flags, "verify")) {
     if (!out) throw new Error("--verify requires --out so the offline verifier has a file");
-    const result = spawnSync("node", ["scripts/verify-evidence-bundle.mjs", out], {
-      cwd: process.cwd(),
-      stdio: "inherit",
-    });
-    if (result.status !== 0) throw new Error("Offline audit bundle verification failed");
+    runOfflineEvidenceVerifier(out, stringFlag(ctx.flags, "fp"));
   }
   return out ? { wrote: out, verified: boolFlag(ctx.flags, "verify"), bundle } : bundle;
+}
+
+async function evidenceCommand(action: string | undefined, ctx: CommandContext) {
+  if (action !== "verify") throw new Error("Supported evidence command: evidence verify");
+  const bundlePath = required(
+    stringFlag(ctx.flags, "bundle") ?? stringFlag(ctx.flags, "file") ?? stringFlag(ctx.flags, "in"),
+    "bundle",
+  );
+  runOfflineEvidenceVerifier(bundlePath, stringFlag(ctx.flags, "fp"));
+  return { ok: true, verified: bundlePath };
 }
 
 /**
@@ -384,6 +405,7 @@ async function main(argv: string[]) {
     policy: policyCommand,
     approvals: approvalsCommand,
     audit: auditCommand,
+    evidence: evidenceCommand,
     "provider-action": providerActionCommand,
   };
   const handler = handlers[command];

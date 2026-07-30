@@ -7,8 +7,16 @@
 
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { generateP256KeyPair, signP256, verifyToken } from "@stwd/auth";
-import { agentSigners, agents, getDb, tenants } from "@stwd/db";
+import {
+  __resetAuditHmacKeyCacheForTests,
+  agentSigners,
+  agents,
+  auditEvents,
+  getDb,
+  tenants,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
@@ -51,6 +59,8 @@ describe("agent enrollment route (keypair-only boot)", () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "enroll-master-password-32-chars-min";
     process.env.STEWARD_JWT_SECRET = "enroll-jwt-secret-at-least-32-chars-long!!";
+    process.env.STEWARD_AUDIT_HMAC_KEY = "enroll-audit-hmac-key-at-least-32-chars-long";
+    __resetAuditHmacKeyCacheForTests();
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
@@ -87,6 +97,8 @@ describe("agent enrollment route (keypair-only boot)", () => {
   afterAll(async () => {
     const { closeDb } = await import("@stwd/db");
     await closeDb().catch(() => {});
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    __resetAuditHmacKeyCacheForTests();
   });
 
   it("issues a short-lived agent token for a valid signed challenge", async () => {
@@ -106,6 +118,15 @@ describe("agent enrollment route (keypair-only boot)", () => {
     expect(body.ok).toBe(true);
     expect(body.data.tenantId).toBe(TENANT_ID);
     expect(body.data.scope).toBe("agent");
+
+    const [event] = await getDb()
+      .select()
+      .from(auditEvents)
+      .where(and(eq(auditEvents.tenantId, TENANT_ID), eq(auditEvents.action, "capability.enroll")));
+    expect(event?.actorType).toBe("agent");
+    expect(event?.actorId).toBe(AGENT_ID);
+    expect(event?.resourceType).toBe("agent");
+    expect(event?.metadata).toMatchObject({ decision: "allow", ttl: "5m" });
 
     // The minted token is a real, verifiable short-lived agent token.
     const payload = await verifyToken(body.data.token);
