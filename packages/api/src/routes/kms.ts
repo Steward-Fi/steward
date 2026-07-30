@@ -204,8 +204,8 @@ function currentRow(rows: Secret[]): Secret | null {
  * (soft-deleted) rows stay decryptable by design: KMS rotation must not brick
  * ciphertext produced under an old version.
  */
-function rootForRow(vault: SecretVault, tenantId: string, row: Secret): Buffer {
-  const hex = vault.decryptSecretRow(tenantId, row);
+async function rootForRow(vault: SecretVault, tenantId: string, row: Secret): Promise<Buffer> {
+  const hex = await vault.exerciseSecretRow(tenantId, row, (plaintext) => plaintext);
   const root = Buffer.from(hex, "hex");
   if (root.length !== 32) throw new Error("kms root key corrupted");
   return root;
@@ -328,7 +328,7 @@ kmsRoutes.post("/keys/:keyId/encrypt", async (c) => {
   if (!row) return c.json<ApiResponse>({ ok: false, error: "key not found" }, 404);
 
   const key = deriveKey(
-    rootForRow(getSecretVault(), principal.tenantId, row),
+    await rootForRow(getSecretVault(), principal.tenantId, row),
     "sym",
     keyId,
     row.version,
@@ -394,7 +394,7 @@ kmsRoutes.post("/keys/:keyId/decrypt", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: `key version ${version} not found` }, 404);
 
   const key = deriveKey(
-    rootForRow(getSecretVault(), principal.tenantId, row),
+    await rootForRow(getSecretVault(), principal.tenantId, row),
     "sym",
     keyId,
     version,
@@ -430,7 +430,7 @@ kmsRoutes.post("/keys/:keyId/hmac", async (c) => {
   if (!row) return c.json<ApiResponse>({ ok: false, error: "key not found" }, 404);
 
   const macKey = deriveKey(
-    rootForRow(getSecretVault(), principal.tenantId, row),
+    await rootForRow(getSecretVault(), principal.tenantId, row),
     "hmac",
     keyId,
     row.version,
@@ -461,7 +461,7 @@ kmsRoutes.post("/keys/:keyId/hmac/verify", async (c) => {
   const vault = getSecretVault();
   for (const row of rows) {
     const macKey = deriveKey(
-      rootForRow(vault, principal.tenantId, row),
+      await rootForRow(vault, principal.tenantId, row),
       "hmac",
       keyId,
       row.version,
@@ -493,7 +493,7 @@ kmsRoutes.post("/keys/:keyId/sign", async (c) => {
   const row = currentRow(rows);
   if (!row) return c.json<ApiResponse>({ ok: false, error: "key not found" }, 404);
 
-  const root = rootForRow(getSecretVault(), principal.tenantId, row);
+  const root = await rootForRow(getSecretVault(), principal.tenantId, row);
   const signature = nodeSign(null, data, ed25519PrivateKey(root, keyId, row.version));
   await auditKms(c, principal, "kms.sign", keyId, {
     version: row.version,
@@ -534,7 +534,7 @@ kmsRoutes.post("/keys/:keyId/verify", async (c) => {
   // signatures minted under ANY version verify (rotation-safe verification)
   const vault = getSecretVault();
   for (const row of rows) {
-    const root = rootForRow(vault, principal.tenantId, row);
+    const root = await rootForRow(vault, principal.tenantId, row);
     const publicKey = createPublicKey(ed25519PrivateKey(root, keyId, row.version));
     if (nodeVerify(null, data, publicKey, signature)) {
       return c.json({ valid: true });
@@ -554,7 +554,7 @@ kmsRoutes.get("/keys/:keyId/public", async (c) => {
   const row = currentRow(rows);
   if (!row) return c.json<ApiResponse>({ ok: false, error: "key not found" }, 404);
 
-  const root = rootForRow(getSecretVault(), principal.tenantId, row);
+  const root = await rootForRow(getSecretVault(), principal.tenantId, row);
   return c.json({
     public_key_b64: ed25519PublicRaw(root, keyId, row.version).toString("base64"),
     algorithm: SUPPORTED_ALGORITHM,

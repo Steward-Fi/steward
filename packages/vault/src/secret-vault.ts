@@ -167,6 +167,20 @@ export class SecretVault {
     if (!row) {
       throw new Error(`Secret ${secretId} not found for tenant ${tenantId}`);
     }
+    return await this.exerciseSecretRow(tenantId, row, use, options);
+  }
+
+  /**
+   * Exercise a secret row already read from the DB. This is the same use-only
+   * plaintext lifetime as exerciseSecret, but supports intentional historical
+   * row consumers such as KMS decrypt-old-version after rotation.
+   */
+  async exerciseSecretRow<T>(
+    tenantId: string,
+    row: Secret,
+    use: (plaintext: string) => T | Promise<T>,
+    options?: { beforeUse?: () => void | Promise<void> },
+  ): Promise<T> {
     // Fail-closed: audit (or any precondition) must succeed before decryption.
     if (options?.beforeUse) await options.beforeUse();
     let plaintext: string | undefined = this.decryptSecretRow(tenantId, row);
