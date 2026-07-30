@@ -22,6 +22,9 @@ export STEWARD_JWT_SECRET=compose-contract-jwt-secret-32-chars
 export STEWARD_EXECUTION_AUTH_SECRET=v1:compose-contract-execution-auth-secret-32-chars
 export STEWARD_AUDIT_HMAC_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 export STEWARD_KDF_SALT=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
+# Compose requires a proxy request-signing root for the API+proxy pair. This is
+# a throwaway value for the contract test only; production must supply its own.
+export STEWARD_PROXY_REQUEST_SIGNING_SECRET=compose-contract-proxy-signing-secret-32-chars
 # Keep one-off contract containers and resources isolated from any local stack.
 export COMPOSE_PROJECT_NAME=steward-compose-monero-contract-$$
 
