@@ -1,3 +1,4 @@
+export * from "./agent-enroll";
 export * from "./api-keys";
 export * from "./authorization-keys";
 export * from "./challenge-store";
