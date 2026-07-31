@@ -73,6 +73,7 @@ import { tenantRoutes } from "./routes/tenants";
 import { userRoutes, userSessionAuth } from "./routes/user";
 import { vaultRoutes } from "./routes/vault";
 import { webhookRoutes } from "./routes/webhooks";
+import { workloadSecretsRoutes } from "./routes/workload-secrets";
 import {
   API_VERSION,
   type ApiResponse,
@@ -144,6 +145,10 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
   // KMS: tenantAuth verifies the bearer (agent tokens included); the kms router
   // additionally REQUIRES an agent-token principal (fail-closed — see routes/kms.ts).
   app.use("/v1/kms/*", (c, next) => tenantAuth(c, next));
+  // Workload secrets: tenantAuth classifies the credential (api-key vs agent
+  // token); the router enforces the disjoint writer/reader principals
+  // (fail-closed — see routes/workload-secrets.ts).
+  app.use("/v1/workload-secrets/*", (c, next) => tenantAuth(c, next));
   app.use("/secrets", (c, next) => tenantAuth(c, next));
   app.use("/secrets/*", (c, next) => tenantAuth(c, next));
   app.use("/tenants/:id", (c, next) => {
@@ -252,6 +257,7 @@ export function mountCoreIdempotencyAndRoutes(
   app.route("/vault", vaultRoutes);
   app.route("/secrets", secretsRoutes);
   app.route("/v1/kms", kmsRoutes);
+  app.route("/v1/workload-secrets", workloadSecretsRoutes);
   // tenantConfigRoutes mounted FIRST so its literal `/config` discovery handler
   // is matched before tenantRoutes' `/:id` wildcard would catch "config" as an id.
   app.route("/tenants", tenantConfigRoutes);
