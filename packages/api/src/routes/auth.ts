@@ -1451,7 +1451,13 @@ function emailMagicLinkVerifySubject(token: string, email: string, tenantId: str
   );
 }
 
-function buildGlobalEmailAuth(overrides?: { baseUrl?: string; callbackPath?: string }): EmailAuth {
+function buildGlobalEmailAuth(overrides?: {
+  baseUrl?: string;
+  callbackPath?: string;
+  templateId?: string;
+  subjectOverride?: string;
+  replyTo?: string;
+}): EmailAuth {
   const resendKey = process.env.RESEND_API_KEY;
   // Mock takes precedence in non-production for deterministic e2e testing.
   const provider = isMockEmailEnabled()
@@ -1469,6 +1475,9 @@ function buildGlobalEmailAuth(overrides?: { baseUrl?: string; callbackPath?: str
     callbackPath: overrides?.callbackPath,
     provider,
     tokenStore: getTokenStore(),
+    templateId: overrides?.templateId,
+    subjectOverride: overrides?.subjectOverride,
+    replyTo: overrides?.replyTo,
   });
 }
 
@@ -1523,10 +1532,16 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
   if (!emailConfig || !emailConfig.apiKeyEncrypted) {
     // No per-tenant Resend config (or only magic-link override) — use the
     // global env-backed provider but still honor the per-tenant magic-link
-    // overrides if present.
+    // AND template overrides if present. Without the template pass-through a
+    // tenant that sets only `templateId` (no own Resend key) silently got the
+    // Steward-branded default email — the exact bug that shipped Steward
+    // branding to Eliza Cloud sign-in emails.
     return buildGlobalEmailAuth({
       baseUrl: magicLinkBaseUrl,
       callbackPath,
+      templateId: emailConfig?.templateId,
+      subjectOverride: emailConfig?.subjectOverride,
+      replyTo: emailConfig?.replyTo,
     });
   }
 

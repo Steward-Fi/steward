@@ -1142,8 +1142,12 @@ platform.get("/tenants/:id", async (c) => {
 /**
  * PATCH /tenants/:tenantId/email-config
  * Body: { apiKey, from, replyTo?, templateId?, subjectOverride? }
+ *   or template-only: { templateId?, subjectOverride?, replyTo? } (no apiKey)
  *
- * Upserts the tenant-specific email provider config.
+ * Upserts the tenant-specific email provider config. When `apiKey` is
+ * omitted the tenant keeps the platform's global Resend provider and only
+ * the branding fields (templateId/subjectOverride/replyTo) are stored —
+ * merged over any existing config so magic-link overrides survive.
  */
 platform.patch("/tenants/:tenantId/email-config", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-email-config:write");
@@ -1172,7 +1176,26 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   }
 
-  if (!isNonEmptyString(body.apiKey) || !isNonEmptyString(body.from)) {
+  const isTemplateOnly = body.apiKey === undefined;
+
+  if (isTemplateOnly) {
+    if (body.from !== undefined) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "from requires apiKey (per-tenant provider config)" },
+        400,
+      );
+    }
+    if (!body.templateId && !body.subjectOverride && !body.replyTo) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            "Provide apiKey+from for provider config, or at least one of templateId, subjectOverride, replyTo",
+        },
+        400,
+      );
+    }
+  } else if (!isNonEmptyString(body.apiKey) || !isNonEmptyString(body.from)) {
     return c.json<ApiResponse>({ ok: false, error: "apiKey and from are required" }, 400);
   }
 
@@ -1187,15 +1210,28 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
     );
   }
 
-  const encryptedApiKey = JSON.stringify(platformKeyStore().encrypt(body.apiKey.trim()));
-  const emailConfig = {
-    provider: "resend" as const,
-    apiKeyEncrypted: encryptedApiKey,
-    from: body.from.trim(),
-    ...(body.replyTo ? { replyTo: body.replyTo.trim() } : {}),
-    ...(body.templateId ? { templateId: body.templateId.trim() } : {}),
-    ...(body.subjectOverride ? { subjectOverride: body.subjectOverride.trim() } : {}),
-  };
+  const [existingRow] = await db
+    .select({ emailConfig: tenantConfigs.emailConfig })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+
+  const emailConfig = isTemplateOnly
+    ? {
+        // Merge branding fields over the existing config so a template-only
+        // PATCH can't clobber magic-link overrides or provider creds.
+        ...(existingRow?.emailConfig ?? {}),
+        ...(body.replyTo ? { replyTo: body.replyTo.trim() } : {}),
+        ...(body.templateId ? { templateId: body.templateId.trim() } : {}),
+        ...(body.subjectOverride ? { subjectOverride: body.subjectOverride.trim() } : {}),
+      }
+    : {
+        provider: "resend" as const,
+        apiKeyEncrypted: JSON.stringify(platformKeyStore().encrypt(body.apiKey.trim())),
+        from: body.from.trim(),
+        ...(body.replyTo ? { replyTo: body.replyTo.trim() } : {}),
+        ...(body.templateId ? { templateId: body.templateId.trim() } : {}),
+        ...(body.subjectOverride ? { subjectOverride: body.subjectOverride.trim() } : {}),
+      };
 
   await writeAuditEvent({
     tenantId,
@@ -1245,22 +1281,22 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
 
   return c.json<
     ApiResponse<{
-      provider: "resend";
-      from: string;
+      provider?: "resend";
+      from?: string;
       replyTo?: string;
       templateId?: string;
       subjectOverride?: string;
-      hasApiKey: true;
+      hasApiKey: boolean;
     }>
   >({
     ok: true,
     data: {
-      provider: "resend",
+      provider: emailConfig.provider,
       from: emailConfig.from,
       replyTo: emailConfig.replyTo,
       templateId: emailConfig.templateId,
       subjectOverride: emailConfig.subjectOverride,
-      hasApiKey: true,
+      hasApiKey: Boolean(emailConfig.apiKeyEncrypted),
     },
   });
 });

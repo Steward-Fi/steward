@@ -180,6 +180,38 @@ describe("getEmailAuthForTenant", () => {
     await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
     invalidateEmailAuthForTenant(TEST_TENANT_ID);
   });
+
+  it("honors templateId/subjectOverride/replyTo on the global provider when no apiKeyEncrypted", async () => {
+    clearEmailAuthTenantCacheForTests();
+
+    const dbHandle = getDb();
+    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    // Template-only tenant config: shared platform Resend account, but the
+    // tenant wants its own branded email. This is the elizacloud shape —
+    // before the fix this silently fell back to the Steward default template.
+    await dbHandle.insert(tenantConfigs).values({
+      tenantId: TEST_TENANT_ID,
+      emailConfig: {
+        templateId: "elizacloud",
+        subjectOverride: "Sign in to Eliza Cloud",
+        replyTo: "support@elizacloud.ai",
+      },
+    });
+    invalidateEmailAuthForTenant(TEST_TENANT_ID);
+
+    const auth = await getEmailAuthForTenant(TEST_TENANT_ID);
+    const provider = (auth as any).provider;
+
+    expect((auth as any).templateId).toBe("elizacloud");
+    expect((auth as any).subjectOverride).toBe("Sign in to Eliza Cloud");
+    expect((auth as any).replyTo).toBe("support@elizacloud.ai");
+    // Still the global provider + global sender
+    expect(provider.constructor.name).toBe("ResendProvider");
+    expect(provider.from).toBe("Global <login@example.com>");
+
+    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    invalidateEmailAuthForTenant(TEST_TENANT_ID);
+  });
 });
 
 describe("email magic-link verification hardening", () => {

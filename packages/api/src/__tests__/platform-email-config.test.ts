@@ -133,6 +133,68 @@ describe("platform tenant email config routes", () => {
     expect(afterDelete?.emailConfig ?? null).toBeNull();
   });
 
+  it("accepts a template-only PATCH (no apiKey) and merges over existing config", async () => {
+    // Template-only branding config: tenant keeps the platform's global
+    // Resend provider, only sets templateId (the elizacloud shape).
+    const patchResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+      },
+      body: JSON.stringify({
+        templateId: "elizacloud",
+        subjectOverride: "Sign in to Eliza Cloud",
+      }),
+    });
+
+    expect(patchResponse.status).toBe(200);
+    const patchBody = (await patchResponse.json()) as {
+      ok: boolean;
+      data: { templateId?: string; subjectOverride?: string; hasApiKey: boolean };
+    };
+    expect(patchBody.ok).toBe(true);
+    expect(patchBody.data.templateId).toBe("elizacloud");
+    expect(patchBody.data.subjectOverride).toBe("Sign in to Eliza Cloud");
+    expect(patchBody.data.hasApiKey).toBe(false);
+
+    const dbHandle = getDb();
+    const [stored] = await dbHandle
+      .select({ emailConfig: tenantConfigs.emailConfig })
+      .from(tenantConfigs)
+      .where(eq(tenantConfigs.tenantId, TENANT_ID));
+    expect(stored?.emailConfig?.templateId).toBe("elizacloud");
+    expect(stored?.emailConfig?.apiKeyEncrypted).toBeUndefined();
+
+    // from without apiKey is rejected (provider config is all-or-nothing).
+    const badResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+      },
+      body: JSON.stringify({ from: "login@elizacloud.ai", templateId: "elizacloud" }),
+    });
+    expect(badResponse.status).toBe(400);
+
+    // Empty template-only body is rejected.
+    const emptyResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+      },
+      body: JSON.stringify({}),
+    });
+    expect(emptyResponse.status).toBe(400);
+
+    // Cleanup so later tests see no residual config.
+    await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+      method: "DELETE",
+      headers: { "X-Steward-Platform-Key": PLATFORM_KEY },
+    });
+  });
+
   it("puts and reads tenant OIDC provider config", async () => {
     const putResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/oidc-providers`, {
       method: "PUT",

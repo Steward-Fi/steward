@@ -59,10 +59,31 @@ curl -X DELETE "$API_BASE/platform/tenants/elizacloud/email-config" \
   -H "X-Steward-Platform-Key: $STEWARD_PLATFORM_KEY"
 ```
 
+## Template-only branding (no per-tenant Resend key)
+
+A tenant can keep the platform's global Resend provider and only override the
+email branding. PATCH with no `apiKey` (and no `from`):
+
+```bash
+curl -X PATCH "$API_BASE/platform/tenants/elizacloud/email-config" \
+  -H "Content-Type: application/json" \
+  -H "X-Steward-Platform-Key: $STEWARD_PLATFORM_KEY" \
+  -d '{ "templateId": "elizacloud" }'
+```
+
+Branding fields are merged over any existing config, so a template-only PATCH
+never clobbers `magicLinkBaseUrl` or stored provider credentials. `from`
+without `apiKey` is rejected (provider config is all-or-nothing).
+
 ## Template IDs
 
-- `default`: built-in Steward template
-- `elizacloud`: stub currently falls back to `default`
+Each template ID covers the full auth email set: magic-link sign-in AND the
+6-digit OTP sign-in-code email.
+
+- `default`: built-in Steward template (dark, amber CTA)
+- `elizacloud`: Eliza Cloud brand — black field, `#141414` card, orange
+  `#FF6B00` pill CTA, hosted eliza mark from `app.elizacloud.ai/brand/`,
+  matching the product's transactional emails
 
 Unknown template IDs also fall back to the default template.
 

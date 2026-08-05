@@ -100,3 +100,68 @@ describe("EmailAuth.sendMagicLink", () => {
     auth.destroy();
   });
 });
+
+describe("EmailAuth.sendOtp", () => {
+  it("routes OTP emails through the per-tenant otp template renderer", async () => {
+    const sent = mock(async () => undefined);
+    const otpTemplateRenderer = mock(() => ({
+      subject: "otp subject",
+      text: "otp text",
+      html: "<p>otp html</p>",
+    }));
+    const provider: EmailProvider = { send: sent };
+    const auth = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider,
+      templateId: "elizacloud",
+      tokenTtlMs: 10 * 60 * 1000,
+      otpTemplateRenderer,
+    });
+
+    await auth.sendOtp("user@example.com", {
+      tenantId: "elizacloud",
+      tenantName: "Eliza Cloud",
+    });
+
+    expect(otpTemplateRenderer).toHaveBeenCalledTimes(1);
+    const [templateId, data] = otpTemplateRenderer.mock.calls[0]!;
+    expect(templateId).toBe("elizacloud");
+    expect(data).toMatchObject({
+      email: "user@example.com",
+      brandName: "Eliza Cloud",
+      expiresInMinutes: 10,
+    });
+    expect(data.code).toMatch(/^\d{6}$/);
+
+    expect(sent).toHaveBeenCalledTimes(1);
+    const [to, subject, text, html] = sent.mock.calls[0]!;
+    expect(to).toBe("user@example.com");
+    expect(subject).toBe("otp subject");
+    expect(text).toBe("otp text");
+    expect(html).toBe("<p>otp html</p>");
+
+    auth.destroy();
+  });
+
+  it("renders the Steward default OTP email when no template is configured", async () => {
+    const sent = mock(async () => undefined);
+    const provider: EmailProvider = { send: sent };
+    const auth = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider,
+      tokenTtlMs: 10 * 60 * 1000,
+    });
+
+    await auth.sendOtp("user@example.com", { tenantName: "Waifu" });
+
+    const [, subject, text, html] = sent.mock.calls[0]!;
+    expect(subject).toMatch(/^\d{6} is your Waifu sign-in code$/);
+    expect(text).toContain("Your Waifu sign-in code is:");
+    expect(html).toContain("Waifu sign-in code");
+    expect(html).toContain("#0b0a09");
+
+    auth.destroy();
+  });
+});
