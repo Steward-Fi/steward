@@ -73,7 +73,7 @@ describe("getEmailAuthForTenant", () => {
         apiKeyEncrypted: JSON.stringify(encrypted),
         from: "Tenant <login@tenant.example.com>",
         replyTo: "help@tenant.example.com",
-        templateId: "elizacloud",
+        templateId: "customer-template",
         subjectOverride: "Tenant Sign In",
       },
     });
@@ -84,7 +84,7 @@ describe("getEmailAuthForTenant", () => {
 
     expect((auth as any).from).toBe("Tenant <login@tenant.example.com>");
     expect((auth as any).replyTo).toBe("help@tenant.example.com");
-    expect((auth as any).templateId).toBe("elizacloud");
+    expect((auth as any).templateId).toBe("customer-template");
     expect((auth as any).subjectOverride).toBe("Tenant Sign In");
     expect(provider.from).toBe("Tenant <login@tenant.example.com>");
     expect(provider.replyTo).toBe("help@tenant.example.com");
@@ -176,6 +176,90 @@ describe("getEmailAuthForTenant", () => {
     // Provider falls back to the global Resend key
     expect(provider.constructor.name).toBe("ResendProvider");
     expect(provider.from).toBe("Global <login@example.com>");
+
+    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    invalidateEmailAuthForTenant(TEST_TENANT_ID);
+  });
+
+  it("honors templateId/subjectOverride/replyTo on the global provider when no apiKeyEncrypted", async () => {
+    clearEmailAuthTenantCacheForTests();
+
+    const dbHandle = getDb();
+    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    // Template-only tenant config: shared platform Resend account, but the
+    // tenant wants its own branded email. This is the shared-provider branding shape —
+    // before the fix this silently fell back to the Steward default template.
+    await dbHandle.insert(tenantConfigs).values({
+      tenantId: TEST_TENANT_ID,
+      emailConfig: {
+        templateId: "customer-template",
+        subjectOverride: "Sign in to Customer App",
+        replyTo: "support@customer-template.ai",
+      },
+    });
+    invalidateEmailAuthForTenant(TEST_TENANT_ID);
+
+    const auth = await getEmailAuthForTenant(TEST_TENANT_ID);
+    const provider = (auth as any).provider;
+
+    expect((auth as any).templateId).toBe("customer-template");
+    expect((auth as any).subjectOverride).toBe("Sign in to Customer App");
+    expect((auth as any).replyTo).toBe("support@customer-template.ai");
+    // Still the global provider + global sender
+    expect(provider.constructor.name).toBe("ResendProvider");
+    expect(provider.from).toBe("Global <login@example.com>");
+
+    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    invalidateEmailAuthForTenant(TEST_TENANT_ID);
+  });
+
+  it("renders deployer-supplied raw templates from tenant config (global provider path)", async () => {
+    clearEmailAuthTenantCacheForTests();
+
+    const dbHandle = getDb();
+    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    // Custom-template tenant config: branded markup stored as instance
+    // CONFIG, not repo code — the vendor-neutral mechanism for hosted
+    // Steward deployments.
+    await dbHandle.insert(tenantConfigs).values({
+      tenantId: TEST_TENANT_ID,
+      emailConfig: {
+        templates: {
+          magicLink: {
+            subject: "Sign in to Customer App",
+            text: "Link: {{magicLink}}",
+            html: '<a href="{{magicLink}}">Sign in to Customer App</a>',
+          },
+          otp: {
+            subject: "{{code}} is your Customer App code",
+            text: "Code: {{code}}",
+            html: "<b>{{code}}</b>",
+          },
+        },
+      },
+    });
+    invalidateEmailAuthForTenant(TEST_TENANT_ID);
+
+    const auth = await getEmailAuthForTenant(TEST_TENANT_ID);
+
+    const magicRendered = (auth as any).templateRenderer(undefined, {
+      magicLink: "https://app.example.com/auth/callback/email?token=t",
+      email: "user@example.com",
+      expiresInMinutes: 10,
+      tenantName: undefined,
+    });
+    expect(magicRendered.subject).toBe("Sign in to Customer App");
+    expect(magicRendered.text).toBe("Link: https://app.example.com/auth/callback/email?token=t");
+    expect(magicRendered.html).toContain("Sign in to Customer App</a>");
+
+    const otpRendered = (auth as any).otpTemplateRenderer(undefined, {
+      email: "user@example.com",
+      code: "654321",
+      brandName: "Customer App",
+      expiresInMinutes: 10,
+    });
+    expect(otpRendered.subject).toBe("654321 is your Customer App code");
+    expect(otpRendered.html).toBe("<b>654321</b>");
 
     await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
     invalidateEmailAuthForTenant(TEST_TENANT_ID);

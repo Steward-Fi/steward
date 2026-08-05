@@ -16,7 +16,7 @@ describe("EmailAuth.sendMagicLink", () => {
       from: "login@steward.fi",
       baseUrl: "https://steward.fi",
       provider,
-      templateId: "elizacloud",
+      templateId: "customer-template",
       tokenTtlMs: 10 * 60 * 1000,
       templateRenderer,
     });
@@ -25,7 +25,7 @@ describe("EmailAuth.sendMagicLink", () => {
 
     expect(templateRenderer).toHaveBeenCalledTimes(1);
     const [templateId, data] = templateRenderer.mock.calls[0]!;
-    expect(templateId).toBe("elizacloud");
+    expect(templateId).toBe("customer-template");
     expect(data).toMatchObject({
       email: "user@example.com",
       expiresInMinutes: 10,
@@ -51,7 +51,7 @@ describe("EmailAuth.sendMagicLink", () => {
       from: "login@steward.fi",
       baseUrl: "https://steward.fi",
       provider,
-      templateId: "elizacloud",
+      templateId: "customer-template",
       tokenTtlMs: 10 * 60 * 1000,
       templateRenderer,
     });
@@ -60,9 +60,9 @@ describe("EmailAuth.sendMagicLink", () => {
     // GET /auth/callback/email resolves the SAME tenant the token was minted
     // for (otherwise the verify guard fires tenant_mismatch and the exchange
     // code is stored under the wrong tenant).
-    await auth.sendMagicLink("user@example.com", { tenantId: "elizacloud" });
+    await auth.sendMagicLink("user@example.com", { tenantId: "customer" });
     const [, withTenant] = templateRenderer.mock.calls[0]!;
-    expect(withTenant.magicLink).toContain("tenantId=elizacloud");
+    expect(withTenant.magicLink).toContain("tenantId=customer");
 
     // No tenant context: byte-for-byte back-compat — no tenantId param at all.
     await auth.sendMagicLink("user@example.com");
@@ -96,6 +96,71 @@ describe("EmailAuth.sendMagicLink", () => {
     expect(text).toContain("tenantId=tenant-1");
     expect(text).toContain(`token=${"a".repeat(64)}`);
     expect(html).toContain("Accept invitation");
+
+    auth.destroy();
+  });
+});
+
+describe("EmailAuth.sendOtp", () => {
+  it("routes OTP emails through the per-tenant otp template renderer", async () => {
+    const sent = mock(async () => undefined);
+    const otpTemplateRenderer = mock(() => ({
+      subject: "otp subject",
+      text: "otp text",
+      html: "<p>otp html</p>",
+    }));
+    const provider: EmailProvider = { send: sent };
+    const auth = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider,
+      templateId: "customer-template",
+      tokenTtlMs: 10 * 60 * 1000,
+      otpTemplateRenderer,
+    });
+
+    await auth.sendOtp("user@example.com", {
+      tenantId: "customer",
+      tenantName: "Customer App",
+    });
+
+    expect(otpTemplateRenderer).toHaveBeenCalledTimes(1);
+    const [templateId, data] = otpTemplateRenderer.mock.calls[0]!;
+    expect(templateId).toBe("customer-template");
+    expect(data).toMatchObject({
+      email: "user@example.com",
+      brandName: "Customer App",
+      expiresInMinutes: 10,
+    });
+    expect(data.code).toMatch(/^\d{6}$/);
+
+    expect(sent).toHaveBeenCalledTimes(1);
+    const [to, subject, text, html] = sent.mock.calls[0]!;
+    expect(to).toBe("user@example.com");
+    expect(subject).toBe("otp subject");
+    expect(text).toBe("otp text");
+    expect(html).toBe("<p>otp html</p>");
+
+    auth.destroy();
+  });
+
+  it("renders the Steward default OTP email when no template is configured", async () => {
+    const sent = mock(async () => undefined);
+    const provider: EmailProvider = { send: sent };
+    const auth = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider,
+      tokenTtlMs: 10 * 60 * 1000,
+    });
+
+    await auth.sendOtp("user@example.com", { tenantName: "Acme" });
+
+    const [, subject, text, html] = sent.mock.calls[0]!;
+    expect(subject).toMatch(/^\d{6} is your Acme sign-in code$/);
+    expect(text).toContain("Your Acme sign-in code is:");
+    expect(html).toContain("Acme sign-in code");
+    expect(html).toContain("#0b0a09");
 
     auth.destroy();
   });
