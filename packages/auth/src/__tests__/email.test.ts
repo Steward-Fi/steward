@@ -154,12 +154,12 @@ describe("EmailAuth.sendOtp", () => {
       tokenTtlMs: 10 * 60 * 1000,
     });
 
-    await auth.sendOtp("user@example.com", { tenantName: "Waifu" });
+    await auth.sendOtp("user@example.com", { tenantName: "Acme" });
 
     const [, subject, text, html] = sent.mock.calls[0]!;
-    expect(subject).toMatch(/^\d{6} is your Waifu sign-in code$/);
-    expect(text).toContain("Your Waifu sign-in code is:");
-    expect(html).toContain("Waifu sign-in code");
+    expect(subject).toMatch(/^\d{6} is your Acme sign-in code$/);
+    expect(text).toContain("Your Acme sign-in code is:");
+    expect(html).toContain("Acme sign-in code");
     expect(html).toContain("#0b0a09");
 
     auth.destroy();
