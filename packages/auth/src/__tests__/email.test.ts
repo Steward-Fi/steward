@@ -16,7 +16,7 @@ describe("EmailAuth.sendMagicLink", () => {
       from: "login@steward.fi",
       baseUrl: "https://steward.fi",
       provider,
-      templateId: "elizacloud",
+      templateId: "customer-template",
       tokenTtlMs: 10 * 60 * 1000,
       templateRenderer,
     });
@@ -25,7 +25,7 @@ describe("EmailAuth.sendMagicLink", () => {
 
     expect(templateRenderer).toHaveBeenCalledTimes(1);
     const [templateId, data] = templateRenderer.mock.calls[0]!;
-    expect(templateId).toBe("elizacloud");
+    expect(templateId).toBe("customer-template");
     expect(data).toMatchObject({
       email: "user@example.com",
       expiresInMinutes: 10,
@@ -51,7 +51,7 @@ describe("EmailAuth.sendMagicLink", () => {
       from: "login@steward.fi",
       baseUrl: "https://steward.fi",
       provider,
-      templateId: "elizacloud",
+      templateId: "customer-template",
       tokenTtlMs: 10 * 60 * 1000,
       templateRenderer,
     });
@@ -60,9 +60,9 @@ describe("EmailAuth.sendMagicLink", () => {
     // GET /auth/callback/email resolves the SAME tenant the token was minted
     // for (otherwise the verify guard fires tenant_mismatch and the exchange
     // code is stored under the wrong tenant).
-    await auth.sendMagicLink("user@example.com", { tenantId: "elizacloud" });
+    await auth.sendMagicLink("user@example.com", { tenantId: "customer" });
     const [, withTenant] = templateRenderer.mock.calls[0]!;
-    expect(withTenant.magicLink).toContain("tenantId=elizacloud");
+    expect(withTenant.magicLink).toContain("tenantId=customer");
 
     // No tenant context: byte-for-byte back-compat — no tenantId param at all.
     await auth.sendMagicLink("user@example.com");
@@ -114,22 +114,22 @@ describe("EmailAuth.sendOtp", () => {
       from: "login@steward.fi",
       baseUrl: "https://steward.fi",
       provider,
-      templateId: "elizacloud",
+      templateId: "customer-template",
       tokenTtlMs: 10 * 60 * 1000,
       otpTemplateRenderer,
     });
 
     await auth.sendOtp("user@example.com", {
-      tenantId: "elizacloud",
-      tenantName: "Eliza Cloud",
+      tenantId: "customer",
+      tenantName: "Customer App",
     });
 
     expect(otpTemplateRenderer).toHaveBeenCalledTimes(1);
     const [templateId, data] = otpTemplateRenderer.mock.calls[0]!;
-    expect(templateId).toBe("elizacloud");
+    expect(templateId).toBe("customer-template");
     expect(data).toMatchObject({
       email: "user@example.com",
-      brandName: "Eliza Cloud",
+      brandName: "Customer App",
       expiresInMinutes: 10,
     });
     expect(data.code).toMatch(/^\d{6}$/);

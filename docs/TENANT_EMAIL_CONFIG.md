@@ -17,8 +17,12 @@ If a tenant has no `tenant_configs.email_config`, auth continues using the globa
   "apiKeyEncrypted": "...",
   "from": "Tenant <login@example.com>",
   "replyTo": "support@example.com",
-  "templateId": "elizacloud",
-  "subjectOverride": "Sign in"
+  "templateId": "acme",
+  "subjectOverride": "Sign in",
+  "templates": {
+    "magicLink": { "subject": "...", "text": "...", "html": "..." },
+    "otp": { "subject": "...", "text": "...", "html": "..." }
+  }
 }
 ```
 
@@ -31,22 +35,22 @@ Routes require `X-Steward-Platform-Key`.
 ### Set or update config
 
 ```bash
-curl -X PATCH "$API_BASE/platform/tenants/elizacloud/email-config" \
+curl -X PATCH "$API_BASE/platform/tenants/acme/email-config" \
   -H "Content-Type: application/json" \
   -H "X-Steward-Platform-Key: $STEWARD_PLATFORM_KEY" \
   -d '{
     "apiKey": "re_xxxxxxxxx",
-    "from": "Eliza Cloud <login@elizacloud.ai>",
-    "replyTo": "support@elizacloud.ai",
-    "templateId": "elizacloud",
-    "subjectOverride": "Sign in to Eliza Cloud"
+    "from": "Acme <login@acme.example>",
+    "replyTo": "support@acme.example",
+    "templateId": "acme",
+    "subjectOverride": "Sign in to Acme"
   }'
 ```
 
 ### Read config
 
 ```bash
-curl "$API_BASE/platform/tenants/elizacloud/email-config" \
+curl "$API_BASE/platform/tenants/acme/email-config" \
   -H "X-Steward-Platform-Key: $STEWARD_PLATFORM_KEY"
 ```
 
@@ -55,7 +59,7 @@ Response omits `apiKeyEncrypted` and returns `hasApiKey` instead.
 ### Clear config
 
 ```bash
-curl -X DELETE "$API_BASE/platform/tenants/elizacloud/email-config" \
+curl -X DELETE "$API_BASE/platform/tenants/acme/email-config" \
   -H "X-Steward-Platform-Key: $STEWARD_PLATFORM_KEY"
 ```
 
@@ -65,15 +69,53 @@ A tenant can keep the platform's global Resend provider and only override the
 email branding. PATCH with no `apiKey` (and no `from`):
 
 ```bash
-curl -X PATCH "$API_BASE/platform/tenants/elizacloud/email-config" \
+curl -X PATCH "$API_BASE/platform/tenants/acme/email-config" \
   -H "Content-Type: application/json" \
   -H "X-Steward-Platform-Key: $STEWARD_PLATFORM_KEY" \
-  -d '{ "templateId": "elizacloud" }'
+  -d '{ "templateId": "acme" }'
 ```
 
 Branding fields are merged over any existing config, so a template-only PATCH
 never clobbers `magicLinkBaseUrl` or stored provider credentials. `from`
 without `apiKey` is rejected (provider config is all-or-nothing).
+
+## Custom raw templates (deployer-supplied branded markup)
+
+For fully branded auth emails, a hosted Steward instance can store raw
+templates as tenant CONFIG instead of shipping branded markup in this repo.
+Each template is `{ subject, text, html }` with `{{placeholder}}`
+substitution:
+
+- magic link: `{{magicLink}}`, `{{email}}`, `{{tenantName}}`, `{{expiresInMinutes}}`
+- OTP: `{{code}}`, `{{email}}`, `{{brandName}}`, `{{expiresInMinutes}}`
+
+Substituted values are HTML-escaped in the `html` body; the template markup
+itself is trusted platform-admin config. Unknown placeholders are left as-is
+so typos surface in rendered output. When set, `templates` takes precedence
+over `templateId` resolution for that email type.
+
+```bash
+curl -X PATCH "$API_BASE/platform/tenants/acme/email-config" \
+  -H "Content-Type: application/json" \
+  -H "X-Steward-Platform-Key: $STEWARD_PLATFORM_KEY" \
+  -d '{
+    "templates": {
+      "magicLink": {
+        "subject": "Sign in to Acme",
+        "text": "Sign in: {{magicLink}} (expires in {{expiresInMinutes}} minutes)",
+        "html": "<a href=\"{{magicLink}}\">Sign in to Acme</a>"
+      },
+      "otp": {
+        "subject": "{{code}} is your Acme sign-in code",
+        "text": "Your code: {{code}}",
+        "html": "<b>{{code}}</b> is your Acme sign-in code"
+      }
+    }
+  }'
+```
+
+Pass `"templates": null` to clear stored templates (falls back to
+`templateId` / default).
 
 ## Template IDs
 
@@ -81,9 +123,9 @@ Each template ID covers the full auth email set: magic-link sign-in AND the
 6-digit OTP sign-in-code email.
 
 - `default`: built-in Steward template (dark, amber CTA)
-- `elizacloud`: Eliza Cloud brand — black field, `#141414` card, orange
-  `#FF6B00` pill CTA, hosted eliza mark from `app.elizacloud.ai/brand/`,
-  matching the product's transactional emails
+
+Tenant-specific branded templates should live in the deployer's Steward
+instance or extension layer, not in the OSS repository.
 
 Unknown template IDs also fall back to the default template.
 

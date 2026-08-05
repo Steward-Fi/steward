@@ -1,21 +1,17 @@
 import { describe, expect, it } from "bun:test";
 
-import { renderDefaultOtpTemplate, renderDefaultTemplate } from "../email-templates/default";
 import {
-  renderElizaCloudOtpTemplate,
-  renderElizaCloudTemplate,
-} from "../email-templates/elizacloud";
+  magicLinkTemplateValues,
+  otpTemplateValues,
+  renderCustomTemplate,
+} from "../email-templates/custom";
+import { renderDefaultOtpTemplate, renderDefaultTemplate } from "../email-templates/default";
 import { renderOtpTemplate, renderTemplate } from "../email-templates/index";
 
 const MAGIC_LINK_DATA = {
   email: "user@example.com",
   magicLink: "https://steward.fi/auth/callback/email?token=test",
   expiresInMinutes: 10,
-};
-
-const ELIZA_MAGIC_LINK_DATA = {
-  ...MAGIC_LINK_DATA,
-  magicLink: "https://api.elizacloud.ai/auth/callback/email?token=test",
 };
 
 const OTP_DATA = {
@@ -32,9 +28,9 @@ describe("renderTemplate", () => {
     );
   });
 
-  it("resolves the elizacloud template", () => {
-    expect(renderTemplate("elizacloud", MAGIC_LINK_DATA)).toEqual(
-      renderElizaCloudTemplate(MAGIC_LINK_DATA),
+  it("does not ship tenant-specific branded templates in OSS", () => {
+    expect(renderTemplate("customer-template", MAGIC_LINK_DATA)).toEqual(
+      renderDefaultTemplate(MAGIC_LINK_DATA),
     );
   });
 });
@@ -46,12 +42,6 @@ describe("renderOtpTemplate", () => {
       renderDefaultOtpTemplate(OTP_DATA),
     );
   });
-
-  it("resolves the elizacloud OTP template", () => {
-    expect(renderOtpTemplate("elizacloud", OTP_DATA)).toEqual(
-      renderElizaCloudOtpTemplate(OTP_DATA),
-    );
-  });
 });
 
 describe("default OTP template", () => {
@@ -60,6 +50,7 @@ describe("default OTP template", () => {
       ...OTP_DATA,
       brandName: '<b>"Evil"</b>',
     });
+
     expect(rendered.subject).toBe('123456 is your <b>"Evil"</b> sign-in code');
     expect(rendered.html).toContain("&lt;b&gt;&quot;Evil&quot;&lt;/b&gt; sign-in code");
     expect(rendered.html).not.toContain('<b>"Evil"</b>');
@@ -68,36 +59,57 @@ describe("default OTP template", () => {
   });
 });
 
-describe("elizacloud templates", () => {
-  it("magic-link email is Eliza-branded, dark, and email-client safe", () => {
-    const rendered = renderElizaCloudTemplate(ELIZA_MAGIC_LINK_DATA);
-    expect(rendered.subject).toBe("Sign in to Eliza Cloud");
-    // Brand fidelity: black field, product card + CTA colors, hosted mark.
-    expect(rendered.html).toContain("#000000");
-    expect(rendered.html).toContain("#141414");
-    expect(rendered.html).toContain("#ff6b00");
-    expect(rendered.html).toContain("app.elizacloud.ai/brand/favicons");
-    // No Steward branding leaks into the tenant email.
-    expect(rendered.html.toLowerCase()).not.toContain("steward");
-    expect(rendered.text.toLowerCase()).not.toContain("steward");
-    // Email-client safety: no third-party stylesheets or script.
-    expect(rendered.html).not.toContain("<link");
-    expect(rendered.html).not.toContain("<script");
-    expect(rendered.html).toContain('name="color-scheme" content="dark"');
-    expect(rendered.html).toContain(ELIZA_MAGIC_LINK_DATA.magicLink);
-    expect(rendered.text).toContain(ELIZA_MAGIC_LINK_DATA.magicLink);
+describe("renderCustomTemplate (deployer-supplied raw templates)", () => {
+  const template = {
+    subject: "Sign in to {{tenantName}}",
+    text: "Link: {{magicLink}} (expires in {{expiresInMinutes}} minutes)",
+    html: '<a href="{{magicLink}}">Sign in</a> sent to {{email}}',
+  };
+
+  it("substitutes magic-link placeholders", () => {
+    const rendered = renderCustomTemplate(
+      template,
+      magicLinkTemplateValues({ ...MAGIC_LINK_DATA, tenantName: "Acme" }),
+    );
+    expect(rendered.subject).toBe("Sign in to Acme");
+    expect(rendered.text).toContain(MAGIC_LINK_DATA.magicLink);
+    expect(rendered.text).toContain("expires in 10 minutes");
+    expect(rendered.html).toContain("user@example.com");
   });
 
-  it("OTP email is Eliza-branded and escapes the code", () => {
-    const rendered = renderElizaCloudOtpTemplate({
-      ...OTP_DATA,
-      code: "654321",
-    });
-    expect(rendered.subject).toBe("654321 is your Eliza Cloud sign-in code");
-    expect(rendered.html).toContain("654321");
-    expect(rendered.html).toContain("app.elizacloud.ai/brand/favicons");
-    expect(rendered.html.toLowerCase()).not.toContain("steward");
-    expect(rendered.text.toLowerCase()).not.toContain("steward");
-    expect(rendered.html).not.toContain("<script");
+  it("HTML-escapes substituted values in the html body only", () => {
+    const rendered = renderCustomTemplate(
+      { subject: "{{email}}", text: "{{email}}", html: "<p>{{email}}</p>" },
+      magicLinkTemplateValues({
+        ...MAGIC_LINK_DATA,
+        email: '<script>alert(1)</script>"@example.com',
+      }),
+    );
+    expect(rendered.html).not.toContain("<script>");
+    expect(rendered.html).toContain("&lt;script&gt;");
+    // subject/text are not HTML contexts — inserted verbatim
+    expect(rendered.subject).toContain("<script>");
+  });
+
+  it("leaves unknown placeholders untouched so typos fail loudly", () => {
+    const rendered = renderCustomTemplate(
+      { subject: "x", text: "{{tyop}}", html: "{{tyop}}" },
+      magicLinkTemplateValues(MAGIC_LINK_DATA),
+    );
+    expect(rendered.text).toBe("{{tyop}}");
+    expect(rendered.html).toBe("{{tyop}}");
+  });
+
+  it("substitutes OTP placeholders", () => {
+    const rendered = renderCustomTemplate(
+      {
+        subject: "{{code}} is your {{brandName}} code",
+        text: "Code: {{code}}",
+        html: "<b>{{code}}</b>",
+      },
+      otpTemplateValues(OTP_DATA),
+    );
+    expect(rendered.subject).toBe("123456 is your Steward code");
+    expect(rendered.html).toBe("<b>123456</b>");
   });
 });

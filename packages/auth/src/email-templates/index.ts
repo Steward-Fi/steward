@@ -5,8 +5,9 @@ import {
   renderDefaultOtpTemplate,
   renderDefaultTemplate,
 } from "./default";
-import { renderElizaCloudOtpTemplate, renderElizaCloudTemplate } from "./elizacloud";
 
+export type { CustomEmailTemplate, TenantEmailTemplates } from "./custom";
+export { magicLinkTemplateValues, otpTemplateValues, renderCustomTemplate } from "./custom";
 export type {
   MagicLinkTemplateData,
   OtpTemplateData,
@@ -17,25 +18,17 @@ export function renderTemplate(
   templateId: string | undefined,
   data: MagicLinkTemplateData,
 ): RenderedMagicLinkTemplate {
-  if (templateId === "elizacloud") {
-    return renderElizaCloudTemplate(data);
-  }
-
   return renderDefaultTemplate(data);
 }
 
 /**
- * Per-tenant OTP (sign-in code) template resolution. Mirrors
- * `renderTemplate`: unknown/absent templateIds fall back to the
- * Steward-branded default so existing tenants are unaffected.
+ * Per-tenant OTP (sign-in code) template resolution. Unknown/absent
+ * templateIds fall back to the Steward-branded default so existing tenants
+ * are unaffected.
  */
 export function renderOtpTemplate(
   templateId: string | undefined,
   data: OtpTemplateData,
 ): RenderedMagicLinkTemplate {
-  if (templateId === "elizacloud") {
-    return renderElizaCloudOtpTemplate(data);
-  }
-
   return renderDefaultOtpTemplate(data);
 }

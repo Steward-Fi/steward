@@ -55,6 +55,7 @@ import {
   buildSamlAuthorizeUrl,
   ChallengeStore,
   EmailAuth,
+  type EmailAuthConfig,
   evaluateSiwePolicy,
   type FarcasterLoginPayload,
   generateApiKey,
@@ -68,15 +69,20 @@ import {
   isBuiltInProvider,
   isDevSecretAllowed,
   isValidE164,
+  type MagicLinkTemplateData,
   MockEmailInbox,
   MockEmailProvider,
   MockSmsInbox,
   MockSmsProvider,
+  magicLinkTemplateValues,
   OAuthClient,
+  type OtpTemplateData,
+  otpTemplateValues,
   PasskeyAuth,
   PhoneAuth,
   type RecoveryCodeStore,
   ResendProvider,
+  renderCustomTemplate,
   revocationStore,
   type SmsProvider,
   type StoreBackend,
@@ -1451,12 +1457,43 @@ function emailMagicLinkVerifySubject(token: string, email: string, tenantId: str
   );
 }
 
+/**
+ * Build EmailAuth renderer overrides from deployer-supplied raw templates
+ * (tenant_configs.email_config.templates). Branded markup is instance CONFIG,
+ * not repo code: when a tenant carries its own subject/text/html we render it
+ * with {{placeholder}} substitution; otherwise fall through to the built-in
+ * templateId resolution.
+ */
+function buildTemplateRenderers(templates: TenantEmailConfig["templates"]): {
+  templateRenderer?: EmailAuthConfig["templateRenderer"];
+  otpTemplateRenderer?: EmailAuthConfig["otpTemplateRenderer"];
+} {
+  if (!templates) return {};
+  const magicLink = templates.magicLink;
+  const otp = templates.otp;
+  return {
+    ...(magicLink
+      ? {
+          templateRenderer: (_templateId: string | undefined, data: MagicLinkTemplateData) =>
+            renderCustomTemplate(magicLink, magicLinkTemplateValues(data)),
+        }
+      : {}),
+    ...(otp
+      ? {
+          otpTemplateRenderer: (_templateId: string | undefined, data: OtpTemplateData) =>
+            renderCustomTemplate(otp, otpTemplateValues(data)),
+        }
+      : {}),
+  };
+}
+
 function buildGlobalEmailAuth(overrides?: {
   baseUrl?: string;
   callbackPath?: string;
   templateId?: string;
   subjectOverride?: string;
   replyTo?: string;
+  templates?: TenantEmailConfig["templates"];
 }): EmailAuth {
   const resendKey = process.env.RESEND_API_KEY;
   // Mock takes precedence in non-production for deterministic e2e testing.
@@ -1478,6 +1515,7 @@ function buildGlobalEmailAuth(overrides?: {
     templateId: overrides?.templateId,
     subjectOverride: overrides?.subjectOverride,
     replyTo: overrides?.replyTo,
+    ...buildTemplateRenderers(overrides?.templates),
   });
 }
 
@@ -1534,14 +1572,14 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
     // global env-backed provider but still honor the per-tenant magic-link
     // AND template overrides if present. Without the template pass-through a
     // tenant that sets only `templateId` (no own Resend key) silently got the
-    // Steward-branded default email — the exact bug that shipped Steward
-    // branding to Eliza Cloud sign-in emails.
+    // Steward-branded default email instead of its configured branding.
     return buildGlobalEmailAuth({
       baseUrl: magicLinkBaseUrl,
       callbackPath,
       templateId: emailConfig?.templateId,
       subjectOverride: emailConfig?.subjectOverride,
       replyTo: emailConfig?.replyTo,
+      templates: emailConfig?.templates,
     });
   }
 
@@ -1572,6 +1610,7 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
     templateId: emailConfig.templateId,
     subjectOverride: emailConfig.subjectOverride,
     replyTo: emailConfig.replyTo,
+    ...buildTemplateRenderers(emailConfig.templates),
   });
 }
 

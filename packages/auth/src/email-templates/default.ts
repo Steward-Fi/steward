@@ -8,7 +8,7 @@ export interface MagicLinkTemplateData {
 export interface OtpTemplateData {
   email: string;
   code: string;
-  /** Display brand for the sending tenant (e.g. "Steward", "Eliza Cloud"). */
+  /** Display brand for the sending tenant (e.g. "Steward", "Acme"). */
   brandName: string;
   expiresInMinutes: number;
 }
