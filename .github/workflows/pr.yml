@@ -40,11 +40,21 @@ jobs:
       # Any new CRITICAL/HIGH CVE must be fixed (upgrade / override) or
       # explicitly accepted in docs/security/threat-model.mdx#known-accepted-cves
       # before the PR can land.
+      # image-size (CVE-2025-71329/71330 via react-native peer tree) has NO
+      # patched release (advisory range <= 2.0.2, latest is 2.0.2). Accepted in
+      # docs/security/threat-model.mdx#known-accepted-cves; drop the ignores the
+      # moment upstream publishes a fixed version.
       - name: Audit dependencies (critical)
-        run: bun audit --audit-level=critical
+        run: >-
+          bun audit --audit-level=critical
+          --ignore CVE-2025-71329 --ignore GHSA-5p2g-fcmc-qvqq
+          --ignore CVE-2025-71330 --ignore GHSA-w3rx-r6r6-pgpr
       - name: Audit dependencies (high)
         if: always()
-        run: bun audit --audit-level=high
+        run: >-
+          bun audit --audit-level=high
+          --ignore CVE-2025-71329 --ignore GHSA-5p2g-fcmc-qvqq
+          --ignore CVE-2025-71330 --ignore GHSA-w3rx-r6r6-pgpr
 
       - name: Check public package version bumps
         env:
