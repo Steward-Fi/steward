@@ -1203,6 +1203,8 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
     replyTo?: string;
     templateId?: string;
     subjectOverride?: string;
+    magicLinkBaseUrl?: string;
+    magicLinkCallbackPath?: string;
     templates?: TenantEmailConfig["templates"] | null;
   }>(c);
 
@@ -1234,13 +1236,15 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
       !body.templateId &&
       !body.subjectOverride &&
       !body.replyTo &&
+      !body.magicLinkBaseUrl &&
+      !body.magicLinkCallbackPath &&
       body.templates === undefined
     ) {
       return c.json<ApiResponse>(
         {
           ok: false,
           error:
-            "Provide apiKey+from for provider config, or at least one of templateId, subjectOverride, replyTo, templates",
+            "Provide apiKey+from for provider config, or at least one of templateId, subjectOverride, replyTo, magicLinkBaseUrl, magicLinkCallbackPath, templates",
         },
         400,
       );
@@ -1252,10 +1256,37 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
   if (
     !isOptionalString(body.replyTo) ||
     !isOptionalString(body.templateId) ||
-    !isOptionalString(body.subjectOverride)
+    !isOptionalString(body.subjectOverride) ||
+    !isOptionalString(body.magicLinkBaseUrl) ||
+    !isOptionalString(body.magicLinkCallbackPath)
   ) {
     return c.json<ApiResponse>(
-      { ok: false, error: "replyTo, templateId, and subjectOverride must be non-empty strings" },
+      {
+        ok: false,
+        error:
+          "replyTo, templateId, subjectOverride, magicLinkBaseUrl, and magicLinkCallbackPath must be non-empty strings",
+      },
+      400,
+    );
+  }
+
+  if (body.magicLinkBaseUrl) {
+    try {
+      const url = new URL(body.magicLinkBaseUrl);
+      if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("protocol");
+    } catch {
+      return c.json<ApiResponse>(
+        { ok: false, error: "magicLinkBaseUrl must be an absolute HTTP(S) URL" },
+        400,
+      );
+    }
+  }
+  if (
+    body.magicLinkCallbackPath &&
+    (!body.magicLinkCallbackPath.startsWith("/") || body.magicLinkCallbackPath.startsWith("//"))
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "magicLinkCallbackPath must be a root-relative path" },
       400,
     );
   }
@@ -1282,6 +1313,10 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
         ...(body.replyTo ? { replyTo: body.replyTo.trim() } : {}),
         ...(body.templateId ? { templateId: body.templateId.trim() } : {}),
         ...(body.subjectOverride ? { subjectOverride: body.subjectOverride.trim() } : {}),
+        ...(body.magicLinkBaseUrl ? { magicLinkBaseUrl: body.magicLinkBaseUrl.trim() } : {}),
+        ...(body.magicLinkCallbackPath
+          ? { magicLinkCallbackPath: body.magicLinkCallbackPath.trim() }
+          : {}),
         ...templatesPatch,
       }
     : {
@@ -1291,6 +1326,10 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
         ...(body.replyTo ? { replyTo: body.replyTo.trim() } : {}),
         ...(body.templateId ? { templateId: body.templateId.trim() } : {}),
         ...(body.subjectOverride ? { subjectOverride: body.subjectOverride.trim() } : {}),
+        ...(body.magicLinkBaseUrl ? { magicLinkBaseUrl: body.magicLinkBaseUrl.trim() } : {}),
+        ...(body.magicLinkCallbackPath
+          ? { magicLinkCallbackPath: body.magicLinkCallbackPath.trim() }
+          : {}),
         ...templatesPatch,
       };
 

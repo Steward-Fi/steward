@@ -401,6 +401,25 @@ adversary defeats the entire architecture.
   credentials grants access to every tenant the user is a member
   of. A compromised user account is broader than one tenant.
 
+## Known accepted CVEs
+
+CI (`bun audit`, PR Checks) blocks on HIGH/CRITICAL advisories. Entries here
+are the only accepted exceptions; each must name the advisory, the reason it
+cannot be fixed today, and the removal condition.
+
+- **image-size <= 2.0.2 — GHSA-w3rx-r6r6-pgpr (CVE-2025-71330, ICNS infinite
+  loop) and GHSA-5p2g-fcmc-qvqq (CVE-2025-71329, JXL/HEIF infinite loops).**
+  Reached only through the `react-native` peer/dev tree of
+  `@stwd/react-native` (metro bundler tooling); no server or API runtime path
+  parses images with it. No patched release exists — the advisories'
+  vulnerable range covers every published version including latest (2.0.2), so
+  there is no upgrade or override target. Accepted as dev-tooling DoS risk.
+  Removal condition: upstream publishes a fixed `image-size`; then bump the
+  transitive pin and delete the `--ignore` flags in
+  `.github/workflows/pr.yml`.
+
 ## Changelog
 
 - 2026-04-24 — Initial version.
+- 2026-08-09 — Added Known accepted CVEs section (image-size, no fix
+  available).
