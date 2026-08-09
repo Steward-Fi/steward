@@ -23,7 +23,7 @@
     "@stwd/policy-engine": "workspace:*",
     "@stwd/shared": "workspace:*",
     "@types/node": "^25.5.0",
-    "hono": "^4.12.18"
+    "hono": "^4.12.34"
   },
   "description": "Minimal hello-world Steward plugin: the smallest honest plugin exercising all four declarative contribution points (route, policy rule, webhook event, migration, adapter) through @stwd/plugin-sdk alone. The runnable reference for writing a plugin."
 }
