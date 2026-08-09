@@ -33,6 +33,52 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+  web-build:
+    # Guard for the @stwd/web Worker build. deploy-web-cloudflare.yml only
+    # triggers on main pushes / PRs touching web/**, so a packages/* change
+    # (e.g. the @stwd/shared barrel leaking node:crypto into the client
+    # bundle, issue #231) can break the web build without any check firing.
+    # Build the Worker here — no upload, no secrets — so those regressions
+    # surface immediately. Mirrors build-check in deploy-web-cloudflare.yml.
+    name: Web Build (@stwd/web)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+
+      # OpenNext tooling needs Node; pin to 22 (Node 24 breaks its CLI deps).
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # web imports the @stwd/react|sdk|shared workspace packages via their
+      # dist/ outputs, so they must be built before the Next build can
+      # resolve them.
+      - name: Build workspace dependencies
+        run: bunx turbo run build --filter=@stwd/react --filter=@stwd/sdk --filter=@stwd/shared
+
+      - name: Build Worker (OpenNext)
+        working-directory: web
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+          NEXT_PUBLIC_STEWARD_API_URL: "https://eliza.steward.fi"
+        run: bun run cf:build
+
+      - name: Validate Worker bundle (dry-run deploy)
+        working-directory: web
+        run: bunx wrangler deploy --dry-run --outdir /tmp/wrangler-dryrun
+
   unit:
     name: Unit Tests (${{ matrix.package }})
     runs-on: ubuntu-latest
