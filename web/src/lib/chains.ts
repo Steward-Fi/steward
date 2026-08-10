@@ -5,7 +5,7 @@
  * `CHAIN_PROVIDERS` registry. To add a new chain, add it once in
  * `packages/shared/src/chains/` and it shows up here automatically.
  */
-import { CHAIN_PROVIDERS, getChainProviderByNumeric } from "@stwd/shared";
+import { CHAIN_PROVIDERS, getChainProviderByNumeric } from "@stwd/shared/client";
 
 export interface ChainMeta {
   id: number;
