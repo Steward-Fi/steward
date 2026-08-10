@@ -157,6 +157,14 @@ jobs:
           - packages/webhooks
           - packages/db
           - packages/shared
+          - packages/plugin-wxmr
+          - packages/plugin-trading
+          - packages/plugin-capabilities
+          - packages/trade-sessions
+          # packages/signer-frost is intentionally absent: its test harness
+          # builds the Rust sidecar via `cargo build --release` and this job
+          # has no Rust toolchain (and a release build would strain the
+          # 10-minute timeout). Add it alongside a rust-toolchain step.
 
     steps:
       - name: Checkout
@@ -190,6 +198,11 @@ jobs:
           fi
         env:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
+          # bunfig.toml [test] preloads only load from bun's cwd, and this job
+          # runs `bun test` from the repo root — so per-package preloads (e.g.
+          # plugin-trading's, which supplies this key) never run. 64-char dummy
+          # matching the preload's "a".repeat(64).
+          STEWARD_AUDIT_HMAC_KEY: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
   unit-redis:
     name: Unit Tests (packages/redis)
