@@ -24,7 +24,7 @@
     "@stwd/venue-hyperliquid": "workspace:*",
     "@stwd/venue-polymarket": "workspace:*",
     "drizzle-orm": "^0.44.5",
-    "hono": "^4.12.18",
+    "hono": "^4.12.34",
     "zod": "^4.3.6"
   },
   "devDependencies": {
