@@ -73,6 +73,18 @@ export interface TenantEmailConfig {
    * Has no effect when `magicLinkBaseUrl` is unset.
    */
   magicLinkCallbackPath?: string;
+  /**
+   * Optional deployer-supplied raw email templates (subject/text/html with
+   * `{{placeholder}}` substitution). This is how a hosted Steward instance
+   * carries tenant-specific branded auth emails as CONFIG rather than code:
+   * the OSS repo ships only the substitution mechanism, the branded markup
+   * lives here in the deployer's database. Takes precedence over
+   * `templateId` resolution when set.
+   */
+  templates?: {
+    magicLink?: { subject: string; text: string; html: string };
+    otp?: { subject: string; text: string; html: string };
+  };
 }
 
 export const chainFamilyEnum = pgEnum("chain_family", ["evm", "solana", "bitcoin"]);
