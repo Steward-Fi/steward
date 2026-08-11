@@ -13,6 +13,7 @@ import {
   type ConfiguredWebhookEventType,
   type DispatchableWebhookEventType,
   toConfiguredWebhookEventType,
+  webhookEventRegistry,
 } from "./webhook-events";
 import { redactWebhookSecrets } from "./webhook-redaction";
 
@@ -27,17 +28,36 @@ export function dispatchWebhook(
   data: Record<string, unknown>,
 ): void {
   const configuredType = toConfiguredWebhookEventType(type);
+  // EMISSION-PATH WIDENING (Phase 2b): a plugin-declared event is one that is NOT
+  // a core configured/alias type but IS present in the runtime
+  // WebhookEventRegistry (core ∪ plugin-declared) because the plugin host merged
+  // it in. We thread the raw plugin event name into the configured fan-out so a
+  // tenant can subscribe to a plugin event specifically (events: ["plugin.evt"]).
+  // We do NOT drop unregistered types here: the legacy tenant-config webhook is a
+  // deliberate catch-all escape hatch that fires for EVERY event type (it has
+  // always done so), so dropping would change long-standing behavior. The
+  // configured fan-out only ever matches a plugin event when it is registry-valid
+  // AND a config explicitly lists it, so an arbitrary unregistered string can
+  // never masquerade as a configured event.
+  const isPluginEvent = configuredType === null && webhookEventRegistry.has(type);
   const redactedData = redactWebhookSecrets(data) as Record<string, unknown>;
+  // `type` has passed the emission gate above (it is a configured/aliasable core
+  // event OR a plugin event registered in the runtime registry). The widened
+  // DispatchableWebhookEventType carries the `(string & {})` arm for plugin
+  // events; cast to the WebhookEvent field type now that the name is validated.
+  const eventType = (configuredType ?? type) as WebhookEvent["type"];
   const event: WebhookEvent = {
-    type: configuredType ?? type,
+    type: eventType,
     tenantId,
     agentId,
     data: redactedData,
     timestamp: new Date(),
   };
-  void dispatchConfiguredWebhooks(event, configuredType).catch((error) => {
-    console.error("[webhooks] Failed to dispatch configured webhooks:", error);
-  });
+  void dispatchConfiguredWebhooks(event, configuredType, isPluginEvent ? type : null).catch(
+    (error) => {
+      console.error("[webhooks] Failed to dispatch configured webhooks:", error);
+    },
+  );
 
   // Legacy tenant-config single webhook URL. Tenants can still set a webhookUrl
   // via the tenants route (tenants.ts), so this fan-out must remain until that
@@ -47,7 +67,7 @@ export function dispatchWebhook(
   const tenantConfigWebhookUrl = tenantConfigs.get(tenantId)?.webhookUrl;
   if (tenantConfigWebhookUrl) {
     const tenantConfigEvent: WebhookEvent = {
-      type,
+      type: type as WebhookEvent["type"],
       tenantId,
       agentId,
       data: redactedData,
@@ -132,6 +152,7 @@ export async function dispatchReplayWebhook(config: {
 async function dispatchConfiguredWebhooks(
   event: WebhookEvent,
   configuredType: ConfiguredWebhookEventType | null,
+  pluginEventType: string | null = null,
 ): Promise<void> {
   const configs = await db
     .select()
@@ -140,11 +161,17 @@ async function dispatchConfiguredWebhooks(
 
   await Promise.all(
     configs
-      .filter((config) =>
-        configuredType
+      .filter((config) => {
+        // Plugin-declared event (registry-valid, not a core configured type): a
+        // config matches when it explicitly lists the event OR is a catch-all
+        // (no events filter). It can never match by being a core configured type.
+        if (pluginEventType) {
+          return config.events.length === 0 || config.events.includes(pluginEventType);
+        }
+        return configuredType
           ? acceptsConfiguredWebhookEvent(config.events, configuredType)
-          : config.events.length === 0,
-      )
+          : config.events.length === 0;
+      })
       .map((config) =>
         dispatchConfiguredWebhook(event, {
           id: config.id,

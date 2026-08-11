@@ -1,0 +1,21 @@
+{
+  "name": "@stwd/cli",
+  "version": "0.4.4",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "steward": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test src/__tests__"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^25.5.0",
+    "typescript": "^5.8.0"
+  },
+  "description": "Steward operator CLI"
+}

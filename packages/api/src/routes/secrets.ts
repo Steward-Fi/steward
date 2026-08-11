@@ -11,14 +11,13 @@
  * handlers to prevent Hono from treating "routes" as a secret ID.
  */
 
-import { isIP } from "node:net";
 import {
   getDb as getVaultDb,
   secretRoutes as secretRouteRows,
   secrets as secretRows,
   tenantConfigs as tenantConfigsTable,
 } from "@stwd/db";
-import { SecretVault } from "@stwd/vault";
+import { SecretVault, validateSecretRouteConfig } from "@stwd/vault";
 import { and, eq, inArray } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { type AuditEventInput, writeAuditEvent } from "../services/audit";
@@ -52,29 +51,11 @@ async function writeSecretsAudit(
   });
 }
 
-const DEFAULT_SECRET_ROUTE_HOSTS = [
-  "api.openai.com",
-  "api.anthropic.com",
-  "public-api.birdeye.so",
-  "api.coingecko.com",
-  "api.helius.xyz",
-];
-const BLOCKED_INJECT_HEADERS = new Set([
-  "connection",
-  "content-length",
-  "host",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
-]);
-const VALID_PROXY_METHODS = new Set(["*", "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]);
-const ALLOW_BROAD_SECRET_ROUTES = process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES === "true";
-const MAX_SECRET_INJECT_FORMAT_LENGTH = 255;
+// Route-config validation (host allowlist, path/method/injectAs/injectKey/
+// injectFormat rules, per-host strictness) lives in the shared
+// validateSecretRouteConfig in @stwd/vault — the single source of truth also
+// used at the vault boundary. Only request-shape parsing stays local here.
 const MAX_SECRET_ROUTE_PRIORITY = 1_000_000;
-const HTTP_HEADER_NAME = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
 const SECRET_ROUTE_UPDATE_KEYS = new Set([
   "hostPattern",
   "agentId",
@@ -85,6 +66,8 @@ const SECRET_ROUTE_UPDATE_KEYS = new Set([
   "injectFormat",
   "priority",
   "enabled",
+  "requiresApproval",
+  "approvalConfig",
 ]);
 
 type SecretRouteUpdate = Partial<{
@@ -97,6 +80,8 @@ type SecretRouteUpdate = Partial<{
   injectFormat: string;
   priority: number;
   enabled: boolean;
+  requiresApproval: boolean;
+  approvalConfig: Record<string, unknown>;
 }>;
 
 type SecretRouteCreate = {
@@ -110,116 +95,9 @@ type SecretRouteCreate = {
   injectFormat?: string;
   priority?: number;
   enabled?: boolean;
+  requiresApproval?: boolean;
+  approvalConfig?: Record<string, unknown>;
 };
-
-function configuredSecretRouteHosts(): string[] {
-  return [
-    ...DEFAULT_SECRET_ROUTE_HOSTS,
-    ...(process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS ?? "")
-      .split(",")
-      .map((host) => host.trim().toLowerCase())
-      .filter(Boolean),
-  ];
-}
-
-function hostAllowedByEntry(hostPattern: string, allowedHost: string): boolean {
-  if (hostPattern === allowedHost) return true;
-  if (hostPattern.startsWith("*.")) {
-    const suffix = hostPattern.slice(2);
-    const suffixLabels = suffix.split(".").filter(Boolean);
-    if (suffixLabels.length < 2) return false;
-    if (!allowedHost.startsWith("*.")) return false;
-    const allowedSuffix = allowedHost.slice(2);
-    return suffix === allowedSuffix || suffix.endsWith(`.${allowedSuffix}`);
-  }
-  if (allowedHost.startsWith("*.")) {
-    const allowedSuffix = allowedHost.slice(1);
-    return hostPattern.endsWith(allowedSuffix) && hostPattern.length > allowedSuffix.length;
-  }
-  return false;
-}
-
-function validateSecretRouteConfig(input: {
-  hostPattern?: string;
-  pathPattern?: string;
-  method?: string;
-  injectAs?: string;
-  injectKey?: string;
-  injectFormat?: string;
-}): string | null {
-  if (input.hostPattern !== undefined) {
-    const hostPattern = input.hostPattern.trim().toLowerCase();
-    if (!hostPattern || hostPattern === "*" || hostPattern === "*.*") {
-      return "hostPattern must be an explicit allowed host";
-    }
-    const hostForIpCheck = hostPattern.startsWith("*.") ? hostPattern.slice(2) : hostPattern;
-    if (
-      isIP(hostForIpCheck) ||
-      hostForIpCheck === "localhost" ||
-      hostForIpCheck.endsWith(".localhost") ||
-      hostForIpCheck.endsWith(".local") ||
-      hostForIpCheck.endsWith(".internal")
-    ) {
-      return "hostPattern must not target localhost, private, or internal hosts";
-    }
-    if (!configuredSecretRouteHosts().some((allowed) => hostAllowedByEntry(hostPattern, allowed))) {
-      return "hostPattern is not in the secret route allowlist";
-    }
-  }
-
-  if (input.pathPattern !== undefined) {
-    const pathPattern = input.pathPattern.trim();
-    const lowered = pathPattern.toLowerCase();
-    if (!pathPattern.startsWith("/")) return "pathPattern must start with /";
-    if (!ALLOW_BROAD_SECRET_ROUTES && (pathPattern === "/*" || pathPattern === "*")) {
-      return "broad pathPattern requires STEWARD_ALLOW_BROAD_SECRET_ROUTES=true";
-    }
-    if (/[\u0000-\u001f\u007f\\]/.test(pathPattern)) return "pathPattern is invalid";
-    if (
-      lowered.includes("%2e") ||
-      lowered.includes("%2f") ||
-      lowered.includes("%5c") ||
-      pathPattern.split("/").some((segment) => segment === "." || segment === "..")
-    ) {
-      return "pathPattern must not contain dot segments or encoded path separators";
-    }
-  }
-
-  if (input.method !== undefined) {
-    const method = input.method.trim().toUpperCase();
-    if (!VALID_PROXY_METHODS.has(method)) return "method is not allowed";
-    if (!ALLOW_BROAD_SECRET_ROUTES && method === "*") {
-      return "broad method requires STEWARD_ALLOW_BROAD_SECRET_ROUTES=true";
-    }
-  }
-
-  if (input.injectAs !== undefined) {
-    const validInjectAs = ["header"];
-    if (!validInjectAs.includes(input.injectAs)) {
-      return `'injectAs' must be one of: ${validInjectAs.join(", ")}`;
-    }
-  }
-
-  if (input.injectKey !== undefined) {
-    const key = input.injectKey.trim().toLowerCase();
-    if (!key || !HTTP_HEADER_NAME.test(key)) return "injectKey is invalid";
-    if (BLOCKED_INJECT_HEADERS.has(key)) return `injectKey '${input.injectKey}' is not allowed`;
-  }
-
-  if (input.injectFormat !== undefined) {
-    if (typeof input.injectFormat !== "string") return "injectFormat must be a string";
-    if (input.injectFormat.length > MAX_SECRET_INJECT_FORMAT_LENGTH) {
-      return `injectFormat cannot exceed ${MAX_SECRET_INJECT_FORMAT_LENGTH} characters`;
-    }
-    if (/[\r\n]/.test(input.injectFormat)) return "injectFormat must not contain line breaks";
-    const placeholderCount = input.injectFormat.match(/\{value\}/g)?.length ?? 0;
-    if (placeholderCount !== 1) {
-      return "injectFormat must contain exactly one {value} placeholder";
-    }
-  }
-
-  return null;
-}
 
 function parseSecretRouteUpdate(body: Record<string, unknown>):
   | {
@@ -277,6 +155,22 @@ function parseSecretRouteUpdate(body: Record<string, unknown>):
     }
     update.enabled = body.enabled;
   }
+  if (body.requiresApproval !== undefined) {
+    if (typeof body.requiresApproval !== "boolean") {
+      return { ok: false, error: "'requiresApproval' must be a boolean" };
+    }
+    update.requiresApproval = body.requiresApproval;
+  }
+  if (body.approvalConfig !== undefined) {
+    if (
+      typeof body.approvalConfig !== "object" ||
+      body.approvalConfig === null ||
+      Array.isArray(body.approvalConfig)
+    ) {
+      return { ok: false, error: "'approvalConfig' must be an object" };
+    }
+    update.approvalConfig = body.approvalConfig as Record<string, unknown>;
+  }
 
   if (Object.keys(update).length === 0) {
     return { ok: false, error: "At least one route field is required" };
@@ -320,6 +214,17 @@ function parseSecretRouteCreate(
   if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
     return { ok: false, error: "'enabled' must be a boolean" };
   }
+  if (body.requiresApproval !== undefined && typeof body.requiresApproval !== "boolean") {
+    return { ok: false, error: "'requiresApproval' must be a boolean" };
+  }
+  if (
+    body.approvalConfig !== undefined &&
+    (typeof body.approvalConfig !== "object" ||
+      body.approvalConfig === null ||
+      Array.isArray(body.approvalConfig))
+  ) {
+    return { ok: false, error: "'approvalConfig' must be an object" };
+  }
   return {
     ok: true,
     value: {
@@ -333,6 +238,8 @@ function parseSecretRouteCreate(
       injectFormat: body.injectFormat as string | undefined,
       priority: body.priority as number | undefined,
       enabled: body.enabled as boolean | undefined,
+      requiresApproval: body.requiresApproval as boolean | undefined,
+      approvalConfig: body.approvalConfig as Record<string, unknown> | undefined,
     },
   };
 }
@@ -517,6 +424,8 @@ secretsRoutes.post("/routes", async (c) => {
     injectFormat?: string;
     priority?: number;
     enabled?: boolean;
+    requiresApproval?: boolean;
+    approvalConfig?: Record<string, unknown>;
   }>(c);
 
   if (!body) {
@@ -557,6 +466,8 @@ secretsRoutes.post("/routes", async (c) => {
         injectKey: routeInput.injectKey,
         priority: routeInput.priority ?? 0,
         enabled: routeInput.enabled ?? true,
+        requiresApproval: routeInput.requiresApproval ?? false,
+        approvalConfig: routeInput.approvalConfig ?? {},
       },
     });
     const route = await sv.createRoute(tenantId, routeInput.secretId, {
@@ -569,6 +480,8 @@ secretsRoutes.post("/routes", async (c) => {
       injectFormat: routeInput.injectFormat,
       priority: routeInput.priority,
       enabled: routeInput.enabled,
+      requiresApproval: routeInput.requiresApproval,
+      approvalConfig: routeInput.approvalConfig,
     });
     try {
       await writeSecretsAudit(c, {
@@ -588,6 +501,8 @@ secretsRoutes.post("/routes", async (c) => {
           injectKey: routeInput.injectKey,
           priority: routeInput.priority ?? 0,
           enabled: routeInput.enabled ?? true,
+          requiresApproval: routeInput.requiresApproval ?? false,
+          approvalConfig: routeInput.approvalConfig ?? {},
         },
       });
     } catch (err) {
@@ -637,7 +552,9 @@ secretsRoutes.put("/routes/:id", async (c) => {
   }
   const update = parsedUpdate.value;
 
-  const validationError = validateSecretRouteConfig(update);
+  // Partial-patch validation: skip per-host strictness here (the patch may omit
+  // method/path). The merged-config pass below enforces strict-host rules.
+  const validationError = validateSecretRouteConfig(update, { enforceStrictHosts: false });
   if (validationError) {
     return c.json<ApiResponse>({ ok: false, error: validationError }, 400);
   }
@@ -655,6 +572,31 @@ secretsRoutes.put("/routes/:id", async (c) => {
   const existing = await sv.getRoute(tenantId, routeId);
   if (!existing) {
     return c.json<ApiResponse>({ ok: false, error: "Route not found" }, 404);
+  }
+  // Fail-closed re-validation against the MERGED config. A partial update (e.g.
+  // changing only pathPattern or method) is validated in isolation above and so
+  // would not trigger per-host strictness for a route that already targets a
+  // strict host. Re-run the shared validator on existing ∪ update so a strict
+  // host's narrowness (explicit method + deep path) can never be loosened by a
+  // partial edit.
+  //
+  // Skipped when the update leaves the route DISABLED: a disabled route injects
+  // no credential, so strictness is moot, and an admin must always be able to
+  // disable a legacy strict-host route that predates these rules.
+  const willBeEnabled = update.enabled ?? existing.enabled ?? true;
+  if (willBeEnabled) {
+    const mergedConfig = {
+      hostPattern: update.hostPattern ?? existing.hostPattern ?? undefined,
+      pathPattern: update.pathPattern ?? existing.pathPattern ?? undefined,
+      method: update.method ?? existing.method ?? undefined,
+      injectAs: update.injectAs ?? existing.injectAs ?? undefined,
+      injectKey: update.injectKey ?? existing.injectKey ?? undefined,
+      injectFormat: update.injectFormat ?? existing.injectFormat ?? undefined,
+    };
+    const mergedValidationError = validateSecretRouteConfig(mergedConfig);
+    if (mergedValidationError) {
+      return c.json<ApiResponse>({ ok: false, error: mergedValidationError }, 400);
+    }
   }
   await writeSecretsAudit(c, {
     tenantId,
@@ -696,6 +638,8 @@ secretsRoutes.put("/routes/:id", async (c) => {
         injectFormat: existing.injectFormat,
         priority: existing.priority,
         enabled: existing.enabled,
+        requiresApproval: existing.requiresApproval,
+        approvalConfig: existing.approvalConfig,
         createdAt: existing.createdAt,
       })
       .where(and(eq(secretRouteRows.id, routeId), eq(secretRouteRows.tenantId, tenantId)));

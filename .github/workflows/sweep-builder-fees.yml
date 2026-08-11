@@ -1,0 +1,66 @@
+# Builder-fee sweep — scheduled (OPTIONAL / OPT-IN).
+#
+# Withdraws accrued Hyperliquid builder fees from the builder EOA and forwards
+# USDC to the platform Safe on Arbitrum, gated by SWEEP_MIN_USDC. Threshold +
+# idempotency are enforced in scripts/sweep-builder-fees.ts itself.
+#
+# DISABLED BY DEFAULT in two ways:
+#   1. The schedule is commented out — uncomment to enable the daily run.
+#   2. It runs in DRY-RUN unless the repo variable SWEEP_EXECUTE == 'true'.
+#
+# This workflow is the GitHub-Actions ALTERNATIVE to the VPS cron wrapper
+# (~/.moltbot/scripts/builder_fee_sweep.sh). Use ONE, not both. The VPS cron is
+# preferred because the builder EOA key already lives on the box and never has
+# to be uploaded as a CI secret. Use this workflow only if you'd rather run the
+# sweep from CI — then you MUST add the secrets below.
+#
+# Required (only if you enable this CI path):
+#   secrets.HL_BUILDER_EOA_JSON  — contents of ~/.moltbot/secrets/hl-builder-eoa.json
+#   vars.SWEEP_MIN_USDC          — threshold (default 50)
+#   vars.SWEEP_EXECUTE           — 'true' to actually move funds (else dry-run)
+#   vars.ARBITRUM_RPC_URL        — optional override
+
+name: Sweep Builder Fees
+
+on:
+  workflow_dispatch:
+    inputs:
+      execute:
+        description: "Set true to move funds (otherwise dry-run)"
+        type: boolean
+        default: false
+  # schedule:
+  #   - cron: "0 9 * * *" # daily 09:00 UTC — UNCOMMENT to enable
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - name: Write builder EOA key
+        env:
+          HL_BUILDER_EOA_JSON: ${{ secrets.HL_BUILDER_EOA_JSON }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/secrets"
+          printf '%s' "$HL_BUILDER_EOA_JSON" > "$RUNNER_TEMP/secrets/hl-builder-eoa.json"
+          chmod 600 "$RUNNER_TEMP/secrets/hl-builder-eoa.json"
+      - name: Run sweep
+        env:
+          SWEEP_MIN_USDC: ${{ vars.SWEEP_MIN_USDC || '50' }}
+          HL_BUILDER_KEY_PATH: ${{ runner.temp }}/secrets/hl-builder-eoa.json
+          ARBITRUM_RPC_URL: ${{ vars.ARBITRUM_RPC_URL || 'https://arb1.arbitrum.io/rpc' }}
+        run: |
+          MODE="--dry-run"
+          if [[ "${{ vars.SWEEP_EXECUTE }}" == "true" || "${{ inputs.execute }}" == "true" ]]; then
+            MODE="--execute"
+          fi
+          echo "Running sweep in $MODE"
+          bun scripts/sweep-builder-fees.ts "$MODE"
+      - name: Cleanup key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/secrets/hl-builder-eoa.json"

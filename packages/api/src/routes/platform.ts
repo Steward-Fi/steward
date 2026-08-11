@@ -44,6 +44,7 @@ import {
   transactions,
   users,
   userTenants,
+  vaultSigningFreezes,
 } from "@stwd/db";
 import type {
   AgentIdentity,
@@ -74,6 +75,7 @@ import {
   publicTestAccount,
   redactedTestAccount,
 } from "../services/test-account-credentials";
+import { getConfiguredVault } from "../services/vault-factory";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 import { getEmailAuthForTenant, invalidateEmailAuthForTenant } from "./auth";
 
@@ -304,35 +306,15 @@ function platformIdentityMigrationDisabledResponse(c: Context) {
   );
 }
 
-// ─── Vault singleton ──────────────────────────────────────────────────────────
-// Platform routes share the same vault as the main API.
+// ─── Vault access ─────────────────────────────────────────────────────────────
+// Platform routes use the shared configured-vault factory.
 
 function getVault(): Vault {
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
-  if (!masterPassword) {
-    if (!isDevSecretAllowed()) {
-      throw new Error(
-        "⛔ STEWARD_MASTER_PASSWORD must be set. For local development only, opt in to the " +
-          "insecure dev fallback with STEWARD_ALLOW_DEV_SECRETS=true.",
-      );
-    }
-    console.warn(
-      "⚠️  [DEV ONLY] Using insecure 'dev-secret' as vault master password. Set STEWARD_MASTER_PASSWORD before going to production!",
-    );
-  }
-  return new Vault({
-    masterPassword: masterPassword || "dev-secret",
-    rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
-    chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
-  });
+  return getConfiguredVault({ allowDevSecretFallback: true });
 }
 
-// Lazily-initialised vault (avoids instantiating when the module is just
-// imported during type-checking / tree-shaking).
-let _vault: Vault | undefined;
 function vault(): Vault {
-  if (!_vault) _vault = getVault();
-  return _vault;
+  return getVault();
 }
 
 let _platformKeyStore: KeyStore | undefined;
@@ -1005,6 +987,146 @@ platform.get("/tenants", async (c) => {
 });
 
 /**
+ * POST /tenants/:id/freeze
+ * Tenant-wide, fail-closed kill-switch for blast-radius incidents: halts ALL
+ * signing for every agent under the tenant at the vault chokepoint (checked
+ * before key decryption). Gated behind a scoped platform key.
+ */
+platform.post("/tenants/:id/freeze", async (c) => {
+  const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-freeze:write");
+  if (scopeResponse) return scopeResponse;
+
+  const db = getDb();
+  const tenantId = c.req.param("id");
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+  if (!tenant) return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+
+  let reason: string | null = null;
+  const body = await safeJsonParse<{ reason?: unknown }>(c);
+  if (body && body.reason !== undefined && body.reason !== null) {
+    if (typeof body.reason !== "string") {
+      return c.json<ApiResponse>({ ok: false, error: "reason must be a string" }, 400);
+    }
+    const trimmed = body.reason.trim();
+    reason = trimmed ? trimmed.slice(0, 1024) : null;
+  }
+
+  const [existing] = await db
+    .select({ id: vaultSigningFreezes.id })
+    .from(vaultSigningFreezes)
+    .where(
+      and(
+        eq(vaultSigningFreezes.tenantId, tenantId),
+        eq(vaultSigningFreezes.scopeType, "tenant"),
+        isNull(vaultSigningFreezes.liftedAt),
+      ),
+    )
+    .limit(1);
+
+  if (existing) {
+    return c.json<ApiResponse>({
+      ok: true,
+      data: { tenantId, scopeType: "tenant", signingState: "frozen", freezeId: existing.id },
+    });
+  }
+
+  const [row] = await db
+    .insert(vaultSigningFreezes)
+    .values({
+      tenantId,
+      scopeType: "tenant",
+      reason,
+      createdByType: "platform",
+      createdById: "platform",
+    })
+    .returning({ id: vaultSigningFreezes.id });
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.freeze",
+    resourceType: "tenant",
+    resourceId: tenantId,
+    metadata: { freezeId: row.id, scopeType: "tenant", reason },
+    ...auditCtx(c),
+  });
+
+  dispatchWebhook(tenantId, tenantId, "wallet.frozen", {
+    tenant_id: tenantId,
+    scope_type: "tenant",
+    freeze_id: row.id,
+    reason,
+  });
+
+  return c.json<ApiResponse>({
+    ok: true,
+    data: { tenantId, scopeType: "tenant", signingState: "frozen", freezeId: row.id },
+  });
+});
+
+/**
+ * POST /tenants/:id/unfreeze
+ * Lifts the active tenant-wide signing freeze. Gated behind a scoped platform key.
+ */
+platform.post("/tenants/:id/unfreeze", async (c) => {
+  const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-freeze:write");
+  if (scopeResponse) return scopeResponse;
+
+  const db = getDb();
+  const tenantId = c.req.param("id");
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  const lifted = await db
+    .update(vaultSigningFreezes)
+    .set({ liftedAt: sql`now()`, liftedByType: "platform", liftedById: "platform" })
+    .where(
+      and(
+        eq(vaultSigningFreezes.tenantId, tenantId),
+        eq(vaultSigningFreezes.scopeType, "tenant"),
+        isNull(vaultSigningFreezes.liftedAt),
+      ),
+    )
+    .returning({ id: vaultSigningFreezes.id });
+
+  if (lifted.length === 0) {
+    return c.json<ApiResponse>({
+      ok: true,
+      data: { tenantId, scopeType: "tenant", signingState: "active", freezeId: null },
+    });
+  }
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.unfreeze",
+    resourceType: "tenant",
+    resourceId: tenantId,
+    metadata: { freezeId: lifted[0].id, scopeType: "tenant" },
+    ...auditCtx(c),
+  });
+
+  dispatchWebhook(tenantId, tenantId, "wallet.unfrozen", {
+    tenant_id: tenantId,
+    scope_type: "tenant",
+    freeze_id: lifted[0].id,
+  });
+
+  return c.json<ApiResponse>({
+    ok: true,
+    data: { tenantId, scopeType: "tenant", signingState: "active", freezeId: lifted[0].id },
+  });
+});
+
+/**
  * GET /tenants/:id
  * Returns a single tenant's details (no key hash).
  */
@@ -1081,6 +1203,8 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
     replyTo?: string;
     templateId?: string;
     subjectOverride?: string;
+    magicLinkBaseUrl?: string;
+    magicLinkCallbackPath?: string;
     templates?: TenantEmailConfig["templates"] | null;
   }>(c);
 
@@ -1112,13 +1236,15 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
       !body.templateId &&
       !body.subjectOverride &&
       !body.replyTo &&
+      !body.magicLinkBaseUrl &&
+      !body.magicLinkCallbackPath &&
       body.templates === undefined
     ) {
       return c.json<ApiResponse>(
         {
           ok: false,
           error:
-            "Provide apiKey+from for provider config, or at least one of templateId, subjectOverride, replyTo, templates",
+            "Provide apiKey+from for provider config, or at least one of templateId, subjectOverride, replyTo, magicLinkBaseUrl, magicLinkCallbackPath, templates",
         },
         400,
       );
@@ -1130,10 +1256,37 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
   if (
     !isOptionalString(body.replyTo) ||
     !isOptionalString(body.templateId) ||
-    !isOptionalString(body.subjectOverride)
+    !isOptionalString(body.subjectOverride) ||
+    !isOptionalString(body.magicLinkBaseUrl) ||
+    !isOptionalString(body.magicLinkCallbackPath)
   ) {
     return c.json<ApiResponse>(
-      { ok: false, error: "replyTo, templateId, and subjectOverride must be non-empty strings" },
+      {
+        ok: false,
+        error:
+          "replyTo, templateId, subjectOverride, magicLinkBaseUrl, and magicLinkCallbackPath must be non-empty strings",
+      },
+      400,
+    );
+  }
+
+  if (body.magicLinkBaseUrl) {
+    try {
+      const url = new URL(body.magicLinkBaseUrl);
+      if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("protocol");
+    } catch {
+      return c.json<ApiResponse>(
+        { ok: false, error: "magicLinkBaseUrl must be an absolute HTTP(S) URL" },
+        400,
+      );
+    }
+  }
+  if (
+    body.magicLinkCallbackPath &&
+    (!body.magicLinkCallbackPath.startsWith("/") || body.magicLinkCallbackPath.startsWith("//"))
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "magicLinkCallbackPath must be a root-relative path" },
       400,
     );
   }
@@ -1160,6 +1313,10 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
         ...(body.replyTo ? { replyTo: body.replyTo.trim() } : {}),
         ...(body.templateId ? { templateId: body.templateId.trim() } : {}),
         ...(body.subjectOverride ? { subjectOverride: body.subjectOverride.trim() } : {}),
+        ...(body.magicLinkBaseUrl ? { magicLinkBaseUrl: body.magicLinkBaseUrl.trim() } : {}),
+        ...(body.magicLinkCallbackPath
+          ? { magicLinkCallbackPath: body.magicLinkCallbackPath.trim() }
+          : {}),
         ...templatesPatch,
       }
     : {
@@ -1169,6 +1326,10 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
         ...(body.replyTo ? { replyTo: body.replyTo.trim() } : {}),
         ...(body.templateId ? { templateId: body.templateId.trim() } : {}),
         ...(body.subjectOverride ? { subjectOverride: body.subjectOverride.trim() } : {}),
+        ...(body.magicLinkBaseUrl ? { magicLinkBaseUrl: body.magicLinkBaseUrl.trim() } : {}),
+        ...(body.magicLinkCallbackPath
+          ? { magicLinkCallbackPath: body.magicLinkCallbackPath.trim() }
+          : {}),
         ...templatesPatch,
       };
 
@@ -1300,6 +1461,125 @@ platform.get("/tenants/:tenantId/email-config", async (c) => {
           emailConfig: null,
           hasApiKey: false,
         },
+  });
+});
+
+/**
+ * GET /tenants/:tenantId/join-mode
+ * Returns the tenant's join_mode ('open' | 'invite' | 'closed'; null when no
+ * tenant_configs row exists — the join gate then treats it as not self-joinable).
+ */
+platform.get("/tenants/:tenantId/join-mode", async (c) => {
+  const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-join-mode:read");
+  if (scopeResponse) return scopeResponse;
+
+  const db = getDb();
+  const tenantId = c.req.param("tenantId");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  if (!(await getTenantOr404(tenantId))) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  const [config] = await db
+    .select({ joinMode: tenantConfigs.joinMode })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+
+  return c.json<ApiResponse<{ tenantId: string; joinMode: string | null }>>({
+    ok: true,
+    data: { tenantId, joinMode: config?.joinMode ?? null },
+  });
+});
+
+/**
+ * PATCH /tenants/:tenantId/join-mode
+ * Sets how users may join the tenant: 'open' (anyone authenticating with this
+ * tenantId is auto-linked), 'invite' (existing user_tenants link required), or
+ * 'closed' (no new members).
+ *
+ * This is the ONLY write surface for join_mode: the column was previously
+ * settable by nothing but raw SQL, so the 0048 hardening backfill (every
+ * 'open' tenant force-flipped to 'invite') left public-product tenants —
+ * e.g. a consumer cloud's primary tenant — silently rejecting all NEW signups
+ * after any fresh-environment migration replay, with no operator remedy short
+ * of psql. Mirrors the email-config PATCH (scope gate, audit pair,
+ * snapshot/restore on audit failure, update-or-insert).
+ */
+platform.patch("/tenants/:tenantId/join-mode", async (c) => {
+  const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-join-mode:write");
+  if (scopeResponse) return scopeResponse;
+
+  const db = getDb();
+  const tenantId = c.req.param("tenantId");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  if (!(await getTenantOr404(tenantId))) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  const body = await safeJsonParse<{ joinMode: string }>(c);
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  const joinMode = typeof body.joinMode === "string" ? body.joinMode.trim() : "";
+  if (!["open", "invite", "closed"].includes(joinMode)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "joinMode must be one of 'open', 'invite', 'closed'" },
+      400,
+    );
+  }
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.join_mode.update.authorized",
+    resourceType: "tenant",
+    resourceId: tenantId,
+    metadata: { joinMode },
+    ...auditCtx(c),
+  });
+
+  const previousConfigRow = await snapshotPlatformTenantConfigRow(tenantId);
+  const [existingConfig] = await db
+    .select({ tenantId: tenantConfigs.tenantId })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+
+  if (existingConfig) {
+    await db
+      .update(tenantConfigs)
+      .set({ joinMode, updatedAt: new Date() })
+      .where(eq(tenantConfigs.tenantId, tenantId));
+  } else {
+    await db.insert(tenantConfigs).values({ tenantId, joinMode });
+  }
+
+  try {
+    await writeAuditEvent({
+      tenantId,
+      actorType: "platform",
+      action: "tenant.join_mode.update",
+      resourceType: "tenant",
+      resourceId: tenantId,
+      metadata: { joinMode },
+      ...auditCtx(c),
+    });
+  } catch (error) {
+    await restorePlatformTenantConfigRow(tenantId, previousConfigRow);
+    throw error;
+  }
+
+  return c.json<ApiResponse<{ tenantId: string; joinMode: string }>>({
+    ok: true,
+    data: { tenantId, joinMode },
   });
 });
 

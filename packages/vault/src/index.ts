@@ -30,6 +30,8 @@ export type {
   ExternalKeyHandleImportRequest,
   ExternalKeyHandleRegistration,
   ExternalKeySigningAvailability,
+  ExternalKeySignTransactionRequest,
+  ExternalKeySignTransactionResult,
 } from "./external-key-custody";
 export {
   assertNoExternalPrivateKeyMaterial,
@@ -40,6 +42,11 @@ export {
   InMemoryExternalKeyCustodyProvider,
   normalizeExternalKeyHandleRegistration,
 } from "./external-key-custody";
+export type {
+  ExecutionAuthorizationConsumeCallback,
+  GovernedSignTransactionOptions,
+} from "./governed-vault";
+export { GovernedVault, GovernedVaultError } from "./governed-vault";
 export type { BitcoinAddressType, BitcoinNetwork, DerivedBitcoinKey } from "./hd-wallet";
 export {
   deriveBitcoinKey,
@@ -61,6 +68,36 @@ export type {
   Pkcs11KmsEnvelopeOptions,
 } from "./keystore-kms";
 export { KmsEnvelopeKeystore, resolveKmsEnvelopeOptions } from "./keystore-kms";
+export type {
+  DecodedMoneroAddress,
+  GeneratedMoneroWallet,
+  MoneroAddressKind,
+  MoneroBalanceResult,
+  MoneroEnv,
+  MoneroKeyPayloadV1,
+  MoneroTransferDestination,
+  MoneroWalletBackend,
+  MoneroWalletBackendContext,
+  MoneroWalletRpcBackendConfig,
+  ParsedMoneroWalletScope,
+  PreparedMoneroTransfer,
+} from "./monero";
+export {
+  assertMoneroAddress,
+  createMoneroBackendFromEnv,
+  decodeMoneroAddress,
+  generateMoneroWallet,
+  MONERO_ATOMIC_UNITS,
+  MONERO_DEFAULT_DAEMON_URLS,
+  MoneroNotConfiguredError,
+  MoneroRpcError,
+  MoneroWalletRpcBackend,
+  moneroWalletScope,
+  parseMoneroKeyPayload,
+  parseMoneroWalletScope,
+  parsePiconeroAmount,
+  serializeMoneroKeyPayload,
+} from "./monero";
 export type { MatchedRoute } from "./route-matcher";
 export {
   findMatchingRoute,
@@ -68,8 +105,24 @@ export {
   globToRegex,
   matchesGlob,
 } from "./route-matcher";
+export type { SecretRouteConfigInput } from "./secret-route-validator";
+export {
+  configuredSecretRouteHosts,
+  DEFAULT_SECRET_ROUTE_HOSTS,
+  STRICT_HOSTS,
+  validateSecretRouteConfig,
+} from "./secret-route-validator";
 export type { CreateSecretOptions, SecretMetadata } from "./secret-vault";
 export { SecretVault } from "./secret-vault";
+export type {
+  SignerBackend,
+  SignerBackendCapabilities,
+  ThresholdGenerateParams,
+  ThresholdKeyRef,
+  ThresholdScheme,
+  ThresholdSignature,
+} from "./signer-backend";
+export { assertNoRawKeyExport } from "./signer-backend";
 export {
   assertVaultSigningActive,
   isVaultSigningFrozenError,
@@ -133,9 +186,16 @@ export type {
   BitcoinPrivateKeyExport,
   ExportPrivateKeyAuthorization,
   ExportPrivateKeyResult,
+  GetMoneroBalanceRequest,
+  GetMoneroBalanceResult,
   InspectBitcoinPsbtResult,
+  MoneroCreateOptions,
+  MoneroPrivateKeyExport,
+  PrepareMoneroTransferRequest,
+  PrepareMoneroTransferResult,
+  RelayMoneroTransferRequest,
   SignBitcoinPsbtRequest,
   SignBitcoinPsbtResult,
   VaultConfig,
 } from "./vault";
-export { Vault, Vault as VaultClient } from "./vault";
+export { BackendBindingMismatchError, Vault, Vault as VaultClient } from "./vault";

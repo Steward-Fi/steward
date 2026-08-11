@@ -4,11 +4,26 @@
  * Reuses the KeyStore's AES-256-GCM encryption. Secrets are encrypted per-tenant
  * using the same master key hierarchy as wallet keys.
  *
- * Decrypted values are NEVER returned via API — only used internally for
- * credential injection into proxied requests.
+ * NO READ-BACK is a property of THIS plane (sovereign-custody Pillar A / A2):
+ *
+ *   - No HTTP route returns a plaintext secret value. The /secrets routes
+ *     return {@link SecretMetadata} only (enforced by the static route scan in
+ *     packages/api/src/__tests__/secrets-no-read-back.test.ts).
+ *   - In-process, the canonical use-only path is {@link SecretVault.exerciseSecret}:
+ *     decrypt → hand to a caller closure → drop the reference. The closure
+ *     returns a RESULT (an HTTP response, a signature), never the secret.
+ *   - The remaining direct decrypt callers ({@link decryptSecret} /
+ *     {@link decryptSecretRow}) form a CLOSED, CI-pinned set (proxy credential
+ *     injection + provider-x refresh). Adding a new caller fails the
+ *     no-read-back inventory test with a classification instruction.
+ *
+ * Custody strength is orthogonal and inherited: the master-password root can be
+ * wrapped by KMS-envelope (aws|pkcs11) via vault-factory custody modes, and the
+ * TEE path (Pillar B) swaps the master-key source for an attestation-gated
+ * release WITHOUT changing this API. There is deliberately NO parallel
+ * file-based secret store — one custody plane, one audit surface.
  */
 
-import { isIP } from "node:net";
 import {
   agents,
   and,
@@ -23,28 +38,7 @@ import {
   secrets,
 } from "@stwd/db";
 import { type EncryptedKey, KeyStore } from "./keystore";
-
-const DEFAULT_SECRET_ROUTE_HOSTS = [
-  "api.openai.com",
-  "api.anthropic.com",
-  "public-api.birdeye.so",
-  "api.coingecko.com",
-  "api.helius.xyz",
-];
-const BLOCKED_INJECT_HEADERS = new Set([
-  "connection",
-  "content-length",
-  "host",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
-]);
-const VALID_PROXY_METHODS = new Set(["*", "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]);
-const MAX_SECRET_INJECT_FORMAT_LENGTH = 255;
-const MAX_SECRET_ROUTE_PRIORITY = 1_000_000;
+import { validateSecretRouteConfig } from "./secret-route-validator";
 
 export interface SecretMetadata {
   id: string;
@@ -63,133 +57,13 @@ export interface CreateSecretOptions {
   expiresAt?: Date;
 }
 
-type SecretRouteConfig = {
-  agentId?: string;
-  hostPattern?: string;
-  pathPattern?: string;
-  method?: string;
-  injectAs?: string;
-  injectKey?: string;
-  injectFormat?: string;
-  priority?: number;
-};
-
-function configuredSecretRouteHosts(): string[] {
-  return [
-    ...DEFAULT_SECRET_ROUTE_HOSTS,
-    ...(process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS ?? "")
-      .split(",")
-      .map((host) => host.trim().toLowerCase())
-      .filter(Boolean),
-  ];
-}
-
-function hostAllowedByEntry(hostPattern: string, allowedHost: string): boolean {
-  if (hostPattern === allowedHost) return true;
-  if (hostPattern.startsWith("*.")) {
-    const suffix = hostPattern.slice(2);
-    const suffixLabels = suffix.split(".").filter(Boolean);
-    if (suffixLabels.length < 2) return false;
-    if (!allowedHost.startsWith("*.")) return false;
-    const allowedSuffix = allowedHost.slice(2);
-    return suffix === allowedSuffix || suffix.endsWith(`.${allowedSuffix}`);
-  }
-  if (allowedHost.startsWith("*.")) {
-    const allowedSuffix = allowedHost.slice(1);
-    return hostPattern.endsWith(allowedSuffix) && hostPattern.length > allowedSuffix.length;
-  }
-  return false;
-}
-
-function validateSecretRouteConfig(input: SecretRouteConfig): string | null {
-  if (input.agentId !== undefined && !input.agentId.trim()) return "agentId is invalid";
-
-  if (input.hostPattern !== undefined) {
-    const hostPattern = input.hostPattern.trim().toLowerCase();
-    if (!hostPattern || hostPattern === "*" || hostPattern === "*.*") {
-      return "hostPattern must be an explicit allowed host";
-    }
-    const hostForIpCheck = hostPattern.startsWith("*.") ? hostPattern.slice(2) : hostPattern;
-    if (
-      isIP(hostForIpCheck) ||
-      hostForIpCheck === "localhost" ||
-      hostForIpCheck.endsWith(".localhost") ||
-      hostForIpCheck.endsWith(".local") ||
-      hostForIpCheck.endsWith(".internal")
-    ) {
-      return "hostPattern must not target localhost, private, or internal hosts";
-    }
-    if (!configuredSecretRouteHosts().some((allowed) => hostAllowedByEntry(hostPattern, allowed))) {
-      return "hostPattern is not in the secret route allowlist";
-    }
-  }
-
-  if (input.pathPattern !== undefined) {
-    const pathPattern = input.pathPattern.trim();
-    const lowered = pathPattern.toLowerCase();
-    if (!pathPattern.startsWith("/")) return "pathPattern must start with /";
-    if (
-      process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES !== "true" &&
-      (pathPattern === "/*" || pathPattern === "*")
-    ) {
-      return "broad pathPattern requires STEWARD_ALLOW_BROAD_SECRET_ROUTES=true";
-    }
-    if (/[\u0000-\u001f\u007f\\]/.test(pathPattern)) return "pathPattern is invalid";
-    if (
-      lowered.includes("%2e") ||
-      lowered.includes("%2f") ||
-      lowered.includes("%5c") ||
-      pathPattern.split("/").some((segment) => segment === "." || segment === "..")
-    ) {
-      return "pathPattern must not contain dot segments or encoded path separators";
-    }
-  }
-
-  if (input.method !== undefined) {
-    const method = input.method.trim().toUpperCase();
-    if (!VALID_PROXY_METHODS.has(method)) return "method is not allowed";
-    if (process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES !== "true" && method === "*") {
-      return "broad method requires STEWARD_ALLOW_BROAD_SECRET_ROUTES=true";
-    }
-  }
-
-  if (input.injectAs !== undefined) {
-    if (!["header", "query"].includes(input.injectAs)) {
-      return "'injectAs' must be one of: header, query";
-    }
-    if (input.injectAs === "query" && process.env.STEWARD_ALLOW_QUERY_SECRET_INJECTION !== "true") {
-      return "query credential injection requires STEWARD_ALLOW_QUERY_SECRET_INJECTION=true";
-    }
-  }
-
-  if (input.injectKey !== undefined) {
-    const key = input.injectKey.trim().toLowerCase();
-    if (!key || /[\r\n:]/.test(key)) return "injectKey is invalid";
-    if (BLOCKED_INJECT_HEADERS.has(key)) return `injectKey '${input.injectKey}' is not allowed`;
-  }
-
-  if (input.injectFormat !== undefined) {
-    if (input.injectFormat.length > MAX_SECRET_INJECT_FORMAT_LENGTH) {
-      return `injectFormat cannot exceed ${MAX_SECRET_INJECT_FORMAT_LENGTH} characters`;
-    }
-    if (/[\r\n]/.test(input.injectFormat)) return "injectFormat must not contain line breaks";
-    const placeholderCount = input.injectFormat.match(/\{value\}/g)?.length ?? 0;
-    if (placeholderCount !== 1) {
-      return "injectFormat must contain exactly one {value} placeholder";
-    }
-  }
-
-  if (
-    input.priority !== undefined &&
-    (!Number.isSafeInteger(input.priority) ||
-      input.priority < 0 ||
-      input.priority > MAX_SECRET_ROUTE_PRIORITY)
-  ) {
-    return `priority must be an integer between 0 and ${MAX_SECRET_ROUTE_PRIORITY}`;
-  }
-
-  return null;
-}
+/**
+ * A drizzle executor (the top-level db OR an open transaction) accepted by the
+ * *WithinTx helpers so a caller can rotate a secret inside its OWN transaction
+ * without a nested `db.transaction` (which deadlocks single-connection PGLite).
+ */
+type SecretTxExecutor = DbBase | Parameters<Parameters<DbBase["transaction"]>[0]>[0];
+type DbBase = ReturnType<typeof getDb>;
 
 export class SecretVault {
   private keyStore: KeyStore;
@@ -267,7 +141,65 @@ export class SecretVault {
   }
 
   /**
-   * Decrypt a secret for internal use (credential injection). NEVER expose via API.
+   * Exercise a secret: decrypt it and hand the plaintext to `use`, returning
+   * the closure's RESULT. The plaintext is returned by NO public API path; it
+   * exists for the duration of the `use` callback and the reference is dropped
+   * afterwards. This is the canonical use-only consumption path for new
+   * consumers (broker a call, sign a webhook, inject a header).
+   *
+   * Fail-closed audit: pass `beforeUse` as the audit chokepoint. It runs after
+   * the secret row is located but BEFORE decryption; if it throws (e.g. the
+   * audit append failed), the secret is never decrypted and `use` never runs.
+   */
+  async exerciseSecret<T>(
+    tenantId: string,
+    secretId: string,
+    use: (plaintext: string) => T | Promise<T>,
+    options?: { beforeUse?: () => void | Promise<void> },
+  ): Promise<T> {
+    const db = getDb();
+    const [row] = await db
+      .select()
+      .from(secrets)
+      .where(
+        and(eq(secrets.id, secretId), eq(secrets.tenantId, tenantId), isNull(secrets.deletedAt)),
+      );
+    if (!row) {
+      throw new Error(`Secret ${secretId} not found for tenant ${tenantId}`);
+    }
+    return await this.exerciseSecretRow(tenantId, row, use, options);
+  }
+
+  /**
+   * Exercise a secret row already read from the DB. This is the same use-only
+   * plaintext lifetime as exerciseSecret, but supports intentional historical
+   * row consumers such as KMS decrypt-old-version after rotation.
+   */
+  async exerciseSecretRow<T>(
+    tenantId: string,
+    row: Secret,
+    use: (plaintext: string) => T | Promise<T>,
+    options?: { beforeUse?: () => void | Promise<void> },
+  ): Promise<T> {
+    // Fail-closed: audit (or any precondition) must succeed before decryption.
+    if (options?.beforeUse) await options.beforeUse();
+    let plaintext: string | undefined = this.decryptSecretRow(tenantId, row);
+    try {
+      return await use(plaintext);
+    } finally {
+      // Best-effort drop of the reference. JS strings are immutable so the
+      // bytes cannot be zeroed, but no live reference survives this method.
+      plaintext = undefined;
+      void plaintext;
+    }
+  }
+
+  /**
+   * Decrypt a secret for internal use (credential injection). NEVER expose via
+   * API. Prefer {@link exerciseSecret} for new consumers — this direct-return
+   * form exists for the proxy injection path, whose plaintext lifetime spans
+   * the outbound request build, and its caller set is pinned by the
+   * no-read-back inventory test.
    */
   async decryptSecret(tenantId: string, secretId: string): Promise<string> {
     const db = getDb();
@@ -281,19 +213,25 @@ export class SecretVault {
     if (!row) {
       throw new Error(`Secret ${secretId} not found for tenant ${tenantId}`);
     }
+    return this.decryptSecretRow(tenantId, row);
+  }
 
-    // Check expiration
+  /**
+   * Decrypt a secret row already read from the DB (e.g. inside a caller's
+   * transaction, so no fresh `getDb()` read is issued that would block on a
+   * single-connection PGLite while an outer transaction holds the connection).
+   * NEVER expose the plaintext via API.
+   */
+  decryptSecretRow(tenantId: string, row: Secret): string {
     if (row.expiresAt && row.expiresAt < new Date()) {
-      throw new Error(`Secret ${secretId} has expired`);
+      throw new Error(`Secret ${row.id} has expired`);
     }
-
     const encrypted: EncryptedKey = {
       ciphertext: row.ciphertext,
       iv: row.iv,
       tag: row.authTag,
       salt: row.salt,
     };
-
     const context = { tenantId, name: row.name, version: row.version };
     try {
       return this.keyStore.decrypt(encrypted, context);
@@ -302,6 +240,63 @@ export class SecretVault {
       // legacy (shared) root. New secrets always use the domain-separated root above.
       return this.legacyKeyStore.decrypt(encrypted, context);
     }
+  }
+
+  /**
+   * Rotate a secret WITHIN a caller-provided transaction. Identical to
+   * {@link rotateSecret} but reuses the caller's `tx` instead of opening its own
+   * `db.transaction`, so it can run inside an outer transaction (e.g. a per-
+   * account refresh that holds a SELECT ... FOR UPDATE lock) without a nested
+   * transaction. The single-flight/atomicity guarantee is the CALLER's outer
+   * transaction; this method only appends the new version + repoints routes +
+   * soft-deletes the prior version.
+   */
+  async rotateSecretWithinTx(
+    tx: SecretTxExecutor,
+    tenantId: string,
+    name: string,
+    newValue: string,
+  ): Promise<SecretMetadata> {
+    const [current] = await tx
+      .select()
+      .from(secrets)
+      .where(and(eq(secrets.tenantId, tenantId), eq(secrets.name, name), isNull(secrets.deletedAt)))
+      .orderBy(desc(secrets.version))
+      .limit(1);
+    if (!current) {
+      throw new Error(`Secret "${name}" not found for tenant ${tenantId}`);
+    }
+    const newVersion = current.version + 1;
+    const encrypted = this.keyStore.encrypt(newValue, { tenantId, name, version: newVersion });
+    const now = new Date();
+
+    const [row] = await tx
+      .insert(secrets)
+      .values({
+        tenantId,
+        name,
+        description: current.description,
+        ciphertext: encrypted.ciphertext,
+        iv: encrypted.iv,
+        authTag: encrypted.tag,
+        salt: encrypted.salt,
+        version: newVersion,
+        rotatedAt: now,
+        expiresAt: current.expiresAt,
+      })
+      .returning();
+
+    await tx
+      .update(secretRoutes)
+      .set({ secretId: row.id })
+      .where(and(eq(secretRoutes.tenantId, tenantId), eq(secretRoutes.secretId, current.id)));
+
+    await tx
+      .update(secrets)
+      .set({ deletedAt: now, updatedAt: now })
+      .where(and(eq(secrets.id, current.id), eq(secrets.tenantId, tenantId)));
+
+    return this.toMetadata(row);
   }
 
   /**
@@ -439,6 +434,8 @@ export class SecretVault {
       injectFormat?: string;
       priority?: number;
       enabled?: boolean;
+      requiresApproval?: boolean;
+      approvalConfig?: Record<string, unknown>;
     },
   ): Promise<SecretRoute> {
     const db = getDb();
@@ -485,6 +482,8 @@ export class SecretVault {
         injectFormat: normalizedConfig.injectFormat,
         priority: normalizedConfig.priority,
         enabled: config.enabled ?? true,
+        requiresApproval: config.requiresApproval ?? false,
+        approvalConfig: config.approvalConfig ?? {},
       })
       .returning();
 
@@ -522,6 +521,8 @@ export class SecretVault {
       injectFormat: string;
       priority: number;
       enabled: boolean;
+      requiresApproval: boolean;
+      approvalConfig: Record<string, unknown>;
     }>,
   ): Promise<SecretRoute | null> {
     const db = getDb();
@@ -536,14 +537,42 @@ export class SecretVault {
       "injectFormat",
       "priority",
       "enabled",
+      "requiresApproval",
+      "approvalConfig",
     ] as const) {
       if (updates[key] !== undefined) allowedUpdates[key] = updates[key] as never;
     }
     if (Object.keys(allowedUpdates).length === 0) {
       return this.getRoute(tenantId, routeId);
     }
-    const validationError = validateSecretRouteConfig(allowedUpdates);
+    // Partial-patch validation: skip per-host strictness here (the patch may not
+    // carry method/path). The merged pass below enforces strict-host rules.
+    const validationError = validateSecretRouteConfig(allowedUpdates, {
+      enforceStrictHosts: false,
+    });
     if (validationError) throw new Error(validationError);
+    // Fail-closed: re-validate against the merged (existing ∪ update) config so a
+    // partial edit can never loosen a strict host's narrowness rules (explicit
+    // method + minimum path depth) for a route that already targets one.
+    //
+    // Exception: if the update leaves the route DISABLED, skip the merged
+    // strict-host pass. A disabled route injects no credential, so strictness is
+    // moot — and blocking it would prevent an admin from disabling a legacy
+    // strict-host route that predates these rules (a safety-REDUCING action must
+    // never be blocked by a stricter narrowness rule).
+    const current = await this.getRoute(tenantId, routeId);
+    const willBeEnabled = allowedUpdates.enabled ?? current?.enabled ?? true;
+    if (current && willBeEnabled) {
+      const mergedValidationError = validateSecretRouteConfig({
+        hostPattern: allowedUpdates.hostPattern ?? current.hostPattern ?? undefined,
+        pathPattern: allowedUpdates.pathPattern ?? current.pathPattern ?? undefined,
+        method: allowedUpdates.method ?? current.method ?? undefined,
+        injectAs: allowedUpdates.injectAs ?? current.injectAs ?? undefined,
+        injectKey: allowedUpdates.injectKey ?? current.injectKey ?? undefined,
+        injectFormat: allowedUpdates.injectFormat ?? current.injectFormat ?? undefined,
+      });
+      if (mergedValidationError) throw new Error(mergedValidationError);
+    }
     if (allowedUpdates.hostPattern !== undefined) {
       allowedUpdates.hostPattern = allowedUpdates.hostPattern.trim().toLowerCase();
     }

@@ -73,7 +73,7 @@ Each encrypted key is stored with:
 
 ## Signing Flow
 
-Every signing request passes through the [Policy Engine](/concepts/policy-engine) before execution:
+Supported transaction-signing API routes pass through the [Policy Engine](/concepts/policy-engine) before invoking the Vault. Compatibility signing routes may instead require MFA, signer permission, and explicit unsafe feature flags:
 
 ```typescript
 // 1. Agent requests a transaction
@@ -100,7 +100,7 @@ For agents that already have keys (e.g., migrating from another system), you can
 
 ```typescript
 // Import requires tenant-level authentication
-const result = await fetch("https://api.steward.fi/vault/my-agent/import", {
+const result = await fetch("http://localhost:3200/vault/my-agent/import", {
   method: "POST",
   headers: {
     "X-Steward-Key": "your-tenant-api-key",

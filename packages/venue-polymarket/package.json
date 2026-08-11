@@ -1,0 +1,27 @@
+{
+  "name": "@stwd/venue-polymarket",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "dev": "tsc --watch",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@stwd/shared": "workspace:*",
+    "@polymarket/builder-relayer-client": "^0.0.4",
+    "@polymarket/builder-signing-sdk": "^0.0.8",
+    "@polymarket/clob-client": "^4.22.7",
+    "ethers": "^6.15.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0"
+  },
+  "description": "Polymarket venue adapter for Steward"
+}

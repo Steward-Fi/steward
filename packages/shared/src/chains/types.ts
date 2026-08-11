@@ -14,7 +14,7 @@ export interface ChainProvider {
    * non-EVM chains this is a convention used to map back to CAIP-2. */
   numericId: number;
   /** Family/VM the chain belongs to. */
-  family: "evm" | "solana" | "bitcoin";
+  family: "evm" | "solana" | "bitcoin" | "monero";
   /** Human-readable display name. */
   name: string;
   /** Native asset ticker. */

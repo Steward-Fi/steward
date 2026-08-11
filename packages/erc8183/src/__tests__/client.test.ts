@@ -6,8 +6,8 @@ import {
   encodeEventTopics,
   type Hex,
 } from "viem";
-import { AGENTIC_COMMERCE_ABI, ERC20_ABI, ERC8183Client, EVALUATOR_ROUTER_ABI } from "../client";
-import type { JobConfig, SignerAdapter } from "../types";
+import { AGENTIC_COMMERCE_ABI, ERC20_ABI, ERC8183Client, EVALUATOR_ROUTER_ABI } from "../client.ts";
+import type { JobConfig, SignerAdapter } from "../types.ts";
 
 const AGENTIC_COMMERCE = "0x0000000000000000000000000000000000008183" as Address;
 const EVALUATOR_ROUTER = "0x0000000000000000000000000000000000008184" as Address;

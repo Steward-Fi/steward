@@ -1,4 +1,44 @@
 export type {
+  CapabilityIntentCompositionEffect,
+  CapabilityIntentCompositionResult,
+  CapabilityIntentConfig,
+  CapabilityIntentConstraints,
+  CapabilityIntentEffect,
+  CumulativeSpendConstraint,
+  CumulativeSpendScope,
+  ProviderPolicyContext,
+  ProviderPolicyEffect,
+  ProviderPolicyEvaluationV1,
+  ProviderPolicyRule,
+  ProviderPolicyRuleResult,
+  XConstraints,
+  XConstraintVerdict,
+  XContentPolicy,
+  XEscalationPolicy,
+  XPostsWindowCap,
+  XQuietHours,
+  XReplyMode,
+  XReplyPolicy,
+  XSpendPolicy,
+} from "./capability-intent";
+export {
+  CAPABILITY_INTENT_RULE_TYPE,
+  capabilityIntentContribution,
+  composeCapabilityIntentDecision,
+  composeProviderActionPolicyDecision,
+  cumulativeSpendBucketKey,
+  estimateXPostMicros,
+  evaluateCapabilityIntent,
+  evaluateXConstraints,
+  MAX_AGGREGATE_WINDOW_SECONDS,
+  PROVIDER_POLICY_REASON,
+  parseCapabilityIntentConfigForTest,
+  parseIso8601DurationSecondsForTest,
+  windowedInvokeBucketKey,
+  X_POST_PRICE_TABLE_V1,
+  X_POST_PRICE_TABLE_VERSION,
+} from "./capability-intent";
+export type {
   AuditHook,
   PolicyEngineOptions,
   PolicyEvaluatedEvent,
@@ -38,6 +78,14 @@ export type { VenueAllowlistContext } from "./evaluators/venue-allowlist";
 export { evaluateVenueAllowlist } from "./evaluators/venue-allowlist";
 export type { ManualApprovalSignal } from "./manual-approval";
 export { resultRequiresManualApproval } from "./manual-approval";
+export type { RegisteredPolicyEvaluator } from "./policy-rule-registry";
+export {
+  CORE_POLICY_RULE_TYPES,
+  evaluateRegisteredPolicy,
+  PolicyRuleRegistry,
+  PolicyRuleRegistryError,
+  policyRuleRegistry,
+} from "./policy-rule-registry";
 export type { ReputationInput } from "./reputation";
 export { calculateInternalReputation } from "./reputation";
 export type {

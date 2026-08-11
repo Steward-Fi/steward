@@ -1,6 +1,6 @@
 # Steward
 
-**Steward is a governance layer for autonomous AI agents.** It provides encrypted wallet management, policy enforcement, secret storage, credential injection, and embeddable React UI — so agents can transact on-chain and call external APIs without ever touching raw private keys or credentials.
+**Steward is an open-source, self-hostable governed credential proxy and policy and approval layer for agent provider actions and wallets.** Supported integrations use scoped grants and configured routes instead of receiving provider credentials directly. The primary EVM transaction sign path adds a signed, single-use execution authorization before raw signing.
 
 ## What It Does
 
@@ -28,15 +28,15 @@ Proxy-bound agent tokens must be minted with the explicit `api:proxy` scope
 the next 1-2 release cycles, but new deployments should opt in when creating the
 token.
 
-Every transaction and every API call flows through Steward, where it is authenticated, policy-checked, logged, and metered before being forwarded with real credentials injected at the proxy.
+Supported transactions and API calls flow through Steward routes, where they are authenticated, policy-checked, logged, and metered before Vault signing or proxy credential injection happens.
 
 ## Core Primitives
 
 | Primitive | What it does |
 |-----------|-------------|
-| **Wallet Vault** | AES-256-GCM encrypted key storage. Creates EVM + Solana keypairs per agent. Agents request signatures; private keys never leave the vault. |
-| **Policy Engine** | Declarative rules evaluated before every signing request: spending limits, address whitelists, rate limits, time windows, chain filters, auto-approve thresholds. |
-| **Secret Vault** | Encrypted credential storage. The proxy injects secrets at request time; agents never see the raw values. |
+| **Wallet Vault** | AES-256-GCM encrypted key storage for EVM and Solana keypairs. Governed API routes request signatures without returning private keys to the caller. |
+| **Policy Engine** | Declarative rules evaluated by supported signing routes before Vault calls: spending limits, address whitelists, rate limits, time windows, chain filters, auto-approve thresholds. |
+| **Secret Vault** | Encrypted credential storage. Configured proxy routes inject secrets server-side instead of returning them to the supported agent caller. |
 | **API Proxy** | Routes agent HTTP calls through Steward for credential injection, cost tracking, and audit logging. |
 | **Approval Queue** | Large or unusual transactions queue for human review before execution. |
 | **Webhooks** | Push notifications on `tx.pending`, `tx.signed`, `tx.approved`, `tx.denied`, `policy.violation`, `spend.threshold`. |
@@ -49,7 +49,7 @@ Every transaction and every API call flows through Steward, where it is authenti
 bun run start:local
 ```
 
-**Hosted** — Backed by PostgreSQL, optional Redis for rate limiting and spend tracking. For production multi-tenant deployments.
+**PostgreSQL** — Backed by PostgreSQL, optional Redis for rate limiting and spend tracking. For self-hosted production deployments that need a durable third-party database.
 
 ```bash
 docker compose up -d
@@ -67,6 +67,7 @@ docker compose up -d
 | `packages/sdk` | TypeScript client (`@stwd/sdk`) |
 | `packages/react` | Embeddable React components (`@stwd/react`) |
 | `packages/eliza-plugin` | ElizaOS plugin |
+| `packages/plugin-wxmr` | Opt-in Monero-on-Solana bridge provider |
 | `packages/proxy` | Credential injection proxy |
 | `packages/webhooks` | Signed webhook dispatcher with retry queue |
 | `packages/shared` | Shared types, chain constants, price oracle |
@@ -77,13 +78,14 @@ docker compose up -d
 - [**Architecture**](./architecture.md) — How the pieces fit together
 - [**Authentication**](./auth.md) — Passkeys, magic links, SIWE, JWT, API keys
 - [**Policy Engine**](./policies.md) — Spending limits, whitelists, rate limits, and more
+- [**Monero on Solana**](./guides/monero-on-solana.mdx) — Configure and use the bidirectional wxmr.io bridge handoff
 - [**SDK Reference**](./sdk.md) — `@stwd/sdk` TypeScript client
 - [**React Components**](./react.md) — `@stwd/react` embeddable UI
 - [**Deployment Guide**](./deployment.md) — Docker, environment variables, database setup
 
 ## Who Uses Steward
 
-- **Milady Cloud** — Production deployment managing 17+ AI agents across 6 nodes on Base mainnet
+- **Production multi-agent deployments** — A production deployment managing dozens of AI agents across a node fleet on Base mainnet
 - **Agent developers** — Anyone building autonomous agents that need wallet access or API credential management
 - **Platform operators** — Teams running multi-tenant agent hosting who need security, cost control, and compliance
 - **Desktop apps** — Local mode with PGLite runs as an embedded sidecar with zero external dependencies

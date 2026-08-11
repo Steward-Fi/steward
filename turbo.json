@@ -2,20 +2,30 @@
   "$schema": "https://turbo.build/schema.json",
   "globalEnv": [
     "DATABASE_URL",
+    "DSTACK_SOCKET_PATH",
     "FAKE_OAUTH_PORT",
     "MILADY_SKIP_STEWARD_FI_LIVE_SMOKE",
     "PLATFORM_KEY",
     "PROXY_URL",
     "SKIP_PROXY_E2E",
     "STEWARD_ALLOW_INSECURE_DB",
+    "STEWARD_ATTESTATION_DEPLOYMENT",
+    "STEWARD_ATTESTATION_ENDPOINT",
+    "STEWARD_ATTESTATION_NOOP_ALLOW",
+    "STEWARD_ATTESTATION_PROVIDER",
     "STEWARD_AUDIT_HMAC_KEY",
     "STEWARD_BEHIND_PROXY",
     "STEWARD_BIND_HOST",
+    "STEWARD_DSTACK_VERIFIER_URL",
     "STEWARD_JWT_SECRET",
     "STEWARD_KDF_SALT",
     "STEWARD_MASTER_PASSWORD",
+    "STEWARD_MEASUREMENT_REGISTRY",
     "STEWARD_PLATFORM_KEY",
     "STEWARD_PLATFORM_KEYS",
+    "STEWARD_REGISTRY_REQUIRED_SIGNATURES",
+    "STEWARD_REGISTRY_TRUSTED_KEY_IDS",
+    "STEWARD_REGISTRY_TRUSTED_KEY_SHA256",
     "STEWARD_SESSION_SECRET",
     "STEWARD_SOC2_ALLOW_DEPENDENCY_SKIP",
     "STEWARD_URL"
@@ -45,6 +55,18 @@
       "dependsOn": ["^build"],
       "outputs": []
     },
+    "@stwd/plugin-capabilities#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@stwd/plugin-example#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@stwd/plugin-sdk#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
     "@stwd/policy-engine#build": {
       "dependsOn": ["^build"],
       "outputs": []
@@ -52,6 +74,10 @@
     "@stwd/proxy#build": {
       "dependsOn": ["^build"],
       "outputs": []
+    },
+    "@stwd/proxy-client#build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"]
     },
     "@stwd/vault#build": {
       "dependsOn": ["^build"],

@@ -1,5 +1,5 @@
 /**
- * Price Oracle — fetches USD prices for native and ERC-20 tokens via DexScreener.
+ * Price Oracle — fetches USD prices for native and fungible tokens via DexScreener.
  *
  * - Free API, no key required
  * - Caches prices for configurable TTL (default 60s)
@@ -58,7 +58,8 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
   const cache = new Map<string, CacheEntry>();
 
   function cacheKey(chainId: number, address: string): string {
-    return `${chainId}:${address.toLowerCase()}`;
+    const normalized = chainId === 101 || chainId === 102 ? address : address.toLowerCase();
+    return `${chainId}:${normalized}`;
   }
 
   function getCached(key: string): number | null {
@@ -93,6 +94,8 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
         return "arbitrum";
       case 43114:
         return "avalanche";
+      case 101:
+        return "solana";
       default:
         return null;
     }
@@ -154,6 +157,12 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
 
   const oracle: PriceOracle = {
     async getNativeUsdPrice(chainId: number): Promise<number | null> {
+      // Monero (301/302) has no wrapped-native DexScreener pair, so this
+      // returns null and every USD-denominated policy rule fails closed
+      // (denies) for Monero requests. This is deliberate: quoting XMR via an
+      // unrelated proxy pair would be dishonest pricing in a money path. Use
+      // piconero-denominated limits for Monero until a vetted XMR price
+      // source is added here.
       const wrappedAddress = getWrappedNativeAddress(chainId);
       if (!wrappedAddress) {
         console.warn(`[price-oracle] No wrapped native address for chainId ${chainId}`);

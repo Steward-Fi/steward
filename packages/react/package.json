@@ -1,7 +1,7 @@
 {
   "name": "@stwd/react",
-  "version": "0.9.1",
-  "description": "Embeddable React components for Steward agent wallet management",
+  "version": "0.10.0",
+  "description": "React components for Steward authentication, wallets, policies, and approvals",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -48,9 +48,10 @@
   "peerDependencies": {
     "react": ">=18.0.0",
     "react-dom": ">=18.0.0",
-    "wagmi": "^2.0.0",
+    "wagmi": "^2.0.0 || ^3.0.0",
     "viem": "^2.0.0",
     "@rainbow-me/rainbowkit": "^2.0.0",
+    "@metamask/connect-evm": "^2.1.0",
     "@tanstack/react-query": "^5.0.0",
     "@solana/wallet-adapter-react": "^0.15.0",
     "@solana/wallet-adapter-react-ui": "^0.9.0",
@@ -65,6 +66,9 @@
   },
   "peerDependenciesMeta": {
     "wagmi": {
+      "optional": true
+    },
+    "@metamask/connect-evm": {
       "optional": true
     },
     "viem": {

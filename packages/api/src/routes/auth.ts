@@ -145,6 +145,7 @@ import { verifyEip1271 } from "../services/eip1271";
 import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
 import { lockUserSession } from "../services/session-lock";
 import { testAccountOtpMatches } from "../services/test-account-credentials";
+import { getConfiguredVault } from "../services/vault-factory";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -1680,13 +1681,7 @@ export function _clearOAuthCodeStoreForTests(): void {
 // ─── Vault helper ─────────────────────────────────────────────────────────────
 
 function getVault(): Vault {
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
-  if (!masterPassword) throw new Error("STEWARD_MASTER_PASSWORD is required");
-  return new Vault({
-    masterPassword,
-    rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
-    chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
-  });
+  return getConfiguredVault();
 }
 
 // ─── Tenant resolution ────────────────────────────────────────────────────────

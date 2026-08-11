@@ -42,3 +42,8 @@ export type {
   StewardGlobalWalletProviderFactory,
 } from "./global.js";
 export { createStewardGlobalWallet, createStewardGlobalWalletConnector } from "./global.js";
+export type {
+  StewardMetaMaskConnectorOptions,
+  StewardMetaMaskDappMetadata,
+} from "./metamask.js";
+export { createStewardMetaMaskConnector } from "./metamask.js";

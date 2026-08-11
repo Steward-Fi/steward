@@ -1,0 +1,26 @@
+{
+  "payload": {
+    "schemaVersion": 1,
+    "registryId": "steward-example",
+    "updatedAt": "2026-07-30T00:00:00.000Z",
+    "deployments": {
+      "local-dev": {
+        "provider": "noop-dev",
+        "measurement": {
+          "imageDigest": "noop-dev",
+          "configHash": "noop-dev"
+        },
+        "status": "active",
+        "notes": "Local development only; production deployments must replace this with dstack-tdx measurements."
+      }
+    }
+  },
+  "signatures": [
+    {
+      "keyId": "example-docs-key-2026-07-30",
+      "algorithm": "ed25519",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA/TaYVx9NuJJzv/coEc86YKpXuNIs/PlzOzwsB8xp0iI=\n-----END PUBLIC KEY-----\n",
+      "signatureBase64": "kqwqBRpKiLo9HEC+VpFLaeVTuk5DYXY2OFPSixE+SPZdySKByeTykWkMmsoFm2MqZFh1bnRYMgJUm/2p2zpFCw=="
+    }
+  ]
+}

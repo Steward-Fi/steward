@@ -8,16 +8,30 @@ const contextSource = readFileSync(join(import.meta.dir, "..", "services", "cont
 describe("external agent JWT hardening", () => {
   it("binds external agent JWTs to tenant and platform claims", () => {
     expect(source).toContain('stringClaim(payload, "tenant_id", "tenantId")');
-    expect(source).toContain("tokenTenantId !== tenantId");
-    expect(source).toContain('return invalid(c, "invalid tenant claims")');
+    // A PRESENT tenant claim must still match the requested tenant.
+    expect(source).toContain("tokenTenantId && tokenTenantId !== tenantId");
+    expect(source).toContain('reason: "invalid tenant claims"');
     expect(source).toContain('stringClaim(payload, "platform_id", "platformId")');
-    expect(source).toContain('return invalid(c, "invalid platform claims")');
+    // A PRESENT platform claim must match the agent's registered platform.
+    expect(source).toContain(
+      "agent.platformId && tokenPlatformId && tokenPlatformId !== agent.platformId",
+    );
+    expect(source).toContain('reason: "invalid platform claims"');
+  });
+
+  it("falls back to agent->tenant registration when the trusted issuer omits the tenant claim", () => {
+    // The eliza-cloud single-tenant minter does not embed tenant_id. We must NOT
+    // reject on a missing claim (that bricked legitimate order auth); the binding
+    // is enforced by ensureAgentForTenant, which 403s a mismatched agent.
+    expect(source).not.toContain("!tokenTenantId || tokenTenantId !== tenantId");
+    expect(source).toContain("const agent = await ensureAgentForTenant(tenantId, agentId)");
+    expect(source).toContain("agent is not registered for tenant");
   });
 
   it("requires explicit trade scope and configured production JWKS for external agent order JWTs", () => {
     expect(source).toContain('const TRADE_ORDER_SCOPE = "trade:order"');
     expect(source).toContain('stringArrayClaim(payload, "scopes", "scope")');
-    expect(source).toContain("!scopes.includes(TRADE_ORDER_SCOPE)");
+    expect(source).toContain("auth.scopes.includes(TRADE_ORDER_SCOPE)");
     expect(source).toContain("Token missing required ${TRADE_ORDER_SCOPE} scope");
     expect(source).toContain(
       'process.env.NODE_ENV === "production" && !process.env.ELIZA_CLOUD_JWKS_URL',

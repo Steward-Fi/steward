@@ -16,7 +16,7 @@ import "@stwd/react/styles.css";
 import { StewardClient } from "@stwd/sdk";
 
 const client = new StewardClient({
-  baseUrl: "https://api.steward.fi",
+  baseUrl: "http://localhost:3200",
   bearerToken: agentJwt,
 });
 
@@ -131,7 +131,7 @@ export function EvmLogin() {
     <StewardProvider
       client={client}
       agentId="agent_abc"
-      auth={{ baseUrl: "https://api.steward.fi" }}
+      auth={{ baseUrl: "http://localhost:3200" }}
     >
       <EVMWalletProvider config={wagmiConfig}>
         <WalletLogin chains="evm" />
@@ -179,6 +179,52 @@ const connector = createStewardGlobalWalletConnector({
 });
 ```
 
+### MetaMask Connect (wagmi v3)
+
+Steward ships a first-class MetaMask Connect (EVM) connector path. It wraps
+wagmi v3's built-in `metaMask()` connector with Steward defaults and is
+RainbowKit-free, so it works on wagmi v3 today without waiting for RainbowKit v3.
+
+This path targets wagmi v3. `@stwd/react` accepts `wagmi@^2 || ^3` as an optional
+peer, so existing v2 + RainbowKit apps keep working untouched. The MetaMask
+Connect connector needs the wagmi-native `metaMask()` connector, which pulls in
+`@metamask/connect-evm` (also an optional peer).
+
+```bash
+bun add wagmi@3 viem @metamask/connect-evm
+```
+
+```tsx
+import { createConfig, http } from "wagmi";
+import { mainnet, base } from "wagmi/chains";
+import { createStewardMetaMaskConnector } from "@stwd/react/wallet/evm";
+
+const config = createConfig({
+  chains: [mainnet, base],
+  connectors: [
+    createStewardMetaMaskConnector({
+      dapp: {
+        name: "My Steward App",
+        url: "https://app.example.com",
+        iconUrl: "https://app.example.com/icon.png",
+      },
+    }),
+  ],
+  transports: {
+    [mainnet.id]: http(),
+    [base.id]: http(),
+  },
+});
+```
+
+The `dapp` metadata is what MetaMask Connect surfaces during the connection
+handshake. Steward defaults the name to `Steward` and, in the browser, the url
+to `location.origin`. Override either field per app. Any other MetaMask Connect
+parameters (`connectAndSign`, `connectWith`, etc) pass straight through.
+
+This connector is standalone: it drops into any wagmi v3 `createConfig` and does
+not change the existing RainbowKit-based EVM path.
+
 If you render `WalletLogin` directly, it is already the wallet UI. To enable wallet sign-in inside the broader `<StewardLogin>` modal (alongside passkey, email, OAuth), pass the `showWallets` prop on `<StewardLogin>` instead.
 
 ### Drop-in: `<StewardLoginWithWallets>`
@@ -194,7 +240,7 @@ import "@solana/wallet-adapter-react-ui/styles.css";
 
 export default function Login() {
   return (
-    <StewardProvider auth={{ baseUrl: "https://api.steward.fi" }}>
+    <StewardProvider auth={{ baseUrl: "http://localhost:3200" }}>
       <StewardLoginWithWallets
         title="sign in"
         showPasskey
@@ -250,7 +296,7 @@ export function SolanaLogin() {
     <StewardProvider
       client={client}
       agentId="agent_abc"
-      auth={{ baseUrl: "https://api.steward.fi" }}
+      auth={{ baseUrl: "http://localhost:3200" }}
     >
       <SolanaWalletProvider
         endpoint="https://api.mainnet-beta.solana.com"
@@ -266,7 +312,7 @@ export function SolanaLogin() {
 ### Combined EVM and Solana example
 
 ```tsx
-<StewardProvider client={client} agentId="agent_abc" auth={{ baseUrl: "https://api.steward.fi" }}>
+<StewardProvider client={client} agentId="agent_abc" auth={{ baseUrl: "http://localhost:3200" }}>
   <EVMWalletProvider config={wagmiConfig}>
     <SolanaWalletProvider endpoint="https://api.mainnet-beta.solana.com">
       <WalletLogin chains="both" onSuccess={(res, kind) => console.log("signed in via", kind)} />

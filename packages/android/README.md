@@ -9,7 +9,7 @@ registration.
 
 ```java
 StewardAndroidClient client = StewardAndroidClient.withBearerToken(
-    "https://api.steward.fi",
+    "http://localhost:3200",
     "user_access_token"
 );
 

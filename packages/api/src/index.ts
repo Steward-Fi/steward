@@ -16,7 +16,7 @@ import { validateJwtSecretEnv } from "@stwd/auth";
 import { closeDb, getDb, runMigrations } from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
 import { sql } from "drizzle-orm";
-import { app } from "./app";
+import { composeApp } from "./compose";
 import { initRedis, shutdownRedis } from "./middleware/redis";
 import { getAuthStoreSources, initAuthStores } from "./routes/auth";
 import {
@@ -28,6 +28,7 @@ import {
 } from "./services/context";
 import { startRetentionScheduler } from "./services/retention";
 import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
+import { configuredVaultStartupLogLine, getConfiguredVault } from "./services/vault-factory";
 import { startWebhookRetryScheduler } from "./services/webhook-retry-scheduler";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -40,6 +41,12 @@ if (!Number.isInteger(PORT) || PORT <= 0) {
   throw new Error("PORT must be a positive integer");
 }
 validateJwtSecretEnv();
+
+// Compose the deployable app: lean core + this repo's opt-in plugins (trading).
+// composeApp() is async because plugin registration may be async + the trading
+// plugin is dynamically imported so the lean core graph never statically pulls
+// in the trading stack. top-level await is supported by the Bun entry.
+const app = await composeApp();
 
 // ─── In-memory rate-limit log + shutdown guard ───────────────────────────────
 //
@@ -170,6 +177,22 @@ if (shouldUsePGLite()) {
     } else {
       console.log("[steward] Migrations already up to date.");
     }
+
+    // Plugin-owned migrations (Phase 2c): applied AFTER the core migrator so a
+    // plugin migration may reference core tables via FK. Each plugin's migrations
+    // land in its OWN namespaced bookkeeping table
+    // (drizzle.__drizzle_migrations_plugin_<id>), totally isolated from the core's
+    // drizzle.__drizzle_migrations journal. Fail-closed: a plugin migration error
+    // aborts boot (we never half-boot with a partially-migrated plugin schema).
+    const { runComposedPluginMigrations } = await import("./compose");
+    const pluginResults = await runComposedPluginMigrations();
+    if (pluginResults.length > 0) {
+      console.log(
+        `[steward] Applied plugin migrations: ${pluginResults
+          .map((r) => `${r.pluginName}\u2192${r.migrationsTable}`)
+          .join(", ")}`,
+      );
+    }
   } catch (err) {
     console.error("[steward] Migration failed — cannot start:", err);
     process.exit(1);
@@ -183,6 +206,11 @@ if (migrationsRan) {
   cancelTransactionReceiptPolling = startTransactionReceiptPollingScheduler();
   cancelWebhookRetryScheduler = startWebhookRetryScheduler();
 }
+
+// Resolve custody before accepting traffic. A configured backend that cannot
+// initialize throws here, so production never falls back to local AES.
+getConfiguredVault();
+console.log(configuredVaultStartupLogLine());
 
 // ─── Redis + auth store initialization (non-blocking) ───────────────────────
 

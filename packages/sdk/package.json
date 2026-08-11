@@ -1,7 +1,7 @@
 {
   "name": "@stwd/sdk",
-  "version": "0.10.1",
-  "description": "TypeScript SDK for Steward, agent wallet infrastructure with policy enforcement",
+  "version": "0.10.3",
+  "description": "TypeScript client for Steward governed wallet and provider capability APIs",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -13,7 +13,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "AGENT-BOOTSTRAP.md"
   ],
   "scripts": {
     "build": "tsc",

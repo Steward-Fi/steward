@@ -217,6 +217,58 @@ describe("platform tenant email config routes", () => {
     });
   });
 
+  it("patches magic-link routing without provider credentials or branding changes", async () => {
+    const dbHandle = getDb();
+    await dbHandle
+      .insert(tenantConfigs)
+      .values({
+        tenantId: TENANT_ID,
+        emailConfig: { templateId: "customer-template" },
+      })
+      .onConflictDoUpdate({
+        target: tenantConfigs.tenantId,
+        set: { emailConfig: { templateId: "customer-template" } },
+      });
+
+    const response = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+      },
+      body: JSON.stringify({
+        magicLinkBaseUrl: "https://app.customer.example/",
+        magicLinkCallbackPath: "/auth/callback/email",
+      }),
+    });
+    expect(response.status).toBe(200);
+
+    const [stored] = await dbHandle
+      .select({ emailConfig: tenantConfigs.emailConfig })
+      .from(tenantConfigs)
+      .where(eq(tenantConfigs.tenantId, TENANT_ID));
+    expect(stored?.emailConfig).toMatchObject({
+      templateId: "customer-template",
+      magicLinkBaseUrl: "https://app.customer.example/",
+      magicLinkCallbackPath: "/auth/callback/email",
+    });
+
+    for (const invalid of [
+      { magicLinkBaseUrl: "javascript:alert(1)" },
+      { magicLinkCallbackPath: "//evil.example/callback" },
+    ]) {
+      const invalidResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Steward-Platform-Key": PLATFORM_KEY,
+        },
+        body: JSON.stringify(invalid),
+      });
+      expect(invalidResponse.status).toBe(400);
+    }
+  });
+
   it("stores, returns, and clears deployer-supplied raw templates", async () => {
     const templates = {
       magicLink: {

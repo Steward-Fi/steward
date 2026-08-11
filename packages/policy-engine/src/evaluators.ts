@@ -25,6 +25,7 @@ import { evaluateReputationScaling } from "./evaluators/reputation-scaling";
 import { evaluateReputationThreshold } from "./evaluators/reputation-threshold";
 import { evaluateVenueAllowlist } from "./evaluators/venue-allowlist";
 import type { ManualApprovalSignal } from "./manual-approval";
+import { evaluateRegisteredPolicy } from "./policy-rule-registry";
 
 const MAX_UINT256_DECIMAL =
   "115792089237316195423570985008687907853269984665640564039457584007913129639935";
@@ -80,6 +81,30 @@ export interface EvaluatorContext {
     chain: string;
     curve: string;
   };
+  /**
+   * Capability-invoke context for `capability-intent` policies. Populated ONLY
+   * by the capability invoke route (W-1c); absent on ordinary signing requests,
+   * so a `capability-intent` policy is "not applicable" (passes) when this is
+   * undefined. Symmetry with `typedData`: capability policies cannot interfere
+   * with transaction signing, and transaction policies cannot interfere with
+   * capability invokes.
+   */
+  capability?: {
+    name: string;
+    args: Record<string, unknown>;
+    host: string;
+    path: string;
+    method: string;
+  };
+  /**
+   * Rolling count of capability INVOKES in the trailing hour (distinct from
+   * `recentTxCount1h`, which counts transaction signs). Populated ONLY by the
+   * capability invoke route (W-1c) alongside `capability`. When a
+   * `capability-intent` rule sets `constraints.maxCallsPerHour` but this count
+   * is absent, the rule FAILS CLOSED (deny) rather than borrowing the tx
+   * counter, so an unwired invoke path can never silently pass a rate cap.
+   */
+  capabilityInvokeCount1h?: number;
 }
 
 function parseUint256Decimal(value: unknown): bigint | null {
@@ -165,13 +190,22 @@ export async function evaluatePolicy(
       return evaluateVenueAllowlist(rule, { venue: ctx.venue });
     case "leverage-cap":
       return evaluateLeverageCap(rule, { leverage: ctx.leverage });
-    default:
+    default: {
+      // FALLTHROUGH FOR NON-CORE RULE TYPES ONLY. Every core type is handled by a
+      // `case` above; control reaches here ONLY for a rule type the core does not
+      // own. Consult the plugin policy-rule registry (Phase 2b): if a plugin
+      // registered an evaluator for this type, run it; otherwise preserve the
+      // historical "Unknown policy type" deny. Core decisions are byte-identical
+      // because no core type ever reaches this arm.
+      const registered = await evaluateRegisteredPolicy(rule, ctx);
+      if (registered) return registered;
       return {
         policyId: rule.id,
         type: rule.type,
         passed: false,
         reason: `Unknown policy type: ${rule.type}`,
       };
+    }
   }
 }
 

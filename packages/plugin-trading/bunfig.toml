@@ -1,0 +1,10 @@
+# Test configuration for @stwd/api.
+#
+# The api suite runs every test file in a single `bun test` process. Several
+# service modules (src/services/context.ts) resolve env-dependent invariants at
+# module-init time and are cached in the shared module registry. test-preload.ts
+# runs once before any test file loads to make that first evaluation
+# deterministic (PGLite runtime + full-entropy test secrets + a bootstrap DB
+# override). See test-preload.ts for the full rationale.
+[test]
+preload = ["./test-preload.ts"]

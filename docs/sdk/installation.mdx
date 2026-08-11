@@ -40,13 +40,13 @@ import { StewardClient } from "@stwd/sdk";
 
 // Tenant-level client (for management operations)
 const steward = new StewardClient({
-  baseUrl: "https://api.steward.fi",
+  baseUrl: "http://localhost:3200",
   apiKey: "stwd_your_tenant_api_key",
 });
 
 // Agent-level client (for signing operations)
 const agentClient = new StewardClient({
-  baseUrl: "https://api.steward.fi",
+  baseUrl: "http://localhost:3200",
   bearerToken: process.env.STEWARD_AGENT_TOKEN,
 });
 ```
@@ -79,7 +79,7 @@ import {
 Common environment variables used with the SDK:
 
 ```bash
-STEWARD_API_URL=https://api.steward.fi    # API base URL
+STEWARD_API_URL=http://localhost:3200    # API base URL
 STEWARD_API_KEY=stwd_your_tenant_key       # Tenant API key
 STEWARD_AGENT_TOKEN=stwd_jwt_...           # Agent JWT token
 STEWARD_AGENT_ID=my-agent                  # Agent identifier

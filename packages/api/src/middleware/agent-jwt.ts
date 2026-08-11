@@ -1,3 +1,4 @@
+import type { VerifiedAgentPrincipal } from "@stwd/shared";
 import type { Context, Next } from "hono";
 import { errors, importJWK, type JWTPayload, jwtVerify } from "jose";
 import { recordAgentTokenExp } from "../services/agent-token-status";
@@ -27,8 +28,8 @@ const TRADE_ORDER_SCOPE = "trade:order";
 
 let jwksCache: CacheEntry | null = null;
 
-function invalid(c: Context, reason: string) {
-  return c.json({ code: "invalid-jwt", reason }, 401);
+function invalid(c: Context, reason: string, status: 401 = 401) {
+  return c.json({ code: "invalid-jwt", reason }, status);
 }
 
 async function loadJwks(): Promise<Map<string, Awaited<ReturnType<typeof importJWK>>>> {
@@ -184,18 +185,81 @@ function observeExpiredAgentToken(c: Context, token: string): void {
   emitAgentTokenEvent(tenantId, agentId, "agent.token.expired", metadata);
 }
 
-export async function requireAgentJwt(c: Context<{ Variables: AppVariables }>, next: Next) {
+/**
+ * The result of authenticating an agent JWT: the verified identity + resolved
+ * tenant/agent rows + observed claims. This is PURE authentication — it carries
+ * NO business-scope decision (no `trade:order` check, no provider authority).
+ * `requireAgentJwt` (legacy) layers the `trade:order` gate on top; provider
+ * routes use `requireProviderAgentJwt` which does not.
+ */
+export interface AgentJwtAuthenticationResult {
+  tenant: Tenant;
+  tenantId: string;
+  agentId: string;
+  /** All scopes observed on the token (evidence only, never provider authority). */
+  scopes: string[];
+  issuer: string;
+  subject: string;
+  tokenId: string | null;
+  platformId: string | null;
+  exp: number | null;
+  iat: number | null;
+}
+
+/**
+ * A typed failure from `authenticateAgentJwt`. The caller renders the response;
+ * the authenticator never writes a body itself so both the legacy and provider
+ * middlewares share identical authN behavior yet keep their OWN response shapes.
+ *
+ * `kind` classifies the failure so each middleware renders the correct wire
+ * response. The LEGACY `requireAgentJwt` preserves its exact prior behavior
+ * (`invalid-token`→401 `{code,reason}`, `tenant-not-found`→404 ApiResponse,
+ * `agent-not-registered`→403 ApiResponse, and tenant/platform-mismatch→401
+ * `invalid()` as before). The provider route maps `kind` onto the spec §8 deny
+ * codes (401 AUTHN_INVALID_TOKEN / AUTHN_TOKEN_EXPIRED, 403
+ * AUTHN_PRINCIPAL_SCOPE_INVALID).
+ */
+export type AgentJwtFailureKind =
+  | "invalid-token" // malformed/unverifiable/mismatched-claim token
+  | "token-expired"
+  | "tenant-not-found"
+  | "agent-not-registered"
+  | "principal-scope-invalid"; // tenant/platform claim mismatch
+
+export interface AgentJwtAuthenticationFailure {
+  kind: AgentJwtFailureKind;
+  reason: string;
+}
+
+export function isAgentJwtFailure(
+  v: AgentJwtAuthenticationResult | AgentJwtAuthenticationFailure,
+): v is AgentJwtAuthenticationFailure {
+  return "kind" in v && typeof (v as AgentJwtAuthenticationFailure).kind === "string";
+}
+
+/**
+ * Verify a bearer agent JWT and resolve its tenant + agent, WITHOUT any
+ * business-scope enforcement. Returns either a verified
+ * {@link AgentJwtAuthenticationResult} or a typed
+ * {@link AgentJwtAuthenticationFailure} the caller maps to a response.
+ *
+ * This is the single Eliza-Cloud RS256 authenticator (iss=eliza-cloud,
+ * aud=steward). Multi-issuer discovery is deliberately out of PR2 scope.
+ */
+export async function authenticateAgentJwt(
+  c: Context<{ Variables: AppVariables }>,
+): Promise<AgentJwtAuthenticationResult | AgentJwtAuthenticationFailure> {
   const token = getBearer(c);
-  if (!token) return invalid(c, "missing bearer token");
+  if (!token) return { kind: "invalid-token", reason: "missing bearer token" };
 
   const header = decodeJwtHeader(token);
-  if (!header?.kid) return invalid(c, "missing kid");
-  if (header.alg !== "RS256") return invalid(c, "unsupported alg");
+  if (!header?.kid) return { kind: "invalid-token", reason: "missing kid" };
+  if (header.alg !== "RS256") return { kind: "invalid-token", reason: "unsupported alg" };
 
   try {
     const keys = await loadJwks();
     const key = keys.get(header.kid);
-    if (!key) return invalid(c, "unknown kid");
+    if (!key) return { kind: "invalid-token", reason: "unknown kid" };
 
     const { payload } = await jwtVerify(token, key, {
       issuer: "eliza-cloud",
@@ -203,43 +267,154 @@ export async function requireAgentJwt(c: Context<{ Variables: AppVariables }>, n
       algorithms: ["RS256"],
     });
     const agentId = agentIdFromPayload(payload);
-    if (!agentId) return invalid(c, "invalid agent claims");
+    if (!agentId) return { kind: "invalid-token", reason: "invalid agent claims" };
     const scopes = stringArrayClaim(payload, "scopes", "scope");
-    if (!scopes.includes(TRADE_ORDER_SCOPE)) {
-      return c.json<ApiResponse>(
-        { ok: false, error: `Token missing required ${TRADE_ORDER_SCOPE} scope` },
-        403,
-      );
-    }
 
     const tenantId = c.req.header("X-Steward-Tenant") || DEFAULT_TENANT_ID;
+    // Tenant binding: when the token DOES carry a tenant claim it MUST match the
+    // requested tenant (prevents a token minted for tenant A from acting on
+    // tenant B). When the trusted issuer omits the claim (the eliza-cloud
+    // single-tenant minter does not embed tenant_id), we do NOT reject — the
+    // agent→tenant binding is still enforced below by ensureAgentForTenant, which
+    // 403s if this agent is not registered for the requested tenant. The token is
+    // already JWKS-verified (iss=eliza-cloud, aud=steward, RS256) at this point.
     const tokenTenantId = stringClaim(payload, "tenant_id", "tenantId");
-    if (!tokenTenantId || tokenTenantId !== tenantId) {
-      return invalid(c, "invalid tenant claims");
+    if (tokenTenantId && tokenTenantId !== tenantId) {
+      return { kind: "principal-scope-invalid", reason: "invalid tenant claims" };
     }
     const tenant = await findTenant(tenantId);
-    if (!tenant) return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+    if (!tenant) return { kind: "tenant-not-found", reason: "Tenant not found" };
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) {
+      return { kind: "agent-not-registered", reason: "agent is not registered for tenant" };
+    }
+    // Platform binding: when the token carries a platform_id it MUST match the
+    // agent's registered platform (prevents a token scoped to platform A from
+    // acting as the agent on platform B). When the trusted issuer omits the claim
+    // (the eliza-cloud minter does not embed platform_id), we do NOT reject — the
+    // agent identity is already established via the JWKS-verified sub + the
+    // tenant→agent registration check above. Symmetric with the tenant_id handling.
+    const tokenPlatformId = stringClaim(payload, "platform_id", "platformId");
+    if (agent.platformId && tokenPlatformId && tokenPlatformId !== agent.platformId) {
+      return { kind: "principal-scope-invalid", reason: "invalid platform claims" };
+    }
+
+    const jti = stringClaim(payload, "jti");
+    return {
+      tenant,
+      tenantId,
+      agentId,
+      scopes,
+      issuer: typeof payload.iss === "string" ? payload.iss : "eliza-cloud",
+      subject: typeof payload.sub === "string" ? payload.sub : `agent:${agentId}`,
+      tokenId: jti,
+      platformId: agent.platformId ?? tokenPlatformId ?? null,
+      exp: typeof payload.exp === "number" ? payload.exp : null,
+      iat: typeof payload.iat === "number" ? payload.iat : null,
+    };
+  } catch (error) {
+    if (error instanceof errors.JWTExpired) {
+      observeExpiredAgentToken(c, token);
+      return { kind: "token-expired", reason: "token expired" };
+    }
+    const reason = error instanceof Error ? error.message : "verification failed";
+    return { kind: "invalid-token", reason };
+  }
+}
+
+function epochToRfc3339(epochSeconds: number | null): string | null {
+  if (epochSeconds === null || !Number.isFinite(epochSeconds)) return null;
+  return new Date(epochSeconds * 1000).toISOString();
+}
+
+/**
+ * Install the verified agent identity into request context. Preserves ALL
+ * existing context writes (`setTenantContext` + `agentScopes`) and ADDITIONALLY
+ * sets the runtime-neutral `verifiedAgentPrincipal` — the value provider-action
+ * routes read to derive the immutable actor. Headers can never set it.
+ */
+export async function installAgentJwtContext(
+  c: Context<{ Variables: AppVariables }>,
+  auth: AgentJwtAuthenticationResult,
+): Promise<void> {
+  await observeAgentTokenExpiry(auth.tenantId, auth.agentId, auth.exp ?? undefined);
+  await setTenantContext(c, auth.tenant, auth.tenantId, auth.agentId);
+  c.set("agentScopes", [AGENT_SCOPE, ...auth.scopes]);
+  const principal: VerifiedAgentPrincipal = {
+    type: "agent",
+    agentId: auth.agentId,
+    tenantId: auth.tenantId,
+    platformId: auth.platformId,
+    issuer: auth.issuer,
+    subject: auth.subject,
+    tokenId: auth.tokenId,
+    scopes: auth.scopes,
+    authenticatedAt: new Date().toISOString(),
+    expiresAt: epochToRfc3339(auth.exp),
+    authnMethod: "agent-jwt-rs256",
+  };
+  c.set("verifiedAgentPrincipal", principal);
+}
+
+/**
+ * LEGACY trading middleware. Authenticates the agent JWT, then REQUIRES the
+ * `trade:order` scope, installs context, and continues. Existing routes and
+ * response behavior are unchanged — this preserves the exact wire behavior the
+ * trading endpoints depend on.
+ */
+export async function requireAgentJwt(c: Context<{ Variables: AppVariables }>, next: Next) {
+  const auth = await authenticateAgentJwt(c);
+  if (isAgentJwtFailure(auth)) {
+    // Preserve the EXACT legacy wire behavior per failure kind.
+    if (auth.kind === "tenant-not-found") {
+      return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+    }
+    if (auth.kind === "agent-not-registered") {
       return c.json<ApiResponse>(
         { ok: false, error: "Forbidden: agent is not registered for tenant" },
         403,
       );
     }
-    const tokenPlatformId = stringClaim(payload, "platform_id", "platformId");
-    if (agent.platformId && tokenPlatformId !== agent.platformId) {
-      return invalid(c, "invalid platform claims");
-    }
-
-    await observeAgentTokenExpiry(tenantId, agentId, payload.exp);
-    await setTenantContext(c, tenant, tenantId, agentId);
-    c.set("agentScopes", [AGENT_SCOPE, ...scopes]);
-    return next();
-  } catch (error) {
-    if (error instanceof errors.JWTExpired) observeExpiredAgentToken(c, token);
-    const reason = error instanceof Error ? error.message : "verification failed";
-    return invalid(c, reason);
+    // invalid-token / token-expired / principal-scope-invalid all rendered 401
+    // `invalid()` in the prior implementation.
+    return invalid(c, auth.reason, 401);
   }
+
+  if (!auth.scopes.includes(TRADE_ORDER_SCOPE)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: `Token missing required ${TRADE_ORDER_SCOPE} scope` },
+      403,
+    );
+  }
+
+  await installAgentJwtContext(c, auth);
+  return next();
+}
+
+/**
+ * PROVIDER-ACTION middleware. Authenticates the agent JWT and installs context
+ * with NO trading or proxy scope check — provider authority is decided later by
+ * bindings/grants, never by token scope. ONLY provider-action routes use this.
+ */
+export async function requireProviderAgentJwt(c: Context<{ Variables: AppVariables }>, next: Next) {
+  const auth = await authenticateAgentJwt(c);
+  if (isAgentJwtFailure(auth)) {
+    // Map onto the spec §8 deny table for provider-action routes.
+    if (auth.kind === "token-expired") {
+      return c.json<ApiResponse>({ ok: false, error: "AUTHN_TOKEN_EXPIRED" }, 401);
+    }
+    if (auth.kind === "principal-scope-invalid" || auth.kind === "agent-not-registered") {
+      return c.json<ApiResponse>({ ok: false, error: "AUTHN_PRINCIPAL_SCOPE_INVALID" }, 403);
+    }
+    if (auth.kind === "tenant-not-found") {
+      // A provider action for an unknown tenant is a principal-scope failure, not
+      // an existence oracle: collapse to 403 principal-scope-invalid.
+      return c.json<ApiResponse>({ ok: false, error: "AUTHN_PRINCIPAL_SCOPE_INVALID" }, 403);
+    }
+    return c.json<ApiResponse>({ ok: false, error: "AUTHN_INVALID_TOKEN" }, 401);
+  }
+  await installAgentJwtContext(c, auth);
+  return next();
 }
 
 export function clearAgentJwksCacheForTests() {

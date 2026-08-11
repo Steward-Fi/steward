@@ -7,7 +7,7 @@
 import { hashSha256Hex, importP256PublicKey, revocationStore } from "@stwd/auth";
 import { agentPolicies, toPersistedPolicyRule } from "@stwd/db";
 import { getSpend, getSpendByHost, invalidateCache, type SpendPeriod } from "@stwd/redis";
-import { and, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { isRedisAvailable } from "../middleware/redis";
 import { writeAuditEvent } from "../services/audit";
@@ -42,6 +42,7 @@ import {
   toPolicyRule,
   transactions,
   vault,
+  vaultSigningFreezes,
 } from "../services/context";
 import {
   publicGasSponsorshipState,
@@ -50,6 +51,7 @@ import {
 import { getPolicyRulesValidationError } from "../services/policy-validation";
 import { createSignerCredentialHash } from "../services/signer-credentials";
 import { redactWalletMetadataSecrets } from "../services/wallet-metadata";
+import { dispatchWebhook } from "../services/webhook-dispatch";
 
 export const agentRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -109,9 +111,10 @@ type PortfolioAsset = {
 type AgentSignerRow = typeof agentSigners.$inferSelect;
 type AgentKeyQuorumRow = typeof agentKeyQuorums.$inferSelect;
 type PolicyRow = typeof policies.$inferSelect;
-type AgentWalletChainFamily = "evm" | "solana" | "bitcoin";
+type AgentWalletChainFamily = "evm" | "solana" | "bitcoin" | "monero";
 type BitcoinNetwork = "mainnet" | "testnet";
 type BitcoinAddressType = "p2wpkh" | "p2tr";
+type MoneroNetwork = "mainnet" | "stagenet";
 
 const USD_SCALE_DECIMALS = 18;
 
@@ -1436,6 +1439,7 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
     purpose?: string;
     bitcoinNetwork?: BitcoinNetwork;
     bitcoinAddressType?: BitcoinAddressType;
+    moneroNetwork?: MoneroNetwork;
     account?: number;
     change?: 0 | 1;
     index?: number;
@@ -1444,19 +1448,31 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
   if (!body) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   }
-  if (body.chainType !== "evm" && body.chainType !== "solana" && body.chainType !== "bitcoin") {
+  if (
+    body.chainType !== "evm" &&
+    body.chainType !== "solana" &&
+    body.chainType !== "bitcoin" &&
+    body.chainType !== "monero"
+  ) {
     return c.json<ApiResponse>(
-      { ok: false, error: 'chainType must be "evm", "solana", or "bitcoin"' },
+      { ok: false, error: 'chainType must be "evm", "solana", "bitcoin", or "monero"' },
       400,
     );
   }
   const scope = body.scope ?? body.venue;
-  if (body.chainType !== "bitcoin" && !isNonEmptyString(scope)) {
+  // Bitcoin and Monero wallet scopes are auto-derived from their options when omitted.
+  if (body.chainType !== "bitcoin" && body.chainType !== "monero" && !isNonEmptyString(scope)) {
     return c.json<ApiResponse>({ ok: false, error: "venue or scope is required" }, 400);
   }
   if (body.bitcoinNetwork !== undefined && !["mainnet", "testnet"].includes(body.bitcoinNetwork)) {
     return c.json<ApiResponse>(
       { ok: false, error: 'bitcoinNetwork must be "mainnet" or "testnet"' },
+      400,
+    );
+  }
+  if (body.moneroNetwork !== undefined && !["mainnet", "stagenet"].includes(body.moneroNetwork)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: 'moneroNetwork must be "mainnet" or "stagenet"' },
       400,
     );
   }
@@ -1482,6 +1498,7 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
         purpose: body.purpose ?? null,
         bitcoinNetwork: body.bitcoinNetwork ?? null,
         bitcoinAddressType: body.bitcoinAddressType ?? null,
+        moneroNetwork: body.moneroNetwork ?? null,
       },
     });
     const wallet = await vault.createWallet({
@@ -1498,6 +1515,13 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
               account: body.account,
               change: body.change,
               index: body.index,
+            }
+          : undefined,
+      monero:
+        body.chainType === "monero"
+          ? {
+              network: body.moneroNetwork,
+              account: body.account,
             }
           : undefined,
     });
@@ -2719,6 +2743,181 @@ agentRoutes.delete("/:agentId/signers/:signerId", async (c) => {
   }
 
   return c.json<ApiResponse>({ ok: true, data: toAgentSignerResponse(row) });
+});
+
+// ─── Agent signing freeze (kill-switch) ──────────────────────────────────────
+
+function freezeActor(c: Parameters<typeof requireTenantLevel>[0]): {
+  createdByType: string;
+  createdById: string;
+} {
+  const authType = c.get("authType");
+  if (authType === "api-key") {
+    return { createdByType: "api-key", createdById: c.get("tenantId") };
+  }
+  return {
+    createdByType: "user",
+    createdById: c.get("userId") ?? authType ?? c.get("tenantId"),
+  };
+}
+
+function normalizeFreezeReason(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw new Error("reason must be a string");
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.length > 1024) throw new Error("reason cannot exceed 1024 characters");
+  return trimmed;
+}
+
+/**
+ * POST /:agentId/freeze
+ * Atomic, fail-closed kill-switch: halts ALL signing for this agent's wallets at
+ * the vault chokepoint (checked before key decryption). Owner/admin + recent MFA.
+ */
+agentRoutes.post("/:agentId/freeze", async (c) => {
+  if (!requireTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Freezing an agent requires owner or admin session" },
+      403,
+    );
+  }
+  const mfaResponse = requireRecentAdminMfa(c, "Agent freeze");
+  if (mfaResponse) return mfaResponse;
+
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+
+  let reason: string | null;
+  try {
+    const body = await safeJsonParse<{ reason?: unknown }>(c);
+    reason = normalizeFreezeReason(body?.reason);
+  } catch (error) {
+    return c.json<ApiResponse>(
+      { ok: false, error: error instanceof Error ? error.message : "Invalid freeze request" },
+      400,
+    );
+  }
+
+  // Idempotent: if an active agent freeze already exists, return it unchanged
+  // rather than violating the partial unique index.
+  const [existing] = await db
+    .select({ id: vaultSigningFreezes.id })
+    .from(vaultSigningFreezes)
+    .where(
+      and(
+        eq(vaultSigningFreezes.tenantId, tenantId),
+        eq(vaultSigningFreezes.scopeType, "agent"),
+        eq(vaultSigningFreezes.agentId, agentId),
+        isNull(vaultSigningFreezes.liftedAt),
+      ),
+    )
+    .limit(1);
+
+  if (existing) {
+    return c.json<ApiResponse>({
+      ok: true,
+      data: { agentId, scopeType: "agent", signingState: "frozen", freezeId: existing.id },
+    });
+  }
+
+  const actor = freezeActor(c);
+  const [row] = await db
+    .insert(vaultSigningFreezes)
+    .values({
+      tenantId,
+      scopeType: "agent",
+      agentId,
+      reason,
+      createdByType: actor.createdByType,
+      createdById: actor.createdById,
+    })
+    .returning({ id: vaultSigningFreezes.id });
+
+  await writeAgentAudit(c, {
+    tenantId,
+    action: "agent.freeze",
+    resourceType: "agent",
+    resourceId: agentId,
+    metadata: { freezeId: row.id, scopeType: "agent", reason },
+  });
+
+  dispatchWebhook(tenantId, agentId, "wallet.frozen", {
+    agent_id: agentId,
+    wallet_id: agentId,
+    scope_type: "agent",
+    freeze_id: row.id,
+    reason,
+  });
+
+  return c.json<ApiResponse>({
+    ok: true,
+    data: { agentId, scopeType: "agent", signingState: "frozen", freezeId: row.id },
+  });
+});
+
+/**
+ * POST /:agentId/unfreeze
+ * Lifts the active agent-scoped signing freeze, restoring signing. Owner/admin +
+ * recent MFA.
+ */
+agentRoutes.post("/:agentId/unfreeze", async (c) => {
+  if (!requireTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Unfreezing an agent requires owner or admin session" },
+      403,
+    );
+  }
+  const mfaResponse = requireRecentAdminMfa(c, "Agent unfreeze");
+  if (mfaResponse) return mfaResponse;
+
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+
+  const actor = freezeActor(c);
+  const lifted = await db
+    .update(vaultSigningFreezes)
+    .set({ liftedAt: sql`now()`, liftedByType: actor.createdByType, liftedById: actor.createdById })
+    .where(
+      and(
+        eq(vaultSigningFreezes.tenantId, tenantId),
+        eq(vaultSigningFreezes.scopeType, "agent"),
+        eq(vaultSigningFreezes.agentId, agentId),
+        isNull(vaultSigningFreezes.liftedAt),
+      ),
+    )
+    .returning({ id: vaultSigningFreezes.id });
+
+  if (lifted.length === 0) {
+    return c.json<ApiResponse>({
+      ok: true,
+      data: { agentId, scopeType: "agent", signingState: "active", freezeId: null },
+    });
+  }
+
+  await writeAgentAudit(c, {
+    tenantId,
+    action: "agent.unfreeze",
+    resourceType: "agent",
+    resourceId: agentId,
+    metadata: { freezeId: lifted[0].id, scopeType: "agent" },
+  });
+
+  dispatchWebhook(tenantId, agentId, "wallet.unfrozen", {
+    agent_id: agentId,
+    wallet_id: agentId,
+    scope_type: "agent",
+    freeze_id: lifted[0].id,
+  });
+
+  return c.json<ApiResponse>({
+    ok: true,
+    data: { agentId, scopeType: "agent", signingState: "active", freezeId: lifted[0].id },
+  });
 });
 
 // ─── Agent key quorums ───────────────────────────────────────────────────────

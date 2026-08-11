@@ -44,15 +44,24 @@ export type RawSigningChain =
   | "sui"
   | "aptos"
   | "movement"
-  | "starknet";
+  | "starknet"
+  | "monero";
 
 export interface RawSigningChainSupport {
   chain: RawSigningChain;
   curve: SigningCurve;
   supported: boolean;
   unsupportedReason?: string;
-  /** Honest scope: raw digest only, not transaction building/broadcast. */
-  capability: "raw-digest";
+  /**
+   * Honest scope of vault support:
+   *  - "raw-digest": the vault signs a caller-provided digest on the chain's
+   *    curve; it does NOT build or broadcast transactions for the chain.
+   *  - "transfer-intent": the vault builds, signs, and broadcasts native
+   *    transfers via a dedicated chain route, but the generic raw-digest
+   *    surface is NOT available (the chain's signature scheme is not plain
+   *    ECDSA/EdDSA over a digest — e.g. Monero's CLSAG ring signatures).
+   */
+  capability: "raw-digest" | "transfer-intent";
 }
 
 /** Canonical reason the stark curve fails closed. Mirrors the vault's guard. */
@@ -171,6 +180,18 @@ export const RAW_SIGNING_CHAIN_SUPPORT: Readonly<Record<RawSigningChain, RawSign
       supported: false,
       unsupportedReason: STARK_UNSUPPORTED_REASON,
       capability: "raw-digest",
+    },
+    // Monero uses ed25519 keys but NOT RFC-8032 EdDSA: transactions are signed
+    // with CLSAG ring signatures over CryptoNote key derivation. A raw ed25519
+    // digest signature is meaningless (and dangerous to pretend) for Monero, so
+    // the capability is "transfer-intent": the vault builds + signs + relays
+    // native transfers through the dedicated /vault/:agentId/monero routes and
+    // the raw-digest surface must reject chain "monero".
+    monero: {
+      chain: "monero",
+      curve: "ed25519",
+      supported: true,
+      capability: "transfer-intent",
     },
   });
 

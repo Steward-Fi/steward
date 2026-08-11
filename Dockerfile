@@ -45,11 +45,18 @@ RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web
 COPY packages/adapters/package.json          packages/adapters/package.json
 COPY packages/agent-trader/package.json      packages/agent-trader/package.json
 COPY packages/api/package.json               packages/api/package.json
+COPY packages/attestation/package.json       packages/attestation/package.json
 COPY packages/auth/package.json              packages/auth/package.json
 COPY packages/db/package.json                packages/db/package.json
 COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
 COPY packages/erc8004/package.json           packages/erc8004/package.json
 COPY packages/erc8183/package.json           packages/erc8183/package.json
+COPY packages/plugin-capabilities/package.json packages/plugin-capabilities/package.json
+COPY packages/plugin-trading/package.json     packages/plugin-trading/package.json
+COPY packages/plugin-wxmr/package.json        packages/plugin-wxmr/package.json
+COPY packages/provider-github/package.json    packages/provider-github/package.json
+COPY packages/provider-x/package.json         packages/provider-x/package.json
+COPY packages/proxy-client/package.json       packages/proxy-client/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
 COPY packages/proxy/package.json             packages/proxy/package.json
 COPY packages/react/package.json             packages/react/package.json
@@ -60,6 +67,7 @@ COPY packages/sdk/package.json               packages/sdk/package.json
 COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
 COPY packages/vault/package.json             packages/vault/package.json
 COPY packages/venue-hyperliquid/package.json packages/venue-hyperliquid/package.json
+COPY packages/venue-polymarket/package.json  packages/venue-polymarket/package.json
 COPY packages/webhooks/package.json          packages/webhooks/package.json
 COPY packages/examples/                      packages/examples/
 
@@ -75,11 +83,18 @@ COPY package.json bun.lock turbo.json tsconfig.json ./
 COPY packages/adapters/package.json          packages/adapters/package.json
 COPY packages/agent-trader/package.json      packages/agent-trader/package.json
 COPY packages/api/package.json               packages/api/package.json
+COPY packages/attestation/package.json       packages/attestation/package.json
 COPY packages/auth/package.json              packages/auth/package.json
 COPY packages/db/package.json                packages/db/package.json
 COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
 COPY packages/erc8004/package.json           packages/erc8004/package.json
 COPY packages/erc8183/package.json           packages/erc8183/package.json
+COPY packages/plugin-capabilities/package.json packages/plugin-capabilities/package.json
+COPY packages/plugin-trading/package.json     packages/plugin-trading/package.json
+COPY packages/plugin-wxmr/package.json        packages/plugin-wxmr/package.json
+COPY packages/provider-github/package.json    packages/provider-github/package.json
+COPY packages/provider-x/package.json         packages/provider-x/package.json
+COPY packages/proxy-client/package.json       packages/proxy-client/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
 COPY packages/proxy/package.json             packages/proxy/package.json
 COPY packages/react/package.json             packages/react/package.json
@@ -90,6 +105,7 @@ COPY packages/sdk/package.json               packages/sdk/package.json
 COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
 COPY packages/vault/package.json             packages/vault/package.json
 COPY packages/venue-hyperliquid/package.json packages/venue-hyperliquid/package.json
+COPY packages/venue-polymarket/package.json  packages/venue-polymarket/package.json
 COPY packages/webhooks/package.json          packages/webhooks/package.json
 COPY packages/examples/                      packages/examples/
 
@@ -102,8 +118,15 @@ RUN BUN_FROZEN_LOCKFILE=0 bun install --no-frozen-lockfile --ignore-scripts
 # Copy full source for all packages needed by api + proxy
 COPY packages/adapters    packages/adapters
 COPY packages/api         packages/api
+COPY packages/attestation packages/attestation
 COPY packages/auth        packages/auth
 COPY packages/db          packages/db
+COPY packages/plugin-capabilities packages/plugin-capabilities
+COPY packages/plugin-trading packages/plugin-trading
+COPY packages/plugin-wxmr packages/plugin-wxmr
+COPY packages/provider-github packages/provider-github
+COPY packages/provider-x packages/provider-x
+COPY packages/proxy-client packages/proxy-client
 COPY packages/policy-engine packages/policy-engine
 COPY packages/proxy       packages/proxy
 COPY packages/redis       packages/redis
@@ -112,11 +135,13 @@ COPY packages/sdk         packages/sdk
 COPY packages/trade-sessions    packages/trade-sessions
 COPY packages/vault       packages/vault
 COPY packages/venue-hyperliquid packages/venue-hyperliquid
+COPY packages/venue-polymarket packages/venue-polymarket
 COPY packages/webhooks    packages/webhooks
 
 # Create workspace symlinks (Bun 1.3 doesn't auto-link in Docker)
 RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/adapters      node_modules/@stwd/adapters && \
+    ln -sf ../../../packages/attestation   node_modules/@stwd/attestation && \
     ln -sf ../../../packages/shared        node_modules/@stwd/shared && \
     ln -sf ../../../packages/sdk           node_modules/@stwd/sdk && \
     ln -sf ../../../packages/auth          node_modules/@stwd/auth && \
@@ -126,8 +151,15 @@ RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/proxy         node_modules/@stwd/proxy && \
     ln -sf ../../../packages/webhooks      node_modules/@stwd/webhooks && \
     ln -sf ../../../packages/policy-engine     node_modules/@stwd/policy-engine && \
+    ln -sf ../../../packages/plugin-capabilities node_modules/@stwd/plugin-capabilities && \
+    ln -sf ../../../packages/plugin-trading    node_modules/@stwd/plugin-trading && \
+    ln -sf ../../../packages/plugin-wxmr       node_modules/@stwd/plugin-wxmr && \
+    ln -sf ../../../packages/provider-github   node_modules/@stwd/provider-github && \
+    ln -sf ../../../packages/provider-x         node_modules/@stwd/provider-x && \
+    ln -sf ../../../packages/proxy-client      node_modules/@stwd/proxy-client && \
     ln -sf ../../../packages/trade-sessions    node_modules/@stwd/trade-sessions && \
-    ln -sf ../../../packages/venue-hyperliquid node_modules/@stwd/venue-hyperliquid
+    ln -sf ../../../packages/venue-hyperliquid node_modules/@stwd/venue-hyperliquid && \
+    ln -sf ../../../packages/venue-polymarket  node_modules/@stwd/venue-polymarket
 
 # Build api and proxy (and their deps) via turborepo
 RUN bunx turbo run build --filter=@stwd/api --filter=@stwd/proxy
@@ -149,11 +181,18 @@ RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web
 COPY packages/adapters/package.json          packages/adapters/package.json
 COPY packages/agent-trader/package.json      packages/agent-trader/package.json
 COPY packages/api/package.json               packages/api/package.json
+COPY packages/attestation/package.json       packages/attestation/package.json
 COPY packages/auth/package.json              packages/auth/package.json
 COPY packages/db/package.json                packages/db/package.json
 COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
 COPY packages/erc8004/package.json           packages/erc8004/package.json
 COPY packages/erc8183/package.json           packages/erc8183/package.json
+COPY packages/plugin-capabilities/package.json packages/plugin-capabilities/package.json
+COPY packages/plugin-trading/package.json     packages/plugin-trading/package.json
+COPY packages/plugin-wxmr/package.json        packages/plugin-wxmr/package.json
+COPY packages/provider-github/package.json    packages/provider-github/package.json
+COPY packages/provider-x/package.json         packages/provider-x/package.json
+COPY packages/proxy-client/package.json       packages/proxy-client/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
 COPY packages/proxy/package.json             packages/proxy/package.json
 COPY packages/react/package.json             packages/react/package.json
@@ -164,6 +203,7 @@ COPY packages/sdk/package.json               packages/sdk/package.json
 COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
 COPY packages/vault/package.json             packages/vault/package.json
 COPY packages/venue-hyperliquid/package.json packages/venue-hyperliquid/package.json
+COPY packages/venue-polymarket/package.json  packages/venue-polymarket/package.json
 COPY packages/webhooks/package.json          packages/webhooks/package.json
 COPY packages/examples/                      packages/examples/
 
@@ -173,8 +213,15 @@ RUN BUN_FROZEN_LOCKFILE=0 bun install --production --no-frozen-lockfile --ignore
 # Copy compiled output from build stage
 COPY --from=build /app/packages/adapters    packages/adapters
 COPY --from=build /app/packages/api         packages/api
+COPY --from=build /app/packages/attestation packages/attestation
 COPY --from=build /app/packages/auth        packages/auth
 COPY --from=build /app/packages/db          packages/db
+COPY --from=build /app/packages/plugin-capabilities packages/plugin-capabilities
+COPY --from=build /app/packages/plugin-trading packages/plugin-trading
+COPY --from=build /app/packages/plugin-wxmr packages/plugin-wxmr
+COPY --from=build /app/packages/provider-github packages/provider-github
+COPY --from=build /app/packages/provider-x packages/provider-x
+COPY --from=build /app/packages/proxy-client packages/proxy-client
 COPY --from=build /app/packages/policy-engine packages/policy-engine
 COPY --from=build /app/packages/proxy       packages/proxy
 COPY --from=build /app/packages/redis       packages/redis
@@ -183,11 +230,13 @@ COPY --from=build /app/packages/sdk         packages/sdk
 COPY --from=build /app/packages/trade-sessions    packages/trade-sessions
 COPY --from=build /app/packages/vault       packages/vault
 COPY --from=build /app/packages/venue-hyperliquid packages/venue-hyperliquid
+COPY --from=build /app/packages/venue-polymarket packages/venue-polymarket
 COPY --from=build /app/packages/webhooks    packages/webhooks
 
 # Create workspace symlinks manually — bun 1.3 doesn't auto-link workspace packages
 RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/adapters      node_modules/@stwd/adapters && \
+    ln -sf ../../../packages/attestation   node_modules/@stwd/attestation && \
     ln -sf ../../../packages/shared        node_modules/@stwd/shared && \
     ln -sf ../../../packages/sdk           node_modules/@stwd/sdk && \
     ln -sf ../../../packages/auth          node_modules/@stwd/auth && \
@@ -198,9 +247,26 @@ RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/proxy         node_modules/@stwd/proxy && \
     ln -sf ../../../packages/webhooks      node_modules/@stwd/webhooks && \
     ln -sf ../../../packages/policy-engine node_modules/@stwd/policy-engine && \
+    ln -sf ../../../packages/plugin-capabilities node_modules/@stwd/plugin-capabilities && \
+    ln -sf ../../../packages/plugin-trading    node_modules/@stwd/plugin-trading && \
+    ln -sf ../../../packages/plugin-wxmr       node_modules/@stwd/plugin-wxmr && \
+    ln -sf ../../../packages/provider-github   node_modules/@stwd/provider-github && \
+    ln -sf ../../../packages/provider-x         node_modules/@stwd/provider-x && \
+    ln -sf ../../../packages/proxy-client      node_modules/@stwd/proxy-client && \
     ln -sf ../../../packages/trade-sessions    node_modules/@stwd/trade-sessions && \
     ln -sf ../../../packages/venue-hyperliquid node_modules/@stwd/venue-hyperliquid && \
+    ln -sf ../../../packages/venue-polymarket  node_modules/@stwd/venue-polymarket && \
     ln -sf ../../../packages/eliza-plugin  node_modules/@stwd/eliza-plugin 2>/dev/null; true
+
+# Re-run the production install AFTER copying the built packages. The
+# `COPY --from=build /app/packages/*` lines above overwrite each package dir
+# (including its per-package node_modules) with the BUILD stage's version, whose
+# third-party-dep symlinks (e.g. packages/api/node_modules/drizzle-orm) point at the
+# build stage's `.bun` store paths that don't exist here — leaving DANGLING
+# symlinks (ENOENT reading drizzle-orm at boot). Re-installing rebuilds the
+# per-package node_modules symlinks against THIS stage's `.bun` store, so runtime
+# resolution is correct + deterministic regardless of resolution drift.
+RUN BUN_FROZEN_LOCKFILE=0 bun install --production --no-frozen-lockfile --ignore-scripts
 
 # ── Non-root user ─────────────────────────────────────────────────────────────
 # bun image already has a 'bun' user (uid 1000); use it.

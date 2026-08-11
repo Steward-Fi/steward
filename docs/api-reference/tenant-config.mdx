@@ -21,7 +21,7 @@ GET /tenants/:id/config
 ```
 
 ```bash
-curl https://api.steward.fi/tenants/my-platform/config \
+curl http://localhost:3200/tenants/my-platform/config \
   -H "X-Steward-Key: your-tenant-key"
 ```
 
@@ -71,7 +71,7 @@ curl https://api.steward.fi/tenants/my-platform/config \
 
 If no config has been saved, returns a default empty config (all features enabled, no policy restrictions).
 
-Built-in defaults are available for: `milady-cloud`, `milady-desktop`, `eliza-cloud`.
+Built-in defaults ship for a small set of known tenant ids. If your tenant id matches one, its preset config is used as the fallback; otherwise the default empty config applies.
 
 ---
 
@@ -134,7 +134,7 @@ GET /auth/oauth/google/authorize?tenant_id=my-platform&client_id=web-prod&redire
 ```
 
 ```bash
-curl -X POST https://api.steward.fi/auth/device/code \
+curl -X POST http://localhost:3200/auth/device/code \
   -H "Content-Type: application/json" \
   -H "X-Steward-Native-Bundle-Id: com.example.app" \
   -d '{
@@ -142,7 +142,7 @@ curl -X POST https://api.steward.fi/auth/device/code \
     "client_id": "ios-prod"
   }'
 
-curl -X POST https://api.steward.fi/auth/device/token \
+curl -X POST http://localhost:3200/auth/device/token \
   -H "Content-Type: application/json" \
   -H "X-Steward-Native-Bundle-Id: com.example.app" \
   -d '{
@@ -168,7 +168,7 @@ App clients can also have backend-only app secrets for Privy-style REST API auth
 Use Basic Auth with the app ID as the username and the app secret as the password, plus `X-Steward-App-Id`:
 
 ```bash
-curl https://api.steward.fi/agents \
+curl http://localhost:3200/agents \
   -H "X-Steward-App-Id: my-platform/web-prod" \
   -H "Authorization: Basic $(printf 'my-platform/web-prod:stw_app_...' | base64)"
 ```
@@ -189,7 +189,7 @@ integrations.
 
 ```ts
 const steward = new StewardClient({
-  baseUrl: "https://api.steward.fi",
+  baseUrl: "http://localhost:3200",
   appId: "my-platform/web-prod",
   appSecret: "stw_app_...",
   requestSigningSecret: "stw_app_...",
@@ -215,7 +215,7 @@ metadata only.
 
 ```ts
 const steward = new StewardClient({
-  baseUrl: "https://api.steward.fi",
+  baseUrl: "http://localhost:3200",
   tenantId: "my-platform",
   apiKey: "stw_...",
   requestSigningSecret: "stw_sig_...",
@@ -303,7 +303,7 @@ GET /tenants/:id/idempotency-metrics/export
 ```
 
 ```bash
-curl "https://api.steward.fi/tenants/my-platform/idempotency-metrics/export" \
+curl "http://localhost:3200/tenants/my-platform/idempotency-metrics/export" \
   -H "Authorization: Bearer user-session-jwt" \
   -o idempotency-metrics.csv
 ```
@@ -501,7 +501,7 @@ PUT /tenants/:id/config
 Full replace — any fields omitted default to their zero values.
 
 ```bash
-curl -X PUT https://api.steward.fi/tenants/my-platform/config \
+curl -X PUT http://localhost:3200/tenants/my-platform/config \
   -H "X-Steward-Key: your-tenant-key" \
   -H "Content-Type: application/json" \
   -d '{

@@ -32,7 +32,7 @@ newest first by audit sequence.
 import { StewardClient } from "@stwd/sdk";
 
 const steward = new StewardClient({
-  baseUrl: "https://api.steward.fi",
+  baseUrl: "http://localhost:3200",
   bearerToken: sessionToken,
 });
 
@@ -58,7 +58,7 @@ const params = new URLSearchParams({
   limit: "25",
 });
 
-const response = await fetch(`https://api.steward.fi/audit/events?${params}`, {
+const response = await fetch(`http://localhost:3200/audit/events?${params}`, {
   headers: {
     Authorization: `Bearer ${sessionToken}`,
   },
@@ -136,6 +136,28 @@ Responses include page/limit pagination metadata:
 
 Use `page` and `limit` for incremental review. Large exports should use the
 bounded audit export endpoint instead of walking unbounded event pages.
+
+## Signed evidence bundles
+
+```bash
+GET /audit/bundle
+```
+
+When `STEWARD_AUDIT_SIGNING_KEY` is configured, this endpoint exports a bounded
+event range with an Ed25519-signed checkpoint over the tenant audit-chain head.
+The repository includes an offline verifier:
+
+```bash
+node scripts/verify-evidence-bundle.mjs bundle.json
+```
+
+The verifier checks the signature against the public key carried in the bundle.
+Separately compare that key with an out-of-band trusted Steward signing key or
+fingerprint. After that trust-root check, a valid bundle shows that its exported
+content matches the signed checkpoint. It does not prove that an operator who
+controls all relevant audit and signing keys could not fabricate a
+self-consistent history. A partial export also does not prove completeness
+outside the exported range.
 
 ## Common Filters
 

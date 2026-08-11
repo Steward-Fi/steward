@@ -42,11 +42,35 @@ const { app } = await import("../src/app");
 const { OPENAPI_DOC } = await import("../src/openapi");
 
 const document = app.getOpenAPI31Document(OPENAPI_DOC);
-const json = `${JSON.stringify(document, null, 2)}\n`;
 
-// Single canonical artifact. The route definitions in packages/api are the source
-// of truth; this emitted spec is the one committed copy, consumed by both Mintlify
-// (docs site) and the SDK type generator. No second copy to drift.
+// Server URL for the DOCS-SITE copy (Mintlify).
+//
+// The runtime spec (getOpenApiSpec / docs/openapi.json, served by the API at
+// /openapi.json) uses a RELATIVE server URL ("/") so generated clients target
+// the same origin the spec was fetched from. That is correct there, but WRONG
+// for the Mintlify copy: Mintlify serves this file from the docs domain
+// (docs.steward.fi), so a relative "/" would make the API playground resolve
+// requests against the docs site instead of a Steward instance.
+//
+// Steward is self-host-first (no shared hosted API), so the docs playground
+// points at an explicit self-host example the reader replaces with their own
+// deployment URL.
+const docsDocument = {
+  ...document,
+  servers: [
+    {
+      url: "http://localhost:3200",
+      description:
+        "Your self-hosted Steward instance (Steward is self-host-first; replace with your deployment URL). The playground targets this rather than the docs domain.",
+    },
+  ],
+};
+const json = `${JSON.stringify(docsDocument, null, 2)}\n`;
+
+// The route definitions in packages/api are the source of truth for the schema.
+// This emitted spec is the docs-site copy consumed by Mintlify (and the SDK type
+// generator); it is identical to the runtime spec except for the `servers` block
+// above, which is overridden for the docs-playground use case.
 const specPath = join(import.meta.dir, "..", "..", "..", "docs", "api-reference", "openapi.json");
 mkdirSync(dirname(specPath), { recursive: true });
 writeFileSync(specPath, json);

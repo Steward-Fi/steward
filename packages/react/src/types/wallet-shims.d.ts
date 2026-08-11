@@ -62,6 +62,30 @@ declare module "wagmi" {
   export function useDisconnect(): { disconnect: () => void };
 }
 
+declare module "wagmi/connectors" {
+  // wagmi v3 ships the MetaMask Connect (EVM) connector built in. We only
+  // surface `metaMask` and keep the param/return types loose so the package
+  // typechecks without the real connector installed. The consumer's install of
+  // wagmi@3 + @metamask/connect-evm shadows these with the precise types.
+  import type { CreateConnectorFn } from "wagmi";
+  export function metaMask(parameters?: unknown): CreateConnectorFn;
+}
+
+declare module "@metamask/connect-evm" {
+  // Optional peer required by wagmi v3's metaMask() connector. We don't import
+  // from it directly; this stub just keeps any transitive reference resolvable
+  // when the real package isn't installed at typecheck time.
+  export interface MetaMaskDappMetadata {
+    name?: string;
+    url?: string;
+    iconUrl?: string;
+  }
+  export interface MetaMaskParameters {
+    dapp?: MetaMaskDappMetadata;
+    [key: string]: unknown;
+  }
+}
+
 declare module "viem" {
   export type Address = `0x${string}`;
   export interface Chain {

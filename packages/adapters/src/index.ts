@@ -16,6 +16,8 @@
 export {
   type BridgeAdapter,
   type BridgeBuildRequest,
+  type BridgeBuildResult,
+  type BridgeHandoff,
   type BridgeQuote,
   type BridgeQuoteRequest,
   type BridgeSession,
@@ -126,6 +128,7 @@ export {
 export {
   type AdapterCategory,
   AdapterNotConfiguredError,
+  AdapterProviderError,
   AdapterUnavailableError,
   AdapterValidationError,
   type BaseAdapter,

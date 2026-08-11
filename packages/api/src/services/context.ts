@@ -47,14 +47,17 @@ import {
   type Tenant,
   type TenantConfig,
 } from "@stwd/shared";
-import { Vault } from "@stwd/vault";
+import type { Vault } from "@stwd/vault";
 import { WebhookDispatcher } from "@stwd/webhooks";
 import { and, eq, gte, sql } from "drizzle-orm";
 import type { Context, Next } from "hono";
+import { getConfiguredVault } from "./vault-factory";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-export const API_VERSION = process.env.API_VERSION || "0.3.0";
+// Re-export for existing callers while keeping the version constant available
+// from a dependency-light module for audit signing and maintenance scripts.
+export { API_VERSION } from "./version";
 export const DEFAULT_TENANT_ID = "default";
 
 /**
@@ -361,19 +364,8 @@ export const db: DbHandle = new Proxy({} as DbHandle, {
 // per-password memo keeps the route vault in lockstep with whatever password
 // sealed each key. MASTER_PASSWORD (captured at import) is the fallback when the
 // env var is transiently unset (e.g. another file's afterAll deleted it).
-const vaultsByPassword = new Map<string, Vault>();
 function activeVault(): Vault {
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD?.trim() || MASTER_PASSWORD;
-  let resolved = vaultsByPassword.get(masterPassword);
-  if (!resolved) {
-    resolved = new Vault({
-      masterPassword,
-      rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
-      chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
-    });
-    vaultsByPassword.set(masterPassword, resolved);
-  }
-  return resolved;
+  return getConfiguredVault({ fallbackPassword: MASTER_PASSWORD });
 }
 export const vault: Vault = new Proxy({} as Vault, {
   get(_target, property) {
@@ -428,30 +420,14 @@ export type AuthenticatedPrincipal = {
   id: string;
 };
 
-export type AppVariables = {
-  tenant: Tenant;
-  tenantConfig: TenantConfig;
-  tenantId: string;
-  userId?: string;
-  tenantRole?: string;
-  sessionMfaVerifiedAt?: number;
-  sessionMfaMethod?: string;
-  agentScope?: string;
-  agentSubject?: string;
-  agentScopes?: string[];
-  authType?:
-    | "api-key"
-    | "app-secret"
-    | "session-jwt"
-    | "agent-token"
-    | "dashboard-jwt"
-    | "platform";
-  requestSignatureVerified?: boolean;
-  requestId?: string;
-  platformKeyHash?: string;
-  platformScopes?: string[];
-  agentPolicyIds?: string[];
-};
+// AppVariables now lives in @stwd/shared so opt-in plugins can type their own
+// hono routes against the same per-request context WITHOUT importing @stwd/api
+// (which would be a circular dependency). imported for local use in this file's
+// type positions AND re-exported so the many existing
+// `import { AppVariables } from "../services/context"` sites keep working.
+import type { AppVariables } from "@stwd/shared";
+
+export type { AppVariables };
 
 // ─── Shared query helpers ─────────────────────────────────────────────────────
 
@@ -1075,12 +1051,14 @@ export {
   encryptedChainKeys,
   encryptedKeys,
   intents,
+  pendingProxyRequests,
   policies,
   tenants,
   toPolicyRule,
   toSignRequest,
   toTxRecord,
   transactions,
+  vaultSigningFreezes,
   webhookConfigs,
   webhookDeliveries,
 } from "@stwd/db";

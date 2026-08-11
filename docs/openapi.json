@@ -7,7 +7,8 @@
   },
   "servers": [
     {
-      "url": "https://api.steward.fi"
+      "url": "/",
+      "description": "Same origin as this Steward deployment (self-hosted)"
     }
   ],
   "x-steward-sensitive-prefixes": [
@@ -38,7 +39,11 @@
     "/condition-sets",
     "/v1/condition-sets",
     "/condition_sets",
-    "/v1/condition_sets"
+    "/v1/condition_sets",
+    "/v2/workspaces",
+    "/v2/provider-accounts",
+    "/v2/provider-role-bindings",
+    "/v2/provider-grants"
   ],
   "tags": [
     {
@@ -103,6 +108,9 @@
     },
     {
       "name": "Tenant Config"
+    },
+    {
+      "name": "Provider Authority"
     }
   ],
   "components": {
@@ -5223,6 +5231,3719 @@
         }
       }
     },
+    "/v2/workspaces": {
+      "get": {
+        "tags": [
+          "Provider Authority"
+        ],
+        "summary": "List workspaces",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Provider Authority"
+        ],
+        "summary": "Create workspace",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Expires-At",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signing-Key-Id",
+            "in": "header",
+            "required": false,
+            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "expectedRevision",
+                  "reason"
+                ],
+                "properties": {
+                  "expectedRevision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Compare-and-set token: MUST equal the current tenant authority revision (provider_authority_tenant_state.revision). Read it from the authorityRevision field returned by GET /v2/workspaces (the only listing that surfaces it). Mismatch returns 409 revision_conflict."
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-steward-hardening": {
+          "sensitive": true,
+          "sensitivePrefix": "/v2/workspaces",
+          "requestExpiry": {
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "acceptedHeaders": [
+              "X-Steward-Request-Timestamp",
+              "X-Steward-Request-Expires-At"
+            ]
+          },
+          "authorizationSignature": {
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "header": "X-Steward-Signature",
+            "schemes": [
+              "v1=hmac-sha256",
+              "p256=ecdsa-secp256r1"
+            ],
+            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+          },
+          "idempotency": {
+            "header": "Idempotency-Key",
+            "requiredForSignedRequests": true,
+            "replayStorage": "enabled when callers provide a key in a replay-safe authenticated context"
+          }
+        }
+      }
+    },
+    "/v2/workspaces/{id}/disable": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "Provider Authority"
+        ],
+        "summary": "Disable workspace",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Expires-At",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signing-Key-Id",
+            "in": "header",
+            "required": false,
+            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "expectedRevision",
+                  "reason"
+                ],
+                "properties": {
+                  "expectedRevision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Compare-and-set token: MUST equal this object's own current revision. Mismatch returns 409 revision_conflict."
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-steward-hardening": {
+          "sensitive": true,
+          "sensitivePrefix": "/v2/workspaces",
+          "requestExpiry": {
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "acceptedHeaders": [
+              "X-Steward-Request-Timestamp",
+              "X-Steward-Request-Expires-At"
+            ]
+          },
+          "authorizationSignature": {
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "header": "X-Steward-Signature",
+            "schemes": [
+              "v1=hmac-sha256",
+              "p256=ecdsa-secp256r1"
+            ],
+            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+          },
+          "idempotency": {
+            "header": "Idempotency-Key",
+            "requiredForSignedRequests": true,
+            "replayStorage": "enabled when callers provide a key in a replay-safe authenticated context"
+          }
+        }
+      }
+    },
+    "/v2/provider-accounts": {
+      "get": {
+        "tags": [
+          "Provider Authority"
+        ],
+        "summary": "List provider accounts",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Provider Authority"
+        ],
+        "summary": "Create provider account",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Expires-At",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signing-Key-Id",
+            "in": "header",
+            "required": false,
+            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "expectedRevision",
+                  "reason"
+                ],
+                "properties": {
+                  "expectedRevision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Compare-and-set token: MUST equal the parent workspace's current revision. Mismatch returns 409 revision_conflict."
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-steward-hardening": {
+          "sensitive": true,
+          "sensitivePrefix": "/v2/provider-accounts",
+          "requestExpiry": {
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "acceptedHeaders": [
+              "X-Steward-Request-Timestamp",
+              "X-Steward-Request-Expires-At"
+            ]
+          },
+          "authorizationSignature": {
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "header": "X-Steward-Signature",
+            "schemes": [
+              "v1=hmac-sha256",
+              "p256=ecdsa-secp256r1"
+            ],
+            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+          },
+          "idempotency": {
+            "header": "Idempotency-Key",
+            "requiredForSignedRequests": true,
+            "replayStorage": "enabled when callers provide a key in a replay-safe authenticated context"
+          }
+        }
+      }
+    },
+    "/v2/provider-accounts/{id}/disable": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "Provider Authority"
+        ],
+        "summary": "Disable provider account",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Expires-At",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signing-Key-Id",
+            "in": "header",
+            "required": false,
+            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "expectedRevision",
+                  "reason"
+                ],
+                "properties": {
+                  "expectedRevision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Compare-and-set token: MUST equal this object's own current revision. Mismatch returns 409 revision_conflict."
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-steward-hardening": {
+          "sensitive": true,
+          "sensitivePrefix": "/v2/provider-accounts",
+          "requestExpiry": {
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "acceptedHeaders": [
+              "X-Steward-Request-Timestamp",
+              "X-Steward-Request-Expires-At"
+            ]
+          },
+          "authorizationSignature": {
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "header": "X-Steward-Signature",
+            "schemes": [
+              "v1=hmac-sha256",
+              "p256=ecdsa-secp256r1"
+            ],
+            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+          },
+          "idempotency": {
+            "header": "Idempotency-Key",
+            "requiredForSignedRequests": true,
+            "replayStorage": "enabled when callers provide a key in a replay-safe authenticated context"
+          }
+        }
+      }
+    },
+    "/v2/provider-accounts/{id}/operations": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "tags": [
+          "Provider Authority"
+        ],
+        "summary": "List provider operations",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Provider Authority"
+        ],
+        "summary": "Register provider operation",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Expires-At",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signing-Key-Id",
+            "in": "header",
+            "required": false,
+            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "expectedRevision",
+                  "reason"
+                ],
+                "properties": {
+                  "expectedRevision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Compare-and-set token: MUST equal the parent provider account's current revision. Mismatch returns 409 revision_conflict."
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-steward-hardening": {
+          "sensitive": true,
+          "sensitivePrefix": "/v2/provider-accounts",
+          "requestExpiry": {
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "acceptedHeaders": [
+              "X-Steward-Request-Timestamp",
+              "X-Steward-Request-Expires-At"
+            ]
+          },
+          "authorizationSignature": {
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "header": "X-Steward-Signature",
+            "schemes": [
+              "v1=hmac-sha256",
+              "p256=ecdsa-secp256r1"
+            ],
+            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+          },
+          "idempotency": {
+            "header": "Idempotency-Key",
+            "requiredForSignedRequests": true,
+            "replayStorage": "enabled when callers provide a key in a replay-safe authenticated context"
+          }
+        }
+      }
+    },
+    "/v2/provider-role-bindings": {
+      "get": {
+        "tags": [
+          "Provider Authority"
+        ],
+        "summary": "List provider role bindings",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Provider Authority"
+        ],
+        "summary": "Issue provider role binding",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Expires-At",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signing-Key-Id",
+            "in": "header",
+            "required": false,
+            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "expectedRevision",
+                  "reason"
+                ],
+                "properties": {
+                  "expectedRevision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Compare-and-set token whose binding target depends on role_key: for role_key='tenant_authority_admin' it MUST equal the tenant authority revision (provider_authority_tenant_state.revision, from the authorityRevision field of GET /v2/workspaces); for every workspace-scoped role (workspace_admin/operator/viewer/approver) it MUST equal the target workspace's current revision. Mismatch returns 409 revision_conflict."
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-steward-hardening": {
+          "sensitive": true,
+          "sensitivePrefix": "/v2/provider-role-bindings",
+          "requestExpiry": {
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "acceptedHeaders": [
+              "X-Steward-Request-Timestamp",
+              "X-Steward-Request-Expires-At"
+            ]
+          },
+          "authorizationSignature": {
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "header": "X-Steward-Signature",
+            "schemes": [
+              "v1=hmac-sha256",
+              "p256=ecdsa-secp256r1"
+            ],
+            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+          },
+          "idempotency": {
+            "header": "Idempotency-Key",
+            "requiredForSignedRequests": true,
+            "replayStorage": "enabled when callers provide a key in a replay-safe authenticated context"
+          }
+        }
+      }
+    },
+    "/v2/provider-role-bindings/{id}/revoke": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "Provider Authority"
+        ],
+        "summary": "Revoke provider role binding",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Expires-At",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signing-Key-Id",
+            "in": "header",
+            "required": false,
+            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "expectedRevision",
+                  "reason"
+                ],
+                "properties": {
+                  "expectedRevision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Compare-and-set token: MUST equal this object's own current revision. Mismatch returns 409 revision_conflict."
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-steward-hardening": {
+          "sensitive": true,
+          "sensitivePrefix": "/v2/provider-role-bindings",
+          "requestExpiry": {
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "acceptedHeaders": [
+              "X-Steward-Request-Timestamp",
+              "X-Steward-Request-Expires-At"
+            ]
+          },
+          "authorizationSignature": {
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "header": "X-Steward-Signature",
+            "schemes": [
+              "v1=hmac-sha256",
+              "p256=ecdsa-secp256r1"
+            ],
+            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+          },
+          "idempotency": {
+            "header": "Idempotency-Key",
+            "requiredForSignedRequests": true,
+            "replayStorage": "enabled when callers provide a key in a replay-safe authenticated context"
+          }
+        }
+      }
+    },
+    "/v2/provider-grants": {
+      "get": {
+        "tags": [
+          "Provider Authority"
+        ],
+        "summary": "List direct provider grants",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Provider Authority"
+        ],
+        "summary": "Issue non-delegable provider grant",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Expires-At",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signing-Key-Id",
+            "in": "header",
+            "required": false,
+            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "expectedRevision",
+                  "reason"
+                ],
+                "properties": {
+                  "expectedRevision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Compare-and-set token: MUST equal the parent workspace's current revision. Mismatch returns 409 revision_conflict."
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-steward-hardening": {
+          "sensitive": true,
+          "sensitivePrefix": "/v2/provider-grants",
+          "requestExpiry": {
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "acceptedHeaders": [
+              "X-Steward-Request-Timestamp",
+              "X-Steward-Request-Expires-At"
+            ]
+          },
+          "authorizationSignature": {
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "header": "X-Steward-Signature",
+            "schemes": [
+              "v1=hmac-sha256",
+              "p256=ecdsa-secp256r1"
+            ],
+            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+          },
+          "idempotency": {
+            "header": "Idempotency-Key",
+            "requiredForSignedRequests": true,
+            "replayStorage": "enabled when callers provide a key in a replay-safe authenticated context"
+          }
+        }
+      }
+    },
+    "/v2/provider-grants/{id}/revoke": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "Provider Authority"
+        ],
+        "summary": "Revoke provider grant",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Expires-At",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signing-Key-Id",
+            "in": "header",
+            "required": false,
+            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "expectedRevision",
+                  "reason"
+                ],
+                "properties": {
+                  "expectedRevision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Compare-and-set token: MUST equal this object's own current revision. Mismatch returns 409 revision_conflict."
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-steward-hardening": {
+          "sensitive": true,
+          "sensitivePrefix": "/v2/provider-grants",
+          "requestExpiry": {
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "acceptedHeaders": [
+              "X-Steward-Request-Timestamp",
+              "X-Steward-Request-Expires-At"
+            ]
+          },
+          "authorizationSignature": {
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "header": "X-Steward-Signature",
+            "schemes": [
+              "v1=hmac-sha256",
+              "p256=ecdsa-secp256r1"
+            ],
+            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+          },
+          "idempotency": {
+            "header": "Idempotency-Key",
+            "requiredForSignedRequests": true,
+            "replayStorage": "enabled when callers provide a key in a replay-safe authenticated context"
+          }
+        }
+      }
+    },
+    "/v2/provider-access/check": {
+      "post": {
+        "tags": [
+          "Provider Authority"
+        ],
+        "summary": "Evaluate structural provider access without execution policy",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/accounts": {
       "get": {
         "tags": [
@@ -5470,7 +9191,8 @@
                                       "enum": [
                                         "ethereum",
                                         "solana",
-                                        "bitcoin"
+                                        "bitcoin",
+                                        "monero"
                                       ]
                                     },
                                     "chainFamily": {
@@ -5478,7 +9200,8 @@
                                       "enum": [
                                         "evm",
                                         "solana",
-                                        "bitcoin"
+                                        "bitcoin",
+                                        "monero"
                                       ]
                                     },
                                     "address": {
@@ -5799,7 +9522,8 @@
                             "ethereum",
                             "evm",
                             "solana",
-                            "bitcoin"
+                            "bitcoin",
+                            "monero"
                           ]
                         },
                         "chainType": {
@@ -5808,7 +9532,8 @@
                             "ethereum",
                             "evm",
                             "solana",
-                            "bitcoin"
+                            "bitcoin",
+                            "monero"
                           ]
                         },
                         "name": {
@@ -5835,7 +9560,8 @@
                             "ethereum",
                             "evm",
                             "solana",
-                            "bitcoin"
+                            "bitcoin",
+                            "monero"
                           ]
                         },
                         "name": {
@@ -6083,7 +9809,8 @@
                                 "enum": [
                                   "ethereum",
                                   "solana",
-                                  "bitcoin"
+                                  "bitcoin",
+                                  "monero"
                                 ]
                               },
                               "chainFamily": {
@@ -6091,7 +9818,8 @@
                                 "enum": [
                                   "evm",
                                   "solana",
-                                  "bitcoin"
+                                  "bitcoin",
+                                  "monero"
                                 ]
                               },
                               "address": {
@@ -6639,7 +10367,8 @@
                                 "enum": [
                                   "ethereum",
                                   "solana",
-                                  "bitcoin"
+                                  "bitcoin",
+                                  "monero"
                                 ]
                               },
                               "chainFamily": {
@@ -6647,7 +10376,8 @@
                                 "enum": [
                                   "evm",
                                   "solana",
-                                  "bitcoin"
+                                  "bitcoin",
+                                  "monero"
                                 ]
                               },
                               "address": {
@@ -6965,7 +10695,8 @@
                             "ethereum",
                             "evm",
                             "solana",
-                            "bitcoin"
+                            "bitcoin",
+                            "monero"
                           ]
                         },
                         "chainType": {
@@ -6974,7 +10705,8 @@
                             "ethereum",
                             "evm",
                             "solana",
-                            "bitcoin"
+                            "bitcoin",
+                            "monero"
                           ]
                         },
                         "name": {
@@ -7001,7 +10733,8 @@
                             "ethereum",
                             "evm",
                             "solana",
-                            "bitcoin"
+                            "bitcoin",
+                            "monero"
                           ]
                         },
                         "name": {
@@ -7249,7 +10982,8 @@
                                 "enum": [
                                   "ethereum",
                                   "solana",
-                                  "bitcoin"
+                                  "bitcoin",
+                                  "monero"
                                 ]
                               },
                               "chainFamily": {
@@ -7257,7 +10991,8 @@
                                 "enum": [
                                   "evm",
                                   "solana",
-                                  "bitcoin"
+                                  "bitcoin",
+                                  "monero"
                                 ]
                               },
                               "address": {
@@ -8003,7 +11738,8 @@
                                 "enum": [
                                   "ethereum",
                                   "solana",
-                                  "bitcoin"
+                                  "bitcoin",
+                                  "monero"
                                 ]
                               },
                               "chainFamily": {
@@ -8011,7 +11747,8 @@
                                 "enum": [
                                   "evm",
                                   "solana",
-                                  "bitcoin"
+                                  "bitcoin",
+                                  "monero"
                                 ]
                               },
                               "address": {
@@ -8093,7 +11830,8 @@
                                 "enum": [
                                   "evm",
                                   "solana",
-                                  "bitcoin"
+                                  "bitcoin",
+                                  "monero"
                                 ]
                               },
                               "chainId": {
@@ -9732,7 +13470,8 @@
                                       "enum": [
                                         "ethereum",
                                         "solana",
-                                        "bitcoin"
+                                        "bitcoin",
+                                        "monero"
                                       ]
                                     },
                                     "chainFamily": {
@@ -9740,7 +13479,8 @@
                                       "enum": [
                                         "evm",
                                         "solana",
-                                        "bitcoin"
+                                        "bitcoin",
+                                        "monero"
                                       ]
                                     },
                                     "address": {
@@ -10061,7 +13801,8 @@
                             "ethereum",
                             "evm",
                             "solana",
-                            "bitcoin"
+                            "bitcoin",
+                            "monero"
                           ]
                         },
                         "chainType": {
@@ -10070,7 +13811,8 @@
                             "ethereum",
                             "evm",
                             "solana",
-                            "bitcoin"
+                            "bitcoin",
+                            "monero"
                           ]
                         },
                         "name": {
@@ -10097,7 +13839,8 @@
                             "ethereum",
                             "evm",
                             "solana",
-                            "bitcoin"
+                            "bitcoin",
+                            "monero"
                           ]
                         },
                         "name": {
@@ -10345,7 +14088,8 @@
                                 "enum": [
                                   "ethereum",
                                   "solana",
-                                  "bitcoin"
+                                  "bitcoin",
+                                  "monero"
                                 ]
                               },
                               "chainFamily": {
@@ -10353,7 +14097,8 @@
                                 "enum": [
                                   "evm",
                                   "solana",
-                                  "bitcoin"
+                                  "bitcoin",
+                                  "monero"
                                 ]
                               },
                               "address": {
@@ -10901,7 +14646,8 @@
                                 "enum": [
                                   "ethereum",
                                   "solana",
-                                  "bitcoin"
+                                  "bitcoin",
+                                  "monero"
                                 ]
                               },
                               "chainFamily": {
@@ -10909,7 +14655,8 @@
                                 "enum": [
                                   "evm",
                                   "solana",
-                                  "bitcoin"
+                                  "bitcoin",
+                                  "monero"
                                 ]
                               },
                               "address": {
@@ -11227,7 +14974,8 @@
                             "ethereum",
                             "evm",
                             "solana",
-                            "bitcoin"
+                            "bitcoin",
+                            "monero"
                           ]
                         },
                         "chainType": {
@@ -11236,7 +14984,8 @@
                             "ethereum",
                             "evm",
                             "solana",
-                            "bitcoin"
+                            "bitcoin",
+                            "monero"
                           ]
                         },
                         "name": {
@@ -11263,7 +15012,8 @@
                             "ethereum",
                             "evm",
                             "solana",
-                            "bitcoin"
+                            "bitcoin",
+                            "monero"
                           ]
                         },
                         "name": {
@@ -11511,7 +15261,8 @@
                                 "enum": [
                                   "ethereum",
                                   "solana",
-                                  "bitcoin"
+                                  "bitcoin",
+                                  "monero"
                                 ]
                               },
                               "chainFamily": {
@@ -11519,7 +15270,8 @@
                                 "enum": [
                                   "evm",
                                   "solana",
-                                  "bitcoin"
+                                  "bitcoin",
+                                  "monero"
                                 ]
                               },
                               "address": {
@@ -12265,7 +16017,8 @@
                                 "enum": [
                                   "ethereum",
                                   "solana",
-                                  "bitcoin"
+                                  "bitcoin",
+                                  "monero"
                                 ]
                               },
                               "chainFamily": {
@@ -12273,7 +16026,8 @@
                                 "enum": [
                                   "evm",
                                   "solana",
-                                  "bitcoin"
+                                  "bitcoin",
+                                  "monero"
                                 ]
                               },
                               "address": {
@@ -12355,7 +16109,8 @@
                                 "enum": [
                                   "evm",
                                   "solana",
-                                  "bitcoin"
+                                  "bitcoin",
+                                  "monero"
                                 ]
                               },
                               "chainId": {
@@ -45352,6 +49107,47 @@
                             },
                             "expiresAt": {
                               "type": "integer"
+                            },
+                            "direction": {
+                              "type": "string"
+                            },
+                            "executionMode": {
+                              "type": "string",
+                              "enum": [
+                                "unsigned-transaction",
+                                "external-handoff"
+                              ]
+                            },
+                            "handoffUrl": {
+                              "type": "string",
+                              "format": "uri"
+                            },
+                            "feeBps": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 10000
+                            },
+                            "feeScope": {
+                              "type": "string",
+                              "enum": [
+                                "final",
+                                "global-estimate",
+                                "not-applicable"
+                              ]
+                            },
+                            "feeObservedSlot": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "feeObservedAt": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "notices": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
                             }
                           }
                         }
@@ -45694,6 +49490,47 @@
                       },
                       "expiresAt": {
                         "type": "integer"
+                      },
+                      "direction": {
+                        "type": "string"
+                      },
+                      "executionMode": {
+                        "type": "string",
+                        "enum": [
+                          "unsigned-transaction",
+                          "external-handoff"
+                        ]
+                      },
+                      "handoffUrl": {
+                        "type": "string",
+                        "format": "uri"
+                      },
+                      "feeBps": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10000
+                      },
+                      "feeScope": {
+                        "type": "string",
+                        "enum": [
+                          "final",
+                          "global-estimate",
+                          "not-applicable"
+                        ]
+                      },
+                      "feeObservedSlot": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "feeObservedAt": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "notices": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
                       }
                     }
                   },
@@ -45723,61 +49560,169 @@
                       "const": true
                     },
                     "data": {
-                      "type": "object",
-                      "properties": {
-                        "unsignedIntent": {
+                      "oneOf": [
+                        {
                           "type": "object",
                           "required": [
-                            "signed",
-                            "kind",
-                            "chainId",
-                            "to",
-                            "value",
-                            "owner",
-                            "category",
-                            "provider"
+                            "unsignedIntent"
                           ],
                           "properties": {
-                            "signed": {
-                              "type": "boolean",
-                              "const": false
-                            },
-                            "kind": {
-                              "type": "string",
-                              "enum": [
-                                "evm-tx",
-                                "evm-typed-data",
-                                "abstract-intent"
-                              ]
-                            },
-                            "chainId": {
-                              "type": "integer"
-                            },
-                            "to": {
-                              "type": "string"
-                            },
-                            "value": {
-                              "type": "string"
-                            },
-                            "data": {
-                              "type": "string"
-                            },
-                            "owner": {
-                              "type": "string"
-                            },
-                            "category": {
-                              "type": "string"
-                            },
-                            "provider": {
-                              "type": "string"
-                            },
-                            "metadata": {
+                            "unsignedIntent": {
                               "type": "object",
-                              "additionalProperties": true
+                              "required": [
+                                "signed",
+                                "kind",
+                                "chainId",
+                                "to",
+                                "value",
+                                "owner",
+                                "category",
+                                "provider"
+                              ],
+                              "properties": {
+                                "signed": {
+                                  "type": "boolean",
+                                  "const": false
+                                },
+                                "kind": {
+                                  "type": "string",
+                                  "enum": [
+                                    "evm-tx",
+                                    "evm-typed-data",
+                                    "abstract-intent"
+                                  ]
+                                },
+                                "chainId": {
+                                  "type": "integer"
+                                },
+                                "to": {
+                                  "type": "string"
+                                },
+                                "value": {
+                                  "type": "string"
+                                },
+                                "data": {
+                                  "type": "string"
+                                },
+                                "owner": {
+                                  "type": "string"
+                                },
+                                "category": {
+                                  "type": "string"
+                                },
+                                "provider": {
+                                  "type": "string"
+                                },
+                                "metadata": {
+                                  "type": "object",
+                                  "additionalProperties": true
+                                }
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "handoff"
+                          ],
+                          "properties": {
+                            "handoff": {
+                              "type": "object",
+                              "required": [
+                                "kind",
+                                "category",
+                                "provider",
+                                "quoteId",
+                                "direction",
+                                "url",
+                                "fromChainId",
+                                "toChainId",
+                                "amountIn",
+                                "estimatedUsd",
+                                "recipient",
+                                "expiresAt",
+                                "notices",
+                                "feeBps",
+                                "feeScope",
+                                "feeObservedAt"
+                              ],
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "external-handoff"
+                                },
+                                "category": {
+                                  "type": "string",
+                                  "const": "bridge"
+                                },
+                                "provider": {
+                                  "type": "string"
+                                },
+                                "quoteId": {
+                                  "type": "string"
+                                },
+                                "direction": {
+                                  "type": "string"
+                                },
+                                "url": {
+                                  "type": "string",
+                                  "format": "uri"
+                                },
+                                "fromChainId": {
+                                  "type": "integer"
+                                },
+                                "toChainId": {
+                                  "type": "integer"
+                                },
+                                "amountIn": {
+                                  "type": "string"
+                                },
+                                "estimatedUsd": {
+                                  "type": "number",
+                                  "exclusiveMinimum": 0
+                                },
+                                "recipient": {
+                                  "type": "string"
+                                },
+                                "recipientSensitive": {
+                                  "type": "boolean"
+                                },
+                                "expiresAt": {
+                                  "type": "integer"
+                                },
+                                "feeBps": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 10000
+                                },
+                                "feeScope": {
+                                  "type": "string",
+                                  "enum": [
+                                    "global-estimate",
+                                    "owner-observed",
+                                    "not-applicable"
+                                  ]
+                                },
+                                "feeObservedSlot": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "feeObservedAt": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "notices": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  }
+                                }
+                              }
                             }
                           }
                         }
-                      }
+                      ]
                     }
                   }
                 }
@@ -46112,6 +50057,47 @@
                       },
                       "expiresAt": {
                         "type": "integer"
+                      },
+                      "direction": {
+                        "type": "string"
+                      },
+                      "executionMode": {
+                        "type": "string",
+                        "enum": [
+                          "unsigned-transaction",
+                          "external-handoff"
+                        ]
+                      },
+                      "handoffUrl": {
+                        "type": "string",
+                        "format": "uri"
+                      },
+                      "feeBps": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10000
+                      },
+                      "feeScope": {
+                        "type": "string",
+                        "enum": [
+                          "final",
+                          "global-estimate",
+                          "not-applicable"
+                        ]
+                      },
+                      "feeObservedSlot": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "feeObservedAt": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "notices": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
                       }
                     }
                   }
@@ -46170,6 +50156,32 @@
                               "type": "string"
                             },
                             "createdAt": {
+                              "type": "integer"
+                            },
+                            "direction": {
+                              "type": "string"
+                            },
+                            "executionMode": {
+                              "type": "string",
+                              "enum": [
+                                "unsigned-transaction",
+                                "external-handoff"
+                              ]
+                            },
+                            "handoffUrl": {
+                              "type": "string",
+                              "format": "uri"
+                            },
+                            "recipientSensitive": {
+                              "type": "boolean"
+                            },
+                            "notices": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "expiresAt": {
                               "type": "integer"
                             }
                           }
@@ -46468,6 +50480,32 @@
                               "type": "string"
                             },
                             "createdAt": {
+                              "type": "integer"
+                            },
+                            "direction": {
+                              "type": "string"
+                            },
+                            "executionMode": {
+                              "type": "string",
+                              "enum": [
+                                "unsigned-transaction",
+                                "external-handoff"
+                              ]
+                            },
+                            "handoffUrl": {
+                              "type": "string",
+                              "format": "uri"
+                            },
+                            "recipientSensitive": {
+                              "type": "boolean"
+                            },
+                            "notices": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "expiresAt": {
                               "type": "integer"
                             }
                           }
@@ -53219,6 +57257,47 @@
                             },
                             "expiresAt": {
                               "type": "integer"
+                            },
+                            "direction": {
+                              "type": "string"
+                            },
+                            "executionMode": {
+                              "type": "string",
+                              "enum": [
+                                "unsigned-transaction",
+                                "external-handoff"
+                              ]
+                            },
+                            "handoffUrl": {
+                              "type": "string",
+                              "format": "uri"
+                            },
+                            "feeBps": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 10000
+                            },
+                            "feeScope": {
+                              "type": "string",
+                              "enum": [
+                                "final",
+                                "global-estimate",
+                                "not-applicable"
+                              ]
+                            },
+                            "feeObservedSlot": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "feeObservedAt": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "notices": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
                             }
                           }
                         }
@@ -53561,6 +57640,47 @@
                       },
                       "expiresAt": {
                         "type": "integer"
+                      },
+                      "direction": {
+                        "type": "string"
+                      },
+                      "executionMode": {
+                        "type": "string",
+                        "enum": [
+                          "unsigned-transaction",
+                          "external-handoff"
+                        ]
+                      },
+                      "handoffUrl": {
+                        "type": "string",
+                        "format": "uri"
+                      },
+                      "feeBps": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10000
+                      },
+                      "feeScope": {
+                        "type": "string",
+                        "enum": [
+                          "final",
+                          "global-estimate",
+                          "not-applicable"
+                        ]
+                      },
+                      "feeObservedSlot": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "feeObservedAt": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "notices": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
                       }
                     }
                   },
@@ -53590,61 +57710,169 @@
                       "const": true
                     },
                     "data": {
-                      "type": "object",
-                      "properties": {
-                        "unsignedIntent": {
+                      "oneOf": [
+                        {
                           "type": "object",
                           "required": [
-                            "signed",
-                            "kind",
-                            "chainId",
-                            "to",
-                            "value",
-                            "owner",
-                            "category",
-                            "provider"
+                            "unsignedIntent"
                           ],
                           "properties": {
-                            "signed": {
-                              "type": "boolean",
-                              "const": false
-                            },
-                            "kind": {
-                              "type": "string",
-                              "enum": [
-                                "evm-tx",
-                                "evm-typed-data",
-                                "abstract-intent"
-                              ]
-                            },
-                            "chainId": {
-                              "type": "integer"
-                            },
-                            "to": {
-                              "type": "string"
-                            },
-                            "value": {
-                              "type": "string"
-                            },
-                            "data": {
-                              "type": "string"
-                            },
-                            "owner": {
-                              "type": "string"
-                            },
-                            "category": {
-                              "type": "string"
-                            },
-                            "provider": {
-                              "type": "string"
-                            },
-                            "metadata": {
+                            "unsignedIntent": {
                               "type": "object",
-                              "additionalProperties": true
+                              "required": [
+                                "signed",
+                                "kind",
+                                "chainId",
+                                "to",
+                                "value",
+                                "owner",
+                                "category",
+                                "provider"
+                              ],
+                              "properties": {
+                                "signed": {
+                                  "type": "boolean",
+                                  "const": false
+                                },
+                                "kind": {
+                                  "type": "string",
+                                  "enum": [
+                                    "evm-tx",
+                                    "evm-typed-data",
+                                    "abstract-intent"
+                                  ]
+                                },
+                                "chainId": {
+                                  "type": "integer"
+                                },
+                                "to": {
+                                  "type": "string"
+                                },
+                                "value": {
+                                  "type": "string"
+                                },
+                                "data": {
+                                  "type": "string"
+                                },
+                                "owner": {
+                                  "type": "string"
+                                },
+                                "category": {
+                                  "type": "string"
+                                },
+                                "provider": {
+                                  "type": "string"
+                                },
+                                "metadata": {
+                                  "type": "object",
+                                  "additionalProperties": true
+                                }
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "handoff"
+                          ],
+                          "properties": {
+                            "handoff": {
+                              "type": "object",
+                              "required": [
+                                "kind",
+                                "category",
+                                "provider",
+                                "quoteId",
+                                "direction",
+                                "url",
+                                "fromChainId",
+                                "toChainId",
+                                "amountIn",
+                                "estimatedUsd",
+                                "recipient",
+                                "expiresAt",
+                                "notices",
+                                "feeBps",
+                                "feeScope",
+                                "feeObservedAt"
+                              ],
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "const": "external-handoff"
+                                },
+                                "category": {
+                                  "type": "string",
+                                  "const": "bridge"
+                                },
+                                "provider": {
+                                  "type": "string"
+                                },
+                                "quoteId": {
+                                  "type": "string"
+                                },
+                                "direction": {
+                                  "type": "string"
+                                },
+                                "url": {
+                                  "type": "string",
+                                  "format": "uri"
+                                },
+                                "fromChainId": {
+                                  "type": "integer"
+                                },
+                                "toChainId": {
+                                  "type": "integer"
+                                },
+                                "amountIn": {
+                                  "type": "string"
+                                },
+                                "estimatedUsd": {
+                                  "type": "number",
+                                  "exclusiveMinimum": 0
+                                },
+                                "recipient": {
+                                  "type": "string"
+                                },
+                                "recipientSensitive": {
+                                  "type": "boolean"
+                                },
+                                "expiresAt": {
+                                  "type": "integer"
+                                },
+                                "feeBps": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 10000
+                                },
+                                "feeScope": {
+                                  "type": "string",
+                                  "enum": [
+                                    "global-estimate",
+                                    "owner-observed",
+                                    "not-applicable"
+                                  ]
+                                },
+                                "feeObservedSlot": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "feeObservedAt": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "notices": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  }
+                                }
+                              }
                             }
                           }
                         }
-                      }
+                      ]
                     }
                   }
                 }
@@ -53979,6 +58207,47 @@
                       },
                       "expiresAt": {
                         "type": "integer"
+                      },
+                      "direction": {
+                        "type": "string"
+                      },
+                      "executionMode": {
+                        "type": "string",
+                        "enum": [
+                          "unsigned-transaction",
+                          "external-handoff"
+                        ]
+                      },
+                      "handoffUrl": {
+                        "type": "string",
+                        "format": "uri"
+                      },
+                      "feeBps": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10000
+                      },
+                      "feeScope": {
+                        "type": "string",
+                        "enum": [
+                          "final",
+                          "global-estimate",
+                          "not-applicable"
+                        ]
+                      },
+                      "feeObservedSlot": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "feeObservedAt": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "notices": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
                       }
                     }
                   }
@@ -54037,6 +58306,32 @@
                               "type": "string"
                             },
                             "createdAt": {
+                              "type": "integer"
+                            },
+                            "direction": {
+                              "type": "string"
+                            },
+                            "executionMode": {
+                              "type": "string",
+                              "enum": [
+                                "unsigned-transaction",
+                                "external-handoff"
+                              ]
+                            },
+                            "handoffUrl": {
+                              "type": "string",
+                              "format": "uri"
+                            },
+                            "recipientSensitive": {
+                              "type": "boolean"
+                            },
+                            "notices": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "expiresAt": {
                               "type": "integer"
                             }
                           }
@@ -54335,6 +58630,32 @@
                               "type": "string"
                             },
                             "createdAt": {
+                              "type": "integer"
+                            },
+                            "direction": {
+                              "type": "string"
+                            },
+                            "executionMode": {
+                              "type": "string",
+                              "enum": [
+                                "unsigned-transaction",
+                                "external-handoff"
+                              ]
+                            },
+                            "handoffUrl": {
+                              "type": "string",
+                              "format": "uri"
+                            },
+                            "recipientSensitive": {
+                              "type": "boolean"
+                            },
+                            "notices": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "expiresAt": {
                               "type": "integer"
                             }
                           }
@@ -91786,6 +96107,577 @@
                         },
                         "feeSats": {
                           "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Steward-Request-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Expires-At",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signing-Key-Id",
+            "in": "header",
+            "required": false,
+            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-steward-hardening": {
+          "sensitive": true,
+          "sensitivePrefix": "/vault",
+          "requestExpiry": {
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "acceptedHeaders": [
+              "X-Steward-Request-Timestamp",
+              "X-Steward-Request-Expires-At"
+            ]
+          },
+          "authorizationSignature": {
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "header": "X-Steward-Signature",
+            "schemes": [
+              "v1=hmac-sha256",
+              "p256=ecdsa-secp256r1"
+            ],
+            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+          },
+          "idempotency": {
+            "header": "Idempotency-Key",
+            "requiredForSignedRequests": true,
+            "replayStorage": "enabled when callers provide a key in a replay-safe authenticated context"
+          }
+        }
+      }
+    },
+    "/vault/{agentId}/monero/balance": {
+      "parameters": [
+        {
+          "name": "agentId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "tags": [
+          "Vault"
+        ],
+        "summary": "Get a scoped Monero wallet balance",
+        "description": "Reads the wallet balance through the self-hosted monero-wallet-rpc sidecar (remote public daemon, keys never leave the host). Returns 503 when Monero support is not configured. The first call after idle time refreshes the wallet scan and may take a few seconds.",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "tenantApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "walletScope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "balancePiconero",
+                        "unlockedPiconero",
+                        "blocksToUnlock",
+                        "syncedHeight",
+                        "walletScope",
+                        "walletAddress",
+                        "network"
+                      ],
+                      "properties": {
+                        "balancePiconero": {
+                          "type": "string",
+                          "description": "Total balance in piconero"
+                        },
+                        "unlockedPiconero": {
+                          "type": "string",
+                          "description": "Spendable (unlocked) balance in piconero"
+                        },
+                        "blocksToUnlock": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "syncedHeight": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "walletScope": {
+                          "type": "string"
+                        },
+                        "walletAddress": {
+                          "type": "string"
+                        },
+                        "network": {
+                          "type": "string",
+                          "enum": [
+                            "mainnet",
+                            "stagenet"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/vault/{agentId}/monero/transfer": {
+      "parameters": [
+        {
+          "name": "agentId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "Vault"
+        ],
+        "summary": "Build, sign, and relay a Monero transfer",
+        "description": "Requires agent access plus owner/admin recent MFA or delegated signer credentials with `sign_transaction`, an enabled `raw-signing-chain` policy that explicitly allows `monero` and `ed25519`, and an Idempotency-Key header. Destinations are policy-evaluated first; the vault's wallet2 backend then builds the transaction without relaying so the exact fee is known, the fee-inclusive aggregate spend is re-evaluated, and only then is the transaction relayed. The vault never accepts a caller-built transaction blob. USD-denominated policy rules fail closed for Monero (no XMR price source) — use piconero-denominated limits.",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "tenantApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "walletScope",
+                  "destinations"
+                ],
+                "properties": {
+                  "walletScope": {
+                    "type": "string",
+                    "description": "Monero wallet scope, e.g. monero:mainnet:0"
+                  },
+                  "destinations": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 15,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "address",
+                        "amountPiconero"
+                      ],
+                      "properties": {
+                        "address": {
+                          "type": "string",
+                          "description": "Standard, subaddress, or integrated Monero address"
+                        },
+                        "amountPiconero": {
+                          "type": "string",
+                          "description": "Positive decimal amount in piconero (1 XMR = 10^12)"
+                        }
+                      }
+                    }
+                  },
+                  "priority": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 3,
+                    "description": "wallet2 fee priority: 0 default … 3 elevated"
+                  },
+                  "referenceId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "transactionId",
+                        "txHash",
+                        "feePiconero",
+                        "amountPiconero",
+                        "totalPiconero",
+                        "walletScope",
+                        "walletAddress",
+                        "network"
+                      ],
+                      "properties": {
+                        "transactionId": {
+                          "type": "string"
+                        },
+                        "txHash": {
+                          "type": "string",
+                          "description": "64-hex Monero transaction hash"
+                        },
+                        "feePiconero": {
+                          "type": "string"
+                        },
+                        "amountPiconero": {
+                          "type": "string"
+                        },
+                        "totalPiconero": {
+                          "type": "string"
+                        },
+                        "walletScope": {
+                          "type": "string"
+                        },
+                        "walletAddress": {
+                          "type": "string"
+                        },
+                        "network": {
+                          "type": "string",
+                          "enum": [
+                            "mainnet",
+                            "stagenet"
+                          ]
                         }
                       }
                     }

@@ -1,0 +1,9 @@
+# test config for @stwd/plugin-capabilities.
+#
+# the plugin's tests exercise the store + routes against a PGLite core schema
+# (createPGLiteDb runs the core migrations) plus this package's OWN plugin
+# migrations (applied via runPluginMigrations + the pglite migrator). the preload
+# supplies full-entropy test secrets + marks the PGLite runtime so any module that
+# resolves env-dependent invariants at import time evaluates deterministically.
+[test]
+preload = ["./test-preload.ts"]

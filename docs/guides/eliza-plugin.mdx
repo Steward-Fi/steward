@@ -42,7 +42,7 @@ const character = {
 Set the required environment variables:
 
 ```bash
-STEWARD_API_URL=https://api.steward.fi    # Steward API base URL
+STEWARD_API_URL=http://localhost:3200    # Steward API base URL
 STEWARD_API_KEY=stwd_your_tenant_key       # Tenant API key
 STEWARD_AGENT_ID=my-trading-agent          # Agent ID in Steward
 STEWARD_AGENT_TOKEN=stwd_jwt_...           # Agent JWT (optional, preferred over API key)
@@ -137,7 +137,7 @@ Your wallet is managed by Steward with policy enforcement.`,
 
 ## Docker Container Setup
 
-For agents running in Docker containers (e.g., on Milady Cloud), the plugin uses environment variables:
+For agents running in Docker containers (e.g., on a hosted cloud), the plugin uses environment variables:
 
 ```dockerfile
 # In your container configuration
@@ -171,4 +171,4 @@ The `approval-required` evaluator periodically checks for pending transactions a
 
 - [Agent Setup Guide](/guides/agent-setup) — Creating agents with policies
 - [SDK Reference](/sdk/eliza-plugin) — Detailed plugin API reference
-- [Milady Cloud Guide](/guides/milady-cloud) — Deploy on Milady Cloud
+- [Cloud Deployment Guide](/guides/cloud-deployment) — Deploy on a hosted cloud

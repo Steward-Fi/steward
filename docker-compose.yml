@@ -2,10 +2,12 @@
 # Steward — Production Docker Compose
 #
 # Services:
-#   steward-api    — REST API + vault (port 3200)
-#   steward-proxy  — Credential injection proxy (port 8080)
-#   postgres       — PostgreSQL 16 (internal only)
-#   redis          — Redis 7 for rate limiting + token store (internal only)
+#   steward-api        — REST API + vault (port 3200)
+#   steward-proxy      — Credential injection proxy (port 8080)
+#   postgres           — PostgreSQL 16 (internal only)
+#   redis              — Redis 7 for rate limiting + token store (internal only)
+#   monero-wallet-rpc  — optional wallet2 sidecar for Monero support
+#                        (profile "monero"; internal only, remote public daemon)
 #
 # Usage:
 #   cp .env.example .env && $EDITOR .env
@@ -40,6 +42,10 @@ services:
       DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
+      # PR4 execution authorization v2 key (keyId:secret,... rotation list).
+      # SEPARATE from STEWARD_JWT_SECRET; governed provider actions fail closed
+      # if unset. Both api (mint) and proxy (claim/verify) require it.
+      STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?STEWARD_EXECUTION_AUTH_SECRET is required - generate with: printf 'v1:%s' \"$(openssl rand -hex 32)\"}"
       STEWARD_PLATFORM_KEYS: "${STEWARD_PLATFORM_KEYS:-}"
       STEWARD_PLATFORM_KEY_SCOPES: "${STEWARD_PLATFORM_KEY_SCOPES:-}"
       ALLOW_USER_TENANT_CREATION: "${ALLOW_USER_TENANT_CREATION:-}"
@@ -48,21 +54,47 @@ services:
       AGENT_TOKEN_EXPIRY: "${AGENT_TOKEN_EXPIRY:-24h}"
       RPC_URL: "${RPC_URL:-https://mainnet.base.org}"
       CHAIN_ID: "${CHAIN_ID:-8453}"
+      STEWARD_PLUGINS: "${STEWARD_PLUGINS:-}"
+      WXMR_SOLANA_RPC_URL: "${WXMR_SOLANA_RPC_URL:-}"
       REDIS_URL: "redis://redis:6379"
+      # API-side invoke paths sign requests to steward-proxy with this shared
+      # root. Keep it distinct from JWT/audit secrets; the proxy service below
+      # verifies the same value.
+      STEWARD_PROXY_URL: "${STEWARD_PROXY_URL:-http://steward-proxy:8080}"
+      STEWARD_PROXY_REQUEST_SIGNING_SECRET: "${STEWARD_PROXY_REQUEST_SIGNING_SECRET:?STEWARD_PROXY_REQUEST_SIGNING_SECRET is required - generate with: openssl rand -hex 32}"
       RESEND_API_KEY: "${RESEND_API_KEY:-}"
-      EMAIL_FROM: "${EMAIL_FROM:-login@steward.fi}"
-      APP_URL: "${APP_URL:-https://steward.fi}"
+      EMAIL_FROM: "${EMAIL_FROM:-login@localhost}"
+      APP_URL: "${APP_URL:-http://localhost:3200}"
       PASSKEY_RP_NAME: "${PASSKEY_RP_NAME:-Steward}"
-      PASSKEY_RP_ID: "${PASSKEY_RP_ID:-steward.fi}"
-      PASSKEY_ORIGIN: "${PASSKEY_ORIGIN:-https://steward.fi}"
+      PASSKEY_RP_ID: "${PASSKEY_RP_ID:-localhost}"
+      PASSKEY_ORIGIN: "${PASSKEY_ORIGIN:-http://localhost:3200}"
       GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:-}"
       GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
       DISCORD_CLIENT_ID: "${DISCORD_CLIENT_ID:-}"
       DISCORD_CLIENT_SECRET: "${DISCORD_CLIENT_SECRET:-}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?STEWARD_KDF_SALT is required - generate with: openssl rand -hex 32}"
+      # Custody posture: this stack sets no STEWARD_KMS_PROVIDER, so the vault
+      # runs in `local` mode (AES-256-GCM at rest; plaintext key in app memory at
+      # sign time). With NODE_ENV=production the vault REFUSES TO BOOT in local
+      # mode unless the operator explicitly acknowledges the posture. No default
+      # is injected here on purpose: an unacknowledged production run must fail
+      # closed, forcing a deliberate decision (set STEWARD_ACK_LOCAL_CUSTODY=true
+      # in .env to accept local custody, or set STEWARD_KMS_PROVIDER=aws|pkcs11
+      # to harden). See docs/security/custody-posture.md and .env.example.
+      STEWARD_ACK_LOCAL_CUSTODY: "${STEWARD_ACK_LOCAL_CUSTODY:-}"
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?STEWARD_AUDIT_HMAC_KEY is required - generate with: openssl rand -hex 32}"
       SIWE_ALLOWED_DOMAINS: "${SIWE_ALLOWED_DOMAINS:-}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
+      # ── Monero (optional; empty = Monero endpoints fail closed with 503) ──
+      # Enable the monero-wallet-rpc sidecar with: COMPOSE_PROFILES=monero
+      # and set STEWARD_MONERO_WALLET_RPC_URL to the sidecar's endpoint below.
+      STEWARD_MONERO_WALLET_RPC_URL: "${STEWARD_MONERO_WALLET_RPC_URL:-}"
+      # Only consulted when the RPC URL above is set; username matches the
+      # sidecar's --rpc-login.
+      STEWARD_MONERO_WALLET_RPC_LOGIN: "steward:${MONERO_WALLET_RPC_PASSWORD:-}"
+      STEWARD_MONERO_DAEMON_URL: "${STEWARD_MONERO_DAEMON_URL:-http://node.sethforprivacy.com:18089}"
+      STEWARD_MONERO_NETWORK: "${STEWARD_MONERO_NETWORK:-mainnet}"
+      STEWARD_MAX_MONERO_FEE_PICONERO: "${STEWARD_MAX_MONERO_FEE_PICONERO:-}"
     ports:
       - "127.0.0.1:${PORT:-3200}:3200"
     healthcheck:
@@ -100,8 +132,18 @@ services:
       DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
+      # PR4 execution authorization v2 key (keyId:secret,... rotation list).
+      # SEPARATE from STEWARD_JWT_SECRET; governed provider actions fail closed
+      # if unset. Both api (mint) and proxy (claim/verify) require it.
+      STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?STEWARD_EXECUTION_AUTH_SECRET is required - generate with: printf 'v1:%s' \"$(openssl rand -hex 32)\"}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?STEWARD_KDF_SALT is required - generate with: openssl rand -hex 32}"
+      # Proxy-side approval expiry now extends the tamper-evident audit chain
+      # (release.ts -> withTenantAuditedTransaction), so the audit HMAC key is
+      # required here just like on the api service, or expired-approval polls
+      # fail closed with a 5xx in production.
+      STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?STEWARD_AUDIT_HMAC_KEY is required - generate with: openssl rand -hex 32}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
+      STEWARD_PROXY_REQUEST_SIGNING_SECRET: "${STEWARD_PROXY_REQUEST_SIGNING_SECRET:?STEWARD_PROXY_REQUEST_SIGNING_SECRET is required - generate with: openssl rand -hex 32}"
       REDIS_URL: "redis://redis:6379"
     ports:
       - "127.0.0.1:${STEWARD_PROXY_PORT:-8080}:8080"
@@ -119,6 +161,66 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
+
+  # ── Monero wallet-rpc sidecar (optional, profile: monero) ────────────────────
+  # Official wallet2 (monero-wallet-rpc) maintained as a container image by
+  # sethforprivacy, pointed at a remote public daemon — no local monerod, no
+  # blockchain storage. Wallet files under /home/monero/wallets are a
+  # DISPOSABLE scan cache: the canonical (encrypted) keys live in Postgres and
+  # the vault rehydrates wallets via generate_from_keys at any time.
+  #
+  # Custody: private keys only ever transit the internal backend network
+  # between steward-api and this sidecar; the remote daemon sees block
+  # requests and fully-signed transactions, never key material.
+  #
+  # Enable with:
+  #   COMPOSE_PROFILES=monero docker compose up -d
+  #   plus MONERO_WALLET_RPC_PASSWORD and
+  #   STEWARD_MONERO_WALLET_RPC_URL=http://monero-wallet-rpc:18083/json_rpc in .env
+  monero-wallet-rpc:
+    # Pinned to the Monero release this integration was validated against.
+    image: ghcr.io/sethforprivacy/simple-monero-wallet-rpc:v0.18.5.0@sha256:7ed1d6c565313de6a8afc33f75f7b1ca31aebd15f59558428d2bbc6b6de16950
+    container_name: steward-monero-wallet-rpc
+    profiles: ["monero"]
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        secret_file=/run/secrets/monero_wallet_rpc_password
+        if [ ! -r "$$secret_file" ]; then
+          echo "MONERO_WALLET_RPC_PASSWORD must be set and non-empty when the monero profile is enabled" >&2
+          exit 1
+        fi
+        password=$$(cat "$$secret_file")
+        if [ -z "$$password" ]; then
+          echo "MONERO_WALLET_RPC_PASSWORD must be set and non-empty when the monero profile is enabled" >&2
+          exit 1
+        fi
+        exec /entrypoint.sh \
+          "--daemon-address=${MONERO_DAEMON_ADDRESS:-node.sethforprivacy.com:18089}" \
+          "--untrusted-daemon" \
+          "--wallet-dir=/home/monero/wallet" \
+          "--rpc-bind-ip=0.0.0.0" \
+          "--rpc-bind-port=18083" \
+          "--confirm-external-bind" \
+          "--rpc-login=steward:$$password" \
+          "--log-level=0"
+    volumes:
+      - monero-wallet-cache:/home/monero/wallet
+    secrets:
+      - source: monero-wallet-rpc-password
+        target: monero_wallet_rpc_password
+    # Dual-homed like steward-api: `backend` is internal-only (so only
+    # steward-api can reach the RPC port), `public` provides egress to the
+    # remote daemon. No host port is published.
+    networks:
+      - public
+      - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
 
   # ── PostgreSQL 16 ─────────────────────────────────────────────────────────────
   postgres:
@@ -180,6 +282,14 @@ volumes:
     driver: local
   redis-data:
     driver: local
+  # Disposable Monero wallet scan cache (canonical keys live in Postgres).
+  monero-wallet-cache:
+    driver: local
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+secrets:
+  monero-wallet-rpc-password:
+    environment: MONERO_WALLET_RPC_PASSWORD
 
 # ── Networks ──────────────────────────────────────────────────────────────────
 networks:

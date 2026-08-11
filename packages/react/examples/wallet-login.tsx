@@ -40,7 +40,7 @@ const wagmiConfig = createDefaultWagmiConfig({
 });
 
 const stewardClient = new StewardClient({
-  baseUrl: "https://api.steward.fi",
+  baseUrl: "http://localhost:3200",
   apiKey: "…",
 });
 
@@ -49,7 +49,7 @@ export function PatternA() {
     <StewardProvider
       client={stewardClient}
       agentId="agent_abc"
-      auth={{ baseUrl: "https://api.steward.fi" }}
+      auth={{ baseUrl: "http://localhost:3200" }}
     >
       <EVMWalletProvider config={wagmiConfig}>
         <SolanaWalletProvider endpoint="https://api.mainnet-beta.solana.com">
@@ -96,7 +96,7 @@ export function PatternB() {
                 <StewardProvider
                   client={stewardClient}
                   agentId="agent_abc"
-                  auth={{ baseUrl: "https://api.steward.fi" }}
+                  auth={{ baseUrl: "http://localhost:3200" }}
                 >
                   <WalletLogin chains="both" />
                 </StewardProvider>
@@ -116,7 +116,7 @@ export function EvmOnly() {
     <StewardProvider
       client={stewardClient}
       agentId="agent_abc"
-      auth={{ baseUrl: "https://api.steward.fi" }}
+      auth={{ baseUrl: "http://localhost:3200" }}
     >
       <EVMWalletProvider config={wagmiConfig}>
         <WalletLogin chains="evm" />

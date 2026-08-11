@@ -10,7 +10,7 @@ identity records, and attach immutable tenant-scoped wallet external IDs. They
 require a platform key and route scopes when scoped platform keys are enabled.
 
 ```bash
-curl https://api.steward.fi/platform/users/lookup \
+curl http://localhost:3200/platform/users/lookup \
   -H "X-Steward-Platform-Key: your-platform-key"
 ```
 
@@ -89,7 +89,7 @@ const user = await steward.platformUsers.create({
 ```
 
 ```bash cURL
-curl -X POST https://api.steward.fi/platform/users \
+curl -X POST http://localhost:3200/platform/users \
   -H "X-Steward-Platform-Key: your-platform-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -156,7 +156,7 @@ const sameUser = await steward.platformUsers.getUserByWalletExternalId(
 ```
 
 ```bash cURL
-curl "https://api.steward.fi/platform/users/lookup?tenantId=app-prod&walletExternalId=wallet_ada_001" \
+curl "http://localhost:3200/platform/users/lookup?tenantId=app-prod&walletExternalId=wallet_ada_001" \
   -H "X-Steward-Platform-Key: your-platform-key"
 ```
 </CodeGroup>
@@ -218,7 +218,7 @@ await steward.platformUsers.assignWalletExternalId("usr_123", {
 ```
 
 ```bash cURL
-curl -X POST https://api.steward.fi/platform/users/usr_123/wallet/external-id \
+curl -X POST http://localhost:3200/platform/users/usr_123/wallet/external-id \
   -H "X-Steward-Platform-Key: your-platform-key" \
   -H "Content-Type: application/json" \
   -d '{ "tenantId": "app-prod", "walletExternalId": "wallet_ada_001" }'
@@ -255,7 +255,7 @@ const { user } = await steward.platformUsers.resolveWalletExternalId({
 ```
 
 ```bash cURL
-curl -X POST https://api.steward.fi/platform/users/wallet/external-id \
+curl -X POST http://localhost:3200/platform/users/wallet/external-id \
   -H "X-Steward-Platform-Key: your-platform-key" \
   -H "Content-Type: application/json" \
   -d '{ "tenantId": "app-prod", "walletExternalId": "wallet_ada_001" }'
@@ -297,7 +297,7 @@ const result = await steward.platformUsers.connectOrCreateByWalletExternalId({
 ```
 
 ```bash cURL
-curl -X POST https://api.steward.fi/platform/users/wallet/external-id/connect-or-create \
+curl -X POST http://localhost:3200/platform/users/wallet/external-id/connect-or-create \
   -H "X-Steward-Platform-Key: your-platform-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -349,7 +349,7 @@ const result = await steward.platformUsers.search("app-prod", {
 ```
 
 ```bash cURL
-curl "https://api.steward.fi/platform/tenants/app-prod/users?walletExternalId=wallet_ada_001" \
+curl "http://localhost:3200/platform/tenants/app-prod/users?walletExternalId=wallet_ada_001" \
   -H "X-Steward-Platform-Key: your-platform-key"
 ```
 </CodeGroup>
@@ -383,7 +383,7 @@ const report = await steward.getTenantWalletPolicyViolations("app-prod", {
 ```
 
 ```bash cURL
-curl "https://api.steward.fi/user/me/tenants/app-prod/users/wallet-policy/violations?limit=50" \
+curl "http://localhost:3200/user/me/tenants/app-prod/users/wallet-policy/violations?limit=50" \
   -H "Authorization: Bearer user-session-jwt"
 ```
 </CodeGroup>
@@ -454,7 +454,7 @@ const result = await steward.remediateTenantWalletPolicyViolation(
 
 ```bash cURL
 curl -X DELETE \
-  "https://api.steward.fi/user/me/tenants/app-prod/users/usr_123/wallet-policy/wallets/acct_2" \
+  "http://localhost:3200/user/me/tenants/app-prod/users/usr_123/wallet-policy/wallets/acct_2" \
   -H "Authorization: Bearer user-session-jwt"
 ```
 </CodeGroup>
@@ -503,7 +503,7 @@ const result = await steward.bulkRemediateTenantWalletPolicyViolations(
 
 ```bash cURL
 curl -X POST \
-  "https://api.steward.fi/user/me/tenants/app-prod/users/wallet-policy/remediations" \
+  "http://localhost:3200/user/me/tenants/app-prod/users/wallet-policy/remediations" \
   -H "Authorization: Bearer user-session-jwt" \
   -H "Content-Type: application/json" \
   -d '{"wallets":[{"userId":"usr_123","accountId":"acct_2"},{"userId":"usr_456","accountId":"acct_7"}]}'

@@ -1,6 +1,7 @@
 import {
   type LegacyWebhookEventType,
   type WebhookCatalogEventType,
+  WebhookEventRegistry,
   type WebhookEventType,
 } from "@stwd/shared";
 
@@ -27,6 +28,8 @@ export const CONFIGURED_WEBHOOK_EVENT_TYPES = [
   "wallet.raw_signature.created",
   "wallet.funds_deposited",
   "wallet.funds_withdrawn",
+  "wallet.frozen",
+  "wallet.unfrozen",
   "transaction.broadcasted",
   "transaction.confirmed",
   "transaction.execution_reverted",
@@ -72,7 +75,17 @@ export const CONFIGURED_WEBHOOK_EVENT_TYPES = [
 export type ConfiguredWebhookEventType = (typeof CONFIGURED_WEBHOOK_EVENT_TYPES)[number];
 type VaultWebhookEventAlias = LegacyWebhookEventType;
 
-export type DispatchableWebhookEventType = WebhookEventType;
+/**
+ * The event-type a caller may pass to `dispatchWebhook`. Core event names
+ * (`WebhookEventType`) stay autocompleted/typed; the `(string & {})` arm widens
+ * the type so a PLUGIN-declared event name (one the plugin host merged into the
+ * runtime {@link webhookEventRegistry}) can also be emitted, WITHOUT the core's
+ * closed union having to enumerate it. The widening is a TYPE accommodation only:
+ * `dispatchWebhook` VALIDATES the name against the runtime registry (core ∪
+ * plugin-declared) and drops an unregistered name, so an arbitrary unvalidated
+ * string can never flow through.
+ */
+export type DispatchableWebhookEventType = WebhookEventType | (string & {});
 
 const CONFIGURED_EVENT_SET = new Set<string>(CONFIGURED_WEBHOOK_EVENT_TYPES);
 const VAULT_EVENT_ALIAS_MAP: Partial<Record<VaultWebhookEventAlias, ConfiguredWebhookEventType>> = {
@@ -97,4 +110,32 @@ export function acceptsConfiguredWebhookEvent(
   type: ConfiguredWebhookEventType,
 ): boolean {
   return events.length === 0 || events.includes(type);
+}
+
+/**
+ * Process-wide registry of valid webhook event names, seeded with the core
+ * configured event types. The plugin host merges each enabled plugin's declared
+ * `webhookEvents` into THIS registry at the composition root, so the webhook
+ * config/dispatch validation accepts a plugin's event type (core ∪
+ * plugin-declared) without the core's closed union having to enumerate it.
+ *
+ * Core events are seeded here and can never be removed: a plugin can only ADD to
+ * the valid set. Tests that compose plugins against an isolated registry can
+ * construct their own {@link WebhookEventRegistry}.
+ */
+export const webhookEventRegistry = new WebhookEventRegistry(CONFIGURED_WEBHOOK_EVENT_TYPES);
+
+/**
+ * True when `type` is a valid webhook event name to CONFIGURE on a subscription:
+ * a core configured event OR an event a registered plugin declared. This is the
+ * runtime-extensible replacement for checking membership of the frozen
+ * `CONFIGURED_WEBHOOK_EVENT_TYPES` list directly.
+ */
+export function isValidConfigurableWebhookEvent(type: string): boolean {
+  return webhookEventRegistry.has(type);
+}
+
+/** Every currently-valid configurable webhook event name (core ∪ plugin), sorted. */
+export function listValidConfigurableWebhookEvents(): string[] {
+  return webhookEventRegistry.list();
 }

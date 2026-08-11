@@ -1,7 +1,7 @@
 {
   "name": "@stwd/mcp",
   "version": "0.1.0",
-  "description": "Model Context Protocol (MCP) server exposing Steward agent-wallet and auth operations as tools for AI agents and IDEs",
+  "description": "MCP tools for invoking Steward-authorized wallet and provider capabilities",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -52,6 +52,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@stwd/sdk": "workspace:*",
+    "@stwd/shared": "workspace:*",
     "zod": "^4.3.6"
   },
   "devDependencies": {
