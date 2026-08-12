@@ -8182,6 +8182,30 @@ auth.post("/passkey/login/verify", async (c) => {
  * Body: { email, tenantId? }
  * Sends a magic link email, returns expiry time.
  */
+// TEMPORARY diagnostic (remove once Railway's client-IP header shape is
+// confirmed): returns the raw proxy headers + what trustedClientIp derives,
+// gated by a probe token so it is not open header disclosure.
+auth.get("/_ipprobe", (c) => {
+  if (c.req.query("probe") !== "steward-ip-probe-9f3a") return c.notFound();
+  const h = (n: string) => c.req.header(n) ?? null;
+  return c.json({
+    hops: trustedProxyHops(),
+    trustCloudflare: process.env.STEWARD_TRUST_CLOUDFLARE === "true",
+    derived: trustedClientIp(c) ?? null,
+    headers: {
+      "x-forwarded-for": h("x-forwarded-for"),
+      "x-real-ip": h("x-real-ip"),
+      "x-envoy-external-address": h("x-envoy-external-address"),
+      "x-envoy-original-dst-host": h("x-envoy-original-dst-host"),
+      "cf-connecting-ip": h("cf-connecting-ip"),
+      "true-client-ip": h("true-client-ip"),
+      forwarded: h("forwarded"),
+      "x-client-ip": h("x-client-ip"),
+      "x-original-forwarded-for": h("x-original-forwarded-for"),
+    },
+  });
+});
+
 auth.post("/email/send", async (c) => {
   // Tiered limits: the per-IP burst is generous (30/min) because one IP is
   // often an office/NAT/dev box full of legit users; the tight anti-abuse
