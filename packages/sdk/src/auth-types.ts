@@ -139,7 +139,15 @@ export interface StewardCurrentUserResult {
 export interface StewardEmailResult {
   ok: boolean;
   expiresAt: string;
+  /** Opaque public challenge id for cross-device email sign-in polling. */
+  challengeId?: string;
+  /** High-entropy secret required with challengeId when polling. Store only client-side. */
+  pollSecret?: string;
 }
+
+export type StewardEmailSignInStatusResult =
+  | { ok: true; status: "pending"; expiresAt?: string }
+  | { ok: true; status: "consumed" | "locked" | "expired" | "invalid" };
 
 export interface StewardSmsOtpResult {
   ok: boolean;

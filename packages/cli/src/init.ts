@@ -66,6 +66,7 @@ function renderEnv(options: InitOptions): string {
     "POSTGRES_PASSWORD=" + postgresPassword,
     "STEWARD_MASTER_PASSWORD=" + hex(32),
     "STEWARD_JWT_SECRET=" + hex(32),
+    "STEWARD_EMAIL_CODE_SECRET=" + hex(32),
     // PR4 provider execution authorization key rotation list. The active first
     // entry signs and all entries verify. Keep this separate from JWT material.
     "STEWARD_EXECUTION_AUTH_SECRET=v1:" + hex(32),

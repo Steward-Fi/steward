@@ -26,6 +26,7 @@ describe("EmailAuth OTP primitives", () => {
       provider: {
         async send(_to: string, _subject: string, body: string) {
           lastEmailBody = body;
+          return { provider: "test" };
         },
       },
     });
@@ -89,6 +90,7 @@ describe("EmailAuth OTP primitives", () => {
       provider: {
         async send(_to: string, _subject: string, body: string) {
           lastEmailBody = body;
+          return { provider: "test" };
         },
       },
     });
@@ -108,6 +110,7 @@ describe("EmailAuth OTP primitives", () => {
         async send(_to: string, subj: string, body: string) {
           subject = subj;
           lastEmailBody = body;
+          return { provider: "test" };
         },
       },
     });

@@ -288,16 +288,16 @@ describe("email magic-link verification hardening", () => {
     expect(verifyStart).toBeGreaterThanOrEqual(0);
     expect(callbackStart).toBeGreaterThanOrEqual(0);
     expect(source.indexOf('"email-verify"', verifyStart)).toBeLessThan(
-      source.indexOf("verifyMagicLink(body.token)", verifyStart),
+      source.indexOf("verifyMagicLink(body.token, email, resolvedTenantId)", verifyStart),
     );
     expect(source.indexOf('"email-verify-token"', verifyStart)).toBeLessThan(
-      source.indexOf("verifyMagicLink(body.token)", verifyStart),
+      source.indexOf("verifyMagicLink(body.token, email, resolvedTenantId)", verifyStart),
     );
     expect(source.indexOf('"email-callback"', callbackStart)).toBeLessThan(
-      source.indexOf("verifyMagicLink(token)", callbackStart),
+      source.indexOf("verifyMagicLink(token, email, resolvedTenantId)", callbackStart),
     );
     expect(source.indexOf('"email-callback-token"', callbackStart)).toBeLessThan(
-      source.indexOf("verifyMagicLink(token)", callbackStart),
+      source.indexOf("verifyMagicLink(token, email, resolvedTenantId)", callbackStart),
     );
   });
 });

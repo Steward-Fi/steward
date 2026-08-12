@@ -32,6 +32,7 @@ export type {
   StewardEmailGrantResult,
   StewardEmailOtpResult,
   StewardEmailResult,
+  StewardEmailSignInStatusResult,
   StewardEmbeddedWalletLoginConfig,
   StewardFarcasterLoginConfig,
   StewardFarcasterLoginPayload,
