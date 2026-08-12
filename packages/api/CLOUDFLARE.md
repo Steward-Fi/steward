@@ -92,6 +92,20 @@ directory. Do NOT put them in `wrangler.toml`.
 `SKIP_MIGRATIONS=1`, `DATABASE_DRIVER=neon-http`, and `REDIS_DRIVER=upstash`
 are already in `wrangler.toml` `[vars]` so they ship with every deploy.
 
+Non-secret client-IP trust config (auth rate limiting) can go in `[vars]`:
+`STEWARD_TRUST_CLOUDFLARE=true` (Workers always sit behind Cloudflare, so
+`cf-connecting-ip` is authoritative here), or `STEWARD_TRUSTED_PROXY_HOPS=<n>`
+when a different appending proxy chain fronts the worker. Optional
+`STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX` bounds auth admissions per minute
+per isolate while a configured Upstash is unreachable (default 300, `0` =
+strict fail-closed). See `packages/api/src/routes/auth.ts`
+(`trustedClientIp`).
+
+On the Railway deploy (no Cloudflare in front), `STEWARD_TRUSTED_PROXY_HOPS=1`
+is REQUIRED, not optional: until it is set, auth rate limits fall back to
+coarse per-host buckets, which are weaker on a directly-exposed
+(non-Host-locked) service. See `docs/deploy/railway-lean-full.md`.
+
 ## Migrations
 
 ```bash

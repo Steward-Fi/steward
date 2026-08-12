@@ -50,11 +50,14 @@ describe("auth rate-limit headers", () => {
 
     expect(response.status).toBe(429);
     expect(response.headers.get("retry-after")).toBe("60");
-    expect(response.headers.get("ratelimit-limit")).toBe("30");
+    // No trusted proxy hops are configured here, so the subject is the coarse
+    // per-host fallback and the advertised limit is the base 30 widened by the
+    // ×5 coarse-fallback headroom (many clients share each coarse bucket).
+    expect(response.headers.get("ratelimit-limit")).toBe("150");
     expect(response.headers.get("ratelimit-remaining")).toBe("0");
     expect(response.headers.get("ratelimit-reset")).toBe("60");
-    expect(response.headers.get("ratelimit-policy")).toBe("30;w=60");
-    expect(response.headers.get("x-ratelimit-limit")).toBe("30");
+    expect(response.headers.get("ratelimit-policy")).toBe("150;w=60");
+    expect(response.headers.get("x-ratelimit-limit")).toBe("150");
     expect(response.headers.get("x-ratelimit-remaining")).toBe("0");
     expect(response.headers.get("x-ratelimit-reset")).toBe("60");
 
