@@ -187,32 +187,129 @@ function normalizeEmailDomain(value: unknown): string | null {
   return domain;
 }
 
-// ─── IP-based auth rate limiting ─────────────────────────────────────────────
+// ─── Trusted client IP + auth rate limiting ──────────────────────────────────
 
 /**
- * Check a client rate limit for auth endpoints, backed by the Redis sliding
- * window. In production, Redis must be available for endpoint-specific auth
- * throttles unless STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL=true is explicitly
- * configured. Forwarded IP headers
- * are used only when STEWARD_TRUST_PROXY_HEADERS=true; otherwise a single
- * global bucket is safer than letting clients pick arbitrary rate-limit keys.
- * We deliberately do not
- * keep an in-memory fallback Map: it is incorrect across multiple instances
- * and impossible on Cloudflare Workers (no shared state across isolates).
- *
- * @param c        - Hono context (used to read client IP headers)
- * @param endpoint - Short name used as part of the Redis key
- * @param windowMs - Window length in milliseconds
- * @param max      - Maximum allowed requests in the window
+ * Number of trusted reverse proxies that APPEND to x-forwarded-for before
+ * requests reach this process. Railway's edge appends the peer IP it observed
+ * as the RIGHT-most entry, so STEWARD_TRUSTED_PROXY_HOPS=1 makes the last
+ * entry authoritative and everything a client prepends is ignored. Set it to
+ * the EXACT number of appending proxies (1 for bare Railway); overestimating
+ * re-opens spoofing. Unset, empty, or invalid values mean no forwarded header
+ * is trusted (safe default — a typo can never widen trust). The deprecated
+ * STEWARD_TRUST_PROXY_HEADERS=true is honored as hops=1 with right-most
+ * semantics; the old left-most read was client-spoofable and is deliberately
+ * not preserved.
  */
-function authRateLimitSubject(c: Context): string {
-  if (process.env.STEWARD_TRUST_PROXY_HEADERS !== "true") return "global";
-  return (
-    c.req.header("cf-connecting-ip")?.trim() ||
-    c.req.header("x-real-ip")?.trim() ||
-    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
-    "global"
+function trustedProxyHops(): number {
+  const raw = process.env.STEWARD_TRUSTED_PROXY_HOPS?.trim();
+  if (raw === undefined || raw === "") {
+    return process.env.STEWARD_TRUST_PROXY_HEADERS === "true" ? 1 : 0;
+  }
+  // Canonical non-negative integer only: "1.5" must not truncate into trust.
+  if (!/^\d+$/.test(raw)) return 0;
+  const parsed = Number.parseInt(raw, 10);
+  return parsed > 0 && parsed <= 10 ? parsed : 0;
+}
+
+/**
+ * Best-effort trustworthy client IP, or undefined when none can be derived.
+ *
+ * - cf-connecting-ip is honored only when STEWARD_TRUST_CLOUDFLARE=true AND
+ *   origin ingress is locked to Cloudflare. This service is served directly
+ *   by Railway today (no cf-ray), so the flag stays unset and the header is
+ *   ignored as client-forgeable.
+ * - x-forwarded-for: each trusted proxy APPENDS the peer it observed, so with
+ *   N trusted hops the trustworthy entry is the N-th from the RIGHT. The
+ *   left-most entry is client-supplied and is never read.
+ * - x-real-ip is deliberately not consulted: no proxy in this topology sets
+ *   it authoritatively, so a client-set value would pass through verbatim.
+ *
+ * Every candidate is validated with isIP so header garbage can never become a
+ * rate-limit key or a captcha remoteip. Callers seeing undefined must degrade
+ * to a partitioned coarse subject — never a shared "global" bucket, never open.
+ */
+export function trustedClientIp(c: Context): string | undefined {
+  if (process.env.STEWARD_TRUST_CLOUDFLARE === "true") {
+    const cf = c.req.header("cf-connecting-ip")?.trim();
+    if (cf && isIP(cf)) return cf;
+  }
+  const hops = trustedProxyHops();
+  if (hops === 0) return undefined;
+  const entries = (c.req.header("x-forwarded-for") ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  const candidate = entries[entries.length - hops];
+  return candidate && isIP(candidate) ? candidate : undefined;
+}
+
+/**
+ * Coarsen an IP for rate-limit keying. IPv4 keys as itself; IPv4-mapped IPv6
+ * unwraps to the embedded IPv4 in BOTH spellings (::ffff:a.b.c.d and the hex
+ * form ::ffff:aabb:ccdd) so mapped clients share one bucket instead of all
+ * collapsing into 0::/64 or splitting across spellings; native IPv6 keys by
+ * /64 — providers delegate whole /64s, so full-address buckets would let one
+ * host mint 2^64 independent budgets while distinct subscribers almost never
+ * share a /64.
+ */
+export function clientIpBucket(ip: string): string {
+  const lower = ip.toLowerCase();
+  if (lower.startsWith("::ffff:") && isIP(lower.slice(7)) === 4) {
+    return lower.slice(7);
+  }
+  if (isIP(lower) !== 6) return lower;
+  const [head = "", tail = ""] = lower.split("::");
+  const headParts = head ? head.split(":") : [];
+  const tailParts = tail ? tail.split(":") : [];
+  const missing = Math.max(8 - headParts.length - tailParts.length, 0);
+  // Parse each hextet numerically so full-form and ::-compressed spellings of
+  // the same address always land in the same bucket.
+  const full = [...headParts, ...Array(missing).fill("0"), ...tailParts].map((part) =>
+    Number.parseInt(part || "0", 16),
   );
+  // IPv4-mapped spelled in hex (::ffff:0102:0304): unwrap to the embedded
+  // IPv4 so it shares the dotted-quad spelling's bucket.
+  if (full.length === 8 && full.slice(0, 5).every((part) => part === 0) && full[5] === 0xffff) {
+    const hi = full[6] ?? 0;
+    const lo = full[7] ?? 0;
+    return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
+  }
+  return `${full
+    .slice(0, 4)
+    .map((part) => part.toString(16))
+    .join(":")}::/64`;
+}
+
+/** Coarse fallback buckets are shared by many clients; widen their budget. */
+const AUTH_RATE_LIMIT_FALLBACK_HEADROOM = 5;
+
+let coarseSubjectWarnedAt = 0;
+
+/**
+ * Rate-limit subject for auth endpoints. With a trusted client IP every
+ * client gets an independent budget (IPv6 at /64). Without one, requests
+ * shard per Host — the edge only routes configured domains here, so Host
+ * cannot be rotated to mint unbounded buckets the way client-controlled
+ * headers or user-agents can — and checkAuthRateLimit widens the budget by
+ * AUTH_RATE_LIMIT_FALLBACK_HEADROOM because many clients share each bucket.
+ * No configuration yields the old literal "global" chokepoint (#268), and no
+ * client-controlled free text ever reaches Redis unhashed.
+ */
+function authRateLimitSubject(c: Context): { subject: string; coarse: boolean } {
+  const ip = trustedClientIp(c);
+  if (ip) return { subject: `ip:${clientIpBucket(ip)}`, coarse: false };
+  const now = Date.now();
+  if (process.env.NODE_ENV === "production" && now - coarseSubjectWarnedAt >= 60_000) {
+    coarseSubjectWarnedAt = now;
+    console.warn(
+      "[AuthRateLimit] No trusted client IP (set STEWARD_TRUSTED_PROXY_HOPS=1 on Railway); auth rate limits fall back to coarse per-host buckets instead of per-client budgets",
+    );
+  }
+  return {
+    subject: `host:${c.req.header("host")?.toLowerCase().trim() || "unknown"}`,
+    coarse: true,
+  };
 }
 
 function allowAuthRateLimitSoftFail(): boolean {
@@ -222,6 +319,68 @@ function allowAuthRateLimitSoftFail(): boolean {
   );
 }
 
+/**
+ * Bounded, observable fallback for the window where Redis is CONFIGURED but
+ * unreachable (blip, restart, failover): admit up to
+ * STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX requests per minute per instance
+ * across all auth endpoints, then deny. 0 restores strict fail-closed.
+ * Redis NEVER configured in production remains a hard deny — misconfiguration
+ * must stay loud. This is not a per-client limiter and does not violate the
+ * no-in-memory-fallback-Map rule in checkAuthRateLimit's doc: it is a single
+ * O(1) circuit-breaker counter bounding blast radius per instance (per
+ * isolate on Workers, which only tightens it).
+ */
+function authRateLimitOutageValveMax(): number {
+  const raw = process.env.STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX;
+  if (raw === undefined || raw === "") return 300;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 300;
+}
+
+let outageValveWindowStartMs = 0;
+let outageValveCount = 0;
+let outageValveLoggedAt = 0;
+
+function authRateLimitOutageAllow(endpoint: string, err?: unknown): boolean {
+  const valveMax = authRateLimitOutageValveMax();
+  if (valveMax === 0) return false;
+  const now = Date.now();
+  if (now - outageValveWindowStartMs >= 60_000) {
+    outageValveWindowStartMs = now;
+    outageValveCount = 0;
+  }
+  if (now - outageValveLoggedAt >= 30_000) {
+    outageValveLoggedAt = now;
+    console.error(
+      `[AuthRateLimit] Redis unavailable; bounded per-instance outage valve engaged (endpoint "${endpoint}", max ${valveMax}/min)`,
+      err ?? "",
+    );
+  }
+  outageValveCount += 1;
+  return outageValveCount <= valveMax;
+}
+
+/**
+ * Check a client rate limit for auth endpoints, backed by the Redis sliding
+ * window. Subjects come from authRateLimitSubject (trusted client IP, or a
+ * coarse per-host fallback whose budget is widened by
+ * AUTH_RATE_LIMIT_FALLBACK_HEADROOM) unless subjectOverride is given. The
+ * subject is always hashed into the Redis key, so neither PII (destination
+ * emails/phones) nor header-controlled bytes ever reach Redis. In production,
+ * Redis must be available unless STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL=true
+ * (full soft-fail, break-glass only) or the bounded outage valve admits the
+ * request (Redis configured but unreachable only). We deliberately do not
+ * keep an in-memory fallback Map as a limiter: it is incorrect across
+ * multiple instances and impossible on Cloudflare Workers (no shared state
+ * across isolates); the outage valve is a single bounded counter, not a
+ * per-client map.
+ *
+ * @param c        - Hono context (used to derive the client subject)
+ * @param endpoint - Short name used as part of the Redis key
+ * @param windowMs - Window length in milliseconds
+ * @param max      - Max requests in the window (×5 for coarse fallback subjects)
+ * @param subjectOverride - Per-target subject (e.g. destination email); hashed at key build
+ */
 async function checkAuthRateLimit(
   c: Context,
   endpoint: string,
@@ -229,17 +388,21 @@ async function checkAuthRateLimit(
   max: number,
   subjectOverride?: string,
 ): Promise<{ allowed: boolean; retryAfterSecs?: number }> {
-  const subject = subjectOverride ?? authRateLimitSubject(c);
-  const key = `ratelimit:auth:${endpoint}:${subject}:${windowMs}`;
+  const resolved =
+    subjectOverride !== undefined
+      ? { subject: subjectOverride, coarse: false }
+      : authRateLimitSubject(c);
+  const effectiveMax = resolved.coarse ? max * AUTH_RATE_LIMIT_FALLBACK_HEADROOM : max;
+  const key = `ratelimit:auth:${endpoint}:${hashSha256Hex(resolved.subject)}:${windowMs}`;
 
   const deny = (retryAfterSecs: number) => {
     const headers = formatRateLimitHeaders({
-      limit: max,
+      limit: effectiveMax,
       remaining: 0,
       resetMs: retryAfterSecs * 1000,
       retryAfterMs: retryAfterSecs * 1000,
     });
-    headers["RateLimit-Policy"] = `${max};w=${Math.ceil(windowMs / 1000)}`;
+    headers["RateLimit-Policy"] = `${effectiveMax};w=${Math.ceil(windowMs / 1000)}`;
     for (const [name, value] of Object.entries(headers)) c.header(name, value);
     return { allowed: false, retryAfterSecs };
   };
@@ -248,17 +411,26 @@ async function checkAuthRateLimit(
     const redisMw = await import("../middleware/redis.js");
     if (!redisMw.isRedisAvailable()) {
       if (allowAuthRateLimitSoftFail()) return { allowed: true };
+      if (redisMw.isRedisConfigured() && authRateLimitOutageAllow(endpoint)) {
+        return { allowed: true };
+      }
       return deny(60);
     }
 
     const { checkRateLimit } = await import("@stwd/redis");
-    const result = await checkRateLimit(key, windowMs, max);
+    const result = await checkRateLimit(key, windowMs, effectiveMax);
     if (!result.allowed) {
       return deny(Math.ceil(result.resetMs / 1000));
     }
     return { allowed: true };
-  } catch {
+  } catch (err) {
     if (allowAuthRateLimitSoftFail()) return { allowed: true };
+    // Any step above can throw — the dynamic imports, the availability probe,
+    // or checkRateLimit itself — so a throw is NOT proof Redis was seen
+    // available. Treat it as an outage and let the bounded valve decide; the
+    // deliberate hard deny for never-configured Redis in production is the
+    // non-throwing isRedisAvailable() branch above, which returns instead.
+    if (authRateLimitOutageAllow(endpoint, err)) return { allowed: true };
     return deny(60);
   }
 }
@@ -473,16 +645,6 @@ async function validateExplicitAuthTenantHint(
   if (!explicitHint) return null;
   if (!(await tenantExists(tenantId))) return `Tenant '${tenantId}' not found`;
   return null;
-}
-
-function trustedRemoteIp(c: Context): string | undefined {
-  if (process.env.STEWARD_TRUST_PROXY_HEADERS !== "true") return undefined;
-  return (
-    c.req.header("cf-connecting-ip")?.trim() ||
-    c.req.header("x-real-ip")?.trim() ||
-    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
-    undefined
-  );
 }
 
 function authTenantHint(c: Context, bodyTenantId?: string): string {
@@ -5011,7 +5173,7 @@ auth.post("/test/token", async (c) => {
 // ── SMS OTP ─────────────────────────────────────────────────────────────────
 
 auth.post("/sms/send", async (c) => {
-  const rl = await checkAuthRateLimit(c, "sms-send", 60_000, 3);
+  const rl = await checkAuthRateLimit(c, "sms-send", 60_000, 5);
   if (!rl.allowed) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many requests. Please try again later." },
@@ -5044,7 +5206,7 @@ auth.post("/sms/send", async (c) => {
     authAbuseConfig,
     "sms_otp",
     body.captchaToken,
-    trustedRemoteIp(c),
+    trustedClientIp(c),
   );
   if (!captcha.ok) {
     return c.json<ApiResponse>(
@@ -5169,7 +5331,7 @@ auth.post("/whatsapp/send", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "WhatsApp OTP is not configured" }, 503);
   }
 
-  const rl = await checkAuthRateLimit(c, "whatsapp-send", 60_000, 3);
+  const rl = await checkAuthRateLimit(c, "whatsapp-send", 60_000, 5);
   if (!rl.allowed) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many requests. Please try again later." },
@@ -5202,7 +5364,7 @@ auth.post("/whatsapp/send", async (c) => {
     authAbuseConfig,
     "sms_otp",
     body.captchaToken,
-    trustedRemoteIp(c),
+    trustedClientIp(c),
   );
   if (!captcha.ok) {
     return c.json<ApiResponse>(
@@ -7299,7 +7461,7 @@ auth.post("/logout", async (c) => {
  * Supports silent re-auth without user interaction when the access token nears expiry.
  */
 auth.post("/refresh", async (c) => {
-  const rl = await checkAuthRateLimit(c, "refresh", 60_000, 30);
+  const rl = await checkAuthRateLimit(c, "refresh", 60_000, 60);
   if (!rl.allowed) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many requests. Please try again later." },
@@ -7602,7 +7764,9 @@ auth.post("/passkey/register/options", async (c) => {
  * Verifies registration, stores credential, provisions wallet, returns JWT.
  */
 auth.post("/passkey/register/verify", async (c) => {
-  const rl = await checkAuthRateLimit(c, "passkey-verify", 60_000, 10);
+  // Distinct endpoint key from login's "passkey-verify" so registration and
+  // login verification do not share one bucket.
+  const rl = await checkAuthRateLimit(c, "passkey-register-verify", 60_000, 10);
   if (!rl.allowed) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many requests. Please try again later." },
@@ -7955,7 +8119,7 @@ auth.post("/passkey/login/verify", async (c) => {
  * Sends a magic link email, returns expiry time.
  */
 auth.post("/email/send", async (c) => {
-  const rl = await checkAuthRateLimit(c, "email-send", 60_000, 3);
+  const rl = await checkAuthRateLimit(c, "email-send", 60_000, 10);
   if (!rl.allowed) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many requests. Please try again later." },
@@ -7996,7 +8160,7 @@ auth.post("/email/send", async (c) => {
     authAbuseConfig,
     "email_otp",
     body.captchaToken,
-    trustedRemoteIp(c),
+    trustedClientIp(c),
   );
   if (!captcha.ok) {
     return c.json<ApiResponse>(
@@ -8262,7 +8426,7 @@ auth.post("/email/code/verify", async (c) => {
 });
 
 auth.post("/email/status", async (c) => {
-  const rl = await checkAuthRateLimit(c, "email-status", 60_000, 60);
+  const rl = await checkAuthRateLimit(c, "email-status", 60_000, 120);
   if (!rl.allowed) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many requests. Please try again later." },
@@ -8309,7 +8473,7 @@ auth.post("/email/status", async (c) => {
 //                                unverified registration (pre-hijack) closed.
 
 auth.post("/email/otp/send", async (c) => {
-  const rl = await checkAuthRateLimit(c, "email-otp-send", 60_000, 3);
+  const rl = await checkAuthRateLimit(c, "email-otp-send", 60_000, 10);
   if (!rl.allowed) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many requests. Please try again later." },
@@ -8350,7 +8514,7 @@ auth.post("/email/otp/send", async (c) => {
     authAbuseConfig,
     "email_otp",
     body.captchaToken,
-    trustedRemoteIp(c),
+    trustedClientIp(c),
   );
   if (!captcha.ok) {
     return c.json<ApiResponse>(
