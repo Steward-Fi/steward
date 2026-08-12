@@ -191,11 +191,13 @@ function normalizeEmailDomain(value: unknown): string | null {
 
 /**
  * Number of trusted reverse proxies that APPEND to x-forwarded-for before
- * requests reach this process. Railway's edge appends the peer IP it observed
- * as the RIGHT-most entry, so STEWARD_TRUSTED_PROXY_HOPS=1 makes the last
- * entry authoritative and everything a client prepends is ignored. Set it to
- * the EXACT number of appending proxies (1 for bare Railway); overestimating
- * re-opens spoofing. Unset, empty, or invalid values mean no forwarded header
+ * requests reach this process. The client IP is the entry that many hops from
+ * the RIGHT; anything a client prepends (further left) is ignored. On bare
+ * Railway this is 2: x-forwarded-for arrives as "<client>, <railway-edge>" and
+ * the right-most edge entry ROTATES between Railway's proxy nodes, so hops=1
+ * scatters one client across buckets while hops=2 locks onto the stable client
+ * entry (verified against prod). Set it to the EXACT number of appending
+ * proxies; overestimating re-opens spoofing. Unset, empty, or invalid values mean no forwarded header
  * is trusted (safe default — a typo can never widen trust). The deprecated
  * STEWARD_TRUST_PROXY_HEADERS=true is honored as hops=1 with right-most
  * semantics; the old left-most read was client-spoofable and is deliberately
@@ -367,7 +369,7 @@ function authRateLimitSubject(c: Context): { subject: string; coarse: boolean } 
   if (process.env.NODE_ENV === "production" && now - coarseSubjectWarnedAt >= 60_000) {
     coarseSubjectWarnedAt = now;
     console.warn(
-      "[AuthRateLimit] No trusted client IP (set STEWARD_TRUSTED_PROXY_HOPS=1 on Railway); auth rate limits fall back to coarse per-host buckets instead of per-client budgets",
+      "[AuthRateLimit] No trusted client IP (set STEWARD_TRUSTED_PROXY_HOPS=2 on Railway); auth rate limits fall back to coarse per-host buckets instead of per-client budgets",
     );
   }
   return {
@@ -8182,30 +8184,6 @@ auth.post("/passkey/login/verify", async (c) => {
  * Body: { email, tenantId? }
  * Sends a magic link email, returns expiry time.
  */
-// TEMPORARY diagnostic (remove once Railway's client-IP header shape is
-// confirmed): returns the raw proxy headers + what trustedClientIp derives,
-// gated by a probe token so it is not open header disclosure.
-auth.get("/_ipprobe", (c) => {
-  if (c.req.query("probe") !== "steward-ip-probe-9f3a") return c.notFound();
-  const h = (n: string) => c.req.header(n) ?? null;
-  return c.json({
-    hops: trustedProxyHops(),
-    trustCloudflare: process.env.STEWARD_TRUST_CLOUDFLARE === "true",
-    derived: trustedClientIp(c) ?? null,
-    headers: {
-      "x-forwarded-for": h("x-forwarded-for"),
-      "x-real-ip": h("x-real-ip"),
-      "x-envoy-external-address": h("x-envoy-external-address"),
-      "x-envoy-original-dst-host": h("x-envoy-original-dst-host"),
-      "cf-connecting-ip": h("cf-connecting-ip"),
-      "true-client-ip": h("true-client-ip"),
-      forwarded: h("forwarded"),
-      "x-client-ip": h("x-client-ip"),
-      "x-original-forwarded-for": h("x-original-forwarded-for"),
-    },
-  });
-});
-
 auth.post("/email/send", async (c) => {
   // Tiered limits: the per-IP burst is generous (30/min) because one IP is
   // often an office/NAT/dev box full of legit users; the tight anti-abuse
