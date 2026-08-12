@@ -113,3 +113,38 @@ describe("renderCustomTemplate (deployer-supplied raw templates)", () => {
     expect(rendered.html).toBe("<b>123456</b>");
   });
 });
+
+describe("magic-link companion code templates", () => {
+  const data = { ...MAGIC_LINK_DATA, code: "123456" };
+
+  it("renders the code in default text and html", () => {
+    const rendered = renderDefaultTemplate(data);
+    expect(rendered.text).toContain("123456");
+    expect(rendered.html).toContain("123456");
+    expect(rendered.text).toContain(data.magicLink);
+    expect(rendered.html).toContain(data.magicLink);
+  });
+
+  it("exposes the code to deployer-supplied magic-link templates via {{code}}", () => {
+    const rendered = renderCustomTemplate(
+      {
+        subject: "Sign in",
+        text: "Link: {{magicLink}} Code: {{code}}",
+        html: '<a href="{{magicLink}}">Sign in</a> or enter <b>{{code}}</b>',
+      },
+      magicLinkTemplateValues(data),
+    );
+    expect(rendered.text).toContain("123456");
+    expect(rendered.html).toContain("<b>123456</b>");
+    expect(rendered.text).toContain(data.magicLink);
+  });
+
+  it("substitutes an empty string for {{code}} when no companion code was issued", () => {
+    const rendered = renderCustomTemplate(
+      { subject: "Sign in", text: "Code: {{code}}", html: "<b>{{code}}</b>" },
+      magicLinkTemplateValues(MAGIC_LINK_DATA),
+    );
+    expect(rendered.text).toBe("Code: ");
+    expect(rendered.html).toBe("<b></b>");
+  });
+});

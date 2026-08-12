@@ -19,6 +19,7 @@ export POSTGRES_USER=steward
 export POSTGRES_PASSWORD=steward_ci
 export STEWARD_MASTER_PASSWORD=compose-contract-master-password
 export STEWARD_JWT_SECRET=compose-contract-jwt-secret-32-chars
+export STEWARD_EMAIL_CODE_SECRET=compose-contract-email-code-secret-32-chars
 export STEWARD_EXECUTION_AUTH_SECRET=v1:compose-contract-execution-auth-secret-32-chars
 export STEWARD_AUDIT_HMAC_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 export STEWARD_KDF_SALT=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789

@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Add shared magic-link + six-digit companion-code login helpers: `verifyEmailSignInCode()` and status-only `pollEmailSignInStatus()`. `signInWithEmail()` now returns opaque polling credentials.
 - `BridgeHandoff` type and `BridgeBuildResult = AdapterUnsignedIntent | BridgeHandoff` union. `buildBridgeIntent()` now returns either an unsigned transaction intent or a non-signable external handoff (for providers like wxmr.io that require an interactive wallet and expose no safe transaction-building API). Bridge quote/session types gain optional `direction`, `executionMode`, `handoffUrl`, `feeScope`, `notices`, and `recipientSensitive` metadata. Additive and backward compatible.
 
 ### Docs

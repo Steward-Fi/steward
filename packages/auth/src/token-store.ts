@@ -36,8 +36,16 @@ export class TokenStore {
    * @param email  Email address tied to this token
    * @param ttlMs  Time-to-live in milliseconds (default 10 min)
    */
-  store(hash: string, email: string, ttlMs: number = DEFAULT_TTL_MS): void {
-    void this.backend.set(hash, email, ttlMs);
+  async store(hash: string, email: string, ttlMs: number = DEFAULT_TTL_MS): Promise<void> {
+    await this.backend.set(hash, email, ttlMs);
+  }
+
+  async setIfNotExists(
+    hash: string,
+    email: string,
+    ttlMs: number = DEFAULT_TTL_MS,
+  ): Promise<boolean> {
+    return this.backend.setIfNotExists(hash, email, ttlMs);
   }
 
   /**
@@ -58,8 +66,8 @@ export class TokenStore {
   /**
    * Delete a hash from the store (called after one-time token consumption).
    */
-  delete(hash: string): void {
-    void this.backend.delete(hash);
+  delete(hash: string): Promise<void> {
+    return this.backend.delete(hash);
   }
 
   /**

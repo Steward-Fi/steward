@@ -296,6 +296,7 @@ jobs:
           STEWARD_PLATFORM_KEY_SCOPES: '{"ci-platform-key":["platform:*"]}'
           ALLOW_USER_TENANT_CREATION: "true"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          STEWARD_EMAIL_CODE_SECRET: "ci-email-code-secret-must-be-at-least-32-chars-long"
           STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
@@ -338,6 +339,7 @@ jobs:
           STEWARD_PLATFORM_KEY_SCOPES: '{"ci-platform-key":["platform:*"]}'
           ALLOW_USER_TENANT_CREATION: "true"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          STEWARD_EMAIL_CODE_SECRET: "ci-email-code-secret-must-be-at-least-32-chars-long"
           STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
@@ -388,6 +390,7 @@ jobs:
           STEWARD_PLATFORM_KEY_SCOPES: '{"ci-platform-key":["platform:*"]}'
           ALLOW_USER_TENANT_CREATION: "true"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          STEWARD_EMAIL_CODE_SECRET: "ci-email-code-secret-must-be-at-least-32-chars-long"
           STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
@@ -451,6 +454,7 @@ jobs:
           STEWARD_PLATFORM_KEY_SCOPES: '{"ci-platform-key":["platform:*"]}'
           ALLOW_USER_TENANT_CREATION: "true"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          STEWARD_EMAIL_CODE_SECRET: "ci-email-code-secret-must-be-at-least-32-chars-long"
           STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           # Dummy HMAC root so the required compose var interpolates; production
@@ -491,6 +495,7 @@ jobs:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          STEWARD_EMAIL_CODE_SECRET: "ci-email-code-secret-must-be-at-least-32-chars-long"
           STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_KDF_SALT: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
           # docker compose interpolates the full compose env even for logs/down,

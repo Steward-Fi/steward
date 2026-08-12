@@ -9,8 +9,9 @@ import { escapeEmailHtml } from "./default";
  * instance as tenant configuration (tenant_configs.email_config.templates),
  * never in this repository.
  *
- * Placeholders (magic link): {{magicLink}}, {{email}}, {{tenantName}},
- * {{expiresInMinutes}}.
+ * Placeholders (magic link): {{magicLink}}, {{code}}, {{email}},
+ * {{tenantName}}, {{expiresInMinutes}}. ({{code}} is the six-digit companion
+ * code that shares the magic-link challenge; empty when no code was issued.)
  * Placeholders (OTP): {{code}}, {{email}}, {{brandName}}, {{expiresInMinutes}}.
  *
  * Substituted values are HTML-escaped in the `html` body (the template markup
@@ -52,6 +53,7 @@ export function renderCustomTemplate(
 export function magicLinkTemplateValues(data: MagicLinkTemplateData): Record<string, string> {
   return {
     magicLink: data.magicLink,
+    code: data.code ?? "",
     email: data.email,
     tenantName: data.tenantName ?? "",
     expiresInMinutes: String(data.expiresInMinutes),

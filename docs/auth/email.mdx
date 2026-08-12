@@ -1,19 +1,19 @@
 ---
-title: "Email Magic Link"
-description: "Passwordless sign-in via email magic links."
+title: "Email Link and Code"
+description: "Passwordless sign-in via a shared email link or six-digit code."
 ---
 
-# Email Magic Link
+# Email Link and Code
 
-Email authentication sends a one-time sign-in link to the user's email address. Clicking the link completes authentication without a password.
+Email authentication sends one challenge containing both a one-time sign-in link and a six-digit code. Redeeming either credential consumes the shared challenge.
 
 ## How It Works
 
 ```
 1. User enters email → SDK calls POST /auth/email/send
-2. Steward sends a magic link to the email
-3. User clicks the link → redirected to your callback URL with ?token=...&email=...
-4. Your app calls auth.verifyEmailCallback(token, email) → JWT session
+2. Steward sends one email containing the link and companion code
+3. User clicks the link or enters the code
+4. Your app calls auth.verifyEmailCallback(token, email) or auth.verifyEmailSignInCode(email, code) → session
 ```
 
 ## SDK Usage
@@ -30,7 +30,7 @@ const auth = new StewardAuth({
 
 const result = await auth.signInWithEmail("user@example.com");
 console.log(result);
-// { ok: true, expiresAt: "2026-04-10T21:00:00.000Z" }
+// { ok: true, expiresAt: "...", challengeId: "...", pollSecret: "..." }
 ```
 
 ### Step 2: Handle the Callback
@@ -102,6 +102,9 @@ RESEND_API_KEY=re_xxxxxxxxxxxx
 # Sender address (must be verified in Resend)
 EMAIL_FROM=auth@myapp.com
 
+# Dedicated HMAC secret for email codes and polling credentials
+STEWARD_EMAIL_CODE_SECRET=<32+ random bytes>
+
 # Your app's public URL (used for magic link generation)
 APP_URL=https://myapp.com
 ```
@@ -124,15 +127,19 @@ Make sure your app has a route at `/auth/callback` that handles this. If you nee
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/auth/email/send` | POST | Send a magic link. Body: `{ email, tenantId? }` |
-| `/auth/email/verify` | POST | Verify a magic link token. Body: `{ token, email, tenantId? }` |
+| `/auth/email/send` | POST | Send one link + code challenge. Returns `challengeId` and `pollSecret`. |
+| `/auth/email/verify` | POST | Redeem the magic-link credential and issue a session. |
+| `/auth/email/code/verify` | POST | Redeem the six-digit credential and issue a session. |
+| `/auth/email/status` | POST | Poll `pending`, `consumed`, `locked`, or expiry state. Status-only, never returns a session. |
 
 ## Security
 
-- Magic link tokens expire after 15 minutes
-- Each token is single-use and invalidated after verification
-- Tokens are cryptographically random (32 bytes)
-- Rate limiting: 5 emails per address per 15 minutes
+- The shared link and code expire after 10 minutes
+- Link and code are one atomic challenge: either can win exactly once
+- Link tokens and polling secrets are cryptographically random (32 bytes)
+- Link tokens are SHA-256 hashed and codes use keyed HMAC at rest
+- Five wrong code attempts hard-lock the challenge; API and destination rate limits also apply
+- Polling is status-only so an unsolicited magic-link click cannot transfer a session to the requester
 
 ## Related
 
