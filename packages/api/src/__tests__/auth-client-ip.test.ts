@@ -187,6 +187,70 @@ describe("trustedClientIp", () => {
     expect(await probeIp({ "x-real-ip": "203.0.113.5" })).toBeNull();
   });
 
+  it("x-envoy-external-address is honored when a trusted edge is configured, with :port stripped", async () => {
+    process.env.STEWARD_TRUSTED_PROXY_HOPS = "1";
+    expect(await probeIp({ "x-envoy-external-address": "203.0.113.9" })).toBe("203.0.113.9");
+    // Railway's Envoy edge may append the observed source port.
+    expect(await probeIp({ "x-envoy-external-address": "203.0.113.9:41234" })).toBe("203.0.113.9");
+    expect(await probeIp({ "x-envoy-external-address": "[2001:db8::9]:443" })).toBe("2001:db8::9");
+    // Envoy's single trusted value wins over the XFF fallback at hops=1.
+    expect(
+      await probeIp({
+        "x-envoy-external-address": "203.0.113.9",
+        "x-forwarded-for": "198.51.100.7",
+      }),
+    ).toBe("203.0.113.9");
+    // Garbage still falls through to the XFF path, never becomes a key.
+    expect(
+      await probeIp({
+        "x-envoy-external-address": "not-an-ip:80",
+        "x-forwarded-for": "198.51.100.7",
+      }),
+    ).toBe("198.51.100.7");
+  });
+
+  it("x-envoy-external-address is NEVER trusted with zero trusted hops (client-forgeable)", async () => {
+    delete process.env.STEWARD_TRUSTED_PROXY_HOPS;
+    delete process.env.STEWARD_TRUST_PROXY_HEADERS;
+    delete process.env.STEWARD_TRUST_CLOUDFLARE;
+    expect(await probeIp({ "x-envoy-external-address": "203.0.113.9" })).toBeNull();
+  });
+
+  it("with hops >= 2 the positional XFF read stays authoritative over x-envoy-external-address", async () => {
+    process.env.STEWARD_TRUSTED_PROXY_HOPS = "2";
+    // Envoy names the intermediate proxy here, not the client — XFF wins.
+    expect(
+      await probeIp({
+        "x-envoy-external-address": "10.0.0.9",
+        "x-forwarded-for": "203.0.113.5, 198.51.100.7, 10.0.0.9",
+      }),
+    ).toBe("198.51.100.7");
+    // ...but Envoy still rescues when the positional read cannot parse.
+    expect(
+      await probeIp({
+        "x-envoy-external-address": "10.0.0.9",
+        "x-forwarded-for": "203.0.113.5",
+      }),
+    ).toBe("10.0.0.9");
+  });
+
+  it("parses ip:port and [ipv6]:port in the trusted XFF position; bare IPv6 is never mangled", async () => {
+    process.env.STEWARD_TRUSTED_PROXY_HOPS = "1";
+    // Envoy-style ip:port right-most entry (the Railway prod shape).
+    expect(await probeIp({ "x-forwarded-for": "203.0.113.5, 198.51.100.7:52801" })).toBe(
+      "198.51.100.7",
+    );
+    expect(await probeIp({ "x-forwarded-for": "203.0.113.5, [2001:db8::7]:443" })).toBe(
+      "2001:db8::7",
+    );
+    expect(await probeIp({ "x-forwarded-for": "203.0.113.5, [2001:db8::7]" })).toBe("2001:db8::7");
+    // Bare IPv6 has >= 2 colons and must not be truncated at its last group.
+    expect(await probeIp({ "x-forwarded-for": "203.0.113.5, 2001:db8::7" })).toBe("2001:db8::7");
+    expect(await probeIp({ "x-forwarded-for": "::1" })).toBe("::1");
+    // ip:garbage-port is not silently repaired into an IP.
+    expect(await probeIp({ "x-forwarded-for": "198.51.100.7:notaport" })).toBeNull();
+  });
+
   it("cf-connecting-ip is honored only behind STEWARD_TRUST_CLOUDFLARE=true", async () => {
     process.env.STEWARD_TRUSTED_PROXY_HOPS = "1";
     delete process.env.STEWARD_TRUST_CLOUDFLARE;
@@ -288,7 +352,12 @@ describe("auth rate-limit keying (route harness)", () => {
     forceDenyAll = true;
 
     const res = await authRoutes.request("/nonce", {
-      headers: { host: "api.steward.example", "x-forwarded-for": "203.0.113.5" },
+      headers: {
+        host: "api.steward.example",
+        "x-forwarded-for": "203.0.113.5",
+        // Forged Envoy header without a trusted edge must not mint an ip: bucket.
+        "x-envoy-external-address": "203.0.113.5",
+      },
     });
     expect(res.status).toBe(429);
     // Base 30/min widened x5 for the shared coarse bucket.
@@ -336,7 +405,7 @@ describe("auth rate-limit keying (route harness)", () => {
     );
   });
 
-  it("enforces launch-sized per-endpoint budgets (email-send 10/min, sms-send 5/min per IP)", async () => {
+  it("enforces launch-sized per-endpoint budgets (email-send 30/min, sms-send 5/min per IP)", async () => {
     await connectMockRedis();
     process.env.STEWARD_TRUSTED_PROXY_HOPS = "1";
     const headers = {
@@ -344,9 +413,11 @@ describe("auth rate-limit keying (route harness)", () => {
       "x-forwarded-for": "198.51.100.30",
     };
 
-    // email-send: 10 allowed, 11th denied. Unique destination emails keep the
-    // per-email limiter out of the way; the per-IP budget is what trips.
-    for (let i = 0; i < 10; i++) {
+    // email-send: 30 allowed (generous per-IP burst for shared NATs — the
+    // per-destination limiter is the anti-abuse backstop), 31st denied.
+    // Unique destination emails keep the per-email limiter out of the way;
+    // the per-IP budget is what trips.
+    for (let i = 0; i < 30; i++) {
       const res = await authRoutes.request("/email/send", {
         method: "POST",
         headers,
@@ -357,10 +428,10 @@ describe("auth rate-limit keying (route harness)", () => {
     const emailDenied = await authRoutes.request("/email/send", {
       method: "POST",
       headers,
-      body: JSON.stringify({ email: "person-10@example.com" }),
+      body: JSON.stringify({ email: "person-30@example.com" }),
     });
     expect(emailDenied.status).toBe(429);
-    expect(emailDenied.headers.get("ratelimit-policy")).toBe("10;w=60");
+    expect(emailDenied.headers.get("ratelimit-policy")).toBe("30;w=60");
 
     // sms-send: 5 allowed (invalid body → 400 AFTER the limiter), 6th denied.
     for (let i = 0; i < 5; i++) {
