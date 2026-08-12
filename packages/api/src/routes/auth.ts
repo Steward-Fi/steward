@@ -213,35 +213,99 @@ function trustedProxyHops(): number {
 }
 
 /**
+ * Normalize one forwarded-address candidate to a bare IP, or undefined.
+ * Proxies (Railway's Envoy edge included) sometimes forward `ip:port` or
+ * `[ipv6]:port`, both of which node's isIP rejects, so the port is stripped
+ * first — but only where it is unambiguous: brackets always delimit an IPv6
+ * address, and a single colon can only be IPv4:port (bare IPv6 always
+ * contains at least two colons and is never truncated).
+ */
+function normalizeIpCandidate(value: string | undefined): string | undefined {
+  let candidate = value?.trim();
+  if (!candidate) return undefined;
+  const bracketed = /^\[([^\]]+)\](?::\d{1,5})?$/.exec(candidate);
+  if (bracketed?.[1]) {
+    candidate = bracketed[1];
+  } else {
+    const ipv4Port = /^([^:]+):\d{1,5}$/.exec(candidate);
+    if (ipv4Port?.[1]) candidate = ipv4Port[1];
+  }
+  return isIP(candidate) ? candidate : undefined;
+}
+
+let clientIpDiagLoggedAt = 0;
+
+/**
+ * TEMPORARY diagnostics — remove once Railway's forwarded-header shape is
+ * confirmed in production logs. Fires (throttled) only when trust IS
+ * configured yet no candidate validated, dumping the raw header values so a
+ * still-failing parse can be fixed precisely instead of guessed at.
+ * JSON.stringify keeps attacker-controlled header bytes on one escaped line.
+ */
+function logNoTrustedClientIpDiag(c: Context, hops: number): void {
+  const now = Date.now();
+  if (now - clientIpDiagLoggedAt < 60_000) return;
+  clientIpDiagLoggedAt = now;
+  console.warn(
+    "[AuthRateLimit][diag] trust configured but no client IP derived; falling back to coarse subject",
+    JSON.stringify({
+      hops,
+      "x-forwarded-for": c.req.header("x-forwarded-for") ?? null,
+      "x-real-ip": c.req.header("x-real-ip") ?? null,
+      "x-envoy-external-address": c.req.header("x-envoy-external-address") ?? null,
+      "cf-connecting-ip": c.req.header("cf-connecting-ip") ?? null,
+    }),
+  );
+}
+
+/**
  * Best-effort trustworthy client IP, or undefined when none can be derived.
  *
  * - cf-connecting-ip is honored only when STEWARD_TRUST_CLOUDFLARE=true AND
  *   origin ingress is locked to Cloudflare. This service is served directly
  *   by Railway today (no cf-ray), so the flag stays unset and the header is
  *   ignored as client-forgeable.
+ * - x-envoy-external-address: Railway's Envoy edge sets this to the single
+ *   external client address it observed (possibly with a :port). It is only
+ *   consulted once the operator has opted into a trusted edge (hops > 0 or
+ *   Cloudflare trust) — on a bare deployment a client could set it — and it
+ *   identifies the CLIENT only when that edge is the outermost trusted hop,
+ *   so with hops >= 2 the positional x-forwarded-for read stays authoritative
+ *   and Envoy's value is only a rescue when that read fails.
  * - x-forwarded-for: each trusted proxy APPENDS the peer it observed, so with
  *   N trusted hops the trustworthy entry is the N-th from the RIGHT. The
  *   left-most entry is client-supplied and is never read.
  * - x-real-ip is deliberately not consulted: no proxy in this topology sets
  *   it authoritatively, so a client-set value would pass through verbatim.
  *
- * Every candidate is validated with isIP so header garbage can never become a
- * rate-limit key or a captcha remoteip. Callers seeing undefined must degrade
- * to a partitioned coarse subject — never a shared "global" bucket, never open.
+ * Every candidate is validated with isIP (after unambiguous :port stripping)
+ * so header garbage can never become a rate-limit key or a captcha remoteip.
+ * Callers seeing undefined must degrade to a partitioned coarse subject —
+ * never a shared "global" bucket, never open.
  */
 export function trustedClientIp(c: Context): string | undefined {
-  if (process.env.STEWARD_TRUST_CLOUDFLARE === "true") {
+  const trustCloudflare = process.env.STEWARD_TRUST_CLOUDFLARE === "true";
+  if (trustCloudflare) {
     const cf = c.req.header("cf-connecting-ip")?.trim();
     if (cf && isIP(cf)) return cf;
   }
   const hops = trustedProxyHops();
-  if (hops === 0) return undefined;
-  const entries = (c.req.header("x-forwarded-for") ?? "")
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0);
-  const candidate = entries[entries.length - hops];
-  return candidate && isIP(candidate) ? candidate : undefined;
+  if (hops === 0 && !trustCloudflare) return undefined;
+
+  const fromEnvoy = () => normalizeIpCandidate(c.req.header("x-envoy-external-address"));
+  const fromForwardedFor = () => {
+    if (hops === 0) return undefined;
+    const entries = (c.req.header("x-forwarded-for") ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+    return normalizeIpCandidate(entries[entries.length - hops]);
+  };
+
+  const ip = hops >= 2 ? (fromForwardedFor() ?? fromEnvoy()) : (fromEnvoy() ?? fromForwardedFor());
+  if (ip) return ip;
+  logNoTrustedClientIpDiag(c, hops);
+  return undefined;
 }
 
 /**
@@ -8119,7 +8183,10 @@ auth.post("/passkey/login/verify", async (c) => {
  * Sends a magic link email, returns expiry time.
  */
 auth.post("/email/send", async (c) => {
-  const rl = await checkAuthRateLimit(c, "email-send", 60_000, 10);
+  // Tiered limits: the per-IP burst is generous (30/min) because one IP is
+  // often an office/NAT/dev box full of legit users; the tight anti-abuse
+  // backstop is email-send-destination (5 per 10min per address) below.
+  const rl = await checkAuthRateLimit(c, "email-send", 60_000, 30);
   if (!rl.allowed) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many requests. Please try again later." },
@@ -8473,7 +8540,10 @@ auth.post("/email/status", async (c) => {
 //                                unverified registration (pre-hijack) closed.
 
 auth.post("/email/otp/send", async (c) => {
-  const rl = await checkAuthRateLimit(c, "email-otp-send", 60_000, 10);
+  // Tiered limits: generous per-IP burst (30/min — shared NATs must not
+  // block); email-otp-send-destination (5 per 10min per address) below is the
+  // tight anti-abuse backstop.
+  const rl = await checkAuthRateLimit(c, "email-otp-send", 60_000, 30);
   if (!rl.allowed) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many requests. Please try again later." },
