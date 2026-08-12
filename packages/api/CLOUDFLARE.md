@@ -101,8 +101,10 @@ per isolate while a configured Upstash is unreachable (default 300, `0` =
 strict fail-closed). See `packages/api/src/routes/auth.ts`
 (`trustedClientIp`).
 
-On the Railway deploy (no Cloudflare in front), `STEWARD_TRUSTED_PROXY_HOPS=1`
-is REQUIRED, not optional: until it is set, auth rate limits fall back to
+On the Railway deploy (no Cloudflare in front), `STEWARD_TRUSTED_PROXY_HOPS=2`
+is REQUIRED, not optional (Railway's edge adds two `x-forwarded-for` entries and
+the right-most one rotates between nodes, so the client is the 2nd from the
+right — verified against prod). Until it is set, auth rate limits fall back to
 coarse per-host buckets, which are weaker on a directly-exposed
 (non-Host-locked) service. See `docs/deploy/railway-lean-full.md`.
 
