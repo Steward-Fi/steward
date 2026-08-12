@@ -1,8 +1,12 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 import { hashSha256Hex } from "./crypto";
-import type { EmailProvider } from "./email-provider";
-import { ConsoleProvider } from "./email-provider";
+import type { EmailDeliveryReceipt, EmailProvider } from "./email-provider";
+import {
+  ConsoleProvider,
+  EmailDeliveryError,
+  EmailDeliveryNotConfiguredError,
+} from "./email-provider";
 import {
   renderOtpTemplate as defaultOtpTemplateRenderer,
   renderTemplate as defaultTemplateRenderer,
@@ -274,6 +278,7 @@ function decodeMagicLinkPayload(value: string): MagicLinkPayload {
 
 export class EmailAuth {
   private provider: EmailProvider;
+  private deliveryNotConfigured: boolean;
   private tokenStore: TokenStore;
   private baseUrl: string;
   private callbackPath: string;
@@ -298,6 +303,15 @@ export class EmailAuth {
     this.callbackPath = config.callbackPath ?? DEFAULT_CALLBACK;
     this.tokenTtlMs = config.tokenTtlMs ?? DEFAULT_TTL_MS;
     this.provider = config.provider ?? new ConsoleProvider();
+    // Fail closed (elizaOS/eliza#18452): in production the ConsoleProvider —
+    // whether the silent default when no provider is configured, or passed
+    // explicitly — must never back login sends. Sends throw a typed
+    // EmailDeliveryNotConfiguredError BEFORE any challenge state is stored,
+    // so the API maps it to 503 instead of returning a false ok:true for a
+    // challenge nobody can ever receive. Verification of previously issued
+    // challenges is unaffected.
+    this.deliveryNotConfigured =
+      process.env.NODE_ENV === "production" && this.provider instanceof ConsoleProvider;
     this.tokenStore = config.tokenStore ?? new TokenStore();
     this.replyTo = config.replyTo;
     this.templateId = config.templateId;
@@ -329,6 +343,64 @@ export class EmailAuth {
     return actual.length === stored.length && timingSafeEqual(actual, stored);
   }
 
+  private assertDeliveryConfigured(): void {
+    if (this.deliveryNotConfigured) {
+      throw new EmailDeliveryNotConfiguredError();
+    }
+  }
+
+  /**
+   * Dispatch through the provider and require an acceptance receipt.
+   * Fail closed: on provider throw/rejection OR a missing receipt, run
+   * `invalidate` (best-effort) so any just-minted challenge state is no
+   * longer redeemable, then surface a typed EmailDeliveryError. Only the
+   * error NAME is logged — never the recipient, subject, token, code, or
+   * raw provider error text.
+   */
+  private async sendOrInvalidate(
+    message: { to: string; subject: string; text: string; html?: string },
+    invalidate: () => Promise<void>,
+  ): Promise<EmailDeliveryReceipt> {
+    let receipt: EmailDeliveryReceipt | undefined;
+    try {
+      receipt = await this.provider.send(message.to, message.subject, message.text, message.html, {
+        replyTo: this.replyTo,
+      });
+    } catch (err) {
+      console.error(
+        "[steward:auth] email provider rejected send:",
+        err instanceof Error ? err.name : typeof err,
+      );
+      await invalidate().catch(() => {});
+      throw new EmailDeliveryError();
+    }
+    if (!receipt || typeof receipt.provider !== "string" || receipt.provider.length === 0) {
+      console.error("[steward:auth] email provider returned no acceptance receipt");
+      await invalidate().catch(() => {});
+      throw new EmailDeliveryError("Email provider returned no acceptance receipt");
+    }
+    return receipt;
+  }
+
+  /**
+   * Remove every record of a pending email-login challenge so neither the
+   * magic link nor the companion code can ever redeem it. Aliases go first
+   * (they are the redemption entry points); all deletes are idempotent.
+   */
+  private async invalidateEmailLoginChallenge(params: {
+    challengeId: string;
+    tokenHash: string;
+    codeVerifier: string;
+    email: string;
+    tenantId?: string;
+  }): Promise<void> {
+    await this.tokenStore.delete(emailLoginLinkAliasKey(params.tokenHash));
+    await this.tokenStore.delete(emailLoginCodeAliasKey(params.codeVerifier));
+    await this.tokenStore.delete(emailLoginPendingKey(params.challengeId));
+    await this.tokenStore.delete(emailLoginStatusKey(params.challengeId));
+    await this.tokenStore.delete(emailLoginTargetKey(params.email, params.tenantId));
+  }
+
   private async markEmailLoginConsumed(challengeId: string): Promise<void> {
     const current = parseStatusRecord(
       await this.tokenStore.verify(emailLoginStatusKey(challengeId)),
@@ -350,6 +422,7 @@ export class EmailAuth {
     email: string,
     context: { tenantId?: string } = {},
   ): Promise<{ tokenHash: string; expiresAt: Date; challengeId: string; pollSecret: string }> {
+    this.assertDeliveryConfigured();
     email = email.toLowerCase().trim();
     const token = generateToken();
     const tokenHash = hashToken(token);
@@ -420,7 +493,18 @@ export class EmailAuth {
     const body = rendered.text;
     const html = rendered.html;
 
-    await this.provider.send(email, subject, body, html, { replyTo: this.replyTo });
+    // Fail closed: success only after the provider ACCEPTED the message. On
+    // rejection or a missing receipt the just-minted challenge is invalidated
+    // so a false ok:true can never leave a live, undeliverable challenge.
+    await this.sendOrInvalidate({ to: email, subject, text: body, html }, () =>
+      this.invalidateEmailLoginChallenge({
+        challengeId,
+        tokenHash,
+        codeVerifier,
+        email,
+        tenantId: context.tenantId,
+      }),
+    );
 
     return { tokenHash, expiresAt, challengeId, pollSecret };
   }
@@ -434,6 +518,7 @@ export class EmailAuth {
     email: string,
     context: { tenantId?: string; tenantName?: string } = {},
   ): Promise<{ expiresAt: Date }> {
+    this.assertDeliveryConfigured();
     const code = generateOtpCode();
     const expiresAt = new Date(Date.now() + this.tokenTtlMs);
 
@@ -452,9 +537,12 @@ export class EmailAuth {
       expiresInMinutes: minutes,
     });
 
-    await this.provider.send(email, rendered.subject, rendered.text, rendered.html, {
-      replyTo: this.replyTo,
-    });
+    // Fail closed: delete the just-stored code if the provider did not accept
+    // the message, so an unsendable code is never left redeemable.
+    await this.sendOrInvalidate(
+      { to: email, subject: rendered.subject, text: rendered.text, html: rendered.html },
+      () => this.tokenStore.delete(otpStoreKey(email, context.tenantId, code)),
+    );
 
     return { expiresAt };
   }
@@ -472,6 +560,7 @@ export class EmailAuth {
   }
 
   async sendTenantInvitation(email: string, context: TenantInvitationEmailContext): Promise<void> {
+    this.assertDeliveryConfigured();
     const acceptLink = buildInvitationLink(
       this.baseUrl,
       context.acceptPath ?? "/accept-invitation",
@@ -518,7 +607,11 @@ export class EmailAuth {
 </body>
 </html>`;
 
-    await this.provider.send(email, subject, text, html, { replyTo: this.replyTo });
+    // The invitation token's persistence is owned by the caller (it is stored
+    // hashed in tenant_invitations before this call); surface a typed error so
+    // callers report emailSent=false instead of a false green. Nothing here is
+    // invalidated because EmailAuth does not own that record.
+    await this.sendOrInvalidate({ to: email, subject, text, html }, async () => {});
   }
 
   /**

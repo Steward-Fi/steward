@@ -9,7 +9,7 @@ function captureAuth(tokenTtlMs = 10 * 60_000) {
     baseUrl: "https://steward.fi",
     codeVerifierSecret: "focused-email-login-test-secret",
     tokenTtlMs,
-    provider: { send: async (_to, _subject, body) => void (text = body) },
+    provider: { send: async (_to, _subject, body) => ((text = body), { provider: "test" }) },
   });
   return {
     auth,

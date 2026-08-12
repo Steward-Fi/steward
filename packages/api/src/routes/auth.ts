@@ -58,6 +58,8 @@ import {
   ChallengeStore,
   EmailAuth,
   type EmailAuthConfig,
+  EmailDeliveryError,
+  EmailDeliveryNotConfiguredError,
   evaluateSiwePolicy,
   type FarcasterLoginPayload,
   generateApiKey,
@@ -1451,6 +1453,27 @@ function testCredentialMatches(actual: string | undefined, expected: string | un
 
 function invalidTestAccountCredentials() {
   return { ok: false, error: "Invalid test account credentials" } satisfies ApiResponse;
+}
+
+/**
+ * Map typed email-delivery failures to fail-closed HTTP responses
+ * (elizaOS/eliza#18452): 503 when no delivery-capable provider is configured
+ * (challenge never issued), 502 when the provider rejected the send (the
+ * challenge was already invalidated by EmailAuth). Returns null for any other
+ * error so it propagates unchanged. Response bodies are generic — no
+ * recipient, token, or provider detail.
+ */
+function emailDeliveryFailureResponse(c: Context, err: unknown): Response | null {
+  if (err instanceof EmailDeliveryNotConfiguredError) {
+    return c.json<ApiResponse>({ ok: false, error: "Email delivery is not configured" }, 503);
+  }
+  if (err instanceof EmailDeliveryError) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Email could not be sent. Please try again later." },
+      502,
+    );
+  }
+  return null;
 }
 
 function emailMagicLinkVerifySubject(token: string, email: string, tenantId: string): string {
@@ -7989,9 +8012,18 @@ auth.post("/email/send", async (c) => {
     );
   }
   const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
-  const { expiresAt, challengeId, pollSecret } = await emailAuth.sendMagicLink(email, {
-    tenantId: resolvedTenantId,
-  });
+  let sent: Awaited<ReturnType<EmailAuth["sendMagicLink"]>>;
+  try {
+    sent = await emailAuth.sendMagicLink(email, { tenantId: resolvedTenantId });
+  } catch (err) {
+    // Fail closed: ok:true only after the provider accepted the message. On
+    // typed delivery failures the challenge is not redeemable (never issued
+    // for 503; invalidated by EmailAuth for 502).
+    const deliveryFailure = emailDeliveryFailureResponse(c, err);
+    if (deliveryFailure) return deliveryFailure;
+    throw err;
+  }
+  const { expiresAt, challengeId, pollSecret } = sent;
 
   return c.json<ApiResponse<{ expiresAt: string; challengeId: string; pollSecret: string }>>({
     ok: true,
@@ -8334,7 +8366,16 @@ auth.post("/email/otp/send", async (c) => {
     );
   }
   const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
-  const { expiresAt } = await emailAuth.sendOtp(email, { tenantId: resolvedTenantId });
+  let expiresAt: Date;
+  try {
+    ({ expiresAt } = await emailAuth.sendOtp(email, { tenantId: resolvedTenantId }));
+  } catch (err) {
+    // Fail closed: mirror /email/send — no ok:true without an acceptance
+    // receipt, and the stored code is deleted by EmailAuth on failure.
+    const deliveryFailure = emailDeliveryFailureResponse(c, err);
+    if (deliveryFailure) return deliveryFailure;
+    throw err;
+  }
 
   return c.json<ApiResponse<{ expiresAt: string }>>({
     ok: true,

@@ -41,7 +41,7 @@ class CapturingBackend implements StoreBackend {
 
 describe("EmailAuth.sendMagicLink", () => {
   it("calls the template renderer with the agreed magic-link payload", async () => {
-    const sent = mock(async () => undefined);
+    const sent = mock(async () => ({ provider: "test" }));
     const templateRenderer = mock(() => ({
       subject: "subject",
       text: "text",
@@ -77,7 +77,7 @@ describe("EmailAuth.sendMagicLink", () => {
   });
 
   it("binds the tenant into the magic link for non-default tenants (and omits it otherwise)", async () => {
-    const sent = mock(async () => undefined);
+    const sent = mock(async () => ({ provider: "test" }));
     const templateRenderer = mock(() => ({
       subject: "subject",
       text: "text",
@@ -110,7 +110,7 @@ describe("EmailAuth.sendMagicLink", () => {
   });
 
   it("sends tenant invitation emails with a one-time accept link", async () => {
-    const sent = mock(async () => undefined);
+    const sent = mock(async () => ({ provider: "test" }));
     const provider: EmailProvider = { send: sent };
     const auth = new EmailAuth({
       from: "login@steward.fi",
@@ -138,7 +138,7 @@ describe("EmailAuth.sendMagicLink", () => {
   });
 
   it("sends one message with a shared link and six-digit sign-in code", async () => {
-    const sent = mock(async () => undefined);
+    const sent = mock(async () => ({ provider: "test" }));
     const provider: EmailProvider = { send: sent };
     const auth = new EmailAuth({
       from: "login@steward.fi",
@@ -164,7 +164,7 @@ describe("EmailAuth.sendMagicLink", () => {
     const auth = new EmailAuth({
       from: "login@steward.fi",
       baseUrl: "https://steward.fi",
-      provider: { send: async (_to, _subject, body) => void (text = body) },
+      provider: { send: async (_to, _subject, body) => ((text = body), { provider: "test" }) },
     });
 
     await auth.sendMagicLink("user@example.com", { tenantId: "tenant-a" });
@@ -191,7 +191,7 @@ describe("EmailAuth.sendMagicLink", () => {
     const auth = new EmailAuth({
       from: "login@steward.fi",
       baseUrl: "https://steward.fi",
-      provider: { send: async (_to, _subject, body) => void (text = body) },
+      provider: { send: async (_to, _subject, body) => ((text = body), { provider: "test" }) },
     });
     await auth.sendMagicLink("lock@example.com", { tenantId: "tenant-a" });
     const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
@@ -212,7 +212,7 @@ describe("EmailAuth.sendMagicLink", () => {
     const auth = new EmailAuth({
       from: "login.fi",
       baseUrl: "https://steward.fi",
-      provider: { send: async (_to, _subject, body) => void (text = body) },
+      provider: { send: async (_to, _subject, body) => ((text = body), { provider: "test" }) },
     });
     const issued = await auth.sendMagicLink("poll.com", { tenantId: "tenant-a" });
     const token = text.match(/[?&]token=([a-f0-9]{64})/i)?.[1] ?? "";
@@ -235,7 +235,7 @@ describe("EmailAuth.sendMagicLink", () => {
     const auth = new EmailAuth({
       from: "login@steward.fi",
       baseUrl: "https://steward.fi",
-      provider: { send: async (_to, _subject, body) => void (text = body) },
+      provider: { send: async (_to, _subject, body) => ((text = body), { provider: "test" }) },
       tokenStore: new TokenStore({ backend }),
       codeVerifierSecret: "test-secret",
     });
@@ -254,7 +254,7 @@ describe("EmailAuth.sendMagicLink", () => {
 
 describe("EmailAuth.sendOtp", () => {
   it("routes OTP emails through the per-tenant otp template renderer", async () => {
-    const sent = mock(async () => undefined);
+    const sent = mock(async () => ({ provider: "test" }));
     const otpTemplateRenderer = mock(() => ({
       subject: "otp subject",
       text: "otp text",
@@ -296,7 +296,7 @@ describe("EmailAuth.sendOtp", () => {
   });
 
   it("renders the Steward default OTP email when no template is configured", async () => {
-    const sent = mock(async () => undefined);
+    const sent = mock(async () => ({ provider: "test" }));
     const provider: EmailProvider = { send: sent };
     const auth = new EmailAuth({
       from: "login@steward.fi",
