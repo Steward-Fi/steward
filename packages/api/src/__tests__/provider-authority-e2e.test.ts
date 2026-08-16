@@ -27,15 +27,20 @@ import {
   closeDb,
   executionAuthorizationNonces,
   getDb,
+  providerAccounts,
   providerActionBindings,
+  providerGrants,
+  providerOperations,
   secretRoutes,
   secrets,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { buildGithubAction } from "@stwd/provider-github";
+import { buildXAction } from "@stwd/provider-x";
 import {
   FakeProviderTransport,
   GITHUB_FIXTURES,
+  X_FIXTURES,
 } from "@stwd/proxy/src/__tests__/fake-provider-transport";
 import { KeyStore } from "@stwd/vault";
 import { and, eq, sql } from "drizzle-orm";
@@ -74,6 +79,9 @@ const READ_OP_KEY = "github.issue.list";
 // the test's KeyStore matches the vault regardless of environment.
 const MASTER = process.env.STEWARD_MASTER_PASSWORD ?? "steward-api-test-suite-master-password";
 const GITHUB_TOKEN_SENTINEL = "ghp_SENTINEL_credential_never_leaks_0123456789ABCD";
+const X_TOKEN_SENTINEL = "X_SENTINEL_credential_never_leaks_0123456789ABCD";
+const X_OP = "40000000-0000-4000-8000-0000000000b0";
+const X_OP_KEY = "x.tweet.create";
 
 let fake: FakeProviderTransport;
 
@@ -96,11 +104,14 @@ function encryptCredential(
  * trigger bumps authority_revision on the watched flip, then we pin it to 1 via
  * an unwatched-column UPDATE so the seeded nonce's routeRevision matches).
  */
-async function enableGovernedRoute(operationId: string): Promise<void> {
+async function enableGovernedRoute(
+  operationId: string,
+  credential = GITHUB_TOKEN_SENTINEL,
+): Promise<void> {
   const db = getDb();
   await db
     .update(secrets)
-    .set(encryptCredential(F.TENANT, "github", GITHUB_TOKEN_SENTINEL))
+    .set(encryptCredential(F.TENANT, "github", credential))
     .where(and(eq(secrets.id, F.SECRET), eq(secrets.tenantId, F.TENANT)));
   await db
     .update(secretRoutes)
@@ -114,6 +125,49 @@ async function enableGovernedRoute(operationId: string): Promise<void> {
     })
     .where(eq(secretRoutes.id, F.ROUTE));
   await db.execute(sql`UPDATE secret_routes SET authority_revision = 1 WHERE id = ${F.ROUTE}`);
+}
+
+async function configureXWrite(): Promise<void> {
+  await getDb()
+    .update(providerAccounts)
+    .set({ adapterKey: "x" })
+    .where(eq(providerAccounts.id, F.ACCOUNT));
+  await getDb()
+    .insert(providerOperations)
+    .values({
+      id: X_OP,
+      tenantId: F.TENANT,
+      workspaceId: F.WORKSPACE,
+      providerAccountId: F.ACCOUNT,
+      operationKey: X_OP_KEY,
+      riskClass: "consequential",
+      secretRouteId: F.ROUTE,
+      requestProfile: {
+        policyRules: [
+          {
+            id: "44444444-4444-4444-8444-444444444444",
+            type: "capability-intent",
+            enabled: true,
+            config: { capabilities: [X_OP_KEY], effect: "allow" },
+          },
+          {
+            id: "55555555-5555-4555-8555-555555555555",
+            type: "capability-intent",
+            enabled: true,
+            config: { capabilities: [X_OP_KEY], effect: "require-approval" },
+          },
+        ],
+      },
+    });
+  await getDb()
+    .update(providerGrants)
+    .set({ operationKeys: [F.OP_KEY, READ_OP_KEY, X_OP_KEY] })
+    .where(eq(providerGrants.id, F.GRANT));
+  await getDb()
+    .update(secretRoutes)
+    .set({ hostPattern: "api.x.com" })
+    .where(eq(secretRoutes.id, F.ROUTE));
+  await enableGovernedRoute(X_OP, X_TOKEN_SENTINEL);
 }
 
 function idem(seed: string): string {
@@ -146,6 +200,30 @@ async function createWriteAction(seed: string): Promise<{
   });
   if (out.kind !== "approval_required") {
     throw new Error(`expected approval_required, got ${out.kind}`);
+  }
+  return { intentId: out.intentId, requestHash: out.requestHash, actionDigest: out.actionDigest };
+}
+
+async function createXWriteAction(seed: string): Promise<{
+  intentId: string;
+  requestHash: string;
+  actionDigest: string;
+}> {
+  const now = new Date();
+  const out = await providerActionService.createProviderAction({
+    principal: principal(),
+    workspaceId: F.WORKSPACE,
+    providerAccountId: F.ACCOUNT,
+    operationKey: X_OP_KEY,
+    build: buildXAction(X_OP_KEY, { text: "governed tweet" }),
+    idempotencyKeyHash: idem(seed),
+    requestedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 300_000).toISOString(),
+    nonce: seed.padEnd(32, "N").slice(0, 32),
+    requestId: null,
+  });
+  if (out.kind !== "approval_required") {
+    throw new Error(`expected X approval_required, got ${out.kind}`);
   }
   return { intentId: out.intentId, requestHash: out.requestHash, actionDigest: out.actionDigest };
 }
@@ -267,6 +345,35 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
     expect(fake.calls()[0].credentialHeaderPresent).toBe(true);
     // ...but its VALUE is never recorded (canary): no sentinel anywhere.
     expect(JSON.stringify(fake.calls())).not.toContain(GITHUB_TOKEN_SENTINEL);
+  });
+
+  it("M19: X consequential write traverses create→approve→resume→dispatch exactly once and stays canary-clean", async () => {
+    await configureXWrite();
+    fake.script(
+      { method: "POST", path: "/2/tweets" },
+      { mode: "ok", status: 201, json: X_FIXTURES.tweetCreated },
+    );
+
+    const { intentId, requestHash, actionDigest } = await createXWriteAction("x-write-happy-1");
+    await approve(intentId, requestHash, actionDigest);
+    await resume(intentId);
+    const dispatch = await dispatchGovernedExecution(intentId, F.TENANT);
+
+    expect(dispatch.dispatchState).toBe("succeeded");
+    expect(await dispatchStateOf(intentId)).toBe("succeeded");
+    expect(fake.dispatchCount()).toBe(1);
+    expect(fake.calls()).toHaveLength(1);
+    expect(fake.calls()[0]).toMatchObject({
+      method: "POST",
+      path: "/2/tweets",
+      credentialHeaderPresent: true,
+    });
+
+    const kase = await getProviderCase(F.TENANT, intentId, [F.WORKSPACE]);
+    expect(kase?.manifest.operation.key).toBe(X_OP_KEY);
+    const captured = JSON.stringify({ calls: fake.calls(), dispatch, kase });
+    expect(captured).not.toContain(X_TOKEN_SENTINEL);
+    expect(captured).not.toContain("Bearer ");
   });
 
   it("M04: write op requires approval — create returns approval_required, no dispatch", async () => {

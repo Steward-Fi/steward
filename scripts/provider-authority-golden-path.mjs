@@ -66,6 +66,7 @@ const CANARY_PATTERNS = [
   "-----BEGIN",
   "Bearer ",
   "SENTINEL_credential",
+  "X_SENTINEL_credential",
 ];
 
 function run(label, cmd, args, opts = {}) {
@@ -130,6 +131,7 @@ function main() {
     schemaVersion: 1,
     note: "Per-action dispatch counts are asserted inside the E2E (fake.dispatchCount()). Success legs assert exactly 1; denial/stale legs assert 0.",
     happyPathDispatch: allGreen ? 1 : null,
+    xHappyPathDispatch: allGreen ? 1 : null,
     denialDispatch: 0,
   };
   writeFileSync(
