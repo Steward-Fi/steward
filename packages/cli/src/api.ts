@@ -84,6 +84,17 @@ export class StewardApiClient {
     }
     return parsed as T;
   }
+
+  async requestText(path: string): Promise<string> {
+    const headers: Record<string, string> = { Accept: "application/x-ndjson" };
+    if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    else if (this.tenantKey) headers["X-Steward-Key"] = this.tenantKey;
+    if (this.tenantId) headers["X-Steward-Tenant"] = this.tenantId;
+    const res = await this.fetchImpl(`${this.baseUrl}${path}`, { method: "GET", headers });
+    const text = await res.text();
+    if (!res.ok) throw new ApiError(`GET ${path} failed with HTTP ${res.status}`, res.status, text);
+    return text;
+  }
 }
 
 function safeJson(text: string): unknown {
