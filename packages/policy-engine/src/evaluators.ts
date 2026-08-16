@@ -816,8 +816,7 @@ function evaluateContractAllowlist(rule: PolicyRule, ctx: EvaluatorContext): Pol
     };
   }
 
-  const constraint =
-    contract.constraints?.[selector] ?? contract.constraints?.[selector.toUpperCase()];
+  const constraint = selectorConstraint(contract.constraints, selector);
   if (constraint) {
     const constraintResult = evaluateEvmSelectorConstraint(rule, ctx, selector, data, constraint);
     if (!constraintResult.passed) return constraintResult;
@@ -829,6 +828,16 @@ function evaluateContractAllowlist(rule: PolicyRule, ctx: EvaluatorContext): Pol
 type ContractSelectorConstraint = NonNullable<
   ContractAllowlistConfig["contracts"][number]["constraints"]
 >[string];
+
+function selectorConstraint(
+  constraints: ContractAllowlistConfig["contracts"][number]["constraints"] | undefined,
+  selector: string,
+): ContractSelectorConstraint | undefined {
+  if (!constraints) return undefined;
+  const normalizedSelector = selector.toLowerCase();
+  if (Object.hasOwn(constraints, normalizedSelector)) return constraints[normalizedSelector];
+  return Object.entries(constraints).find(([key]) => key.toLowerCase() === normalizedSelector)?.[1];
+}
 
 function decodeAbiAddress(word: string): string | null {
   if (!/^[a-fA-F0-9]{64}$/.test(word)) return null;
@@ -990,6 +999,25 @@ function evaluateEvmSelectorConstraint(
   constraint: ContractSelectorConstraint,
 ): PolicyResult {
   const base = { policyId: rule.id, type: rule.type } as const;
+
+  if (constraint.maxNativeValueWei !== undefined) {
+    const requestValue = parseUint256Decimal(ctx.request.value);
+    const maxValue = parseUint256Decimal(constraint.maxNativeValueWei);
+    if (requestValue === null || maxValue === null) {
+      return {
+        ...base,
+        passed: false,
+        reason: "Native value and selector maxNativeValueWei must be uint256 decimal strings",
+      };
+    }
+    if (requestValue > maxValue) {
+      return {
+        ...base,
+        passed: false,
+        reason: `Native value ${ctx.request.value} exceeds selector maxNativeValueWei ${constraint.maxNativeValueWei}`,
+      };
+    }
+  }
 
   switch (selector) {
     case "0xa9059cbb": {
