@@ -40,7 +40,7 @@ jobs:
     steps:
       # Checkout the repository
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Authenticate with GHCR when publishing images from push events.
       - name: Login to GHCR
