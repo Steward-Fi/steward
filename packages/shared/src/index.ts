@@ -16,6 +16,7 @@ export * from "./provider-case.js";
 export * from "./provider-execution-auth.js";
 // ─── Non-throwing description of an arbitrary thrown value (fail-closed catches) ───
 export { describeThrown, UNPRINTABLE_THROWN_VALUE } from "./safe-error.js";
+export * from "./secret-route-matching.js";
 export * from "./security-surface.js";
 // ─── Token Registry & Price Oracle ───
 export * from "./tokens.js";

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { StewardApiClient } from "./api";
+import { ApiError, StewardApiClient } from "./api";
 import { describeSecret } from "./format";
 
 export type DoctorCheck = {
@@ -15,10 +15,24 @@ export type DoctorOptions = {
   api?: StewardApiClient;
 };
 
-type ReadyCheck = { ok?: unknown; error?: unknown; detail?: unknown };
+type ReadyCheck = { ok?: unknown; required?: unknown; error?: unknown; detail?: unknown };
 type ReadyResponse = {
   checks?: Record<string, ReadyCheck>;
 };
+
+function readyResponseFromError(error: unknown): ReadyResponse | null {
+  if (!(error instanceof ApiError) || !error.body || typeof error.body !== "object") return null;
+  const body = error.body as { checks?: unknown; data?: unknown };
+  const candidate =
+    body.checks !== undefined
+      ? body
+      : body.data && typeof body.data === "object"
+        ? (body.data as { checks?: unknown })
+        : null;
+  return candidate && candidate.checks && typeof candidate.checks === "object"
+    ? (candidate as ReadyResponse)
+    : null;
+}
 
 function operationalDetail(check: ReadyCheck | undefined, fallback: string): string {
   if (!check) return fallback;
@@ -104,43 +118,36 @@ export async function runDoctor(
   } catch (error) {
     checks.push({ name: "api:/health", ok: !options.strict, detail: (error as Error).message });
   }
+  let readyResponse: ReadyResponse | null = null;
+  let readyError: unknown;
   try {
     const requestedAt = Date.now();
     const ready = await api.request<ReadyResponse>("GET", "/ready", undefined, { tenant: false });
     const receivedAt = Date.now();
-    checks.push({ name: "api:/ready", ok: true, detail: JSON.stringify(ready) });
+    readyResponse = ready;
     const readyChecks = ready.checks ?? {};
-    for (const [name, source] of [
-      ["ops:migration-tip", readyChecks.migrations],
-      ["ops:redis-reachability", readyChecks.redis],
-      ["ops:governed-route-inventory", readyChecks.governedRoutes],
-      ["ops:proxy-clock-skew", readyChecks.proxyClock],
-    ] as const) {
-      checks.push({
-        name,
-        ok: source?.ok === true || (!options.strict && source?.ok !== false),
-        detail: operationalDetail(source, "diagnostic unavailable"),
-      });
-    }
-    const databaseDetail = readyChecks.database?.detail as
-      | { clockSkewMs?: unknown; serverTime?: unknown }
-      | undefined;
-    const apiTime = Date.parse(String(databaseDetail?.serverTime ?? ""));
-    const midpoint = requestedAt + (receivedAt - requestedAt) / 2;
-    const apiSkewMs = Math.abs(apiTime - midpoint);
-    const dbSkewMs = Number(databaseDetail?.clockSkewMs);
-    const clocksOk =
-      Number.isFinite(apiSkewMs) &&
-      apiSkewMs <= 30_000 &&
-      Number.isFinite(dbSkewMs) &&
-      dbSkewMs <= 30_000;
-    checks.push({
-      name: "ops:api-database-clock-skew",
-      ok: clocksOk || !options.strict,
-      detail: JSON.stringify({ apiSkewMs: Math.round(apiSkewMs), databaseSkewMs: dbSkewMs }),
-    });
+    checks.push({ name: "api:/ready", ok: true, detail: JSON.stringify(ready) });
+    appendReadyChecks(checks, readyChecks, options.strict === true, requestedAt, receivedAt);
   } catch (error) {
-    checks.push({ name: "api:/ready", ok: !options.strict, detail: (error as Error).message });
+    readyError = error;
+    readyResponse = readyResponseFromError(error);
+    if (readyResponse) {
+      const now = Date.now();
+      checks.push({
+        name: "api:/ready",
+        ok: !options.strict,
+        detail: JSON.stringify(readyResponse),
+      });
+      appendReadyChecks(checks, readyResponse.checks ?? {}, options.strict === true, now, now);
+    }
+  }
+  if (!readyResponse) {
+    const error = readyError;
+    checks.push({
+      name: "api:/ready",
+      ok: !options.strict,
+      detail: error instanceof Error ? error.message : "readiness response unavailable",
+    });
     for (const name of [
       "ops:migration-tip",
       "ops:redis-reachability",
@@ -183,4 +190,42 @@ export async function runDoctor(
   }
 
   return { ok: checks.every((check) => check.ok), checks };
+}
+
+function appendReadyChecks(
+  checks: DoctorCheck[],
+  readyChecks: Record<string, ReadyCheck>,
+  strict: boolean,
+  requestedAt: number,
+  receivedAt: number,
+): void {
+  for (const [name, source] of [
+    ["ops:migration-tip", readyChecks.migrations],
+    ["ops:redis-reachability", readyChecks.redis],
+    ["ops:governed-route-inventory", readyChecks.governedRoutes],
+    ["ops:proxy-clock-skew", readyChecks.proxyClock],
+  ] as const) {
+    checks.push({
+      name,
+      ok: source?.ok === true || source?.required === false || (!strict && source?.ok !== false),
+      detail: operationalDetail(source, "diagnostic unavailable"),
+    });
+  }
+  const databaseDetail = readyChecks.database?.detail as
+    | { clockSkewMs?: unknown; serverTime?: unknown }
+    | undefined;
+  const apiTime = Date.parse(String(databaseDetail?.serverTime ?? ""));
+  const midpoint = requestedAt + (receivedAt - requestedAt) / 2;
+  const apiSkewMs = Math.abs(apiTime - midpoint);
+  const dbSkewMs = Number(databaseDetail?.clockSkewMs);
+  const clocksOk =
+    Number.isFinite(apiSkewMs) &&
+    apiSkewMs <= 30_000 &&
+    Number.isFinite(dbSkewMs) &&
+    dbSkewMs <= 30_000;
+  checks.push({
+    name: "ops:api-database-clock-skew",
+    ok: clocksOk || !strict,
+    detail: JSON.stringify({ apiSkewMs: Math.round(apiSkewMs), databaseSkewMs: dbSkewMs }),
+  });
 }

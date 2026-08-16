@@ -47,6 +47,9 @@ Auth:
   back to the tenant API key (--tenant-key -> X-Steward-Key), which the API
   treats as an api-key machine credential. This is the non-interactive path the
   golden-path script uses (api-key auth bypasses the human-session MFA step-up).
+  doctor --strict additionally verifies /audit/integrity and therefore requires
+  an owner/admin Bearer session with recent MFA; tenant keys and agent tokens
+  intentionally fail that check.
 `;
 
 function createContext(flags: Record<string, string | boolean>): CommandContext {
@@ -363,13 +366,14 @@ async function main(argv: string[]) {
     return;
   }
   if (command === "doctor") {
-    printResult(
-      await runDoctor({
-        strict: boolFlag(parsed.flags, "strict"),
-        envPath: stringFlag(parsed.flags, "env"),
-      }),
-      ctx.format,
-    );
+    const strict = boolFlag(parsed.flags, "strict");
+    const result = await runDoctor({
+      strict,
+      envPath: stringFlag(parsed.flags, "env"),
+      api: ctx.api,
+    });
+    printResult(result, ctx.format);
+    if (strict && !result.ok) process.exitCode = 1;
     return;
   }
 

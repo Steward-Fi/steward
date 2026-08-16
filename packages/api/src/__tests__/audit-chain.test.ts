@@ -20,6 +20,7 @@ const TENANT_TRUNCATE = `audit-test-truncate-${Date.now()}`;
 const TENANT_TAIL = `audit-test-tail-${Date.now()}`;
 const TENANT_WIPE = `audit-test-wipe-${Date.now()}`;
 const TENANT_EMPTY = `audit-test-empty-${Date.now()}`;
+const TENANT_BOUNDED = `audit-test-bounded-${Date.now()}`;
 
 const ALL_TENANTS = [
   TENANT_OK,
@@ -28,6 +29,7 @@ const ALL_TENANTS = [
   TENANT_TAIL,
   TENANT_WIPE,
   TENANT_EMPTY,
+  TENANT_BOUNDED,
 ];
 
 async function cleanup(): Promise<void> {
@@ -163,6 +165,22 @@ describe.skipIf(SKIP)("audit chain", () => {
     const result = await verifyAuditChain(TENANT_EMPTY);
     expect(result.valid).toBe(true);
     if (result.valid) expect(result.count).toBe(0);
+  });
+
+  it("enforces maxRows in SQL even when the stored head count is understated", async () => {
+    for (let i = 0; i < 5; i++) {
+      await writeAuditEvent({
+        tenantId: TENANT_BOUNDED,
+        actorType: "system",
+        action: "test.bounded",
+        metadata: { i },
+      });
+    }
+    await getDb().execute(
+      sql`UPDATE audit_chain_heads SET expected_count = 1 WHERE tenant_id = ${TENANT_BOUNDED}`,
+    );
+    const result = await verifyAuditChain(TENANT_BOUNDED, { requireHead: true, maxRows: 2 });
+    expect(result).toEqual({ valid: false, brokenAt: 3, limitExceeded: true });
   });
 
   it("trackAuditEvent does not throw on success", () => {

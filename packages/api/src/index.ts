@@ -17,7 +17,7 @@ import { closeDb, getDb, getMigrationExpectation, runMigrations } from "@stwd/db
 import { shouldUsePGLite } from "@stwd/db/pglite";
 import { sql } from "drizzle-orm";
 import { composeApp } from "./compose";
-import { getRedisClient, initRedis, shutdownRedis } from "./middleware/redis";
+import { getRedisClient, initRedis, isRedisConfigured, shutdownRedis } from "./middleware/redis";
 import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
 import {
   API_VERSION,
@@ -117,11 +117,20 @@ app.get("/ready", async (c) => {
 
   try {
     const db = getDb();
-    const result = await db.execute(sql`
-      SELECT
-        EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS database_time_ms,
-        (SELECT MAX(created_at) FROM drizzle.__drizzle_migrations) AS migration_created_at
-    `);
+    const pglite = shouldUsePGLite();
+    const result = pglite
+      ? await db.execute(sql`
+          SELECT
+            EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000 AS database_time_ms,
+            EXISTS(
+              SELECT 1 FROM __steward_migrations WHERE tag = ${expectedMigration.tag}
+            ) AS expected_migration_applied
+        `)
+      : await db.execute(sql`
+          SELECT
+            EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS database_time_ms,
+            (SELECT MAX(created_at) FROM drizzle.__drizzle_migrations) AS migration_created_at
+        `);
     const rows = Array.isArray(result)
       ? result
       : ((result as unknown as { rows?: unknown[] }).rows ?? []);
@@ -130,17 +139,24 @@ app.get("/ready", async (c) => {
       | undefined;
     const databaseTimeMs = Number(row?.database_time_ms);
     const migrationCreatedAt = Number(row?.migration_created_at);
+    const expectedMigrationApplied =
+      (row as { expected_migration_applied?: unknown } | undefined)?.expected_migration_applied ===
+      true;
     const databaseSkewMs = Math.abs(Date.now() - databaseTimeMs);
     checks.database = {
       ok: Number.isFinite(databaseTimeMs) && databaseSkewMs <= 30_000,
       detail: { clockSkewMs: Math.round(databaseSkewMs), serverTime: new Date().toISOString() },
     };
     checks.migrations = {
-      ok: migrationsRan && migrationCreatedAt === expectedMigration.createdAt,
+      ok:
+        migrationsRan &&
+        (pglite ? expectedMigrationApplied : migrationCreatedAt === expectedMigration.createdAt),
       detail: {
         expected: expectedMigration.tag,
         expectedCreatedAt: expectedMigration.createdAt,
-        actualCreatedAt: Number.isFinite(migrationCreatedAt) ? migrationCreatedAt : null,
+        ...(pglite
+          ? { expectedMigrationApplied }
+          : { actualCreatedAt: Number.isFinite(migrationCreatedAt) ? migrationCreatedAt : null }),
       },
     };
   } catch (err: unknown) {
@@ -151,7 +167,9 @@ app.get("/ready", async (c) => {
     const redis = getRedisClient();
     checks.redis = redis
       ? { ok: (await redis.ping()).toUpperCase() === "PONG" }
-      : { ok: false, error: "Redis is not connected" };
+      : isRedisConfigured()
+        ? { ok: false, error: "Redis is configured but not connected" }
+        : { ok: false, required: false, error: "Redis is not configured (optional mode)" };
   } catch (err: unknown) {
     checks.redis = { ok: false, error: err instanceof Error ? err.message : "unknown" };
   }

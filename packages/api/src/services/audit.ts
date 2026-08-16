@@ -217,6 +217,8 @@ export async function verifyAuditChain(
     fromSeq?: number;
     toSeq?: number;
     requireHead?: boolean;
+    /** Hard cap enforced by the SQL read itself (LIMIT maxRows + 1). */
+    maxRows?: number;
     /**
      * Optional read executor (a snapshot transaction) so callers can verify a
      * chain segment WITHIN a single coherent snapshot alongside other reads
@@ -225,11 +227,20 @@ export async function verifyAuditChain(
      */
     executor?: AuditReadExecutor;
   } = {},
-): Promise<{ valid: true; count: number } | { valid: false; brokenAt: number }> {
+): Promise<
+  { valid: true; count: number } | { valid: false; brokenAt: number; limitExceeded?: boolean }
+> {
   const key = getHmacKey();
   const db = opts.executor ?? getDb();
   const requestedFromSeq = opts.fromSeq ?? 1;
   const toSeq = opts.toSeq;
+  const maxRows = opts.maxRows;
+  if (
+    maxRows !== undefined &&
+    (!Number.isSafeInteger(maxRows) || maxRows <= 0 || maxRows > 1_000_000)
+  ) {
+    throw new Error("maxRows must be a positive safe integer no greater than 1000000");
+  }
 
   // Out-of-band high-water-mark: persisted atomically with each append. Lets us
   // detect tail-truncation / whole-chain deletion that walking the surviving
@@ -320,10 +331,18 @@ export async function verifyAuditChain(
   }>(
     await db.execute(
       toSeq !== undefined
-        ? sql`SELECT * FROM audit_events WHERE tenant_id = ${tenantId} AND seq BETWEEN ${effectiveFromSeq} AND ${toSeq} ORDER BY seq ASC`
-        : sql`SELECT * FROM audit_events WHERE tenant_id = ${tenantId} AND seq >= ${effectiveFromSeq} ORDER BY seq ASC`,
+        ? maxRows !== undefined
+          ? sql`SELECT * FROM audit_events WHERE tenant_id = ${tenantId} AND seq BETWEEN ${effectiveFromSeq} AND ${toSeq} ORDER BY seq ASC LIMIT ${maxRows + 1}`
+          : sql`SELECT * FROM audit_events WHERE tenant_id = ${tenantId} AND seq BETWEEN ${effectiveFromSeq} AND ${toSeq} ORDER BY seq ASC`
+        : maxRows !== undefined
+          ? sql`SELECT * FROM audit_events WHERE tenant_id = ${tenantId} AND seq >= ${effectiveFromSeq} ORDER BY seq ASC LIMIT ${maxRows + 1}`
+          : sql`SELECT * FROM audit_events WHERE tenant_id = ${tenantId} AND seq >= ${effectiveFromSeq} ORDER BY seq ASC`,
     ),
   );
+
+  if (maxRows !== undefined && rows.length > maxRows) {
+    return { valid: false, brokenAt: effectiveFromSeq + maxRows, limitExceeded: true };
+  }
 
   let count = 0;
   let expectedSeq = effectiveFromSeq;
