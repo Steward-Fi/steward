@@ -1567,7 +1567,110 @@ export type IntentType =
   | "policy_rule_delete"
   | "policy_rule_update"
   | "quorum_update"
-  | "wallet_action";
+  | "wallet_action"
+  | "provider-action";
+
+export interface ProviderActionInvokeInput {
+  workspaceId: string;
+  providerAccountId: string;
+  operationKey: string;
+  /** Adapter-defined public arguments. Credentials are resolved only by Steward. */
+  arguments: Record<string, unknown>;
+  idempotencyKey: string;
+}
+
+export interface ProviderActionInvokeResult {
+  id: string;
+  status: "pending_approval" | "stub_succeeded" | "stub_failed";
+  requestHash: string;
+  actionDigest: string;
+  result?: {
+    ok: boolean;
+    status: "stub_succeeded" | "stub_failed";
+    echo: { operationId: string; actionDigest: string };
+  };
+}
+
+export interface ProviderActionApprovalDetail {
+  id: string;
+  status: string;
+  version: number;
+  requestHash: string;
+  actionDigest: string;
+  expiresAt: string | null;
+  safeSummary: Record<string, unknown> | null;
+  operationId: string;
+  providerAccountId: string;
+  workspaceId: string;
+}
+
+export interface ProviderActionApprovalDecisionInput {
+  decision: "approve" | "deny";
+  expectedVersion: number;
+  expectedRequestHash: string;
+  expectedActionDigest: string;
+  reasonCode?: ProviderApprovalReasonCode;
+  reason?: string;
+  idempotencyKey: string;
+}
+
+export type ProviderApprovalReasonCode =
+  | "approver_manual_approve"
+  | "approver_manual_deny"
+  | "approver_risk_deny"
+  | "approver_scope_deny"
+  | "approver_duplicate_deny"
+  | "approver_other";
+
+export interface ProviderActionTransitionResult {
+  id: string;
+  status: string;
+  version: number;
+  requestHash: string;
+  actionDigest: string;
+  replayed?: true;
+  resumeAttemptId?: string;
+}
+
+export type ProviderCaseTerminalState =
+  | "denied_access"
+  | "denied_policy"
+  | "pending_approval"
+  | "approval_denied"
+  | "approval_expired"
+  | "approval_staled"
+  | "execution_ready"
+  | "executing"
+  | "succeeded"
+  | "failed"
+  | "outcome_unknown"
+  | "unknown";
+
+export interface ProviderCaseManifest {
+  schemaVersion: "steward.provider-case-manifest.v1";
+  caseId: string;
+  tenantId: string;
+  workspaceId: string;
+  terminalState: ProviderCaseTerminalState;
+  completeness: "complete" | "incomplete" | "unknown";
+  missingRequiredRoles: string[];
+  incompletenessReasons: string[];
+  safeSummary: Record<string, unknown> | null;
+  genesisAt: string | null;
+  terminalAt: string | null;
+  assembledAt: string;
+  [key: string]: unknown;
+}
+
+export interface ProviderCaseEvidence {
+  version: 1;
+  tenantId: string;
+  caseId: string;
+  manifest: ProviderCaseManifest;
+  bundle: Record<string, unknown>;
+  completeness: "complete" | "incomplete" | "unknown";
+  generatedAt: string;
+}
 
 export interface Intent {
   id: string;

@@ -108,6 +108,142 @@ const intentSchema: JsonSchema = {
     updatedAt: dateTimeSchema,
   },
 };
+const providerActionInvokeSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["workspaceId", "providerAccountId", "operationKey", "arguments", "idempotencyKey"],
+  properties: {
+    workspaceId: stringSchema,
+    providerAccountId: stringSchema,
+    operationKey: stringSchema,
+    arguments: metadataSchema,
+    idempotencyKey: { type: "string", minLength: 8, maxLength: 255 },
+  },
+};
+const providerActionResultSchema: JsonSchema = {
+  type: "object",
+  required: ["id", "status", "requestHash", "actionDigest"],
+  properties: {
+    id: stringSchema,
+    status: {
+      type: "string",
+      enum: ["pending_approval", "stub_succeeded", "stub_failed"],
+    },
+    requestHash: stringSchema,
+    actionDigest: stringSchema,
+    result: metadataSchema,
+  },
+};
+const providerApprovalDetailSchema: JsonSchema = {
+  type: "object",
+  required: [
+    "id",
+    "status",
+    "version",
+    "requestHash",
+    "actionDigest",
+    "expiresAt",
+    "safeSummary",
+    "operationId",
+    "providerAccountId",
+    "workspaceId",
+  ],
+  properties: {
+    id: stringSchema,
+    status: stringSchema,
+    version: { type: "integer" },
+    requestHash: stringSchema,
+    actionDigest: stringSchema,
+    expiresAt: { type: ["string", "null"], format: "date-time" },
+    safeSummary: { type: ["object", "null"], additionalProperties: true },
+    operationId: stringSchema,
+    providerAccountId: stringSchema,
+    workspaceId: stringSchema,
+  },
+};
+const providerApprovalDecisionSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "decision",
+    "expectedVersion",
+    "expectedRequestHash",
+    "expectedActionDigest",
+    "idempotencyKey",
+  ],
+  properties: {
+    decision: { type: "string", enum: ["approve", "deny"] },
+    expectedVersion: { type: "integer" },
+    expectedRequestHash: stringSchema,
+    expectedActionDigest: stringSchema,
+    reasonCode: {
+      type: "string",
+      enum: [
+        "approver_manual_approve",
+        "approver_manual_deny",
+        "approver_risk_deny",
+        "approver_scope_deny",
+        "approver_duplicate_deny",
+        "approver_other",
+      ],
+    },
+    reason: { type: "string", maxLength: 1000 },
+    idempotencyKey: { type: "string", minLength: 8, maxLength: 255 },
+  },
+};
+const providerTransitionSchema: JsonSchema = {
+  type: "object",
+  required: ["id", "status", "version", "requestHash", "actionDigest"],
+  properties: {
+    id: stringSchema,
+    status: stringSchema,
+    version: { type: "integer" },
+    requestHash: stringSchema,
+    actionDigest: stringSchema,
+    replayed: { type: "boolean" },
+    resumeAttemptId: stringSchema,
+  },
+};
+const providerCaseManifestSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: true,
+  required: [
+    "schemaVersion",
+    "caseId",
+    "tenantId",
+    "workspaceId",
+    "terminalState",
+    "completeness",
+    "missingRequiredRoles",
+    "incompletenessReasons",
+    "assembledAt",
+  ],
+  properties: {
+    schemaVersion: { type: "string", const: "steward.provider-case-manifest.v1" },
+    caseId: stringSchema,
+    tenantId: stringSchema,
+    workspaceId: stringSchema,
+    terminalState: stringSchema,
+    completeness: { type: "string", enum: ["complete", "incomplete", "unknown"] },
+    missingRequiredRoles: { type: "array", items: stringSchema },
+    incompletenessReasons: { type: "array", items: stringSchema },
+    safeSummary: { type: ["object", "null"], additionalProperties: true },
+    assembledAt: dateTimeSchema,
+  },
+};
+const providerCaseEvidenceSchema: JsonSchema = {
+  type: "object",
+  required: ["version", "tenantId", "caseId", "manifest", "bundle", "completeness", "generatedAt"],
+  properties: {
+    version: { type: "integer", const: 1 },
+    tenantId: stringSchema,
+    caseId: stringSchema,
+    manifest: providerCaseManifestSchema,
+    bundle: metadataSchema,
+    completeness: { type: "string", enum: ["complete", "incomplete", "unknown"] },
+    generatedAt: dateTimeSchema,
+  },
+};
 
 const paginationQueryParameters = [
   parameter("limit", "query", { type: "integer", minimum: 1, maximum: 200 }),
@@ -240,6 +376,21 @@ function providerAuthorityPaths(): Record<string, OpenApiPathItem> {
     additionalProperties: true,
   });
   return {
+    "/v2/provider-actions": {
+      post: {
+        tags: ["Provider Authority"],
+        summary: "Invoke a governed provider action as an agent",
+        description:
+          "Provider credentials are resolved server-side from the bound account and are never accepted in this request.",
+        security: [{ bearerAuth: [] }],
+        requestBody: jsonRequestBody(providerActionInvokeSchema),
+        responses: {
+          "200": jsonResponse(providerActionResultSchema),
+          "202": jsonResponse(providerActionResultSchema),
+          ...errorResponses(),
+        },
+      },
+    },
     "/v2/workspaces": {
       get: listing("List workspaces"),
       // create workspace -> binds to the tenant authority revision
@@ -320,6 +471,63 @@ function providerAuthorityPaths(): Record<string, OpenApiPathItem> {
           "403": jsonResponse(errorResponse()),
           "404": jsonResponse(errorResponse()),
         },
+      },
+    },
+    "/v2/provider-actions/{id}/approval": {
+      parameters: [parameter("id", "path")],
+      get: {
+        tags: ["Provider Authority"],
+        summary: "Get exact-request approval detail",
+        description: "Requires an eligible human session with recent MFA.",
+        security,
+        responses: {
+          "200": jsonResponse(apiResponse(providerApprovalDetailSchema)),
+          ...errorResponses(),
+        },
+      },
+      post: {
+        tags: ["Provider Authority"],
+        summary: "Approve or deny an exact provider request",
+        description: "Requires an eligible human session with recent MFA.",
+        security,
+        requestBody: jsonRequestBody(providerApprovalDecisionSchema),
+        responses: { "200": jsonResponse(providerTransitionSchema), ...errorResponses() },
+      },
+    },
+    "/v2/provider-actions/{id}/execute": {
+      parameters: [parameter("id", "path")],
+      post: {
+        tags: ["Provider Authority"],
+        summary: "Request safe resume of an approved provider action",
+        description:
+          "The server authorizes the caller against persisted ownership and exact approval state; callers cannot replace the actor or action.",
+        security,
+        requestBody: jsonRequestBody({
+          type: "object",
+          additionalProperties: false,
+          properties: { idempotencyKey: stringSchema },
+        }),
+        responses: { "200": jsonResponse(providerTransitionSchema), ...errorResponses() },
+      },
+    },
+    "/v2/provider-actions/{id}/case": {
+      parameters: [parameter("id", "path")],
+      get: {
+        tags: ["Provider Authority"],
+        summary: "Get a provider-action case manifest",
+        description: "Requires an owner/admin human session with recent MFA.",
+        security,
+        responses: { "200": jsonResponse(providerCaseManifestSchema), ...errorResponses() },
+      },
+    },
+    "/v2/provider-actions/{id}/evidence": {
+      parameters: [parameter("id", "path")],
+      get: {
+        tags: ["Provider Authority"],
+        summary: "Get signed provider-action case evidence",
+        description: "Requires an owner/admin human session with recent MFA.",
+        security,
+        responses: { "200": jsonResponse(providerCaseEvidenceSchema), ...errorResponses() },
       },
     },
   };

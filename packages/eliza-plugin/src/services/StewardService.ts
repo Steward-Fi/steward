@@ -7,8 +7,11 @@ import {
   type ApprovalStats,
   type GetBalanceResult,
   type GetHistoryResult,
+  type Intent,
   type PendingProxyRequest,
   type PolicyRule,
+  type ProviderActionInvokeInput,
+  type ProviderActionInvokeResult,
   type SignMessageResult,
   type SignTransactionInput,
   type SignTransactionResult,
@@ -74,6 +77,7 @@ export class StewardService extends Service {
   private pluginConfig: StewardPluginConfig | null = null;
   private agentIdentity: AgentIdentity | null = null;
   private _connected = false;
+  private readonly trackedProviderActionIds = new Set<string>();
 
   static async start(runtime: IAgentRuntime): Promise<StewardService> {
     const service = new StewardService(runtime);
@@ -85,6 +89,7 @@ export class StewardService extends Service {
     this.client = null;
     this._connected = false;
     this.agentIdentity = null;
+    this.trackedProviderActionIds.clear();
   }
 
   // ── Initialization ──────────────────────────────────────────────
@@ -230,6 +235,34 @@ export class StewardService extends Service {
   async getApprovalStats(): Promise<ApprovalStats> {
     this.assertConnected();
     return this.getClient().getApprovalStats();
+  }
+
+  async invokeProviderAction(
+    input: ProviderActionInvokeInput,
+  ): Promise<ProviderActionInvokeResult> {
+    this.assertConnected();
+    const result = await this.getClient().providerActions.invoke(input);
+    this.trackedProviderActionIds.add(result.id);
+    return result;
+  }
+
+  async getProviderAction(actionId: string): Promise<Intent> {
+    this.assertConnected();
+    const status = await this.getClient().providerActions.get(actionId);
+    this.trackedProviderActionIds.add(actionId);
+    return status;
+  }
+
+  /**
+   * Poll only action status available to this agent JWT. Human approval detail,
+   * case manifests, and evidence remain on their existing human/MFA routes.
+   */
+  async listTrackedProviderActions(): Promise<Intent[]> {
+    this.assertConnected();
+    const results = await Promise.allSettled(
+      [...this.trackedProviderActionIds].map((id) => this.getClient().providerActions.get(id)),
+    );
+    return results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
   }
 
   async listPendingProxyRequests(): Promise<PendingProxyRequest[]> {
