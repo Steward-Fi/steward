@@ -22,6 +22,8 @@ const ENV_KEYS = [
   "STEWARD_ALLOW_DEV_SECRET",
   "STEWARD_MASTER_PASSWORD",
   "STEWARD_KMS_PROVIDER",
+  "STEWARD_EXTERNAL_CUSTODY_PROVIDER",
+  "STEWARD_EXTERNAL_CUSTODY_AWS_REGION",
   "STEWARD_KMS_KEY_ID",
   "STEWARD_AWS_KMS_KEY_ARN",
   "STEWARD_AWS_REGION",
@@ -143,6 +145,25 @@ describe("vault factory", () => {
     for (const capability of VAULT_SIGNING_CAPABILITIES) {
       expect(line).toContain(capability);
     }
+  });
+
+  it("wires AWS asymmetric external custody separately from KMS envelope mode", () => {
+    process.env.STEWARD_MASTER_PASSWORD = "factory-master";
+    delete process.env.STEWARD_KMS_PROVIDER;
+    process.env.STEWARD_EXTERNAL_CUSTODY_PROVIDER = "aws-kms";
+    process.env.STEWARD_EXTERNAL_CUSTODY_AWS_REGION = "us-east-1";
+
+    expect(() => createConfiguredVault()).not.toThrow();
+    const line = configuredVaultStartupLogLine();
+    expect(line).toContain("mode=local");
+    expect(line).toContain("external_custody=aws-kms");
+    expect(line).not.toContain("us-east-1");
+  });
+
+  it("fails closed for an unknown external custody provider", () => {
+    process.env.STEWARD_MASTER_PASSWORD = "factory-master";
+    process.env.STEWARD_EXTERNAL_CUSTODY_PROVIDER = "not-a-provider";
+    expect(() => createConfiguredVault()).toThrow("Unsupported STEWARD_EXTERNAL_CUSTODY_PROVIDER");
   });
 
   it("marks every signing operation supported for local and KMS envelope modes", () => {

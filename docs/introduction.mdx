@@ -60,7 +60,7 @@ Configured provider calls and wallet actions then enter Steward through authenti
 - **Credential proxy:** configured provider requests receive credentials server-side without returning them to the supported agent caller.
 - **Audit evidence:** HMAC chaining, Ed25519 checkpoints, bundle export, and offline verification, with a separate out-of-band check of the bundled public key.
 - **Self-hosting:** Docker with PostgreSQL and Redis, or embedded PGLite for local and desktop use.
-- **Custody choices:** local encrypted storage, AWS KMS envelope wrapping, a PKCS#11 wrapping adapter, and an external custody interface. Steward does not claim MPC or native HSM signing.
+- **Custody choices:** local encrypted storage, AWS KMS envelope wrapping, a PKCS#11 wrapping adapter, a versioned external-custody interface, and an EVM-only AWS KMS asymmetric signing reference provider. Steward does not claim MPC or threshold signing.
 
 ## Direction
 

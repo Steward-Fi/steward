@@ -72,7 +72,8 @@ that.
 | **local** | (default; no `STEWARD_KMS_PROVIDER`) | **Yes**, effectively — key is AES-256-GCM ciphertext, but the unwrap material (`STEWARD_MASTER_PASSWORD` + `STEWARD_KDF_SALT`) is also on the same host/env, so a host compromise recovers keys offline | **Yes** | none | at-rest confidentiality vs. a **stolen DB backup alone** (no env/secrets) | host compromise, memory scrape, malicious dependency, master-password disclosure |
 | **kms-envelope:aws** | `STEWARD_KMS_PROVIDER=aws` + `STEWARD_KMS_KEY_ID`/`STEWARD_AWS_KMS_KEY_ARN` | **No** — each key is wrapped by a per-record data key that only AWS KMS can unwrap; a stolen DB is inert without live KMS access | **Yes** | data-key wrap/unwrap happens in AWS KMS; the KMS master key never leaves KMS | offline DB compromise, offline master-password compromise (data key needs live KMS `Decrypt`), KMS-side audit + revocation | **memory scrape at sign time** (key is AES-decrypted in-process after the data key is unwrapped), a compromised Steward process with live KMS creds |
 | **kms-envelope:pkcs11** | `STEWARD_KMS_PROVIDER=pkcs11` + `STEWARD_PKCS11_MODULE`/`_PIN`/`_KEY_LABEL` (+ operator-supplied `Pkcs11ClientLike`) | **No** — data key is wrapped/unwrapped by the HSM via `C_WrapKey`/`C_UnwrapKey`; stolen DB is inert without the HSM | **Yes** | data-key wrap/unwrap happens inside the HSM; the wrapping key never leaves the HSM | offline DB compromise, offline master-password compromise, HSM-side access control + tamper resistance for the **wrapping** key | **memory scrape at sign time** (private key is AES-decrypted in-process), a compromised Steward process with live HSM session |
-| **external custody** | `VaultConfig.externalKeyCustodyProvider` (code-wired; not a `STEWARD_KMS_PROVIDER` value) | **No** — Steward never holds private key material; it holds an opaque handle (`ExternalKeyHandleDescriptor`) | **No** | signing happens entirely in the external provider; Steward sends the unsigned tx and receives a signed result | plaintext-at-rest **and** plaintext-at-sign-time in the Steward process; key exfiltration via Steward memory | trust in the external provider itself, the provider's own key handling, network/path to the provider |
+| **external custody: AWS KMS** | `STEWARD_EXTERNAL_CUSTODY_PROVIDER=aws-kms` (separate from `STEWARD_KMS_PROVIDER`) | **No** — Steward stores an opaque asymmetric KMS key handle and public address only | **No** | an `ECC_SECG_P256K1` `SIGN_VERIFY` key signs the EVM transaction digest inside AWS KMS | plaintext-at-rest **and** plaintext-at-sign-time in Steward; database-only key recovery | trust in AWS KMS/IAM and the live Steward process's authority to request signatures; EVM transactions only |
+| **external custody: custom v1 provider** | `VaultConfig.externalKeyCustodyProvider` | Provider-defined, but v1 forbids private material in the contract and private-key export | Provider-defined | operator implementation | depends on provider | provider and transport trust; must pass the exported v1 conformance suite |
 
 > **Note on `kms-envelope:pkcs11` in this release:** the built-in PKCS#11 path
 > requires an operator-supplied `Pkcs11ClientLike` adapter for `C_WrapKey` /
@@ -101,9 +102,10 @@ Pick the weakest mode whose residual risk you can accept, then harden.
 - **Your threat model includes a compromised Steward process itself** (memory
   scrape, malicious dependency, hostile co-tenant with code exec), i.e. you
   cannot accept plaintext key bytes in Steward's address space **ever**:
-  → **external custody.** This is the only mode that removes
+  → **external custody.** The reference AWS KMS asymmetric signer is the only
+  built-in mode that removes
   plaintext-at-sign-time. It moves trust to the external signer; evaluate that
-  provider on its own terms.
+  provider on its own terms. See `docs/security/external-custody.md`.
 
 Regardless of mode, always set in production:
 
@@ -173,12 +175,13 @@ local_custody_acknowledged=true capabilities=...`.
 
 ## Honest limitations
 
-- **Every built-in mode exposes plaintext at sign time.** KMS-envelope and
+- **Every built-in keystore mode exposes plaintext at sign time.** KMS-envelope and
   PKCS#11 protect the key **at rest**; they do **not** protect it against a
-  compromised Steward process. Only external custody does.
-- **No MPC, no threshold signing, no native HSM signing** is implemented in
-  this repo. The `KeystoreBackend` interface is a plug for operators to bring
-  their own (`packages/vault/src/keystore-backend.ts`); shipping a threshold
+  compromised Steward process. The AWS KMS asymmetric external-custody provider
+  signs EVM transactions without importing the private key into Steward.
+- **No MPC or threshold signing** is implemented in this repo. The
+  `ExternalKeyCustodyProvider` v1 interface is the plug for operators to bring
+  their own; shipping a threshold
   protocol from inside the monorepo would be theater — the security of MPC comes
   from independent operators, an operational concern outside the codebase.
 - **No operator-proof / tamper-evident custody claim.** Audit logs record
@@ -200,7 +203,9 @@ local_custody_acknowledged=true capabilities=...`.
 | AES-256-GCM at-rest keystore + KDF | `packages/vault/src/keystore.ts` |
 | Pluggable backend contract | `packages/vault/src/keystore-backend.ts` |
 | KMS/PKCS#11 envelope (unwrap + in-process AES decrypt) | `packages/vault/src/keystore-kms.ts` |
-| External custody (no plaintext in-process) | `packages/vault/src/external-key-custody.ts` |
+| External custody v1 contract (no private-material fields) | `packages/vault/src/external-key-custody.ts` |
+| AWS KMS asymmetric EVM reference provider | `packages/vault/src/aws-kms-external-custody.ts` |
+| Reusable provider conformance probe | `packages/vault/src/external-key-custody-conformance.ts` |
 | Signing paths that decrypt to plaintext | `packages/vault/src/vault.ts` (`this.keyStore.decrypt`) |
 | Mode resolution + production ack gate | `packages/api/src/services/vault-factory.ts` |
 | Precedent: adapter mock gate | `packages/adapters/src/registry.ts` |
