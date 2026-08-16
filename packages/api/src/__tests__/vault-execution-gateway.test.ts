@@ -805,6 +805,7 @@ describe("vault EVM execution gateway", () => {
 
   class ProviderSpy implements ExternalKeyCustodyProvider {
     id = "transition-provider-spy";
+    readonly contractVersion = 1 as const;
     registerCalls: ExternalKeyHandleImportRequest[] = [];
     signCalls: ExternalKeySignTransactionRequest[] = [];
     async registerKeyHandle(

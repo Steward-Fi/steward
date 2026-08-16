@@ -1,10 +1,11 @@
 import { createRequire } from "node:module";
 import { isDevSecretAllowed } from "@stwd/auth";
-import { KmsEnvelopeKeystore, Vault } from "@stwd/vault";
+import { AwsKmsExternalKeyCustodyProvider, KmsEnvelopeKeystore, Vault } from "@stwd/vault";
 
 const require = createRequire(import.meta.url);
 
 export type VaultMode = "local" | "kms-envelope:aws" | "kms-envelope:pkcs11";
+export type ExternalCustodyProviderName = "aws-kms";
 
 /**
  * Explicit acknowledgement that this deployment runs the weakest custody
@@ -76,6 +77,29 @@ function configuredKmsProvider(): "aws" | "pkcs11" | undefined {
   if (!value) return undefined;
   if (value === "aws" || value === "pkcs11") return value;
   throw new Error(`Unsupported STEWARD_KMS_PROVIDER: ${value}`);
+}
+
+function configuredExternalCustodyProvider(): ExternalCustodyProviderName | undefined {
+  const value = process.env.STEWARD_EXTERNAL_CUSTODY_PROVIDER?.trim();
+  if (!value) return undefined;
+  if (value === "aws-kms") return value;
+  throw new Error(`Unsupported STEWARD_EXTERNAL_CUSTODY_PROVIDER: ${value}`);
+}
+
+function createExternalCustodyProvider() {
+  const provider = configuredExternalCustodyProvider();
+  if (!provider) return undefined;
+  // External signing uses the same optional AWS SDK package as envelope mode,
+  // but it is deliberately selected by a separate configuration key and never
+  // changes the keystore backend.
+  try {
+    require.resolve("@aws-sdk/client-kms");
+  } catch {
+    throw new Error(
+      "@aws-sdk/client-kms is required when STEWARD_EXTERNAL_CUSTODY_PROVIDER=aws-kms",
+    );
+  }
+  return AwsKmsExternalKeyCustodyProvider.fromEnv();
 }
 
 function requireKmsConfiguration(provider: "aws" | "pkcs11"): void {
@@ -197,13 +221,17 @@ export function createConfiguredVault(options: ConfiguredVaultOptions = {}): Vau
     rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
     chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
     ...(mode === "local" ? {} : { keystoreBackend: KmsEnvelopeKeystore.fromEnv() }),
+    ...(configuredExternalCustodyProvider()
+      ? { externalKeyCustodyProvider: createExternalCustodyProvider() }
+      : {}),
   });
 }
 
 export function getConfiguredVault(options: ConfiguredVaultOptions = {}): Vault {
   const mode = configuredMode();
+  const externalCustody = configuredExternalCustodyProvider() ?? "none";
   const masterPassword = resolveMasterPassword(options);
-  const key = `${mode}:${masterPassword}`;
+  const key = `${mode}:${externalCustody}:${masterPassword}`;
   let vault = vaultsByKey.get(key);
   if (!vault) {
     vault = createConfiguredVault({ ...options, fallbackPassword: masterPassword });
@@ -216,6 +244,7 @@ export function configuredVaultStartupLogLine(): string {
   const provider = configuredKmsProvider();
   const mode: VaultMode = provider ? `kms-envelope:${provider}` : "local";
   const plaintextAtSignTime = modeExposesPlaintextAtSignTime(mode);
+  const externalCustody = configuredExternalCustodyProvider() ?? "none";
   // In production, local mode only reaches this point when the operator has
   // explicitly acknowledged the weak posture (see assertProductionCustodyAcknowledged).
   // Surface that acknowledgement in the boot log so it is auditable. Never emit
@@ -225,7 +254,8 @@ export function configuredVaultStartupLogLine(): string {
       ? ` local_custody_acknowledged=${localCustodyAcknowledged()}`
       : "";
   return (
-    `[steward] vault mode=${mode} plaintext_at_sign_time=${plaintextAtSignTime}${ack} ` +
+    `[steward] vault mode=${mode} external_custody=${externalCustody} ` +
+    `plaintext_at_sign_time=${plaintextAtSignTime}${ack} ` +
     `capabilities=${VAULT_SIGNING_CAPABILITIES.join(",")}`
   );
 }

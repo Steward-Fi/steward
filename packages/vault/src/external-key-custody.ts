@@ -2,6 +2,9 @@ import type { ChainFamily } from "@stwd/shared";
 
 export type ExternalKeySigningAvailability = "not-supported" | "provider-signing";
 
+/** Public compatibility marker for operator-supplied custody providers. */
+export const EXTERNAL_KEY_CUSTODY_CONTRACT_VERSION = 1 as const;
+
 export interface ExternalKeyHandleDescriptor {
   providerId: string;
   keyId: string;
@@ -67,6 +70,7 @@ export interface ExternalKeyHandleRegistration {
 
 export interface ExternalKeyCustodyProvider {
   id: string;
+  readonly contractVersion: typeof EXTERNAL_KEY_CUSTODY_CONTRACT_VERSION;
   registerKeyHandle(
     request: ExternalKeyHandleImportRequest,
   ): Promise<ExternalKeyHandleRegistration>;
@@ -76,6 +80,19 @@ export interface ExternalKeyCustodyProvider {
   ): Promise<ExternalKeySignTransactionResult>;
 }
 
+export function assertExternalKeyCustodyProviderV1(provider: ExternalKeyCustodyProvider): void {
+  if (provider.contractVersion !== EXTERNAL_KEY_CUSTODY_CONTRACT_VERSION) {
+    throw new Error(
+      `Unsupported external key custody contract version: ${String(provider.contractVersion)}`,
+    );
+  }
+  if (!provider.id?.trim() || typeof provider.registerKeyHandle !== "function") {
+    throw new Error(
+      "External key custody provider does not implement the v1 registration contract",
+    );
+  }
+}
+
 const PRIVATE_MATERIAL_FIELD_NAMES = new Set([
   "privatekey",
   "secretkey",
@@ -83,6 +100,7 @@ const PRIVATE_MATERIAL_FIELD_NAMES = new Set([
   "plaintextkey",
   "mnemonic",
   "seed",
+  "seedphrase",
 ]);
 
 export function externalKeyCustodyUnavailableError(): Error {
@@ -110,7 +128,10 @@ export function assertNoExternalPrivateKeyMaterial(value: unknown, path = "reque
   if (typeof value !== "object") return;
 
   for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
-    if (PRIVATE_MATERIAL_FIELD_NAMES.has(key.toLowerCase())) {
+    // Normalize separators/casing so aliases such as private_key, private-key,
+    // seedPhrase and KEY_MATERIAL cannot bypass the provider boundary.
+    const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (PRIVATE_MATERIAL_FIELD_NAMES.has(normalizedKey)) {
       throw new Error(`External key custody ${path}.${key} must not contain private key material`);
     }
     assertNoExternalPrivateKeyMaterial(nested, `${path}.${key}`);
@@ -147,6 +168,7 @@ export function normalizeExternalKeyHandleRegistration(
 
 export class FailClosedExternalKeyCustodyProvider implements ExternalKeyCustodyProvider {
   id = "external-key-custody-disabled";
+  readonly contractVersion = EXTERNAL_KEY_CUSTODY_CONTRACT_VERSION;
 
   async registerKeyHandle(): Promise<ExternalKeyHandleRegistration> {
     throw externalKeyCustodyUnavailableError();
@@ -159,6 +181,7 @@ export class FailClosedExternalKeyCustodyProvider implements ExternalKeyCustodyP
 
 export class InMemoryExternalKeyCustodyProvider implements ExternalKeyCustodyProvider {
   id: string;
+  readonly contractVersion = EXTERNAL_KEY_CUSTODY_CONTRACT_VERSION;
   private registrations = new Map<string, ExternalKeyHandleRegistration>();
 
   constructor(id = "in-memory-external-key-custody") {

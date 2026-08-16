@@ -54,6 +54,7 @@ import {
 } from "./bitcoin-psbt";
 import { allocateEvmNonce, confirmEvmNonce, markEvmNonceDropped } from "./evm-nonce-manager";
 import {
+  assertExternalKeyCustodyProviderV1,
   assertNoExternalPrivateKeyMaterial,
   type ExternalKeyCustodyProvider,
   type ExternalKeyHandleImportRequest,
@@ -441,6 +442,9 @@ export class Vault {
   private moneroBackend?: MoneroWalletBackend;
 
   constructor(config: VaultConfig) {
+    if (config.externalKeyCustodyProvider) {
+      assertExternalKeyCustodyProviderV1(config.externalKeyCustodyProvider);
+    }
     this.config = config;
     this.externalKeyCustodyProvider = config.externalKeyCustodyProvider;
     this.moneroBackend = config.moneroBackend;
@@ -1847,9 +1851,8 @@ export class Vault {
   /**
    * Register an external hardware/HSM key handle for an agent.
    *
-   * This is intentionally a custody seam only. It accepts provider-neutral
-   * handle metadata and returns the registered public identity, but signing
-   * through external handles is not wired into Vault signing paths yet and
+   * It accepts provider-neutral handle metadata and returns the registered
+   * public identity. A v1 provider may also opt into transaction signing, but
    * plaintext private key export is never available for external custody.
    */
   async importExternalKeyHandle(

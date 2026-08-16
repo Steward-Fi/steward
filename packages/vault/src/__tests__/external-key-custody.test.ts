@@ -20,6 +20,7 @@ const openClients: Array<{ close: () => Promise<void> }> = [];
 
 class TestExternalKeyProvider implements ExternalKeyCustodyProvider {
   id = "test-external-key-provider";
+  readonly contractVersion = 1 as const;
   registerCalls: ExternalKeyHandleImportRequest[] = [];
   signCalls: ExternalKeySignTransactionRequest[] = [];
 
@@ -181,6 +182,7 @@ describe("external key custody seam", () => {
   test("external-only wallets refuse signing when provider signing is unavailable", async () => {
     const provider = {
       id: "unsupported-signing-provider",
+      contractVersion: 1 as const,
       async registerKeyHandle(
         request: ExternalKeyHandleImportRequest,
       ): Promise<ExternalKeyHandleRegistration> {

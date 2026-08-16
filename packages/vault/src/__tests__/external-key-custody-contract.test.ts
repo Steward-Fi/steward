@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  assertExternalKeyCustodyProviderV1,
   assertNoExternalPrivateKeyMaterial,
+  EXTERNAL_KEY_CUSTODY_CONTRACT_VERSION,
   type ExternalKeyHandleImportRequest,
   type ExternalKeyHandleRegistration,
   externalKeyPrivateExportUnavailableError,
@@ -40,6 +42,28 @@ function registration(
 }
 
 describe("external key custody contract", () => {
+  test("publishes and enforces the v1 compatibility marker", () => {
+    expect(EXTERNAL_KEY_CUSTODY_CONTRACT_VERSION).toBe(1);
+    expect(() =>
+      assertExternalKeyCustodyProviderV1({
+        id: "provider-v1",
+        contractVersion: 1,
+        async registerKeyHandle(input) {
+          return normalizeExternalKeyHandleRegistration(input, registration());
+        },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertExternalKeyCustodyProviderV1({
+        id: "future-provider",
+        contractVersion: 2 as 1,
+        async registerKeyHandle(input) {
+          return normalizeExternalKeyHandleRegistration(input, registration());
+        },
+      }),
+    ).toThrow("Unsupported external key custody contract version");
+  });
+
   test("normalizes provider-signing registrations without private-key exportability", () => {
     const normalized = normalizeExternalKeyHandleRegistration(request, registration());
 
@@ -58,6 +82,12 @@ describe("external key custody contract", () => {
         handle: { providerId: "hsm", keyId: "key-1" },
         metadata: { nested: { secretKey: "not-allowed" } },
       }),
+    ).toThrow("must not contain private key material");
+    expect(() =>
+      assertNoExternalPrivateKeyMaterial({ metadata: { nested: { private_key: "0xsecret" } } }),
+    ).toThrow("must not contain private key material");
+    expect(() =>
+      assertNoExternalPrivateKeyMaterial({ metadata: { nested: { seedPhrase: "words" } } }),
     ).toThrow("must not contain private key material");
   });
 
