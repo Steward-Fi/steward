@@ -407,7 +407,7 @@ export async function releaseWindowedInvoke(input: {
     },
     reservationId: input.reservationId,
     amount: 1,
-  }).catch(() => undefined);
+  });
 }
 
 /**
