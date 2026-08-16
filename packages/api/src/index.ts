@@ -26,6 +26,7 @@ import {
   RATE_LIMIT_MAX_REQUESTS,
   RATE_LIMIT_WINDOW_MS,
 } from "./services/context";
+import { startProviderReservationReconciliationScheduler } from "./services/provider-reservation-reconciliation-scheduler";
 import { startRetentionScheduler } from "./services/retention";
 import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
 import { configuredVaultStartupLogLine, getConfiguredVault } from "./services/vault-factory";
@@ -56,6 +57,7 @@ const app = await composeApp();
 const requestLog = new Map<string, { count: number; resetAt: number }>();
 let isShuttingDown = false;
 let cancelRetention: (() => void) | undefined;
+let cancelProviderReservationReconciliation: (() => void) | undefined;
 let cancelTransactionReceiptPolling: (() => void) | undefined;
 let cancelWebhookRetryScheduler: (() => void) | undefined;
 
@@ -216,6 +218,7 @@ console.log(configuredVaultStartupLogLine());
 
 initRedis()
   .then((redisOk) => {
+    cancelProviderReservationReconciliation = startProviderReservationReconciliationScheduler();
     // usePostgres=true when migrations have run, so auth_kv_store table exists.
     const usePostgres = migrationsRan && !redisOk;
     return initAuthStores(usePostgres).then(() => {
@@ -254,6 +257,7 @@ const shutdown = async (signal: string) => {
   clearInterval(requestLogCleanupTimer);
   if (nonceCleanupTimer) clearInterval(nonceCleanupTimer);
   if (cancelRetention) cancelRetention();
+  if (cancelProviderReservationReconciliation) cancelProviderReservationReconciliation();
   if (cancelTransactionReceiptPolling) cancelTransactionReceiptPolling();
   if (cancelWebhookRetryScheduler) cancelWebhookRetryScheduler();
   requestLog.clear();

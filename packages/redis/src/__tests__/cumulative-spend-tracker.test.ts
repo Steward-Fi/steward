@@ -232,6 +232,9 @@ describeRedis("fail closed", () => {
     const caps = [{ windowSeconds: 3600, max: 5_000_000 }];
     await expect(reserveCumulativeSpend({ stream: STREAM, caps, amount: -1 })).rejects.toThrow();
     await expect(reserveCumulativeSpend({ stream: STREAM, caps, amount: 1.5 })).rejects.toThrow();
+    await expect(
+      reserveCumulativeSpend({ stream: STREAM, caps, amount: Number.MAX_SAFE_INTEGER + 1 }),
+    ).rejects.toThrow();
     await expect(reserveCumulativeSpend({ stream: STREAM, caps: [], amount: 1 })).rejects.toThrow();
     await expect(
       reserveCumulativeSpend({
