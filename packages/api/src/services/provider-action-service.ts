@@ -1648,6 +1648,7 @@ class ProviderActionService {
       // github actions report api.github.com, never a hardcoded provider.
       host: hostFromOrigin(build.action.origin),
       path: build.action.normalizedPath,
+      evaluatedAt: decidedAt,
       // Trailing-hour count is not wired in PR2; rules that require it will
       // fail closed (POLICY_INPUT_UNAVAILABLE) exactly as specified.
       invokeCount1h: undefined,

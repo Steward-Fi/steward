@@ -151,4 +151,119 @@ describe("composeProviderActionPolicyDecision precedence", () => {
       composeProviderActionPolicyDecision([capRule], { ...ctx, invokeCount1h: 4 }).effect,
     ).toBe("allow");
   });
+
+  it("enforces IANA business hours from the server-supplied instant", () => {
+    const businessHours = rule("hours", "allow", {
+      constraints: {
+        timeWindow: {
+          timezone: "America/Los_Angeles",
+          allow: [{ days: ["mon", "tue", "wed", "thu", "fri"], from: "09:00", to: "17:00" }],
+        },
+      },
+    });
+    expect(
+      composeProviderActionPolicyDecision([businessHours], {
+        ...ctx,
+        evaluatedAt: "2026-08-17T19:00:00.000Z", // Monday noon PDT
+      }).effect,
+    ).toBe("allow");
+    expect(
+      composeProviderActionPolicyDecision([businessHours], {
+        ...ctx,
+        evaluatedAt: "2026-08-17T23:59:00.000Z", // Monday 16:59 PDT
+      }).effect,
+    ).toBe("allow");
+    expect(
+      composeProviderActionPolicyDecision([businessHours], {
+        ...ctx,
+        evaluatedAt: "2026-08-18T00:00:00.000Z", // Monday 17:00 PDT, exclusive
+      }).effect,
+    ).toBe("hard_deny");
+  });
+
+  it("handles overnight windows against the opening weekday", () => {
+    const overnight = rule("overnight", "allow", {
+      constraints: {
+        timeWindow: {
+          timezone: "America/Los_Angeles",
+          allow: [{ days: ["mon"], from: "22:00", to: "02:00" }],
+        },
+      },
+    });
+    expect(
+      composeProviderActionPolicyDecision([overnight], {
+        ...ctx,
+        evaluatedAt: "2026-08-18T08:00:00.000Z", // Tuesday 01:00 PDT
+      }).effect,
+    ).toBe("allow");
+    expect(
+      composeProviderActionPolicyDecision([overnight], {
+        ...ctx,
+        evaluatedAt: "2026-08-18T09:00:00.000Z", // Tuesday 02:00 PDT
+      }).effect,
+    ).toBe("hard_deny");
+  });
+
+  it("is deterministic across DST gaps and repeated local times", () => {
+    const dstWindow = rule("dst", "allow", {
+      constraints: {
+        timeWindow: {
+          timezone: "America/New_York",
+          allow: [{ days: ["sun"], from: "01:00", to: "03:00" }],
+        },
+      },
+    });
+    // Spring-forward: 01:30 exists; the next sampled instant is 03:30 and denied.
+    expect(
+      composeProviderActionPolicyDecision([dstWindow], {
+        ...ctx,
+        evaluatedAt: "2026-03-08T06:30:00.000Z",
+      }).effect,
+    ).toBe("allow");
+    expect(
+      composeProviderActionPolicyDecision([dstWindow], {
+        ...ctx,
+        evaluatedAt: "2026-03-08T07:30:00.000Z",
+      }).effect,
+    ).toBe("hard_deny");
+    // Fall-back: both distinct instants mapping to 01:30 are treated alike.
+    for (const evaluatedAt of ["2026-11-01T05:30:00.000Z", "2026-11-01T06:30:00.000Z"]) {
+      expect(composeProviderActionPolicyDecision([dstWindow], { ...ctx, evaluatedAt }).effect).toBe(
+        "allow",
+      );
+    }
+  });
+
+  it("fails closed on absent time, invalid timezone, unknown keys, and empty windows", () => {
+    const valid = rule("hours", "allow", {
+      constraints: {
+        timeWindow: {
+          timezone: "UTC",
+          allow: [{ days: ["mon"], from: "09:00", to: "17:00" }],
+        },
+      },
+    });
+    const missing = composeProviderActionPolicyDecision([valid], {
+      ...ctx,
+      evaluatedAt: undefined,
+    });
+    expect(missing.effect).toBe("hard_deny");
+    expect(missing.reasonCodes).toContain(PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE);
+
+    for (const timeWindow of [
+      { timezone: "Not/A_Zone", allow: [{ days: ["mon"], from: "09:00", to: "17:00" }] },
+      { timezone: "UTC", allow: [] },
+      { timezone: "UTC", allow: [{ days: ["MON"], from: "09:00", to: "17:00" }] },
+      { timezone: "UTC", allow: [{ days: ["mon"], from: "09:00", to: "09:00" }] },
+      { timezone: "UTC", allow: [{ days: ["mon"], from: "09:00", to: "17:00", extra: true }] },
+    ]) {
+      const malformed = rule("bad-hours", "allow", { constraints: { timeWindow } });
+      const decision = composeProviderActionPolicyDecision([malformed], {
+        ...ctx,
+        evaluatedAt: "2026-08-17T12:00:00.000Z",
+      });
+      expect(decision.effect).toBe("hard_deny");
+      expect(decision.reasonCodes).toContain(PROVIDER_POLICY_REASON.CONFIGURATION_INVALID);
+    }
+  });
 });

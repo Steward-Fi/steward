@@ -311,12 +311,14 @@ export async function invokeCapabilityThroughProxy(
     });
   }
 
+  const evaluatedAt = new Date().toISOString();
   const capabilityCtx: NonNullable<EvaluatorContext["capability"]> = {
     name: cap.name,
     args: invokeArgs,
     host: cap.host,
     path: cap.pathPattern,
     method: cap.method,
+    evaluatedAt,
   };
 
   let policySet: PolicyRule[];

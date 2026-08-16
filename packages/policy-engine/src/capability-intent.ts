@@ -201,6 +201,8 @@ export interface XConstraints {
 
 /** Constraints evaluated ONLY on an `effect: "allow"` match. */
 export interface CapabilityIntentConstraints {
+  /** Local business-hours allow windows evaluated from a server-supplied instant. */
+  readonly timeWindow?: CapabilityTimeWindow;
   /**
    * Max capability INVOKES per trailing hour. Evaluated against
    * `ctx.capabilityInvokeCount1h` (NOT the tx counter). If this is set but the
@@ -252,6 +254,21 @@ export interface CapabilityIntentConstraints {
    * See {@link XConstraints} + docs/security/permissioned-x.mdx.
    */
   readonly x?: XConstraints;
+}
+
+export type CapabilityWeekday = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
+
+export interface CapabilityTimeWindowEntry {
+  readonly days: CapabilityWeekday[];
+  /** Inclusive local wall-clock start, HH:MM. */
+  readonly from: string;
+  /** Exclusive local wall-clock end, HH:MM. Overnight windows are supported. */
+  readonly to: string;
+}
+
+export interface CapabilityTimeWindow {
+  readonly timezone: string;
+  readonly allow: CapabilityTimeWindowEntry[];
 }
 
 /** The jsonb config of a `capability-intent` rule. */
@@ -354,6 +371,7 @@ const ALLOWED_CONSTRAINT_KEYS: ReadonlySet<string> = new Set([
   "cumulativeSpend",
   "argEquals",
   "argMatches",
+  "timeWindow",
   "x",
 ]);
 const ALLOWED_CUMULATIVE_SPEND_KEYS: ReadonlySet<string> = new Set([
@@ -363,6 +381,109 @@ const ALLOWED_CUMULATIVE_SPEND_KEYS: ReadonlySet<string> = new Set([
   "aggregateOver",
 ]);
 const CUMULATIVE_SPEND_SCOPES: ReadonlySet<string> = new Set(["operation", "agent", "grant"]);
+const WEEKDAYS: readonly CapabilityWeekday[] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+const WEEKDAY_SET: ReadonlySet<string> = new Set(WEEKDAYS);
+const HH_MM = /^([01][0-9]|2[0-3]):([0-5][0-9])$/;
+
+function minuteOfDay(value: string): number | null {
+  const match = HH_MM.exec(value);
+  return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+}
+
+function parseTimeWindow(raw: unknown): CapabilityTimeWindow | { error: string } {
+  if (!isPlainObject(raw))
+    return { error: "capability-intent: `constraints.timeWindow` must be an object" };
+  const unknown = Object.keys(raw).filter((key) => key !== "timezone" && key !== "allow");
+  if (unknown.length)
+    return {
+      error: `capability-intent: unknown constraints.timeWindow key(s): ${unknown.join(", ")}`,
+    };
+  if (typeof raw.timezone !== "string" || !raw.timezone || raw.timezone.length > 128) {
+    return { error: "capability-intent: `timeWindow.timezone` must be an IANA timezone" };
+  }
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: raw.timezone }).format(new Date(0));
+  } catch {
+    return { error: "capability-intent: `timeWindow.timezone` must be an IANA timezone" };
+  }
+  if (!Array.isArray(raw.allow) || raw.allow.length === 0 || raw.allow.length > 64) {
+    return { error: "capability-intent: `timeWindow.allow` must contain 1..64 windows" };
+  }
+  const allow: CapabilityTimeWindowEntry[] = [];
+  for (const candidate of raw.allow) {
+    if (!isPlainObject(candidate))
+      return { error: "capability-intent: each time window must be an object" };
+    const extra = Object.keys(candidate).filter(
+      (key) => key !== "days" && key !== "from" && key !== "to",
+    );
+    if (extra.length)
+      return { error: `capability-intent: unknown time window key(s): ${extra.join(", ")}` };
+    if (
+      !Array.isArray(candidate.days) ||
+      candidate.days.length === 0 ||
+      candidate.days.some((day) => typeof day !== "string" || !WEEKDAY_SET.has(day))
+    ) {
+      return { error: "capability-intent: time window days must be non-empty lowercase weekdays" };
+    }
+    if (new Set(candidate.days).size !== candidate.days.length) {
+      return { error: "capability-intent: time window days must not contain duplicates" };
+    }
+    if (
+      typeof candidate.from !== "string" ||
+      typeof candidate.to !== "string" ||
+      minuteOfDay(candidate.from) === null ||
+      minuteOfDay(candidate.to) === null ||
+      candidate.from === candidate.to
+    ) {
+      return { error: "capability-intent: time window from/to must be distinct HH:MM values" };
+    }
+    allow.push({
+      days: candidate.days as CapabilityWeekday[],
+      from: candidate.from,
+      to: candidate.to,
+    });
+  }
+  return { timezone: raw.timezone, allow };
+}
+
+function timeWindowAllows(
+  window: CapabilityTimeWindow,
+  evaluatedAt: string | undefined,
+): "allow" | "deny" | "unavailable" {
+  if (typeof evaluatedAt !== "string") return "unavailable";
+  const instant = new Date(evaluatedAt);
+  if (!Number.isFinite(instant.getTime())) return "unavailable";
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: window.timezone,
+      weekday: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(instant);
+  } catch {
+    return "unavailable";
+  }
+  const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const day = byType.weekday?.slice(0, 3).toLowerCase() as CapabilityWeekday | undefined;
+  const minute = Number(byType.hour) * 60 + Number(byType.minute);
+  if (!day || !WEEKDAY_SET.has(day) || !Number.isInteger(minute)) return "unavailable";
+  const dayIndex = WEEKDAYS.indexOf(day);
+  const previousDay = WEEKDAYS[(dayIndex + 6) % 7];
+  for (const entry of window.allow) {
+    const from = minuteOfDay(entry.from) as number;
+    const to = minuteOfDay(entry.to) as number;
+    if (from < to && entry.days.includes(day) && minute >= from && minute < to) return "allow";
+    if (
+      from > to &&
+      ((entry.days.includes(day) && minute >= from) ||
+        (entry.days.includes(previousDay) && minute < to))
+    )
+      return "allow";
+  }
+  return "deny";
+}
 
 /**
  * Parse a restricted ISO-8601 duration into a positive integer number of
@@ -785,6 +906,13 @@ function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: strin
       return { error: "capability-intent: `constraints.argMatches` must be Record<string,string>" };
     }
 
+    let timeWindow: CapabilityTimeWindow | undefined;
+    if (c.timeWindow !== undefined) {
+      const parsedTimeWindow = parseTimeWindow(c.timeWindow);
+      if ("error" in parsedTimeWindow) return parsedTimeWindow;
+      timeWindow = parsedTimeWindow;
+    }
+
     let xConstraints: XConstraints | undefined;
     if (c.x !== undefined) {
       const parsedX = parseXConstraints(c.x);
@@ -809,6 +937,7 @@ function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: strin
         : {}),
       ...(c.argEquals !== undefined ? { argEquals: c.argEquals as Record<string, string> } : {}),
       ...(c.argMatches !== undefined ? { argMatches: c.argMatches as Record<string, string> } : {}),
+      ...(timeWindow !== undefined ? { timeWindow } : {}),
       ...(xConstraints !== undefined ? { x: xConstraints } : {}),
     };
   }
@@ -901,6 +1030,19 @@ function evaluateConstraints(
           reason: `capability-intent: arg "${key}" does not match required pattern`,
         };
       }
+    }
+  }
+  if (constraints.timeWindow) {
+    const result = timeWindowAllows(constraints.timeWindow, capability.evaluatedAt);
+    if (result !== "allow") {
+      return {
+        ...base,
+        passed: false,
+        reason:
+          result === "unavailable"
+            ? "capability-intent: timeWindow set but server evaluation time is unavailable"
+            : "capability-intent: invoke is outside the configured business-hours window",
+      };
     }
   }
 
@@ -1257,6 +1399,8 @@ export interface ProviderPolicyContext {
   readonly method: string;
   readonly host: string;
   readonly path: string;
+  /** Immutable server-supplied evaluation instant. Never accepted from action args. */
+  readonly evaluatedAt?: string;
   /** Authoritative trailing-hour invoke count. `undefined` => input
    *  unavailable => fail closed (hard_deny, POLICY_INPUT_UNAVAILABLE). */
   readonly invokeCount1h?: number;
@@ -1567,6 +1711,11 @@ function evaluateProviderConstraints(
       const value = args[key];
       if (typeof value !== "string" || !re.test(value)) return PROVIDER_POLICY_REASON.HARD_DENY;
     }
+  }
+  if (constraints.timeWindow) {
+    const result = timeWindowAllows(constraints.timeWindow, ctx.evaluatedAt);
+    if (result === "unavailable") return PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE;
+    if (result === "deny") return PROVIDER_POLICY_REASON.HARD_DENY;
   }
   if (constraints.maxCallsPerHour !== undefined) {
     const count = ctx.invokeCount1h;

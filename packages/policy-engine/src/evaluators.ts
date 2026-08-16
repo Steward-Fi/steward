@@ -95,6 +95,8 @@ export interface EvaluatorContext {
     host: string;
     path: string;
     method: string;
+    /** Immutable server-supplied instant for time-window constraints. */
+    evaluatedAt?: string;
   };
   /**
    * Rolling count of capability INVOKES in the trailing hour (distinct from
