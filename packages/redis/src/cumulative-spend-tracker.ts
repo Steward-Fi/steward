@@ -202,7 +202,11 @@ return {sum}
 `;
 
 function isNonNegInt(v: number): boolean {
-  return typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 0;
+  // Redis Lua numbers are IEEE-754 doubles. Values above MAX_SAFE_INTEGER may
+  // stringify/round differently between JS and Lua, which would make a durable
+  // reservation impossible to identify and release exactly. Reject them before
+  // touching Redis.
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 }
 
 function isValidWindow(w: number): boolean {
@@ -409,7 +413,7 @@ export async function releaseWindowedInvoke(input: {
     },
     reservationId: input.reservationId,
     amount: 1,
-  }).catch(() => undefined);
+  });
 }
 
 /**

@@ -57,9 +57,13 @@ import {
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { PROVIDER_POLICY_REASON } from "@stwd/policy-engine";
 import { buildXAction } from "@stwd/provider-x";
-import { disconnectRedis, getRedis } from "@stwd/redis";
+import { disconnectRedis, getCumulativeSpendSum, getRedis } from "@stwd/redis";
+import { eq } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
-import { providerActionService } from "../services/provider-action-service";
+import {
+  __setReservationReconciliationFaultForTests,
+  providerActionService,
+} from "../services/provider-action-service";
 
 setDefaultTimeout(120_000);
 
@@ -203,8 +207,10 @@ async function seed(opts: {
   declaredCurrency?: string;
   declareSpendField?: boolean;
   countCapMaxCalls?: number;
+  combineCountAndSpend?: boolean;
   grantScoped?: boolean;
   accessViaRoleBindingNoGrant?: boolean;
+  extraDenyRule?: boolean;
 }) {
   const db = getDb();
   await db.insert(tenants).values([{ id: CS.TENANT, name: "CS", apiKeyHash: "hcs" }]);
@@ -263,13 +269,29 @@ async function seed(opts: {
   ]);
   const requestProfile: Record<string, unknown> = {
     policyRules:
-      opts.countCapMaxCalls !== undefined
+      opts.countCapMaxCalls !== undefined && !opts.combineCountAndSpend
         ? countCapRules(OP_TWEET_KEY, opts.countCapMaxCalls)
         : opts.grantScoped
           ? grantScopedSpendRules(OP_TWEET_KEY, opts.maxBytes)
           : spendCapRules(OP_TWEET_KEY, opts.maxBytes, opts.capCurrency ?? "BYTES"),
   };
-  if (opts.countCapMaxCalls === undefined && opts.declareSpendField !== false) {
+  if (opts.combineCountAndSpend && opts.countCapMaxCalls !== undefined) {
+    (requestProfile.policyRules as Array<Record<string, unknown>>).push(
+      ...countCapRules(OP_TWEET_KEY, opts.countCapMaxCalls),
+    );
+  }
+  if (opts.extraDenyRule) {
+    (requestProfile.policyRules as Array<Record<string, unknown>>).push({
+      id: "c4444444-4444-4444-8444-4444444444f4",
+      type: "capability-intent",
+      enabled: true,
+      config: { capabilities: [OP_TWEET_KEY], effect: "deny" },
+    });
+  }
+  if (
+    (opts.countCapMaxCalls === undefined || opts.combineCountAndSpend) &&
+    opts.declareSpendField !== false
+  ) {
     requestProfile.spendDeclaration = {
       field: "textByteLength",
       currency: opts.declaredCurrency ?? "BYTES",
@@ -359,6 +381,7 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     delete process.env.STEWARD_PGLITE_MEMORY;
   });
   beforeEach(async () => {
+    __setReservationReconciliationFaultForTests(null);
     await wipe();
     await cleanupRedis();
   });
@@ -433,5 +456,125 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     if (t.kind === "policy_denied") {
       expect(t.code).toBe(PROVIDER_POLICY_REASON.CUMULATIVE_SPEND_CAP_EXCEEDED);
     }
+  });
+
+  test("#240 crash after terminal commit: C2 settles persisted handles exactly once under a worker race", async () => {
+    await seed({ maxBytes: 250 });
+    __setReservationReconciliationFaultForTests("before_apply");
+    const out = await proposeTweet("settled-spend", "cs-240-settle");
+    expect(out.kind).toBe("allowed");
+    if (out.kind !== "allowed") throw new Error("expected allowed");
+    const [crashed] = await getDb()
+      .select()
+      .from(providerActionBindings)
+      .where(eq(providerActionBindings.intentId, out.intentId));
+    expect(crashed.status).toBe("stub_succeeded");
+    expect(crashed.reservationReconciliationState).toBe("pending");
+    expect(crashed.reservationReconciliationAttempts).toBe(1);
+    expect(crashed.reservationReconciliationLastError).toContain("injected crash");
+    expect(crashed.reservationReconciliationNextRetryAt).not.toBeNull();
+    expect(crashed.policyReservationHandles).toMatchObject({
+      schemaVersion: "steward.provider-policy-reservations.v1",
+      generation: 1,
+      phase: "decision",
+      cumulativeSpend: [{ amount: 13 }],
+    });
+    expect(JSON.stringify(crashed.policyReservationHandles)).not.toContain("settled-spend");
+
+    __setReservationReconciliationFaultForTests(null);
+    const [a, b] = await Promise.all([
+      providerActionService.reconcilePolicyReservations(CS.TENANT, out.intentId),
+      providerActionService.reconcilePolicyReservations(CS.TENANT, out.intentId),
+    ]);
+    expect(a + b).toBe(1);
+    const [done] = await getDb()
+      .select()
+      .from(providerActionBindings)
+      .where(eq(providerActionBindings.intentId, out.intentId));
+    expect(done.reservationReconciliationState).toBe("settled");
+    expect(done.reservationReconciledAt).not.toBeNull();
+  });
+
+  test("#240 crash before release: C2 reclaims failed spend and maxCalls reservations", async () => {
+    await seed({
+      maxBytes: 250,
+      extraDenyRule: true,
+      countCapMaxCalls: 5,
+      combineCountAndSpend: true,
+    });
+    __setReservationReconciliationFaultForTests("before_apply");
+    const out = await proposeTweet("known-failure", "cs-240-release");
+    expect(out.kind).toBe("policy_denied");
+    if (out.kind !== "policy_denied") throw new Error("expected denial");
+    const [crashed] = await getDb()
+      .select()
+      .from(providerActionBindings)
+      .where(eq(providerActionBindings.intentId, out.intentId));
+    expect(crashed.reservationReconciliationState).toBe("pending");
+    expect(crashed.reservationReconciliationAttempts).toBe(1);
+    expect(crashed.policyReservationHandles).toMatchObject({
+      cumulativeSpend: [{ amount: 13 }],
+      windowedInvoke: { agentId: CS.AGENT, operationKey: OP_TWEET_KEY },
+    });
+    expect(
+      await getCumulativeSpendSum({
+        agentId: CS.AGENT,
+        scope: "agent",
+        scopeKey: "",
+        currency: "BYTES",
+        windowSeconds: 86_400,
+      }),
+    ).toEqual({ sum: 13 });
+
+    __setReservationReconciliationFaultForTests(null);
+    expect(await providerActionService.recoverUnsignedIntents(CS.TENANT, out.intentId)).toBe(0);
+    expect(
+      await getCumulativeSpendSum({
+        agentId: CS.AGENT,
+        scope: "agent",
+        scopeKey: "",
+        currency: "BYTES",
+        windowSeconds: 86_400,
+      }),
+    ).toEqual({ sum: 0 });
+    const [done] = await getDb()
+      .select()
+      .from(providerActionBindings)
+      .where(eq(providerActionBindings.intentId, out.intentId));
+    expect(done.reservationReconciliationState).toBe("released");
+  });
+
+  test("#240 crash after Redis release but before CAS is idempotently recovered", async () => {
+    await seed({ maxBytes: 250, extraDenyRule: true });
+    __setReservationReconciliationFaultForTests("after_apply");
+    const out = await proposeTweet("released-once", "cs-240-after-redis");
+    expect(out.kind).toBe("policy_denied");
+    if (out.kind !== "policy_denied") throw new Error("expected denial");
+    const [crashed] = await getDb()
+      .select()
+      .from(providerActionBindings)
+      .where(eq(providerActionBindings.intentId, out.intentId));
+    expect(crashed.reservationReconciliationState).toBe("pending");
+    expect(
+      await getCumulativeSpendSum({
+        agentId: CS.AGENT,
+        scope: "agent",
+        scopeKey: "",
+        currency: "BYTES",
+        windowSeconds: 86_400,
+      }),
+    ).toEqual({ sum: 0 });
+
+    __setReservationReconciliationFaultForTests(null);
+    // The unscoped entry point is what the autonomous startup/periodic worker
+    // invokes. Make the retry due, then prove it recovers across all tenants.
+    await getDb()
+      .update(providerActionBindings)
+      .set({ reservationReconciliationNextRetryAt: new Date(0) })
+      .where(eq(providerActionBindings.intentId, out.intentId));
+    expect(await providerActionService.reconcilePolicyReservations()).toBe(1);
+    expect(await providerActionService.reconcilePolicyReservations(CS.TENANT, out.intentId)).toBe(
+      0,
+    );
   });
 });
