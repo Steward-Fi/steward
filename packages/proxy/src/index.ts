@@ -50,6 +50,7 @@ app.get("/health", (c) =>
     ok: true,
     service: "steward-proxy",
     version: "0.3.0",
+    serverTime: new Date().toISOString(),
     aliases: getAliasNames(),
   }),
 );
