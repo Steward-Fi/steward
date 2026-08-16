@@ -159,6 +159,19 @@ controls all relevant audit and signing keys could not fabricate a
 self-consistent history. A partial export also does not prove completeness
 outside the exported range.
 
+Deployments can opt into RFC 3161 third-party checkpoint timestamps. Verify an
+included proof with auditor-supplied TSA trust material:
+
+```bash
+node scripts/verify-evidence-bundle.mjs bundle.json \
+  --tsa-ca auditor-trusted-tsa-ca.pem \
+  --require-anchor
+```
+
+The verified timestamp shows that the checkpoint existed no later than the TSA
+time, narrowing the pre-anchor rewrite window. It is not a tamper-proof or
+operator-proof guarantee. See [third-party audit-checkpoint anchoring](/security/audit-checkpoint-anchoring).
+
 ## Common Filters
 
 | Use case | Query |

@@ -25,6 +25,7 @@ import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { auditOwnerAdminMfaGate } from "../middleware/audit-gate";
 import { AuditSigningKeyError, isCheckpointSigningConfigured } from "../services/audit-checkpoint";
+import { AuditCheckpointAnchorError } from "../services/audit-checkpoint-anchor";
 import {
   type ApiResponse,
   type AppVariables,
@@ -107,6 +108,9 @@ providerCaseRoutes.get("/provider-actions/:id/evidence", async (c) => {
   } catch (err) {
     if (err instanceof AuditSigningKeyError) {
       return c.json<ApiResponse>({ ok: false, error: "CASE_EVIDENCE_SIGNING_DISABLED" }, 503);
+    }
+    if (err instanceof AuditCheckpointAnchorError) {
+      return c.json<ApiResponse>({ ok: false, error: "CASE_EVIDENCE_ANCHOR_UNAVAILABLE" }, 503);
     }
     if (err instanceof CaseRangeTooLargeError) {
       // Pathological same-tenant interleave (KC15): the case segment is too
