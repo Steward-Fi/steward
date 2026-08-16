@@ -8944,6 +8944,338 @@
         }
       }
     },
+    "/v2/provider-actions/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "tags": [
+          "Provider Authority"
+        ],
+        "summary": "Get the authenticated agent's own provider-action status",
+        "description": "Requires an agent JWT. The action is scoped server-side to the verified tenant and agent; absent, malformed, cross-agent, and cross-tenant ids all return the same 404 response. This route does not grant access to the human/MFA-gated approval, case, or evidence surfaces.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Steward-Tenant",
+            "in": "header",
+            "required": false,
+            "description": "Tenant containing the authenticated agent. It is checked against the verified agent principal and never selects a foreign action.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "id",
+                        "intent_id",
+                        "intentType",
+                        "intent_type",
+                        "status",
+                        "payload",
+                        "createdAt",
+                        "updatedAt"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "intent_id": {
+                          "type": "string"
+                        },
+                        "tenantId": {
+                          "type": "string"
+                        },
+                        "agentId": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "wallet_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "intentType": {
+                          "type": "string",
+                          "enum": [
+                            "rpc",
+                            "transfer",
+                            "wallet_update",
+                            "policy_update",
+                            "policy_rule_create",
+                            "policy_rule_delete",
+                            "policy_rule_update",
+                            "quorum_update",
+                            "wallet_action",
+                            "provider-action"
+                          ]
+                        },
+                        "intent_type": {
+                          "type": "string",
+                          "enum": [
+                            "rpc",
+                            "transfer",
+                            "wallet_update",
+                            "policy_update",
+                            "policy_rule_create",
+                            "policy_rule_delete",
+                            "policy_rule_update",
+                            "quorum_update",
+                            "wallet_action",
+                            "provider-action"
+                          ]
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "pending",
+                            "authorized",
+                            "executing",
+                            "executed",
+                            "failed",
+                            "rejected",
+                            "canceled",
+                            "expired"
+                          ]
+                        },
+                        "resourceType": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "resourceId": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "resource_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "createdByType": {
+                          "type": "string"
+                        },
+                        "createdById": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "created_by_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "createdByDisplayName": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "created_by_display_name": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "authorizationDetails": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": true
+                          }
+                        },
+                        "authorization_details": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": true
+                          }
+                        },
+                        "payload": {
+                          "type": "object",
+                          "additionalProperties": true
+                        },
+                        "executionResult": {
+                          "type": [
+                            "object",
+                            "null"
+                          ],
+                          "additionalProperties": true
+                        },
+                        "execution_result": {
+                          "type": [
+                            "object",
+                            "null"
+                          ],
+                          "additionalProperties": true
+                        },
+                        "expiresAt": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "format": "date-time"
+                        },
+                        "expires_at": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "authorizedBy": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "authorized_by": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "authorizedAt": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "format": "date-time"
+                        },
+                        "executedAt": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "format": "date-time"
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "created_at": {
+                          "type": "integer"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/accounts": {
       "get": {
         "tags": [
@@ -33842,7 +34174,8 @@
                 "policy_rule_delete",
                 "policy_rule_update",
                 "quorum_update",
-                "wallet_action"
+                "wallet_action",
+                "provider-action"
               ]
             }
           },
@@ -33861,7 +34194,8 @@
                 "policy_rule_delete",
                 "policy_rule_update",
                 "quorum_update",
-                "wallet_action"
+                "wallet_action",
+                "provider-action"
               ]
             }
           },
@@ -33880,7 +34214,8 @@
                 "policy_rule_delete",
                 "policy_rule_update",
                 "quorum_update",
-                "wallet_action"
+                "wallet_action",
+                "provider-action"
               ]
             }
           },
@@ -33991,7 +34326,8 @@
                                   "policy_rule_delete",
                                   "policy_rule_update",
                                   "quorum_update",
-                                  "wallet_action"
+                                  "wallet_action",
+                                  "provider-action"
                                 ]
                               },
                               "intent_type": {
@@ -34005,7 +34341,8 @@
                                   "policy_rule_delete",
                                   "policy_rule_update",
                                   "quorum_update",
-                                  "wallet_action"
+                                  "wallet_action",
+                                  "provider-action"
                                 ]
                               },
                               "status": {
@@ -34314,7 +34651,8 @@
                       "policy_rule_delete",
                       "policy_rule_update",
                       "quorum_update",
-                      "wallet_action"
+                      "wallet_action",
+                      "provider-action"
                     ]
                   },
                   "intent_type": {
@@ -34328,7 +34666,8 @@
                       "policy_rule_delete",
                       "policy_rule_update",
                       "quorum_update",
-                      "wallet_action"
+                      "wallet_action",
+                      "provider-action"
                     ]
                   },
                   "agentId": {
@@ -34497,7 +34836,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "intent_type": {
@@ -34511,7 +34851,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "status": {
@@ -34959,7 +35300,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "intent_type": {
@@ -34973,7 +35315,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "status": {
@@ -35350,7 +35693,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "intent_type": {
@@ -35364,7 +35708,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "status": {
@@ -35837,7 +36182,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "intent_type": {
@@ -35851,7 +36197,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "status": {
@@ -36323,7 +36670,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "intent_type": {
@@ -36337,7 +36685,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "status": {
@@ -36809,7 +37158,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "intent_type": {
@@ -36823,7 +37173,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "status": {
@@ -37295,7 +37646,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "intent_type": {
@@ -37309,7 +37661,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "status": {
@@ -37781,7 +38134,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "intent_type": {
@@ -37795,7 +38149,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "status": {
@@ -38267,7 +38622,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "intent_type": {
@@ -38281,7 +38637,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "status": {
@@ -38692,7 +39049,8 @@
                 "policy_rule_delete",
                 "policy_rule_update",
                 "quorum_update",
-                "wallet_action"
+                "wallet_action",
+                "provider-action"
               ]
             }
           },
@@ -38711,7 +39069,8 @@
                 "policy_rule_delete",
                 "policy_rule_update",
                 "quorum_update",
-                "wallet_action"
+                "wallet_action",
+                "provider-action"
               ]
             }
           },
@@ -38730,7 +39089,8 @@
                 "policy_rule_delete",
                 "policy_rule_update",
                 "quorum_update",
-                "wallet_action"
+                "wallet_action",
+                "provider-action"
               ]
             }
           },
@@ -38841,7 +39201,8 @@
                                   "policy_rule_delete",
                                   "policy_rule_update",
                                   "quorum_update",
-                                  "wallet_action"
+                                  "wallet_action",
+                                  "provider-action"
                                 ]
                               },
                               "intent_type": {
@@ -38855,7 +39216,8 @@
                                   "policy_rule_delete",
                                   "policy_rule_update",
                                   "quorum_update",
-                                  "wallet_action"
+                                  "wallet_action",
+                                  "provider-action"
                                 ]
                               },
                               "status": {
@@ -39164,7 +39526,8 @@
                       "policy_rule_delete",
                       "policy_rule_update",
                       "quorum_update",
-                      "wallet_action"
+                      "wallet_action",
+                      "provider-action"
                     ]
                   },
                   "intent_type": {
@@ -39178,7 +39541,8 @@
                       "policy_rule_delete",
                       "policy_rule_update",
                       "quorum_update",
-                      "wallet_action"
+                      "wallet_action",
+                      "provider-action"
                     ]
                   },
                   "agentId": {
@@ -39347,7 +39711,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "intent_type": {
@@ -39361,7 +39726,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "status": {
@@ -39714,7 +40080,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "intent_type": {
@@ -39728,7 +40095,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "status": {
@@ -40105,7 +40473,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "intent_type": {
@@ -40119,7 +40488,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "status": {
@@ -40497,7 +40867,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "intent_type": {
@@ -40511,7 +40882,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "status": {
@@ -40888,7 +41260,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "intent_type": {
@@ -40902,7 +41275,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "status": {
@@ -41279,7 +41653,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "intent_type": {
@@ -41293,7 +41668,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "status": {
@@ -41670,7 +42046,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "intent_type": {
@@ -41684,7 +42061,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "status": {
@@ -42061,7 +42439,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "intent_type": {
@@ -42075,7 +42454,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "status": {
@@ -42452,7 +42832,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "intent_type": {
@@ -42466,7 +42847,8 @@
                             "policy_rule_delete",
                             "policy_rule_update",
                             "quorum_update",
-                            "wallet_action"
+                            "wallet_action",
+                            "provider-action"
                           ]
                         },
                         "status": {

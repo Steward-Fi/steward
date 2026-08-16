@@ -256,11 +256,11 @@ export function buildTools(ctx: ToolContext): StewardTool[] {
     defineTool(ctx, {
       name: "provider_action_status",
       description:
-        "Fetch the current provider-action intent from the existing GET /intents/:intentId route. This real API route requires tenant-level credentials and rejects agent JWTs; MCP preserves that gate.",
+        "Fetch the current provider-action intent through the agent-scoped GET /v2/provider-actions/:id route. The API only returns actions submitted by the authenticated agent and uses a uniform not-found response for foreign actions.",
       schema: z.object({ actionId: providerCaseId }).strict(),
       readOnly: true,
       run: ({ actionId }) =>
-        requireProviderApi(ctx).request(`/intents/${encodeURIComponent(actionId)}`),
+        requireProviderApi(ctx).request(`/v2/provider-actions/${encodeURIComponent(actionId)}`),
     }),
     defineTool(ctx, {
       name: "provider_action_approval",

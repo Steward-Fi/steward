@@ -102,7 +102,7 @@ structured content; Steward API errors surface their HTTP status and any policy
 | Tool | Kind | SDK method | Description |
 | --- | --- | --- | --- |
 | `provider_action_invoke` | write (destructive) | `POST /v2/provider-actions` | Submit an action for provider authorization and policy evaluation. |
-| `provider_action_status` | read | `GET /intents/:id` | Fetch current action intent status through the API's existing status route. |
+| `provider_action_status` | read | `GET /v2/provider-actions/:id` | Fetch the authenticated agent's own action intent status. Foreign and absent actions return the same not-found response. |
 | `provider_action_approval` | read | `GET /v2/provider-actions/:id/approval` | Fetch approval state. The API requires an eligible human session and recent MFA. |
 | `provider_action_case` | read | `GET /v2/provider-actions/:id/case` | Fetch the correlated case manifest. |
 | `provider_action_evidence` | read | `GET /v2/provider-actions/:id/evidence` | Fetch the correlated signed evidence bundle. |
@@ -126,14 +126,12 @@ provider credential, URL, or host arguments. Approval, case, and evidence reads
 retain the API's human-session, MFA, role, workspace, and tenant gates. In
 particular, an agent JWT cannot use MCP to impersonate a human approver.
 
-The current API intentionally has split auth modes. Invocation requires an agent
-JWT. The existing status route (`GET /intents/:id`) requires a tenant API key or
-owner/admin session. Approval, case, and evidence reads require eligible human
-sessions and recent MFA, with case and evidence further limited to owner/admin.
-A single agent-JWT MCP process can invoke but receives honest authorization
-errors from those human or tenant-level read routes. No agent-readable v2 status
-route exists on the current API, and this package does not invent one or weaken
-the API gates.
+Invocation and the agent-scoped status route both accept an agent JWT. Status is
+bound server-side to the verified tenant and agent, so a process can poll only
+actions that same agent submitted. Approval, case, and evidence reads continue
+to require eligible human sessions and recent MFA, with case and evidence
+further limited to owner/admin. The agent-readable route does not weaken or
+stand in for any of those human gates.
 
 These tools **do not implement MCP OAuth 2.1 resource-server semantics**. That
 separate authorization-layer work is tracked by issue #219.
