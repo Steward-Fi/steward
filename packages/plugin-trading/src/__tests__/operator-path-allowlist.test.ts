@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { Hono } from "hono";
 
-import { isOperatorRecoveryPath } from "../index";
+import { isAgentOrderPath, isOperatorRecoveryPath, tradingPlugin } from "../index";
 
 /**
  * Regression guard for the "added an operator route but forgot the auth
@@ -31,13 +32,33 @@ describe("operator-recovery auth allowlist", () => {
     });
   }
 
-  it("does NOT treat the agent order route as an operator path", () => {
-    // /hyperliquid/order is requireAgentJwt, not operator-gated.
-    expect(isOperatorRecoveryPath("/v1/trade/hyperliquid/order")).toBe(false);
+  it("classifies both venue order routes for the strict agent-JWT gate", () => {
+    for (const prefix of ["/trade", "/v1/trade"]) {
+      expect(isAgentOrderPath(`${prefix}/hyperliquid/order`)).toBe(true);
+      expect(isAgentOrderPath(`${prefix}/polymarket/order`)).toBe(true);
+      expect(isOperatorRecoveryPath(`${prefix}/hyperliquid/order`)).toBe(false);
+      expect(isOperatorRecoveryPath(`${prefix}/polymarket/order`)).toBe(false);
+    }
   });
 
   it("does NOT treat unrelated paths as operator paths", () => {
     expect(isOperatorRecoveryPath("/v1/trade/sessions")).toBe(false);
     expect(isOperatorRecoveryPath("/v1/agents/sol-waifu/policy")).toBe(false);
+  });
+
+  it("actually mounts the strict agent-JWT middleware on Polymarket order routes", async () => {
+    const app = new Hono();
+    const ctx = {
+      requireAgentJwt: () => new Response("agent-jwt", { status: 418 }),
+      operatorAuth: () => new Response("operator", { status: 419 }),
+      tenantAuth: () => new Response("tenant", { status: 420 }),
+    };
+    tradingPlugin.register(app as never, ctx as never);
+
+    for (const path of ["/trade/polymarket/order", "/v1/trade/polymarket/order"]) {
+      const res = await app.request(path, { method: "POST" });
+      expect(res.status).toBe(418);
+      expect(await res.text()).toBe("agent-jwt");
+    }
   });
 });

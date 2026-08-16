@@ -61,7 +61,10 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin "${BASE_REF}"
+          # Checkout above is intentionally unshallow. Keep it that way: a
+          # depth-1 fetch can rewrite origin/${BASE_REF} as a shallow tip and
+          # remove the merge base needed by the three-dot diff below.
+          git fetch --no-tags origin "${BASE_REF}"
           changed_files=$(git diff --name-only "origin/${BASE_REF}...HEAD")
 
           status=0
