@@ -737,6 +737,57 @@ export function validateGenericHttpDescriptor(raw: unknown): GenericHttpOperatio
   };
 }
 
+/**
+ * Prove that an exact credential-route path is a subset of a descriptor's path
+ * language. Secret routes intentionally do not accept regexes; at operation
+ * authoring time we therefore require one concrete path and validate each of
+ * its decoded segments against the descriptor. This prevents a credential
+ * route from widening a config-driven operation while still allowing an
+ * operator to bind a descriptor to a specific resource path.
+ */
+export function genericDescriptorAllowsExactPath(
+  descriptor: GenericHttpOperationDescriptorV1,
+  rawPath: string,
+): boolean {
+  if (
+    !rawPath.startsWith("/") ||
+    rawPath.includes("*") ||
+    rawPath.includes("?") ||
+    rawPath.includes("#")
+  ) {
+    return false;
+  }
+  const rawSegments = rawPath.slice(1).split("/");
+  if (rawSegments.length !== descriptor.pathTemplate.length || rawSegments.some((s) => !s)) {
+    return false;
+  }
+  for (let i = 0; i < descriptor.pathTemplate.length; i++) {
+    const spec = descriptor.pathTemplate[i];
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(rawSegments[i]);
+    } catch {
+      return false;
+    }
+    // Re-encoding must be canonical. This rejects encoded delimiters, dot
+    // segments, double encoding, and alternate spellings before matching.
+    if (encodeRfc3986(decoded) !== rawSegments[i]) return false;
+    if (spec.literal !== undefined) {
+      if (decoded !== spec.literal) return false;
+      continue;
+    }
+    const param = spec.param;
+    if (!param) return false;
+    try {
+      assertSafeSegmentValue(decoded, param.name);
+      validateScalarValue(decoded, param.type, param.name, { pattern: param.pattern });
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Argument validation + canonical action construction (per-request)
 // ─────────────────────────────────────────────────────────────────────────────
