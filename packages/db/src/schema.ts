@@ -2163,6 +2163,32 @@ export const providerActionBindings = pgTable(
     policyDecision: jsonb("policy_decision").$type<Record<string, unknown>>(),
     policyDecisionHash: varchar("policy_decision_hash", { length: 71 }),
 
+    // #240: immutable Redis reservation identities captured in the same commit
+    // as the authority decision. Only the reconciliation state/timestamp below
+    // may advance after insert; the raw handles remain frozen by migration 0084.
+    policyReservationHandles: jsonb("policy_reservation_handles").$type<{
+      schemaVersion: "steward.provider-policy-reservations.v1";
+      cumulativeSpend: Array<{
+        stream: {
+          agentId: string;
+          scope: "operation" | "agent" | "grant";
+          scopeKey: string;
+          currency: string;
+        };
+        reservationId: string;
+        amount: number;
+      }>;
+      windowedInvoke: {
+        agentId: string;
+        operationKey: string;
+        reservationId: string;
+      } | null;
+    }>(),
+    reservationReconciliationState: varchar("reservation_reconciliation_state", { length: 24 })
+      .notNull()
+      .default("not_required"),
+    reservationReconciledAt: timestamp("reservation_reconciled_at", { withTimezone: true }),
+
     status: varchar("status", { length: 32 }).notNull(),
     // ── PR3 approval lifecycle columns (0081) ──
     // Mutable only via the PR3 transition trigger; binding_revision increments by

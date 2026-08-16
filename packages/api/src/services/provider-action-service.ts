@@ -86,11 +86,10 @@ const EVALUATOR_VERSION = "provider-action.v1";
 const POLICY_TYPE = "capability-intent" as const;
 
 /**
- * A handle to an atomic cumulative-spend reservation (#206) so the pipeline can
- * SETTLE it (known-success) or RELEASE it (known-failure/deny). On
- * outcome_unknown the pipeline deliberately does NEITHER - the reservation ages
- * out at the window edge (fail closed for a money cap: never free budget that
- * may have really spent).
+ * A handle to an atomic cumulative-spend reservation (#206). #240 persists this
+ * exact identity on the binding so a known outcome can be reconciled after a
+ * process crash. On outcome_unknown the sweeper deliberately does NEITHER - the
+ * reservation ages out at the window edge (fail closed for a money cap).
  */
 export interface CumulativeSpendReservationHandle {
   /** the spend-STREAM identity (scope+scopeKey+currency); NOT the cap threshold
@@ -110,6 +109,115 @@ export interface WindowedInvokeReservationHandle {
   agentId: string;
   operationKey: string;
   reservationId: string;
+}
+
+export interface PersistedPolicyReservationHandlesV1 {
+  schemaVersion: "steward.provider-policy-reservations.v1";
+  cumulativeSpend: CumulativeSpendReservationHandle[];
+  windowedInvoke: WindowedInvokeReservationHandle | null;
+}
+
+type ReservationReconciliationTarget = "settled" | "released";
+
+let reservationReconciliationFaultForTests: "before_apply" | "after_apply" | null = null;
+
+/** Test-only crash injection at the external-effect / DB-CAS boundary. */
+export function __setReservationReconciliationFaultForTests(
+  fault: "before_apply" | "after_apply" | null,
+): void {
+  reservationReconciliationFaultForTests = fault;
+}
+
+function persistedReservationHandles(
+  cumulativeSpend: CumulativeSpendReservationHandle[],
+  windowedInvoke: WindowedInvokeReservationHandle | undefined,
+): PersistedPolicyReservationHandlesV1 | null {
+  if (cumulativeSpend.length === 0 && windowedInvoke === undefined) return null;
+  return {
+    schemaVersion: "steward.provider-policy-reservations.v1",
+    cumulativeSpend,
+    windowedInvoke: windowedInvoke ?? null,
+  };
+}
+
+function parsePersistedReservationHandles(
+  value: unknown,
+): PersistedPolicyReservationHandlesV1 | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  if (v.schemaVersion !== "steward.provider-policy-reservations.v1") return null;
+  if (!Array.isArray(v.cumulativeSpend)) return null;
+  const cumulativeSpend: CumulativeSpendReservationHandle[] = [];
+  for (const raw of v.cumulativeSpend) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const r = raw as Record<string, unknown>;
+    if (!r.stream || typeof r.stream !== "object" || Array.isArray(r.stream)) return null;
+    const stream = r.stream as Record<string, unknown>;
+    if (
+      typeof stream.agentId !== "string" ||
+      !["operation", "agent", "grant"].includes(String(stream.scope)) ||
+      typeof stream.scopeKey !== "string" ||
+      typeof stream.currency !== "string" ||
+      typeof r.reservationId !== "string" ||
+      !Number.isSafeInteger(r.amount) ||
+      (r.amount as number) < 0
+    )
+      return null;
+    cumulativeSpend.push({
+      stream: {
+        agentId: stream.agentId,
+        scope: stream.scope as CumulativeSpendScope,
+        scopeKey: stream.scopeKey,
+        currency: stream.currency,
+      },
+      reservationId: r.reservationId,
+      amount: r.amount as number,
+    });
+  }
+  let windowedInvoke: WindowedInvokeReservationHandle | null = null;
+  if (v.windowedInvoke !== null) {
+    if (
+      !v.windowedInvoke ||
+      typeof v.windowedInvoke !== "object" ||
+      Array.isArray(v.windowedInvoke)
+    )
+      return null;
+    const r = v.windowedInvoke as Record<string, unknown>;
+    if (
+      typeof r.agentId !== "string" ||
+      typeof r.operationKey !== "string" ||
+      typeof r.reservationId !== "string"
+    )
+      return null;
+    windowedInvoke = {
+      agentId: r.agentId,
+      operationKey: r.operationKey,
+      reservationId: r.reservationId,
+    };
+  }
+  if (cumulativeSpend.length === 0 && windowedInvoke === null) return null;
+  return {
+    schemaVersion: "steward.provider-policy-reservations.v1",
+    cumulativeSpend,
+    windowedInvoke,
+  };
+}
+
+function reconciliationTargetForStatus(status: string): ReservationReconciliationTarget | null {
+  if (status === "stub_succeeded" || status === "succeeded") return "settled";
+  if (
+    status === "denied" ||
+    status === "pending_approval" ||
+    status === "approval_denied" ||
+    status === "approval_expired" ||
+    status === "approval_stale" ||
+    status === "stub_failed" ||
+    status === "failed"
+  )
+    return "released";
+  // allowed_stub / approved / execution_ready / executing / outcome_unknown:
+  // never free maybe-consumed budget before the action has a known outcome.
+  return null;
 }
 
 // ─── Public result envelope ───────────────────────────────────────────────────
@@ -616,6 +724,14 @@ class ProviderActionService {
           policyRevisionHash: policy ? policy.doc.policyRevisionHash : null,
           policyDecision: policy ? (policy.doc as unknown as Record<string, unknown>) : null,
           policyDecisionHash,
+          policyReservationHandles: persistedReservationHandles(
+            cumulativeSpendReservations,
+            windowedInvokeReservation,
+          ),
+          reservationReconciliationState:
+            cumulativeSpendReservations.length > 0 || windowedInvokeReservation !== undefined
+              ? "pending"
+              : "not_required",
           status: effects.status,
         });
 
@@ -708,8 +824,7 @@ class ProviderActionService {
       // never run on replay, so we DO reclaim. `effects.status === "allowed_stub"`
       // is exactly the replayable-execute case.
       if (effects.status !== "allowed_stub") {
-        await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
-        await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
+        await this.reconcilePolicyReservations(tenantId, intentId);
       }
       return {
         kind: "evidence_failure",
@@ -723,8 +838,7 @@ class ProviderActionService {
     if (effects.access === "deny") {
       // Access denied => policy never ran => no reservations to release, but be
       // defensive in case a future path reserves before access resolves.
-      await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
-      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
+      await this.reconcilePolicyReservations(tenantId, intentId);
       return {
         kind: "access_denied",
         code: access.doc.reasonCode,
@@ -739,11 +853,7 @@ class ProviderActionService {
       // spend-cap breach already released its own reservations during eval; this
       // covers a deny for a DIFFERENT reason where a cumulativeSpend rule had
       // passed and reserved - the action will not execute, so free its budget.
-      await this.finalizeCumulativeSpend(
-        (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [],
-        "failure",
-      );
-      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
+      await this.reconcilePolicyReservations(tenantId, intentId);
       const code = (policy as PolicyResult | null)?.doc.reasonCodes[0] ?? "POLICY_HARD_DENY";
       return {
         kind: "policy_denied",
@@ -774,11 +884,7 @@ class ProviderActionService {
       // Correct enforcement requires the approval-execute path to re-reserve at
       // EXECUTION time; that is a documented follow-up filed against the approval
       // plane (provider-approval.ts). See the PR honest-gaps section.
-      await this.finalizeCumulativeSpend(
-        (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [],
-        "failure",
-      );
-      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
+      await this.reconcilePolicyReservations(tenantId, intentId);
       return {
         kind: "approval_required",
         code: "APPROVAL_REQUIRED",
@@ -790,7 +896,6 @@ class ProviderActionService {
     }
 
     // ── Step 4: allow — call the in-process stub, then record the transition. ──
-    const csReservations = (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [];
     let stub: ProviderActionStubResult;
     try {
       stub = await executeProviderActionStub(intentId);
@@ -809,15 +914,6 @@ class ProviderActionService {
         actionDigest,
       };
     }
-    // #206: known outcome. stub_succeeded => settle (keep counted); stub_failed
-    // => release (reclaim spend budget + the maxCalls slot, the action did not
-    // consume one).
-    const outcome = stub.ok ? "success" : "failure";
-    await this.finalizeCumulativeSpend(csReservations, outcome);
-    await this.finalizeWindowedInvoke(
-      (policy as PolicyResult | null)?.windowedInvokeReservation,
-      outcome,
-    );
     // Record the narrow allowed_stub -> stub_succeeded|stub_failed transition.
     await this.db()
       .update(providerActionBindings)
@@ -828,6 +924,9 @@ class ProviderActionService {
           eq(providerActionBindings.status, "allowed_stub"),
         ),
       );
+    // #240: status is the durable outcome source. Reconcile only AFTER the
+    // terminal transition so a crash at any instruction boundary is retryable.
+    await this.reconcilePolicyReservations(tenantId, intentId);
 
     return {
       kind: "allowed",
@@ -1567,7 +1666,87 @@ class ProviderActionService {
         .returning({ id: providerActionAuditOutbox.id });
       if (marked.length > 0 && signedNow) delivered += 1;
     }
+    // #240 extends the same C2 pass to durable policy reservations. Audit and
+    // reservation recovery are independently idempotent; a Redis outage leaves
+    // the reservation pending and fail-closed for the next sweep.
+    await this.reconcilePolicyReservations(tenantId, intentId);
     return delivered;
+  }
+
+  /**
+   * Reconcile terminal provider bindings with their immutable Redis reservation
+   * handles. Redis settle/release operations are idempotent, so workers may race:
+   * they perform the external operation first, then exactly one worker wins the
+   * DB CAS from pending to settled/released. A crash before or after Redis is
+   * safely retried; unknown outcomes remain pending and are never released.
+   */
+  async reconcilePolicyReservations(tenantId: string, intentId?: string): Promise<number> {
+    const rows = await this.db()
+      .select()
+      .from(providerActionBindings)
+      .where(
+        and(
+          eq(providerActionBindings.tenantId, tenantId),
+          eq(providerActionBindings.reservationReconciliationState, "pending"),
+          intentId
+            ? eq(providerActionBindings.intentId, intentId)
+            : (sql`true` as unknown as ReturnType<typeof eq>),
+        ),
+      );
+    let reconciled = 0;
+    for (const row of rows) {
+      const target = reconciliationTargetForStatus(row.status);
+      if (!target) continue;
+      const handles = parsePersistedReservationHandles(row.policyReservationHandles);
+      // Corrupt/unrecognized persisted handles fail closed and remain pending.
+      if (!handles) continue;
+      try {
+        if (reservationReconciliationFaultForTests === "before_apply")
+          throw new Error("injected crash before reservation reconciliation");
+        await this.applyPersistedReservationHandles(handles, target);
+        if (reservationReconciliationFaultForTests === "after_apply")
+          throw new Error("injected crash after reservation reconciliation");
+      } catch {
+        continue;
+      }
+      const updated = await this.db()
+        .update(providerActionBindings)
+        .set({
+          reservationReconciliationState: target,
+          reservationReconciledAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(providerActionBindings.intentId, row.intentId),
+            eq(providerActionBindings.status, row.status),
+            eq(providerActionBindings.reservationReconciliationState, "pending"),
+          ),
+        )
+        .returning({ intentId: providerActionBindings.intentId });
+      if (updated.length > 0) reconciled += 1;
+    }
+    return reconciled;
+  }
+
+  private async applyPersistedReservationHandles(
+    handles: PersistedPolicyReservationHandlesV1,
+    target: ReservationReconciliationTarget,
+  ): Promise<void> {
+    await Promise.all(
+      handles.cumulativeSpend.map((r) =>
+        target === "settled"
+          ? settleCumulativeSpend({ stream: r.stream, reservationId: r.reservationId })
+          : releaseCumulativeSpend({
+              stream: r.stream,
+              reservationId: r.reservationId,
+              amount: r.amount,
+            }),
+      ),
+    );
+    if (target === "released" && handles.windowedInvoke) {
+      await releaseWindowedInvoke(handles.windowedInvoke);
+    }
   }
 
   // ── Required-audit outbox drain (post-commit, pre-stub) ──
@@ -1656,26 +1835,12 @@ class ProviderActionService {
     };
   }
 
-  /**
-   * Idempotent replay path: reconstruct the outcome from an existing binding.
-   *
-   * #206 RESERVATION REPLAY CAVEAT (codex P2, honest gap): cumulative-spend
-   * reservation handles are in-memory to the ORIGINAL create call and are NOT
-   * persisted on the binding. A replay here (or a crash between the binding
-   * commit and the original finalize) therefore has no handle to settle/release.
-   * This is deliberately FAIL-CLOSED, not a silent leak: on the original call a
-   * crash after commit leaves the reservation as `outcome_unknown` (documented:
-   * it ages out at the window edge, never freeing maybe-spent budget). A replay
-   * that resolves to stub_succeeded is a real spend and SHOULD stay counted, so
-   * not releasing is correct. A replay that resolves to stub_failed is the only
-   * case where budget could be transiently over-counted for one window; that is
-   * a bounded DENY-side error (safe), never an allow-side one. Crash-durable
-   * reservation handles (persisted per binding + reconciled by the C2 sweeper)
-   * are the follow-up; this lane does not add a migration for it.
-   */
+  /** Idempotent replay path: reconstruct the outcome from an existing binding. */
   private async outcomeFromBinding(
     b: typeof providerActionBindings.$inferSelect,
   ): Promise<ProviderActionOutcome> {
+    // Opportunistically finish any terminal reservation left pending by a crash.
+    await this.reconcilePolicyReservations(b.tenantId, b.intentId);
     if (b.status === "denied") {
       if (b.accessEffect === "deny")
         return {
@@ -1759,6 +1924,7 @@ class ProviderActionService {
             eq(providerActionBindings.status, "allowed_stub"),
           ),
         );
+      await this.reconcilePolicyReservations(b.tenantId, b.intentId);
       return {
         kind: "allowed",
         code: "POLICY_ALLOW",
