@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { StewardApiClient } from "./api";
 import { boolFlag, intFlag, parseArgs, parseJsonFlag, required, stringFlag } from "./args";
 import { runDoctor } from "./doctor";
@@ -28,6 +29,7 @@ Usage:
   steward policy set --name NAME --rules '[...]' [--description TEXT] [--agent-id ID]
   steward approvals list|stats|approve|deny ...
   steward audit bundle [--from 1] [--to N] [--out bundle.json] [--verify]
+  steward audit export --from N --to N --out DIR [--chunk-size N] [--verify] [--fp HEX]
   steward provider-action create --workspace-id ID --account-id ID --operation KEY --arguments '{...}' --idempotency-key KEY
   steward provider-action get|approval|case --id ID
   steward provider-action approve|deny --id ID --reason TEXT [--idempotency-key KEY]
@@ -226,7 +228,44 @@ async function approvalsCommand(action: string | undefined, ctx: CommandContext)
 }
 
 async function auditCommand(action: string | undefined, ctx: CommandContext) {
-  if (action !== "bundle") throw new Error("Supported audit command: audit bundle");
+  if (action === "export") {
+    const fromSeq = intFlag(ctx.flags, "from");
+    const toSeq = intFlag(ctx.flags, "to");
+    if (fromSeq === undefined) throw new Error("--from is required");
+    if (toSeq === undefined) throw new Error("--to is required");
+    const out = required(stringFlag(ctx.flags, "out"), "out");
+    const chunkSize = intFlag(ctx.flags, "chunk-size");
+    const archive = await ctx.api.request<{
+      archiveId: string;
+      manifest: { chunks: Array<{ index: number; file: string }> };
+      manifestSha256: string;
+      signature: string;
+      publicKey: string;
+      status: string;
+      sealedAt: string;
+      prunedAt: string | null;
+    }>("POST", "/audit/archives", { fromSeq, toSeq, chunkSize });
+    mkdirSync(out, { recursive: true, mode: 0o700 });
+    const manifestPath = join(out, "manifest.json");
+    writeFileSync(manifestPath, `${JSON.stringify(archive, null, 2)}\n`, { mode: 0o600 });
+    for (const chunk of archive.manifest.chunks) {
+      const jsonl = await ctx.api.requestText(
+        `/audit/archives/${encodeURIComponent(archive.archiveId)}/chunks/${chunk.index}`,
+      );
+      writeFileSync(join(out, chunk.file), jsonl, { mode: 0o600, flag: "wx" });
+    }
+    if (boolFlag(ctx.flags, "verify")) {
+      const args = ["scripts/verify-audit-archive.mjs", manifestPath, out];
+      const fingerprint = stringFlag(ctx.flags, "fp");
+      if (fingerprint) args.push("--expected-key-fingerprint", fingerprint);
+      const result = spawnSync("node", args, { cwd: process.cwd(), stdio: "inherit" });
+      if (result.status !== 0) throw new Error("Offline audit archive verification failed");
+    }
+    return { archiveId: archive.archiveId, wrote: out, chunks: archive.manifest.chunks.length };
+  }
+  if (action !== "bundle") {
+    throw new Error("Supported audit commands: audit bundle|export");
+  }
   const params = new URLSearchParams();
   params.set("from", String(intFlag(ctx.flags, "from") ?? 1));
   const to = intFlag(ctx.flags, "to");

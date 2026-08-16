@@ -15,7 +15,20 @@ import {
   readAuditBundleData,
   signAuditBundle,
   verifyAuditChain,
+  writeAuditEvent,
 } from "../services/audit";
+import {
+  createAuditArchive,
+  getAuditArchiveChunk,
+  getAuditArchiveManifest,
+  getAuditRetentionPolicy,
+  MAX_ARCHIVE_CHUNK_SIZE,
+  MAX_AUDIT_RETENTION_DAYS,
+  MIN_ARCHIVE_CHUNK_SIZE,
+  MIN_AUDIT_RETENTION_DAYS,
+  runTenantAuditRetention,
+  setAuditRetentionPolicy,
+} from "../services/audit-archive";
 import {
   AuditSigningKeyError,
   isCheckpointSigningConfigured,
@@ -28,6 +41,7 @@ import {
   agents,
   approvalQueue,
   db,
+  safeJsonParse,
   transactions,
 } from "../services/context";
 import { inspectGovernedRoutes } from "../services/governed-route-inventory";
@@ -51,6 +65,8 @@ const MAX_AUDIT_METADATA_VALUE_LENGTH = 256;
 // Owner/admin + recent-MFA gate, shared with the PR5 case/evidence routes so
 // both surfaces enforce an IDENTICAL posture (spec §6.3).
 auditRoutes.use("*", auditOwnerAdminMfaGate);
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -884,6 +900,160 @@ auditRoutes.get("/integrity", async (c) => {
     ok: true,
     data,
   });
+});
+
+// ─── Tenant retention + durable archive control plane ─────────────────────
+
+auditRoutes.get("/retention-policy", async (c) => {
+  const policy = await getAuditRetentionPolicy(c.get("tenantId"));
+  return c.json({ ok: true, data: policy });
+});
+
+auditRoutes.put("/retention-policy", async (c) => {
+  const body = await safeJsonParse<Record<string, unknown>>(c);
+  if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON body" }, 400);
+  const allowed = new Set(["enabled", "retentionDays", "archiveChunkSize"]);
+  if (Object.keys(body).some((key) => !allowed.has(key))) {
+    return c.json<ApiResponse>({ ok: false, error: "Unsupported retention policy field" }, 400);
+  }
+  if (
+    typeof body.enabled !== "boolean" ||
+    !Number.isSafeInteger(body.retentionDays) ||
+    !Number.isSafeInteger(body.archiveChunkSize)
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "enabled, retentionDays, and archiveChunkSize are required" },
+      400,
+    );
+  }
+  const retentionDays = body.retentionDays as number;
+  const archiveChunkSize = body.archiveChunkSize as number;
+  if (retentionDays < MIN_AUDIT_RETENTION_DAYS || retentionDays > MAX_AUDIT_RETENTION_DAYS) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: `retentionDays must be ${MIN_AUDIT_RETENTION_DAYS}-${MAX_AUDIT_RETENTION_DAYS}`,
+      },
+      400,
+    );
+  }
+  if (archiveChunkSize < MIN_ARCHIVE_CHUNK_SIZE || archiveChunkSize > MAX_ARCHIVE_CHUNK_SIZE) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: `archiveChunkSize must be ${MIN_ARCHIVE_CHUNK_SIZE}-${MAX_ARCHIVE_CHUNK_SIZE}`,
+      },
+      400,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const policy = await setAuditRetentionPolicy({
+    tenantId,
+    enabled: body.enabled,
+    retentionDays,
+    archiveChunkSize,
+    updatedBy: c.get("userId") ?? null,
+  });
+  await writeAuditEvent({
+    tenantId,
+    actorType: "user",
+    actorId: c.get("userId") ?? null,
+    action: "audit.retention_policy.updated",
+    resourceType: "audit_retention_policy",
+    resourceId: tenantId,
+    metadata: { enabled: policy.enabled, retentionDays, archiveChunkSize },
+    requestId: c.get("requestId") ?? null,
+  });
+  return c.json({ ok: true, data: policy });
+});
+
+auditRoutes.post("/archives", async (c) => {
+  if (!isCheckpointSigningConfigured()) {
+    return c.json<ApiResponse>({ ok: false, error: "Audit signing key is required" }, 503);
+  }
+  const body = await safeJsonParse<Record<string, unknown>>(c);
+  const allowed = new Set(["fromSeq", "toSeq", "chunkSize"]);
+  if (
+    !body ||
+    Object.keys(body).some((key) => !allowed.has(key)) ||
+    !Number.isSafeInteger(body.fromSeq) ||
+    !Number.isSafeInteger(body.toSeq) ||
+    (body.chunkSize !== undefined && !Number.isSafeInteger(body.chunkSize))
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "fromSeq and toSeq are required safe integers" },
+      400,
+    );
+  }
+  try {
+    const policy = await getAuditRetentionPolicy(c.get("tenantId"));
+    const archive = await createAuditArchive({
+      tenantId: c.get("tenantId"),
+      fromSeq: body.fromSeq as number,
+      toSeq: body.toSeq as number,
+      chunkSize: (body.chunkSize as number | undefined) ?? policy.archiveChunkSize,
+    });
+    return c.json({ ok: true, data: archive }, archive.reused ? 200 : 201);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Audit archive failed";
+    return c.json<ApiResponse>({ ok: false, error: message }, 409);
+  }
+});
+
+auditRoutes.get("/archives/:archiveId", async (c) => {
+  const archiveId = c.req.param("archiveId");
+  if (!UUID_PATTERN.test(archiveId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Archive not found" }, 404);
+  }
+  const manifest = await getAuditArchiveManifest(c.get("tenantId"), archiveId);
+  if (!manifest) return c.json<ApiResponse>({ ok: false, error: "Archive not found" }, 404);
+  return c.json({ ok: true, data: manifest });
+});
+
+auditRoutes.get("/archives/:archiveId/chunks/:index", async (c) => {
+  const archiveId = c.req.param("archiveId");
+  const indexRaw = c.req.param("index");
+  if (!UUID_PATTERN.test(archiveId) || !/^\d{1,6}$/.test(indexRaw)) {
+    return c.json<ApiResponse>({ ok: false, error: "Archive chunk not found" }, 404);
+  }
+  const chunk = await getAuditArchiveChunk(c.get("tenantId"), archiveId, Number(indexRaw));
+  if (!chunk) return c.json<ApiResponse>({ ok: false, error: "Archive chunk not found" }, 404);
+  return new Response(chunk.jsonl, {
+    headers: {
+      "Cache-Control": "no-store",
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "X-Content-SHA256": chunk.sha256,
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+});
+
+auditRoutes.post("/retention/run", async (c) => {
+  if (!isCheckpointSigningConfigured()) {
+    return c.json<ApiResponse>({ ok: false, error: "Audit signing key is required" }, 503);
+  }
+  const tenantId = c.get("tenantId");
+  try {
+    const result = await runTenantAuditRetention(tenantId);
+    const verification = await verifyAuditChain(tenantId, { requireHead: true });
+    if (!verification.valid) {
+      throw new Error(`Post-retention audit verification failed at seq ${verification.brokenAt}`);
+    }
+    await writeAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: c.get("userId") ?? null,
+      action: "audit.retention.completed",
+      resourceType: "audit_archive",
+      resourceId: result.archiveId,
+      metadata: result,
+      requestId: c.get("requestId") ?? null,
+    });
+    return c.json({ ok: true, data: result });
+  } catch (error) {
+    console.error(`[audit] retention run failed for tenant ${tenantId}:`, error);
+    return c.json<ApiResponse>({ ok: false, error: "Audit retention failed" }, 500);
+  }
 });
 
 // ─── GET /audit/bundle ────────────────────────────────────────────────────

@@ -26,6 +26,7 @@ import {
   numeric,
   pgEnum,
   pgTable,
+  primaryKey,
   serial,
   text,
   timestamp,
@@ -2602,3 +2603,94 @@ export const auditCheckpoints = pgTable(
 
 export type AuditCheckpointRow = typeof auditCheckpoints.$inferSelect;
 export type NewAuditCheckpointRow = typeof auditCheckpoints.$inferInsert;
+
+export const auditRetentionPolicies = pgTable(
+  "audit_retention_policies",
+  {
+    tenantId: varchar("tenant_id", { length: 64 })
+      .primaryKey()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    enabled: boolean("enabled").notNull().default(false),
+    retentionDays: integer("retention_days").notNull().default(365),
+    archiveChunkSize: integer("archive_chunk_size").notNull().default(1000),
+    updatedBy: varchar("updated_by", { length: 255 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    retentionBounds: check(
+      "audit_retention_days_bounds",
+      sql`${table.retentionDays} BETWEEN 30 AND 3650`,
+    ),
+    chunkBounds: check(
+      "audit_retention_chunk_bounds",
+      sql`${table.archiveChunkSize} BETWEEN 1 AND 10000`,
+    ),
+  }),
+);
+
+export const auditArchives = pgTable(
+  "audit_archives",
+  {
+    id: uuid("id").primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "restrict" }),
+    fromSeq: bigint("from_seq", { mode: "number" }).notNull(),
+    toSeq: bigint("to_seq", { mode: "number" }).notNull(),
+    eventCount: bigint("event_count", { mode: "number" }).notNull(),
+    status: varchar("status", { length: 16 }).notNull().default("building"),
+    manifest: jsonb("manifest").$type<Record<string, unknown>>(),
+    manifestSha256: varchar("manifest_sha256", { length: 64 }),
+    signature: text("signature"),
+    publicKey: text("public_key"),
+    sealedAt: timestamp("sealed_at", { withTimezone: true }),
+    prunedAt: timestamp("pruned_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    tenantRangeUnique: uniqueIndex("audit_archives_tenant_range_unique").on(
+      table.tenantId,
+      table.fromSeq,
+      table.toSeq,
+    ),
+    tenantCreatedIdx: index("audit_archives_tenant_created_idx").on(
+      table.tenantId,
+      table.createdAt,
+    ),
+    resumableIdx: index("audit_archives_resumable_idx").on(
+      table.tenantId,
+      table.status,
+      table.fromSeq,
+      table.toSeq,
+    ),
+  }),
+);
+
+export const auditArchiveChunks = pgTable(
+  "audit_archive_chunks",
+  {
+    archiveId: uuid("archive_id")
+      .notNull()
+      .references(() => auditArchives.id, { onDelete: "cascade" }),
+    chunkIndex: integer("chunk_index").notNull(),
+    fromSeq: bigint("from_seq", { mode: "number" }).notNull(),
+    toSeq: bigint("to_seq", { mode: "number" }).notNull(),
+    eventCount: integer("event_count").notNull(),
+    sha256: varchar("sha256", { length: 64 }).notNull(),
+    byteLength: integer("byte_length").notNull(),
+    jsonl: text("jsonl").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    primaryKey: primaryKey({
+      name: "audit_archive_chunks_pk",
+      columns: [table.archiveId, table.chunkIndex],
+    }),
+  }),
+);
+
+export type AuditRetentionPolicy = typeof auditRetentionPolicies.$inferSelect;
+export type AuditArchive = typeof auditArchives.$inferSelect;
+export type AuditArchiveChunk = typeof auditArchiveChunks.$inferSelect;
