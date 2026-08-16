@@ -1,0 +1,64 @@
+---
+title: "Provider actions"
+description: "Invoke and observe workspace-scoped governed provider operations with the TypeScript SDK."
+---
+
+# Provider actions
+
+Use an agent JWT to submit a governed provider operation and poll only actions
+submitted by that agent. Provider credentials stay in Steward; neither the SDK
+input nor the returned action status contains them.
+
+```typescript
+import { StewardClient } from "@stwd/sdk";
+
+const steward = new StewardClient({
+  baseUrl: process.env.STEWARD_API_URL!,
+  bearerToken: process.env.STEWARD_JWT!,
+  tenantId: process.env.STEWARD_TENANT_ID!,
+});
+
+const action = await steward.providerActions.invoke({
+  workspaceId: "workspace_123",
+  providerAccountId: "provider_account_123",
+  operationKey: "github.issue.list",
+  arguments: { owner: "Steward-Fi", repo: "steward", state: "open" },
+  idempotencyKey: crypto.randomUUID(),
+});
+
+if (action.status === "pending_approval") {
+  console.log("Blocked pending human approval; no provider request was dispatched.");
+}
+
+const status = await steward.providerActions.get(action.id);
+console.log(status.status);
+```
+
+`getApproval` and `decideApproval` require an eligible human session with recent
+MFA. `getCase` and `getEvidence` require an owner/admin human session with recent
+MFA. The SDK preserves those server gates; an agent JWT cannot use these methods
+to impersonate an approver or read protected evidence.
+
+```typescript
+// Run with a separately constructed, authenticated human-session client.
+const approval = await humanSteward.providerActions.getApproval(action.id);
+await humanSteward.providerActions.decideApproval(action.id, {
+  decision: "approve",
+  expectedVersion: approval.version,
+  expectedRequestHash: approval.requestHash,
+  expectedActionDigest: approval.actionDigest,
+  idempotencyKey: crypto.randomUUID(),
+});
+
+// The submitting agent may request safe resume only after the server verifies
+// the persisted approval and exact action binding.
+await steward.providerActions.execute(action.id, {
+  idempotencyKey: crypto.randomUUID(),
+});
+
+const manifest = await humanSteward.providerActions.getCase(action.id);
+const evidence = await humanSteward.providerActions.getEvidence(action.id);
+```
+
+Never pass provider tokens, cookies, API keys, or authorization headers in
+`arguments`. Steward resolves the credential from the bound provider account.

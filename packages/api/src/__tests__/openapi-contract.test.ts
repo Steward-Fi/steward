@@ -943,6 +943,16 @@ describe("generated OpenAPI contract", () => {
     expect(responseStatus.properties).not.toHaveProperty("payload");
     expect(responseStatus.properties).not.toHaveProperty("executionResult");
     expect(responseStatus.properties).not.toHaveProperty("safeSummary");
+
+    expect(paths["/v2/provider-actions"]).toHaveProperty("post");
+    expect(paths["/v2/provider-actions/{id}/approval"]).toHaveProperty("get");
+    expect(paths["/v2/provider-actions/{id}/approval"]).toHaveProperty("post");
+    expect(paths["/v2/provider-actions/{id}/execute"]).toHaveProperty("post");
+    expect(paths["/v2/provider-actions/{id}/case"]).toHaveProperty("get");
+    expect(paths["/v2/provider-actions/{id}/evidence"]).toHaveProperty("get");
+    expect(paths["/v2/provider-actions/{id}/approval"].get.description).toContain("recent MFA");
+    expect(paths["/v2/provider-actions/{id}/case"].get.description).toContain("human session");
+    expect(paths["/v2/provider-actions"].post.description).toContain("never accepted");
   });
 
   it("serves the generated contract at /openapi.json", async () => {
