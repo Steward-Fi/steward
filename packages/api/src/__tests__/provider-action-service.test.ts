@@ -233,6 +233,13 @@ async function auditCount(): Promise<number> {
   return Number((arr[0] as { n: number }).n);
 }
 
+function hhmm(minute: number): string {
+  const normalized = ((minute % 1440) + 1440) % 1440;
+  return `${String(Math.floor(normalized / 60)).padStart(2, "0")}:${String(normalized % 60).padStart(2, "0")}`;
+}
+
+const ALL_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+
 describe("provider-action service pipeline", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
@@ -271,6 +278,40 @@ describe("provider-action service pipeline", () => {
     expect(bindings.length).toBe(0);
     // Required denial audit DID write.
     expect(await auditCount()).toBe(before + 1);
+  });
+
+  test("#207 server-time business window is enforced end to end and is load-bearing", async () => {
+    await grantAgent(AGENT, WORKSPACE_A, ACCOUNT_A, ["github.issue.list"]);
+    const now = new Date();
+    const minute = now.getUTCHours() * 60 + now.getUTCMinutes();
+    const rules = (from: string, to: string) => [
+      {
+        id: "20700000-0000-4000-8000-000000000001",
+        type: "capability-intent",
+        enabled: true,
+        config: {
+          capabilities: ["github.issue.list"],
+          effect: "allow",
+          constraints: { timeWindow: { timezone: "UTC", allow: [{ days: ALL_DAYS, from, to }] } },
+        },
+      },
+    ];
+
+    // A narrow window containing the current server minute allows.
+    await setOpPolicyRules(OP_A_READ, rules(hhmm(minute - 1), hhmm(minute + 2)));
+    const allowed = await providerActionService.createProviderAction(input());
+    expect(allowed.kind).toBe("allowed");
+
+    await getDb().delete(providerActionAuditOutbox);
+    await getDb().delete(providerActionBindings);
+    await getDb().delete(intents);
+
+    // Mutation proof: moving the same window just ahead of server time denies.
+    await setOpPolicyRules(OP_A_READ, rules(hhmm(minute + 2), hhmm(minute + 4)));
+    const denied = await providerActionService.createProviderAction(
+      input({ idempotencyKeyHash: `sha256:${"b".repeat(64)}` }),
+    );
+    expect(denied.kind).toBe("policy_denied");
   });
 
   test("metrics observer failure cannot change a real governed denial decision", async () => {
