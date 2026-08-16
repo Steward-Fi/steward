@@ -7,7 +7,7 @@
  *   - SIWE (Sign-In With Ethereum) — browser + Node
  *
  * Usage:
- *   const auth = new StewardAuth({ baseUrl: "https://api.steward.fi" });
+ *   const auth = new StewardAuth({ baseUrl: "http://localhost:3200" });
  *   const { token, user } = await auth.signInWithPasskey("me@example.com");
  *   const client = new StewardClient({ baseUrl, bearerToken: auth.getToken() });
  */
@@ -26,6 +26,7 @@ import type {
   StewardEmailGrantResult,
   StewardEmailOtpResult,
   StewardEmailResult,
+  StewardEmailSignInStatusResult,
   StewardFarcasterLoginConfig,
   StewardFarcasterLoginPayload,
   StewardGuestDeleteResult,
@@ -905,12 +906,17 @@ export class StewardAuth {
     }
 
     // Unwrap the expiresAt — may sit directly on the response or inside `data`
+    const data = res.data.data as
+      | { expiresAt?: string; challengeId?: string; pollSecret?: string }
+      | undefined;
     const expiresAt =
-      typeof res.data.expiresAt === "string"
-        ? res.data.expiresAt
-        : ((res.data.data as { expiresAt?: string } | undefined)?.expiresAt ?? "");
+      typeof res.data.expiresAt === "string" ? res.data.expiresAt : (data?.expiresAt ?? "");
+    const challengeId =
+      typeof res.data.challengeId === "string" ? res.data.challengeId : data?.challengeId;
+    const pollSecret =
+      typeof res.data.pollSecret === "string" ? res.data.pollSecret : data?.pollSecret;
 
-    return { ok: true, expiresAt };
+    return { ok: true, expiresAt, challengeId, pollSecret };
   }
 
   /**
@@ -935,6 +941,69 @@ export class StewardAuth {
     }
 
     return this.storeExchangeResponse(res.data);
+  }
+
+  async verifyEmailSignInCode(
+    email: string,
+    code: string,
+  ): Promise<StewardAuthResult | StewardMfaRequiredResult> {
+    const res = await authRequest<StewardAuthExchangeResponse>(
+      this.baseUrl,
+      "/auth/email/code/verify",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          email,
+          code,
+          ...(this.tenantId ? { tenantId: this.tenantId } : {}),
+        }),
+      },
+    );
+
+    if (!res.ok) {
+      throw new StewardApiError(res.error, res.status);
+    }
+
+    return this.storeExchangeResponse(res.data);
+  }
+
+  async pollEmailSignInStatus(
+    challengeId: string,
+    pollSecret: string,
+  ): Promise<StewardEmailSignInStatusResult> {
+    const res = await authRequest<{ ok: true; data?: { status?: string; expiresAt?: string } }>(
+      this.baseUrl,
+      "/auth/email/status",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          challengeId,
+          pollSecret,
+          ...(this.tenantId ? { tenantId: this.tenantId } : {}),
+        }),
+      },
+    );
+
+    if (!res.ok) {
+      throw new StewardApiError(res.error, res.status);
+    }
+
+    const payload = res.data;
+    const status = payload.data?.status;
+    if (
+      status === "pending" ||
+      status === "consumed" ||
+      status === "locked" ||
+      status === "expired" ||
+      status === "invalid"
+    ) {
+      return {
+        ok: true,
+        status,
+        ...(status === "pending" ? { expiresAt: payload.data?.expiresAt } : {}),
+      };
+    }
+    throw new StewardApiError("Email sign-in status response was malformed.", res.status);
   }
 
   // ─── SMS OTP ───────────────────────────────────────────────────────────────

@@ -106,7 +106,7 @@ async function main() {
   console.log("");
   console.log("Set these in Sol's eliza-cloud container env:");
   console.log(`STEWARD_AGENT_ID=${agentId}`);
-  console.log("STEWARD_API_URL=https://api.steward.fi");
+  console.log("STEWARD_API_URL=http://localhost:3200");
   console.log(`STEWARD_TRADE_SESSION_ID=${session.id}`);
   console.log(`STEWARD_JWT=${jwt}`);
   console.log("");

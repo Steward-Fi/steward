@@ -8,13 +8,13 @@
     "build": "tsc --noEmit",
     "dev": "bun run src/index.ts",
     "start": "bun run src/index.ts",
-    "test": "bun test --timeout 30000"
+    "test": "bun scripts/run-tests-isolated.ts"
   },
   "dependencies": {
     "@stwd/auth": "workspace:*",
     "@stwd/db": "workspace:*",
     "drizzle-orm": "^0.44.5",
-    "hono": "^4.12.18",
+    "hono": "^4.12.34",
     "@stwd/redis": "workspace:*",
     "@stwd/vault": "workspace:*",
     "@stwd/shared": "workspace:*"

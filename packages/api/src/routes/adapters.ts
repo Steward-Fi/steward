@@ -23,9 +23,11 @@
 
 import {
   AdapterNotConfiguredError,
+  AdapterProviderError,
   AdapterUnavailableError,
   AdapterValidationError,
   adapterRegistry,
+  type BridgeHandoff,
   type BridgeQuote,
   type SparkWallet,
   type UnsignedTxIntent,
@@ -272,6 +274,7 @@ function adapterErrorStatus(err: unknown): {
 } {
   if (err instanceof AdapterValidationError) return { status: 400, message: err.message };
   if (err instanceof AdapterNotConfiguredError) return { status: 503, message: err.message };
+  if (err instanceof AdapterProviderError) return { status: 503, message: err.message };
   if (err instanceof AdapterUnavailableError) return { status: 501, message: err.message };
   return { status: 500, message: "Internal server error" };
 }
@@ -395,6 +398,89 @@ function assertUnsigned(intent: UnsignedTxIntent): void {
     throw new AdapterUnavailableError(
       intent.category,
       "Adapter returned a signed artifact; refusing. Adapters must return unsigned intents only.",
+    );
+  }
+}
+
+/** Defense-in-depth validation for a non-signable, external bridge handoff. */
+function assertBridgeHandoff(handoff: BridgeHandoff): void {
+  const suspect = handoff as unknown as Record<string, unknown>;
+  const allowedKeys = new Set([
+    "kind",
+    "category",
+    "provider",
+    "quoteId",
+    "direction",
+    "url",
+    "fromChainId",
+    "toChainId",
+    "amountIn",
+    "estimatedUsd",
+    "recipient",
+    "recipientSensitive",
+    "expiresAt",
+    "feeBps",
+    "feeScope",
+    "feeObservedSlot",
+    "feeObservedAt",
+    "notices",
+  ]);
+  let url: URL;
+  try {
+    url = new URL(handoff.url);
+  } catch {
+    throw new AdapterUnavailableError("bridge", "Bridge adapter returned an invalid handoff URL.");
+  }
+  const boundedString = (value: unknown, max: number): value is string =>
+    typeof value === "string" && value.length > 0 && value.length <= max;
+  const validObservedSlot =
+    handoff.feeObservedSlot === undefined ||
+    (Number.isSafeInteger(handoff.feeObservedSlot) && handoff.feeObservedSlot >= 0);
+  if (
+    handoff.kind !== "external-handoff" ||
+    handoff.category !== "bridge" ||
+    url.protocol !== "https:" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    Object.keys(suspect).some((key) => !allowedKeys.has(key)) ||
+    !boundedString(handoff.provider, 64) ||
+    !boundedString(handoff.quoteId, 256) ||
+    !boundedString(handoff.direction, 64) ||
+    !boundedString(handoff.recipient, 256) ||
+    !boundedString(handoff.amountIn, 80) ||
+    !/^\d+$/.test(handoff.amountIn) ||
+    BigInt(handoff.amountIn) <= 0n ||
+    !Number.isSafeInteger(handoff.fromChainId) ||
+    handoff.fromChainId <= 0 ||
+    !Number.isSafeInteger(handoff.toChainId) ||
+    handoff.toChainId <= 0 ||
+    handoff.fromChainId === handoff.toChainId ||
+    !Number.isFinite(handoff.estimatedUsd) ||
+    handoff.estimatedUsd <= 0 ||
+    !Number.isSafeInteger(handoff.expiresAt) ||
+    handoff.expiresAt <= Date.now() ||
+    !Number.isSafeInteger(handoff.feeBps) ||
+    handoff.feeBps < 0 ||
+    handoff.feeBps > 10_000 ||
+    (handoff.feeScope !== "global-estimate" &&
+      handoff.feeScope !== "owner-observed" &&
+      handoff.feeScope !== "not-applicable") ||
+    !Number.isSafeInteger(handoff.feeObservedAt) ||
+    handoff.feeObservedAt < 0 ||
+    handoff.feeObservedAt > handoff.expiresAt ||
+    !validObservedSlot ||
+    (handoff.recipientSensitive !== undefined && typeof handoff.recipientSensitive !== "boolean") ||
+    !Array.isArray(handoff.notices) ||
+    handoff.notices.length > 16 ||
+    handoff.notices.some((notice) => !boundedString(notice, 1_000)) ||
+    suspect.signature !== undefined ||
+    suspect.rawTransaction !== undefined ||
+    suspect.signedTx !== undefined ||
+    suspect.data !== undefined
+  ) {
+    throw new AdapterUnavailableError(
+      "bridge",
+      "Bridge adapter returned an unsafe handoff; refusing. External handoffs must contain no signable transaction artifact.",
     );
   }
 }
@@ -848,6 +934,7 @@ adapterRoutes.post("/bridge/quote", async (c) => {
       recipient: parsed.data.recipient,
       slippageBps: parsed.data.slippageBps,
     });
+    setNoStoreHeaders(c);
     return c.json(ok({ quote }));
   } catch (err) {
     return handleAdapterError(c, err);
@@ -865,14 +952,22 @@ adapterRoutes.post("/bridge/build", async (c) => {
 
   try {
     const bridge = adapterRegistry.bridge();
-    const intent = await bridge.buildBridge({
+    const result = await bridge.buildBridge({
       quote: parsed.data.quote as unknown as BridgeQuote,
       owner: parsed.data.owner,
     });
-    assertUnsigned(intent);
+    if (result.kind === "external-handoff") assertBridgeHandoff(result);
+    else assertUnsigned(result);
 
     const caps = spendCaps();
-    const estimatedUsd = parsed.data.estimatedUsd ?? caps.perOrderCapUsd;
+    // External handoffs carry a server-derived notional from the provider. A
+    // caller may submit a higher estimate, but can never understate it to bypass
+    // the policy gate. Transaction-building adapters retain the conservative
+    // cap fallback until they expose the same trusted valuation field.
+    const estimatedUsd =
+      result.kind === "external-handoff"
+        ? Math.max(result.estimatedUsd, parsed.data.estimatedUsd ?? 0)
+        : (parsed.data.estimatedUsd ?? caps.perOrderCapUsd);
     const gate = await enforceFundMovingPolicy(c, {
       agentId,
       estimatedUsd,
@@ -887,13 +982,30 @@ adapterRoutes.post("/bridge/build", async (c) => {
       return c.json({ code: "policy-violation", reason: gate.reason }, 400);
     }
 
+    if (result.kind === "external-handoff") {
+      // Do not persist the recipient: for Solana -> Monero it is a native Monero
+      // address and therefore privacy-sensitive. The handoff is returned only to
+      // the authenticated caller.
+      await auditAdapterEvent(c, "adapter.bridge.handoff.authorized", agentId, {
+        provider: result.provider,
+        direction: result.direction,
+        fromChainId: result.fromChainId,
+        toChainId: result.toChainId,
+        amountIn: result.amountIn,
+        estimatedUsd,
+        handoffOrigin: new URL(result.url).origin,
+      });
+      setNoStoreHeaders(c);
+      return c.json(ok({ handoff: result }));
+    }
+
     await auditAdapterEvent(c, "adapter.bridge.build.authorized", agentId, {
-      fromChainId: intent.chainId,
-      to: intent.to,
+      fromChainId: result.chainId,
+      to: result.to,
       estimatedUsd,
-      bridge: intent.metadata,
+      bridge: result.metadata,
     });
-    return c.json(ok({ unsignedIntent: intent }));
+    return c.json(ok({ unsignedIntent: result }));
   } catch (err) {
     return handleAdapterError(c, err);
   }
@@ -917,7 +1029,9 @@ adapterRoutes.post("/bridge/sessions", async (c) => {
       quoteId: session.quoteId,
       fromChainId: session.fromChainId,
       toChainId: session.toChainId,
-      recipient: session.recipient,
+      ...(session.recipientSensitive ? {} : { recipient: session.recipient }),
+      direction: session.direction,
+      executionMode: session.executionMode,
     });
     setNoStoreHeaders(c);
     return c.json(ok({ session }), 201);

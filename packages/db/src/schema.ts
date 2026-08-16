@@ -73,9 +73,30 @@ export interface TenantEmailConfig {
    * Has no effect when `magicLinkBaseUrl` is unset.
    */
   magicLinkCallbackPath?: string;
+  /**
+   * Optional deployer-supplied raw email templates (subject/text/html with
+   * `{{placeholder}}` substitution). This is how a hosted Steward instance
+   * carries tenant-specific branded auth emails as CONFIG rather than code:
+   * the OSS repo ships only the substitution mechanism, the branded markup
+   * lives here in the deployer's database. Takes precedence over
+   * `templateId` resolution when set.
+   */
+  templates?: {
+    magicLink?: { subject: string; text: string; html: string };
+    otp?: { subject: string; text: string; html: string };
+  };
 }
 
 export const chainFamilyEnum = pgEnum("chain_family", ["evm", "solana", "bitcoin", "monero"]);
+
+// PR4 (0082): governed provider route authority mode. `legacy` = the historical
+// direct-proxy credential path; `governed_v2` = decrypt/inject only reachable via
+// a claimed v2 execution authorization (dispatchGovernedExecution). A route is
+// never both. Default `legacy` => migration 0082 changes nothing at deploy (X9).
+export const secretRouteAuthorityModeEnum = pgEnum("secret_route_authority_mode", [
+  "legacy",
+  "governed_v2",
+]);
 
 export const policyTypeEnum = pgEnum("policy_type", [
   "spending-limit",
@@ -109,6 +130,18 @@ export const approvalQueueStatusEnum = pgEnum("approval_queue_status", [
   "pending",
   "approved",
   "rejected",
+  // PR3 provider-action arm lifecycle statuses (0081). The legacy transaction
+  // arm only ever uses pending/approved/rejected.
+  "expired",
+  "stale",
+  "consumed",
+]);
+
+export const executionAuthorizationStatusEnum = pgEnum("execution_authorization_status", [
+  "active",
+  "consumed",
+  "expired",
+  "revoked",
 ]);
 
 const timestamps = {
@@ -873,6 +906,8 @@ export const transactions = pgTable(
     txHash: varchar("tx_hash", { length: 128 }),
     actionType: varchar("action_type", { length: 64 }),
     actionPayload: jsonb("action_payload").$type<Record<string, unknown>>(),
+    executionPayloadDigest: varchar("execution_payload_digest", { length: 64 }),
+    executionPolicyRevisionHash: varchar("execution_policy_revision_hash", { length: 64 }),
     policyResults: jsonb("policy_results").$type<PolicyResult[]>().notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     signedAt: timestamp("signed_at", { withTimezone: true }),
@@ -882,6 +917,81 @@ export const transactions = pgTable(
     agentIdIdx: index("transactions_agent_id_idx").on(table.agentId),
     // `value` is a wei amount: must be a non-empty decimal digit string.
     valueIsWei: check("transactions_value_wei_chk", sql`${table.value} ~ '^[0-9]+$'`),
+  }),
+);
+
+export const executionAuthorizationNonces = pgTable(
+  "execution_authorization_nonces",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    authorizationId: varchar("authorization_id", { length: 64 }).notNull(),
+    requestId: varchar("request_id", { length: 64 }).notNull(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: varchar("agent_id", { length: 64 })
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    capability: varchar("capability", { length: 64 }).notNull(),
+    backend: varchar("backend", { length: 64 }).notNull(),
+    payloadDigest: varchar("payload_digest", { length: 64 }).notNull(),
+    policyRevisionHash: varchar("policy_revision_hash", { length: 64 }),
+    approvalId: varchar("approval_id", { length: 64 }),
+    nonce: varchar("nonce", { length: 64 }).notNull(),
+    signature: text("signature").notNull(),
+    idempotencyKey: text("idempotency_key"),
+    status: executionAuthorizationStatusEnum("status").notNull().default("active"),
+    issuedAt: timestamp("issued_at", { withTimezone: true }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // ─── PR4 (0082): provider execution authorization v2 extension ───────────
+    // version=1 rows are the legacy wallet/EVM nonce (all v2 fields null).
+    // version=2 rows carry the full provider commitment binding + dispatch
+    // state machine. Enforced by exec_auth_nonces_v2_arm_chk (raw SQL, 0082).
+    // The v2 fields are the DB-time claim predicate (§2.3) and the reconciler's
+    // dispatch-state source of truth (§4).
+    version: integer("version").notNull().default(1),
+    executionId: varchar("execution_id", { length: 64 }),
+    intentId: varchar("intent_id", { length: 64 }),
+    workspaceId: uuid("workspace_id"),
+    providerAccountId: uuid("provider_account_id"),
+    operationId: uuid("operation_id"),
+    operationRevision: integer("operation_revision"),
+    requestHash: varchar("request_hash", { length: 71 }),
+    actionDigest: varchar("action_digest", { length: 71 }),
+    grantDependencyHash: varchar("grant_dependency_hash", { length: 71 }),
+    routeId: uuid("route_id"),
+    routeRevision: integer("route_revision"),
+    secretId: uuid("secret_id"),
+    secretVersion: integer("secret_version"),
+    providerIdempotencyKey: varchar("provider_idempotency_key", { length: 255 }),
+    commitmentHash: varchar("commitment_hash", { length: 71 }),
+    keyId: varchar("key_id", { length: 64 }),
+    dispatchState: varchar("dispatch_state", { length: 24 }).notNull().default("none"),
+    dispatchedAt: timestamp("dispatched_at", { withTimezone: true }),
+    outcomeRecordedAt: timestamp("outcome_recorded_at", { withTimezone: true }),
+  },
+  (table) => ({
+    authorizationIdUniqueIdx: uniqueIndex("execution_authorization_nonces_auth_id_idx").on(
+      table.authorizationId,
+    ),
+    nonceUniqueIdx: uniqueIndex("execution_authorization_nonces_nonce_idx").on(table.nonce),
+    tenantAgentStatusIdx: index("execution_authorization_nonces_tenant_agent_status_idx").on(
+      table.tenantId,
+      table.agentId,
+      table.status,
+    ),
+    expiryIdx: index("execution_authorization_nonces_expires_at_idx").on(table.expiresAt),
+    // Partial-unique v2 indexes + composite FKs + CHECK constraints are RAW SQL
+    // ONLY (0082): drizzle cannot express partial predicates or composite FKs.
+    // The migration test asserts they exist after migrate.
+    v2IntentUniqIdx: uniqueIndex("exec_auth_nonces_intent_uniq")
+      .on(table.intentId)
+      .where(sql`version = 2`),
+    v2ExecutionUniqIdx: uniqueIndex("exec_auth_nonces_execution_uniq")
+      .on(table.executionId)
+      .where(sql`version = 2`),
   }),
 );
 
@@ -937,13 +1047,19 @@ export const sponsoredGasEvents = pgTable(
   }),
 );
 
+// PR3 (0081): approval_queue is a discriminated union. The legacy transaction
+// arm (approval_kind='transaction') keeps tx_id + the original columns; the new
+// provider_action arm carries the exact-binding tuple. `tx_id` is now nullable
+// (arm CHECK re-requires it for transaction rows). Several PR3 invariants (the
+// arm CHECK, the decision-shape CHECK, and the partial unique indexes) live in
+// 0081 raw SQL and are NOT visible to drizzle-kit.
 export const approvalQueue = pgTable(
   "approval_queue",
   {
     id: varchar("id", { length: 64 }).primaryKey(),
-    txId: varchar("tx_id", { length: 64 })
-      .notNull()
-      .references(() => transactions.id, { onDelete: "cascade" }),
+    txId: varchar("tx_id", { length: 64 }).references(() => transactions.id, {
+      onDelete: "cascade",
+    }),
     agentId: varchar("agent_id", { length: 64 })
       .notNull()
       .references(() => agents.id, { onDelete: "cascade" }),
@@ -955,12 +1071,108 @@ export const approvalQueue = pgTable(
     resolvedBy: varchar("resolved_by", { length: 255 }),
     resolvedByType: varchar("resolved_by_type", { length: 32 }),
     resolvedById: varchar("resolved_by_id", { length: 255 }),
+    // ── PR3 provider-action arm (0081) ──
+    approvalKind: varchar("approval_kind", { length: 32 }).notNull().default("transaction"),
+    intentId: varchar("intent_id", { length: 64 }),
+    tenantId: varchar("tenant_id", { length: 64 }),
+    workspaceId: uuid("workspace_id"),
+    requestHash: varchar("request_hash", { length: 71 }),
+    actionDigest: varchar("action_digest", { length: 71 }),
+    approvalCommitment: jsonb("approval_commitment").$type<Record<string, unknown>>(),
+    approvalCommitmentHash: varchar("approval_commitment_hash", { length: 71 }),
+    expectedBindingRevision: integer("expected_binding_revision"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    decision: varchar("decision", { length: 16 }),
+    reasonCode: varchar("reason_code", { length: 96 }),
+    reason: text("reason"),
+    mfaVerifiedAt: timestamp("mfa_verified_at", { withTimezone: true }),
+    mfaAgeMsAtDecision: integer("mfa_age_ms_at_decision"),
+    decisionIdempotencyKeyHash: varchar("decision_idempotency_key_hash", { length: 71 }),
+    decisionRequestHash: varchar("decision_request_hash", { length: 71 }),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    consumedBy: varchar("consumed_by", { length: 64 }),
+    // ── #205 M-of-N quorum arm (0083) ──
+    // NULL threshold => single-approver legacy path (byte-for-byte unchanged).
+    // A non-NULL threshold flips the provider-action approval into flat N-of-M
+    // quorum: `quorum_threshold` DISTINCT eligible approvals are required before
+    // the queue can transition pending -> approved (execute-reachable). Nested
+    // quorums are out of scope. `quorum_eligible_user_ids` is the frozen,
+    // workspace_approver-scoped eligible set committed at create time.
+    // `quorum_approvals_count` is the guarded running tally of DISTINCT approve
+    // decisions at the CURRENT binding revision; it is reset to 0 whenever the
+    // set is invalidated (staleness bumps binding_revision).
+    quorumThreshold: integer("quorum_threshold"),
+    quorumEligibleUserIds: uuid("quorum_eligible_user_ids").array().notNull().default([]),
+    quorumApprovalsCount: integer("quorum_approvals_count").notNull().default(0),
   },
   (table) => ({
     txIdUniqueIdx: uniqueIndex("approval_queue_tx_id_idx").on(table.txId),
     statusIdx: index("approval_queue_status_idx").on(table.status),
   }),
 );
+
+/**
+ * #205 M-of-N quorum: one row per DISTINCT approver decision on a provider-action
+ * approval. The single-approver legacy path never inserts here (it records its
+ * lone decision on `approval_queue` directly). Every row binds the EXACT
+ * request_hash / action_digest / approval_commitment_hash and the
+ * `binding_revision_at_decision` the approval was cast against, so a dependency
+ * or payload change (which bumps binding_revision) invalidates the WHOLE
+ * collected set, so a stale approval can never count toward a later quorum.
+ *
+ * Distinctness is a UNIQUE(approval_queue_id, approver_user_id): an approver
+ * approving twice is rejected loudly the second time. The requester (agent owner)
+ * can never be an eligible approver (enforced at decide time), so requester
+ * separation generalizes to "requester never counts toward quorum".
+ */
+export const providerActionApprovals = pgTable(
+  "provider_action_approvals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    approvalQueueId: varchar("approval_queue_id", { length: 64 })
+      .notNull()
+      .references(() => approvalQueue.id, { onDelete: "cascade" }),
+    intentId: varchar("intent_id", { length: 64 }).notNull(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    approverUserId: uuid("approver_user_id").notNull(),
+    decision: varchar("decision", { length: 16 }).notNull(),
+    bindingRevisionAtDecision: integer("binding_revision_at_decision").notNull(),
+    requestHash: varchar("request_hash", { length: 71 }).notNull(),
+    actionDigest: varchar("action_digest", { length: 71 }).notNull(),
+    approvalCommitmentHash: varchar("approval_commitment_hash", { length: 71 }).notNull(),
+    decisionIdempotencyKeyHash: varchar("decision_idempotency_key_hash", { length: 71 }).notNull(),
+    decisionRequestHash: varchar("decision_request_hash", { length: 71 }).notNull(),
+    mfaVerifiedAt: timestamp("mfa_verified_at", { withTimezone: true }),
+    mfaAgeMsAtDecision: integer("mfa_age_ms_at_decision"),
+    reasonCode: varchar("reason_code", { length: 96 }),
+    reason: text("reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    // Distinctness: an approver counts at most once per approval.
+    approverUniqueIdx: uniqueIndex("provider_action_approvals_approver_uniq").on(
+      table.approvalQueueId,
+      table.approverUserId,
+    ),
+    // Cross-action decision-idempotency-key reuse guard (mirrors approval_queue).
+    idemUniqueIdx: uniqueIndex("provider_action_approvals_idem_uniq").on(
+      table.tenantId,
+      table.approverUserId,
+      table.decisionIdempotencyKeyHash,
+    ),
+    queueIdx: index("provider_action_approvals_queue_idx").on(table.approvalQueueId),
+    intentIdx: index("provider_action_approvals_intent_idx").on(table.tenantId, table.intentId),
+    queueFk: foreignKey({
+      columns: [table.approvalQueueId],
+      foreignColumns: [approvalQueue.id],
+      name: "provider_action_approvals_queue_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+export type ProviderActionApprovalRow = typeof providerActionApprovals.$inferSelect;
+export type NewProviderActionApprovalRow = typeof providerActionApprovals.$inferInsert;
 
 /**
  * First-class Privy-style intents for actions that may require authorization
@@ -1491,6 +1703,8 @@ export type Transaction = typeof transactions.$inferSelect;
 export type NewTransaction = typeof transactions.$inferInsert;
 export type ApprovalQueueEntry = typeof approvalQueue.$inferSelect;
 export type NewApprovalQueueEntry = typeof approvalQueue.$inferInsert;
+export type ExecutionAuthorizationNonce = typeof executionAuthorizationNonces.$inferSelect;
+export type NewExecutionAuthorizationNonce = typeof executionAuthorizationNonces.$inferInsert;
 export type Intent = typeof intents.$inferSelect;
 export type NewIntent = typeof intents.$inferInsert;
 export type AgentSigner = typeof agentSigners.$inferSelect;
@@ -1547,6 +1761,7 @@ export const secrets = pgTable(
       table.version,
     ),
     tenantIdx: index("secrets_tenant_idx").on(table.tenantId),
+    tenantIdUnique: uniqueIndex("secrets_tenant_id_unique_idx").on(table.tenantId, table.id),
   }),
 );
 
@@ -1565,6 +1780,20 @@ export const secretRoutes = pgTable(
     injectFormat: varchar("inject_format", { length: 255 }).default("{value}"),
     priority: integer("priority").notNull().default(0),
     enabled: boolean("enabled").notNull().default(true),
+    requiresApproval: boolean("requires_approval").notNull().default(false),
+    approvalConfig: jsonb("approval_config").$type<Record<string, unknown>>().notNull().default({}),
+    // PR3 (0081, G1 adjudication): a route revision that a route/secret rotation
+    // increments. Bound by PR3's approval commitment so resume can detect route
+    // rotation. Maintained by the `secret_routes_bump_authority_revision`
+    // BEFORE UPDATE trigger (raw SQL only, not visible to drizzle-kit). PR4's
+    // 0082 adds authority_mode + provider_operation_id and extends the trigger.
+    authorityRevision: integer("authority_revision").notNull().default(1),
+    // PR4 (0082): governed cutover columns. authority_mode default 'legacy' means
+    // every existing route behaves exactly as today until explicitly enrolled
+    // (PR8). A governed route MUST name its provider_operation_id (raw-SQL CHECK
+    // secret_routes_governed_operation_chk); a legacy route MUST NOT.
+    authorityMode: secretRouteAuthorityModeEnum("authority_mode").notNull().default("legacy"),
+    providerOperationId: uuid("provider_operation_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -1572,6 +1801,544 @@ export const secretRoutes = pgTable(
     agentIdx: index("secret_routes_agent_idx").on(table.agentId),
     secretIdx: index("secret_routes_secret_idx").on(table.secretId),
     hostIdx: index("secret_routes_host_idx").on(table.hostPattern),
+    tenantIdUnique: uniqueIndex("secret_routes_tenant_id_unique_idx").on(table.tenantId, table.id),
+  }),
+);
+
+// ─── Workspace-scoped provider authority (governed-provider plan PR1) ─────────
+//
+// ⚠️ RAW-SQL-ONLY INVARIANTS (drift risk — NOT expressible in Drizzle, see
+//    drizzle/0079_workspace_provider_authority.sql):
+//
+//    1. Ownership immutability. A BEFORE UPDATE trigger
+//       `steward_reject_provider_scope_move()` is attached to FIVE tables via
+//       these triggers, and rejects any UPDATE that changes tenant_id /
+//       workspace_id / provider_account_id (RAISE EXCEPTION ... 'immutable',
+//       ERRCODE 23514):
+//         - workspaces_immutable_owner            (ON workspaces)
+//         - provider_accounts_immutable_owner     (ON provider_accounts)
+//         - provider_operations_immutable_owner   (ON provider_operations)
+//         - provider_role_bindings_immutable_owner(ON provider_role_bindings)
+//         - provider_grants_immutable_owner       (ON provider_grants)
+//       Drizzle has no trigger DSL, so these live only in raw SQL. Do NOT
+//       assume a `drizzle-kit generate` reflects them — it will not, and
+//       regenerating without re-adding them silently drops fund-safety guards.
+//
+//    2. provider_role_bindings_lifetime_check CHECK
+//       (not_before IS NULL OR expires_at IS NULL OR expires_at > not_before)
+//       is defined in 0079 raw SQL only and is intentionally absent from the
+//       providerRoleBindings table below (both bounds are nullable there, so
+//       the tri-state predicate is awkward to keep in sync via the Drizzle
+//       `check()` helper). It is the counterpart to providerGrants'
+//       lifetimeCheck (which IS declared in-schema because expires_at is NOT
+//       NULL on grants).
+//
+//    The regression test `packages/db/src/__tests__/provider-authority-migration.test.ts`
+//    ("schema-only invariants ..." cases) asserts all five triggers, the trigger
+//    function, and the lifetime CHECK exist after migration so accidental
+//    removal fails CI.
+
+export const providerEnvironmentEnum = pgEnum("provider_environment", [
+  "development",
+  "staging",
+  "production",
+]);
+export const providerAuthorityStatusEnum = pgEnum("provider_authority_status", [
+  "active",
+  "disabled",
+  "revoked",
+]);
+export const providerPrincipalTypeEnum = pgEnum("provider_principal_type", ["human", "agent"]);
+export const providerRoleEnum = pgEnum("provider_role", [
+  "tenant_authority_admin",
+  "workspace_admin",
+  "workspace_operator",
+  "workspace_viewer",
+  "workspace_approver",
+]);
+export const providerRiskClassEnum = pgEnum("provider_risk_class", [
+  "read",
+  "write",
+  "consequential",
+]);
+
+/** Tenant-level CAS watermark for authority mutations. It is not an access dependency. */
+export const providerAuthorityTenantState = pgTable("provider_authority_tenant_state", {
+  tenantId: varchar("tenant_id", { length: 64 })
+    .primaryKey()
+    .references(() => tenants.id, { onDelete: "cascade" }),
+  revision: integer("revision").notNull().default(0),
+  bootstrapCompleted: boolean("bootstrap_completed").notNull().default(false),
+  ...timestamps,
+});
+
+// NOTE: owner immutability enforced by `workspaces_immutable_owner` trigger in
+// 0079 raw SQL (tenant_id cannot change). Not visible to drizzle-kit.
+export const workspaces = pgTable(
+  "workspaces",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    key: varchar("key", { length: 128 }).notNull(),
+    name: varchar("name", { length: 255 }).notNull(),
+    environment: providerEnvironmentEnum("environment").notNull(),
+    status: providerAuthorityStatusEnum("status").notNull().default("active"),
+    revision: integer("revision").notNull().default(1),
+    createdBy: uuid("created_by").notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantIdUnique: uniqueIndex("workspaces_tenant_id_id_idx").on(table.tenantId, table.id),
+    tenantKeyUnique: uniqueIndex("workspaces_tenant_key_idx").on(table.tenantId, table.key),
+    tenantStatusIdx: index("workspaces_tenant_status_idx").on(table.tenantId, table.status),
+  }),
+);
+
+// NOTE: owner immutability (tenant_id + workspace_id) enforced by
+// `provider_accounts_immutable_owner` trigger in 0079 raw SQL. Not visible to
+// drizzle-kit.
+export const providerAccounts = pgTable(
+  "provider_accounts",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    adapterKey: varchar("adapter_key", { length: 128 }).notNull(),
+    externalRef: varchar("external_ref", { length: 512 }).notNull(),
+    displayName: varchar("display_name", { length: 255 }).notNull(),
+    status: providerAuthorityStatusEnum("status").notNull().default("active"),
+    credentialSecretId: uuid("credential_secret_id"),
+    credentialVersion: integer("credential_version"),
+    revision: integer("revision").notNull().default(1),
+    ...timestamps,
+  },
+  (table) => ({
+    workspaceFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId],
+      foreignColumns: [workspaces.tenantId, workspaces.id],
+      name: "provider_accounts_tenant_workspace_fk",
+    }).onDelete("cascade"),
+    credentialFk: foreignKey({
+      columns: [table.tenantId, table.credentialSecretId],
+      foreignColumns: [secrets.tenantId, secrets.id],
+      name: "provider_accounts_tenant_credential_fk",
+    }).onDelete("restrict"),
+    tenantWorkspaceIdUnique: uniqueIndex("provider_accounts_tenant_workspace_id_idx").on(
+      table.tenantId,
+      table.workspaceId,
+      table.id,
+    ),
+    externalRefUnique: uniqueIndex("provider_accounts_workspace_external_ref_idx").on(
+      table.tenantId,
+      table.workspaceId,
+      table.adapterKey,
+      table.externalRef,
+    ),
+    credentialPairCheck: check(
+      "provider_accounts_credential_pair_check",
+      sql`(${table.credentialSecretId} IS NULL) = (${table.credentialVersion} IS NULL)`,
+    ),
+  }),
+);
+
+// NOTE: owner immutability enforced by `provider_operations_immutable_owner`
+// trigger in 0079 raw SQL. Not visible to drizzle-kit.
+export const providerOperations = pgTable(
+  "provider_operations",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    providerAccountId: uuid("provider_account_id").notNull(),
+    operationKey: varchar("operation_key", { length: 128 }).notNull(),
+    riskClass: providerRiskClassEnum("risk_class").notNull(),
+    capabilityId: uuid("capability_id"),
+    secretRouteId: uuid("secret_route_id"),
+    requestProfile: jsonb("request_profile").$type<Record<string, unknown>>().notNull().default({}),
+    responseProfile: jsonb("response_profile")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    status: providerAuthorityStatusEnum("status").notNull().default("active"),
+    revision: integer("revision").notNull().default(1),
+    ...timestamps,
+  },
+  (table) => ({
+    accountFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId, table.providerAccountId],
+      foreignColumns: [
+        providerAccounts.tenantId,
+        providerAccounts.workspaceId,
+        providerAccounts.id,
+      ],
+      name: "provider_operations_tenant_workspace_account_fk",
+    }).onDelete("cascade"),
+    routeFk: foreignKey({
+      columns: [table.tenantId, table.secretRouteId],
+      foreignColumns: [secretRoutes.tenantId, secretRoutes.id],
+      name: "provider_operations_tenant_route_fk",
+    }).onDelete("restrict"),
+    operationUnique: uniqueIndex("provider_operations_account_key_idx").on(
+      table.tenantId,
+      table.workspaceId,
+      table.providerAccountId,
+      table.operationKey,
+    ),
+    tenantWorkspaceAccountIdUnique: uniqueIndex(
+      "provider_operations_tenant_workspace_account_id_idx",
+    ).on(table.tenantId, table.workspaceId, table.providerAccountId, table.id),
+  }),
+);
+
+// NOTE: owner immutability enforced by `provider_role_bindings_immutable_owner`
+// trigger, and the tri-state lifetime rule by
+// `provider_role_bindings_lifetime_check` CHECK — BOTH in 0079 raw SQL only
+// (see the section banner above). Not visible to drizzle-kit.
+export const providerRoleBindings = pgTable(
+  "provider_role_bindings",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id"),
+    providerAccountId: uuid("provider_account_id"),
+    principalType: providerPrincipalTypeEnum("principal_type").notNull(),
+    principalId: varchar("principal_id", { length: 64 }).notNull(),
+    roleKey: providerRoleEnum("role_key").notNull(),
+    operationKeys: text("operation_keys").array().notNull().default([]),
+    environment: providerEnvironmentEnum("environment"),
+    notBefore: timestamp("not_before", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    status: providerAuthorityStatusEnum("status").notNull().default("active"),
+    revision: integer("revision").notNull().default(1),
+    grantedByUserId: uuid("granted_by_user_id").notNull(),
+    reason: text("reason").notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    workspaceFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId],
+      foreignColumns: [workspaces.tenantId, workspaces.id],
+      name: "provider_role_bindings_tenant_workspace_fk",
+    }).onDelete("cascade"),
+    accountFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId, table.providerAccountId],
+      foreignColumns: [
+        providerAccounts.tenantId,
+        providerAccounts.workspaceId,
+        providerAccounts.id,
+      ],
+      name: "provider_role_bindings_tenant_workspace_account_fk",
+    }).onDelete("cascade"),
+    principalIdx: index("provider_role_bindings_principal_idx").on(
+      table.tenantId,
+      table.principalType,
+      table.principalId,
+      table.status,
+    ),
+    scopeCheck: check(
+      "provider_role_bindings_scope_check",
+      sql`(${table.roleKey} = 'tenant_authority_admin' AND ${table.workspaceId} IS NULL AND ${table.providerAccountId} IS NULL) OR (${table.roleKey} <> 'tenant_authority_admin' AND ${table.workspaceId} IS NOT NULL)`,
+    ),
+    accountNeedsWorkspaceCheck: check(
+      "provider_role_bindings_account_workspace_check",
+      sql`${table.providerAccountId} IS NULL OR ${table.workspaceId} IS NOT NULL`,
+    ),
+  }),
+);
+
+// NOTE: owner immutability enforced by `provider_grants_immutable_owner`
+// trigger in 0079 raw SQL (lifetimeCheck IS declared in-schema below since
+// expires_at is NOT NULL here). Not visible to drizzle-kit.
+export const providerGrants = pgTable(
+  "provider_grants",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    providerAccountId: uuid("provider_account_id").notNull(),
+    agentId: varchar("agent_id", { length: 64 }).notNull(),
+    operationKeys: text("operation_keys").array().notNull(),
+    environment: providerEnvironmentEnum("environment"),
+    notBefore: timestamp("not_before", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    status: providerAuthorityStatusEnum("status").notNull().default("active"),
+    revision: integer("revision").notNull().default(1),
+    grantedByUserId: uuid("granted_by_user_id").notNull(),
+    reason: text("reason").notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedByUserId: uuid("revoked_by_user_id"),
+    revocationReason: text("revocation_reason"),
+    ...timestamps,
+  },
+  (table) => ({
+    accountFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId, table.providerAccountId],
+      foreignColumns: [
+        providerAccounts.tenantId,
+        providerAccounts.workspaceId,
+        providerAccounts.id,
+      ],
+      name: "provider_grants_tenant_workspace_account_fk",
+    }).onDelete("cascade"),
+    agentFk: foreignKey({
+      columns: [table.tenantId, table.agentId],
+      foreignColumns: [agents.tenantId, agents.id],
+      name: "provider_grants_tenant_agent_fk",
+    }).onDelete("cascade"),
+    agentScopeIdx: index("provider_grants_agent_scope_idx").on(
+      table.tenantId,
+      table.workspaceId,
+      table.agentId,
+      table.status,
+    ),
+    operationsNonempty: check(
+      "provider_grants_operations_nonempty_check",
+      sql`cardinality(${table.operationKeys}) > 0`,
+    ),
+    lifetimeCheck: check(
+      "provider_grants_lifetime_check",
+      sql`${table.notBefore} IS NULL OR ${table.expiresAt} > ${table.notBefore}`,
+    ),
+  }),
+);
+
+export type Workspace = typeof workspaces.$inferSelect;
+export type ProviderAccount = typeof providerAccounts.$inferSelect;
+export type ProviderOperation = typeof providerOperations.$inferSelect;
+export type ProviderRoleBinding = typeof providerRoleBindings.$inferSelect;
+export type ProviderGrant = typeof providerGrants.$inferSelect;
+
+// ─── Provider action bindings (PR2) ──────────────────────────────────────────
+// The 1:1 typed companion to `intents` that carries the canonical provider
+// action, request envelope, and the two separate (access + policy) decision
+// documents with distinct IDs/hashes. `intents` stays the sole lifecycle root.
+//
+// NOTE: several invariants live ONLY in 0080 raw SQL and are not visible to
+// drizzle-kit: (a) the composite FKs to intents/agents/workspaces/accounts/
+// operations, (b) the CHECK constraints (digest regex, effect enums, the
+// access/policy/status state machine, byte-size bounds), and (c) the
+// `provider_action_bindings_immutable` BEFORE UPDATE trigger that freezes every
+// column except status/updated_at and allows only the
+// allowed_stub -> stub_succeeded|stub_failed transition in PR2.
+export const providerActionBindings = pgTable(
+  "provider_action_bindings",
+  {
+    intentId: varchar("intent_id", { length: 64 }).primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    actorAgentId: varchar("actor_agent_id", { length: 64 }).notNull(),
+    providerAccountId: uuid("provider_account_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    operationRevision: integer("operation_revision").notNull(),
+
+    canonicalProfile: varchar("canonical_profile", { length: 96 }).notNull(),
+    canonicalActionBytes: bytea("canonical_action_bytes").notNull(),
+    actionDigest: varchar("action_digest", { length: 71 }).notNull(),
+    requestEnvelope: jsonb("request_envelope").$type<Record<string, unknown>>().notNull(),
+    requestHash: varchar("request_hash", { length: 71 }).notNull(),
+    idempotencyKeyHash: varchar("idempotency_key_hash", { length: 71 }).notNull(),
+    safeSummary: jsonb("safe_summary").$type<Record<string, unknown>>().notNull(),
+
+    accessDecisionId: uuid("access_decision_id").notNull(),
+    accessEffect: varchar("access_effect", { length: 16 }).notNull(),
+    accessReasonCode: varchar("access_reason_code", { length: 96 }).notNull(),
+    matchedBindingIds: uuid("matched_binding_ids").array().notNull().default([]),
+    matchedGrantIds: uuid("matched_grant_ids").array().notNull().default([]),
+    dependencyRevisions: jsonb("dependency_revisions").$type<Record<string, unknown>>().notNull(),
+    accessDecision: jsonb("access_decision").$type<Record<string, unknown>>().notNull(),
+    accessDecisionHash: varchar("access_decision_hash", { length: 71 }).notNull(),
+
+    policyDecisionId: uuid("policy_decision_id"),
+    policyEffect: varchar("policy_effect", { length: 24 }).notNull(),
+    policyReasonCodes: text("policy_reason_codes").array().notNull().default([]),
+    policyResults: jsonb("policy_results")
+      .$type<Array<Record<string, unknown>>>()
+      .notNull()
+      .default([]),
+    policyRevisionHash: varchar("policy_revision_hash", { length: 71 }),
+    policyDecision: jsonb("policy_decision").$type<Record<string, unknown>>(),
+    policyDecisionHash: varchar("policy_decision_hash", { length: 71 }),
+
+    status: varchar("status", { length: 32 }).notNull(),
+    // ── PR3 approval lifecycle columns (0081) ──
+    // Mutable only via the PR3 transition trigger; binding_revision increments by
+    // exactly one per state-changing transition. Several invariants (transition
+    // graph, per-state field-shape CHECK, frozen-column freeze) live in 0081 raw
+    // SQL and are not visible to drizzle-kit.
+    bindingRevision: integer("binding_revision").notNull().default(1),
+    approvalQueueId: varchar("approval_queue_id", { length: 64 }),
+    approvalActorUserId: uuid("approval_actor_user_id"),
+    approvalCommitmentHash: varchar("approval_commitment_hash", { length: 71 }),
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    deniedAt: timestamp("denied_at", { withTimezone: true }),
+    expiredAt: timestamp("expired_at", { withTimezone: true }),
+    staleAt: timestamp("stale_at", { withTimezone: true }),
+    staleReasonCode: varchar("stale_reason_code", { length: 96 }),
+    resumeActor: varchar("resume_actor", { length: 64 }),
+    resumeAttemptId: uuid("resume_attempt_id"),
+    resumeValidatedAt: timestamp("resume_validated_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    intentFk: foreignKey({
+      columns: [table.tenantId, table.intentId],
+      foreignColumns: [intents.tenantId, intents.id],
+      name: "provider_action_bindings_intent_fk",
+    }).onDelete("cascade"),
+    actorFk: foreignKey({
+      columns: [table.tenantId, table.actorAgentId],
+      foreignColumns: [agents.tenantId, agents.id],
+      name: "provider_action_bindings_actor_fk",
+    }).onDelete("restrict"),
+    workspaceFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId],
+      foreignColumns: [workspaces.tenantId, workspaces.id],
+      name: "provider_action_bindings_workspace_fk",
+    }).onDelete("restrict"),
+    accountFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId, table.providerAccountId],
+      foreignColumns: [
+        providerAccounts.tenantId,
+        providerAccounts.workspaceId,
+        providerAccounts.id,
+      ],
+      name: "provider_action_bindings_account_fk",
+    }).onDelete("restrict"),
+    operationFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId, table.providerAccountId, table.operationId],
+      foreignColumns: [
+        providerOperations.tenantId,
+        providerOperations.workspaceId,
+        providerOperations.providerAccountId,
+        providerOperations.id,
+      ],
+      name: "provider_action_bindings_operation_fk",
+    }).onDelete("restrict"),
+    accessDecisionIdUnique: uniqueIndex("provider_action_bindings_access_decision_id_uniq").on(
+      table.accessDecisionId,
+    ),
+    requestHashUnique: uniqueIndex("provider_action_bindings_request_hash_uniq").on(
+      table.requestHash,
+    ),
+    idempotencyUnique: uniqueIndex("provider_action_bindings_idempotency_uniq").on(
+      table.tenantId,
+      table.workspaceId,
+      table.actorAgentId,
+      table.operationId,
+      table.idempotencyKeyHash,
+    ),
+    scopeCreatedIdx: index("provider_action_bindings_scope_created_idx").on(
+      table.tenantId,
+      table.workspaceId,
+      table.createdAt,
+    ),
+    actorStatusCreatedIdx: index("provider_action_bindings_actor_status_created_idx").on(
+      table.tenantId,
+      table.actorAgentId,
+      table.status,
+      table.createdAt,
+    ),
+  }),
+);
+
+export type ProviderActionBinding = typeof providerActionBindings.$inferSelect;
+
+// Transactional required-audit outbox (spec §6.4). A provider-action decision
+// inserts its REQUIRED audit intent here in the SAME transaction as the binding;
+// it is drained into the tamper-evident audit chain immediately after commit and
+// BEFORE the executor stub can run. Guarantees the event is never lost even though
+// the audit chain uses its own advisory-locked transaction.
+export const providerActionAuditOutbox = pgTable(
+  "provider_action_audit_outbox",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    intentId: varchar("intent_id", { length: 64 }).notNull(),
+    action: varchar("action", { length: 96 }).notNull(),
+    resourceType: varchar("resource_type", { length: 64 }).notNull(),
+    resourceId: varchar("resource_id", { length: 255 }).notNull(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    intentFk: foreignKey({
+      columns: [table.tenantId, table.intentId],
+      foreignColumns: [intents.tenantId, intents.id],
+      name: "provider_action_audit_outbox_intent_fk",
+    }).onDelete("cascade"),
+    undeliveredIdx: index("provider_action_audit_outbox_undelivered_idx").on(
+      table.tenantId,
+      table.createdAt,
+    ),
+  }),
+);
+
+export type ProviderActionAuditOutbox = typeof providerActionAuditOutbox.$inferSelect;
+
+export const pendingProxyRequestStatusEnum = pgEnum("pending_proxy_request_status", [
+  "pending",
+  "approved",
+  "denied",
+  "executing",
+  "executed",
+  "expired",
+  "failed",
+]);
+
+export const pendingProxyRequests = pgTable(
+  "pending_proxy_requests",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: text("tenant_id").notNull(),
+    agentId: varchar("agent_id", { length: 64 }).notNull(),
+    routeId: uuid("route_id").notNull(),
+    method: varchar("method", { length: 10 }).notNull(),
+    targetHost: varchar("target_host", { length: 512 }).notNull(),
+    targetPath: varchar("target_path", { length: 2048 }).notNull(),
+    requestDigest: varchar("request_digest", { length: 64 }).notNull(),
+    idempotencyKey: varchar("idempotency_key", { length: 255 }),
+    preview: jsonb("preview").$type<Record<string, unknown>>().notNull().default({}),
+    safeHeaders: jsonb("safe_headers").$type<Record<string, string>>().notNull().default({}),
+    bodyCiphertext: text("body_ciphertext").notNull(),
+    bodyIv: text("body_iv").notNull(),
+    bodyAuthTag: text("body_auth_tag").notNull(),
+    bodySalt: text("body_salt").notNull(),
+    status: pendingProxyRequestStatusEnum("status").notNull().default("pending"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    approvedBy: varchar("approved_by", { length: 255 }),
+    deniedAt: timestamp("denied_at", { withTimezone: true }),
+    deniedBy: varchar("denied_by", { length: 255 }),
+    denialReason: text("denial_reason"),
+    executedAt: timestamp("executed_at", { withTimezone: true }),
+    executionStatusCode: integer("execution_status_code"),
+    executionError: text("execution_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdateFn(() => sql`now()`),
+  },
+  (table) => ({
+    tenantStatusIdx: index("pending_proxy_requests_tenant_status_idx").on(
+      table.tenantId,
+      table.status,
+      table.createdAt,
+    ),
+    agentIdx: index("pending_proxy_requests_agent_idx").on(table.agentId),
+    routeIdx: index("pending_proxy_requests_route_idx").on(table.routeId),
+    expiresAtIdx: index("pending_proxy_requests_expires_at_idx").on(table.expiresAt),
+    idempotencyIdx: uniqueIndex("pending_proxy_requests_idempotency_idx").on(
+      table.tenantId,
+      table.agentId,
+      table.idempotencyKey,
+    ),
   }),
 );
 
@@ -1590,6 +2357,8 @@ export type Secret = typeof secrets.$inferSelect;
 export type NewSecret = typeof secrets.$inferInsert;
 export type SecretRoute = typeof secretRoutes.$inferSelect;
 export type NewSecretRoute = typeof secretRoutes.$inferInsert;
+export type PendingProxyRequest = typeof pendingProxyRequests.$inferSelect;
+export type NewPendingProxyRequest = typeof pendingProxyRequests.$inferInsert;
 
 // ─── Proxy Audit Log ─────────────────────────────────────────────────────────
 
@@ -1743,3 +2512,35 @@ export const auditChainHeads = pgTable("audit_chain_heads", {
 
 export type AuditChainHead = typeof auditChainHeads.$inferSelect;
 export type NewAuditChainHead = typeof auditChainHeads.$inferInsert;
+
+// Ed25519 checkpoints over the audit chain head. The HMAC chain is symmetric
+// (verifiable only with STEWARD_AUDIT_HMAC_KEY); a checkpoint signs a canonical
+// statement about the chain head with an Ed25519 key whose PUBLIC half can be
+// published, so an third-party auditor can verify a signed evidence bundle offline
+// without any Steward secret. `payload` is the exact JSON object that was
+// canonicalized+signed; `signature` is base64 Ed25519 over the canonical bytes;
+// `publicKey` is the SPKI PEM (denormalized per row so a bundle is
+// self-contained and key rotation is auditable). Append-only, never mutated.
+export const auditCheckpoints = pgTable(
+  "audit_checkpoints",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    seq: bigint("seq", { mode: "number" }).notNull(),
+    headHmac: bytea("head_hmac").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    signature: text("signature").notNull(),
+    publicKey: text("public_key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    tenantSeqIdx: index("audit_checkpoints_tenant_seq_idx").on(table.tenantId, table.seq),
+    tenantCreatedIdx: index("audit_checkpoints_tenant_created_idx").on(
+      table.tenantId,
+      table.createdAt,
+    ),
+  }),
+);
+
+export type AuditCheckpointRow = typeof auditCheckpoints.$inferSelect;
+export type NewAuditCheckpointRow = typeof auditCheckpoints.$inferInsert;

@@ -65,6 +65,16 @@ describe("#101 deploy/docker-compose.yml proxy production env", () => {
     expect(hasRedisUrl || optsOutOfRedis).toBe(true);
   });
 
+  test("production proxy supplies STEWARD_AUDIT_HMAC_KEY (approval-expiry now extends the audit chain, fails closed without it)", () => {
+    // The proxy release handler's approval-expiry paths now commit a
+    // `proxy.approval.expired` event to the tamper-evident audit chain
+    // (release.ts -> withTenantAuditedTransaction). getHmacKey() throws under
+    // NODE_ENV=production when STEWARD_AUDIT_HMAC_KEY is unset, so an expired
+    // approval polled through the proxy would 5xx and never transition. The
+    // production proxy service must therefore supply the key.
+    expect(/STEWARD_AUDIT_HMAC_KEY\s*:/.test(proxy)).toBe(true);
+  });
+
   test("a redis service is defined when REDIS_URL points at the redis host", () => {
     if (/REDIS_URL\s*:\s*["']?\S*redis:\/\/redis(:|\b)/.test(proxy)) {
       expect(/^\s{2}redis:\s*$/m.test(compose)).toBe(true);
@@ -170,6 +180,9 @@ describe("#111 deploy/provision-steward-node.sh does not leak secrets", () => {
       "STEWARD_MASTER_PASSWORD",
       "STEWARD_JWT_SECRET",
       "STEWARD_KDF_SALT",
+      // The production proxy fails closed on audit-chain writes (approval expiry)
+      // without this; the provisioner must render it into the node .env.
+      "STEWARD_AUDIT_HMAC_KEY",
       "POSTGRES_PASSWORD",
     ]) {
       expect(new RegExp(`^${key}=`, "m").test(script)).toBe(true);

@@ -9,11 +9,13 @@ The Steward API is a REST API built with [Hono](https://hono.dev) running on [Bu
 
 ## Base URL
 
+Steward is self-hosted. Point the SDK and all requests at your own deployment. The default local Compose profile exposes the API on port 3200:
+
 ```
-https://api.steward.fi
+http://localhost:3200
 ```
 
-For self-hosted instances, replace with your deployment URL.
+Replace this with your deployment's URL when running behind your own domain and TLS.
 
 ## Authentication
 
@@ -24,7 +26,7 @@ Steward supports three authentication methods:
     For tenant-level operations (agent CRUD, policy management, secret management):
 
     ```bash
-    curl https://api.steward.fi/agents \
+    curl http://localhost:3200/agents \
       -H "X-Steward-Key: stwd_your_tenant_api_key"
     ```
 
@@ -34,7 +36,7 @@ Steward supports three authentication methods:
     For agent-scoped operations (signing, balance checks). Preferred for agents:
 
     ```bash
-    curl https://api.steward.fi/vault/my-agent/sign \
+    curl http://localhost:3200/vault/my-agent/sign \
       -H "Authorization: Bearer stwd_jwt_..."
     ```
 
@@ -45,10 +47,10 @@ Steward supports three authentication methods:
 
     ```bash
     # 1. Get nonce
-    curl https://api.steward.fi/auth/nonce
+    curl http://localhost:3200/auth/nonce
 
     # 2. Sign message and verify
-    curl -X POST https://api.steward.fi/auth/verify \
+    curl -X POST http://localhost:3200/auth/verify \
       -H "Content-Type: application/json" \
       -d '{ "message": "...", "signature": "0x..." }'
     ```
@@ -62,7 +64,7 @@ Steward supports three authentication methods:
 For platform-level operations (cross-tenant management), use the platform key:
 
 ```bash
-curl https://api.steward.fi/platform/stats \
+curl http://localhost:3200/platform/stats \
   -H "X-Steward-Platform-Key: your-platform-key"
 ```
 

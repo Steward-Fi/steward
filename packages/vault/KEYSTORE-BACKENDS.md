@@ -68,6 +68,51 @@ Environment variables:
 - `STEWARD_PKCS11_PIN`, user PIN or token PIN
 - `STEWARD_PKCS11_KEY_LABEL`, label of the wrapping key
 
+## SignerBackend — the threshold/MPC sibling (does NOT replace KeystoreBackend)
+
+`KeystoreBackend` is built around `encrypt(privateKey) -> EncryptedKey` /
+`decrypt(EncryptedKey) -> privateKey`. That shape assumes a raw private key
+*exists* and can be handed back for an ephemeral signing operation. Threshold /
+MPC signing (FROST, CGGMP21) breaks that assumption on purpose: the private key
+never assembles in one place, so there is nothing to `encrypt` and nothing for
+`decrypt` to return.
+
+Rather than corrupt the `KeystoreBackend` contract, `@stwd/vault` ships a
+**sibling** interface, `SignerBackend` (`src/signer-backend.ts`). The two are
+independent and complementary:
+
+| | `KeystoreBackend` | `SignerBackend` |
+|---|---|---|
+| Key material | raw private key, encrypted at rest | shares that never assemble |
+| Core methods | `encrypt` / `decrypt` | `generate` (DKG/keygen ceremony) / `sign` / `verify` |
+| Returns raw key? | yes (`decrypt`) | **never** — `capabilities.canReturnRawKey: false` (literal type) |
+| Default? | yes (AES-256-GCM) | no — opt-in per wallet |
+| Backends | AES, AWS KMS, PKCS#11 | FROST-secp256k1 (`@stwd/signer-frost`), later CGGMP21 |
+
+The defining property of `SignerBackend` is `canReturnRawKey: false` as a
+*literal type* — it is impossible to construct one that advertises a raw-key
+export path, and `assertNoRawKeyExport()` enforces it at runtime for values that
+slipped through via `any`/casts.
+
+The classic path is untouched: existing call sites that `decrypt`-then-sign keep
+working exactly as before. A wallet opts into threshold signing by carrying a
+`ThresholdKeyRef` and routing to `signerBackend.sign(ref, digest)` instead of
+touching `keystore.decrypt`. See `packages/signer-frost/THRESHOLD-SIGNING.md` for
+the FROST prototype, ceremony/ops, and the EIP-1271/Safe verification path.
+
+```ts
+import type { SignerBackend, ThresholdKeyRef } from "@stwd/vault";
+import { FrostSignerBackend } from "@stwd/signer-frost";
+
+const signer: SignerBackend = new FrostSignerBackend({
+  shareEndpoints: ["http://127.0.0.1:7401", "http://127.0.0.1:7402", "http://127.0.0.1:7403"],
+  threshold: 2,
+  groupPublicKeyHex: process.env.STEWARD_FROST_GROUP_PUBKEY!,
+});
+const ref: ThresholdKeyRef = signer.keyRef();
+const { signature } = await signer.sign(ref, digest); // no private key ever exists
+```
+
 ## Custom backend
 
 Implement `KeystoreBackend` and pass it to the vault.

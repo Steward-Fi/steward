@@ -221,7 +221,7 @@ const { accounts } = await steward.accounts.list();
 ```
 
 ```bash cURL
-curl https://api.steward.fi/accounts \
+curl http://localhost:3200/accounts \
   -H "X-Steward-Key: your-key"
 ```
 </CodeGroup>
@@ -276,7 +276,7 @@ const account = await steward.accounts.create({
 ```
 
 ```bash cURL
-curl -X POST https://api.steward.fi/accounts \
+curl -X POST http://localhost:3200/accounts \
   -H "X-Steward-Key: your-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -310,7 +310,7 @@ const account = await steward.accounts.get("acct_treasury");
 ```
 
 ```bash cURL
-curl https://api.steward.fi/accounts/acct_treasury \
+curl http://localhost:3200/accounts/acct_treasury \
   -H "X-Steward-Key: your-key"
 ```
 </CodeGroup>
@@ -420,7 +420,7 @@ const balance = await steward.accounts.getBalance("acct_treasury");
 ```
 
 ```bash cURL
-curl "https://api.steward.fi/accounts/acct_treasury/balance?chainId=84532&tokens=0x9999999999999999999999999999999999999999" \
+curl "http://localhost:3200/accounts/acct_treasury/balance?chainId=84532&tokens=0x9999999999999999999999999999999999999999" \
   -H "X-Steward-Key: your-key"
 ```
 </CodeGroup>
@@ -469,7 +469,7 @@ const account = await steward.accounts.update("acct_treasury", {
 ```
 
 ```bash cURL
-curl -X PATCH https://api.steward.fi/accounts/acct_treasury \
+curl -X PATCH http://localhost:3200/accounts/acct_treasury \
   -H "X-Steward-Key: your-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -514,7 +514,7 @@ await steward.accounts.delete("acct_treasury");
 ```
 
 ```bash cURL
-curl -X DELETE https://api.steward.fi/accounts/acct_treasury \
+curl -X DELETE http://localhost:3200/accounts/acct_treasury \
   -H "X-Steward-Key: your-key"
 ```
 </CodeGroup>
@@ -584,7 +584,7 @@ const { aggregations } = await steward.accounts.listAggregations("acct_treasury"
 ```
 
 ```bash cURL
-curl https://api.steward.fi/accounts/acct_treasury/aggregations \
+curl http://localhost:3200/accounts/acct_treasury/aggregations \
   -H "X-Steward-Key: your-key"
 ```
 </CodeGroup>
@@ -617,7 +617,7 @@ const aggregation = await steward.accounts.createAggregation("acct_treasury", {
 ```
 
 ```bash cURL
-curl -X POST https://api.steward.fi/accounts/acct_treasury/aggregations \
+curl -X POST http://localhost:3200/accounts/acct_treasury/aggregations \
   -H "X-Steward-Key: your-key" \
   -H "Content-Type: application/json" \
   -d '{

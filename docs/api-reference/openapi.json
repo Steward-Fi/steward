@@ -7,8 +7,8 @@
   },
   "servers": [
     {
-      "url": "https://api.steward.fi",
-      "description": "Production"
+      "url": "http://localhost:3200",
+      "description": "Your self-hosted Steward instance (Steward is self-host-first; replace with your deployment URL). The playground targets this rather than the docs domain."
     }
   ],
   "components": {

@@ -1,0 +1,22 @@
+{
+  "name": "@stwd/signer-frost",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "dev": "tsc --watch",
+    "test": "bun test --timeout 60000",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "sidecar:build": "cargo build --release --manifest-path sidecar/Cargo.toml"
+  },
+  "dependencies": {
+    "@stwd/vault": "workspace:*"
+  },
+  "description": "PROTOTYPE FROST-secp256k1 (Zcash Foundation) threshold SignerBackend for @stwd/vault. Rust sidecar + thin TS client. Dev keys only.",
+  "devDependencies": {
+    "@types/node": "^25.5.0"
+  }
+}

@@ -36,6 +36,7 @@ import {
   refreshTokens,
   secretRoutes,
   secrets,
+  type TenantEmailConfig,
   tenantConfigs,
   tenantInvitations,
   tenants,
@@ -74,6 +75,7 @@ import {
   publicTestAccount,
   redactedTestAccount,
 } from "../services/test-account-credentials";
+import { getConfiguredVault } from "../services/vault-factory";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 import { getEmailAuthForTenant, invalidateEmailAuthForTenant } from "./auth";
 
@@ -304,35 +306,15 @@ function platformIdentityMigrationDisabledResponse(c: Context) {
   );
 }
 
-// ─── Vault singleton ──────────────────────────────────────────────────────────
-// Platform routes share the same vault as the main API.
+// ─── Vault access ─────────────────────────────────────────────────────────────
+// Platform routes use the shared configured-vault factory.
 
 function getVault(): Vault {
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
-  if (!masterPassword) {
-    if (!isDevSecretAllowed()) {
-      throw new Error(
-        "⛔ STEWARD_MASTER_PASSWORD must be set. For local development only, opt in to the " +
-          "insecure dev fallback with STEWARD_ALLOW_DEV_SECRETS=true.",
-      );
-    }
-    console.warn(
-      "⚠️  [DEV ONLY] Using insecure 'dev-secret' as vault master password. Set STEWARD_MASTER_PASSWORD before going to production!",
-    );
-  }
-  return new Vault({
-    masterPassword: masterPassword || "dev-secret",
-    rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
-    chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
-  });
+  return getConfiguredVault({ allowDevSecretFallback: true });
 }
 
-// Lazily-initialised vault (avoids instantiating when the module is just
-// imported during type-checking / tree-shaking).
-let _vault: Vault | undefined;
 function vault(): Vault {
-  if (!_vault) _vault = getVault();
-  return _vault;
+  return getVault();
 }
 
 let _platformKeyStore: KeyStore | undefined;
@@ -484,6 +466,34 @@ function isOptionalString(value: unknown): value is string | undefined {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Validate a deployer-supplied `templates` payload for the email-config
+ * PATCH: `{ magicLink?, otp? }` where each present entry must carry
+ * non-empty `subject`, `text`, and `html` strings. `undefined` (absent) and
+ * `null` (explicit clear) are both accepted; anything else is rejected so a
+ * malformed body can't be persisted and later break auth email rendering.
+ */
+function isValidEmailTemplates(
+  value: unknown,
+): value is TenantEmailConfig["templates"] | null | undefined {
+  if (value === undefined || value === null) return true;
+  if (!isPlainObject(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length === 0) return false;
+  if (!keys.every((key) => key === "magicLink" || key === "otp")) return false;
+  return keys.every((key) => {
+    const entry = value[key];
+    if (!isPlainObject(entry)) return false;
+    const entryKeys = Object.keys(entry);
+    if (!entryKeys.every((k) => k === "subject" || k === "text" || k === "html")) return false;
+    return (
+      isNonEmptyString(entry.subject) &&
+      isNonEmptyString(entry.text) &&
+      isNonEmptyString(entry.html)
+    );
+  });
 }
 
 function getPlatformMetadataValidationError(
@@ -1160,9 +1170,17 @@ platform.get("/tenants/:id", async (c) => {
 
 /**
  * PATCH /tenants/:tenantId/email-config
- * Body: { apiKey, from, replyTo?, templateId?, subjectOverride? }
+ * Body: { apiKey, from, replyTo?, templateId?, subjectOverride?, templates? }
+ *   or template-only: { templateId?, subjectOverride?, replyTo?, templates? }
+ *   (no apiKey)
  *
- * Upserts the tenant-specific email provider config.
+ * Upserts the tenant-specific email provider config. When `apiKey` is
+ * omitted the tenant keeps the platform's global Resend provider and only
+ * the branding fields (templateId/subjectOverride/replyTo/templates) are
+ * stored — merged over any existing config so magic-link overrides survive.
+ * `templates` carries deployer-supplied raw subject/text/html bodies with
+ * {{placeholder}} substitution (see TenantEmailConfig.templates); pass
+ * `templates: null` to clear them.
  */
 platform.patch("/tenants/:tenantId/email-config", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-email-config:write");
@@ -1185,36 +1203,135 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
     replyTo?: string;
     templateId?: string;
     subjectOverride?: string;
+    magicLinkBaseUrl?: string;
+    magicLinkCallbackPath?: string;
+    templates?: TenantEmailConfig["templates"] | null;
   }>(c);
 
   if (!body) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   }
 
-  if (!isNonEmptyString(body.apiKey) || !isNonEmptyString(body.from)) {
+  if (!isValidEmailTemplates(body.templates)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "templates must be { magicLink?, otp? } where each entry has non-empty subject, text, and html strings (or null to clear)",
+      },
+      400,
+    );
+  }
+
+  const isTemplateOnly = body.apiKey === undefined;
+
+  if (isTemplateOnly) {
+    if (body.from !== undefined) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "from requires apiKey (per-tenant provider config)" },
+        400,
+      );
+    }
+    if (
+      !body.templateId &&
+      !body.subjectOverride &&
+      !body.replyTo &&
+      !body.magicLinkBaseUrl &&
+      !body.magicLinkCallbackPath &&
+      body.templates === undefined
+    ) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            "Provide apiKey+from for provider config, or at least one of templateId, subjectOverride, replyTo, magicLinkBaseUrl, magicLinkCallbackPath, templates",
+        },
+        400,
+      );
+    }
+  } else if (!isNonEmptyString(body.apiKey) || !isNonEmptyString(body.from)) {
     return c.json<ApiResponse>({ ok: false, error: "apiKey and from are required" }, 400);
   }
 
   if (
     !isOptionalString(body.replyTo) ||
     !isOptionalString(body.templateId) ||
-    !isOptionalString(body.subjectOverride)
+    !isOptionalString(body.subjectOverride) ||
+    !isOptionalString(body.magicLinkBaseUrl) ||
+    !isOptionalString(body.magicLinkCallbackPath)
   ) {
     return c.json<ApiResponse>(
-      { ok: false, error: "replyTo, templateId, and subjectOverride must be non-empty strings" },
+      {
+        ok: false,
+        error:
+          "replyTo, templateId, subjectOverride, magicLinkBaseUrl, and magicLinkCallbackPath must be non-empty strings",
+      },
       400,
     );
   }
 
-  const encryptedApiKey = JSON.stringify(platformKeyStore().encrypt(body.apiKey.trim()));
-  const emailConfig = {
-    provider: "resend" as const,
-    apiKeyEncrypted: encryptedApiKey,
-    from: body.from.trim(),
-    ...(body.replyTo ? { replyTo: body.replyTo.trim() } : {}),
-    ...(body.templateId ? { templateId: body.templateId.trim() } : {}),
-    ...(body.subjectOverride ? { subjectOverride: body.subjectOverride.trim() } : {}),
-  };
+  if (body.magicLinkBaseUrl) {
+    try {
+      const url = new URL(body.magicLinkBaseUrl);
+      if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("protocol");
+    } catch {
+      return c.json<ApiResponse>(
+        { ok: false, error: "magicLinkBaseUrl must be an absolute HTTP(S) URL" },
+        400,
+      );
+    }
+  }
+  if (
+    body.magicLinkCallbackPath &&
+    (!body.magicLinkCallbackPath.startsWith("/") || body.magicLinkCallbackPath.startsWith("//"))
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "magicLinkCallbackPath must be a root-relative path" },
+      400,
+    );
+  }
+
+  const [existingRow] = await db
+    .select({ emailConfig: tenantConfigs.emailConfig })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+
+  // `templates: null` clears stored templates; undefined leaves them alone
+  // (template-only merge) or omits them (full provider replace).
+  const templatesPatch =
+    body.templates === undefined
+      ? {}
+      : body.templates === null
+        ? { templates: undefined }
+        : { templates: body.templates };
+
+  const emailConfig = isTemplateOnly
+    ? {
+        // Merge branding fields over the existing config so a template-only
+        // PATCH can't clobber magic-link overrides or provider creds.
+        ...(existingRow?.emailConfig ?? {}),
+        ...(body.replyTo ? { replyTo: body.replyTo.trim() } : {}),
+        ...(body.templateId ? { templateId: body.templateId.trim() } : {}),
+        ...(body.subjectOverride ? { subjectOverride: body.subjectOverride.trim() } : {}),
+        ...(body.magicLinkBaseUrl ? { magicLinkBaseUrl: body.magicLinkBaseUrl.trim() } : {}),
+        ...(body.magicLinkCallbackPath
+          ? { magicLinkCallbackPath: body.magicLinkCallbackPath.trim() }
+          : {}),
+        ...templatesPatch,
+      }
+    : {
+        provider: "resend" as const,
+        apiKeyEncrypted: JSON.stringify(platformKeyStore().encrypt(body.apiKey.trim())),
+        from: body.from.trim(),
+        ...(body.replyTo ? { replyTo: body.replyTo.trim() } : {}),
+        ...(body.templateId ? { templateId: body.templateId.trim() } : {}),
+        ...(body.subjectOverride ? { subjectOverride: body.subjectOverride.trim() } : {}),
+        ...(body.magicLinkBaseUrl ? { magicLinkBaseUrl: body.magicLinkBaseUrl.trim() } : {}),
+        ...(body.magicLinkCallbackPath
+          ? { magicLinkCallbackPath: body.magicLinkCallbackPath.trim() }
+          : {}),
+        ...templatesPatch,
+      };
 
   await writeAuditEvent({
     tenantId,
@@ -1264,22 +1381,22 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
 
   return c.json<
     ApiResponse<{
-      provider: "resend";
-      from: string;
+      provider?: "resend";
+      from?: string;
       replyTo?: string;
       templateId?: string;
       subjectOverride?: string;
-      hasApiKey: true;
+      hasApiKey: boolean;
     }>
   >({
     ok: true,
     data: {
-      provider: "resend",
+      provider: emailConfig.provider,
       from: emailConfig.from,
       replyTo: emailConfig.replyTo,
       templateId: emailConfig.templateId,
       subjectOverride: emailConfig.subjectOverride,
-      hasApiKey: true,
+      hasApiKey: Boolean(emailConfig.apiKeyEncrypted),
     },
   });
 });
@@ -1320,6 +1437,7 @@ platform.get("/tenants/:tenantId/email-config", async (c) => {
         subjectOverride?: string;
         magicLinkBaseUrl?: string;
         magicLinkCallbackPath?: string;
+        templates?: TenantEmailConfig["templates"];
       } | null;
       hasApiKey: boolean;
     }>
@@ -1335,6 +1453,7 @@ platform.get("/tenants/:tenantId/email-config", async (c) => {
             subjectOverride: emailConfig.subjectOverride,
             magicLinkBaseUrl: emailConfig.magicLinkBaseUrl,
             magicLinkCallbackPath: emailConfig.magicLinkCallbackPath,
+            templates: emailConfig.templates,
           },
           hasApiKey: Boolean(emailConfig.apiKeyEncrypted),
         }

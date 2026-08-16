@@ -1,15 +1,15 @@
 ---
 title: "Cloud Deployment Integration"
-description: "How Steward powers wallet management for hosted AI agents across a node fleet."
+description: "How to self-host Steward for wallet management across an operator-controlled node fleet."
 ---
 
 # Cloud Deployment Integration
 
-A hosted cloud deployment can use Steward as the governance layer between its agent containers and the outside world. This guide describes a production topology managing dozens of AI agents across a node fleet with on-chain transactions on Base mainnet.
+An operator-controlled cloud deployment can place Steward governed routes between its agent containers and configured provider or wallet operations. This guide describes a reference topology for a node fleet with on-chain transactions on Base mainnet.
 
 ## Architecture
 
-Each node runs Steward as the governance layer in front of its agent containers:
+Each node runs self-hosted Steward in front of supported agent actions:
 
 ```
 ┌─────────────────────────────────────────┐

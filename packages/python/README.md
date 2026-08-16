@@ -6,7 +6,7 @@ Python backend SDK for Steward API integrations.
 from steward_sdk import StewardClient
 
 client = StewardClient(
-    base_url="https://api.steward.fi",
+    base_url="http://localhost:3200",
     platform_key="steward_platform_...",
 )
 
@@ -21,7 +21,7 @@ Steward HMAC request signatures, freshness timestamps, and idempotency keys.
 
 ```python
 client = StewardClient(
-    base_url="https://api.steward.fi",
+    base_url="http://localhost:3200",
     app_id="app_...",
     app_secret="secret_...",
     request_signing_secret="stwd_req_...",

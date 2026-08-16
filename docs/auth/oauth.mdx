@@ -34,7 +34,7 @@ The popup-based flow keeps the user on your page while authentication happens in
 import { StewardAuth } from "@stwd/sdk";
 
 const auth = new StewardAuth({
-  baseUrl: "https://api.steward.fi",
+  baseUrl: "http://localhost:3200",
   storage: localStorage,
 });
 
@@ -178,7 +178,7 @@ For CLIs, TVs, and other input-constrained clients, Steward supports a bounded R
 
 ```typescript
 const auth = new StewardAuth({
-  baseUrl: "https://api.steward.fi",
+  baseUrl: "http://localhost:3200",
   tenantId: "my-tenant",
 });
 
@@ -232,7 +232,7 @@ attestation provider used by the native app.
 Minimal iOS-bound device-code request:
 
 ```bash
-curl -X POST https://api.steward.fi/auth/device/code \
+curl -X POST http://localhost:3200/auth/device/code \
   -H "Content-Type: application/json" \
   -H "X-Steward-Native-Bundle-Id: com.example.ios" \
   -d '{
@@ -259,7 +259,7 @@ The token poll must repeat the same app client and native identifier, either as
 headers or JSON fields:
 
 ```bash
-curl -X POST https://api.steward.fi/auth/device/token \
+curl -X POST http://localhost:3200/auth/device/token \
   -H "Content-Type: application/json" \
   -d '{
     "grant_type": "urn:ietf:params:oauth:grant-type:device_code",

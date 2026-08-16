@@ -5,12 +5,22 @@ import type { VenueId } from "./types/venue.js";
 
 // ─── Chain providers (extensible registry) ───
 export * from "./chains/index.js";
+export * from "./execution-contract.js";
+export * from "./execution-payload.js";
 export type { PriceOracle } from "./price-oracle.js";
 export { createPriceOracle } from "./price-oracle.js";
+export * from "./provider-action.js";
+export * from "./provider-approval.js";
+export * from "./provider-authority.js";
+export * from "./provider-case.js";
+export * from "./provider-execution-auth.js";
+// ─── Non-throwing description of an arbitrary thrown value (fail-closed catches) ───
+export { describeThrown, UNPRINTABLE_THROWN_VALUE } from "./safe-error.js";
+export * from "./security-surface.js";
 // ─── Token Registry & Price Oracle ───
 export * from "./tokens.js";
 // ─── Per-request app context shape (shared so plugins can type routes) ───
-export type { AppVariables } from "./types/app-variables.js";
+export type { AppVariables, VerifiedAgentPrincipal } from "./types/app-variables.js";
 // ─── Lean-core + opt-in-plugin contract ───
 export type {
   AdapterContribution,
@@ -24,6 +34,7 @@ export type {
 export * from "./types/venue.js";
 // ─── Runtime-extensible webhook event registry (core ∪ plugin-declared) ───
 export { WebhookEventRegistry } from "./webhook-event-registry.js";
+export * from "./x-provider-action.js";
 
 // ─── Tenancy ───
 
@@ -1285,6 +1296,8 @@ export const CHAIN_META: Record<number, ChainMeta> = {
 export function getChainMeta(chainId: number): ChainMeta | undefined {
   return CHAIN_META[chainId];
 }
+
+export * from "./security-metrics.js";
 
 export function getExplorerTxLink(chainId: number, txHash: string): string | undefined {
   const meta = CHAIN_META[chainId];

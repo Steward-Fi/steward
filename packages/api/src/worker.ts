@@ -25,6 +25,14 @@
  *   - RESEND_API_KEY                Magic-link email provider
  *   - GOOGLE/DISCORD/GITHUB/TWITTER OAuth client IDs + secrets
  *   - PASSKEY_RP_ID, PASSKEY_ORIGIN, PASSKEY_RP_NAME
+ *
+ * Optional client-IP trust bindings (auth rate limiting):
+ *   - STEWARD_TRUSTED_PROXY_HOPS    Trusted proxies appending to x-forwarded-for
+ *   - STEWARD_TRUST_CLOUDFLARE      "true" only when ingress is locked to
+ *                                   Cloudflare; trusts cf-connecting-ip
+ *   - STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX
+ *                                   Bounded auth admissions/min/isolate while a
+ *                                   configured Redis is unreachable
  */
 
 import { initRedis } from "./middleware/redis";
@@ -53,6 +61,9 @@ export interface Env {
   PASSKEY_RP_ID?: string;
   PASSKEY_ORIGIN?: string;
   PASSKEY_RP_NAME?: string;
+  STEWARD_TRUSTED_PROXY_HOPS?: string;
+  STEWARD_TRUST_CLOUDFLARE?: string;
+  STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX?: string;
   [key: string]: unknown;
 }
 

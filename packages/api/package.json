@@ -25,20 +25,26 @@
     "wrangler:dry-run": "wrangler deploy --dry-run --outdir=dist"
   },
   "dependencies": {
+    "@aws-sdk/client-kms": "^3.700.0",
     "@hono/zod-openapi": "^1.4.0",
     "@stwd/adapters": "workspace:*",
+    "@stwd/attestation": "workspace:*",
     "@stwd/auth": "workspace:*",
     "@stwd/db": "workspace:*",
     "@stwd/plugin-capabilities": "workspace:*",
     "@stwd/plugin-trading": "workspace:*",
+    "@stwd/plugin-wxmr": "workspace:*",
     "@stwd/policy-engine": "workspace:*",
+    "@stwd/provider-github": "workspace:*",
+    "@stwd/provider-x": "workspace:*",
     "@stwd/redis": "workspace:*",
     "@stwd/shared": "workspace:*",
     "@stwd/vault": "workspace:*",
     "@stwd/webhooks": "workspace:*",
     "bs58": "^6.0.0",
     "drizzle-orm": "^0.44.5",
-    "hono": "^4.12.18",
+    "graphene-pk11": "^2.2.0",
+    "hono": "^4.12.34",
     "jose": "^6.2.1",
     "viem": "^2.30.0",
     "zod": "^4.3.6"
@@ -46,6 +52,8 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241218.0",
     "@scure/btc-signer": "^2.2.0",
+    "@stwd/proxy": "workspace:*",
+    "@stwd/sdk": "workspace:*",
     "@types/node": "^25.5.0",
     "openapi-typescript": "^7.13.0",
     "wrangler": "^4.0.0"

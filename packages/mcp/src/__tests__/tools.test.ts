@@ -55,6 +55,11 @@ function toolMap(tools: StewardTool[]): Map<string, StewardTool> {
 }
 
 const EXPECTED_TOOLS = [
+  "provider_action_invoke",
+  "provider_action_status",
+  "provider_action_approval",
+  "provider_action_case",
+  "provider_action_evidence",
   "list_wallets",
   "get_wallet",
   "create_wallet",
@@ -88,6 +93,8 @@ describe("tool registration", () => {
   test("only state-changing tools are marked destructive; reads are readOnly", () => {
     const { ctx } = makeContext();
     const map = toolMap(buildTools(ctx));
+    expect(map.get("provider_action_invoke")?.annotations.destructiveHint).toBe(true);
+    expect(map.get("provider_action_status")?.annotations.readOnlyHint).toBe(true);
     expect(map.get("sign_transaction")?.annotations.destructiveHint).toBe(true);
     expect(map.get("create_transfer")?.annotations.destructiveHint).toBe(true);
     expect(map.get("create_wallet")?.annotations.readOnlyHint).toBe(false);

@@ -36,6 +36,7 @@ import type {
   PolicyResult,
   PolicyRule,
 } from "@stwd/shared";
+import { describeThrown } from "@stwd/shared";
 import type { EvaluatorContext } from "./evaluators";
 import type { ManualApprovalSignal } from "./manual-approval";
 
@@ -208,13 +209,13 @@ export async function evaluateRegisteredPolicy(
         : {}),
     };
   } catch (error) {
+    // describeThrown NEVER throws for any hostile thrown value, so this
+    // fail-closed deny reason cannot itself escape as an unhandled exception.
     return {
       policyId: rule.id,
       type: rule.type as PolicyResult["type"],
       passed: false,
-      reason: `Plugin policy evaluator for "${rule.type}" threw: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      reason: `Plugin policy evaluator for "${rule.type}" threw: ${describeThrown(error)}`,
     };
   }
 }

@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import {
   createPriceOracle,
+  getKnownToken,
   getNativeDecimals,
   getNativeSymbol,
   getTokenDecimals,
   getWrappedNativeAddress,
   isVenueId,
+  MONERO_ON_SOLANA,
   VENUE_IDS,
   VENUE_METADATA,
 } from "../index";
@@ -35,6 +37,20 @@ describe("token helpers", () => {
     expect(getTokenDecimals(101)).toBe(9);
     expect(getTokenDecimals(101, "")).toBe(9);
     expect(getTokenDecimals(101, "native")).toBe(9);
+  });
+
+  it("registers Monero on Solana with its exact case-sensitive mint and decimals", () => {
+    expect(MONERO_ON_SOLANA).toEqual({
+      address: "WXMRyRZhsa19ety5erZhHg4N3xj3EVN92u94422teJp",
+      symbol: "XMR",
+      decimals: 12,
+      chainId: 101,
+      name: "Monero on Solana",
+      website: "https://wxmr.io",
+    });
+    expect(getKnownToken(101, MONERO_ON_SOLANA.address)).toBe(MONERO_ON_SOLANA);
+    expect(getTokenDecimals(101, MONERO_ON_SOLANA.address)).toBe(12);
+    expect(getKnownToken(101, MONERO_ON_SOLANA.address.toLowerCase())).toBeUndefined();
   });
 
   it("exposes wrapped native addresses only for configured chains", () => {
@@ -109,6 +125,40 @@ describe("createPriceOracle", () => {
 
     await expect(oracle.weiToUsd("2000000000000000000", 8453)).resolves.toBe(100);
     await expect(oracle.usdToWei(100, 8453)).resolves.toBe("2000000000000000000");
+  });
+
+  it("values Monero on Solana with the registered 12-decimal mint", async () => {
+    const fetchMock = mock(
+      async () =>
+        new Response(
+          JSON.stringify({
+            pairs: [{ chainId: "solana", priceUsd: "325.50", liquidity: { usd: 50_000 } }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const oracle = createPriceOracle({ cacheTtlMs: 60_000 });
+    await expect(oracle.weiToUsd("2000000000000", 101, MONERO_ON_SOLANA.address)).resolves.toBe(
+      651,
+    );
+  });
+
+  it("keeps case-distinct Solana mint prices isolated in the cache", async () => {
+    const fetchMock = mock(async (input: RequestInfo | URL) => {
+      const price = String(input).endsWith("/AbCMint") ? "10" : "20";
+      return new Response(JSON.stringify({ pairs: [{ chainId: "solana", priceUsd: price }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const oracle = createPriceOracle({ cacheTtlMs: 60_000 });
+
+    await expect(oracle.getTokenUsdPrice(101, "AbCMint")).resolves.toBe(10);
+    await expect(oracle.getTokenUsdPrice(101, "abcmint")).resolves.toBe(20);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("returns null instead of throwing when no wrapped native token or pair is available", async () => {

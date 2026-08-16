@@ -14,6 +14,7 @@ import type { Context, Next } from "hono";
 import { Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
 import { safeJsonParse, setNoStoreHeaders, verifySessionToken } from "../services/context";
+import { getConfiguredVault } from "../services/vault-factory";
 
 type UserSessionPayload = {
   userId: string;
@@ -96,13 +97,7 @@ async function userSessionAuth(
 globalWalletRoutes.use("*", userSessionAuth);
 
 function getVault(): Vault {
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
-  if (!masterPassword) throw new Error("STEWARD_MASTER_PASSWORD is required");
-  return new Vault({
-    masterPassword,
-    rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
-    chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
-  });
+  return getConfiguredVault();
 }
 
 function parseAppId(value: unknown): { tenantId: string; clientId: string } | null {

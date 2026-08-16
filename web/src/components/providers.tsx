@@ -3,11 +3,12 @@
 import { StewardProvider, useAuth } from "@stwd/react";
 import { createElement, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { clearAuthToken, setAuthToken, steward } from "@/lib/api";
+import { STEWARD_API_URL } from "@/lib/steward-api-url";
 
 // Pre-import @simplewebauthn/browser so it's in the client bundle.
 import "@simplewebauthn/browser";
 
-const API_URL = process.env.NEXT_PUBLIC_STEWARD_API_URL || "https://api.steward.fi";
+const API_URL = STEWARD_API_URL;
 
 /**
  * SECURITY (XSS risk — tracked hardening): this wires the Steward auth tokens

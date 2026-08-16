@@ -1,4 +1,4 @@
-import { getNativeDecimals, getNativeSymbol } from "@stwd/shared";
+import { getNativeDecimals, getNativeSymbol } from "@stwd/shared/client";
 
 export function shortenAddress(addr: string, chars = 4): string {
   if (!addr) return "";

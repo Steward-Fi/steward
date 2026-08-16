@@ -44,6 +44,18 @@ REDIS_DRIVER = "upstash"
 # Passkeys (WebAuthn)
 #   PASSKEY_RP_ID, PASSKEY_ORIGIN, PASSKEY_RP_NAME
 #   PASSKEY_ALLOWED_ORIGINS          comma-separated list of accepted origins
+#
+# Client IP trust (auth rate limiting) — non-secret, can live in [vars]
+#   STEWARD_TRUSTED_PROXY_HOPS       trusted proxies APPENDING to x-forwarded-for
+#                                    (right-most-Nth entry = client IP; unset =
+#                                    coarse per-host rate-limit fallback)
+#   STEWARD_TRUST_CLOUDFLARE         "true" only when origin ingress is locked to
+#                                    Cloudflare; then cf-connecting-ip is trusted
+#                                    (natural fit for this Workers adapter)
+#   STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX
+#                                    bounded auth admissions/min/isolate while a
+#                                    configured Redis is unreachable (default 300,
+#                                    0 = strict fail-closed)
 
 [env.staging]
 name = "steward-api-staging"

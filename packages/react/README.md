@@ -16,7 +16,7 @@ import "@stwd/react/styles.css";
 import { StewardClient } from "@stwd/sdk";
 
 const client = new StewardClient({
-  baseUrl: "https://api.steward.fi",
+  baseUrl: "http://localhost:3200",
   bearerToken: agentJwt,
 });
 
@@ -131,7 +131,7 @@ export function EvmLogin() {
     <StewardProvider
       client={client}
       agentId="agent_abc"
-      auth={{ baseUrl: "https://api.steward.fi" }}
+      auth={{ baseUrl: "http://localhost:3200" }}
     >
       <EVMWalletProvider config={wagmiConfig}>
         <WalletLogin chains="evm" />
@@ -240,7 +240,7 @@ import "@solana/wallet-adapter-react-ui/styles.css";
 
 export default function Login() {
   return (
-    <StewardProvider auth={{ baseUrl: "https://api.steward.fi" }}>
+    <StewardProvider auth={{ baseUrl: "http://localhost:3200" }}>
       <StewardLoginWithWallets
         title="sign in"
         showPasskey
@@ -296,7 +296,7 @@ export function SolanaLogin() {
     <StewardProvider
       client={client}
       agentId="agent_abc"
-      auth={{ baseUrl: "https://api.steward.fi" }}
+      auth={{ baseUrl: "http://localhost:3200" }}
     >
       <SolanaWalletProvider
         endpoint="https://api.mainnet-beta.solana.com"
@@ -312,7 +312,7 @@ export function SolanaLogin() {
 ### Combined EVM and Solana example
 
 ```tsx
-<StewardProvider client={client} agentId="agent_abc" auth={{ baseUrl: "https://api.steward.fi" }}>
+<StewardProvider client={client} agentId="agent_abc" auth={{ baseUrl: "http://localhost:3200" }}>
   <EVMWalletProvider config={wagmiConfig}>
     <SolanaWalletProvider endpoint="https://api.mainnet-beta.solana.com">
       <WalletLogin chains="both" onSuccess={(res, kind) => console.log("signed in via", kind)} />

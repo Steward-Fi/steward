@@ -6,7 +6,7 @@ import { StewardClient, type StewardClientConfig } from "@stwd/sdk";
  * agent-scoped tools when the caller omits one.
  */
 export interface StewardMcpConfig {
-  /** Base URL of the Steward API, e.g. `https://api.steward.fi`. */
+  /** Base URL of the Steward API, e.g. `http://localhost:3200` for a self-hosted instance. */
   baseUrl: string;
   /** Tenant API key. Sent as an authorization header by the SDK. */
   apiKey?: string;
@@ -66,7 +66,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): StewardMcpConf
   const baseUrl = (env.STEWARD_URL ?? env.STEWARD_BASE_URL ?? "").trim();
   if (!baseUrl) {
     throw new Error(
-      "Missing required STEWARD_URL (or STEWARD_BASE_URL). Set it to your Steward API base URL, e.g. https://api.steward.fi",
+      "Missing required STEWARD_URL (or STEWARD_BASE_URL). Set it to your Steward API base URL, e.g. http://localhost:3200",
     );
   }
   assertSecureBaseUrl(baseUrl);

@@ -58,7 +58,7 @@ describe("platform tenant email config routes", () => {
         apiKey: "tenant-resend-api-key",
         from: "Tenant <login@tenant.example.com>",
         replyTo: "help@tenant.example.com",
-        templateId: "elizacloud",
+        templateId: "customer-template",
         subjectOverride: "Tenant Sign In",
       }),
     });
@@ -111,7 +111,7 @@ describe("platform tenant email config routes", () => {
       provider: "resend",
       from: "Tenant <login@tenant.example.com>",
       replyTo: "help@tenant.example.com",
-      templateId: "elizacloud",
+      templateId: "customer-template",
       subjectOverride: "Tenant Sign In",
     });
 
@@ -131,6 +131,220 @@ describe("platform tenant email config routes", () => {
       .from(tenantConfigs)
       .where(eq(tenantConfigs.tenantId, TENANT_ID));
     expect(afterDelete?.emailConfig ?? null).toBeNull();
+  });
+
+  it("accepts a template-only PATCH (no apiKey) and merges over existing config", async () => {
+    const dbHandle = getDb();
+    // Seed existing config (upsert: earlier tests may have created the row).
+    await dbHandle
+      .insert(tenantConfigs)
+      .values({
+        tenantId: TENANT_ID,
+        emailConfig: {
+          magicLinkBaseUrl: "https://app.customer.example",
+          magicLinkCallbackPath: "/auth/email/verify",
+        },
+      })
+      .onConflictDoUpdate({
+        target: tenantConfigs.tenantId,
+        set: {
+          emailConfig: {
+            magicLinkBaseUrl: "https://app.customer.example",
+            magicLinkCallbackPath: "/auth/email/verify",
+          },
+        },
+      });
+
+    // Template-only branding config: tenant keeps the platform's global
+    // Resend provider, only sets templateId (the shared-provider branding shape).
+    const patchResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+      },
+      body: JSON.stringify({
+        templateId: "customer-template",
+        subjectOverride: "Sign in to Customer App",
+      }),
+    });
+
+    expect(patchResponse.status).toBe(200);
+    const patchBody = (await patchResponse.json()) as {
+      ok: boolean;
+      data: { templateId?: string; subjectOverride?: string; hasApiKey: boolean };
+    };
+    expect(patchBody.ok).toBe(true);
+    expect(patchBody.data.templateId).toBe("customer-template");
+    expect(patchBody.data.subjectOverride).toBe("Sign in to Customer App");
+    expect(patchBody.data.hasApiKey).toBe(false);
+
+    const [stored] = await dbHandle
+      .select({ emailConfig: tenantConfigs.emailConfig })
+      .from(tenantConfigs)
+      .where(eq(tenantConfigs.tenantId, TENANT_ID));
+    expect(stored?.emailConfig?.templateId).toBe("customer-template");
+    expect(stored?.emailConfig?.apiKeyEncrypted).toBeUndefined();
+    expect(stored?.emailConfig?.magicLinkBaseUrl).toBe("https://app.customer.example");
+    expect(stored?.emailConfig?.magicLinkCallbackPath).toBe("/auth/email/verify");
+
+    // from without apiKey is rejected (provider config is all-or-nothing).
+    const badResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+      },
+      body: JSON.stringify({ from: "login@customer.example", templateId: "customer-template" }),
+    });
+    expect(badResponse.status).toBe(400);
+
+    // Empty template-only body is rejected.
+    const emptyResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+      },
+      body: JSON.stringify({}),
+    });
+    expect(emptyResponse.status).toBe(400);
+
+    // Cleanup so later tests see no residual config.
+    await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+      method: "DELETE",
+      headers: { "X-Steward-Platform-Key": PLATFORM_KEY },
+    });
+  });
+
+  it("patches magic-link routing without provider credentials or branding changes", async () => {
+    const dbHandle = getDb();
+    await dbHandle
+      .insert(tenantConfigs)
+      .values({
+        tenantId: TENANT_ID,
+        emailConfig: { templateId: "customer-template" },
+      })
+      .onConflictDoUpdate({
+        target: tenantConfigs.tenantId,
+        set: { emailConfig: { templateId: "customer-template" } },
+      });
+
+    const response = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+      },
+      body: JSON.stringify({
+        magicLinkBaseUrl: "https://app.customer.example/",
+        magicLinkCallbackPath: "/auth/callback/email",
+      }),
+    });
+    expect(response.status).toBe(200);
+
+    const [stored] = await dbHandle
+      .select({ emailConfig: tenantConfigs.emailConfig })
+      .from(tenantConfigs)
+      .where(eq(tenantConfigs.tenantId, TENANT_ID));
+    expect(stored?.emailConfig).toMatchObject({
+      templateId: "customer-template",
+      magicLinkBaseUrl: "https://app.customer.example/",
+      magicLinkCallbackPath: "/auth/callback/email",
+    });
+
+    for (const invalid of [
+      { magicLinkBaseUrl: "javascript:alert(1)" },
+      { magicLinkCallbackPath: "//evil.example/callback" },
+    ]) {
+      const invalidResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Steward-Platform-Key": PLATFORM_KEY,
+        },
+        body: JSON.stringify(invalid),
+      });
+      expect(invalidResponse.status).toBe(400);
+    }
+  });
+
+  it("stores, returns, and clears deployer-supplied raw templates", async () => {
+    const templates = {
+      magicLink: {
+        subject: "Sign in to Customer App",
+        text: "Link: {{magicLink}}",
+        html: '<a href="{{magicLink}}">Sign in</a>',
+      },
+      otp: {
+        subject: "{{code}} is your Customer App code",
+        text: "Code: {{code}}",
+        html: "<b>{{code}}</b>",
+      },
+    };
+
+    // Template-only PATCH carrying raw templates.
+    const patchResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+      },
+      body: JSON.stringify({ templates }),
+    });
+    expect(patchResponse.status).toBe(200);
+
+    const dbHandle = getDb();
+    const [stored] = await dbHandle
+      .select({ emailConfig: tenantConfigs.emailConfig })
+      .from(tenantConfigs)
+      .where(eq(tenantConfigs.tenantId, TENANT_ID));
+    expect(stored?.emailConfig?.templates).toEqual(templates);
+
+    // GET exposes the stored templates.
+    const getResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+      method: "GET",
+      headers: { "X-Steward-Platform-Key": PLATFORM_KEY },
+    });
+    expect(getResponse.status).toBe(200);
+    const getBody = (await getResponse.json()) as {
+      data: { emailConfig: { templates?: typeof templates } | null };
+    };
+    expect(getBody.data.emailConfig?.templates).toEqual(templates);
+
+    // Malformed templates are rejected before persistence.
+    const badResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+      },
+      body: JSON.stringify({ templates: { magicLink: { subject: "only-subject" } } }),
+    });
+    expect(badResponse.status).toBe(400);
+
+    // templates: null clears them without touching the rest of the config.
+    const clearResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+      },
+      body: JSON.stringify({ templates: null, templateId: "customer-template" }),
+    });
+    expect(clearResponse.status).toBe(200);
+    const [afterClear] = await dbHandle
+      .select({ emailConfig: tenantConfigs.emailConfig })
+      .from(tenantConfigs)
+      .where(eq(tenantConfigs.tenantId, TENANT_ID));
+    expect(afterClear?.emailConfig?.templates).toBeUndefined();
+    expect(afterClear?.emailConfig?.templateId).toBe("customer-template");
+
+    // Cleanup.
+    await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+      method: "DELETE",
+      headers: { "X-Steward-Platform-Key": PLATFORM_KEY },
+    });
   });
 
   it("puts and reads tenant OIDC provider config", async () => {

@@ -9,7 +9,7 @@ import type {
   ExternalKeySignTransactionRequest,
   ExternalKeySignTransactionResult,
 } from "../external-key-custody";
-import { Vault } from "../vault";
+import { BackendBindingMismatchError, Vault } from "../vault";
 
 const MASTER_PASSWORD = "test-vault-external-key-custody";
 const TENANT_ID = "tenant-external-key-custody";
@@ -276,6 +276,94 @@ describe("external key custody seam", () => {
     expect(tx?.agentId).toBe("agent-external");
     expect(tx?.status).toBe("signed");
     expect(tx?.txHash).toBeNull();
+  });
+
+  // ── ROUND 3 / ITEM 3: backend-resolution TOCTOU (fail closed at sign) ────
+  // resolveExecutionBackend is a separate, stale-able DB read. Between the
+  // gateway's precheck (which may see "local-vault") and the raw sign, the
+  // wallet's backend can FLIP to external custody (local key removed, external
+  // key inserted). The raw signer re-resolves the backend from the SAME fresh
+  // wallet lookup it will sign with; when the caller's authorization is bound to
+  // "local-vault" (options.expectedBackend), a request that re-resolves to the
+  // external branch must fail closed with BackendBindingMismatchError BEFORE the
+  // external custody provider is ever reached.
+
+  test("fails closed (backend binding mismatch) before the provider when a local-vault-bound sign re-resolves to external custody", async () => {
+    const provider = new TestExternalKeyProvider("provider-signing", async () => {
+      // If this ever runs, the TOCTOU guard failed: a local-vault-bound
+      // authorization reached the external custody provider.
+      throw new Error("provider must not be reached for a backend-binding mismatch");
+    });
+    vault = await freshVault(provider);
+    await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
+    // Wallet resolves to external custody (provider-signing). This models the
+    // post-flip state at signing time.
+    await vault.importExternalKeyHandle(externalHandleRequest());
+
+    // Sanity: without a bound backend, this SAME wallet WOULD reach the
+    // provider (which throws its own guard). We assert the mismatch path is
+    // distinct from the normal provider path.
+    let error: unknown;
+    try {
+      await vault.signTransaction(
+        {
+          tenantId: TENANT_ID,
+          agentId: "agent-external",
+          chainId: 8453,
+          to: "0x2222222222222222222222222222222222222222",
+          value: "1",
+          data: "0x",
+          venue: "hsm-primary",
+          broadcast: false,
+        },
+        { txId: "toctou-mismatch-1", expectedBackend: "local-vault" },
+      );
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error).toBeInstanceOf(BackendBindingMismatchError);
+    expect((error as BackendBindingMismatchError).code).toBe("backend_binding_mismatch");
+    expect((error as BackendBindingMismatchError).expectedBackend).toBe("local-vault");
+    // The provider signer was NEVER invoked.
+    expect(provider.signCalls).toHaveLength(0);
+
+    // No transaction row was written for the failed sign.
+    const rows = await getDb()
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, "toctou-mismatch-1"));
+    expect(rows).toHaveLength(0);
+  });
+
+  test("still routes to the provider when the sign is NOT backend-bound (precheck path unchanged)", async () => {
+    // Belt-and-suspenders: an external-custody wallet signed WITHOUT a bound
+    // backend (a non-gateway caller) still reaches the provider exactly as
+    // before. The TOCTOU guard only engages when options.expectedBackend is set.
+    const provider = new TestExternalKeyProvider("provider-signing", async () => ({
+      result: "0xsigned-by-external-provider",
+      broadcast: false,
+    }));
+    vault = await freshVault(provider);
+    await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
+    await vault.importExternalKeyHandle(externalHandleRequest());
+
+    const signed = await vault.signTransaction(
+      {
+        tenantId: TENANT_ID,
+        agentId: "agent-external",
+        chainId: 8453,
+        to: "0x2222222222222222222222222222222222222222",
+        value: "1",
+        data: "0x",
+        venue: "hsm-primary",
+        broadcast: false,
+      },
+      { txId: "toctou-unbound-1" },
+    );
+
+    expect(signed).toBe("0xsigned-by-external-provider");
+    expect(provider.signCalls).toHaveLength(1);
   });
 
   test("break-glass private key export refuses agents with external custody wallets", async () => {

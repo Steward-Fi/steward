@@ -1,18 +1,18 @@
 ---
 title: "Policy Engine"
-description: "Declarative policy evaluation on every agent action — default deny, composable rules."
+description: "Declarative policy evaluation for governed wallet routes and named provider capabilities."
 ---
 
 # Policy Engine
 
-The Policy Engine evaluates declarative policies before every agent action. It enforces **default deny** — if no policy explicitly allows an action, it's rejected.
+The Policy Engine evaluates declarative policies on governed wallet routes and named provider capability invocations. Those paths use default deny when no applicable policy allows the request. Policy coverage is route-specific.
 
 ## Design Principles
 
 - **Default deny** — new agents can't do anything until policies are assigned
 - **Declarative** — JSON-based policy definitions, no custom DSL to learn
 - **Composable** — multiple policies evaluated in order; ALL must pass
-- **Fast** — < 5ms evaluation, cached in Redis
+- **Cache-aware**: policy context can be cached in Redis
 
 ## Policy Types
 
@@ -172,13 +172,13 @@ Transactions that pass all policies except auto-approve enter the approval queue
 ```typescript
 // List pending approvals
 const pending = await fetch(
-  `https://api.steward.fi/vault/${agentId}/pending`,
+  `http://localhost:3200/vault/${agentId}/pending`,
   { headers: { Authorization: `Bearer ${agentToken}` } }
 );
 
 // Approve (requires tenant-level auth)
 await fetch(
-  `https://api.steward.fi/vault/${agentId}/approve/${txId}`,
+  `http://localhost:3200/vault/${agentId}/approve/${txId}`,
   {
     method: "POST",
     headers: { "X-Steward-Key": "tenant-key" },
@@ -187,7 +187,7 @@ await fetch(
 
 // Reject
 await fetch(
-  `https://api.steward.fi/vault/${agentId}/reject/${txId}`,
+  `http://localhost:3200/vault/${agentId}/reject/${txId}`,
   {
     method: "POST",
     headers: { "X-Steward-Key": "tenant-key" },

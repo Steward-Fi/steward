@@ -51,7 +51,7 @@ const agent = await steward.createWallet("my-agent", "My Trading Agent");
 ```
 
 ```bash cURL
-curl -X POST https://api.steward.fi/agents \
+curl -X POST http://localhost:3200/agents \
   -H "X-Steward-Key: your-key" \
   -H "Content-Type: application/json" \
   -d '{"id": "my-agent", "name": "My Trading Agent"}'
@@ -93,7 +93,7 @@ const agents = await steward.listAgents();
 ```
 
 ```bash cURL
-curl https://api.steward.fi/agents \
+curl http://localhost:3200/agents \
   -H "X-Steward-Key: your-key"
 ```
 </CodeGroup>
@@ -116,7 +116,7 @@ const agent = await steward.getAgent("my-agent");
 ```
 
 ```bash cURL
-curl https://api.steward.fi/agents/my-agent \
+curl http://localhost:3200/agents/my-agent \
   -H "X-Steward-Key: your-key"
 ```
 </CodeGroup>
@@ -147,7 +147,7 @@ DELETE /agents/:agentId
 </Warning>
 
 ```bash
-curl -X DELETE https://api.steward.fi/agents/my-agent \
+curl -X DELETE http://localhost:3200/agents/my-agent \
   -H "X-Steward-Key: your-key"
 ```
 
@@ -187,7 +187,7 @@ POST /agents/:agentId/token
 ```
 
 ```bash
-curl -X POST https://api.steward.fi/agents/my-agent/token \
+curl -X POST http://localhost:3200/agents/my-agent/token \
   -H "X-Steward-Key: your-key" \
   -H "Content-Type: application/json" \
   -d '{"expiresIn": "24h"}'
@@ -239,7 +239,7 @@ const account = await steward.getAgentAccount("my-agent", {
 ```
 
 ```bash cURL
-curl "https://api.steward.fi/agents/my-agent/account?chainId=8453" \
+curl "http://localhost:3200/agents/my-agent/account?chainId=8453" \
   -H "Authorization: Bearer agent-jwt"
 ```
 </CodeGroup>
@@ -280,7 +280,7 @@ const balance = await steward.getBalance("my-agent", 8453);
 ```
 
 ```bash cURL
-curl "https://api.steward.fi/agents/my-agent/balance?chainId=8453" \
+curl "http://localhost:3200/agents/my-agent/balance?chainId=8453" \
   -H "Authorization: Bearer agent-jwt"
 ```
 </CodeGroup>
@@ -451,7 +451,7 @@ const result = await steward.createWalletBatch(
 ```
 
 ```bash cURL
-curl -X POST https://api.steward.fi/agents/batch \
+curl -X POST http://localhost:3200/agents/batch \
   -H "X-Steward-Key: your-key" \
   -H "Content-Type: application/json" \
   -d '{

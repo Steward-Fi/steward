@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc --noEmit",
     "dev": "tsc --watch",
-    "test": "bun test --timeout 30000",
+    "test": "bun test --isolate --timeout 30000",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit"
   },
@@ -25,7 +25,7 @@
     "@stwd/venue-hyperliquid": "workspace:*",
     "@stwd/venue-polymarket": "workspace:*",
     "drizzle-orm": "^0.44.5",
-    "hono": "^4.12.18",
+    "hono": "^4.12.34",
     "zod": "^4.3.6"
   },
   "devDependencies": {

@@ -4,8 +4,24 @@
  * Reuses the KeyStore's AES-256-GCM encryption. Secrets are encrypted per-tenant
  * using the same master key hierarchy as wallet keys.
  *
- * Decrypted values are NEVER returned via API — only used internally for
- * credential injection into proxied requests.
+ * NO READ-BACK is a property of THIS plane (sovereign-custody Pillar A / A2):
+ *
+ *   - No HTTP route returns a plaintext secret value. The /secrets routes
+ *     return {@link SecretMetadata} only (enforced by the static route scan in
+ *     packages/api/src/__tests__/secrets-no-read-back.test.ts).
+ *   - In-process, the canonical use-only path is {@link SecretVault.exerciseSecret}:
+ *     decrypt → hand to a caller closure → drop the reference. The closure
+ *     returns a RESULT (an HTTP response, a signature), never the secret.
+ *   - The remaining direct decrypt callers ({@link decryptSecret} /
+ *     {@link decryptSecretRow}) form a CLOSED, CI-pinned set (proxy credential
+ *     injection + provider-x refresh). Adding a new caller fails the
+ *     no-read-back inventory test with a classification instruction.
+ *
+ * Custody strength is orthogonal and inherited: the master-password root can be
+ * wrapped by KMS-envelope (aws|pkcs11) via vault-factory custody modes, and the
+ * TEE path (Pillar B) swaps the master-key source for an attestation-gated
+ * release WITHOUT changing this API. There is deliberately NO parallel
+ * file-based secret store — one custody plane, one audit surface.
  */
 
 import {
@@ -40,6 +56,14 @@ export interface CreateSecretOptions {
   description?: string;
   expiresAt?: Date;
 }
+
+/**
+ * A drizzle executor (the top-level db OR an open transaction) accepted by the
+ * *WithinTx helpers so a caller can rotate a secret inside its OWN transaction
+ * without a nested `db.transaction` (which deadlocks single-connection PGLite).
+ */
+type SecretTxExecutor = DbBase | Parameters<Parameters<DbBase["transaction"]>[0]>[0];
+type DbBase = ReturnType<typeof getDb>;
 
 export class SecretVault {
   private keyStore: KeyStore;
@@ -117,7 +141,65 @@ export class SecretVault {
   }
 
   /**
-   * Decrypt a secret for internal use (credential injection). NEVER expose via API.
+   * Exercise a secret: decrypt it and hand the plaintext to `use`, returning
+   * the closure's RESULT. The plaintext is returned by NO public API path; it
+   * exists for the duration of the `use` callback and the reference is dropped
+   * afterwards. This is the canonical use-only consumption path for new
+   * consumers (broker a call, sign a webhook, inject a header).
+   *
+   * Fail-closed audit: pass `beforeUse` as the audit chokepoint. It runs after
+   * the secret row is located but BEFORE decryption; if it throws (e.g. the
+   * audit append failed), the secret is never decrypted and `use` never runs.
+   */
+  async exerciseSecret<T>(
+    tenantId: string,
+    secretId: string,
+    use: (plaintext: string) => T | Promise<T>,
+    options?: { beforeUse?: () => void | Promise<void> },
+  ): Promise<T> {
+    const db = getDb();
+    const [row] = await db
+      .select()
+      .from(secrets)
+      .where(
+        and(eq(secrets.id, secretId), eq(secrets.tenantId, tenantId), isNull(secrets.deletedAt)),
+      );
+    if (!row) {
+      throw new Error(`Secret ${secretId} not found for tenant ${tenantId}`);
+    }
+    return await this.exerciseSecretRow(tenantId, row, use, options);
+  }
+
+  /**
+   * Exercise a secret row already read from the DB. This is the same use-only
+   * plaintext lifetime as exerciseSecret, but supports intentional historical
+   * row consumers such as KMS decrypt-old-version after rotation.
+   */
+  async exerciseSecretRow<T>(
+    tenantId: string,
+    row: Secret,
+    use: (plaintext: string) => T | Promise<T>,
+    options?: { beforeUse?: () => void | Promise<void> },
+  ): Promise<T> {
+    // Fail-closed: audit (or any precondition) must succeed before decryption.
+    if (options?.beforeUse) await options.beforeUse();
+    let plaintext: string | undefined = this.decryptSecretRow(tenantId, row);
+    try {
+      return await use(plaintext);
+    } finally {
+      // Best-effort drop of the reference. JS strings are immutable so the
+      // bytes cannot be zeroed, but no live reference survives this method.
+      plaintext = undefined;
+      void plaintext;
+    }
+  }
+
+  /**
+   * Decrypt a secret for internal use (credential injection). NEVER expose via
+   * API. Prefer {@link exerciseSecret} for new consumers — this direct-return
+   * form exists for the proxy injection path, whose plaintext lifetime spans
+   * the outbound request build, and its caller set is pinned by the
+   * no-read-back inventory test.
    */
   async decryptSecret(tenantId: string, secretId: string): Promise<string> {
     const db = getDb();
@@ -131,19 +213,25 @@ export class SecretVault {
     if (!row) {
       throw new Error(`Secret ${secretId} not found for tenant ${tenantId}`);
     }
+    return this.decryptSecretRow(tenantId, row);
+  }
 
-    // Check expiration
+  /**
+   * Decrypt a secret row already read from the DB (e.g. inside a caller's
+   * transaction, so no fresh `getDb()` read is issued that would block on a
+   * single-connection PGLite while an outer transaction holds the connection).
+   * NEVER expose the plaintext via API.
+   */
+  decryptSecretRow(tenantId: string, row: Secret): string {
     if (row.expiresAt && row.expiresAt < new Date()) {
-      throw new Error(`Secret ${secretId} has expired`);
+      throw new Error(`Secret ${row.id} has expired`);
     }
-
     const encrypted: EncryptedKey = {
       ciphertext: row.ciphertext,
       iv: row.iv,
       tag: row.authTag,
       salt: row.salt,
     };
-
     const context = { tenantId, name: row.name, version: row.version };
     try {
       return this.keyStore.decrypt(encrypted, context);
@@ -152,6 +240,63 @@ export class SecretVault {
       // legacy (shared) root. New secrets always use the domain-separated root above.
       return this.legacyKeyStore.decrypt(encrypted, context);
     }
+  }
+
+  /**
+   * Rotate a secret WITHIN a caller-provided transaction. Identical to
+   * {@link rotateSecret} but reuses the caller's `tx` instead of opening its own
+   * `db.transaction`, so it can run inside an outer transaction (e.g. a per-
+   * account refresh that holds a SELECT ... FOR UPDATE lock) without a nested
+   * transaction. The single-flight/atomicity guarantee is the CALLER's outer
+   * transaction; this method only appends the new version + repoints routes +
+   * soft-deletes the prior version.
+   */
+  async rotateSecretWithinTx(
+    tx: SecretTxExecutor,
+    tenantId: string,
+    name: string,
+    newValue: string,
+  ): Promise<SecretMetadata> {
+    const [current] = await tx
+      .select()
+      .from(secrets)
+      .where(and(eq(secrets.tenantId, tenantId), eq(secrets.name, name), isNull(secrets.deletedAt)))
+      .orderBy(desc(secrets.version))
+      .limit(1);
+    if (!current) {
+      throw new Error(`Secret "${name}" not found for tenant ${tenantId}`);
+    }
+    const newVersion = current.version + 1;
+    const encrypted = this.keyStore.encrypt(newValue, { tenantId, name, version: newVersion });
+    const now = new Date();
+
+    const [row] = await tx
+      .insert(secrets)
+      .values({
+        tenantId,
+        name,
+        description: current.description,
+        ciphertext: encrypted.ciphertext,
+        iv: encrypted.iv,
+        authTag: encrypted.tag,
+        salt: encrypted.salt,
+        version: newVersion,
+        rotatedAt: now,
+        expiresAt: current.expiresAt,
+      })
+      .returning();
+
+    await tx
+      .update(secretRoutes)
+      .set({ secretId: row.id })
+      .where(and(eq(secretRoutes.tenantId, tenantId), eq(secretRoutes.secretId, current.id)));
+
+    await tx
+      .update(secrets)
+      .set({ deletedAt: now, updatedAt: now })
+      .where(and(eq(secrets.id, current.id), eq(secrets.tenantId, tenantId)));
+
+    return this.toMetadata(row);
   }
 
   /**
@@ -289,6 +434,8 @@ export class SecretVault {
       injectFormat?: string;
       priority?: number;
       enabled?: boolean;
+      requiresApproval?: boolean;
+      approvalConfig?: Record<string, unknown>;
     },
   ): Promise<SecretRoute> {
     const db = getDb();
@@ -335,6 +482,8 @@ export class SecretVault {
         injectFormat: normalizedConfig.injectFormat,
         priority: normalizedConfig.priority,
         enabled: config.enabled ?? true,
+        requiresApproval: config.requiresApproval ?? false,
+        approvalConfig: config.approvalConfig ?? {},
       })
       .returning();
 
@@ -372,6 +521,8 @@ export class SecretVault {
       injectFormat: string;
       priority: number;
       enabled: boolean;
+      requiresApproval: boolean;
+      approvalConfig: Record<string, unknown>;
     }>,
   ): Promise<SecretRoute | null> {
     const db = getDb();
@@ -386,6 +537,8 @@ export class SecretVault {
       "injectFormat",
       "priority",
       "enabled",
+      "requiresApproval",
+      "approvalConfig",
     ] as const) {
       if (updates[key] !== undefined) allowedUpdates[key] = updates[key] as never;
     }

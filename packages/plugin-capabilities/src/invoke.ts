@@ -12,11 +12,11 @@
  */
 
 import { signAgentToken } from "@stwd/auth";
+import { secretRoutes, secrets } from "@stwd/db";
 import {
   CAPABILITY_INTENT_RULE_TYPE,
-  type CapabilityIntentConfig,
+  composeCapabilityIntentDecision,
   type EvaluatorContext,
-  evaluateCapabilityIntent,
   PolicyEngine,
 } from "@stwd/policy-engine";
 import { StewardProxyClient } from "@stwd/proxy-client";
@@ -123,6 +123,100 @@ function readProxyEnv(env: NodeJS.ProcessEnv = process.env): ProxyEnv | null {
   return { proxyUrl, signingSecret };
 }
 
+// Minimal host/path matchers mirroring @stwd/proxy matching.ts (that package is
+// not a dependency here). Used ONLY to detect whether a governed route claims
+// this capability's surface so we can fail closed — a broad match is acceptable
+// because it only ever DENIES (never grants).
+function pluginMatchHost(pattern: string, host: string): boolean {
+  if (pattern === host) return true;
+  if (pattern.startsWith("*.")) {
+    const suffix = pattern.slice(1);
+    return host.endsWith(suffix) && host.length > suffix.length;
+  }
+  return false;
+}
+function pluginMatchPath(pattern: string | null | undefined, path: string): boolean {
+  const p = pattern ?? "/*";
+  if (p === "/*" || p === "*") return true;
+  if (p === path) return true;
+  if (p.endsWith("/*")) return path.startsWith(p.slice(0, -1));
+  return false;
+}
+
+/**
+ * True when the resolved capability maps to a `governed_v2` secret route for this
+ * tenant/agent (matched by host + path + method). Governed routes must NOT be
+ * invokable through the plugin (spec §5.2, P03/P04). Throws are treated as
+ * fail-closed by the caller.
+ */
+async function capabilityMapsToGovernedRoute(
+  db: StewardAppContext["db"],
+  tenantId: string,
+  agentId: string,
+  cap: Capability,
+): Promise<boolean> {
+  const { and, eq, gt, isNull, or } = await import("drizzle-orm");
+  const now = new Date();
+  // Mirror the proxy's route SELECTION (codex P2): only ENABLED governed routes
+  // whose backing secret is currently active (not deleted, not expired) can ever
+  // be selected by the proxy, so only those should gate the plugin. A disabled
+  // governed route or one backed by a deleted/expired secret is unselectable and
+  // must NOT block an otherwise-valid plugin invocation (rollback/cutover leaves
+  // such stale rows). Join secrets exactly like findMatchingRoute.
+  const rows = await (
+    db as unknown as {
+      select: (c: Record<string, unknown>) => {
+        from: (t: unknown) => {
+          innerJoin: (
+            t: unknown,
+            on: unknown,
+          ) => {
+            where: (w: unknown) => Promise<
+              Array<{
+                hostPattern: string;
+                pathPattern: string | null;
+                method: string | null;
+                authorityMode: string | null;
+              }>
+            >;
+          };
+        };
+      };
+    }
+  )
+    .select({
+      hostPattern: secretRoutes.hostPattern,
+      pathPattern: secretRoutes.pathPattern,
+      method: secretRoutes.method,
+      authorityMode: secretRoutes.authorityMode,
+    })
+    .from(secretRoutes)
+    .innerJoin(
+      secrets,
+      and(
+        eq(secrets.id, secretRoutes.secretId),
+        eq(secrets.tenantId, tenantId),
+        isNull(secrets.deletedAt),
+        or(isNull(secrets.expiresAt), gt(secrets.expiresAt, now)),
+      ),
+    )
+    .where(
+      and(
+        eq(secretRoutes.tenantId, tenantId),
+        eq(secretRoutes.agentId, agentId),
+        eq(secretRoutes.authorityMode, "governed_v2"),
+        eq(secretRoutes.enabled, true),
+      ),
+    );
+  const capMethod = cap.method.toUpperCase();
+  return rows.some(
+    (r) =>
+      pluginMatchHost(r.hostPattern, cap.host) &&
+      pluginMatchPath(r.pathPattern, cap.pathPattern) &&
+      (!r.method || r.method === "*" || r.method.toUpperCase() === capMethod),
+  );
+}
+
 function buildProxyPath(cap: Capability, query: Record<string, string> | undefined): string {
   const host = cap.host.toLowerCase();
   const basePath = cap.pathPattern.startsWith("/") ? cap.pathPattern : `/${cap.pathPattern}`;
@@ -145,29 +239,8 @@ function syntheticSignRequest(tenantId: string, agentId: string): SignRequest {
   };
 }
 
-function patternMatches(pattern: string, name: string): boolean {
-  if (typeof pattern !== "string" || pattern.length === 0) return false;
-  if (pattern.endsWith(".*")) return name.startsWith(pattern.slice(0, -1));
-  return pattern === name;
-}
-
 function isCapabilityIntentRule(rule: PolicyRule): boolean {
   return (rule.type as string) === (CAPABILITY_INTENT_RULE_TYPE as string);
-}
-
-function isMatchingAllowRule(rule: PolicyRule, name: string): boolean {
-  if (!isCapabilityIntentRule(rule)) return false;
-  const cfg = rule.config as Partial<CapabilityIntentConfig>;
-  if (cfg.effect !== "allow") return false;
-  if (!Array.isArray(cfg.capabilities)) return false;
-  return cfg.capabilities.some((p) => patternMatches(p, name));
-}
-
-function isGoverningRule(rule: PolicyRule, name: string): boolean {
-  if (!isCapabilityIntentRule(rule)) return false;
-  const cfg = rule.config as Partial<CapabilityIntentConfig>;
-  if (!Array.isArray(cfg.capabilities)) return false;
-  return cfg.capabilities.some((p) => patternMatches(p, name));
 }
 
 async function recordAndJson(
@@ -271,44 +344,73 @@ export async function invokeCapabilityThroughProxy(
     capabilityInvokeCount1h: count1h,
   };
 
-  await engine.evaluate(capRules, evaluatorCtx);
+  // FAIL-CLOSED OUTER BOUNDARY. Both the generic engine sweep and the canonical
+  // composer are defensively non-throwing by contract (the composer wraps every
+  // per-rule body; the registry describes hostile thrown values with a
+  // non-throwing helper). But this invoke path is a security gate: a throw here
+  // — from either call, a hostile jsonb getter deserializing `r.config`, or any
+  // unforeseen path — must DENY (403), never escape as a raw 500 (which callers
+  // could treat as a transient/retryable failure and which reveals nothing about
+  // the gate). We therefore wrap the entire evaluate+compose region and translate
+  // ANY escape into a fail-closed deny.
+  let decision: ReturnType<typeof composeCapabilityIntentDecision>;
+  try {
+    await engine.evaluate(capRules, evaluatorCtx);
 
-  const governing = capRules.filter((r) => isGoverningRule(r, cap.name));
-  if (governing.length === 0) {
+    // CANONICAL PRECEDENCE (master-plan §5.3): the policy-engine helper composes
+    // ALL enabled capability-intent rules in the one true order — hard deny
+    // (incl. malformed config / failed hard constraint) > approval_required >
+    // allow > default-deny. This is the single source of truth: an applicable
+    // require-approval can NEVER be shadowed by a matching allow, and a hard deny
+    // can never be softened into an approval.
+    //
+    // We pass the FULL enabled capability-intent set (not a pre-filtered
+    // "governing" subset): a MALFORMED rule config (e.g. a misspelled
+    // `capabilities` key or an unsupported glob) makes a raw governing-match
+    // filter return false, which would silently DROP the broken gate and fail
+    // OPEN if a sibling allow matched. The composer instead parses every rule and
+    // hard-denies on ANY malformation (fail closed), treats well-formed
+    // non-governing rules as inert, and applies the effective default-deny when
+    // no governing allow passes (covers the previous "no policy authorizes this
+    // capability" 403).
+    decision = composeCapabilityIntentDecision(
+      capRules.map((r) => ({
+        id: r.id,
+        type: r.type as string,
+        enabled: r.enabled,
+        config: r.config,
+      })),
+      evaluatorCtx,
+    );
+  } catch {
+    // A throw escaped the (defensively non-throwing) evaluation region. Fail
+    // closed: deny, never 500. The reason is intentionally generic — it must not
+    // leak internals and must not itself risk stringifying a hostile value.
     return recordAndJson(store, {
       tenantId,
       agentId,
       capabilityId: cap.id,
       decision: "deny",
       status: 403,
-      payload: { ok: false, error: "no policy authorizes this capability" } satisfies ApiResponse,
+      payload: { ok: false, error: "policy evaluation failed" } satisfies ApiResponse,
     });
   }
 
-  let sawApproval = false;
-  let matchedAllowPassed = false;
-  let sawDeny = false;
-  let denyReason: string | undefined;
-  for (const rule of governing) {
-    const result = evaluateCapabilityIntent(
-      { id: rule.id, type: rule.type as string, enabled: rule.enabled, config: rule.config },
-      evaluatorCtx,
-    );
-    if (result.requiresManualApproval) {
-      sawApproval = true;
-      continue;
-    }
-    if (!result.passed) {
-      sawDeny = true;
-      denyReason = result.reason ?? "denied by policy";
-      continue;
-    }
-    if (isMatchingAllowRule(rule, cap.name)) matchedAllowPassed = true;
+  if (decision.effect === "hard_deny") {
+    return recordAndJson(store, {
+      tenantId,
+      agentId,
+      capabilityId: cap.id,
+      decision: "deny",
+      status: 403,
+      payload: {
+        ok: false,
+        error: decision.reason,
+      } satisfies ApiResponse,
+    });
   }
 
-  if (!sawDeny && matchedAllowPassed) {
-    // proceed to proxy delegation.
-  } else if (!sawDeny && sawApproval) {
+  if (decision.effect === "approval_required") {
     let approvalId: string | null = null;
     try {
       approvalId = await store.recordInvocation({
@@ -331,19 +433,9 @@ export async function invokeCapabilityThroughProxy(
       });
     }
     return jsonResponse({ ok: true, data: { approvalId, status: "pending" } }, 202);
-  } else {
-    return recordAndJson(store, {
-      tenantId,
-      agentId,
-      capabilityId: cap.id,
-      decision: "deny",
-      status: 403,
-      payload: {
-        ok: false,
-        error: denyReason ?? "capability invoke denied by policy",
-      } satisfies ApiResponse,
-    });
   }
+
+  // decision.effect === "allow": proceed to proxy delegation.
 
   const proxyEnv = readProxyEnv();
   if (!proxyEnv) {
@@ -354,6 +446,43 @@ export async function invokeCapabilityThroughProxy(
       decision: "error",
       status: 503,
       payload: { ok: false, error: "capability delegation unavailable" } satisfies ApiResponse,
+    });
+  }
+
+  // ── PR4 governed-route plugin gate (spec §5.2, X1, P03/P04) ────────────────
+  // A governed_v2 route/operation cannot be invoked through the capability alias
+  // or the OpenAI-compat adapter: the plugin's URLSearchParams path (G4) cannot
+  // faithfully represent a governed action's duplicate-query semantics, and
+  // governed actions must go through /v2/provider-actions (PR2), never a minted
+  // proxy token. If the resolved capability maps to a governed route, the plugin
+  // must NOT mint a proxy token; it denies with GOVERNED_ROUTE_PLUGIN_DENIED.
+  try {
+    const governed = await capabilityMapsToGovernedRoute(ctx.db, tenantId, agentId, cap);
+    if (governed) {
+      return recordAndJson(store, {
+        tenantId,
+        agentId,
+        capabilityId: cap.id,
+        decision: "deny",
+        status: 403,
+        payload: {
+          ok: false,
+          error: "GOVERNED_ROUTE_PLUGIN_DENIED",
+        } satisfies ApiResponse,
+      });
+    }
+  } catch {
+    // Fail closed: if we cannot prove the route is NOT governed, deny (X7).
+    return recordAndJson(store, {
+      tenantId,
+      agentId,
+      capabilityId: cap.id,
+      decision: "deny",
+      status: 403,
+      payload: {
+        ok: false,
+        error: "GOVERNED_ROUTE_PLUGIN_DENIED",
+      } satisfies ApiResponse,
     });
   }
 

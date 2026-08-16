@@ -19,7 +19,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { createStewardNativeAuth } from "@stwd/react-native";
 
 const auth = await createStewardNativeAuth({
-  baseUrl: "https://api.steward.fi",
+  baseUrl: "http://localhost:3200",
   tenantId: "my-app",
   storage: AsyncStorage,
 });
@@ -137,7 +137,7 @@ const registration = createNativePushTokenRegistration(expoPushToken, {
 });
 
 const client = createStewardNativeClient({
-  baseUrl: "https://api.steward.fi",
+  baseUrl: "http://localhost:3200",
   bearerToken: auth.getSession()?.token,
 });
 await registerNativePushToken(client, expoPushToken, registration);
