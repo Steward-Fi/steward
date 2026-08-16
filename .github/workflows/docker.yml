@@ -19,6 +19,12 @@ on:
       - "packages/**/package.json"
       - ".github/workflows/docker.yml"
 
+# A branch tag is mutable. Do not let a slower build for an older push finish
+# after a newer build and overwrite `:develop` / `:main` with stale bytes.
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
@@ -63,6 +69,8 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            # Immutable tag consumed by the staging workflow.
+            type=sha,format=long
 
       # Build pull requests to validate the Dockerfile; publish images for pushes
       # to develop and version tags so deploys can pull the expected tags.
