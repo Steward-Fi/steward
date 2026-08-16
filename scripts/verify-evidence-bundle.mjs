@@ -3,7 +3,8 @@
 /**
  * Standalone offline verifier for a Steward audit evidence bundle.
  *
- * ZERO project imports, ZERO third-party dependencies — only Node builtins.
+ * ZERO project imports and ZERO package dependencies. Base bundle checks use
+ * only Node builtins; optional RFC 3161 trust verification invokes OpenSSL.
  * An auditor can run this on any machine with Node, holding nothing but the
  * bundle JSON (which carries its own Ed25519 public key). No Steward access, no
  * secret HMAC key.
@@ -43,11 +44,16 @@
  *     is present is internally consistent, its contents are authentic, and (when
  *     it reaches the head) it matches the signed head. A gap BELOW the first
  *     exported seq is expected for partial exports.
- *   • It does not timestamp-anchor the checkpoint externally (out of scope v1).
+ *   • RFC 3161 verification is optional and trusts only an auditor-supplied
+ *     TSA CA. Anchoring narrows the pre-anchor rewrite window; it does not make
+ *     the system tamper-proof or operator-proof.
  */
 
+import { spawnSync } from "node:child_process";
 import { createHash, createPublicKey, verify as edVerify } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 function fail(msg, seq) {
   const at = seq === undefined ? "" : ` (seq ${seq})`;
@@ -58,7 +64,7 @@ function fail(msg, seq) {
 function usage(msg) {
   console.error(`usage error: ${msg}`);
   console.error(
-    "  node scripts/verify-evidence-bundle.mjs <bundle.json> [--expected-key-fingerprint <hex>]",
+    "  node scripts/verify-evidence-bundle.mjs <bundle.json> [--expected-key-fingerprint <hex>] [--tsa-ca <pem>]",
   );
   console.error("  cat bundle.json | node scripts/verify-evidence-bundle.mjs [--fp <hex>]");
   console.error("");
@@ -67,6 +73,12 @@ function usage(msg) {
   console.error("       STEWARD_EXPECTED_AUDIT_KEY_FP (comma-separated). If absent, the verifier");
   console.error("       prints the observed fingerprint and states trust-root matching is the");
   console.error("       auditor responsibility.");
+  console.error(
+    "  --tsa-ca <pem>  Verify an included RFC 3161 token against this auditor-supplied CA.",
+  );
+  console.error("  --tsa-untrusted <pem>  Optional intermediate TSA certificate chain.");
+  console.error("  --require-anchor  Fail unless an RFC 3161 proof is present and verifies.");
+  console.error("  --anchored-before <ISO-8601>  Require verified TSA time at/before this bound.");
   process.exit(2);
 }
 
@@ -75,6 +87,10 @@ function parseArgs() {
   const argv = process.argv.slice(2);
   let bundleArg;
   const expectedFps = [];
+  let tsaCa;
+  let tsaUntrusted;
+  let requireAnchor = false;
+  let anchoredBefore;
   const clean = (s) => s.toLowerCase().replace(/[^0-9a-f]/g, "");
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -85,8 +101,21 @@ function parseArgs() {
       i++;
     } else if (a.startsWith("--expected-key-fingerprint=") || a.startsWith("--fp=")) {
       expectedFps.push(clean(a.slice(a.indexOf("=") + 1)));
+    } else if (a === "--tsa-ca" || a === "--tsa-untrusted" || a === "--anchored-before") {
+      const v = argv[i + 1];
+      if (!v) usage(`${a} requires a value`);
+      if (a === "--tsa-ca") tsaCa = v;
+      if (a === "--tsa-untrusted") tsaUntrusted = v;
+      if (a === "--anchored-before") anchoredBefore = v;
+      i++;
+    } else if (a === "--require-anchor") {
+      requireAnchor = true;
+    } else if (a.startsWith("--")) {
+      usage(`unknown option ${a}`);
     } else if (!bundleArg) {
       bundleArg = a;
+    } else {
+      usage(`unexpected positional argument ${a}`);
     }
   }
   const envFp = process.env.STEWARD_EXPECTED_AUDIT_KEY_FP;
@@ -96,7 +125,98 @@ function parseArgs() {
       if (c) expectedFps.push(c);
     }
   }
-  return { bundleArg, expectedFps };
+  if (anchoredBefore && !Number.isFinite(new Date(anchoredBefore).getTime())) {
+    usage("--anchored-before must be a valid ISO-8601 timestamp");
+  }
+  if (tsaUntrusted && !tsaCa) usage("--tsa-untrusted requires --tsa-ca");
+  if ((requireAnchor || anchoredBefore) && !tsaCa) {
+    usage("--require-anchor/--anchored-before require an auditor-supplied --tsa-ca");
+  }
+  return { bundleArg, expectedFps, tsaCa, tsaUntrusted, requireAnchor, anchoredBefore };
+}
+
+function checkpointAnchorDigest(payload) {
+  return createHash("sha256").update(canonicalCheckpointBytes(payload)).digest("hex");
+}
+
+function strictBase64(value, name) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) {
+    fail(`${name} is not canonical base64`);
+  }
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.length === 0 || decoded.toString("base64") !== value) {
+    fail(`${name} is not canonical base64`);
+  }
+  return decoded;
+}
+
+function verifyRfc3161Anchor(anchor, payload, options) {
+  if (!anchor) {
+    if (options.requireAnchor || options.tsaCa || options.anchoredBefore) {
+      fail("required RFC 3161 checkpoint anchor is missing");
+    }
+    return { present: false, verified: false, time: null };
+  }
+  if (
+    anchor.v !== 1 ||
+    anchor.type !== "rfc3161" ||
+    anchor.hashAlgorithm !== "sha256" ||
+    typeof anchor.sinkId !== "string" ||
+    !/^[0-9a-f]{64}$/.test(anchor.checkpointDigest)
+  ) {
+    fail("checkpoint RFC 3161 anchor schema is invalid");
+  }
+  const digest = checkpointAnchorDigest(payload);
+  if (anchor.checkpointDigest !== digest) {
+    fail("RFC 3161 anchor digest does not match the signed checkpoint payload");
+  }
+  const response = strictBase64(anchor.timestampResponse, "RFC 3161 timestampResponse");
+  if (response.length > 1024 * 1024) fail("RFC 3161 timestampResponse exceeds 1 MiB");
+  if (!options.tsaCa) return { present: true, verified: false, time: null };
+
+  const dir = mkdtempSync(join(tmpdir(), "steward-rfc3161-"));
+  const responsePath = join(dir, "response.tsr");
+  try {
+    writeFileSync(responsePath, response, { mode: 0o600 });
+    const verifyArgs = [
+      "ts",
+      "-verify",
+      "-digest",
+      digest,
+      "-in",
+      responsePath,
+      "-CAfile",
+      options.tsaCa,
+    ];
+    if (options.tsaUntrusted) verifyArgs.push("-untrusted", options.tsaUntrusted);
+    const verified = spawnSync("openssl", verifyArgs, {
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    if (verified.error) fail(`could not run OpenSSL RFC 3161 verifier: ${verified.error.message}`);
+    if (verified.status !== 0) {
+      fail(`RFC 3161 token verification failed: ${(verified.stderr || verified.stdout).trim()}`);
+    }
+    const inspected = spawnSync("openssl", ["ts", "-reply", "-in", responsePath, "-text"], {
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    if (inspected.error || inspected.status !== 0) {
+      fail("verified RFC 3161 token could not be inspected for its timestamp");
+    }
+    const match = inspected.stdout.match(/^Time stamp:\s*(.+)$/m);
+    if (!match) fail("verified RFC 3161 token did not contain a timestamp");
+    const time = new Date(match[1]);
+    if (!Number.isFinite(time.getTime())) fail("RFC 3161 token timestamp is not parseable");
+    if (options.anchoredBefore && time > new Date(options.anchoredBefore)) {
+      fail(
+        `RFC 3161 anchor time ${time.toISOString()} is after required bound ${options.anchoredBefore}`,
+      );
+    }
+    return { present: true, verified: true, time: time.toISOString() };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 // SHA-256 fingerprint of a signing key SPKI DER (spec §7.1/§7.2, C6).
@@ -191,7 +311,8 @@ function eventsContentDigest(events, tenantId) {
 }
 
 function main() {
-  const { bundleArg, expectedFps } = parseArgs();
+  const options = parseArgs();
+  const { bundleArg, expectedFps } = options;
   const input = loadBundle(bundleArg);
 
   if (!input || typeof input !== "object") fail("bundle is not an object");
@@ -240,6 +361,10 @@ function main() {
   }
   const sigOk = edVerify(null, canonicalCheckpointBytes(payload), pubKeyObj, sigBytes);
   if (!sigOk) fail("Ed25519 checkpoint signature does not verify");
+
+  // Optional third-party time proof. Its message imprint MUST bind the exact
+  // canonical checkpoint payload. Trust comes only from an auditor-supplied CA.
+  const anchorResult = verifyRfc3161Anchor(checkpoint.anchor, payload, options);
 
   // ── Trust-root fingerprint match (spec §7.1/§7.2, C6) ────────────────────
   // The bundle is self-describing (it carries its own public key); an auditor
@@ -359,6 +484,15 @@ function main() {
   console.log(`  signature:     Ed25519 OK`);
   console.log(`  content:       SHA-256 events digest OK`);
   console.log(`  linkage:       OK`);
+  console.log(
+    `  anchor:        ${
+      anchorResult.verified
+        ? `RFC 3161 verified; checkpoint existed no later than ${anchorResult.time}`
+        : anchorResult.present
+          ? "RFC 3161 proof present but NOT trusted; supply --tsa-ca"
+          : "not present (optional)"
+    }`,
+  );
   if (manifest)
     console.log(`  manifest:      cross-check OK (every fact backed by a signed event)`);
   console.log(`  head:          ${headNote}`);
@@ -378,6 +512,9 @@ function main() {
       (trustRootChecked
         ? "the signing key matches an auditor-supplied trusted fingerprint; "
         : "") +
+      (anchorResult.verified
+        ? `a trusted TSA proves the checkpoint existed no later than ${anchorResult.time}; `
+        : "") +
       "the checkpoint is authentically Ed25519-signed and unaltered.",
   );
   console.log(
@@ -385,7 +522,9 @@ function main() {
       "operator holding BOTH the HMAC key AND the signing key could fabricate a " +
       "self-consistent history; that the export is the complete history; " +
       (trustRootChecked ? "" : "trust-root binding (no expected fingerprint supplied); ") +
-      "out-of-band time anchoring.",
+      (anchorResult.verified
+        ? "events after the anchor or TSA/operator collusion. Anchoring narrows the pre-anchor rewrite window; it is not operator-proof."
+        : "out-of-band time anchoring."),
   );
   process.exit(0);
 }

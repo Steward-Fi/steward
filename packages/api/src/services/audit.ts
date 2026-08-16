@@ -35,6 +35,10 @@ import {
   eventsContentDigest,
   getCheckpointSigner,
 } from "./audit-checkpoint";
+import {
+  maybeAnchorAuditCheckpoint,
+  type Rfc3161CheckpointAnchorProof,
+} from "./audit-checkpoint-anchor";
 import { API_VERSION } from "./version";
 
 /**
@@ -532,6 +536,7 @@ export interface SignedAuditBundle {
     payload: CheckpointPayload;
     signature: string;
     publicKey: string;
+    anchor?: Rfc3161CheckpointAnchorProof;
   };
   generatedAt: string;
 }
@@ -590,6 +595,10 @@ export async function signAuditBundle(
     eventsToSeq: events.length > 0 ? events[events.length - 1].seq : 0,
   };
   const signed = signer.sign(checkpointPayload);
+  // Default/off mode returns synchronously without constructing a sink or
+  // touching the network. Required mode throws instead of emitting an
+  // unanchored bundle; best-effort mode logs and preserves the v1 envelope.
+  const anchor = await maybeAnchorAuditCheckpoint(signed);
   // Process-local operational gauge only. Durable checkpoint evidence is the
   // signed payload/table below and remains authoritative across restarts.
   try {
@@ -632,6 +641,7 @@ export async function signAuditBundle(
       payload: signed.payload,
       signature: signed.signature,
       publicKey: signed.publicKey,
+      ...(anchor ? { anchor } : {}),
     },
     generatedAt: new Date().toISOString(),
   };

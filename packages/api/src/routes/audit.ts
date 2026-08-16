@@ -16,6 +16,7 @@ import {
   verifyAuditChain,
 } from "../services/audit";
 import { AuditSigningKeyError, isCheckpointSigningConfigured } from "../services/audit-checkpoint";
+import { AuditCheckpointAnchorError } from "../services/audit-checkpoint-anchor";
 import {
   type ApiResponse,
   type AppVariables,
@@ -888,6 +889,9 @@ auditRoutes.get("/bundle", async (c) => {
   } catch (err) {
     if (err instanceof AuditSigningKeyError) {
       return c.json<ApiResponse>({ ok: false, error: err.message }, 503);
+    }
+    if (err instanceof AuditCheckpointAnchorError) {
+      return c.json<ApiResponse>({ ok: false, error: "Required checkpoint anchoring failed" }, 503);
     }
     console.error(`[audit] checkpoint signing failed for tenant ${tenantId}:`, err);
     return c.json<ApiResponse>({ ok: false, error: "Failed to sign checkpoint" }, 500);
