@@ -1,27 +1,12 @@
 /**
  * Behavioral coverage for POST /v1/trade/polymarket/order.
  *
- * Mirrors the Hyperliquid venue-submit fence test's harness: a real in-memory
- * PGLite DB + the REAL TradeSessionManager, driving the REAL route. Only two
- * seams are stubbed, both infrastructure:
- *   - PolymarketExecutionAdapter.submitOrder (the venue network edge); and
- *   - vault.getWallet, to inject the agent's polymarket venue wallet + funder
- *     metadata (provisioning of the wallet itself is out of scope here).
- *
- * The L2 CLOB apiCredentials are NOT provisioned by anything yet (Phase C), so
- * the route's resolvePolymarketCreds returns `creds-not-provisioned` by default
- * and the route fails closed (409). The "happy path" test patches the
- * creds-resolution by spying the adapter constructor's guard indirectly: it
- * monkeypatches vault.getWallet to return funder metadata AND stubs the secret
- * path by spying on PolymarketExecutionAdapter so no real client/creds run.
- * Because the route's fail-closed gate keys on the (still-unwired) secret creds,
- * the happy-path test injects creds via a module-level spy on the route's
- * resolver is not possible (it's a closure); instead we assert the happy path
- * THROUGH the adapter by provisioning funder metadata and asserting the route
- * reaches the adapter only when creds resolve. Since creds cannot resolve yet,
- * the happy-path test stubs the adapter AND asserts the fail-closed 409 is the
- * current contract, then a SECOND happy-path variant injects a resolvable creds
- * path via a test-only env seam.
+ * Mirrors the Hyperliquid venue-submit fence harness: real in-memory PGLite,
+ * TradeSessionManager, policy/session routes, vault provisioning, credential
+ * derivation, and execution adapter. Focused fault-path cases retain narrow
+ * wallet/adapter spies. The deterministic E2E case uses the real vault signer
+ * and Polymarket SDK, intercepting only the SDK's HTTP methods at the network
+ * edge.
  *
  * Coverage:
  *   (a) policy-reject: market-not-allowed -> 400 policy-violation + audit, no spend.
@@ -41,9 +26,11 @@ import {
   setDefaultTimeout,
   spyOn,
 } from "bun:test";
+import { ClobClient } from "@polymarket/clob-client";
 import {
   agentPolicies,
   agents,
+  agentWallets,
   auditEvents,
   closeDb,
   getDb,
@@ -56,6 +43,7 @@ import { Vault } from "@stwd/vault";
 import { PolymarketExecutionAdapter } from "@stwd/venue-polymarket";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
+import type { StewardAppContext } from "../context";
 import type { AppVariables } from "../services/context";
 
 setDefaultTimeout(30000);
@@ -181,6 +169,7 @@ async function auditCount(tenantId: string, action: string): Promise<number> {
 // runs all test files in one process; a per-describe closeDb() would tear down
 // PGLite before the second describe's beforeAll re-imports routes.
 let sharedTradeRoutes: Hono;
+let sharedTestContext: StewardAppContext;
 beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD ??= "pm-order-master-password";
@@ -206,7 +195,8 @@ beforeAll(async () => {
   );
   const { createTradeRoutes } = await import("../routes/trade");
   const { testCtx } = await import("./_ctx");
-  sharedTradeRoutes = createTradeRoutes(testCtx());
+  sharedTestContext = testCtx();
+  sharedTradeRoutes = createTradeRoutes(sharedTestContext);
 });
 
 afterAll(async () => {
@@ -408,6 +398,156 @@ describe("POST /v1/trade/polymarket/order", () => {
     }
   });
 
+  it("deterministic E2E: real vault wallet -> L2 derive -> policy/session -> SDK sign/post -> audit/idempotency", async () => {
+    const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const tenantId = `pm-e2e-tenant-${suffix}`;
+    const agentId = `pm-e2e-agent-${suffix}`;
+    await getDb()
+      .insert(tenants)
+      .values({ id: tenantId, name: "PM E2E Tenant", apiKeyHash: `hash-${tenantId}` });
+    await getDb().insert(agents).values({
+      id: agentId,
+      tenantId,
+      name: "PM E2E Agent",
+      walletAddress: "0x0000000000000000000000000000000000000001",
+    });
+    await getDb()
+      .insert(agentPolicies)
+      .values({
+        agentId,
+        tenantId,
+        dailyCapUsd: "100",
+        perOrderCapUsd: "25",
+        leverageCap: "1",
+        allowedAssets: [`pm:${TOKEN_ID}`],
+        allowedVenues: ["polymarket"],
+        updatedBy: "e2e-human-policy",
+      });
+
+    // This is real provisioning into the encrypted venue-scoped vault. No
+    // getWallet/signing spy and no raw private key leaves the vault.
+    const wallet = await sharedTestContext.vault.createWallet({
+      agentId,
+      venue: "polymarket",
+      chainType: "evm",
+    });
+    // Promote the provisioned delegate to the preferred sigType-2 topology:
+    // Safe holds funds (maker), venue-scoped EOA signs. Metadata is public and
+    // identity-bound; no secret material is introduced.
+    await getDb()
+      .update(agentWallets)
+      .set({ metadata: { funderAddress: FUNDER } })
+      .where(and(eq(agentWallets.agentId, agentId), eq(agentWallets.venue, "polymarket")));
+
+    const requests: Array<{ method: string; path: string; body?: unknown }> = [];
+    type ClobHttpOptions = { headers?: Record<string, string>; data?: unknown };
+    type ClobHttpPrototype = {
+      get(endpoint: string, options?: ClobHttpOptions): Promise<unknown>;
+      post(endpoint: string, options?: ClobHttpOptions): Promise<unknown>;
+    };
+    const clobPrototype = ClobClient.prototype as unknown as ClobHttpPrototype;
+    const getSpy = spyOn(clobPrototype, "get").mockImplementation((async (endpoint: string) => {
+      const path = new URL(endpoint).pathname;
+      requests.push({ method: "GET", path });
+      if (path === "/tick-size") return { minimum_tick_size: 0.01 };
+      if (path === "/fee-rate") return { base_fee: 0 };
+      throw new Error(`unexpected deterministic CLOB GET ${path}`);
+    }) as never);
+    const postSpy = spyOn(clobPrototype, "post").mockImplementation((async (
+      endpoint: string,
+      options?: ClobHttpOptions,
+    ) => {
+      const path = new URL(endpoint).pathname;
+      requests.push({ method: "POST", path, body: options?.data });
+      const headers = new Headers(options?.headers);
+      if (path === "/auth/api-key") {
+        expect(headers.get("poly_address")?.toLowerCase()).toBe(wallet.address.toLowerCase());
+        expect(headers.get("poly_signature")).toMatch(/^0x[0-9a-f]+$/i);
+        return {
+          apiKey: "deterministic-e2e-key",
+          secret: "ZGV0ZXJtaW5pc3RpYy1zZWNyZXQ=",
+          passphrase: "deterministic-e2e-passphrase",
+        };
+      }
+      if (path === "/order") {
+        expect(headers.get("poly_api_key")).toBe("deterministic-e2e-key");
+        const payload = options?.data as {
+          owner?: string;
+          order?: { maker?: string; signer?: string; signature?: string; tokenId?: string };
+        };
+        expect(payload.owner).toBe("deterministic-e2e-key");
+        expect(payload.order?.maker?.toLowerCase()).toBe(FUNDER.toLowerCase());
+        expect(payload.order?.signer?.toLowerCase()).toBe(wallet.address.toLowerCase());
+        expect(payload.order?.tokenId).toBe(TOKEN_ID);
+        expect(payload.order?.signature).toMatch(/^0x[0-9a-f]+$/i);
+        return {
+          orderID: "pm-e2e-order-1",
+          status: "matched",
+          success: true,
+          makingAmount: "10000000",
+          takingAmount: "20000000",
+        };
+      }
+      throw new Error(`unexpected deterministic CLOB POST ${path}`);
+    }) as never);
+
+    process.env.POLYMARKET_CLOB_API_URL = "https://clob.e2e.invalid";
+    try {
+      const app = makeApp(tenantId, agentId, tradeRoutes);
+      const sessionRes = await app.request("/v1/trade/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          agentId,
+          venue: "polymarket",
+          dailyCap: 40,
+          perOrderCap: 20,
+          allowedAssets: [`pm:${TOKEN_ID}`],
+        }),
+      });
+      expect(sessionRes.status).toBe(201);
+      const sessionBody = (await sessionRes.json()) as { data: { sessionId: string } };
+      const idempotencyKey = `pm-e2e-${crypto.randomUUID()}`;
+      const orderBody = {
+        sessionId: sessionBody.data.sessionId,
+        tokenId: TOKEN_ID,
+        side: "buy",
+        amount: 10,
+        price: 0.5,
+        tickSize: "0.01",
+        negRisk: true,
+      };
+      const first = await app.request("/v1/trade/polymarket/order", {
+        method: "POST",
+        headers: { "content-type": "application/json", "Idempotency-Key": idempotencyKey },
+        body: JSON.stringify(orderBody),
+      });
+      expect(first.status).toBe(200);
+      expect((await first.json()) as unknown).toMatchObject({
+        ok: true,
+        data: { orderId: "pm-e2e-order-1", filledQty: 20, avgPrice: 0.5, notionalUsd: 10 },
+      });
+
+      // Same governed request is replayed without a second CLOB POST or spend.
+      const replay = await app.request("/v1/trade/polymarket/order", {
+        method: "POST",
+        headers: { "content-type": "application/json", "Idempotency-Key": idempotencyKey },
+        body: JSON.stringify(orderBody),
+      });
+      expect(replay.status).toBe(200);
+      expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+      expect(requests.filter((r) => r.path === "/auth/api-key")).toHaveLength(1);
+      expect(requests.filter((r) => r.path === "/order")).toHaveLength(1);
+      expect(await dailySpendOf(sessionBody.data.sessionId)).toBe(10);
+      expect(await auditCount(tenantId, "trade.order.submit.authorized")).toBe(1);
+      expect(await auditCount(tenantId, "trade.order.submitted")).toBe(1);
+    } finally {
+      delete process.env.POLYMARKET_CLOB_API_URL;
+      getSpy.mockRestore();
+      postSpy.mockRestore();
+    }
+  });
+
   it("no funder metadata -> EOA funder path still executes (sigType 0, funder=wallet)", async () => {
     // v1 EOA custody: when no funder Safe is recorded, the delegate EOA is its
     // own funder. The order should still flow end-to-end (sigType selection is
@@ -498,28 +638,54 @@ describe("POST /v1/trade/polymarket/order", () => {
     }
   });
 
-  it("pre-submit build failure -> 400, RELEASES spend, never calls submitOrder", async () => {
+  it("live-book unavailable -> refuses to guess options, releases spend, never posts", async () => {
     const { tenantId, agentId, sessionId } = await seedSession({});
     const app = makeApp(tenantId, agentId, tradeRoutes);
 
     process.env.STEWARD_PM_TEST_CREDS = "1";
     stubWallet(true);
-    // buildSignedOrder throws BEFORE anything reaches the venue (e.g. tickSize
-    // resolution failure / CLOB rounding rejection). submitOrder must NOT run
-    // and the reserved spend MUST be released (this never burns the daily cap).
-    buildSpy = spyOn(PolymarketExecutionAdapter.prototype, "buildSignedOrder").mockRejectedValue(
-      new Error("could not resolve tickSize"),
-    );
+    const fetchSpy = spyOn(globalThis, "fetch").mockRejectedValue(new Error("book down"));
     submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitSignedOrder").mockResolvedValue({
       venue: "polymarket" as const,
     } as Awaited<ReturnType<PolymarketExecutionAdapter["submitSignedOrder"]>>);
 
     try {
+      // No caller-supplied tickSize/negRisk. The real adapter must resolve the
+      // live book and fail closed when it is unavailable, never guess defaults.
       const res = await postOrder(app, sessionId, crypto.randomUUID());
       expect(res.status).toBe(400);
       expect(((await res.json()) as { error?: string }).error).toContain("could not be built");
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
       expect(submitSpy).toHaveBeenCalledTimes(0);
-      // Pre-submit failures release the reserved spend.
+      expect(await dailySpendOf(sessionId)).toBe(0);
+      expect(await auditCount(tenantId, "trade.order.submitted")).toBe(0);
+    } finally {
+      fetchSpy.mockRestore();
+      delete process.env.STEWARD_PM_TEST_CREDS;
+    }
+  });
+
+  it("sub-0.01 SELL -> real adapter rejects pre-sign and releases spend", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({});
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    process.env.STEWARD_PM_TEST_CREDS = "1";
+    stubWallet(true);
+    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitSignedOrder").mockResolvedValue({
+      venue: "polymarket" as const,
+    } as Awaited<ReturnType<PolymarketExecutionAdapter["submitSignedOrder"]>>);
+
+    try {
+      const res = await postOrder(app, sessionId, crypto.randomUUID(), {
+        side: "sell",
+        amount: 0.005,
+        price: 0.5,
+        tickSize: "0.01",
+        negRisk: true,
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error?: string }).error).toContain("could not be built");
+      expect(submitSpy).toHaveBeenCalledTimes(0);
       expect(await dailySpendOf(sessionId)).toBe(0);
       expect(await auditCount(tenantId, "trade.order.submitted")).toBe(0);
     } finally {

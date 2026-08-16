@@ -28,6 +28,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@polymarket/clob-client": "^4.22.7",
     "@stwd/auth": "workspace:*",
     "@types/node": "^25.5.0"
   },
