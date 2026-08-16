@@ -30,6 +30,7 @@ import {
   GenericDescriptorError,
   GITHUB_PROVIDER_ACTION_PROFILE,
   GOLDEN_VECTORS,
+  genericDescriptorAllowsExactPath,
   genericHttpCanonicalActionBytes,
   isRegisteredProfile,
   REGISTERED_PROFILES,
@@ -38,6 +39,39 @@ import {
   X_GOLDEN_VECTORS,
   X_PROVIDER_ACTION_PROFILE,
 } from "../index.js";
+
+describe("generic credential-route subset proof", () => {
+  const descriptor = validateGenericHttpDescriptor(GENERIC_GOLDEN_DESCRIPTOR_A);
+
+  it("accepts only canonical exact paths admitted by the descriptor", () => {
+    expect(
+      genericDescriptorAllowsExactPath(
+        descriptor,
+        "/v1/orgs/acme-inc/projects/11111111-1111-4111-8111-111111111111/items",
+      ),
+    ).toBe(true);
+    expect(genericDescriptorAllowsExactPath(descriptor, "/v1/orgs/acme-inc/projects/*")).toBe(
+      false,
+    );
+    expect(
+      genericDescriptorAllowsExactPath(
+        descriptor,
+        "/v1/orgs/acme-inc/projects/11111111-1111-4111-8111-111111111111/items/extra",
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects traversal, encoded delimiters, noncanonical encoding, and typed-param mismatch", () => {
+    for (const path of [
+      "/v1/orgs/../projects/11111111-1111-4111-8111-111111111111/items",
+      "/v1/orgs/acme%2Fother/projects/11111111-1111-4111-8111-111111111111/items",
+      "/v1/orgs/acme%2dinc/projects/11111111-1111-4111-8111-111111111111/items",
+      "/v1/orgs/acme-inc/projects/not-a-uuid/items",
+    ]) {
+      expect(genericDescriptorAllowsExactPath(descriptor, path)).toBe(false);
+    }
+  });
+});
 
 function descriptorDenies(raw: unknown): string | null {
   try {

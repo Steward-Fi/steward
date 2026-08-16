@@ -44,19 +44,27 @@ export interface ProviderProfileDescriptor {
 const REGISTRY: ReadonlyMap<string, ProviderProfileDescriptor> = new Map([
   [
     GITHUB_PROVIDER_ACTION_PROFILE,
-    { profile: GITHUB_PROVIDER_ACTION_PROFILE, kind: "adapter-fixed", label: "GitHub" },
+    Object.freeze<ProviderProfileDescriptor>({
+      profile: GITHUB_PROVIDER_ACTION_PROFILE,
+      kind: "adapter-fixed",
+      label: "GitHub",
+    }),
   ],
   [
     X_PROVIDER_ACTION_PROFILE,
-    { profile: X_PROVIDER_ACTION_PROFILE, kind: "adapter-fixed", label: "X" },
+    Object.freeze<ProviderProfileDescriptor>({
+      profile: X_PROVIDER_ACTION_PROFILE,
+      kind: "adapter-fixed",
+      label: "X",
+    }),
   ],
   [
     GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
-    {
+    Object.freeze<ProviderProfileDescriptor>({
       profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
       kind: "config-driven",
       label: "Generic HTTP",
-    },
+    }),
   ],
 ]);
 

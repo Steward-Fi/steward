@@ -58,6 +58,7 @@ import { eq } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import { providerActionService } from "../services/provider-action-service";
 import { providerApprovalService } from "../services/provider-approval";
+import { providerAuthorityStore } from "../services/provider-authority-store";
 
 setDefaultTimeout(120_000);
 
@@ -78,12 +79,14 @@ const G = {
   APPROVER2: "82000000-0000-4000-8000-000000000002",
   APPROVER_BINDING: "92000000-0000-4000-8000-000000000001",
   APPROVER2_BINDING: "92000000-0000-4000-8000-000000000002",
+  ADMIN_BINDING: "92000000-0000-4000-8000-000000000003",
   GRANT: "a2000000-0000-4000-8000-000000000001",
 } as const;
 
 const OP_LIST_KEY = "acme.item.list";
 const OP_CREATE_KEY = "acme.item.create";
 const OP_QUORUM_KEY = "acme.item.quorum";
+const OP_AUTHORED_KEY = "acme.item.authored";
 const FUTURE = new Date(Date.now() + 365 * 24 * 3600_000);
 
 function principal(): ProviderPrincipalV1 {
@@ -184,6 +187,7 @@ async function seedGeneric() {
     { id: G.APPROVER2, email: "approverg2@t.test" },
   ]);
   await db.insert(userTenants).values([
+    { userId: G.GRANTOR, tenantId: G.TENANT, role: "owner" },
     { userId: G.APPROVER, tenantId: G.TENANT, role: "member" },
     { userId: G.APPROVER2, tenantId: G.TENANT, role: "member" },
   ]);
@@ -295,6 +299,19 @@ async function seedGeneric() {
     },
   ]);
   await db.insert(providerRoleBindings).values([
+    {
+      id: G.ADMIN_BINDING,
+      tenantId: G.TENANT,
+      workspaceId: G.WORKSPACE,
+      principalType: "human",
+      principalId: G.GRANTOR,
+      roleKey: "workspace_admin",
+      operationKeys: [],
+      environment: "production",
+      status: "active",
+      grantedByUserId: G.GRANTOR,
+      reason: "admin",
+    },
     {
       id: G.APPROVER_BINDING,
       tenantId: G.TENANT,
@@ -408,6 +425,7 @@ describe("#201 generic-http governed provider-action E2E", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY ||= "0".repeat(64);
+    process.env.STEWARD_EXECUTION_AUTH_SECRET ||= "1".repeat(64);
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => client.close());
   });
@@ -449,12 +467,101 @@ describe("#201 generic-http governed provider-action E2E", () => {
       tenantId: G.TENANT,
       caller: { agentId: G.AGENT },
     });
+    if (!res.ok) throw new Error(`resume failed: ${JSON.stringify(res)}`);
     expect(res.ok).toBe(true);
-    if (!res.ok) throw new Error("unreachable");
     expect(res.status).toBe("execution_ready");
 
     const bFinal = await bindingRow(out.intentId);
     expect(bFinal.status).toBe("execution_ready");
+  });
+
+  test("operator path: register a validated generic operation, then invoke it", async () => {
+    const operation = await providerAuthorityStore.registerOperation(
+      {
+        tenantId: G.TENANT,
+        actorUserId: G.GRANTOR,
+        tenantRole: "owner",
+        mfaVerifiedAt: Date.now(),
+        idempotencyKey: "generic-author-operation-1",
+        expectedRevision: 1,
+        reason: "register governed Acme write",
+        audit: async () => {},
+      },
+      G.ACCOUNT,
+      {
+        operationKey: OP_AUTHORED_KEY,
+        riskClass: "write",
+        secretRouteId: G.ROUTE_CREATE,
+        requestProfile: {
+          profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+          operationDescriptor: CREATE_DESCRIPTOR,
+          policyRules: approvalRules(OP_AUTHORED_KEY),
+        },
+      },
+    );
+    expect(operation.operationKey).toBe(OP_AUTHORED_KEY);
+
+    await getDb()
+      .update(providerGrants)
+      .set({
+        operationKeys: [OP_LIST_KEY, OP_CREATE_KEY, OP_QUORUM_KEY, OP_AUTHORED_KEY],
+        revision: 2,
+      })
+      .where(eq(providerGrants.id, G.GRANT));
+
+    const out = await propose(
+      OP_AUTHORED_KEY,
+      "POST",
+      { title: "operator-authored ticket", priority: 2 },
+      "ghauthor01",
+    );
+    expect(out.kind).toBe("approval_required");
+  });
+
+  test("operator path rejects malformed descriptors and widening credential routes before commit", async () => {
+    const baseContext = {
+      tenantId: G.TENANT,
+      actorUserId: G.GRANTOR,
+      tenantRole: "owner",
+      mfaVerifiedAt: Date.now(),
+      idempotencyKey: "generic-author-operation-2",
+      expectedRevision: 1,
+      reason: "negative authoring proof",
+      audit: async () => {},
+    };
+    await expect(
+      providerAuthorityStore.registerOperation(baseContext, G.ACCOUNT, {
+        operationKey: OP_AUTHORED_KEY,
+        riskClass: "write",
+        secretRouteId: G.ROUTE_CREATE,
+        requestProfile: {
+          profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+          operationDescriptor: { ...CREATE_DESCRIPTOR, origin: "https://169.254.169.254" },
+        },
+      }),
+    ).rejects.toMatchObject({ code: "bad_request", status: 400 });
+
+    await expect(
+      providerAuthorityStore.registerOperation(
+        { ...baseContext, idempotencyKey: "generic-author-operation-3" },
+        G.ACCOUNT,
+        {
+          operationKey: OP_AUTHORED_KEY,
+          riskClass: "write",
+          secretRouteId: G.ROUTE_LIST,
+          requestProfile: {
+            profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+            operationDescriptor: CREATE_DESCRIPTOR,
+          },
+        },
+      ),
+    ).rejects.toMatchObject({ code: "forbidden", status: 403 });
+
+    const rows = await getDb()
+      .select()
+      .from(providerOperations)
+      .where(eq(providerOperations.operationKey, OP_AUTHORED_KEY));
+    expect(rows).toHaveLength(0);
   });
 
   test("E2E read path: allow-only reaches the in-process stub with no approval", async () => {
