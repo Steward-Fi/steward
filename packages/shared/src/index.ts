@@ -7,15 +7,15 @@ import type { VenueId } from "./types/venue.js";
 export * from "./chains/index.js";
 export * from "./execution-contract.js";
 export * from "./execution-payload.js";
+export * from "./generic-http-provider-action.js";
 export type { PriceOracle } from "./price-oracle.js";
 export { createPriceOracle } from "./price-oracle.js";
-export * from "./generic-http-provider-action.js";
 export * from "./provider-action.js";
 export * from "./provider-approval.js";
-export * from "./provider-profile-registry.js";
 export * from "./provider-authority.js";
 export * from "./provider-case.js";
 export * from "./provider-execution-auth.js";
+export * from "./provider-profile-registry.js";
 // ─── Non-throwing description of an arbitrary thrown value (fail-closed catches) ───
 export { describeThrown, UNPRINTABLE_THROWN_VALUE } from "./safe-error.js";
 export * from "./secret-route-matching.js";
