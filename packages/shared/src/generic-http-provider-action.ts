@@ -270,6 +270,50 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+function assertExactKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  code: GenericDescriptorErrorCode,
+  where: string,
+): void {
+  const allowedSet = new Set(allowed);
+  const unknown = Object.keys(value).find((key) => !allowedSet.has(key));
+  if (unknown) descriptorFail(code, `${where}: unknown key '${unknown}'`);
+}
+
+/**
+ * Operator regexes execute on request data, so accept only a deliberately
+ * finite-time subset: anchored expressions, bounded repetition, no lookaround,
+ * backreferences, unbounded quantifiers, or quantified groups. This preserves
+ * useful character classes/alternation while excluding common ReDoS shapes.
+ */
+function validateSafeRegex(
+  pattern: unknown,
+  code: GenericDescriptorErrorCode,
+  where: string,
+): string {
+  if (typeof pattern !== "string" || pattern.length === 0 || pattern.length > 128)
+    descriptorFail(code, `${where}: pattern must be a bounded string`);
+  const p = pattern as string;
+  if (!p.startsWith("^") || !p.endsWith("$"))
+    descriptorFail(code, `${where}: pattern must be anchored ^...$`);
+  if (/\(\?/.test(p) || /\\[1-9]/.test(p) || /[*+]/.test(p) || /\)\s*(?:\?|\{)/.test(p))
+    descriptorFail(code, `${where}: unsafe regex construct`);
+  for (const match of p.matchAll(/\{(\d+)(?:,(\d*))?\}/g)) {
+    const min = Number(match[1]);
+    const max = match[2] === undefined ? min : match[2] === "" ? Number.NaN : Number(match[2]);
+    if (!Number.isSafeInteger(min) || !Number.isSafeInteger(max) || min > max || max > 256) {
+      descriptorFail(code, `${where}: repetition must be finite and at most 256`);
+    }
+  }
+  try {
+    new RegExp(p);
+  } catch {
+    descriptorFail(code, `${where}: pattern does not compile`);
+  }
+  return p;
+}
+
 /**
  * Validate the operator-declared origin: MUST be an absolute https URL whose
  * host is a real DNS name (no IP literal, no userinfo, no port other than 443,
@@ -340,27 +384,13 @@ export function canonicalizeGenericOrigin(raw: unknown): string {
 }
 
 function validatePattern(pattern: unknown, where: string): string {
-  if (typeof pattern !== "string" || pattern.length === 0 || pattern.length > 512)
-    descriptorFail(
-      "CANON_DESCRIPTOR_SEGMENT_INVALID",
-      `${where}: pattern must be a bounded string`,
-    );
-  const p = pattern as string;
-  // Must be fully anchored so a partial match cannot smuggle a delimiter.
-  if (!p.startsWith("^") || !p.endsWith("$"))
-    descriptorFail("CANON_DESCRIPTOR_SEGMENT_INVALID", `${where}: pattern must be anchored ^...$`);
+  const p = validateSafeRegex(pattern, "CANON_DESCRIPTOR_SEGMENT_INVALID", where);
   // Reject patterns that could admit a path/query delimiter or dot-segment.
   if (/[/\\]/.test(p))
     descriptorFail(
       "CANON_DESCRIPTOR_SEGMENT_INVALID",
       `${where}: pattern must not contain / or \\`,
     );
-  try {
-    // Construct to prove it compiles; not used for match here.
-    new RegExp(p);
-  } catch {
-    descriptorFail("CANON_DESCRIPTOR_SEGMENT_INVALID", `${where}: pattern does not compile`);
-  }
   return p;
 }
 
@@ -383,6 +413,12 @@ export function validateGenericHttpDescriptor(raw: unknown): GenericHttpOperatio
     descriptorFail("CANON_DESCRIPTOR_SHAPE_INVALID", "descriptor must be a plain object");
   assertNoProtoPollution(raw, "descriptor");
   const d = raw as Record<string, unknown>;
+  assertExactKeys(
+    d,
+    ["profile", "origin", "methods", "pathTemplate", "query", "headers", "body", "projection"],
+    "CANON_DESCRIPTOR_SHAPE_INVALID",
+    "descriptor",
+  );
 
   if (d.profile !== GENERIC_HTTP_PROVIDER_ACTION_PROFILE)
     descriptorFail("CANON_DESCRIPTOR_PROFILE_INVALID", "profile mismatch");
@@ -390,7 +426,11 @@ export function validateGenericHttpDescriptor(raw: unknown): GenericHttpOperatio
   const origin = canonicalizeGenericOrigin(d.origin);
 
   // Methods
-  if (!Array.isArray(d.methods) || d.methods.length === 0)
+  if (
+    !Array.isArray(d.methods) ||
+    d.methods.length === 0 ||
+    d.methods.length > PROFILE_METHODS.size
+  )
     descriptorFail("CANON_DESCRIPTOR_METHOD_INVALID", "methods must be a non-empty array");
   const methods: CanonicalMethod[] = [];
   const seenMethods = new Set<string>();
@@ -404,7 +444,7 @@ export function validateGenericHttpDescriptor(raw: unknown): GenericHttpOperatio
   }
 
   // Path template
-  if (!Array.isArray(d.pathTemplate) || d.pathTemplate.length === 0)
+  if (!Array.isArray(d.pathTemplate) || d.pathTemplate.length === 0 || d.pathTemplate.length > 64)
     descriptorFail("CANON_DESCRIPTOR_PATH_TEMPLATE_INVALID", "pathTemplate must be non-empty");
   const pathTemplate: GenericPathSegmentSpec[] = [];
   const paramNames = new Set<string>();
@@ -412,6 +452,12 @@ export function validateGenericHttpDescriptor(raw: unknown): GenericHttpOperatio
     if (!isPlainObject(segRaw))
       descriptorFail("CANON_DESCRIPTOR_PATH_TEMPLATE_INVALID", "path segment must be an object");
     const seg = segRaw as Record<string, unknown>;
+    assertExactKeys(
+      seg,
+      ["literal", "param"],
+      "CANON_DESCRIPTOR_PATH_TEMPLATE_INVALID",
+      "path segment",
+    );
     const hasLiteral = "literal" in seg && seg.literal !== undefined;
     const hasParam = "param" in seg && seg.param !== undefined;
     if (hasLiteral === hasParam)
@@ -444,6 +490,7 @@ export function validateGenericHttpDescriptor(raw: unknown): GenericHttpOperatio
       if (!isPlainObject(param))
         descriptorFail("CANON_DESCRIPTOR_SEGMENT_INVALID", "param must be an object");
       const p = param as Record<string, unknown>;
+      assertExactKeys(p, ["name", "type", "pattern"], "CANON_DESCRIPTOR_SEGMENT_INVALID", "param");
       if (typeof p.name !== "string" || !PARAM_NAME_RE.test(p.name))
         descriptorFail(
           "CANON_DESCRIPTOR_SEGMENT_INVALID",
@@ -477,7 +524,7 @@ export function validateGenericHttpDescriptor(raw: unknown): GenericHttpOperatio
   // Query params
   let query: GenericQueryParamSpec[] | undefined;
   if ("query" in d && d.query !== undefined) {
-    if (!Array.isArray(d.query))
+    if (!Array.isArray(d.query) || d.query.length > 64)
       descriptorFail("CANON_DESCRIPTOR_QUERY_INVALID", "query must be an array");
     query = [];
     const seenQ = new Set<string>();
@@ -485,6 +532,12 @@ export function validateGenericHttpDescriptor(raw: unknown): GenericHttpOperatio
       if (!isPlainObject(qRaw))
         descriptorFail("CANON_DESCRIPTOR_QUERY_INVALID", "query param must be an object");
       const q = qRaw as Record<string, unknown>;
+      assertExactKeys(
+        q,
+        ["name", "type", "pattern", "required", "min", "max"],
+        "CANON_DESCRIPTOR_QUERY_INVALID",
+        "query param",
+      );
       if (typeof q.name !== "string" || !QUERY_NAME_RE.test(q.name))
         descriptorFail("CANON_DESCRIPTOR_QUERY_INVALID", `invalid query name '${String(q.name)}'`);
       if (seenQ.has(q.name))
@@ -531,7 +584,7 @@ export function validateGenericHttpDescriptor(raw: unknown): GenericHttpOperatio
   // Headers
   let headers: Array<{ name: string; value: string }> | undefined;
   if ("headers" in d && d.headers !== undefined) {
-    if (!Array.isArray(d.headers))
+    if (!Array.isArray(d.headers) || d.headers.length > 64)
       descriptorFail("CANON_DESCRIPTOR_HEADER_INVALID", "headers must be an array");
     headers = [];
     const seenH = new Set<string>();
@@ -539,6 +592,7 @@ export function validateGenericHttpDescriptor(raw: unknown): GenericHttpOperatio
       if (!isPlainObject(hRaw))
         descriptorFail("CANON_DESCRIPTOR_HEADER_INVALID", "header must be an object");
       const hd = hRaw as Record<string, unknown>;
+      assertExactKeys(hd, ["name", "value"], "CANON_DESCRIPTOR_HEADER_INVALID", "header");
       if (typeof hd.name !== "string")
         descriptorFail("CANON_DESCRIPTOR_HEADER_INVALID", "header name must be a string");
       const name = (hd.name as string).toLowerCase();
@@ -573,12 +627,13 @@ export function validateGenericHttpDescriptor(raw: unknown): GenericHttpOperatio
     if (!isPlainObject(d.body))
       descriptorFail("CANON_DESCRIPTOR_BODY_SCHEMA_INVALID", "body must be an object");
     const b = d.body as Record<string, unknown>;
+    assertExactKeys(b, ["contentType", "fields"], "CANON_DESCRIPTOR_BODY_SCHEMA_INVALID", "body");
     if (b.contentType !== "application/json")
       descriptorFail(
         "CANON_DESCRIPTOR_BODY_SCHEMA_INVALID",
         "body.contentType must be application/json",
       );
-    if (!Array.isArray(b.fields))
+    if (!Array.isArray(b.fields) || b.fields.length > 128)
       descriptorFail("CANON_DESCRIPTOR_BODY_SCHEMA_INVALID", "body.fields must be an array");
     const fields: GenericBodyFieldSpec[] = [];
     const seenF = new Set<string>();
@@ -586,6 +641,12 @@ export function validateGenericHttpDescriptor(raw: unknown): GenericHttpOperatio
       if (!isPlainObject(fRaw))
         descriptorFail("CANON_DESCRIPTOR_BODY_SCHEMA_INVALID", "body field must be an object");
       const f = fRaw as Record<string, unknown>;
+      assertExactKeys(
+        f,
+        ["name", "type", "required", "pattern", "min", "max", "maxBytes"],
+        "CANON_DESCRIPTOR_BODY_SCHEMA_INVALID",
+        "body field",
+      );
       if (typeof f.name !== "string" || !PARAM_NAME_RE.test(f.name))
         descriptorFail(
           "CANON_DESCRIPTOR_BODY_SCHEMA_INVALID",
@@ -621,26 +682,11 @@ export function validateGenericHttpDescriptor(raw: unknown): GenericHttpOperatio
           );
         // Body patterns may contain / (JSON string value, not a path), so use a
         // looser anchored check.
-        if (
-          typeof f.pattern !== "string" ||
-          f.pattern.length === 0 ||
-          f.pattern.length > 512 ||
-          !(f.pattern as string).startsWith("^") ||
-          !(f.pattern as string).endsWith("$")
-        )
-          descriptorFail(
-            "CANON_DESCRIPTOR_BODY_SCHEMA_INVALID",
-            `body '${f.name}' pattern invalid`,
-          );
-        try {
-          new RegExp(f.pattern as string);
-        } catch {
-          descriptorFail(
-            "CANON_DESCRIPTOR_BODY_SCHEMA_INVALID",
-            `body '${f.name}' pattern no compile`,
-          );
-        }
-        spec.pattern = f.pattern as string;
+        spec.pattern = validateSafeRegex(
+          f.pattern,
+          "CANON_DESCRIPTOR_BODY_SCHEMA_INVALID",
+          `body '${f.name}'`,
+        );
         if ("maxBytes" in f && f.maxBytes !== undefined) {
           if (
             typeof f.maxBytes !== "number" ||
@@ -692,6 +738,12 @@ export function validateGenericHttpDescriptor(raw: unknown): GenericHttpOperatio
   if (!isPlainObject(d.projection))
     descriptorFail("CANON_DESCRIPTOR_POLICY_ARG_INVALID", "projection must be an object");
   const proj = d.projection as Record<string, unknown>;
+  assertExactKeys(
+    proj,
+    ["policyArgs", "safeSummary"],
+    "CANON_DESCRIPTOR_POLICY_ARG_INVALID",
+    "projection",
+  );
   const knownScalars = new Set<string>([...paramNames]);
   if (query) for (const q of query) knownScalars.add(q.name);
   if (body) for (const f of body.fields) knownScalars.add(f.name);
@@ -843,6 +895,9 @@ function validateScalarValue(
     case "string": {
       if (typeof value !== "string") argError(`${name} must be a string`);
       const v = value as string;
+      const byteLength = Buffer.from(v, "utf8").length;
+      const byteLimit = opts.maxBytes ?? 4096;
+      if (byteLength > byteLimit) argError(`${name} exceeds maxBytes`);
       // Reject lone surrogates.
       for (let i = 0; i < v.length; i++) {
         const c = v.charCodeAt(i);
@@ -857,8 +912,6 @@ function validateScalarValue(
       }
       if (opts.pattern && !new RegExp(opts.pattern).test(v))
         throw new CanonError("CANON_PATH_SEGMENT_INVALID", `'${name}' fails pattern`);
-      if (opts.maxBytes !== undefined && Buffer.from(v, "utf8").length > opts.maxBytes)
-        argError(`${name} exceeds maxBytes`);
       return { stringForm: v, scalar: v };
     }
     default:

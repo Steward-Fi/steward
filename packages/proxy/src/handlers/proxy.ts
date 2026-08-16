@@ -1067,9 +1067,10 @@ export async function handleProxy(c: Context): Promise<Response> {
   const agentId = c.get("agentId") as string;
   const tenantId = c.get("tenantId") as string;
   const method = c.req.method;
+  const governedExecutionClaim = c.get("governedExecutionClaim" as never) as unknown;
 
   // 1. Resolve target URL from request path
-  const target = resolveTarget(c.req.path);
+  const target = resolveTarget(c.req.path, { governed: Boolean(governedExecutionClaim) });
   if (!target) {
     await recordAudit({
       agentId,

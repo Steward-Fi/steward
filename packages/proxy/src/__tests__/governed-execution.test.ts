@@ -31,6 +31,7 @@ import { createHmac, hkdfSync, randomUUID } from "node:crypto";
 import {
   agents,
   approvalQueue,
+  auditEvents,
   closeDb,
   executionAuthorizationNonces,
   getDb,
@@ -52,15 +53,18 @@ import {
   canonicalActionBytes,
   computeActionDigest,
   computeApprovalCommitmentHash,
+  computeGenericHttpActionDigest,
   computeProviderExecutionCommitmentHash,
+  type GenericHttpCanonicalActionV1,
   type GithubCanonicalActionV1,
+  genericHttpCanonicalActionBytes,
   jcsStringify,
   type ProviderApprovalCommitmentV1,
   providerExecutionSignatureInput,
   sha256HexPrefixed,
 } from "@stwd/shared";
 import { KeyStore } from "@stwd/vault";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 setDefaultTimeout(30000);
 
@@ -218,6 +222,7 @@ interface SeedNonceOpts {
   status?: "active" | "consumed";
   dispatchState?: string;
   intentSuffix?: string;
+  action?: GithubCanonicalActionV1 | GenericHttpCanonicalActionV1;
 }
 
 async function seedExecutionReady(opts: SeedNonceOpts = {}) {
@@ -231,7 +236,14 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
   const expiresAt = new Date(now.getTime() + (opts.expiresInMs ?? 300_000));
   const routeRevision = opts.routeRevision ?? 1;
   const secretVersion = opts.secretVersion ?? 1;
-  const actionDigest = computeActionDigest(ACTION);
+  const action = opts.action ?? ACTION;
+  const generic = action.profile === "generic-http.provider-action.v1";
+  const actionDigest = generic
+    ? computeGenericHttpActionDigest(action as GenericHttpCanonicalActionV1)
+    : computeActionDigest(action as GithubCanonicalActionV1);
+  const actionBytes = generic
+    ? genericHttpCanonicalActionBytes(action as GenericHttpCanonicalActionV1)
+    : canonicalActionBytes(action as GithubCanonicalActionV1);
   const requestHash = sha256HexPrefixed(`req:${intentId}`);
   const policyRevisionHash = sha256HexPrefixed("policy:1");
   const accessDecisionHash = sha256HexPrefixed("access:1");
@@ -249,7 +261,7 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
       key: "issues.list",
       revision: 1,
       riskClass: "read",
-      canonicalProfile: "github.provider-action.v1",
+      canonicalProfile: action.profile,
     },
     requestHash,
     actionDigest,
@@ -303,7 +315,7 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
 
   const commitment = buildProviderExecutionCommitmentV2({
     approval: approvalCommitment,
-    action: ACTION,
+    action,
     approvalCommitmentHash,
     approvalId,
     authorizationId,
@@ -337,8 +349,8 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
     providerAccountId: IDS.account,
     operationId: IDS.operation,
     operationRevision: 1,
-    canonicalProfile: "github.provider-action.v1",
-    canonicalActionBytes: Buffer.from(canonicalActionBytes(ACTION), "utf8"),
+    canonicalProfile: action.profile,
+    canonicalActionBytes: Buffer.from(actionBytes, "utf8"),
     actionDigest,
     requestEnvelope: { schemaVersion: "steward.provider-request.v1" },
     requestHash,
@@ -766,6 +778,50 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     // dispatch_state advanced past 'none' (claimed/dispatched/terminal).
     expect(n.ds).not.toBe("none");
     expect(res.intentId).toBe(intentId);
+  });
+
+  it("#201 generic-http dispatches through the governed route without env host widening and records evidence", async () => {
+    const genericAction: GenericHttpCanonicalActionV1 = {
+      profile: "generic-http.provider-action.v1",
+      method: "POST",
+      origin: "https://api.customer.example",
+      normalizedPath: "/v1/items",
+      orderedQueryPairs: [["mode", "safe"]],
+      selectedHeaders: [["accept", "application/json"]],
+      canonicalBody: { name: "widget" },
+    };
+    await getDb()
+      .update(secretRoutes)
+      .set({ hostPattern: "api.customer.example", pathPattern: "/v1/items", method: "POST" })
+      .where(eq(secretRoutes.id, IDS.route));
+    await getDb().execute(
+      sql`UPDATE secret_routes SET authority_revision = 1 WHERE id = ${IDS.route}`,
+    );
+    const saved = process.env.STEWARD_PROXY_ALLOWED_HOSTS;
+    delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
+    try {
+      const { intentId } = await seedExecutionReady({ action: genericAction });
+      const result = await dispatchGovernedExecution(intentId, IDS.tenant);
+      expect(result).toMatchObject({
+        ok: true,
+        dispatchState: "succeeded",
+        upstreamStatusCode: 200,
+      });
+      expect(captured).toEqual({
+        url: "https://api.customer.example/v1/items?mode=safe",
+        method: "POST",
+      });
+      expect(capturedBody).toBe('{"name":"widget"}');
+      const evidence = await getDb()
+        .select({ action: auditEvents.action })
+        .from(auditEvents)
+        .where(and(eq(auditEvents.tenantId, IDS.tenant), eq(auditEvents.resourceId, intentId)));
+      expect(evidence.map((row) => row.action)).toContain("provider.execution.dispatched");
+      expect(evidence.map((row) => row.action)).toContain("provider.execution.succeeded");
+    } finally {
+      if (saved === undefined) delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
+      else process.env.STEWARD_PROXY_ALLOWED_HOSTS = saved;
+    }
   });
 
   it("K01/P43: two concurrent claims → exactly one consumes, one dispatch", async () => {

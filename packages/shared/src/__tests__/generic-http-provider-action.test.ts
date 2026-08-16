@@ -201,6 +201,41 @@ describe("descriptor validation", () => {
     ).toBe("CANON_DESCRIPTOR_ORIGIN_INVALID");
   });
 
+  it("rejects unknown keys at every descriptor layer", () => {
+    expect(descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, surprise: true })).toBe(
+      "CANON_DESCRIPTOR_SHAPE_INVALID",
+    );
+    expect(
+      descriptorDenies({
+        ...GENERIC_GOLDEN_DESCRIPTOR_A,
+        pathTemplate: [{ literal: "v1", surprise: true }],
+      }),
+    ).toBe("CANON_DESCRIPTOR_PATH_TEMPLATE_INVALID");
+    expect(
+      descriptorDenies({
+        ...GENERIC_GOLDEN_DESCRIPTOR_A,
+        query: [{ name: "q", type: "string", pattern: "^[a-z]{1,8}$", surprise: true }],
+      }),
+    ).toBe("CANON_DESCRIPTOR_QUERY_INVALID");
+    expect(
+      descriptorDenies({
+        ...GENERIC_GOLDEN_DESCRIPTOR_B,
+        body: { ...GENERIC_GOLDEN_DESCRIPTOR_B.body, surprise: true },
+      }),
+    ).toBe("CANON_DESCRIPTOR_BODY_SCHEMA_INVALID");
+  });
+
+  it("rejects ReDoS-capable operator regexes", () => {
+    for (const pattern of ["^(a+)+$", "^(a|aa)*$", "^(?=a).+$", "^(a)\\1$", "^a{1,}$"]) {
+      expect(
+        descriptorDenies({
+          ...GENERIC_GOLDEN_DESCRIPTOR_A,
+          pathTemplate: [{ param: { name: "x", type: "string", pattern } }],
+        }),
+      ).toBe("CANON_DESCRIPTOR_SEGMENT_INVALID");
+    }
+  });
+
   it("rejects an IP-literal origin (SSRF-adjacent)", () => {
     expect(descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://127.0.0.1" })).toBe(
       "CANON_DESCRIPTOR_ORIGIN_INVALID",
