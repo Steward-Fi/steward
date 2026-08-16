@@ -6,7 +6,7 @@ First-pass Rust backend SDK for Steward API integrations.
 use steward_sdk::{Client, Config, CreateUserInput};
 
 let client = Client::new(Config {
-    base_url: "https://api.steward.fi".to_string(),
+    base_url: "http://localhost:3200".to_string(),
     platform_key: Some("steward_platform_...".to_string()),
     ..Config::default()
 })?;

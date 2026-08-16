@@ -63,7 +63,12 @@ describe("secret-bearing responses", () => {
   });
 
   it("marks MFA-gated audit and dashboard reads as non-cacheable", () => {
-    expect(source("routes/audit.ts")).toContain("setNoStoreHeaders(c);");
+    // Audit routes get no-store via the shared owner/admin+MFA gate
+    // (middleware/audit-gate.ts), wired onto every /audit route with
+    // `.use("*", auditOwnerAdminMfaGate)`. The gate sets no-store only AFTER the
+    // auth checks pass, so a 403 rejection never emits cacheable secret bodies.
+    expect(source("routes/audit.ts")).toContain('auditRoutes.use("*", auditOwnerAdminMfaGate)');
+    expect(source("middleware/audit-gate.ts")).toContain("setNoStoreHeaders(c);");
     expectNoStoreBeforeReturn(
       source("routes/dashboard.ts"),
       "Dashboard data requires recent MFA verification",

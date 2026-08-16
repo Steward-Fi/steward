@@ -16,7 +16,20 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import type { ClientRequest, RequestOptions } from "node:http";
 import { isIP, type LookupFunction } from "node:net";
 import type { SecretRoute } from "@stwd/db";
-import { and, desc, eq, getDb, gt, isNull, or, secretRoutes, secrets } from "@stwd/db";
+import {
+  and,
+  desc,
+  eq,
+  getDb,
+  gt,
+  isNull,
+  or,
+  providerAccounts,
+  providerOperations,
+  secretRoutes,
+  secrets,
+  workspaces,
+} from "@stwd/db";
 import { getRedis, type SpendReservation, settleReservedSpend } from "@stwd/redis";
 import { SecretVault } from "@stwd/vault";
 import type { Context } from "hono";
@@ -31,7 +44,9 @@ import {
   trackProxySpend,
 } from "../middleware/redis-enforcement";
 import { resolveTarget } from "./alias";
+import { holdProxyApprovalRequest } from "./approvals";
 import { compareRouteMatchSpecificity, matchHost, matchPath } from "./matching";
+import { applyGovernedQuery, extractRawQuery } from "./query-forwarding";
 
 // ─── Secret Vault singleton ──────────────────────────────────────────────────
 
@@ -527,6 +542,7 @@ async function claimUnsafeProxyRequest(
   agentId: string,
   target: { host: string; path: string },
   method: string,
+  rawQuery: string,
 ): Promise<ProxyReplayClaimResult> {
   const signedRequest = Boolean(requestHeader(c, "x-steward-signature"));
   if (SAFE_PROXY_METHODS.has(method.toUpperCase()) && !signedRequest) {
@@ -552,8 +568,14 @@ async function claimUnsafeProxyRequest(
     };
   }
 
+  // The query is part of the request we forward upstream, so it must be part of
+  // the replay/idempotency identity: two requests that differ only by their
+  // query (e.g. ?id=1 vs ?id=2) are distinct operations and must not collide on
+  // the same Idempotency-Key. `rawQuery` preserves exact bytes + ordering.
   const fingerprint = await sha256Hex(
-    [tenantId, agentId, method.toUpperCase(), target.host, target.path, bodyHash].join("\n"),
+    [tenantId, agentId, method.toUpperCase(), target.host, target.path, rawQuery, bodyHash].join(
+      "\n",
+    ),
   );
   const storageKey = `proxy:idempotency:${await sha256Hex([tenantId, agentId, key].join("\n"))}`;
   const claim: ProxyReplayClaim = {
@@ -576,7 +598,7 @@ async function claimUnsafeProxyRequest(
     const existing = rawExisting ? safeJsonParseString<ProxyReplayClaim>(rawExisting) : null;
     if (!existing || existing.expiresAt <= Date.now()) {
       await redis.del(storageKey);
-      return claimUnsafeProxyRequest(c, tenantId, agentId, target, method);
+      return claimUnsafeProxyRequest(c, tenantId, agentId, target, method, rawQuery);
     }
     if (existing.fingerprint !== fingerprint) {
       return {
@@ -1069,6 +1091,14 @@ export async function handleProxy(c: Context): Promise<Response> {
     );
   }
 
+  // Extract the client's raw query string once (encoding + ordered duplicate
+  // keys preserved, fragment stripped). Target resolution and route matching
+  // above intentionally used the path only, so the query never influences which
+  // route/host we select; it is only forwarded onto the pinned upstream below,
+  // and mixed into the replay/idempotency fingerprint so that two otherwise
+  // identical requests with different queries are treated as distinct.
+  const rawQuery = extractRawQuery(c.req.raw.url);
+
   // 2. Find matching secret route
   const route = await findMatchingRoute(tenantId, agentId, target.host, target.path, method);
   if (!route) {
@@ -1090,6 +1120,90 @@ export async function handleProxy(c: Context): Promise<Response> {
       403,
     );
   }
+  // ── PR4 governed-route authority gate (spec §5.1, X1/X7) ──────────────────
+  // The gate is on the SELECTED route row, so a governed route is unreachable
+  // via direct /proxy, named aliases, or /proxy/<host>/... regardless of how it
+  // was addressed. A governed route is permitted ONLY when the request arrived
+  // through dispatchGovernedExecution, which sets a non-forgeable in-process
+  // `governedExecutionClaim` context (never from a header — mirror the
+  // proxyApprovalRelease rule). Any unknown authority_mode default-denies so a
+  // reverted/older proxy that no longer understands governed mode still fails
+  // closed (§6.3).
+  const authorityMode = (route as { authorityMode?: string }).authorityMode ?? "legacy";
+  const governedClaim = c.get("governedExecutionClaim" as never) as
+    | {
+        authorizationId: string;
+        executionId: string;
+        routeId: string;
+        routeRevision?: number;
+        secretId?: string;
+        secretVersion?: number;
+        workspaceId?: string;
+        providerAccountId?: string;
+        operationId?: string;
+        operationRevision?: number;
+        providerAccountRevision?: number;
+      }
+    | undefined;
+  // Set once the governed claim is verified against the selected route; the
+  // single-use v2 nonce it represents is the replay guard, so a verified governed
+  // dispatch skips the header-based Idempotency-Key claim below (codex P1).
+  let isVerifiedGovernedDispatch = false;
+  if (authorityMode !== "legacy") {
+    // The claim must match the SELECTED route by id AND by the exact revision +
+    // secret binding it was minted against (codex P1). A rotated route/secret
+    // after the claim (routeId unchanged) would otherwise decrypt with the CURRENT
+    // credential; requiring the claimed authorityRevision + secretId here fails
+    // closed on any such drift before the decrypt. The secret VERSION is
+    // additionally re-checked at decrypt time (the version lives on the secret,
+    // not the route row).
+    const routeSecretId = (route as { secretId?: string }).secretId;
+    const routeRevision = (route as { authorityRevision?: number }).authorityRevision;
+    const claimMatches =
+      authorityMode === "governed_v2" &&
+      governedClaim !== undefined &&
+      governedClaim.routeId === route.id &&
+      governedClaim.routeRevision !== undefined &&
+      governedClaim.routeRevision === routeRevision &&
+      governedClaim.secretId !== undefined &&
+      governedClaim.secretId === routeSecretId &&
+      // secretVersion is REQUIRED for a verified governed claim (codex P2): a
+      // partial claim that omits it must NOT be treated as verified, otherwise the
+      // decrypt-time version recheck below (guarded on secretVersion !== undefined)
+      // would be skipped and a rotated secret could be decrypted. The live
+      // account/operation boundary fields are also required for the final
+      // decrypt-time recheck below. Missing = unverified.
+      governedClaim.secretVersion !== undefined &&
+      governedClaim.workspaceId !== undefined &&
+      governedClaim.providerAccountId !== undefined &&
+      governedClaim.operationId !== undefined &&
+      governedClaim.operationRevision !== undefined &&
+      governedClaim.providerAccountRevision !== undefined;
+    if (!claimMatches) {
+      await recordRequiredAudit({
+        agentId,
+        tenantId,
+        targetHost: target.host,
+        targetPath: target.path,
+        method,
+        statusCode: 403,
+        latencyMs: Date.now() - startTime,
+        reason:
+          authorityMode === "governed_v2"
+            ? "governed-route-direct-denied"
+            : "governed-route-unknown-authority-mode",
+      });
+      return c.json(
+        {
+          ok: false,
+          error: "GOVERNED_ROUTE_DIRECT_DENIED",
+        },
+        403,
+      );
+    }
+    isVerifiedGovernedDispatch = true;
+  }
+
   if (route.injectAs === "query") {
     await recordAudit({
       agentId,
@@ -1109,6 +1223,109 @@ export async function handleProxy(c: Context): Promise<Response> {
       },
       403,
     );
+  }
+
+  // Only the in-process release handler can set this context value. Never trust
+  // a request header for approval bypass, since agents control all headers.
+  const approvalReleaseId = c.get("proxyApprovalRelease" as never) as string | undefined;
+  const approvalReleaseRouteId = c.get("proxyApprovalRouteId" as never) as string | undefined;
+  if (approvalReleaseId && approvalReleaseRouteId !== route.id) {
+    await recordRequiredAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: 409,
+      latencyMs: Date.now() - startTime,
+      reason: "proxy-approval-route-mismatch",
+    });
+    return c.json({ ok: false, error: "Approved proxy route no longer matches" }, 409);
+  }
+  if (route.requiresApproval && !approvalReleaseId && !isVerifiedGovernedDispatch) {
+    // NOTE: a verified governed dispatch is EXCLUDED here (codex P1). A governed
+    // route's approval was already adjudicated by the v2 authority flow (the
+    // intent is approved + the binding is execution_ready before the nonce is
+    // minted); it must NOT re-enter the legacy proxy-approval hold, which would
+    // return a 202 hold that dispatchOnce would misread as a successful upstream
+    // dispatch and falsely consume the authorization / mark the action succeeded.
+    //
+    // Fail closed on approval-gated routes that carry a query. The approval
+    // hold/replay path reconstructs the request from the stored path only and
+    // cannot yet round-trip the query, so executing it later would forward a
+    // semantically different (query-stripped) request than the one the agent
+    // submitted and the human approved. Rejecting here is safer than silently
+    // changing the approved request. (Direct, non-approval routes preserve the
+    // query via applyGovernedQuery below.)
+    if (rawQuery !== "") {
+      await recordAudit({
+        agentId,
+        tenantId,
+        targetHost: target.host,
+        targetPath: target.path,
+        method,
+        statusCode: 400,
+        latencyMs: Date.now() - startTime,
+        reason: "proxy-approval-query-unsupported",
+      });
+      return c.json(
+        {
+          ok: false,
+          error: "Query strings are not supported on approval-gated proxy routes",
+        },
+        400,
+      );
+    }
+    try {
+      const held = await holdProxyApprovalRequest({
+        tenantId,
+        agentId,
+        route,
+        method,
+        targetHost: target.host,
+        targetPath: target.path,
+        request: c.req.raw,
+      });
+      await recordRequiredAudit({
+        agentId,
+        tenantId,
+        targetHost: target.host,
+        targetPath: target.path,
+        method,
+        statusCode: 202,
+        latencyMs: Date.now() - startTime,
+        reason: "proxy-approval-held",
+      });
+      return c.json(
+        {
+          ok: true,
+          status: "pending_approval",
+          id: held.id,
+          approvalId: held.id,
+          pollUrl: `/approvals/proxy/${held.id}`,
+          expiresAt: held.expiresAt.toISOString(),
+        },
+        202,
+      );
+    } catch (err) {
+      await recordAudit({
+        agentId,
+        tenantId,
+        targetHost: target.host,
+        targetPath: target.path,
+        method,
+        statusCode: 500,
+        latencyMs: Date.now() - startTime,
+        reason: "proxy-approval-hold-failed",
+      });
+      const error = err instanceof Error ? err.message : "Failed to hold proxy request";
+      const status = error.includes("too large")
+        ? 413
+        : error.includes("Idempotency-Key")
+          ? 409
+          : 500;
+      return c.json({ ok: false, error }, status);
+    }
   }
 
   // 2.5. Redis rate-limit check (per agent + host)
@@ -1279,7 +1496,16 @@ export async function handleProxy(c: Context): Promise<Response> {
     return c.json({ ok: false, error: dnsCheck.error }, dnsCheck.status);
   }
 
-  const replayClaim = await claimUnsafeProxyRequest(c, tenantId, agentId, target, method);
+  // A governed dispatch (verified single-use v2 nonce, already atomically
+  // consumed by the claim) and an approval-release both carry their OWN replay
+  // protection, so neither goes through the header Idempotency-Key claim. Without
+  // this, mutating governed actions (POST/PUT/PATCH/DELETE) would 400 for a
+  // missing Idempotency-Key AFTER the nonce was already spent (codex P1) — the
+  // provider-action header allowlist does not even permit that header.
+  const replayClaim =
+    approvalReleaseId || isVerifiedGovernedDispatch
+      ? ({ ok: true, storageKey: "", storage: "memory" } as const)
+      : await claimUnsafeProxyRequest(c, tenantId, agentId, target, method, rawQuery);
   if (!replayClaim.ok) {
     await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
     await recordAudit({
@@ -1334,6 +1560,111 @@ export async function handleProxy(c: Context): Promise<Response> {
   }
 
   // 3. Decrypt credential
+  //
+  // Governed signing-boundary backstop: account/workspace/operation status and
+  // secret version can change after the claim transaction but before this exact
+  // decrypt point. Re-read every live boundary fact here, after proxy policy/DNS
+  // checks and immediately before touching the vault.
+  const denyGovernedAtDecryptBoundary = async (
+    error: "EXEC_AUTH_ACCOUNT_DISABLED" | "EXEC_AUTH_STALE_DEPENDENCY" | "EXEC_AUTH_STALE_SECRET",
+    reason: string,
+  ): Promise<Response> => {
+    let auditUnavailable = false;
+    try {
+      await recordRequiredAudit({
+        agentId,
+        tenantId,
+        targetHost: target.host,
+        targetPath: target.path,
+        method,
+        statusCode: 409,
+        latencyMs: Date.now() - startTime,
+        reason,
+      });
+    } catch {
+      auditUnavailable = true;
+    } finally {
+      // Required-audit failure must fail closed without leaking the slot or spend
+      // reservation held by this pre-forward path.
+      await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
+      await releaseUnsafeProxyRequest(replayClaim);
+      proxySlot.release();
+    }
+    return auditUnavailable
+      ? c.json({ ok: false, error: "EXEC_AUDIT_UNAVAILABLE" }, 503)
+      : c.json({ ok: false, error }, 409);
+  };
+
+  if (authorityMode === "governed_v2" && governedClaim) {
+    const db = getDb();
+    const [liveWorkspace] = await db
+      .select({ status: workspaces.status })
+      .from(workspaces)
+      .where(
+        and(
+          eq(workspaces.tenantId, tenantId),
+          eq(workspaces.id, governedClaim.workspaceId as string),
+        ),
+      )
+      .limit(1);
+    const [liveAccount] = await db
+      .select({ status: providerAccounts.status, revision: providerAccounts.revision })
+      .from(providerAccounts)
+      .where(
+        and(
+          eq(providerAccounts.tenantId, tenantId),
+          eq(providerAccounts.workspaceId, governedClaim.workspaceId as string),
+          eq(providerAccounts.id, governedClaim.providerAccountId as string),
+        ),
+      )
+      .limit(1);
+    const [liveOperation] = await db
+      .select({ status: providerOperations.status, revision: providerOperations.revision })
+      .from(providerOperations)
+      .where(
+        and(
+          eq(providerOperations.tenantId, tenantId),
+          eq(providerOperations.workspaceId, governedClaim.workspaceId as string),
+          eq(providerOperations.providerAccountId, governedClaim.providerAccountId as string),
+          eq(providerOperations.id, governedClaim.operationId as string),
+        ),
+      )
+      .limit(1);
+    if (
+      !liveWorkspace ||
+      liveWorkspace.status !== "active" ||
+      !liveAccount ||
+      liveAccount.status !== "active" ||
+      !liveOperation ||
+      liveOperation.status !== "active"
+    ) {
+      return denyGovernedAtDecryptBoundary(
+        "EXEC_AUTH_ACCOUNT_DISABLED",
+        "governed-account-boundary-disabled",
+      );
+    }
+    if (
+      liveAccount.revision !== governedClaim.providerAccountRevision ||
+      liveOperation.revision !== governedClaim.operationRevision
+    ) {
+      return denyGovernedAtDecryptBoundary(
+        "EXEC_AUTH_STALE_DEPENDENCY",
+        "governed-operation-revision-stale",
+      );
+    }
+    const [liveSecret] = await db
+      .select({ version: secrets.version })
+      .from(secrets)
+      .where(and(eq(secrets.tenantId, tenantId), eq(secrets.id, route.secretId)))
+      .limit(1);
+    if (!liveSecret || liveSecret.version !== governedClaim.secretVersion) {
+      return denyGovernedAtDecryptBoundary(
+        "EXEC_AUTH_STALE_SECRET",
+        "governed-stale-secret-version",
+      );
+    }
+  }
+
   let credential: string;
   try {
     credential = await decryptSecret(tenantId, route.secretId);
@@ -1356,7 +1687,32 @@ export async function handleProxy(c: Context): Promise<Response> {
   }
 
   // 4. Build outbound request
-  const outboundUrl = new URL(target.url);
+  //
+  // Compose the client's query string onto the pinned upstream target. Target
+  // resolution above (and route matching) intentionally used the path only, so
+  // the query cannot influence which route/host we selected. Here we forward the
+  // client's exact query bytes (encoding + ordered duplicate keys preserved)
+  // while re-validating that the query did not alter the pinned
+  // scheme/host/port/path or introduce userinfo/fragment.
+  const governedQuery = applyGovernedQuery(new URL(target.url), rawQuery);
+  if (!governedQuery.ok) {
+    credential = "";
+    await recordAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: 400,
+      latencyMs: Date.now() - startTime,
+      reason: `query-forwarding-rejected:${governedQuery.reason}`,
+    });
+    await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
+    await releaseUnsafeProxyRequest(replayClaim);
+    proxySlot.release();
+    return c.json({ ok: false, error: "Invalid proxy request target" }, 400);
+  }
+  const outboundUrl = governedQuery.url;
   const outboundHeaders = new Headers();
 
   const skipHeaders = stripHopByHopHeaders(c.req.raw.headers);

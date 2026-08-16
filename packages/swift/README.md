@@ -4,7 +4,7 @@ First-pass Swift SDK for Steward API integrations.
 
 ```swift
 let client = try StewardClient(config: StewardConfig(
-    baseURL: "https://api.steward.fi",
+    baseURL: "http://localhost:3200",
     platformKey: "steward_platform_..."
 ))
 

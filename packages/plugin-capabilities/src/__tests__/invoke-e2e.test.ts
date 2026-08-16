@@ -334,6 +334,55 @@ describe("invoke e2e: full arc through the real proxy", () => {
     expect(res.headers.get("x-steward-cap-gate")).toBeNull();
   });
 
+  // ROUND-2 P0 (full arc): a GOVERNING capability-intent rule whose evaluation
+  // throws an unprintable value (throwing toString/valueOf/Symbol.toPrimitive)
+  // used to escape the composer's catch as a raw exception => HTTP 500. End to
+  // end it must fail closed: 403, NEVER a 500, and NEVER forward to the proxy
+  // (no credential injection on a gate failure).
+  it("P0: governing rule throws an UNPRINTABLE value => 403 (NOT 500), never forwards", async () => {
+    await seedCapability();
+    const hostile = {
+      toString() {
+        throw new Error("toString throws");
+      },
+      valueOf() {
+        throw new Error("valueOf throws");
+      },
+      [Symbol.toPrimitive]() {
+        throw new Error("toPrimitive throws");
+      },
+    };
+    const hostileConfig: Record<string, unknown> = {
+      capabilities: ["github.pr.comment"],
+      effect: "allow",
+    };
+    Object.defineProperty(hostileConfig, "constraints", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        throw hostile;
+      },
+    });
+    currentPolicySet = [
+      {
+        id: "hostile-throw-e2e",
+        type: "capability-intent" as unknown as PolicyRule["type"],
+        enabled: true,
+        config: hostileConfig as unknown as Record<string, unknown>,
+      },
+    ];
+    const app = buildInvokeApp();
+    const res = await app.request("/capabilities/github.pr.comment/invoke", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(403);
+    expect(res.status).not.toBe(500);
+    // fail-closed: the credential must never have been injected/forwarded.
+    expect(lastForwarded).toBeNull();
+  });
+
   it("ungranted capability => 403", async () => {
     // seed a capability but NO grant for this agent.
     const vault = new SecretVault(MASTER_PASSWORD);

@@ -18,6 +18,8 @@
  *
  * POST /email/send                  — { email } → { ok, expiresAt }
  * POST /email/verify                — { token, email } → { token (JWT), user }
+ * POST /email/code/verify           — { email, code } → { token (JWT), user }
+ * POST /email/status                — { challengeId, pollSecret } → status only
  * GET  /callback/email              — ?token=...&email=... → 302 redirect with session tokens
  *
  * Tenant context
@@ -55,6 +57,9 @@ import {
   buildSamlAuthorizeUrl,
   ChallengeStore,
   EmailAuth,
+  type EmailAuthConfig,
+  EmailDeliveryError,
+  EmailDeliveryNotConfiguredError,
   evaluateSiwePolicy,
   type FarcasterLoginPayload,
   generateApiKey,
@@ -68,15 +73,20 @@ import {
   isBuiltInProvider,
   isDevSecretAllowed,
   isValidE164,
+  type MagicLinkTemplateData,
   MockEmailInbox,
   MockEmailProvider,
   MockSmsInbox,
   MockSmsProvider,
+  magicLinkTemplateValues,
   OAuthClient,
+  type OtpTemplateData,
+  otpTemplateValues,
   PasskeyAuth,
   PhoneAuth,
   type RecoveryCodeStore,
   ResendProvider,
+  renderCustomTemplate,
   revocationStore,
   type SmsProvider,
   type StoreBackend,
@@ -139,6 +149,7 @@ import { verifyEip1271 } from "../services/eip1271";
 import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
 import { lockUserSession } from "../services/session-lock";
 import { testAccountOtpMatches } from "../services/test-account-credentials";
+import { getConfiguredVault } from "../services/vault-factory";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -176,32 +187,195 @@ function normalizeEmailDomain(value: unknown): string | null {
   return domain;
 }
 
-// ─── IP-based auth rate limiting ─────────────────────────────────────────────
+// ─── Trusted client IP + auth rate limiting ──────────────────────────────────
 
 /**
- * Check a client rate limit for auth endpoints, backed by the Redis sliding
- * window. In production, Redis must be available for endpoint-specific auth
- * throttles unless STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL=true is explicitly
- * configured. Forwarded IP headers
- * are used only when STEWARD_TRUST_PROXY_HEADERS=true; otherwise a single
- * global bucket is safer than letting clients pick arbitrary rate-limit keys.
- * We deliberately do not
- * keep an in-memory fallback Map: it is incorrect across multiple instances
- * and impossible on Cloudflare Workers (no shared state across isolates).
- *
- * @param c        - Hono context (used to read client IP headers)
- * @param endpoint - Short name used as part of the Redis key
- * @param windowMs - Window length in milliseconds
- * @param max      - Maximum allowed requests in the window
+ * Number of trusted reverse proxies that APPEND to x-forwarded-for before
+ * requests reach this process. The client IP is the entry that many hops from
+ * the RIGHT; anything a client prepends (further left) is ignored. On bare
+ * Railway this is 2: x-forwarded-for arrives as "<client>, <railway-edge>" and
+ * the right-most edge entry ROTATES between Railway's proxy nodes, so hops=1
+ * scatters one client across buckets while hops=2 locks onto the stable client
+ * entry (verified against prod). Set it to the EXACT number of appending
+ * proxies; overestimating re-opens spoofing. Unset, empty, or invalid values mean no forwarded header
+ * is trusted (safe default — a typo can never widen trust). The deprecated
+ * STEWARD_TRUST_PROXY_HEADERS=true is honored as hops=1 with right-most
+ * semantics; the old left-most read was client-spoofable and is deliberately
+ * not preserved.
  */
-function authRateLimitSubject(c: Context): string {
-  if (process.env.STEWARD_TRUST_PROXY_HEADERS !== "true") return "global";
-  return (
-    c.req.header("cf-connecting-ip")?.trim() ||
-    c.req.header("x-real-ip")?.trim() ||
-    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
-    "global"
+function trustedProxyHops(): number {
+  const raw = process.env.STEWARD_TRUSTED_PROXY_HOPS?.trim();
+  if (raw === undefined || raw === "") {
+    return process.env.STEWARD_TRUST_PROXY_HEADERS === "true" ? 1 : 0;
+  }
+  // Canonical non-negative integer only: "1.5" must not truncate into trust.
+  if (!/^\d+$/.test(raw)) return 0;
+  const parsed = Number.parseInt(raw, 10);
+  return parsed > 0 && parsed <= 10 ? parsed : 0;
+}
+
+/**
+ * Normalize one forwarded-address candidate to a bare IP, or undefined.
+ * Proxies (Railway's Envoy edge included) sometimes forward `ip:port` or
+ * `[ipv6]:port`, both of which node's isIP rejects, so the port is stripped
+ * first — but only where it is unambiguous: brackets always delimit an IPv6
+ * address, and a single colon can only be IPv4:port (bare IPv6 always
+ * contains at least two colons and is never truncated).
+ */
+function normalizeIpCandidate(value: string | undefined): string | undefined {
+  let candidate = value?.trim();
+  if (!candidate) return undefined;
+  const bracketed = /^\[([^\]]+)\](?::\d{1,5})?$/.exec(candidate);
+  if (bracketed?.[1]) {
+    candidate = bracketed[1];
+  } else {
+    const ipv4Port = /^([^:]+):\d{1,5}$/.exec(candidate);
+    if (ipv4Port?.[1]) candidate = ipv4Port[1];
+  }
+  return isIP(candidate) ? candidate : undefined;
+}
+
+let clientIpDiagLoggedAt = 0;
+
+/**
+ * TEMPORARY diagnostics — remove once Railway's forwarded-header shape is
+ * confirmed in production logs. Fires (throttled) only when trust IS
+ * configured yet no candidate validated, dumping the raw header values so a
+ * still-failing parse can be fixed precisely instead of guessed at.
+ * JSON.stringify keeps attacker-controlled header bytes on one escaped line.
+ */
+function logNoTrustedClientIpDiag(c: Context, hops: number): void {
+  const now = Date.now();
+  if (now - clientIpDiagLoggedAt < 60_000) return;
+  clientIpDiagLoggedAt = now;
+  console.warn(
+    "[AuthRateLimit][diag] trust configured but no client IP derived; falling back to coarse subject",
+    JSON.stringify({
+      hops,
+      "x-forwarded-for": c.req.header("x-forwarded-for") ?? null,
+      "x-real-ip": c.req.header("x-real-ip") ?? null,
+      "x-envoy-external-address": c.req.header("x-envoy-external-address") ?? null,
+      "cf-connecting-ip": c.req.header("cf-connecting-ip") ?? null,
+    }),
   );
+}
+
+/**
+ * Best-effort trustworthy client IP, or undefined when none can be derived.
+ *
+ * - cf-connecting-ip is honored only when STEWARD_TRUST_CLOUDFLARE=true AND
+ *   origin ingress is locked to Cloudflare. This service is served directly
+ *   by Railway today (no cf-ray), so the flag stays unset and the header is
+ *   ignored as client-forgeable.
+ * - x-envoy-external-address: Railway's Envoy edge sets this to the single
+ *   external client address it observed (possibly with a :port). It is only
+ *   consulted once the operator has opted into a trusted edge (hops > 0 or
+ *   Cloudflare trust) — on a bare deployment a client could set it — and it
+ *   identifies the CLIENT only when that edge is the outermost trusted hop,
+ *   so with hops >= 2 the positional x-forwarded-for read stays authoritative
+ *   and Envoy's value is only a rescue when that read fails.
+ * - x-forwarded-for: each trusted proxy APPENDS the peer it observed, so with
+ *   N trusted hops the trustworthy entry is the N-th from the RIGHT. The
+ *   left-most entry is client-supplied and is never read.
+ * - x-real-ip is deliberately not consulted: no proxy in this topology sets
+ *   it authoritatively, so a client-set value would pass through verbatim.
+ *
+ * Every candidate is validated with isIP (after unambiguous :port stripping)
+ * so header garbage can never become a rate-limit key or a captcha remoteip.
+ * Callers seeing undefined must degrade to a partitioned coarse subject —
+ * never a shared "global" bucket, never open.
+ */
+export function trustedClientIp(c: Context): string | undefined {
+  const trustCloudflare = process.env.STEWARD_TRUST_CLOUDFLARE === "true";
+  if (trustCloudflare) {
+    const cf = c.req.header("cf-connecting-ip")?.trim();
+    if (cf && isIP(cf)) return cf;
+  }
+  const hops = trustedProxyHops();
+  if (hops === 0 && !trustCloudflare) return undefined;
+
+  const fromEnvoy = () => normalizeIpCandidate(c.req.header("x-envoy-external-address"));
+  const fromForwardedFor = () => {
+    if (hops === 0) return undefined;
+    const entries = (c.req.header("x-forwarded-for") ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+    return normalizeIpCandidate(entries[entries.length - hops]);
+  };
+
+  const ip = hops >= 2 ? (fromForwardedFor() ?? fromEnvoy()) : (fromEnvoy() ?? fromForwardedFor());
+  if (ip) return ip;
+  logNoTrustedClientIpDiag(c, hops);
+  return undefined;
+}
+
+/**
+ * Coarsen an IP for rate-limit keying. IPv4 keys as itself; IPv4-mapped IPv6
+ * unwraps to the embedded IPv4 in BOTH spellings (::ffff:a.b.c.d and the hex
+ * form ::ffff:aabb:ccdd) so mapped clients share one bucket instead of all
+ * collapsing into 0::/64 or splitting across spellings; native IPv6 keys by
+ * /64 — providers delegate whole /64s, so full-address buckets would let one
+ * host mint 2^64 independent budgets while distinct subscribers almost never
+ * share a /64.
+ */
+export function clientIpBucket(ip: string): string {
+  const lower = ip.toLowerCase();
+  if (lower.startsWith("::ffff:") && isIP(lower.slice(7)) === 4) {
+    return lower.slice(7);
+  }
+  if (isIP(lower) !== 6) return lower;
+  const [head = "", tail = ""] = lower.split("::");
+  const headParts = head ? head.split(":") : [];
+  const tailParts = tail ? tail.split(":") : [];
+  const missing = Math.max(8 - headParts.length - tailParts.length, 0);
+  // Parse each hextet numerically so full-form and ::-compressed spellings of
+  // the same address always land in the same bucket.
+  const full = [...headParts, ...Array(missing).fill("0"), ...tailParts].map((part) =>
+    Number.parseInt(part || "0", 16),
+  );
+  // IPv4-mapped spelled in hex (::ffff:0102:0304): unwrap to the embedded
+  // IPv4 so it shares the dotted-quad spelling's bucket.
+  if (full.length === 8 && full.slice(0, 5).every((part) => part === 0) && full[5] === 0xffff) {
+    const hi = full[6] ?? 0;
+    const lo = full[7] ?? 0;
+    return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
+  }
+  return `${full
+    .slice(0, 4)
+    .map((part) => part.toString(16))
+    .join(":")}::/64`;
+}
+
+/** Coarse fallback buckets are shared by many clients; widen their budget. */
+const AUTH_RATE_LIMIT_FALLBACK_HEADROOM = 5;
+
+let coarseSubjectWarnedAt = 0;
+
+/**
+ * Rate-limit subject for auth endpoints. With a trusted client IP every
+ * client gets an independent budget (IPv6 at /64). Without one, requests
+ * shard per Host — the edge only routes configured domains here, so Host
+ * cannot be rotated to mint unbounded buckets the way client-controlled
+ * headers or user-agents can — and checkAuthRateLimit widens the budget by
+ * AUTH_RATE_LIMIT_FALLBACK_HEADROOM because many clients share each bucket.
+ * No configuration yields the old literal "global" chokepoint (#268), and no
+ * client-controlled free text ever reaches Redis unhashed.
+ */
+function authRateLimitSubject(c: Context): { subject: string; coarse: boolean } {
+  const ip = trustedClientIp(c);
+  if (ip) return { subject: `ip:${clientIpBucket(ip)}`, coarse: false };
+  const now = Date.now();
+  if (process.env.NODE_ENV === "production" && now - coarseSubjectWarnedAt >= 60_000) {
+    coarseSubjectWarnedAt = now;
+    console.warn(
+      "[AuthRateLimit] No trusted client IP (set STEWARD_TRUSTED_PROXY_HOPS=2 on Railway); auth rate limits fall back to coarse per-host buckets instead of per-client budgets",
+    );
+  }
+  return {
+    subject: `host:${c.req.header("host")?.toLowerCase().trim() || "unknown"}`,
+    coarse: true,
+  };
 }
 
 function allowAuthRateLimitSoftFail(): boolean {
@@ -211,6 +385,68 @@ function allowAuthRateLimitSoftFail(): boolean {
   );
 }
 
+/**
+ * Bounded, observable fallback for the window where Redis is CONFIGURED but
+ * unreachable (blip, restart, failover): admit up to
+ * STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX requests per minute per instance
+ * across all auth endpoints, then deny. 0 restores strict fail-closed.
+ * Redis NEVER configured in production remains a hard deny — misconfiguration
+ * must stay loud. This is not a per-client limiter and does not violate the
+ * no-in-memory-fallback-Map rule in checkAuthRateLimit's doc: it is a single
+ * O(1) circuit-breaker counter bounding blast radius per instance (per
+ * isolate on Workers, which only tightens it).
+ */
+function authRateLimitOutageValveMax(): number {
+  const raw = process.env.STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX;
+  if (raw === undefined || raw === "") return 300;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 300;
+}
+
+let outageValveWindowStartMs = 0;
+let outageValveCount = 0;
+let outageValveLoggedAt = 0;
+
+function authRateLimitOutageAllow(endpoint: string, err?: unknown): boolean {
+  const valveMax = authRateLimitOutageValveMax();
+  if (valveMax === 0) return false;
+  const now = Date.now();
+  if (now - outageValveWindowStartMs >= 60_000) {
+    outageValveWindowStartMs = now;
+    outageValveCount = 0;
+  }
+  if (now - outageValveLoggedAt >= 30_000) {
+    outageValveLoggedAt = now;
+    console.error(
+      `[AuthRateLimit] Redis unavailable; bounded per-instance outage valve engaged (endpoint "${endpoint}", max ${valveMax}/min)`,
+      err ?? "",
+    );
+  }
+  outageValveCount += 1;
+  return outageValveCount <= valveMax;
+}
+
+/**
+ * Check a client rate limit for auth endpoints, backed by the Redis sliding
+ * window. Subjects come from authRateLimitSubject (trusted client IP, or a
+ * coarse per-host fallback whose budget is widened by
+ * AUTH_RATE_LIMIT_FALLBACK_HEADROOM) unless subjectOverride is given. The
+ * subject is always hashed into the Redis key, so neither PII (destination
+ * emails/phones) nor header-controlled bytes ever reach Redis. In production,
+ * Redis must be available unless STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL=true
+ * (full soft-fail, break-glass only) or the bounded outage valve admits the
+ * request (Redis configured but unreachable only). We deliberately do not
+ * keep an in-memory fallback Map as a limiter: it is incorrect across
+ * multiple instances and impossible on Cloudflare Workers (no shared state
+ * across isolates); the outage valve is a single bounded counter, not a
+ * per-client map.
+ *
+ * @param c        - Hono context (used to derive the client subject)
+ * @param endpoint - Short name used as part of the Redis key
+ * @param windowMs - Window length in milliseconds
+ * @param max      - Max requests in the window (×5 for coarse fallback subjects)
+ * @param subjectOverride - Per-target subject (e.g. destination email); hashed at key build
+ */
 async function checkAuthRateLimit(
   c: Context,
   endpoint: string,
@@ -218,17 +454,21 @@ async function checkAuthRateLimit(
   max: number,
   subjectOverride?: string,
 ): Promise<{ allowed: boolean; retryAfterSecs?: number }> {
-  const subject = subjectOverride ?? authRateLimitSubject(c);
-  const key = `ratelimit:auth:${endpoint}:${subject}:${windowMs}`;
+  const resolved =
+    subjectOverride !== undefined
+      ? { subject: subjectOverride, coarse: false }
+      : authRateLimitSubject(c);
+  const effectiveMax = resolved.coarse ? max * AUTH_RATE_LIMIT_FALLBACK_HEADROOM : max;
+  const key = `ratelimit:auth:${endpoint}:${hashSha256Hex(resolved.subject)}:${windowMs}`;
 
   const deny = (retryAfterSecs: number) => {
     const headers = formatRateLimitHeaders({
-      limit: max,
+      limit: effectiveMax,
       remaining: 0,
       resetMs: retryAfterSecs * 1000,
       retryAfterMs: retryAfterSecs * 1000,
     });
-    headers["RateLimit-Policy"] = `${max};w=${Math.ceil(windowMs / 1000)}`;
+    headers["RateLimit-Policy"] = `${effectiveMax};w=${Math.ceil(windowMs / 1000)}`;
     for (const [name, value] of Object.entries(headers)) c.header(name, value);
     return { allowed: false, retryAfterSecs };
   };
@@ -237,17 +477,26 @@ async function checkAuthRateLimit(
     const redisMw = await import("../middleware/redis.js");
     if (!redisMw.isRedisAvailable()) {
       if (allowAuthRateLimitSoftFail()) return { allowed: true };
+      if (redisMw.isRedisConfigured() && authRateLimitOutageAllow(endpoint)) {
+        return { allowed: true };
+      }
       return deny(60);
     }
 
     const { checkRateLimit } = await import("@stwd/redis");
-    const result = await checkRateLimit(key, windowMs, max);
+    const result = await checkRateLimit(key, windowMs, effectiveMax);
     if (!result.allowed) {
       return deny(Math.ceil(result.resetMs / 1000));
     }
     return { allowed: true };
-  } catch {
+  } catch (err) {
     if (allowAuthRateLimitSoftFail()) return { allowed: true };
+    // Any step above can throw — the dynamic imports, the availability probe,
+    // or checkRateLimit itself — so a throw is NOT proof Redis was seen
+    // available. Treat it as an outage and let the bounded valve decide; the
+    // deliberate hard deny for never-configured Redis in production is the
+    // non-throwing isRedisAvailable() branch above, which returns instead.
+    if (authRateLimitOutageAllow(endpoint, err)) return { allowed: true };
     return deny(60);
   }
 }
@@ -462,16 +711,6 @@ async function validateExplicitAuthTenantHint(
   if (!explicitHint) return null;
   if (!(await tenantExists(tenantId))) return `Tenant '${tenantId}' not found`;
   return null;
-}
-
-function trustedRemoteIp(c: Context): string | undefined {
-  if (process.env.STEWARD_TRUST_PROXY_HEADERS !== "true") return undefined;
-  return (
-    c.req.header("cf-connecting-ip")?.trim() ||
-    c.req.header("x-real-ip")?.trim() ||
-    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
-    undefined
-  );
 }
 
 function authTenantHint(c: Context, bodyTenantId?: string): string {
@@ -1444,13 +1683,71 @@ function invalidTestAccountCredentials() {
   return { ok: false, error: "Invalid test account credentials" } satisfies ApiResponse;
 }
 
+/**
+ * Map typed email-delivery failures to fail-closed HTTP responses
+ * (elizaOS/eliza#18452): 503 when no delivery-capable provider is configured
+ * (challenge never issued), 502 when the provider rejected the send (the
+ * challenge was already invalidated by EmailAuth). Returns null for any other
+ * error so it propagates unchanged. Response bodies are generic — no
+ * recipient, token, or provider detail.
+ */
+function emailDeliveryFailureResponse(c: Context, err: unknown): Response | null {
+  if (err instanceof EmailDeliveryNotConfiguredError) {
+    return c.json<ApiResponse>({ ok: false, error: "Email delivery is not configured" }, 503);
+  }
+  if (err instanceof EmailDeliveryError) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Email could not be sent. Please try again later." },
+      502,
+    );
+  }
+  return null;
+}
+
 function emailMagicLinkVerifySubject(token: string, email: string, tenantId: string): string {
   return hashSha256Hex(
     [tenantId.trim().toLowerCase(), email.trim().toLowerCase(), token.trim()].join(":"),
   );
 }
 
-function buildGlobalEmailAuth(overrides?: { baseUrl?: string; callbackPath?: string }): EmailAuth {
+/**
+ * Build EmailAuth renderer overrides from deployer-supplied raw templates
+ * (tenant_configs.email_config.templates). Branded markup is instance CONFIG,
+ * not repo code: when a tenant carries its own subject/text/html we render it
+ * with {{placeholder}} substitution; otherwise fall through to the built-in
+ * templateId resolution.
+ */
+function buildTemplateRenderers(templates: TenantEmailConfig["templates"]): {
+  templateRenderer?: EmailAuthConfig["templateRenderer"];
+  otpTemplateRenderer?: EmailAuthConfig["otpTemplateRenderer"];
+} {
+  if (!templates) return {};
+  const magicLink = templates.magicLink;
+  const otp = templates.otp;
+  return {
+    ...(magicLink
+      ? {
+          templateRenderer: (_templateId: string | undefined, data: MagicLinkTemplateData) =>
+            renderCustomTemplate(magicLink, magicLinkTemplateValues(data)),
+        }
+      : {}),
+    ...(otp
+      ? {
+          otpTemplateRenderer: (_templateId: string | undefined, data: OtpTemplateData) =>
+            renderCustomTemplate(otp, otpTemplateValues(data)),
+        }
+      : {}),
+  };
+}
+
+function buildGlobalEmailAuth(overrides?: {
+  baseUrl?: string;
+  callbackPath?: string;
+  templateId?: string;
+  subjectOverride?: string;
+  replyTo?: string;
+  templates?: TenantEmailConfig["templates"];
+}): EmailAuth {
   const resendKey = process.env.RESEND_API_KEY;
   // Mock takes precedence in non-production for deterministic e2e testing.
   const provider = isMockEmailEnabled()
@@ -1468,6 +1765,10 @@ function buildGlobalEmailAuth(overrides?: { baseUrl?: string; callbackPath?: str
     callbackPath: overrides?.callbackPath,
     provider,
     tokenStore: getTokenStore(),
+    templateId: overrides?.templateId,
+    subjectOverride: overrides?.subjectOverride,
+    replyTo: overrides?.replyTo,
+    ...buildTemplateRenderers(overrides?.templates),
   });
 }
 
@@ -1522,10 +1823,16 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
   if (!emailConfig || !emailConfig.apiKeyEncrypted) {
     // No per-tenant Resend config (or only magic-link override) — use the
     // global env-backed provider but still honor the per-tenant magic-link
-    // overrides if present.
+    // AND template overrides if present. Without the template pass-through a
+    // tenant that sets only `templateId` (no own Resend key) silently got the
+    // Steward-branded default email instead of its configured branding.
     return buildGlobalEmailAuth({
       baseUrl: magicLinkBaseUrl,
       callbackPath,
+      templateId: emailConfig?.templateId,
+      subjectOverride: emailConfig?.subjectOverride,
+      replyTo: emailConfig?.replyTo,
+      templates: emailConfig?.templates,
     });
   }
 
@@ -1556,6 +1863,7 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
     templateId: emailConfig.templateId,
     subjectOverride: emailConfig.subjectOverride,
     replyTo: emailConfig.replyTo,
+    ...buildTemplateRenderers(emailConfig.templates),
   });
 }
 
@@ -1626,13 +1934,7 @@ export function _clearOAuthCodeStoreForTests(): void {
 // ─── Vault helper ─────────────────────────────────────────────────────────────
 
 function getVault(): Vault {
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
-  if (!masterPassword) throw new Error("STEWARD_MASTER_PASSWORD is required");
-  return new Vault({
-    masterPassword,
-    rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
-    chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
-  });
+  return getConfiguredVault();
 }
 
 // ─── Tenant resolution ────────────────────────────────────────────────────────
@@ -4937,7 +5239,7 @@ auth.post("/test/token", async (c) => {
 // ── SMS OTP ─────────────────────────────────────────────────────────────────
 
 auth.post("/sms/send", async (c) => {
-  const rl = await checkAuthRateLimit(c, "sms-send", 60_000, 3);
+  const rl = await checkAuthRateLimit(c, "sms-send", 60_000, 5);
   if (!rl.allowed) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many requests. Please try again later." },
@@ -4970,7 +5272,7 @@ auth.post("/sms/send", async (c) => {
     authAbuseConfig,
     "sms_otp",
     body.captchaToken,
-    trustedRemoteIp(c),
+    trustedClientIp(c),
   );
   if (!captcha.ok) {
     return c.json<ApiResponse>(
@@ -5095,7 +5397,7 @@ auth.post("/whatsapp/send", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "WhatsApp OTP is not configured" }, 503);
   }
 
-  const rl = await checkAuthRateLimit(c, "whatsapp-send", 60_000, 3);
+  const rl = await checkAuthRateLimit(c, "whatsapp-send", 60_000, 5);
   if (!rl.allowed) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many requests. Please try again later." },
@@ -5128,7 +5430,7 @@ auth.post("/whatsapp/send", async (c) => {
     authAbuseConfig,
     "sms_otp",
     body.captchaToken,
-    trustedRemoteIp(c),
+    trustedClientIp(c),
   );
   if (!captcha.ok) {
     return c.json<ApiResponse>(
@@ -7225,7 +7527,7 @@ auth.post("/logout", async (c) => {
  * Supports silent re-auth without user interaction when the access token nears expiry.
  */
 auth.post("/refresh", async (c) => {
-  const rl = await checkAuthRateLimit(c, "refresh", 60_000, 30);
+  const rl = await checkAuthRateLimit(c, "refresh", 60_000, 60);
   if (!rl.allowed) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many requests. Please try again later." },
@@ -7528,7 +7830,9 @@ auth.post("/passkey/register/options", async (c) => {
  * Verifies registration, stores credential, provisions wallet, returns JWT.
  */
 auth.post("/passkey/register/verify", async (c) => {
-  const rl = await checkAuthRateLimit(c, "passkey-verify", 60_000, 10);
+  // Distinct endpoint key from login's "passkey-verify" so registration and
+  // login verification do not share one bucket.
+  const rl = await checkAuthRateLimit(c, "passkey-register-verify", 60_000, 10);
   if (!rl.allowed) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many requests. Please try again later." },
@@ -7881,7 +8185,10 @@ auth.post("/passkey/login/verify", async (c) => {
  * Sends a magic link email, returns expiry time.
  */
 auth.post("/email/send", async (c) => {
-  const rl = await checkAuthRateLimit(c, "email-send", 60_000, 3);
+  // Tiered limits: the per-IP burst is generous (30/min) because one IP is
+  // often an office/NAT/dev box full of legit users; the tight anti-abuse
+  // backstop is email-send-destination (5 per 10min per address) below.
+  const rl = await checkAuthRateLimit(c, "email-send", 60_000, 30);
   if (!rl.allowed) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many requests. Please try again later." },
@@ -7922,7 +8229,7 @@ auth.post("/email/send", async (c) => {
     authAbuseConfig,
     "email_otp",
     body.captchaToken,
-    trustedRemoteIp(c),
+    trustedClientIp(c),
   );
   if (!captcha.ok) {
     return c.json<ApiResponse>(
@@ -7938,13 +8245,22 @@ auth.post("/email/send", async (c) => {
     );
   }
   const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
-  const { expiresAt } = await emailAuth.sendMagicLink(email, {
-    tenantId: resolvedTenantId,
-  });
+  let sent: Awaited<ReturnType<EmailAuth["sendMagicLink"]>>;
+  try {
+    sent = await emailAuth.sendMagicLink(email, { tenantId: resolvedTenantId });
+  } catch (err) {
+    // Fail closed: ok:true only after the provider accepted the message. On
+    // typed delivery failures the challenge is not redeemable (never issued
+    // for 503; invalidated by EmailAuth for 502).
+    const deliveryFailure = emailDeliveryFailureResponse(c, err);
+    if (deliveryFailure) return deliveryFailure;
+    throw err;
+  }
+  const { expiresAt, challengeId, pollSecret } = sent;
 
-  return c.json<ApiResponse<{ expiresAt: string }>>({
+  return c.json<ApiResponse<{ expiresAt: string; challengeId: string; pollSecret: string }>>({
     ok: true,
-    data: { expiresAt: expiresAt.toISOString() },
+    data: { expiresAt: expiresAt.toISOString(), challengeId, pollSecret },
   });
 });
 
@@ -7993,7 +8309,7 @@ auth.get("/callback/email", async (c) => {
   let result: Awaited<ReturnType<EmailAuth["verifyMagicLink"]>>;
   try {
     const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
-    result = await emailAuth.verifyMagicLink(token);
+    result = await emailAuth.verifyMagicLink(token, email, resolvedTenantId);
   } catch {
     return redirectEmailAuthFailure(c, "invalid_link");
   }
@@ -8066,7 +8382,16 @@ auth.post("/email/verify", async (c) => {
   }
 
   const email = body.email.toLowerCase().trim();
-  const resolvedTenantId = c.req.header("X-Steward-Tenant") || body.tenantId || _DEFAULT_TENANT_ID;
+  const headerTenantId = c.req.header("X-Steward-Tenant")?.trim();
+  const bodyTenantId = body.tenantId?.trim();
+  const resolvedTenantId = headerTenantId || bodyTenantId || _DEFAULT_TENANT_ID;
+  const tenantHintError = await validateExplicitAuthTenantHint(
+    resolvedTenantId,
+    Boolean(headerTenantId || bodyTenantId),
+  );
+  if (tenantHintError) {
+    return c.json<ApiResponse>({ ok: false, error: tenantHintError }, 404);
+  }
   const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "email");
   if (methodResponse) return methodResponse;
   const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
@@ -8090,7 +8415,7 @@ auth.post("/email/verify", async (c) => {
     );
   }
   const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
-  const result = await emailAuth.verifyMagicLink(body.token);
+  const result = await emailAuth.verifyMagicLink(body.token, email, resolvedTenantId);
 
   if (!result.valid || result.email.toLowerCase().trim() !== email) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired magic link" }, 401);
@@ -8107,6 +8432,105 @@ auth.post("/email/verify", async (c) => {
   return authExchangeJson(c, authResult.response);
 });
 
+auth.post("/email/code/verify", async (c) => {
+  const rl = await checkAuthRateLimit(c, "email-code-verify", 60_000, 10);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many verification attempts. Try again later." },
+      429,
+    );
+  }
+
+  const body = await safeJsonParse<{ email: string; code: string; tenantId?: string }>(c);
+  if (!body?.email || !body?.code) {
+    return c.json<ApiResponse>({ ok: false, error: "email and code are required" }, 400);
+  }
+
+  const email = body.email.toLowerCase().trim();
+  const code = body.code.trim();
+  const resolvedTenantId = c.req.header("X-Steward-Tenant") || body.tenantId || _DEFAULT_TENANT_ID;
+  const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "email");
+  if (methodResponse) return methodResponse;
+  const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
+    c,
+    resolvedTenantId,
+    email,
+    "Email",
+  );
+  if (ssoRequiredResponse) return ssoRequiredResponse;
+  const attemptRl = await checkAuthRateLimit(
+    c,
+    "email-code-verify-target",
+    10 * 60_000,
+    5,
+    `${resolvedTenantId}:${hashSha256Hex(email)}`,
+  );
+  if (!attemptRl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many verification attempts. Try again later." },
+      429,
+    );
+  }
+
+  const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
+  const result = await emailAuth.verifyEmailLoginCode(email, code, resolvedTenantId);
+  if (!result.valid) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          result.reason === "locked"
+            ? "Too many verification attempts. Try again later."
+            : "Invalid or expired code",
+      },
+      result.reason === "locked" ? 429 : 401,
+    );
+  }
+
+  const authResult = await completeEmailAuth(c, email, body.tenantId);
+  if (!authResult.ok) {
+    return c.json<ApiResponse>({ ok: false, error: authResult.error }, authResult.status);
+  }
+  return authExchangeJson(c, authResult.response);
+});
+
+auth.post("/email/status", async (c) => {
+  const rl = await checkAuthRateLimit(c, "email-status", 60_000, 120);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
+  }
+  const body = await safeJsonParse<{ challengeId: string; pollSecret: string; tenantId?: string }>(
+    c,
+  );
+  if (!body?.challengeId || !body?.pollSecret) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "challengeId and pollSecret are required" },
+      400,
+    );
+  }
+  const headerTenantId = c.req.header("X-Steward-Tenant")?.trim();
+  const bodyTenantId = body.tenantId?.trim();
+  const resolvedTenantId = headerTenantId || bodyTenantId || _DEFAULT_TENANT_ID;
+  const tenantHintError = await validateExplicitAuthTenantHint(
+    resolvedTenantId,
+    Boolean(headerTenantId || bodyTenantId),
+  );
+  if (tenantHintError) {
+    return c.json<ApiResponse>({ ok: false, error: tenantHintError }, 404);
+  }
+  const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
+  const status = await emailAuth.getEmailLoginStatus(body.challengeId, body.pollSecret);
+  return c.json<ApiResponse<{ status: string; expiresAt?: string }>>({
+    ok: true,
+    data: {
+      status: status.status,
+      ...(status.status === "pending" ? { expiresAt: status.expiresAt } : {}),
+    },
+  });
+});
 // ── Email OTP (Privy-style verified signup) ───────────────────────────────
 //
 // POST /auth/email/otp/send    — email a 6-digit one-time code.
@@ -8118,7 +8542,10 @@ auth.post("/email/verify", async (c) => {
 //                                unverified registration (pre-hijack) closed.
 
 auth.post("/email/otp/send", async (c) => {
-  const rl = await checkAuthRateLimit(c, "email-otp-send", 60_000, 3);
+  // Tiered limits: generous per-IP burst (30/min — shared NATs must not
+  // block); email-otp-send-destination (5 per 10min per address) below is the
+  // tight anti-abuse backstop.
+  const rl = await checkAuthRateLimit(c, "email-otp-send", 60_000, 30);
   if (!rl.allowed) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many requests. Please try again later." },
@@ -8159,7 +8586,7 @@ auth.post("/email/otp/send", async (c) => {
     authAbuseConfig,
     "email_otp",
     body.captchaToken,
-    trustedRemoteIp(c),
+    trustedClientIp(c),
   );
   if (!captcha.ok) {
     return c.json<ApiResponse>(
@@ -8175,7 +8602,16 @@ auth.post("/email/otp/send", async (c) => {
     );
   }
   const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
-  const { expiresAt } = await emailAuth.sendOtp(email, { tenantId: resolvedTenantId });
+  let expiresAt: Date;
+  try {
+    ({ expiresAt } = await emailAuth.sendOtp(email, { tenantId: resolvedTenantId }));
+  } catch (err) {
+    // Fail closed: mirror /email/send — no ok:true without an acceptance
+    // receipt, and the stored code is deleted by EmailAuth on failure.
+    const deliveryFailure = emailDeliveryFailureResponse(c, err);
+    if (deliveryFailure) return deliveryFailure;
+    throw err;
+  }
 
   return c.json<ApiResponse<{ expiresAt: string }>>({
     ok: true,
@@ -8503,7 +8939,9 @@ auth.post("/guest/upgrade", async (c) => {
   const email = rawEmail.toLowerCase();
 
   const emailAuth = await getEmailAuthForTenant(tenantId);
-  const result = await emailAuth.verifyMagicLink(magicLinkToken);
+  // The shared link+code challenge binds each token to {email, tenant}; pass
+  // both so verification enforces the binding (token-only calls fail closed).
+  const result = await emailAuth.verifyMagicLink(magicLinkToken, email, tenantId);
   if (!result.valid || result.email.toLowerCase().trim() !== email) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired magic link" }, 401);
   }

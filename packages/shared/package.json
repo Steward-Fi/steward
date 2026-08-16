@@ -1,7 +1,7 @@
 {
   "name": "@stwd/shared",
   "version": "0.2.0",
-  "description": "Shared domain types, interfaces, and constants for the Steward monorepo",
+  "description": "Shared domain types, execution contracts, and constants for Steward",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
     }
   },
   "files": [

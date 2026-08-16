@@ -28,6 +28,7 @@ export const DEFAULT_SECRET_ROUTE_HOSTS = [
   "api.coingecko.com",
   "api.helius.xyz",
   "api.github.com",
+  "api.x.com",
 ] as const;
 
 /**
@@ -98,6 +99,16 @@ export const STRICT_HOSTS: Record<
     requireExplicitMethod: true,
     disallowPathWildcards: true,
   },
+  // X provider-action endpoints: POST /2/tweets, DELETE /2/tweets/{id},
+  // GET /2/users/me. Every governed X path has >=2 segments, so the same
+  // strict narrowness as github pins each route to one exact endpoint + verb
+  // and forbids "*" wildcards (a /2/* route would attach the OAuth token to
+  // every X endpoint).
+  "api.x.com": {
+    minPathSegments: 2,
+    requireExplicitMethod: true,
+    disallowPathWildcards: true,
+  },
 };
 
 export type SecretRouteConfigInput = {
@@ -109,6 +120,8 @@ export type SecretRouteConfigInput = {
   injectKey?: string;
   injectFormat?: string;
   priority?: number;
+  requiresApproval?: boolean;
+  approvalConfig?: Record<string, unknown>;
 };
 
 function allowBroadSecretRoutes(): boolean {

@@ -27,7 +27,7 @@
     "@stwd/proxy": "workspace:*",
     "@stwd/vault": "workspace:*",
     "@types/bun": "latest",
-    "hono": "^4.12.18",
+    "hono": "^4.12.34",
     "typescript": "^5.8.0"
   }
 }

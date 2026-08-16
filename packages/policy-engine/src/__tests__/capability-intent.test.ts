@@ -18,9 +18,11 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import type { ContributedPolicyRule, PolicyRule, SignRequest } from "@stwd/shared";
+import { UNPRINTABLE_THROWN_VALUE } from "@stwd/shared";
 import {
   CAPABILITY_INTENT_RULE_TYPE,
   capabilityIntentContribution,
+  composeCapabilityIntentDecision,
   evaluateCapabilityIntent,
 } from "../capability-intent";
 import { PolicyEngine } from "../engine";
@@ -586,5 +588,632 @@ describe("capability-intent — multi-rule composition (all-must-pass)", () => {
     expect(other.passed).toBe(true);
     expect(allow.passed).toBe(true);
     expect(other.passed && allow.passed).toBe(true);
+  });
+});
+
+describe("capability-intent — composeCapabilityIntentDecision (canonical precedence)", () => {
+  // The canonical composition (master-plan §5.3 / PR2 spec §6.3):
+  //   1. malformed/unknown rule config or unavailable input => hard_deny
+  //   2. any matching hard deny (deny effect OR failed hard constraint) => hard_deny
+  //   3. else any matching require-approval => approval_required
+  //   4. else any matching passing allow => allow
+  //   5. else (no governing passing allow) => hard_deny
+  // These tests are the SINGLE SOURCE OF TRUTH for capability-intent precedence
+  // and directly guard the "allow-over-approval" regression.
+
+  const ctx = makeContext({ capability: cap() });
+
+  it("REGRESSION: approval_required is NOT shadowed by a matching passing allow", () => {
+    // This is the exact bug: allow + require-approval on the SAME capability.
+    // The old invoke-layer logic let the passing allow short-circuit to ALLOW.
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+        rule({ capabilities: ["github.pr.comment"], effect: "require-approval" }, "approval-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("approval_required");
+  });
+
+  it("REGRESSION holds regardless of rule order (approval listed first)", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.pr.comment"], effect: "require-approval" }, "approval-rule"),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("approval_required");
+  });
+
+  it("deny + allow => hard_deny (deny wins over allow)", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+        rule({ capabilities: ["github.pr.comment"], effect: "deny" }, "deny-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("deny + approval => hard_deny (deny wins over approval, never softened)", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.pr.comment"], effect: "require-approval" }, "approval-rule"),
+        rule({ capabilities: ["github.pr.comment"], effect: "deny" }, "deny-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("deny + approval + allow => hard_deny (deny is absolute)", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+        rule({ capabilities: ["github.pr.comment"], effect: "require-approval" }, "approval-rule"),
+        rule({ capabilities: ["github.pr.comment"], effect: "deny" }, "deny-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("approval + allow => approval_required", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.pr.comment"], effect: "require-approval" }, "approval-rule"),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("approval_required");
+  });
+
+  it("multiple allows => allow", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-1"),
+        rule({ capabilities: ["github.pr.comment"], effect: "allow" }, "allow-2"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("allow");
+  });
+
+  it("single matching allow => allow", () => {
+    const d = composeCapabilityIntentDecision(
+      [rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule")],
+      ctx,
+    );
+    expect(d.effect).toBe("allow");
+  });
+
+  it("malformed rule config present => hard_deny (even alongside a passing allow)", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+        // unknown top-level key fails closed in parseConfig
+        rule({ capabilities: ["github.*"], effect: "allow", bogus: true }, "malformed-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("malformed rule config => hard_deny, never softened into approval", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.pr.comment"], effect: "require-approval" }, "approval-rule"),
+        rule({ capabilities: ["github.*"], effect: "allow", bogus: true }, "malformed-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("failed hard constraint on an allow => hard_deny (counts as deny, not approval)", () => {
+    // allow rule whose maxCallsPerHour is exceeded => the allow FAILS a hard
+    // constraint. That is a hard deny and must win over a co-present approval.
+    const overCtx = makeContext({ capability: cap(), capabilityInvokeCount1h: 5 });
+    const d = composeCapabilityIntentDecision(
+      [
+        rule(
+          { capabilities: ["github.*"], effect: "allow", constraints: { maxCallsPerHour: 2 } },
+          "capped-allow",
+        ),
+        rule({ capabilities: ["github.pr.comment"], effect: "require-approval" }, "approval-rule"),
+      ],
+      overCtx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("no matching rule (all non-governing) => hard_deny (effective default-deny)", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["gitlab.*"], effect: "allow" }, "other-allow"),
+        rule({ capabilities: ["bitbucket.*"], effect: "deny" }, "other-deny"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("empty rule set => hard_deny (no governing allow)", () => {
+    const d = composeCapabilityIntentDecision([], ctx);
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("no ctx.capability => hard_deny (fail closed, not a capability invoke)", () => {
+    const d = composeCapabilityIntentDecision(
+      [rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule")],
+      makeContext(),
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("precedence is stable under 100 shuffles of a deny+approval+allow set", () => {
+    const base = [
+      rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      rule({ capabilities: ["github.pr.comment"], effect: "require-approval" }, "approval-rule"),
+      rule({ capabilities: ["github.pr.comment"], effect: "deny" }, "deny-rule"),
+    ];
+    for (let i = 0; i < 100; i++) {
+      const shuffled = [...base];
+      for (let j = shuffled.length - 1; j > 0; j--) {
+        const k = Math.floor(Math.random() * (j + 1));
+        [shuffled[j], shuffled[k]] = [shuffled[k], shuffled[j]];
+      }
+      expect(composeCapabilityIntentDecision(shuffled, ctx).effect).toBe("hard_deny");
+    }
+  });
+
+  it("approval+allow precedence is stable under 100 shuffles (approval wins)", () => {
+    const base = [
+      rule({ capabilities: ["github.*"], effect: "allow" }, "allow-1"),
+      rule({ capabilities: ["github.pr.comment"], effect: "allow" }, "allow-2"),
+      rule({ capabilities: ["github.pr.comment"], effect: "require-approval" }, "approval-rule"),
+    ];
+    for (let i = 0; i < 100; i++) {
+      const shuffled = [...base];
+      for (let j = shuffled.length - 1; j > 0; j--) {
+        const k = Math.floor(Math.random() * (j + 1));
+        [shuffled[j], shuffled[k]] = [shuffled[k], shuffled[j]];
+      }
+      expect(composeCapabilityIntentDecision(shuffled, ctx).effect).toBe("approval_required");
+    }
+  });
+});
+
+describe("capability-intent — composeCapabilityIntentDecision (malformed rule cannot be dropped)", () => {
+  const ctx = makeContext({ capability: cap() });
+
+  it("a malformed rule with a misspelled `capabilities` key hard-denies even alongside a matching allow", () => {
+    // The rule's `capabilities` is misspelled, so a naive governing-match filter
+    // (Array.isArray(cfg.capabilities)) would treat it as non-governing and DROP
+    // it, failing open. The composer parses every rule first and hard-denies.
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+        // @ts-expect-error intentionally malformed config for the fail-closed test
+        {
+          id: "typo",
+          type: CAPABILITY_INTENT_RULE_TYPE,
+          enabled: true,
+          config: { capabilties: ["github.*"], effect: "deny" },
+        },
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("parseConfig runs BEFORE capabilityMatches, so a malformed non-governing-looking rule still hard-denies", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        // unsupported glob makes parseConfig fail (badPattern) even though it
+        // "looks" like it governs github.* — must hard-deny, not be treated inert.
+        rule({ capabilities: ["git*hub.pr"], effect: "deny" }, "bad-glob"),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+});
+
+describe("capability-intent — composeCapabilityIntentDecision (disabled rules are inert)", () => {
+  const ctx = makeContext({ capability: cap() });
+
+  function disabled(config: Record<string, unknown>, id: string): ContributedPolicyRule {
+    return { id, type: CAPABILITY_INTENT_RULE_TYPE, enabled: false, config };
+  }
+
+  it("a DISABLED deny rule does NOT block a matching enabled allow", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        disabled({ capabilities: ["github.pr.comment"], effect: "deny" }, "disabled-deny"),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("allow");
+  });
+
+  it("a DISABLED require-approval rule does NOT queue approval over an enabled allow", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        disabled(
+          { capabilities: ["github.pr.comment"], effect: "require-approval" },
+          "disabled-approval",
+        ),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("allow");
+  });
+
+  it("a DISABLED malformed rule does NOT fail the composition closed", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        // @ts-expect-error intentionally malformed but DISABLED => must be inert
+        {
+          id: "disabled-bad",
+          type: CAPABILITY_INTENT_RULE_TYPE,
+          enabled: false,
+          config: { capabilties: ["github.*"], effect: "deny" },
+        },
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("allow");
+  });
+
+  it("only DISABLED rules present => default-deny (no enabled governing allow)", () => {
+    const d = composeCapabilityIntentDecision(
+      [disabled({ capabilities: ["github.*"], effect: "allow" }, "disabled-allow")],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("a rule with enabled:undefined is inert (falsy-enabled, matches the generic engine)", () => {
+    // NIT alignment: the composer skips ANY falsy `enabled`, not only
+    // `enabled === false`. An undefined-enabled deny must not block a valid allow.
+    const d = composeCapabilityIntentDecision(
+      [
+        {
+          id: "undef-enabled-deny",
+          type: CAPABILITY_INTENT_RULE_TYPE,
+          enabled: undefined,
+          config: { capabilities: ["github.pr.comment"], effect: "deny" },
+        } as unknown as ContributedPolicyRule,
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("allow");
+  });
+});
+
+describe("capability-intent — malformed runtime input never throws (FINDING 1)", () => {
+  // `rule.config` is opaque jsonb: at runtime it can be null / a scalar / an
+  // array (untyped storage, bad migration, hand-edited row). The composer must
+  // turn ANY such malformation into a fail-closed decision, NEVER a thrown
+  // TypeError (which surfaces as an HTTP 500 instead of a deny).
+
+  const ctx = makeContext({ capability: cap() });
+
+  // Build a rule whose config bypasses the compile-time `Record<string,unknown>`
+  // type so we can exercise the true runtime shapes (null / scalar / array).
+  function rawRule(config: unknown, id: string): ContributedPolicyRule {
+    return {
+      id,
+      type: CAPABILITY_INTENT_RULE_TYPE,
+      enabled: true,
+      config,
+    } as ContributedPolicyRule;
+  }
+
+  it("evaluateCapabilityIntent: config null => deny (no throw)", () => {
+    const r = evaluateCapabilityIntent(rawRule(null, "null-cfg"), ctx);
+    expect(r.passed).toBe(false);
+    expect(r.reason).toContain("config must be a non-null object");
+  });
+
+  it("composeCapabilityIntentDecision: config null => hard_deny (no throw), even beside a passing allow", () => {
+    // The null-config rule has an unrecoverable selector => governing-ambiguous
+    // => hard_deny. Critically: it must NOT throw a TypeError.
+    let d: ReturnType<typeof composeCapabilityIntentDecision> | undefined;
+    expect(() => {
+      d = composeCapabilityIntentDecision(
+        [
+          rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+          rawRule(null, "null-cfg"),
+        ],
+        ctx,
+      );
+    }).not.toThrow();
+    expect(d?.effect).toBe("hard_deny");
+  });
+
+  for (const [label, badConfig] of [
+    ["string", "not-an-object"],
+    ["number", 42],
+    ["boolean", true],
+    ["array", ["github.*"]],
+  ] as const) {
+    it(`composeCapabilityIntentDecision: config ${label} => hard_deny (no throw)`, () => {
+      let d: ReturnType<typeof composeCapabilityIntentDecision> | undefined;
+      expect(() => {
+        d = composeCapabilityIntentDecision([rawRule(badConfig, `bad-${label}`)], ctx);
+      }).not.toThrow();
+      expect(d?.effect).toBe("hard_deny");
+    });
+  }
+
+  it("composeCapabilityIntentDecision: an evaluator that THROWS => hard_deny (never approval, never 500)", () => {
+    // Inject a throw at the evaluation seam. `constraints.argMatches` is applied
+    // during evaluation; we make Object.entries hit a hostile getter for THIS
+    // rule's constraints object, proving the composer's try/catch converts a
+    // thrown evaluator error into a hard_deny.
+    const hostile: Record<string, unknown> = {};
+    Object.defineProperty(hostile, "boom", {
+      enumerable: true,
+      get() {
+        throw new Error("injected evaluator failure");
+      },
+    });
+    // A well-formed, GOVERNING allow rule whose argMatches constraint iteration
+    // hits the hostile getter and throws inside evaluateConstraints.
+    const throwingRule = rule(
+      { capabilities: ["github.*"], effect: "allow", constraints: { argMatches: hostile } },
+      "throwing-rule",
+    );
+    let d: ReturnType<typeof composeCapabilityIntentDecision> | undefined;
+    expect(() => {
+      d = composeCapabilityIntentDecision([throwingRule], ctx);
+    }).not.toThrow();
+    expect(d?.effect).toBe("hard_deny");
+    expect(d?.reason).toContain("evaluator error");
+  });
+});
+
+describe("capability-intent — malformed-input precedence is SCOPED to governing rules (FINDING 2)", () => {
+  // master-plan §5.3: malformed-input precedence applies to GOVERNING rules. A
+  // malformed rule provably scoped to a DIFFERENT capability must not brick an
+  // unrelated invoke; a malformed rule whose SELECTOR is unrecoverable fails
+  // closed (its scope cannot be determined).
+
+  const ctx = makeContext({ capability: cap() }); // requests github.pr.comment
+
+  function rawRule(config: unknown, id: string): ContributedPolicyRule {
+    return {
+      id,
+      type: CAPABILITY_INTENT_RULE_TYPE,
+      enabled: true,
+      config,
+    } as ContributedPolicyRule;
+  }
+
+  it("malformed rule SCOPED ELSEWHERE (valid selector, other capability) + valid allow => ALLOW (inert, not bricked)", () => {
+    // Selector `gitlab.*` is well-formed and provably does NOT govern
+    // github.pr.comment, so the malformed remainder (bogus key) is irrelevant.
+    const d = composeCapabilityIntentDecision(
+      [
+        rawRule(
+          { capabilities: ["gitlab.*"], effect: "allow", bogus: true },
+          "malformed-elsewhere",
+        ),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("allow");
+  });
+
+  it("malformed rule scoped elsewhere with an unknown-constraint typo + valid allow => ALLOW (inert)", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rawRule(
+          { capabilities: ["gitlab.*"], effect: "allow", constraints: { maxCallPerHour: 2 } },
+          "malformed-elsewhere-2",
+        ),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("allow");
+  });
+
+  it("malformed rule with UNRECOVERABLE selector (misspelled capabilities key) + valid allow for another capability => HARD_DENY (fail closed on ambiguous scope)", () => {
+    // The selector cannot be recovered (`capabilities` is missing), so we cannot
+    // prove this rule is non-governing. Fail closed.
+    const d = composeCapabilityIntentDecision(
+      [
+        rawRule({ capabilties: ["gitlab.*"], effect: "deny" }, "unrecoverable-selector"),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("malformed rule with null config (unrecoverable selector) + valid allow => HARD_DENY (fail closed)", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rawRule(null, "null-selector"),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("malformed rule with an ILLEGAL glob selector (ambiguous scope) + valid allow => HARD_DENY (fail closed)", () => {
+    // `git*hub.*` is an illegal glob: patternMatches would treat it as an exact
+    // literal that can never match, so we cannot trust it to be non-governing.
+    const d = composeCapabilityIntentDecision(
+      [
+        rawRule({ capabilities: ["git*hub.*"], effect: "deny", bogus: true }, "illegal-glob"),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("malformed GOVERNING rule (valid selector matches THIS capability, malformed rest) => HARD_DENY (existing semantics preserved)", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rawRule(
+          { capabilities: ["github.*"], effect: "allow", bogus: true },
+          "malformed-governing",
+        ),
+        rule({ capabilities: ["github.pr.comment"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("scoping is order-independent: allow-first vs malformed-elsewhere-first both => ALLOW", () => {
+    const malformedElsewhere = rawRule(
+      { capabilities: ["gitlab.*"], effect: "deny", bogus: true },
+      "malformed-elsewhere",
+    );
+    const validAllow = rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule");
+    expect(composeCapabilityIntentDecision([validAllow, malformedElsewhere], ctx).effect).toBe(
+      "allow",
+    );
+    expect(composeCapabilityIntentDecision([malformedElsewhere, validAllow], ctx).effect).toBe(
+      "allow",
+    );
+  });
+});
+
+describe("capability-intent — composer catch is fail-closed against HOSTILE thrown values (P0)", () => {
+  // ROUND-2 P0: the per-rule catch used to build its deny reason with
+  //   `err instanceof Error ? err.message : String(err)`
+  // A thrown value whose toString/valueOf/Symbol.toPrimitive (or a Proxy
+  // `.message` getter) THROWS made that catch block ITSELF throw, unwinding past
+  // the fail-closed `return { effect: "hard_deny" }` and escaping the composer as
+  // a raw exception (=> HTTP 500 at the invoke boundary). These tests assert the
+  // composer NEVER throws and ALWAYS hard-denies for a governing rule whose
+  // evaluation throws an unprintable value.
+  const ctx = makeContext({ capability: cap() });
+
+  // A config that is a GOVERNING match for `github.pr.comment` (valid selector,
+  // so it is not scoped-elsewhere / inert) but whose `constraints` access throws
+  // `thrown` during parseConfig — reproducing an evaluator throw on the governing
+  // rule. `capabilities` and `effect` are plain so recoverSelectorMatch succeeds.
+  function governingConfigThatThrows(thrown: unknown): ContributedPolicyRule {
+    const config: Record<string, unknown> = {
+      capabilities: ["github.pr.comment"],
+      effect: "allow",
+    };
+    Object.defineProperty(config, "constraints", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        throw thrown;
+      },
+    });
+    return { id: "hostile-throw", type: CAPABILITY_INTENT_RULE_TYPE, enabled: true, config };
+  }
+
+  it("thrown value with a throwing toString => hard_deny, NO exception (the exact probe)", () => {
+    const hostile = {
+      toString() {
+        throw new Error("secondary stringify failure");
+      },
+    };
+    let d: ReturnType<typeof composeCapabilityIntentDecision> | undefined;
+    expect(() => {
+      d = composeCapabilityIntentDecision([governingConfigThatThrows(hostile)], ctx);
+    }).not.toThrow();
+    expect(d?.effect).toBe("hard_deny");
+  });
+
+  it("thrown value with throwing toString AND valueOf AND Symbol.toPrimitive => hard_deny, NO exception", () => {
+    const hostile = {
+      toString() {
+        throw new Error("toString throws");
+      },
+      valueOf() {
+        throw new Error("valueOf throws");
+      },
+      [Symbol.toPrimitive]() {
+        throw new Error("toPrimitive throws");
+      },
+    };
+    let d: ReturnType<typeof composeCapabilityIntentDecision> | undefined;
+    expect(() => {
+      d = composeCapabilityIntentDecision([governingConfigThatThrows(hostile)], ctx);
+    }).not.toThrow();
+    expect(d?.effect).toBe("hard_deny");
+    // Reason falls back to the static unprintable message (never leaks / throws).
+    expect(d?.reason).toContain(UNPRINTABLE_THROWN_VALUE);
+  });
+
+  it("thrown Proxy(Error) whose `.message` getter throws => hard_deny, NO exception", () => {
+    // instanceof Error is TRUE for this Proxy, so the old `.message` read would
+    // have invoked the throwing get-trap and escaped.
+    const hostile = new Proxy(new Error("real"), {
+      get(_t, prop) {
+        if (prop === "message") throw new Error("hostile message getter");
+        // Also make string coercion hostile so we exercise the full fallback.
+        if (prop === "toString" || prop === Symbol.toPrimitive || prop === "valueOf") {
+          return () => {
+            throw new Error("hostile coercion");
+          };
+        }
+        return undefined;
+      },
+    });
+    let d: ReturnType<typeof composeCapabilityIntentDecision> | undefined;
+    expect(() => {
+      d = composeCapabilityIntentDecision([governingConfigThatThrows(hostile)], ctx);
+    }).not.toThrow();
+    expect(d?.effect).toBe("hard_deny");
+    expect(d?.reason).toContain(UNPRINTABLE_THROWN_VALUE);
+  });
+
+  it("a hostile throw on a NON-governing (scoped-elsewhere) rule stays inert; sibling allow still wins", () => {
+    // The hostile rule's selector is well-formed and scoped to gitlab.* (NOT this
+    // capability), so the throw is on an inert rule and must not deny.
+    const hostile = {
+      toString() {
+        throw new Error("boom");
+      },
+    };
+    const elsewhereConfig: Record<string, unknown> = {
+      capabilities: ["gitlab.*"],
+      effect: "deny",
+    };
+    Object.defineProperty(elsewhereConfig, "constraints", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        throw hostile;
+      },
+    });
+    const hostileElsewhere: ContributedPolicyRule = {
+      id: "hostile-elsewhere",
+      type: CAPABILITY_INTENT_RULE_TYPE,
+      enabled: true,
+      config: elsewhereConfig,
+    };
+    const validAllow = rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule");
+    let d: ReturnType<typeof composeCapabilityIntentDecision> | undefined;
+    expect(() => {
+      d = composeCapabilityIntentDecision([hostileElsewhere, validAllow], ctx);
+    }).not.toThrow();
+    expect(d?.effect).toBe("allow");
   });
 });

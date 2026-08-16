@@ -14,6 +14,7 @@ export const DEFAULT_ALIASES: Record<string, string> = {
   coingecko: "api.coingecko.com",
   helius: "api.helius.xyz",
   github: "api.github.com",
+  x: "api.x.com",
 };
 
 /** Default port for the proxy server */

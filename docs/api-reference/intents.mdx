@@ -126,7 +126,7 @@ await steward.createIntent({
 ```
 
 ```bash cURL
-curl -X POST https://api.steward.fi/intents \
+curl -X POST http://localhost:3200/intents \
   -H "Authorization: Bearer owner-session-jwt" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: policy-rule-create-spending-limit-v1" \
@@ -170,7 +170,7 @@ GET /intents
 ```
 
 ```bash
-curl "https://api.steward.fi/intents?status=pending&intent_type=policy_rule_update&wallet_id=treasury-wallet" \
+curl "http://localhost:3200/intents?status=pending&intent_type=policy_rule_update&wallet_id=treasury-wallet" \
   -H "X-Steward-Key: your-tenant-key"
 ```
 
@@ -183,7 +183,7 @@ GET /intents/:intentId
 **Auth:** Tenant-level auth
 
 ```bash
-curl https://api.steward.fi/intents/intent_550e8400-... \
+curl http://localhost:3200/intents/intent_550e8400-... \
   -H "X-Steward-Key: your-tenant-key"
 ```
 
@@ -201,7 +201,7 @@ POST /intents/:intentId/reject
 is stored for rejection audit/webhook context.
 
 ```bash
-curl -X POST https://api.steward.fi/intents/intent_550e8400-.../approve \
+curl -X POST http://localhost:3200/intents/intent_550e8400-.../approve \
   -H "Authorization: Bearer owner-session-jwt" \
   -H "Content-Type: application/json" \
   -d '{ "reason": "Reviewed in weekly policy change window" }'
@@ -220,7 +220,7 @@ Execution requires the intent to be `authorized`. The response includes
 redacted in stored intent rows.
 
 ```bash
-curl -X POST https://api.steward.fi/intents/intent_550e8400-.../execute \
+curl -X POST http://localhost:3200/intents/intent_550e8400-.../execute \
   -H "Authorization: Bearer owner-session-jwt" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: execute-intent-550e8400-v1" \

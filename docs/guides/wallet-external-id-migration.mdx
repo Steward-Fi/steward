@@ -58,7 +58,7 @@ if (existing.user) {
 ```
 
 ```bash cURL
-curl -X POST https://api.steward.fi/platform/users/wallet/external-id \
+curl -X POST http://localhost:3200/platform/users/wallet/external-id \
   -H "X-Steward-Platform-Key: your-platform-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -81,7 +81,7 @@ await steward.platformUsers.assignWalletExternalId("usr_123", {
 ```
 
 ```bash cURL
-curl -X POST https://api.steward.fi/platform/users/usr_123/wallet/external-id \
+curl -X POST http://localhost:3200/platform/users/usr_123/wallet/external-id \
   -H "X-Steward-Platform-Key: your-platform-key" \
   -H "Content-Type: application/json" \
   -d '{

@@ -1,0 +1,155 @@
+---
+title: "Bridge Monero on Solana"
+description: "Enable Steward's wxmr provider and prepare policy-checked Monero-to-Solana and Solana-to-Monero handoffs."
+---
+
+# Bridge Monero on Solana
+
+Steward's opt-in `wxmr` provider prepares bridge handoffs in both directions at
+[wxmr.io](https://wxmr.io): native Monero to Monero on Solana, and Monero on
+Solana back to native Monero.
+
+For routine Steward activity, Monero on Solana is often the more practical side
+of the bridge: XMR-denominated liquidity remains available to Solana wallets and
+applications. Choose native Monero when Monero-native transaction privacy is the
+priority.
+
+<Warning>
+  Monero on Solana moves on Solana's public ledger. It does not inherit native
+  Monero transaction privacy. A bridge also introduces third-party provider,
+  smart-contract, and token-backing risk.
+</Warning>
+
+## Enable the provider
+
+Add `wxmr` to the API's comma-separated plugin list:
+
+```bash
+STEWARD_PLUGINS=wxmr
+
+# Optional, but prefer an operator-controlled Solana mainnet RPC in production.
+WXMR_SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+```
+
+Keep any other enabled plugins in the same list, for example
+`STEWARD_PLUGINS=trading,wxmr`. `WXMR_SOLANA_RPC_URL` falls back to
+`SOLANA_RPC_URL`, then Solana's public mainnet endpoint.
+
+## Steward network and token identifiers
+
+| Asset | Chain ID | Token address | Decimals |
+| --- | ---: | --- | ---: |
+| Native Monero mainnet | `301` | `native` | `12` |
+| Monero on Solana mainnet | `101` | `WXMRyRZhsa19ety5erZhHg4N3xj3EVN92u94422teJp` | `12` |
+
+Bridge amounts are base-unit decimal strings. Both assets use 12 decimals, so
+`1000000000000` represents 1 XMR. The audited bridge-program minimum is 0.1 XMR
+(`100000000000` atomic units) in either direction.
+
+## Monero to Solana
+
+The recipient is the Solana wallet that will connect to wxmr.io and receive the
+token. Pass that same address as `owner` when requesting the handoff.
+
+```typescript
+const solanaWallet = "YOUR_SOLANA_WALLET";
+
+const quote = await steward.getBridgeQuote({
+  agentId: "my-agent",
+  fromChainId: 301,
+  toChainId: 101,
+  fromToken: { address: "native", symbol: "XMR", decimals: 12 },
+  toToken: {
+    address: "WXMRyRZhsa19ety5erZhHg4N3xj3EVN92u94422teJp",
+    symbol: "XMR",
+    decimals: 12,
+  },
+  amount: "1000000000000", // 1 XMR
+  recipient: solanaWallet,
+  slippageBps: 0,
+});
+
+const result = await steward.buildBridgeIntent({
+  agentId: "my-agent",
+  quote,
+  owner: solanaWallet,
+});
+
+if (result.kind !== "external-handoff") {
+  throw new Error("Expected an interactive wxmr bridge handoff");
+}
+
+// Present result.url to the user for a deliberate, interactive handoff.
+console.log(result.url); // https://wxmr.io/
+```
+
+## Solana to Monero
+
+For the reverse direction, `owner` is the Solana wallet holding the token and
+`recipient` is the native Monero mainnet address. Steward validates the Monero
+address but does not include it in bridge audit metadata.
+
+```typescript
+const solanaWallet = "YOUR_SOLANA_WALLET";
+const moneroRecipient = "YOUR_MONERO_MAINNET_ADDRESS";
+
+const quote = await steward.getBridgeQuote({
+  agentId: "my-agent",
+  fromChainId: 101,
+  toChainId: 301,
+  fromToken: {
+    address: "WXMRyRZhsa19ety5erZhHg4N3xj3EVN92u94422teJp",
+    symbol: "XMR",
+    decimals: 12,
+  },
+  toToken: { address: "native", symbol: "XMR", decimals: 12 },
+  amount: "1000000000000", // 1 XMR
+  recipient: moneroRecipient,
+  slippageBps: 0,
+});
+
+const result = await steward.buildBridgeIntent({
+  agentId: "my-agent",
+  quote,
+  owner: solanaWallet,
+});
+
+if (result.kind === "external-handoff") {
+  console.log(result.url); // https://wxmr.io/
+}
+```
+
+## What the handoff guarantees
+
+Before returning the wxmr.io URL, Steward:
+
+- validates the exact chain direction, token mint, amount, and recipient format;
+- checks the bridge's global fee and the connected wallet's override together at
+  one Solana slot for Solana-to-Monero;
+- derives an XMR/USD notional from fresh Kraken and CoinGecko native-XMR prices,
+  fails closed if either source is unavailable or they disagree materially, and
+  uses the higher value for policy enforcement so a caller-supplied estimate
+  cannot reduce the checked value; and
+- returns an explicit `external-handoff` object with no calldata, serialized
+  transaction, signature, deposit address, or claimed settlement state.
+
+Quotes expire quickly. Request a fresh quote if the fee changes or the quote
+expires, then let the user open the returned URL and connect the `owner` Solana
+wallet. Steward authorizes the handoff, but it cannot enforce policy after the
+user leaves Steward or independently verify completion at the external site.
+The wxmr handoff is independent of Steward's native Monero vault support: it
+never selects or spends a Steward Monero wallet automatically.
+Because completion is not observable, the external transfer is not added to
+Steward's daily spend counter. The check authorizes only the handoff response; it
+is not vault-layer enforcement of what happens at wxmr.io.
+The URL does not prefill or execute a transfer; confirm the quoted amount and
+recipient again in wxmr.io's interactive flow.
+
+<Note>
+  Review the live minimum, final fee, required confirmations, destination, and
+  settlement status at wxmr.io before approving anything. A Solana-to-Monero
+  quote's output uses the global fee and its generic `minAmountOut` is therefore
+  zero; the build handoff reports the connected wallet's observed fee as
+  `owner-observed`. Recheck it at wxmr.io because on-chain settings can change
+  after Steward's observation.
+</Note>

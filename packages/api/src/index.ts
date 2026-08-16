@@ -28,6 +28,7 @@ import {
 } from "./services/context";
 import { startRetentionScheduler } from "./services/retention";
 import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
+import { configuredVaultStartupLogLine, getConfiguredVault } from "./services/vault-factory";
 import { startWebhookRetryScheduler } from "./services/webhook-retry-scheduler";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -205,6 +206,11 @@ if (migrationsRan) {
   cancelTransactionReceiptPolling = startTransactionReceiptPollingScheduler();
   cancelWebhookRetryScheduler = startWebhookRetryScheduler();
 }
+
+// Resolve custody before accepting traffic. A configured backend that cannot
+// initialize throws here, so production never falls back to local AES.
+getConfiguredVault();
+console.log(configuredVaultStartupLogLine());
 
 // ─── Redis + auth store initialization (non-blocking) ───────────────────────
 

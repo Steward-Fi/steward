@@ -7,6 +7,19 @@ export { and, asc, count, desc, eq, gte, inArray, lt, lte, sql } from "drizzle-o
 // that bun's test loader resolves (works at runtime via the cjs fallback,
 // fails under `bun test` with "Export named 'isNull' not found").
 export { gt, isNotNull, isNull, or } from "drizzle-orm/sql";
+export {
+  __resetAuditHmacKeyCacheForTests,
+  type ActorType as AuditActorType,
+  type AppendRequiredAudit,
+  type AuditEventInput,
+  type AuditTxLike,
+  appendAuditEvent,
+  appendAuditEventWithinTx,
+  redactWebhookSecrets,
+  withTenantAuditedTransaction,
+  withTenantAuditQueue,
+  writeAuditEvent,
+} from "./audit-chain";
 export type { DatabaseDriver } from "./client";
 export {
   closeDb,

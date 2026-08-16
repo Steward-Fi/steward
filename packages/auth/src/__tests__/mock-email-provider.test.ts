@@ -31,7 +31,7 @@ describe("MockEmailProvider", () => {
     expect(msg?.magicLink).toContain("https://steward.fi/auth/callback/email?token=");
 
     // The captured token must redeem against the live token store.
-    const result = await auth.verifyMagicLink(msg!.token!);
+    const result = await auth.verifyMagicLink(msg!.token!, "bob@example.com");
     expect(result.valid).toBe(true);
     expect(result.email).toBe("bob@example.com");
     expect(tokenHash).toBeDefined();

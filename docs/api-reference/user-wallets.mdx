@@ -133,12 +133,12 @@ await steward.submitEncryptedUserWalletKeyImport({
 ```
 
 ```bash cURL
-curl -X POST https://api.steward.fi/user/me/wallet/import/init \
+curl -X POST http://localhost:3200/user/me/wallet/import/init \
   -H "Authorization: Bearer user-session-jwt" \
   -H "Content-Type: application/json" \
   -d '{"chain":"evm","walletIndex":2}'
 
-curl -X POST https://api.steward.fi/user/me/wallet/import/submit \
+curl -X POST http://localhost:3200/user/me/wallet/import/submit \
   -H "Authorization: Bearer user-session-jwt" \
   -H "Content-Type: application/json" \
   -d '{
@@ -287,7 +287,7 @@ await steward.revokeUserWalletSigner(created.id, { walletIndex: 2 });
 ```
 
 ```bash cURL
-curl -X POST https://api.steward.fi/user/me/wallet/signers \
+curl -X POST http://localhost:3200/user/me/wallet/signers \
   -H "Authorization: Bearer user-session-jwt" \
   -H "Content-Type: application/json" \
   -d '{

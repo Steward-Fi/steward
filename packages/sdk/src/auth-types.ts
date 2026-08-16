@@ -139,7 +139,15 @@ export interface StewardCurrentUserResult {
 export interface StewardEmailResult {
   ok: boolean;
   expiresAt: string;
+  /** Opaque public challenge id for cross-device email sign-in polling. */
+  challengeId?: string;
+  /** High-entropy secret required with challengeId when polling. Store only client-side. */
+  pollSecret?: string;
 }
+
+export type StewardEmailSignInStatusResult =
+  | { ok: true; status: "pending"; expiresAt?: string }
+  | { ok: true; status: "consumed" | "locked" | "expired" | "invalid" };
 
 export interface StewardSmsOtpResult {
   ok: boolean;
@@ -305,7 +313,7 @@ export interface StewardIdentityTokenResult {
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 export interface StewardAuthConfig {
-  /** Base URL of the Steward API, e.g. "https://api.steward.fi" */
+  /** Base URL of the Steward API, e.g. "http://localhost:3200" for a self-hosted instance */
   baseUrl: string;
   /**
    * Optional storage backend for persisting access and refresh tokens.

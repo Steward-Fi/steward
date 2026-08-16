@@ -60,7 +60,7 @@ export class PhoneAuth {
     const code = generateCode();
     const key = codeStorageKey(phone, code, purpose);
     const expiresAt = new Date(Date.now() + this.tokenTtlMs);
-    this.tokenStore.store(key, phone, this.tokenTtlMs);
+    await this.tokenStore.store(key, phone, this.tokenTtlMs);
     await this.provider.send(phone, this.bodyTemplate.replace("{code}", code));
     return { expiresAt };
   }
