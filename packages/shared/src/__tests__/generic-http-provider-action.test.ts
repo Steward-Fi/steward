@@ -32,8 +32,11 @@ import {
   GOLDEN_VECTORS,
   genericDescriptorAllowsExactPath,
   genericHttpCanonicalActionBytes,
+  getProfileDescriptor,
   isRegisteredProfile,
+  type ProviderProfileDescriptor,
   REGISTERED_PROFILES,
+  runProfileConformance,
   UnregisteredProfileError,
   validateGenericHttpDescriptor,
   X_GOLDEN_VECTORS,
@@ -169,6 +172,52 @@ describe("profile registry", () => {
   // that admits an unregistered profile at any site would flip one of these.
   it("every registered profile round-trips through assertRegisteredProfile", () => {
     for (const p of REGISTERED_PROFILES) expect(assertRegisteredProfile(p)).toBe(p);
+  });
+
+  it("runs every invariant against every immutable registered profile", () => {
+    for (const profile of REGISTERED_PROFILES) {
+      const descriptor = getProfileDescriptor(profile);
+      expect(descriptor).toBeDefined();
+      expect(Object.isFrozen(descriptor)).toBe(true);
+      expect(Object.isFrozen(descriptor?.conformance)).toBe(true);
+      expect(Object.isFrozen(descriptor?.conformance.rejects)).toBe(true);
+      expect(runProfileConformance(descriptor as ProviderProfileDescriptor)).toEqual([]);
+    }
+  });
+
+  it("the harness catches a deliberately violating profile fixture", () => {
+    const acceptsEverything = () => ({ ok: true });
+    let buildCount = 0;
+    const violating = {
+      profile: "violating.provider-action.v1",
+      kind: "adapter-fixed",
+      label: "Violating",
+      conformance: {
+        build: () => ({
+          bytes: 'authorization:"steward-secret-canary"',
+          digest: String(++buildCount),
+        }),
+        rejects: {
+          "credential-exclusion": acceptsEverything,
+          "duplicate-key": acceptsEverything,
+          "duplicate-query": acceptsEverything,
+          "plain-traversal": acceptsEverything,
+          "encoded-traversal": acceptsEverything,
+          "unsupported-content-type": acceptsEverything,
+        },
+      },
+    } satisfies ProviderProfileDescriptor;
+    expect(runProfileConformance(violating)).toEqual(
+      expect.arrayContaining([
+        "determinism",
+        "credential-exclusion",
+        "duplicate-key",
+        "duplicate-query",
+        "plain-traversal",
+        "encoded-traversal",
+        "unsupported-content-type",
+      ]),
+    );
   });
 });
 
