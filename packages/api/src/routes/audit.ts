@@ -816,12 +816,39 @@ auditRoutes.post("/verify", async (c) => {
 // applies; no HMAC key or private signing material is returned.
 auditRoutes.get("/integrity", async (c) => {
   const tenantId = c.get("tenantId");
-  const chain = await verifyAuditChain(tenantId, { requireHead: true });
   const [head] = await db
-    .select({ seq: auditChainHeads.expectedSeq, hmac: auditChainHeads.headHmac })
+    .select({
+      seq: auditChainHeads.expectedSeq,
+      count: auditChainHeads.expectedCount,
+      floorSeq: auditChainHeads.floorSeq,
+      hmac: auditChainHeads.headHmac,
+    })
     .from(auditChainHeads)
     .where(eq(auditChainHeads.tenantId, tenantId))
     .limit(1);
+  const configuredLimit = Number(process.env.STEWARD_DOCTOR_AUDIT_MAX_EVENTS ?? "100000");
+  const maxEvents =
+    Number.isSafeInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : 100_000;
+  const liveCount = head ? Number(head.count) - Number(head.floorSeq ?? 0) : 0;
+  if (!Number.isSafeInteger(liveCount) || liveCount < 0 || liveCount > maxEvents) {
+    return c.json<ApiResponse>({
+      ok: true,
+      data: {
+        valid: false,
+        chainValid: false,
+        checkpointPresent: false,
+        checkpointValid: false,
+        checkpointAtHead: false,
+        checkpointSeq: null,
+        chainHeadSeq: head ? Number(head.seq) : null,
+        bounded: true,
+        eventsInspected: 0,
+        maxEvents,
+        error: "audit chain exceeds the bounded doctor verification limit; use an offline export",
+      },
+    });
+  }
+  const chain = await verifyAuditChain(tenantId, { requireHead: true });
   const [row] = await db
     .select()
     .from(auditCheckpoints)
@@ -855,6 +882,9 @@ auditRoutes.get("/integrity", async (c) => {
       checkpointAtHead,
       checkpointSeq: row?.seq ?? null,
       chainHeadSeq: head ? Number(head.seq) : null,
+      bounded: true,
+      eventsInspected: chain.valid ? chain.count : 0,
+      maxEvents,
     },
   });
 });

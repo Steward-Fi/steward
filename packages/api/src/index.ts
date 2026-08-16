@@ -17,7 +17,7 @@ import { closeDb, getDb, getMigrationExpectation, runMigrations } from "@stwd/db
 import { shouldUsePGLite } from "@stwd/db/pglite";
 import { sql } from "drizzle-orm";
 import { composeApp } from "./compose";
-import { getRedisClient, initRedis, shutdownRedis } from "./middleware/redis";
+import { getRedisClient, initRedis, isRedisConfigured, shutdownRedis } from "./middleware/redis";
 import { getAuthStoreSources, initAuthStores } from "./routes/auth";
 import {
   API_VERSION,
@@ -151,7 +151,9 @@ app.get("/ready", async (c) => {
     const redis = getRedisClient();
     checks.redis = redis
       ? { ok: (await redis.ping()).toUpperCase() === "PONG" }
-      : { ok: false, error: "Redis is not connected" };
+      : isRedisConfigured()
+        ? { ok: false, error: "Redis is configured but not connected" }
+        : { ok: false, required: false, error: "Redis is not configured (optional mode)" };
   } catch (err: unknown) {
     checks.redis = { ok: false, error: err instanceof Error ? err.message : "unknown" };
   }

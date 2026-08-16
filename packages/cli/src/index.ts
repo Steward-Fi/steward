@@ -363,13 +363,14 @@ async function main(argv: string[]) {
     return;
   }
   if (command === "doctor") {
-    printResult(
-      await runDoctor({
-        strict: boolFlag(parsed.flags, "strict"),
-        envPath: stringFlag(parsed.flags, "env"),
-      }),
-      ctx.format,
-    );
+    const strict = boolFlag(parsed.flags, "strict");
+    const result = await runDoctor({
+      strict,
+      envPath: stringFlag(parsed.flags, "env"),
+      api: ctx.api,
+    });
+    printResult(result, ctx.format);
+    if (strict && !result.ok) process.exitCode = 1;
     return;
   }
 

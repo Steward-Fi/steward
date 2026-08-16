@@ -7,6 +7,16 @@ export type GovernedRouteInventory = {
   ok: boolean;
 };
 
+type InventoryRoute = {
+  tenant_id: string;
+  agent_id: string | null;
+  authority_mode: string;
+  provider_operation_id: string | null;
+  host_pattern: string;
+  path_pattern: string | null;
+  method: string | null;
+};
+
 function rowsFromExecute<T>(result: unknown): T[] {
   if (Array.isArray(result)) return result as T[];
   if (result && typeof result === "object" && "rows" in result) {
@@ -16,46 +26,77 @@ function rowsFromExecute<T>(result: unknown): T[] {
   return [];
 }
 
-/**
- * Single source for the runtime doctor and PR7's static/runtime route guard.
- * A dual-mode match is the same tenant/agent/host/path/method credential route
- * exposed once through legacy authority and once through governed authority.
- */
+function wildcardSuffix(pattern: string): string | null {
+  return pattern.startsWith("*.") ? pattern.slice(1).toLowerCase() : null;
+}
+
+export function hostPatternsOverlap(a: string, b: string): boolean {
+  const left = a.toLowerCase();
+  const right = b.toLowerCase();
+  if (left === "*" || right === "*") return true;
+  if (left === right) return true;
+  const leftSuffix = wildcardSuffix(left);
+  const rightSuffix = wildcardSuffix(right);
+  if (leftSuffix && rightSuffix) {
+    return leftSuffix.endsWith(rightSuffix) || rightSuffix.endsWith(leftSuffix);
+  }
+  if (leftSuffix) return right.endsWith(leftSuffix) && right.length > leftSuffix.length;
+  if (rightSuffix) return left.endsWith(rightSuffix) && left.length > rightSuffix.length;
+  return false;
+}
+
+function pathPrefix(pattern: string): string | null {
+  if (pattern === "*" || pattern === "/*") return "/";
+  return pattern.endsWith("/*") ? pattern.slice(0, -1) : null;
+}
+
+export function pathPatternsOverlap(a: string | null, b: string | null): boolean {
+  const left = a ?? "/*";
+  const right = b ?? "/*";
+  if (left === right) return true;
+  const leftPrefix = pathPrefix(left);
+  const rightPrefix = pathPrefix(right);
+  if (leftPrefix && rightPrefix) {
+    return leftPrefix.startsWith(rightPrefix) || rightPrefix.startsWith(leftPrefix);
+  }
+  if (leftPrefix) return right.startsWith(leftPrefix);
+  if (rightPrefix) return left.startsWith(rightPrefix);
+  return false;
+}
+
+export function methodPatternsOverlap(a: string | null, b: string | null): boolean {
+  const left = (a ?? "*").toUpperCase();
+  const right = (b ?? "*").toUpperCase();
+  return left === "*" || right === "*" || left === right;
+}
+
+function authorityRoutesOverlap(a: InventoryRoute, b: InventoryRoute): boolean {
+  return (
+    a.tenant_id === b.tenant_id &&
+    a.agent_id === b.agent_id &&
+    hostPatternsOverlap(a.host_pattern, b.host_pattern) &&
+    pathPatternsOverlap(a.path_pattern, b.path_pattern) &&
+    methodPatternsOverlap(a.method, b.method)
+  );
+}
+
+/** Runtime doctor using the same wildcard semantics as proxy matching. */
 export async function inspectGovernedRoutes(): Promise<GovernedRouteInventory> {
-  const db = getDb();
-  const [row = { governed: 0, null_operations: 0, dual_mode: 0 }] = rowsFromExecute<{
-    governed: number;
-    null_operations: number;
-    dual_mode: number;
-  }>(
-    await db.execute(sql`
-      WITH route_counts AS (
-        SELECT
-          tenant_id,
-          COALESCE(agent_id, '') AS agent_id,
-          host_pattern,
-          COALESCE(path_pattern, '/*') AS path_pattern,
-          COALESCE(method, '*') AS method,
-          BOOL_OR(authority_mode = 'legacy') AS has_legacy,
-          BOOL_OR(authority_mode = 'governed_v2') AS has_governed
-        FROM secret_routes
-        WHERE enabled = TRUE
-        GROUP BY tenant_id, COALESCE(agent_id, ''), host_pattern,
-          COALESCE(path_pattern, '/*'), COALESCE(method, '*')
-      )
-      SELECT
-        (SELECT COUNT(*)::int FROM secret_routes
-          WHERE enabled = TRUE AND authority_mode = 'governed_v2') AS governed,
-        (SELECT COUNT(*)::int FROM secret_routes
-          WHERE enabled = TRUE AND authority_mode = 'governed_v2'
-            AND provider_operation_id IS NULL) AS null_operations,
-        (SELECT COUNT(*)::int FROM route_counts
-          WHERE has_legacy AND has_governed) AS dual_mode
+  const routes = rowsFromExecute<InventoryRoute>(
+    await getDb().execute(sql`
+      SELECT tenant_id, agent_id, authority_mode, provider_operation_id,
+             host_pattern, path_pattern, method
+      FROM secret_routes WHERE enabled = TRUE
     `),
   );
-  const governedRoutes = Number(row.governed);
-  const nullOperationRoutes = Number(row.null_operations);
-  const dualModeRoutes = Number(row.dual_mode);
+  const governed = routes.filter((route) => route.authority_mode === "governed_v2");
+  const legacy = routes.filter((route) => route.authority_mode === "legacy");
+  let dualModeRoutes = 0;
+  for (const route of governed) {
+    if (legacy.some((candidate) => authorityRoutesOverlap(route, candidate))) dualModeRoutes++;
+  }
+  const governedRoutes = governed.length;
+  const nullOperationRoutes = governed.filter((route) => !route.provider_operation_id).length;
   return {
     governedRoutes,
     nullOperationRoutes,
