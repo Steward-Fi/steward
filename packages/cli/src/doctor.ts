@@ -15,6 +15,21 @@ export type DoctorOptions = {
   api?: StewardApiClient;
 };
 
+type ReadyCheck = { ok?: unknown; error?: unknown; detail?: unknown };
+type ReadyResponse = {
+  checks?: Record<string, ReadyCheck>;
+};
+
+function operationalDetail(check: ReadyCheck | undefined, fallback: string): string {
+  if (!check) return fallback;
+  if (typeof check.error === "string") return check.error;
+  return check.detail === undefined
+    ? check.ok === true
+      ? "ok"
+      : fallback
+    : JSON.stringify(check.detail);
+}
+
 function parseEnv(path: string): Record<string, string> {
   if (!existsSync(path)) return {};
   const out: Record<string, string> = {};
@@ -90,10 +105,81 @@ export async function runDoctor(
     checks.push({ name: "api:/health", ok: !options.strict, detail: (error as Error).message });
   }
   try {
-    const ready = await api.request("GET", "/ready", undefined, { tenant: false });
+    const requestedAt = Date.now();
+    const ready = await api.request<ReadyResponse>("GET", "/ready", undefined, { tenant: false });
+    const receivedAt = Date.now();
     checks.push({ name: "api:/ready", ok: true, detail: JSON.stringify(ready) });
+    const readyChecks = ready.checks ?? {};
+    for (const [name, source] of [
+      ["ops:migration-tip", readyChecks.migrations],
+      ["ops:redis-reachability", readyChecks.redis],
+      ["ops:governed-route-inventory", readyChecks.governedRoutes],
+      ["ops:proxy-clock-skew", readyChecks.proxyClock],
+    ] as const) {
+      checks.push({
+        name,
+        ok: source?.ok === true || (!options.strict && source?.ok !== false),
+        detail: operationalDetail(source, "diagnostic unavailable"),
+      });
+    }
+    const databaseDetail = readyChecks.database?.detail as
+      | { clockSkewMs?: unknown; serverTime?: unknown }
+      | undefined;
+    const apiTime = Date.parse(String(databaseDetail?.serverTime ?? ""));
+    const midpoint = requestedAt + (receivedAt - requestedAt) / 2;
+    const apiSkewMs = Math.abs(apiTime - midpoint);
+    const dbSkewMs = Number(databaseDetail?.clockSkewMs);
+    const clocksOk =
+      Number.isFinite(apiSkewMs) &&
+      apiSkewMs <= 30_000 &&
+      Number.isFinite(dbSkewMs) &&
+      dbSkewMs <= 30_000;
+    checks.push({
+      name: "ops:api-database-clock-skew",
+      ok: clocksOk || !options.strict,
+      detail: JSON.stringify({ apiSkewMs: Math.round(apiSkewMs), databaseSkewMs: dbSkewMs }),
+    });
   } catch (error) {
     checks.push({ name: "api:/ready", ok: !options.strict, detail: (error as Error).message });
+    for (const name of [
+      "ops:migration-tip",
+      "ops:redis-reachability",
+      "ops:governed-route-inventory",
+      "ops:proxy-clock-skew",
+      "ops:api-database-clock-skew",
+    ]) {
+      checks.push({ name, ok: !options.strict, detail: "unavailable because /ready failed" });
+    }
+  }
+
+  try {
+    const integrity = await api.request<{
+      valid?: unknown;
+      chainValid?: unknown;
+      checkpointPresent?: unknown;
+      checkpointValid?: unknown;
+      checkpointAtHead?: unknown;
+      checkpointSeq?: unknown;
+      chainHeadSeq?: unknown;
+    }>("GET", "/audit/integrity");
+    checks.push({
+      name: "ops:audit-checkpoint-integrity",
+      ok: integrity.valid === true || !options.strict,
+      detail: JSON.stringify({
+        chainValid: integrity.chainValid === true,
+        checkpointPresent: integrity.checkpointPresent === true,
+        checkpointValid: integrity.checkpointValid === true,
+        checkpointAtHead: integrity.checkpointAtHead === true,
+        checkpointSeq: integrity.checkpointSeq ?? null,
+        chainHeadSeq: integrity.chainHeadSeq ?? null,
+      }),
+    });
+  } catch (error) {
+    checks.push({
+      name: "ops:audit-checkpoint-integrity",
+      ok: !options.strict,
+      detail: (error as Error).message,
+    });
   }
 
   return { ok: checks.every((check) => check.ok), checks };
