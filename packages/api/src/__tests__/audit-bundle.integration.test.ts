@@ -6,11 +6,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { auditCheckpoints, closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
 import { resetCheckpointSignerCache } from "../services/audit-checkpoint";
 import type { AppVariables } from "../services/context";
+import { inspectGovernedRoutes } from "../services/governed-route-inventory";
 
 const TENANT_ID = "audit-bundle-tenant";
 const OTHER_TENANT_ID = "audit-bundle-other-tenant";
@@ -169,6 +170,99 @@ describe("audit evidence bundle endpoint + offline verifier", () => {
     expect(rows.length).toBeGreaterThanOrEqual(1);
     expect(rows[0].signature.length).toBeGreaterThan(0);
     expect(rows[0].publicKey).toContain("BEGIN PUBLIC KEY");
+  });
+
+  it("doctor integrity requires a valid checkpoint at the current chain head", async () => {
+    await fetchBundle();
+    const current = await app().request("/audit/integrity");
+    expect(current.status).toBe(200);
+    expect(await current.json()).toMatchObject({
+      ok: true,
+      data: {
+        valid: true,
+        chainValid: true,
+        checkpointPresent: true,
+        checkpointValid: true,
+        checkpointAtHead: true,
+        checkpointSeq: 4,
+        chainHeadSeq: 4,
+      },
+    });
+
+    await writeAuditEvent({
+      tenantId: TENANT_ID,
+      actorType: "system",
+      action: "doctor.checkpoint.stale",
+      metadata: {},
+    });
+    const stale = await app().request("/audit/integrity");
+    expect(stale.status).toBe(200);
+    expect(await stale.json()).toMatchObject({
+      ok: true,
+      data: {
+        valid: false,
+        chainValid: true,
+        checkpointValid: true,
+        checkpointAtHead: false,
+        checkpointSeq: 4,
+        chainHeadSeq: 5,
+      },
+    });
+
+    // Restore a current checkpoint so the remaining bundle/verifier tests run
+    // against the new five-event head.
+    await fetchBundle();
+  });
+
+  it("shared governed-route inventory detects an enabled legacy bypass", async () => {
+    await getDb().execute(sql`
+      INSERT INTO users (id, email)
+      VALUES ('55555555-5555-4555-8555-555555555555', 'doctor@example.invalid')
+    `);
+    await getDb().execute(sql`
+      INSERT INTO workspaces (id, tenant_id, key, name, environment, created_by)
+      VALUES ('44444444-4444-4444-8444-444444444444', ${TENANT_ID},
+        'doctor', 'Doctor', 'development', '55555555-5555-4555-8555-555555555555')
+    `);
+    await getDb().execute(sql`
+      INSERT INTO provider_accounts
+        (id, tenant_id, workspace_id, adapter_key, external_ref, display_name)
+      VALUES ('66666666-6666-4666-8666-666666666666', ${TENANT_ID},
+        '44444444-4444-4444-8444-444444444444', 'slack', 'doctor', 'Doctor')
+    `);
+    await getDb().execute(sql`
+      INSERT INTO provider_operations
+        (id, tenant_id, workspace_id, provider_account_id, operation_key, risk_class)
+      VALUES ('33333333-3333-4333-8333-333333333333', ${TENANT_ID},
+        '44444444-4444-4444-8444-444444444444',
+        '66666666-6666-4666-8666-666666666666', 'doctor.test', 'read')
+    `);
+    await getDb().execute(sql`
+      INSERT INTO secret_routes
+        (tenant_id, secret_id, host_pattern, path_pattern, method, inject_as, inject_key,
+         enabled, authority_mode, provider_operation_id)
+      VALUES
+        (${TENANT_ID}, '11111111-1111-4111-8111-111111111111', 'slack.com', '/api/*', 'POST',
+         'header', 'Authorization', TRUE, 'legacy', NULL),
+        (${TENANT_ID}, '22222222-2222-4222-8222-222222222222', 'slack.com', '/api/*', 'POST',
+         'header', 'Authorization', TRUE, 'governed_v2',
+         '33333333-3333-4333-8333-333333333333')
+    `);
+    const inventory = await inspectGovernedRoutes();
+    expect(inventory).toMatchObject({
+      governedRoutes: 1,
+      nullOperationRoutes: 0,
+      dualModeRoutes: 1,
+      ok: false,
+    });
+    await getDb().execute(sql`DELETE FROM secret_routes WHERE tenant_id = ${TENANT_ID}`);
+    await getDb().execute(sql`
+      DELETE FROM workspaces
+      WHERE id = '44444444-4444-4444-8444-444444444444'
+    `);
+    await getDb().execute(sql`
+      DELETE FROM users WHERE id = '55555555-5555-4555-8555-555555555555'
+    `);
   });
 
   it("PASSES the standalone offline verifier for a genuine bundle", async () => {

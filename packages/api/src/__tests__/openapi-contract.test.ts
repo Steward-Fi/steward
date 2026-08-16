@@ -96,6 +96,7 @@ describe("generated OpenAPI contract", () => {
     expect(spec.paths).toHaveProperty("/audit/export");
     expect(spec.paths).toHaveProperty("/audit/events");
     expect(spec.paths).toHaveProperty("/audit/verify");
+    expect(spec.paths).toHaveProperty("/audit/integrity");
     expect(spec.paths).toHaveProperty("/intents");
     expect(spec.paths).toHaveProperty("/intents/{intentId}/approve");
     expect(spec.paths).toHaveProperty("/v1/intents/{intentId}/approve");
