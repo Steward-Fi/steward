@@ -8,6 +8,7 @@
  * (Caller provides the full key, e.g. ratelimit:{agentId}:{host}:{window})
  */
 
+import { randomUUID } from "node:crypto";
 import { getRedis } from "./client.js";
 
 // KEYS[1]=zset  ARGV: now, windowStart, maxRequests, member, ttlMs
@@ -39,6 +40,18 @@ export interface RateLimitResult {
   resetMs: number;
 }
 
+function validateRateLimitInput(key: string, windowMs: number, maxRequests: number): void {
+  if (key.length === 0 || key.length > 512) {
+    throw new RangeError("rate limit key must contain between 1 and 512 characters");
+  }
+  if (!Number.isSafeInteger(windowMs) || windowMs <= 0) {
+    throw new RangeError("rate limit windowMs must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(maxRequests) || maxRequests <= 0) {
+    throw new RangeError("rate limit maxRequests must be a positive safe integer");
+  }
+}
+
 /**
  * Check and increment a sliding window rate limit.
  *
@@ -58,12 +71,13 @@ export async function checkRateLimit(
   windowMs: number,
   maxRequests: number,
 ): Promise<RateLimitResult> {
+  validateRateLimitInput(key, windowMs, maxRequests);
   const redis = getRedis();
   const now = Date.now();
   const windowStart = now - windowMs;
 
   // Unique member: timestamp + random suffix to handle sub-ms bursts
-  const member = `${now}:${Math.random().toString(36).slice(2, 8)}`;
+  const member = `${now}:${randomUUID()}`;
 
   const res = (await redis.eval(
     RATE_LIMIT_LUA,
@@ -103,6 +117,7 @@ export async function getRateLimitStatus(
   windowMs: number,
   maxRequests: number,
 ): Promise<RateLimitResult> {
+  validateRateLimitInput(key, windowMs, maxRequests);
   const redis = getRedis();
   const now = Date.now();
   const windowStart = now - windowMs;

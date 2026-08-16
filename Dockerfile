@@ -23,7 +23,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 
 # ── Stage 0: Base ─────────────────────────────────────────────────────────────
-FROM oven/bun:1.3-alpine AS base
+FROM oven/bun:1.3-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0 AS base
 
 WORKDIR /app
 
@@ -47,11 +47,15 @@ COPY packages/agent-trader/package.json      packages/agent-trader/package.json
 COPY packages/api/package.json               packages/api/package.json
 COPY packages/attestation/package.json       packages/attestation/package.json
 COPY packages/auth/package.json              packages/auth/package.json
+COPY packages/cli/package.json               packages/cli/package.json
 COPY packages/db/package.json                packages/db/package.json
 COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
 COPY packages/erc8004/package.json           packages/erc8004/package.json
 COPY packages/erc8183/package.json           packages/erc8183/package.json
+COPY packages/mcp/package.json               packages/mcp/package.json
 COPY packages/plugin-capabilities/package.json packages/plugin-capabilities/package.json
+COPY packages/plugin-example/package.json     packages/plugin-example/package.json
+COPY packages/plugin-sdk/package.json         packages/plugin-sdk/package.json
 COPY packages/plugin-trading/package.json     packages/plugin-trading/package.json
 COPY packages/plugin-wxmr/package.json        packages/plugin-wxmr/package.json
 COPY packages/provider-github/package.json    packages/provider-github/package.json
@@ -59,10 +63,12 @@ COPY packages/provider-x/package.json         packages/provider-x/package.json
 COPY packages/proxy-client/package.json       packages/proxy-client/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
 COPY packages/proxy/package.json             packages/proxy/package.json
+COPY packages/react-native/package.json      packages/react-native/package.json
 COPY packages/react/package.json             packages/react/package.json
 COPY packages/redis/package.json             packages/redis/package.json
 COPY packages/seed/package.json              packages/seed/package.json
 COPY packages/shared/package.json            packages/shared/package.json
+COPY packages/signer-frost/package.json      packages/signer-frost/package.json
 COPY packages/sdk/package.json               packages/sdk/package.json
 COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
 COPY packages/vault/package.json             packages/vault/package.json
@@ -71,7 +77,7 @@ COPY packages/venue-polymarket/package.json  packages/venue-polymarket/package.j
 COPY packages/webhooks/package.json          packages/webhooks/package.json
 COPY packages/examples/                      packages/examples/
 
-RUN BUN_FROZEN_LOCKFILE=0 bun install --no-frozen-lockfile --ignore-scripts
+RUN bun install --frozen-lockfile --ignore-scripts
 
 # ── Stage 2: Build ────────────────────────────────────────────────────────────
 FROM base AS build
@@ -85,11 +91,15 @@ COPY packages/agent-trader/package.json      packages/agent-trader/package.json
 COPY packages/api/package.json               packages/api/package.json
 COPY packages/attestation/package.json       packages/attestation/package.json
 COPY packages/auth/package.json              packages/auth/package.json
+COPY packages/cli/package.json               packages/cli/package.json
 COPY packages/db/package.json                packages/db/package.json
 COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
 COPY packages/erc8004/package.json           packages/erc8004/package.json
 COPY packages/erc8183/package.json           packages/erc8183/package.json
+COPY packages/mcp/package.json               packages/mcp/package.json
 COPY packages/plugin-capabilities/package.json packages/plugin-capabilities/package.json
+COPY packages/plugin-example/package.json     packages/plugin-example/package.json
+COPY packages/plugin-sdk/package.json         packages/plugin-sdk/package.json
 COPY packages/plugin-trading/package.json     packages/plugin-trading/package.json
 COPY packages/plugin-wxmr/package.json        packages/plugin-wxmr/package.json
 COPY packages/provider-github/package.json    packages/provider-github/package.json
@@ -97,10 +107,12 @@ COPY packages/provider-x/package.json         packages/provider-x/package.json
 COPY packages/proxy-client/package.json       packages/proxy-client/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
 COPY packages/proxy/package.json             packages/proxy/package.json
+COPY packages/react-native/package.json      packages/react-native/package.json
 COPY packages/react/package.json             packages/react/package.json
 COPY packages/redis/package.json             packages/redis/package.json
 COPY packages/seed/package.json              packages/seed/package.json
 COPY packages/shared/package.json            packages/shared/package.json
+COPY packages/signer-frost/package.json      packages/signer-frost/package.json
 COPY packages/sdk/package.json               packages/sdk/package.json
 COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
 COPY packages/vault/package.json             packages/vault/package.json
@@ -113,7 +125,7 @@ COPY packages/examples/                      packages/examples/
 RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web/package.json
 
 # Install deps fresh in build stage (bun symlinks don't survive COPY --from in BuildKit)
-RUN BUN_FROZEN_LOCKFILE=0 bun install --no-frozen-lockfile --ignore-scripts
+RUN bun install --frozen-lockfile --ignore-scripts
 
 # Copy full source for all packages needed by api + proxy
 COPY packages/adapters    packages/adapters
@@ -165,7 +177,7 @@ RUN mkdir -p node_modules/@stwd && \
 RUN bunx turbo run build --filter=@stwd/api --filter=@stwd/proxy
 
 # ── Stage 3: Runtime ──────────────────────────────────────────────────────────
-FROM oven/bun:1.3-alpine AS runtime
+FROM oven/bun:1.3-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0 AS runtime
 
 WORKDIR /app
 
@@ -183,11 +195,15 @@ COPY packages/agent-trader/package.json      packages/agent-trader/package.json
 COPY packages/api/package.json               packages/api/package.json
 COPY packages/attestation/package.json       packages/attestation/package.json
 COPY packages/auth/package.json              packages/auth/package.json
+COPY packages/cli/package.json               packages/cli/package.json
 COPY packages/db/package.json                packages/db/package.json
 COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
 COPY packages/erc8004/package.json           packages/erc8004/package.json
 COPY packages/erc8183/package.json           packages/erc8183/package.json
+COPY packages/mcp/package.json               packages/mcp/package.json
 COPY packages/plugin-capabilities/package.json packages/plugin-capabilities/package.json
+COPY packages/plugin-example/package.json     packages/plugin-example/package.json
+COPY packages/plugin-sdk/package.json         packages/plugin-sdk/package.json
 COPY packages/plugin-trading/package.json     packages/plugin-trading/package.json
 COPY packages/plugin-wxmr/package.json        packages/plugin-wxmr/package.json
 COPY packages/provider-github/package.json    packages/provider-github/package.json
@@ -195,10 +211,12 @@ COPY packages/provider-x/package.json         packages/provider-x/package.json
 COPY packages/proxy-client/package.json       packages/proxy-client/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
 COPY packages/proxy/package.json             packages/proxy/package.json
+COPY packages/react-native/package.json      packages/react-native/package.json
 COPY packages/react/package.json             packages/react/package.json
 COPY packages/redis/package.json             packages/redis/package.json
 COPY packages/seed/package.json              packages/seed/package.json
 COPY packages/shared/package.json            packages/shared/package.json
+COPY packages/signer-frost/package.json      packages/signer-frost/package.json
 COPY packages/sdk/package.json               packages/sdk/package.json
 COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
 COPY packages/vault/package.json             packages/vault/package.json
@@ -208,7 +226,7 @@ COPY packages/webhooks/package.json          packages/webhooks/package.json
 COPY packages/examples/                      packages/examples/
 
 COPY --from=deps /app/bun.lock ./bun.lock
-RUN BUN_FROZEN_LOCKFILE=0 bun install --production --no-frozen-lockfile --ignore-scripts
+RUN bun install --production --frozen-lockfile --ignore-scripts
 
 # Copy compiled output from build stage
 COPY --from=build /app/packages/adapters    packages/adapters
@@ -266,7 +284,7 @@ RUN mkdir -p node_modules/@stwd && \
 # symlinks (ENOENT reading drizzle-orm at boot). Re-installing rebuilds the
 # per-package node_modules symlinks against THIS stage's `.bun` store, so runtime
 # resolution is correct + deterministic regardless of resolution drift.
-RUN BUN_FROZEN_LOCKFILE=0 bun install --production --no-frozen-lockfile --ignore-scripts
+RUN bun install --production --frozen-lockfile --ignore-scripts
 
 # ── Non-root user ─────────────────────────────────────────────────────────────
 # bun image already has a 'bun' user (uid 1000); use it.

@@ -123,13 +123,12 @@ async function ensureWorkerInit(env: Env): Promise<void> {
         runtime: "workers",
       },
     });
-    const { initAuthStores } = await import("./routes/auth");
+    const { assertAuthStoresAreSafe, initAuthStores } = await import("./routes/auth");
     // usePostgres=false: Workers deployments do not run migrations on startup
     // (SKIP_MIGRATIONS=1 in wrangler.toml) so auth_kv_store may not exist;
     // Redis is the canonical store on Workers.
-    await initAuthStores(false).catch((err) => {
-      console.warn("[steward:workers] initAuthStores failed; auth flows may degrade:", err);
-    });
+    await initAuthStores(false);
+    assertAuthStoresAreSafe();
     const { getAuthStoreSources } = await import("./routes/auth");
     const { importSession } = getAuthStoreSources();
     if (importSession === "memory") {

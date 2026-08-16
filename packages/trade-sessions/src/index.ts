@@ -277,12 +277,18 @@ function normalizeTtl(ttlSeconds?: number): number {
 }
 
 function validateCaps(input: CreateSessionInput): void {
-  if (input.dailyCapUsd <= 0) throw new Error("dailyCapUsd must be positive");
-  if (input.perOrderCapUsd <= 0) throw new Error("perOrderCapUsd must be positive");
+  if (!Number.isFinite(input.dailyCapUsd) || input.dailyCapUsd <= 0) {
+    throw new Error("dailyCapUsd must be a positive finite number");
+  }
+  if (!Number.isFinite(input.perOrderCapUsd) || input.perOrderCapUsd <= 0) {
+    throw new Error("perOrderCapUsd must be a positive finite number");
+  }
   if (input.perOrderCapUsd > input.dailyCapUsd) {
     throw new Error("perOrderCapUsd cannot exceed dailyCapUsd");
   }
-  if (input.leverageCap <= 0) throw new Error("leverageCap must be positive");
+  if (!Number.isFinite(input.leverageCap) || input.leverageCap <= 0) {
+    throw new Error("leverageCap must be a positive finite number");
+  }
   if (input.allowedAssets.length === 0) throw new Error("allowedAssets cannot be empty");
 }
 
@@ -300,6 +306,13 @@ export class TradeSessionManager {
     const createdAt = this.now();
     const expiresAt =
       input.expiresAt ?? new Date(createdAt.getTime() + normalizeTtl(input.ttlSeconds) * 1000);
+    const lifetimeMs = expiresAt.getTime() - createdAt.getTime();
+    if (!Number.isFinite(expiresAt.getTime()) || lifetimeMs <= 0) {
+      throw new Error("expiresAt must be a valid future date");
+    }
+    if (lifetimeMs > MAX_TTL_SECONDS * 1000) {
+      throw new Error("expiresAt cannot exceed the 24 hour session lifetime maximum");
+    }
     const session: TradeSession = {
       id: `ses_${crypto.randomUUID()}`,
       agentId: input.agentId,

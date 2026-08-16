@@ -245,18 +245,40 @@ describe("env wiring", () => {
     expect(createMoneroBackendFromEnv({})).toBeNull();
   });
 
-  test("builds a backend with defaults pointed at sethforprivacy nodes", () => {
+  test("builds a backend only with an explicitly configured secure daemon", () => {
     const backend = createMoneroBackendFromEnv({
-      STEWARD_MONERO_WALLET_RPC_URL: "http://monero-wallet-rpc.invalid:18083/json_rpc",
+      STEWARD_MONERO_WALLET_RPC_URL: "http://monero-wallet-rpc:18083/json_rpc",
+      STEWARD_MONERO_DAEMON_URL: "https://daemon.example:18089",
     });
     expect(backend).not.toBeNull();
     expect(backend?.network).toBe("mainnet");
   });
 
+  test("rejects missing or plaintext public daemon transport", () => {
+    expect(() =>
+      createMoneroBackendFromEnv({
+        STEWARD_MONERO_WALLET_RPC_URL: "http://monero-wallet-rpc:18083/json_rpc",
+      }),
+    ).toThrow(/STEWARD_MONERO_DAEMON_URL is required/);
+    expect(() =>
+      createMoneroBackendFromEnv({
+        STEWARD_MONERO_WALLET_RPC_URL: "http://monero-wallet-rpc:18083/json_rpc",
+        STEWARD_MONERO_DAEMON_URL: "http://public-daemon.example:18089",
+      }),
+    ).toThrow(/must use HTTPS/);
+    expect(() =>
+      createMoneroBackendFromEnv({
+        STEWARD_MONERO_WALLET_RPC_URL: "http://public-wallet-rpc.example:18083/json_rpc",
+        STEWARD_MONERO_DAEMON_URL: "https://daemon.example:18089",
+      }),
+    ).toThrow(/must use HTTPS/);
+  });
+
   test("rejects unknown networks and malformed logins", () => {
     expect(() =>
       createMoneroBackendFromEnv({
-        STEWARD_MONERO_WALLET_RPC_URL: "http://monero-wallet-rpc.invalid:18083/json_rpc",
+        STEWARD_MONERO_WALLET_RPC_URL: "http://monero-wallet-rpc:18083/json_rpc",
+        STEWARD_MONERO_DAEMON_URL: "https://daemon.example:18089",
         STEWARD_MONERO_NETWORK: "testnet",
       }),
     ).toThrow(/STEWARD_MONERO_NETWORK/);
@@ -264,8 +286,18 @@ describe("env wiring", () => {
       () =>
         new MoneroWalletRpcBackend({
           network: "mainnet",
-          rpcUrl: "http://monero-wallet-rpc.invalid:18083/json_rpc",
+          rpcUrl: "http://monero-wallet-rpc:18083/json_rpc",
+          daemonUrl: "https://daemon.example:18089",
           rpcLogin: "no-separator",
+        }),
+    ).toThrow(/user:password/);
+    expect(
+      () =>
+        new MoneroWalletRpcBackend({
+          network: "mainnet",
+          rpcUrl: "http://monero-wallet-rpc:18083/json_rpc",
+          daemonUrl: "https://daemon.example:18089",
+          rpcLogin: "user:",
         }),
     ).toThrow(/user:password/);
   });
@@ -305,9 +337,9 @@ function scriptedBackend(script: ScriptedCall[], options: { login?: string } = {
 
   const backend = new MoneroWalletRpcBackend({
     network: "mainnet",
-    rpcUrl: "http://monero-wallet-rpc.invalid:18083/json_rpc",
+    rpcUrl: "http://monero-wallet-rpc:18083/json_rpc",
     rpcLogin: options.login,
-    daemonUrl: "http://daemon.invalid:18089",
+    daemonUrl: "http://monero-daemon:18089",
     fetchFn,
   });
   return { backend, calls, consumed: () => index === script.length };
@@ -547,7 +579,8 @@ describe("MoneroWalletRpcBackend (scripted)", () => {
 
     const backend = new MoneroWalletRpcBackend({
       network: "mainnet",
-      rpcUrl: "http://monero-wallet-rpc.invalid:18083/json_rpc",
+      rpcUrl: "http://monero-wallet-rpc:18083/json_rpc",
+      daemonUrl: "https://daemon.invalid:18089",
       fetchFn,
     });
     await Promise.all([backend.getBalance(PAYLOAD, CONTEXT), backend.getBalance(PAYLOAD, CONTEXT)]);
@@ -588,7 +621,8 @@ describe("MoneroWalletRpcBackend (scripted)", () => {
 
     const backend = new MoneroWalletRpcBackend({
       network: "mainnet",
-      rpcUrl: "http://monero-wallet-rpc.invalid:18083/json_rpc",
+      rpcUrl: "http://monero-wallet-rpc:18083/json_rpc",
+      daemonUrl: "https://daemon.invalid:18089",
       rpcLogin: "steward:secret",
       fetchFn,
     });

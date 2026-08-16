@@ -343,6 +343,31 @@ describe("operator recovery approve-builder", () => {
       { builder: "0xabcdef0123456789abcdef0123456789abcdef01", maxFeeRate: "0.1%" },
     ]);
   });
+
+  it("rejects an excessive builder fee before calling the adapter", async () => {
+    const tenantId = `tenant-builder-cap-${Date.now()}`;
+    const agentId = `agent-builder-cap-${Date.now()}`;
+    await seedAgent({ tenantId, agentId });
+    approveBuilderFeeCalls.length = 0;
+
+    const app = await buildApp();
+    const res = await app.request("/v1/trade/hyperliquid/approve-builder", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+        "X-Steward-Tenant": tenantId,
+      },
+      body: JSON.stringify({
+        agentId,
+        builder: "0xABCDEF0123456789abcdef0123456789ABCDEF01",
+        maxFeeRate: "100%",
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(approveBuilderFeeCalls).toHaveLength(0);
+  });
 });
 
 describe("operator recovery add-margin", () => {

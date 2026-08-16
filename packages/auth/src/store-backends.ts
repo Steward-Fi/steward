@@ -208,7 +208,10 @@ export class PostgresBackend implements StoreBackend {
   async set(key: string, value: string, ttlMs: number): Promise<void> {
     await this.ensureTable();
     const sql = this.getSqlClient();
-    const expiresAt = new Date(Date.now() + ttlMs);
+    // postgres-js does not serialize Date instances as query parameters on all
+    // supported runtimes. Bind an ISO-8601 string and let TIMESTAMPTZ perform
+    // the type conversion server-side.
+    const expiresAt = new Date(Date.now() + ttlMs).toISOString();
     await sql`
       INSERT INTO auth_kv_store (id, namespace, value, expires_at)
       VALUES (${key}, ${this.namespace}, ${value}, ${expiresAt})
@@ -221,11 +224,14 @@ export class PostgresBackend implements StoreBackend {
   async setIfNotExists(key: string, value: string, ttlMs: number): Promise<boolean> {
     await this.ensureTable();
     const sql = this.getSqlClient();
-    const expiresAt = new Date(Date.now() + ttlMs);
+    const expiresAt = new Date(Date.now() + ttlMs).toISOString();
     const rows = await sql<Array<{ id: string }>>`
       INSERT INTO auth_kv_store (id, namespace, value, expires_at)
       VALUES (${key}, ${this.namespace}, ${value}, ${expiresAt})
-      ON CONFLICT (id, namespace) DO NOTHING
+      ON CONFLICT (id, namespace) DO UPDATE
+        SET value      = EXCLUDED.value,
+            expires_at = EXCLUDED.expires_at
+        WHERE auth_kv_store.expires_at <= now()
       RETURNING id
     `;
     return rows.length > 0;

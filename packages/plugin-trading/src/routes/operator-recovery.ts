@@ -86,7 +86,10 @@ const addMarginSchema = z.object({
 const approveBuilderSchema = z.object({
   agentId: z.string().min(1),
   builder: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-  maxFeeRate: z.string().min(1),
+  maxFeeRate: z
+    .string()
+    .regex(/^(?:0|[1-9]\d*)(?:\.\d{1,6})?%$/, "maxFeeRate must be a decimal percentage")
+    .refine((value) => Number(value.slice(0, -1)) <= 0.1, "maxFeeRate cannot exceed 0.1%"),
   idempotencyKey: z.string().min(1).max(256).optional(),
 });
 
@@ -120,6 +123,7 @@ const HL_MAX_DEPOSIT_USDC = 2000;
 // multiple deliberate calls. (Override per-tenant later if needed.)
 const HL_MAX_WITHDRAW_USDC = 2000;
 const USDC_DECIMALS = 6;
+const HL_MAX_WITHDRAW_BASE_UNITS = BigInt(HL_MAX_WITHDRAW_USDC) * 10n ** BigInt(USDC_DECIMALS);
 const ERC20_TRANSFER_SELECTOR = "0xa9059cbb";
 const USDC_AMOUNT_RE = /^\d+(?:\.(\d+))?$/;
 
@@ -1170,6 +1174,19 @@ export function createOperatorRecoveryRoutes(
     }
     if (amountBaseUnits === null) {
       return c.json<ApiResponse>({ ok: false, error: "amount must be a positive number" }, 400);
+    }
+    // The omitted-amount path resolves a live full balance, so enforce the same
+    // per-call safety ceiling after resolution. Otherwise omitting `amount`
+    // bypasses the explicit-amount cap and can drain an arbitrarily large venue
+    // balance in one request.
+    if (amountBaseUnits > HL_MAX_WITHDRAW_BASE_UNITS) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: `amount exceeds the per-withdraw maximum of ${HL_MAX_WITHDRAW_USDC} USDC; specify an amount and split into smaller withdraws`,
+        },
+        400,
+      );
     }
 
     // ── Policy gate (BEFORE signing) ─────────────────────────────────────────────

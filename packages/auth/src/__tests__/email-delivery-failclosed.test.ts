@@ -58,12 +58,18 @@ class CapturingBackend implements StoreBackend {
 
 const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
 const ORIGINAL_CODE_SECRET = process.env.STEWARD_EMAIL_CODE_SECRET;
+const ORIGINAL_ALLOW_DEV_SECRETS = process.env.STEWARD_ALLOW_DEV_SECRETS;
+const ORIGINAL_ALLOW_DEV_SECRET = process.env.STEWARD_ALLOW_DEV_SECRET;
 
 function restoreEnv(): void {
   if (ORIGINAL_NODE_ENV === undefined) delete process.env.NODE_ENV;
   else process.env.NODE_ENV = ORIGINAL_NODE_ENV;
   if (ORIGINAL_CODE_SECRET === undefined) delete process.env.STEWARD_EMAIL_CODE_SECRET;
   else process.env.STEWARD_EMAIL_CODE_SECRET = ORIGINAL_CODE_SECRET;
+  if (ORIGINAL_ALLOW_DEV_SECRETS === undefined) delete process.env.STEWARD_ALLOW_DEV_SECRETS;
+  else process.env.STEWARD_ALLOW_DEV_SECRETS = ORIGINAL_ALLOW_DEV_SECRETS;
+  if (ORIGINAL_ALLOW_DEV_SECRET === undefined) delete process.env.STEWARD_ALLOW_DEV_SECRET;
+  else process.env.STEWARD_ALLOW_DEV_SECRET = ORIGINAL_ALLOW_DEV_SECRET;
 }
 
 function buildAuth(provider: EmailProvider | undefined, backend: CapturingBackend): EmailAuth {
@@ -72,7 +78,7 @@ function buildAuth(provider: EmailProvider | undefined, backend: CapturingBacken
     baseUrl: "https://steward.fi",
     ...(provider ? { provider } : {}),
     tokenStore: new TokenStore({ backend }),
-    codeVerifierSecret: "fail-closed-test-secret",
+    codeVerifierSecret: "fail-closed-test-secret-at-least-32-characters",
   });
 }
 
@@ -283,6 +289,52 @@ describe("production requires a delivery-capable provider", () => {
     } finally {
       console.log = originalLog;
     }
+  });
+});
+
+describe("email code verifier secret hardening", () => {
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  it("rejects missing and weak verifier secrets in production", () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.STEWARD_EMAIL_CODE_SECRET;
+    expect(
+      () =>
+        new EmailAuth({
+          from: "login@steward.fi",
+          baseUrl: "https://steward.fi",
+          provider: new MockEmailProvider(),
+        }),
+    ).toThrow("STEWARD_EMAIL_CODE_SECRET is required");
+
+    expect(
+      () =>
+        new EmailAuth({
+          from: "login@steward.fi",
+          baseUrl: "https://steward.fi",
+          provider: new MockEmailProvider(),
+          codeVerifierSecret: "short-secret",
+        }),
+    ).toThrow("must be at least 32 characters");
+  });
+
+  it("requires explicit opt-in before using the deterministic development secret", () => {
+    process.env.NODE_ENV = "development";
+    delete process.env.STEWARD_EMAIL_CODE_SECRET;
+    delete process.env.STEWARD_ALLOW_DEV_SECRETS;
+    delete process.env.STEWARD_ALLOW_DEV_SECRET;
+    const config = {
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider: new MockEmailProvider(),
+    };
+
+    expect(() => new EmailAuth(config)).toThrow("STEWARD_ALLOW_DEV_SECRETS=true");
+    process.env.STEWARD_ALLOW_DEV_SECRETS = "true";
+    const allowed = new EmailAuth(config);
+    allowed.destroy();
   });
 });
 

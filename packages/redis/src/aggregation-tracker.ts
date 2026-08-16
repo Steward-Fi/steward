@@ -24,6 +24,7 @@
  * documented convention so off-by-one window math cannot flip a verdict.
  */
 
+import { randomUUID } from "node:crypto";
 import { getRedis } from "./client.js";
 
 /** Maximum rolling window we retain events for (matches the 30d named window). */
@@ -190,11 +191,9 @@ async function runRecord(
   );
 }
 
-let seqCounter = 0;
-/** Monotonic-ish suffix so two events in the same ms get distinct members. */
+/** Cryptographically strong suffix so events remain unique across restarts. */
 function cryptoSeq(): string {
-  seqCounter = (seqCounter + 1) % 1_000_000;
-  return `${seqCounter}.${Math.random().toString(36).slice(2, 8)}`;
+  return randomUUID();
 }
 
 function decodePayload(member: string): string {

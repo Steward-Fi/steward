@@ -1421,6 +1421,29 @@ export function getAuthStoreSources(): AuthStoreSources {
   return { ..._authStoreSources };
 }
 
+/**
+ * Refuse ephemeral auth state in production and Workers deployments. Losing or
+ * partitioning challenge, token, nonce, MFA, or import-session state across
+ * processes can break single-use guarantees. A single-instance deployment may
+ * explicitly acknowledge that trade-off, but it must never happen silently.
+ */
+export function assertAuthStoresAreSafe(sources: AuthStoreSources = getAuthStoreSources()): void {
+  const requiresDurableStores =
+    process.env.NODE_ENV === "production" || process.env.STEWARD_RUNTIME === "workers";
+  if (!requiresDurableStores || process.env.STEWARD_ALLOW_MEMORY_AUTH_STORES === "true") return;
+
+  const memoryStores = Object.entries(sources)
+    .filter(([, source]) => source === "memory")
+    .map(([name]) => name);
+  if (memoryStores.length > 0) {
+    throw new Error(
+      `Durable auth storage is required; memory-backed stores: ${memoryStores.join(", ")}. ` +
+        "Configure Redis/Postgres or explicitly set STEWARD_ALLOW_MEMORY_AUTH_STORES=true " +
+        "for a single-instance deployment.",
+    );
+  }
+}
+
 export function encryptImportSessionJson(value: unknown): string {
   return JSON.stringify(getOAuthKeyStore().encrypt(JSON.stringify(value)));
 }

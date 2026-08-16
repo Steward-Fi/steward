@@ -347,6 +347,19 @@ function hasUsdLimits(config: SpendingLimitConfig): boolean {
   );
 }
 
+function invalidUsdLimit(config: SpendingLimitConfig): string | null {
+  for (const field of ["maxPerTxUsd", "maxPerDayUsd", "maxPerWeekUsd"] as const) {
+    const value = config[field];
+    if (
+      value !== undefined &&
+      (typeof value !== "number" || !Number.isFinite(value) || value < 0)
+    ) {
+      return field;
+    }
+  }
+  return null;
+}
+
 async function evaluateSpendingLimit(
   rule: PolicyRule,
   ctx: EvaluatorContext,
@@ -364,6 +377,14 @@ async function evaluateSpendingLimit(
 
   // ── USD-based evaluation (preferred when available) ─────────────────────────
   if (hasUsdLimits(config)) {
+    const invalidField = invalidUsdLimit(config);
+    if (invalidField) {
+      return {
+        ...base,
+        passed: false,
+        reason: `${invalidField} must be a non-negative finite number`,
+      };
+    }
     if (!ctx.priceOracle) {
       return {
         ...base,
@@ -374,7 +395,7 @@ async function evaluateSpendingLimit(
     const chainId = ctx.request.chainId;
     const txUsd = await ctx.priceOracle.weiToUsd(ctx.request.value, chainId);
 
-    if (txUsd === null) {
+    if (txUsd === null || !Number.isFinite(txUsd) || txUsd < 0) {
       return {
         ...base,
         passed: false,
@@ -394,7 +415,7 @@ async function evaluateSpendingLimit(
     // Daily USD limit - convert spentToday from wei to USD
     if (config.maxPerDayUsd !== undefined) {
       const spentTodayUsd = await ctx.priceOracle.weiToUsd(ctx.spentToday.toString(), chainId);
-      if (spentTodayUsd === null) {
+      if (spentTodayUsd === null || !Number.isFinite(spentTodayUsd) || spentTodayUsd < 0) {
         return {
           ...base,
           passed: false,
@@ -413,7 +434,7 @@ async function evaluateSpendingLimit(
     // Weekly USD limit - convert spentThisWeek from wei to USD
     if (config.maxPerWeekUsd !== undefined) {
       const spentWeekUsd = await ctx.priceOracle.weiToUsd(ctx.spentThisWeek.toString(), chainId);
-      if (spentWeekUsd === null) {
+      if (spentWeekUsd === null || !Number.isFinite(spentWeekUsd) || spentWeekUsd < 0) {
         return {
           ...base,
           passed: false,
@@ -600,13 +621,28 @@ async function evaluateAutoApprove(rule: PolicyRule, ctx: EvaluatorContext): Pro
     };
   }
 
-  // No threshold configured at all - pass (policy misconfigured but don't block)
-  return { ...base, passed: true, reason: "No threshold configured" };
+  // An enabled but empty auto-approve rule must never become an unbounded
+  // approval. Fail this soft policy so the engine routes the request to manual
+  // approval instead.
+  return { ...base, passed: false, reason: "Auto-approve threshold is not configured" };
 }
 
 function evaluateRateLimit(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
   const config = rule.config as unknown as RateLimitConfig;
   const base = { policyId: rule.id, type: rule.type } as const;
+
+  if (
+    !Number.isSafeInteger(config.maxTxPerHour) ||
+    config.maxTxPerHour < 0 ||
+    !Number.isSafeInteger(config.maxTxPerDay) ||
+    config.maxTxPerDay < 0
+  ) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Rate limits must be non-negative safe integers",
+    };
+  }
 
   if (ctx.recentTxCount1h >= config.maxTxPerHour) {
     return {

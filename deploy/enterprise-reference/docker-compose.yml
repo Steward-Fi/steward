@@ -19,7 +19,10 @@ services:
     command: ["bun", "packages/db/src/migrate.ts"]
     environment:
       DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/steward}"
-      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-true}"
+      # Explicit acknowledgement is required because this allows plaintext DB
+      # transport. The bundled Postgres is isolated on steward-backend, but an
+      # operator-supplied external DATABASE_URL must never inherit this silently.
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:?required for the internal plaintext Postgres profile}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -67,7 +70,7 @@ services:
       PASSKEY_RP_ID: "${PASSKEY_RP_ID:-steward.localhost}"
       PASSKEY_ORIGIN: "${PASSKEY_ORIGIN:-https://steward.localhost}"
       SKIP_MIGRATIONS: "true"
-      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-true}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:?required for the internal plaintext Postgres profile}"
     depends_on:
       steward-migrate:
         condition: service_completed_successfully
@@ -104,7 +107,7 @@ services:
       # polls fail closed in production.
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?required}"
       STEWARD_PROXY_REQUEST_SIGNING_SECRETS: "${STEWARD_PROXY_REQUEST_SIGNING_SECRETS:?required}"
-      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-true}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:?required for the internal plaintext Postgres profile}"
     depends_on:
       steward-api:
         condition: service_healthy
@@ -119,7 +122,7 @@ services:
 
   caddy:
     profiles: ["enterprise-reference"]
-    image: caddy:2.8-alpine
+    image: caddy:2.8-alpine@sha256:af32e97399febea808609119bb21544d0265c58a02836576e32a2d082c262c17
     ports:
       - "${STEWARD_TLS_HTTP_PORT:-80}:80"
       - "${STEWARD_TLS_HTTPS_PORT:-443}:443"
@@ -139,7 +142,7 @@ services:
 
   postgres:
     profiles: ["enterprise-reference"]
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     environment:
       POSTGRES_DB: steward
       POSTGRES_USER: steward
@@ -158,7 +161,7 @@ services:
 
   redis:
     profiles: ["enterprise-reference"]
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
     command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     volumes:
       - redis-data:/data
@@ -172,7 +175,7 @@ services:
 
   backup:
     profiles: ["enterprise-reference", "backup"]
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     entrypoint: ["/bin/sh", "-ec"]
     command: "pg_dump \"$${DATABASE_URL}\" > /backups/steward-$$(date -u +%Y%m%dT%H%M%SZ).sql"
     environment:

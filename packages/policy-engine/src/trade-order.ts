@@ -35,10 +35,6 @@ function isBuilderPerpAsset(asset: string | undefined): boolean {
   return typeof asset === "string" && BUILDER_PERP_SYMBOL_RE.test(asset);
 }
 
-function finiteNumber(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-}
-
 function finitePositiveOrderUsd(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
@@ -61,11 +57,20 @@ export const venueAllowlistEvaluator: TradeOrderEvaluator = (session, order) => 
 };
 
 export const leverageCapEvaluator: TradeOrderEvaluator = (session, order) => {
-  const sessionCap = finiteNumber(session.leverageCap, DEFAULT_LEVERAGE_CAP);
+  if (
+    session.leverageCap !== undefined &&
+    (!Number.isFinite(session.leverageCap) || session.leverageCap < 1)
+  ) {
+    return { allow: false, reason: "leverage-cap: session leverage cap is invalid" };
+  }
+  const sessionCap = session.leverageCap ?? DEFAULT_LEVERAGE_CAP;
   const cap = isBuilderPerpAsset(order.asset)
     ? Math.min(sessionCap, BUILDER_PERP_LEVERAGE_CAP)
     : sessionCap;
-  const leverage = finiteNumber(order.leverage, 1);
+  if (order.leverage !== undefined && (!Number.isFinite(order.leverage) || order.leverage < 1)) {
+    return { allow: false, reason: "leverage-cap: requested leverage is invalid" };
+  }
+  const leverage = order.leverage ?? 1;
   if (leverage > cap) {
     return { allow: false, reason: `leverage-cap: leverage ${leverage} exceeds cap ${cap}` };
   }
@@ -98,7 +103,16 @@ export const assetAllowlistEvaluator: TradeOrderEvaluator = (session, order) => 
 export const dailySpendCapEvaluator: TradeOrderEvaluator = (session, order) => {
   const dailyCapUsd = session.dailyCapUsd;
   if (dailyCapUsd === undefined) return { allow: true };
-  const spent = finiteNumber(session.dailySpendUsd, 0);
+  if (!Number.isFinite(dailyCapUsd) || dailyCapUsd < 0) {
+    return { allow: false, reason: "daily-spend-cap: session daily cap is invalid" };
+  }
+  if (
+    session.dailySpendUsd !== undefined &&
+    (!Number.isFinite(session.dailySpendUsd) || session.dailySpendUsd < 0)
+  ) {
+    return { allow: false, reason: "daily-spend-cap: session daily spend is invalid" };
+  }
+  const spent = session.dailySpendUsd ?? 0;
   const estimated = finitePositiveOrderUsd(order.estimatedOrderUsd);
   if (estimated === null) {
     return {
@@ -116,7 +130,13 @@ export const dailySpendCapEvaluator: TradeOrderEvaluator = (session, order) => {
 };
 
 export const perOrderCapEvaluator: TradeOrderEvaluator = (session, order) => {
-  const cap = finiteNumber(session.perOrderCapUsd, DEFAULT_PER_ORDER_CAP_USD);
+  if (
+    session.perOrderCapUsd !== undefined &&
+    (!Number.isFinite(session.perOrderCapUsd) || session.perOrderCapUsd <= 0)
+  ) {
+    return { allow: false, reason: "per-order-cap: session per-order cap is invalid" };
+  }
+  const cap = session.perOrderCapUsd ?? DEFAULT_PER_ORDER_CAP_USD;
   const estimated = finitePositiveOrderUsd(order.estimatedOrderUsd);
   if (estimated === null) {
     return {

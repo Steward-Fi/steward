@@ -10,7 +10,7 @@
  *   - Transaction crypto (CryptoNote key derivation, CLSAG ring signatures,
  *     RingCT) is NEVER hand-rolled. It is delegated to the official
  *     monero-wallet-rpc (wallet2) running as a private sidecar, which itself
- *     talks to a remote public daemon (e.g. node.sethforprivacy.com:18089)
+ *     talks to an explicitly configured daemon
  *     with --untrusted-daemon. Private keys reach the sidecar only transiently
  *     (generate_from_keys) over the internal network; the remote daemon never
  *     sees key material — it only serves block data and receives fully-signed
@@ -55,11 +55,6 @@ const ADDRESS_PREFIXES: Record<
 > = {
   mainnet: { standard: 18, integrated: 19, subaddress: 42 },
   stagenet: { standard: 24, integrated: 25, subaddress: 36 },
-};
-
-export const MONERO_DEFAULT_DAEMON_URLS: Record<MoneroNetwork, string> = {
-  mainnet: "http://node.sethforprivacy.com:18089",
-  stagenet: "http://node.sethforprivacy.com:38089",
 };
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
@@ -693,14 +688,42 @@ export interface MoneroWalletRpcBackendConfig {
   rpcUrl: string;
   /** "user:password" for --rpc-login; omit only when the sidecar runs with --disable-rpc-login. */
   rpcLogin?: string;
-  /** Restricted public daemon used ONLY for chain height at wallet creation. */
-  daemonUrl?: string;
+  /** Restricted daemon used ONLY for chain height at wallet creation. */
+  daemonUrl: string;
   /** Per-RPC-call timeout; wallet refresh/transfer can legitimately take a while. */
   timeoutMs?: number;
   fetchFn?: typeof fetch;
 }
 
 const DEFAULT_RPC_TIMEOUT_MS = 120_000;
+
+function isPrivateHttpHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host === "::1" || host.endsWith(".localhost")) return true;
+  if (!host.includes(".")) return true; // Docker/Kubernetes service name.
+  if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)) return true;
+  const match = /^172\.(\d+)\./.exec(host);
+  return !!match && Number(match[1]) >= 16 && Number(match[1]) <= 31;
+}
+
+function validateRpcTransport(rawUrl: string, field: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error(`${field} must be a valid HTTP(S) URL`);
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error(`${field} must not embed credentials in the URL`);
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error(`${field} must use HTTP(S)`);
+  }
+  if (parsed.protocol === "http:" && !isPrivateHttpHost(parsed.hostname)) {
+    throw new Error(`${field} must use HTTPS for a non-private host`);
+  }
+  return parsed.toString().replace(/\/$/, "");
+}
 
 export class MoneroWalletRpcBackend implements MoneroWalletBackend {
   readonly network: MoneroNetwork;
@@ -714,16 +737,13 @@ export class MoneroWalletRpcBackend implements MoneroWalletBackend {
   constructor(config: MoneroWalletRpcBackendConfig) {
     if (!config.rpcUrl) throw new MoneroNotConfiguredError();
     this.network = config.network;
-    this.rpcUrl = config.rpcUrl;
-    this.daemonUrl = (config.daemonUrl ?? MONERO_DEFAULT_DAEMON_URLS[config.network]).replace(
-      /\/$/,
-      "",
-    );
+    this.rpcUrl = validateRpcTransport(config.rpcUrl, "STEWARD_MONERO_WALLET_RPC_URL");
+    this.daemonUrl = validateRpcTransport(config.daemonUrl, "STEWARD_MONERO_DAEMON_URL");
     this.timeoutMs = config.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS;
     this.fetchFn = config.fetchFn ?? fetch;
     if (config.rpcLogin) {
       const separator = config.rpcLogin.indexOf(":");
-      if (separator <= 0) {
+      if (separator <= 0 || separator === config.rpcLogin.length - 1) {
         throw new Error("STEWARD_MONERO_WALLET_RPC_LOGIN must look like user:password");
       }
       this.login = {
@@ -1071,6 +1091,10 @@ export function createMoneroBackendFromEnv(
 ): MoneroWalletBackend | null {
   const rpcUrl = env.STEWARD_MONERO_WALLET_RPC_URL;
   if (!rpcUrl) return null;
+  const daemonUrl = env.STEWARD_MONERO_DAEMON_URL;
+  if (!daemonUrl) {
+    throw new MoneroNotConfiguredError("STEWARD_MONERO_DAEMON_URL is required.");
+  }
   const network = env.STEWARD_MONERO_NETWORK ?? "mainnet";
   if (network !== "mainnet" && network !== "stagenet") {
     throw new Error("STEWARD_MONERO_NETWORK must be mainnet or stagenet");
@@ -1079,7 +1103,7 @@ export function createMoneroBackendFromEnv(
     network,
     rpcUrl,
     rpcLogin: env.STEWARD_MONERO_WALLET_RPC_LOGIN,
-    daemonUrl: env.STEWARD_MONERO_DAEMON_URL,
+    daemonUrl,
   });
 }
 

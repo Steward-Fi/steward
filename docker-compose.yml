@@ -7,7 +7,7 @@
 #   postgres           — PostgreSQL 16 (internal only)
 #   redis              — Redis 7 for rate limiting + token store (internal only)
 #   monero-wallet-rpc  — optional wallet2 sidecar for Monero support
-#                        (profile "monero"; internal only, remote public daemon)
+#                        (profile "monero"; internal only, explicit TLS daemon)
 #
 # Usage:
 #   cp .env.example .env && $EDITOR .env
@@ -93,7 +93,9 @@ services:
       # Only consulted when the RPC URL above is set; username matches the
       # sidecar's --rpc-login.
       STEWARD_MONERO_WALLET_RPC_LOGIN: "steward:${MONERO_WALLET_RPC_PASSWORD:-}"
-      STEWARD_MONERO_DAEMON_URL: "${STEWARD_MONERO_DAEMON_URL:-http://node.sethforprivacy.com:18089}"
+      # No public plaintext daemon default. Remote daemon URLs are opt-in and
+      # must use TLS (validated by the vault configuration).
+      STEWARD_MONERO_DAEMON_URL: "${STEWARD_MONERO_DAEMON_URL:-}"
       STEWARD_MONERO_NETWORK: "${STEWARD_MONERO_NETWORK:-mainnet}"
       STEWARD_MAX_MONERO_FEE_PICONERO: "${STEWARD_MAX_MONERO_FEE_PICONERO:-}"
     ports:
@@ -166,13 +168,13 @@ services:
 
   # ── Monero wallet-rpc sidecar (optional, profile: monero) ────────────────────
   # Official wallet2 (monero-wallet-rpc) maintained as a container image by
-  # sethforprivacy, pointed at a remote public daemon — no local monerod, no
-  # blockchain storage. Wallet files under /home/monero/wallets are a
+  # sethforprivacy, pointed at the explicitly configured daemon — no bundled
+  # monerod or blockchain storage. Wallet files under /home/monero/wallets are a
   # DISPOSABLE scan cache: the canonical (encrypted) keys live in Postgres and
   # the vault rehydrates wallets via generate_from_keys at any time.
   #
   # Custody: private keys only ever transit the internal backend network
-  # between steward-api and this sidecar; the remote daemon sees block
+  # between steward-api and this sidecar; the configured daemon sees block
   # requests and fully-signed transactions, never key material.
   #
   # Enable with:
@@ -198,8 +200,14 @@ services:
           echo "MONERO_WALLET_RPC_PASSWORD must be set and non-empty when the monero profile is enabled" >&2
           exit 1
         fi
+        daemon_address="${MONERO_DAEMON_ADDRESS:-}"
+        if [ -z "$$daemon_address" ]; then
+          echo "MONERO_DAEMON_ADDRESS is required when the monero profile is enabled" >&2
+          exit 1
+        fi
         exec /entrypoint.sh \
-          "--daemon-address=${MONERO_DAEMON_ADDRESS:-node.sethforprivacy.com:18089}" \
+          "--daemon-address=$$daemon_address" \
+          "--daemon-ssl=enabled" \
           "--untrusted-daemon" \
           "--wallet-dir=/home/monero/wallet" \
           "--rpc-bind-ip=0.0.0.0" \
@@ -226,7 +234,7 @@ services:
 
   # ── PostgreSQL 16 ─────────────────────────────────────────────────────────────
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     container_name: steward-postgres
     restart: unless-stopped
     environment:
@@ -253,7 +261,7 @@ services:
 
   # ── Redis 7 ───────────────────────────────────────────────────────────────────
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
     container_name: steward-redis
     restart: unless-stopped
     command: >

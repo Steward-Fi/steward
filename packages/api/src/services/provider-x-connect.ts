@@ -144,13 +144,55 @@ export interface XForwardResponse {
 
 export type XForwardFn = (req: XForwardRequest) => Promise<XForwardResponse>;
 
+const X_FORWARD_TIMEOUT_MS = 10_000;
+const X_FORWARD_MAX_RESPONSE_BYTES = 1024 * 1024;
+
+async function readBoundedXResponse(res: Response): Promise<string> {
+  const declaredLength = res.headers.get("content-length");
+  if (declaredLength) {
+    const length = Number(declaredLength);
+    if (!Number.isFinite(length) || length < 0 || length > X_FORWARD_MAX_RESPONSE_BYTES) {
+      await res.body?.cancel().catch(() => {});
+      throw new Error("X provider response exceeded maximum size");
+    }
+  }
+  if (!res.body) return "";
+
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > X_FORWARD_MAX_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw new Error("X provider response exceeded maximum size");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
 async function defaultForward(req: XForwardRequest): Promise<XForwardResponse> {
   const res = await fetch(req.url, {
     method: req.method,
     headers: req.headers,
     body: req.body,
+    signal: AbortSignal.timeout(X_FORWARD_TIMEOUT_MS),
   });
-  const text = await res.text();
+  const text = await readBoundedXResponse(res);
   let json: unknown = null;
   try {
     json = text.length > 0 ? JSON.parse(text) : null;
@@ -158,6 +200,11 @@ async function defaultForward(req: XForwardRequest): Promise<XForwardResponse> {
     json = null;
   }
   return { status: res.status, ok: res.ok, json, text };
+}
+
+/** Test-only access to the real bounded transport (never used by runtime callers). */
+export function __runDefaultXForwardForTests(req: XForwardRequest): Promise<XForwardResponse> {
+  return defaultForward(req);
 }
 
 let forwardImpl: XForwardFn = defaultForward;

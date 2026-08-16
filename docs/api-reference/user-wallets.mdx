@@ -152,10 +152,10 @@ curl -X POST http://localhost:3200/user/me/wallet/import/submit \
 ```
 
 Production deployments should initialize Redis or run migrations so the import-session backend is
-durable across API replicas. If auth store initialization falls back to memory, init/submit must stay
-on one process and sessions will not survive restarts. The Bun `/ready` probe reports
-`checks.importSessionStore.source` and fails production readiness when import sessions are backed by
-memory unless `STEWARD_ALLOW_MEMORY_IMPORT_SESSION_STORE=true`.
+durable across API replicas. Production startup fails before accepting traffic if any auth store
+falls back to memory. The Bun `/ready` probe reports `checks.authStores`; only a guaranteed
+single-instance deployment may acknowledge restart-unsafe memory storage with
+`STEWARD_ALLOW_MEMORY_AUTH_STORES=true`.
 
 ## Additional Signer Credentials
 

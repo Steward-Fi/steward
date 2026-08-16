@@ -384,7 +384,9 @@ async function testSiweNonce() {
   try {
     // SIWE nonce requests are bound to an allowed Origin (PR #79 hardening).
     const { status, data } = await api("GET", "/auth/nonce", {
-      headers: { Origin: "https://steward.fi" },
+      // Exercise the configured deployment origin instead of hard-coding the
+      // hosted domain, which makes local TLS-safe smoke tests fail spuriously.
+      headers: { Origin: new URL(STEWARD_URL).origin },
     });
 
     if (status === 200 && typeof data?.nonce === "string" && data.nonce.length > 0) {

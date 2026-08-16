@@ -120,6 +120,14 @@ describe("leverage-cap evaluator", () => {
     expect(r.passed).toBe(false);
     expect(r.reason).toContain("not a finite number");
   });
+
+  it("NACKs zero or negative leverage instead of treating it as within the cap", () => {
+    for (const leverage of [0, -1]) {
+      const r = evaluateLeverageCap(leverageRule(2), { leverage });
+      expect(r.passed).toBe(false);
+      expect(r.reason).toContain("must be >= 1");
+    }
+  });
 });
 
 describe("PolicyEngine audit hook", () => {

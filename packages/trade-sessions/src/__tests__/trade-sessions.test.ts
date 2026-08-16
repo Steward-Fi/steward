@@ -102,6 +102,34 @@ describe("TradeSessionManager", () => {
     expect(fetched?.walletId).toBe(session.walletId);
   });
 
+  test("createSession rejects non-finite caps", async () => {
+    const manager = await freshManager();
+    await expect(
+      manager.createSession({ ...baseInput(), dailyCapUsd: Number.POSITIVE_INFINITY }),
+    ).rejects.toThrow("positive finite number");
+    await expect(
+      manager.createSession({ ...baseInput(), perOrderCapUsd: Number.NaN }),
+    ).rejects.toThrow("positive finite number");
+    await expect(
+      manager.createSession({ ...baseInput(), leverageCap: Number.POSITIVE_INFINITY }),
+    ).rejects.toThrow("positive finite number");
+  });
+
+  test("createSession cannot bypass the lifetime ceiling with expiresAt", async () => {
+    const now = new Date("2026-05-22T10:00:00Z");
+    const manager = await freshManager(() => now);
+
+    await expect(
+      manager.createSession({
+        ...baseInput(),
+        expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000 + 1),
+      }),
+    ).rejects.toThrow("24 hour session lifetime maximum");
+    await expect(
+      manager.createSession({ ...baseInput(), expiresAt: new Date(now.getTime() - 1) }),
+    ).rejects.toThrow("valid future date");
+  });
+
   test("getSession returns null for unknown sessions", async () => {
     const manager = await freshManager();
     expect(await manager.getSession({ tenantId: TENANT_ID, id: "ses_missing" })).toBeNull();

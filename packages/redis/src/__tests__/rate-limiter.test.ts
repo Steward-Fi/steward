@@ -11,6 +11,21 @@ function testKey(suffix: string): string {
   return `${TEST_PREFIX}:${suffix}:${Date.now()}`;
 }
 
+describe("Rate Limiter input validation", () => {
+  test("rejects invalid limits before connecting to Redis", async () => {
+    await expect(checkRateLimit("key", 0, 1)).rejects.toThrow("windowMs");
+    await expect(checkRateLimit("key", Number.POSITIVE_INFINITY, 1)).rejects.toThrow("windowMs");
+    await expect(checkRateLimit("key", 1_000, 0)).rejects.toThrow("maxRequests");
+    await expect(checkRateLimit("", 1_000, 1)).rejects.toThrow("key");
+    await expect(checkRateLimit("x".repeat(513), 1_000, 1)).rejects.toThrow("key");
+  });
+
+  test("status validation also fails before connecting to Redis", async () => {
+    await expect(getRateLimitStatus("key", -1, 1)).rejects.toThrow("windowMs");
+    await expect(getRateLimitStatus("key", 1_000, Number.NaN)).rejects.toThrow("maxRequests");
+  });
+});
+
 beforeEach(async () => {
   if (!runRedis) return;
   // Clean up test keys

@@ -6320,7 +6320,7 @@ export function getOpenApiSpec() {
           tags: ["Vault"],
           summary: "Get a scoped Monero wallet balance",
           description:
-            "Reads the wallet balance through the self-hosted monero-wallet-rpc sidecar (remote public daemon, keys never leave the host). Returns 503 when Monero support is not configured. The first call after idle time refreshes the wallet scan and may take a few seconds.",
+            "Reads the wallet balance through the self-hosted monero-wallet-rpc sidecar (explicitly configured daemon; keys never leave the host). Returns 503 when Monero support is not configured. The first call after idle time refreshes the wallet scan and may take a few seconds.",
           security: [{ bearerAuth: [] }, { tenantApiKey: [] }],
           parameters: [parameter("walletScope", "query", stringSchema)],
           responses: {
