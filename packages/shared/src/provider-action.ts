@@ -656,6 +656,13 @@ export function sha256HexPrefixed(input: string | Uint8Array): string {
 
 export const GITHUB_PROVIDER_ACTION_PROFILE = "github.provider-action.v1" as const;
 export const PROVIDER_REQUEST_SCHEMA_VERSION = "steward.provider-request.v1" as const;
+export const PROVIDER_POLICY_INPUT_SCHEMA_VERSION = "steward.provider-policy-input.v1" as const;
+/**
+ * Hash-domain prefix for policy-input replay identity. This keeps a policy-input
+ * digest cryptographically distinct from action/request hashes even if a future
+ * document happens to serialize to the same bytes.
+ */
+export const PROVIDER_POLICY_INPUT_HASH_DOMAIN = "steward.provider-policy-input.v1\n" as const;
 export const CANONICAL_ORIGIN = "https://api.github.com" as const;
 
 export type CanonicalMethod = "GET" | "POST" | "PATCH" | "PUT" | "DELETE" | "HEAD";
@@ -687,10 +694,34 @@ export interface ProviderRequestEnvelopeV1 {
   operationId: string;
   operationRevision: number;
   actionDigest: string;
+  /**
+   * Digest of adapter-validated policy inputs. Optional only so request hashes
+   * recorded before this field existed remain reproducible; every newly-created
+   * provider request includes it.
+   */
+  policyInputDigest?: string;
   idempotencyKeyHash: string;
   requestedAt: string;
   expiresAt: string;
   nonce: string;
+}
+
+/**
+ * Compute the replay identity for adapter-validated policy inputs.
+ *
+ * The adapter contract permits only policy-safe JSON values here (never raw
+ * credentials or the X `policyText` channel). JCS rejects undefined, non-finite,
+ * prototype-bearing, or otherwise unsupported runtime values rather than
+ * silently weakening the identity. Only the digest is persisted.
+ */
+export function computeProviderPolicyInputDigest(
+  policyArgs: Readonly<Record<string, unknown>>,
+): string {
+  const bytes = jcsStringify({
+    schemaVersion: PROVIDER_POLICY_INPUT_SCHEMA_VERSION,
+    policyArgs,
+  });
+  return sha256HexPrefixed(`${PROVIDER_POLICY_INPUT_HASH_DOMAIN}${bytes}`);
 }
 
 /**
@@ -721,7 +752,7 @@ export function computeActionDigest(a: GithubCanonicalActionV1): string {
 }
 
 function toEnvelopeObject(e: ProviderRequestEnvelopeV1): Record<string, unknown> {
-  return {
+  const envelope: Record<string, unknown> = {
     schemaVersion: e.schemaVersion,
     tenantId: e.tenantId,
     workspaceId: e.workspaceId,
@@ -735,6 +766,9 @@ function toEnvelopeObject(e: ProviderRequestEnvelopeV1): Record<string, unknown>
     expiresAt: e.expiresAt,
     nonce: e.nonce,
   };
+  // Preserve the byte-for-byte hash of legacy envelopes that predate #229.
+  if (e.policyInputDigest !== undefined) envelope.policyInputDigest = e.policyInputDigest;
+  return envelope;
 }
 
 /** `requestHash` = sha256: hex of the JCS of the request envelope. */
