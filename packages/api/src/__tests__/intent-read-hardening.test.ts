@@ -1,25 +1,67 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import {
+  redactIntentResponseValue,
+  toProviderActionStatusResponse,
+} from "../services/intent-response";
 
 const routeSource = readFileSync(join(import.meta.dir, "..", "routes", "intents.ts"), "utf8");
 
 describe("intent read hardening", () => {
-  it("redacts signed transaction material from stored intent read responses", () => {
-    const responseStart = routeSource.indexOf("function toIntentResponse");
-    expect(responseStart).toBeGreaterThanOrEqual(0);
-    const responseBody = routeSource.slice(
-      responseStart,
-      routeSource.indexOf("function redactSignedTransactions", responseStart),
+  it("behaviorally redacts adversarial nested and array credential shapes", () => {
+    const canary = "intent-hardening-canary";
+    const redacted = redactIntentResponseValue({
+      tokenAddress: "0xabc",
+      nested: [
+        { password: `${canary}-password`, passphrase: `${canary}-passphrase` },
+        { auth: `Bearer ${canary}-auth`, clientSecretValue: `${canary}-client-secret` },
+        { privateKeyPem: `-----BEGIN PRIVATE KEY-----\n${canary}\n-----END PRIVATE KEY-----` },
+        { cookieHeader: `session=${canary}-cookie` },
+        { endpoint: `https://user:${canary}-userinfo@example.test/path` },
+      ],
+    });
+    const text = JSON.stringify(redacted);
+    expect(text).not.toContain(canary);
+    expect(text).toContain('"tokenAddress":"0xabc"');
+  });
+
+  it("provider-action status DTO is an explicit scalar allowlist", () => {
+    const canary = "provider-status-canary";
+    const hostileInput = {
+      id: "pa_00000000-0000-4000-8000-000000000001",
+      status: "pending_approval",
+      version: 1,
+      workspaceId: "20000000-0000-4000-8000-000000000001",
+      providerAccountId: "30000000-0000-4000-8000-000000000001",
+      operationId: "40000000-0000-4000-8000-000000000001",
+      operationRevision: 1,
+      actionDigest: `sha256:${"a".repeat(64)}`,
+      requestHash: `sha256:${"b".repeat(64)}`,
+      expiresAt: null,
+      createdAt: new Date("2026-08-16T00:00:00.000Z"),
+      updatedAt: new Date("2026-08-16T00:00:01.000Z"),
+      payload: { password: canary },
+      safeSummary: { auth: canary },
+    };
+    const status = toProviderActionStatusResponse(hostileInput);
+    expect(Object.keys(status).sort()).toEqual(
+      [
+        "actionDigest",
+        "createdAt",
+        "expiresAt",
+        "id",
+        "operationId",
+        "operationRevision",
+        "providerAccountId",
+        "requestHash",
+        "status",
+        "updatedAt",
+        "version",
+        "workspaceId",
+      ].sort(),
     );
-    expect(responseBody).toContain(
-      "executionResult: redactSignedTransactions(row.executionResult)",
-    );
-    expect(responseBody).toContain(
-      "execution_result: redactSignedTransactions(row.executionResult)",
-    );
-    expect(responseBody).not.toContain("executionResult: row.executionResult");
-    expect(responseBody).not.toContain("execution_result: row.executionResult");
+    expect(JSON.stringify(status)).not.toContain(canary);
   });
 
   it("attributes intent audits to the actual auth type and writes lifecycle authorization audit first", () => {

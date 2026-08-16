@@ -914,6 +914,34 @@ describe("generated OpenAPI contract", () => {
     expect(paths["/v2/provider-grants"]).toHaveProperty("post");
     expect(paths["/v2/provider-grants/{id}/revoke"]).toHaveProperty("post");
     expect(paths["/v2/provider-access/check"]).toHaveProperty("post");
+    expect(paths["/v2/provider-actions/{id}"]).toHaveProperty("get");
+
+    const status = paths["/v2/provider-actions/{id}"].get;
+    expect(status.security).toEqual([{ bearerAuth: [] }]);
+    expect(status.description).toContain("cross-agent");
+    expect(status.description).toContain("human/MFA-gated");
+    const responseStatus =
+      status.responses["200"].content["application/json"].schema.properties.data;
+    expect(responseStatus.additionalProperties).toBe(false);
+    expect(Object.keys(responseStatus.properties).sort()).toEqual(
+      [
+        "actionDigest",
+        "createdAt",
+        "expiresAt",
+        "id",
+        "operationId",
+        "operationRevision",
+        "providerAccountId",
+        "requestHash",
+        "status",
+        "updatedAt",
+        "version",
+        "workspaceId",
+      ].sort(),
+    );
+    expect(responseStatus.properties).not.toHaveProperty("payload");
+    expect(responseStatus.properties).not.toHaveProperty("executionResult");
+    expect(responseStatus.properties).not.toHaveProperty("safeSummary");
   });
 
   it("serves the generated contract at /openapi.json", async () => {

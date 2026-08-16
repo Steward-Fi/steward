@@ -16,14 +16,17 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
+import { getDb, intents, providerActionBindings } from "@stwd/db";
 import { buildGithubAction, isGithubOperationKey } from "@stwd/provider-github";
 import { buildXAction, isXOperationKey } from "@stwd/provider-x";
 import { CanonError, decodeUtf8Strict, isCanonError, strictParseJson } from "@stwd/shared";
+import { and, eq } from "drizzle-orm";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { requireProviderAgentJwt } from "../middleware/agent-jwt";
 import { resolveProviderPrincipal } from "../middleware/provider-principal";
 import { type ApiResponse, type AppVariables, setNoStoreHeaders } from "../services/context";
+import { toProviderActionStatusResponse } from "../services/intent-response";
 import {
   type ProviderActionOutcome,
   providerActionService,
@@ -56,6 +59,16 @@ export function registerProviderActionRoutes(app: Hono<{ Variables: AppVariables
   });
   app.use("/v2/provider-actions", requireProviderAgentJwt);
   app.post("/v2/provider-actions", handleCreateProviderAction);
+
+  // #233: a read-only status view for the authenticated agent's own actions.
+  // Keep this path exact (no wildcard suffix) so the sibling approval, execute,
+  // case, and evidence routes retain their distinct human/MFA gates.
+  app.use("/v2/provider-actions/:id", async (c, next) => {
+    setNoStoreHeaders(c);
+    await next();
+  });
+  app.use("/v2/provider-actions/:id", requireProviderAgentJwt);
+  app.get("/v2/provider-actions/:id", handleGetProviderActionStatus);
 }
 
 const MAX_REQUEST_BYTES = 256 * 1024; // 256 KiB bound
@@ -73,6 +86,60 @@ const TOP_LEVEL_KEYS = new Set([
 
 function deny(c: RouteContext, code: string, status: number) {
   return c.json<ApiResponse>({ ok: false, error: code }, status as never);
+}
+
+function providerActionNotFound(c: RouteContext) {
+  return c.json<ApiResponse>({ ok: false, error: "PROVIDER_ACTION_NOT_FOUND" }, 404);
+}
+
+async function handleGetProviderActionStatus(c: RouteContext) {
+  const principal = resolveProviderPrincipal(c);
+  const intentId = c.req.param("id") ?? "";
+
+  // Provider action ids are currently `pa_` + UUID. Treat malformed ids exactly
+  // like absent/foreign ids so this read surface is non-enumerating.
+  if (!/^pa_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(intentId)) {
+    return providerActionNotFound(c);
+  }
+
+  const [owned] = await getDb()
+    .select({ binding: providerActionBindings, intent: intents })
+    .from(providerActionBindings)
+    .innerJoin(
+      intents,
+      and(
+        eq(intents.id, providerActionBindings.intentId),
+        eq(intents.tenantId, providerActionBindings.tenantId),
+      ),
+    )
+    .where(
+      and(
+        eq(providerActionBindings.intentId, intentId),
+        eq(providerActionBindings.tenantId, principal.tenantId),
+        eq(providerActionBindings.actorAgentId, principal.agentId),
+        eq(intents.intentType, "provider-action"),
+      ),
+    )
+    .limit(1);
+
+  if (!owned) return providerActionNotFound(c);
+  return c.json<ApiResponse>({
+    ok: true,
+    data: toProviderActionStatusResponse({
+      id: owned.binding.intentId,
+      status: owned.binding.status,
+      version: owned.binding.bindingRevision,
+      workspaceId: owned.binding.workspaceId,
+      providerAccountId: owned.binding.providerAccountId,
+      operationId: owned.binding.operationId,
+      operationRevision: owned.binding.operationRevision,
+      actionDigest: owned.binding.actionDigest,
+      requestHash: owned.binding.requestHash,
+      expiresAt: owned.intent.expiresAt,
+      createdAt: owned.binding.createdAt,
+      updatedAt: owned.binding.updatedAt,
+    }),
+  });
 }
 
 function outcomeToResponse(c: RouteContext, outcome: ProviderActionOutcome) {
@@ -254,6 +321,7 @@ async function handleCreateProviderAction(c: RouteContext) {
 // Also register on the standalone sub-app so it can be unit-tested in isolation
 // (and remains a valid mount target if the router behavior changes).
 providerActionRoutes.post("/provider-actions", handleCreateProviderAction);
+providerActionRoutes.get("/provider-actions/:id", handleGetProviderActionStatus);
 
 /** RFC 3339 UTC with exactly three fractional digits and trailing Z. */
 function toRfc3339Millis(d: Date): string {

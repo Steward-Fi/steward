@@ -60,6 +60,7 @@ const intentTypeSchema: JsonSchema = {
     "policy_rule_update",
     "quorum_update",
     "wallet_action",
+    "provider-action",
   ],
 };
 const intentSchema: JsonSchema = {
@@ -104,6 +105,39 @@ const intentSchema: JsonSchema = {
     executedAt: { type: ["string", "null"], format: "date-time" },
     createdAt: dateTimeSchema,
     created_at: { type: "integer" },
+    updatedAt: dateTimeSchema,
+  },
+};
+
+const providerActionStatusSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "id",
+    "status",
+    "version",
+    "workspaceId",
+    "providerAccountId",
+    "operationId",
+    "operationRevision",
+    "actionDigest",
+    "requestHash",
+    "expiresAt",
+    "createdAt",
+    "updatedAt",
+  ],
+  properties: {
+    id: stringSchema,
+    status: stringSchema,
+    version: { type: "integer", minimum: 1 },
+    workspaceId: stringSchema,
+    providerAccountId: stringSchema,
+    operationId: stringSchema,
+    operationRevision: { type: "integer", minimum: 1 },
+    actionDigest: stringSchema,
+    requestHash: stringSchema,
+    expiresAt: { type: ["string", "null"], format: "date-time" },
+    createdAt: dateTimeSchema,
     updatedAt: dateTimeSchema,
   },
 };
@@ -297,6 +331,28 @@ function providerAuthorityPaths(): Record<string, OpenApiPathItem> {
           content: { "application/json": { schema: metadataSchema } },
         },
         responses: { "200": jsonResponse(apiResponse(metadataSchema)), ...errorResponses() },
+      },
+    },
+    "/v2/provider-actions/{id}": {
+      parameters: [parameter("id", "path")],
+      get: {
+        tags: ["Provider Authority"],
+        summary: "Get the authenticated agent's own provider-action status",
+        description:
+          "Requires an agent JWT. The action is scoped server-side to the verified tenant and agent; absent, malformed, cross-agent, and cross-tenant ids all return the same 404 response. This route does not grant access to the human/MFA-gated approval, case, or evidence surfaces.",
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          headerParameter(
+            "X-Steward-Tenant",
+            "Tenant containing the authenticated agent. It is checked against the verified agent principal and never selects a foreign action.",
+          ),
+        ],
+        responses: {
+          "200": jsonResponse(apiResponse(providerActionStatusSchema)),
+          "401": jsonResponse(errorResponse()),
+          "403": jsonResponse(errorResponse()),
+          "404": jsonResponse(errorResponse()),
+        },
       },
     },
   };

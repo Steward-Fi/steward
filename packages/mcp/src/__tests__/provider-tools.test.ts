@@ -76,7 +76,7 @@ describe("governed provider action tools", () => {
 
   test("uses only fixed status, approval, case, and evidence routes", async () => {
     const routes = {
-      [`/intents/${ACTION_ID}`]: { status: "authorized" },
+      [`/v2/provider-actions/${ACTION_ID}`]: { status: "authorized" },
       [`/v2/provider-actions/${ACTION_ID}/approval`]: { status: "pending" },
       [`/v2/provider-actions/${ACTION_ID}/case`]: { kind: "case" },
       [`/v2/provider-actions/${ACTION_ID}/evidence`]: { kind: "evidence" },
@@ -87,6 +87,29 @@ describe("governed provider action tools", () => {
       expect(result.isError).toBeUndefined();
     }
     expect(calls.map((call) => call.path)).toEqual(Object.keys(routes));
+  });
+
+  test("status uses the agent-scoped route and preserves its least-privilege DTO", async () => {
+    const status = {
+      ok: true,
+      data: {
+        id: ACTION_ID,
+        status: "pending_approval",
+        version: 1,
+        workspaceId: "20000000-0000-4000-8000-000000000001",
+        providerAccountId: "30000000-0000-4000-8000-000000000001",
+        operationId: "40000000-0000-4000-8000-000000000001",
+        operationRevision: 1,
+      },
+    };
+    const path = `/v2/provider-actions/${ACTION_ID}`;
+    const { tools, calls } = harness({ [path]: status });
+
+    const result = await tools.get("provider_action_status")!.handler({ actionId: ACTION_ID });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toEqual(status);
+    expect(calls).toEqual([{ path, init: undefined }]);
   });
 
   test("rejects tenant, workspace substitution, host injection, and unknown keys", async () => {
