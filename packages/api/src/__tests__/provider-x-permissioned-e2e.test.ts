@@ -66,6 +66,7 @@ import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { estimateXPostMicros, X_POST_PRICE_TABLE_V1 } from "@stwd/policy-engine";
 import { buildXAction } from "@stwd/provider-x";
 import {
+  computeProviderPolicyInputDigest,
   computeXActionDigest,
   jcsStringify,
   sha256HexPrefixed,
@@ -365,6 +366,72 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
     expect(out.kind).toBe("allowed");
     if (out.kind !== "allowed") throw new Error(`got ${out.kind}`);
     expect(out.stub.status).toBe("stub_succeeded");
+  });
+
+  test("policy-input replay identity: exact summoned replay returns the original outcome", async () => {
+    await seed([
+      allowRule("11111111-1111-4111-8111-1111111111b2", { replyPolicy: { mode: "summoned-only" } }),
+    ]);
+    const args = {
+      text: "thanks for the mention!",
+      replyToTweetId: "1750000000000000000",
+      summoned: true,
+    };
+    const first = await propose(args, "summon-idem-exact");
+    expect(first.kind).toBe("allowed");
+    if (first.kind !== "allowed") throw new Error(`got ${first.kind}`);
+
+    const replay = await propose(args, "summon-idem-exact");
+    expect(replay.kind).toBe("allowed");
+    if (replay.kind !== "allowed") throw new Error(`got ${replay.kind}`);
+    expect(replay.intentId).toBe(first.intentId);
+
+    const binding = await bindingRow(first.intentId);
+    const envelope = binding.requestEnvelope as Record<string, unknown>;
+    const build = buildXAction(OP_TWEET as never, args);
+    expect(envelope.policyInputDigest).toBe(computeProviderPolicyInputDigest(build.policyArgs));
+    // Only the digest is persisted in the replay envelope: no policy args or
+    // raw tweet text cross this durability boundary.
+    expect(envelope).not.toHaveProperty("policyArgs");
+    expect(JSON.stringify(envelope)).not.toContain(args.text);
+  });
+
+  test.each([
+    ["denied false -> allowed true", false, true, "summon-idem-danger"],
+    ["allowed true -> denied false", true, false, "summon-idem-benign"],
+  ])("policy-input replay identity conflicts on %s with the same outbound action", async (_case, firstSummoned, replaySummoned, key) => {
+    await seed([
+      allowRule("11111111-1111-4111-8111-1111111111b2", {
+        replyPolicy: { mode: "summoned-only" },
+      }),
+    ]);
+    const base = {
+      text: "thanks for the mention!",
+      replyToTweetId: "1750000000000000000",
+    };
+    const firstBuild = buildXAction(OP_TWEET as never, {
+      ...base,
+      summoned: firstSummoned,
+    });
+    const replayBuild = buildXAction(OP_TWEET as never, {
+      ...base,
+      summoned: replaySummoned,
+    });
+    // `summoned` remains policy-only: outbound canonical bytes/digest are
+    // identical, while the separate replay identity is intentionally not.
+    expect(computeXActionDigest(firstBuild.action)).toBe(computeXActionDigest(replayBuild.action));
+    expect(computeProviderPolicyInputDigest(firstBuild.policyArgs)).not.toBe(
+      computeProviderPolicyInputDigest(replayBuild.policyArgs),
+    );
+
+    const first = await propose({ ...base, summoned: firstSummoned }, key);
+    expect(first.kind).toBe(firstSummoned ? "allowed" : "policy_denied");
+    const replay = await propose({ ...base, summoned: replaySummoned }, key);
+    expect(replay).toEqual({
+      kind: "replay_conflict",
+      code: "REPLAY_IDEMPOTENCY_CONFLICT",
+      httpStatus: 409,
+    });
   });
 
   test("contentPolicy blockedPatterns: a blocked-pattern post is policy_denied via in-memory policyText", async () => {
