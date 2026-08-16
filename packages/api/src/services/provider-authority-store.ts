@@ -13,6 +13,8 @@ import {
   workspaces,
 } from "@stwd/db";
 import {
+  GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+  genericDescriptorAllowsExactPath,
   PROVIDER_ACCESS_REASON,
   type ProviderAccessDecisionV1,
   type ProviderAccessRequestV1,
@@ -20,6 +22,7 @@ import {
   type ProviderEnvironment,
   type ProviderPrincipalType,
   type ProviderRiskClass,
+  validateGenericHttpDescriptor,
 } from "@stwd/shared";
 import { and, eq, inArray, sql } from "drizzle-orm";
 
@@ -43,6 +46,7 @@ const PROVIDER_HOST_ALLOWLIST: Readonly<Record<string, string>> = {
   github: "api.github.com",
   x: "api.x.com",
 };
+const REGISTERED_ADAPTER_KEYS = new Set(["github", "x", "generic-http"]);
 const ENVIRONMENTS = new Set(["development", "staging", "production"]);
 const PRINCIPAL_TYPES = new Set(["human", "agent"]);
 const ROLES = new Set([
@@ -450,6 +454,10 @@ export class ProviderAuthorityStore {
       if (!secret || (secret.expiresAt && secret.expiresAt <= new Date()))
         throw new ProviderAuthorityError("resource not found", "not_found", 404);
     }
+    const adapterKey = assertText(input.adapterKey, "adapterKey", 128);
+    if (!REGISTERED_ADAPTER_KEYS.has(adapterKey)) {
+      throw new ProviderAuthorityError("adapter is not registered", "bad_request", 400);
+    }
     const id = randomUUID();
     await ctx.audit({
       action: "provider.account.create",
@@ -481,7 +489,7 @@ export class ProviderAuthorityStore {
           id,
           tenantId: ctx.tenantId,
           workspaceId: workspace.id,
-          adapterKey: assertText(input.adapterKey, "adapterKey", 128),
+          adapterKey,
           externalRef: assertText(input.externalRef, "externalRef", 512),
           displayName: assertText(input.displayName, "displayName", 255),
           credentialSecretId: input.credentialSecretId,
@@ -585,13 +593,32 @@ export class ProviderAuthorityStore {
       throw new ProviderAuthorityError("invalid riskClass", "bad_request", 400);
     if (!OPERATION_KEY.test(operationKey))
       throw new ProviderAuthorityError("invalid operationKey", "bad_request", 400);
-    const allowedMethod = PROVIDER_OPERATION_ALLOWLIST[account.adapterKey]?.[operationKey];
-    if (!allowedMethod)
-      throw new ProviderAuthorityError(
-        "operation is not in the adapter allowlist",
-        "forbidden",
-        403,
-      );
+    let allowedMethods: readonly string[];
+    let genericDescriptor: ReturnType<typeof validateGenericHttpDescriptor> | undefined;
+    if (account.adapterKey === "generic-http") {
+      try {
+        if (input.requestProfile?.profile !== GENERIC_HTTP_PROVIDER_ACTION_PROFILE) {
+          throw new Error("profile mismatch");
+        }
+        genericDescriptor = validateGenericHttpDescriptor(input.requestProfile.operationDescriptor);
+        allowedMethods = genericDescriptor.methods;
+      } catch {
+        throw new ProviderAuthorityError(
+          "invalid generic-http operation descriptor",
+          "bad_request",
+          400,
+        );
+      }
+    } else {
+      const fixedMethod = PROVIDER_OPERATION_ALLOWLIST[account.adapterKey]?.[operationKey];
+      if (!fixedMethod)
+        throw new ProviderAuthorityError(
+          "operation is not in the adapter allowlist",
+          "forbidden",
+          403,
+        );
+      allowedMethods = [fixedMethod];
+    }
     if (input.secretRouteId) {
       const [route] = await this.db()
         .select()
@@ -604,13 +631,22 @@ export class ProviderAuthorityStore {
           ),
         )
         .limit(1);
-      const expectedHost = PROVIDER_HOST_ALLOWLIST[account.adapterKey];
+      const expectedHost = genericDescriptor
+        ? new URL(genericDescriptor.origin).hostname
+        : PROVIDER_HOST_ALLOWLIST[account.adapterKey];
+      const method = route?.method?.toUpperCase();
+      const pathAllowed = genericDescriptor
+        ? Boolean(
+            route?.pathPattern &&
+              genericDescriptorAllowsExactPath(genericDescriptor, route.pathPattern),
+          )
+        : Boolean(route?.pathPattern && !route.pathPattern.includes("*"));
       if (
         !route ||
         route.hostPattern !== expectedHost ||
-        route.method !== allowedMethod ||
-        !route.pathPattern ||
-        route.pathPattern.includes("*")
+        !method ||
+        !allowedMethods.includes(method) ||
+        !pathAllowed
       ) {
         throw new ProviderAuthorityError(
           "route target would widen the adapter operation",
