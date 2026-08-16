@@ -110,12 +110,12 @@ jobs:
           RESOLVED_TAG: ${{ steps.resolve.outputs.tag }}
           DRY_RUN: ${{ steps.flags.outputs.dry_run }}
         run: |
-          ARGS="$RESOLVED_TAG"
+          ARGS=("$RESOLVED_TAG")
           if [[ "$DRY_RUN" == "true" ]]; then
-            ARGS="${ARGS} --dry-run"
+            ARGS+=("--dry-run")
           fi
           chmod +x scripts/railway-deploy.sh
-          ./scripts/railway-deploy.sh $ARGS
+          ./scripts/railway-deploy.sh "${ARGS[@]}"
 
       # Update deployment status on success
       - name: Update deployment status (success)
