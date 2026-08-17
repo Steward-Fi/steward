@@ -275,6 +275,170 @@ describe("trade policy audit", () => {
     });
   });
 
+  it("SEC-114: sizes market orders (no limitPx) against caps instead of rejecting a zero estimate", async () => {
+    const tenantId = `tenant-trade-mkt-${Date.now()}`;
+    const agentId = `agent-trade-mkt-${Date.now()}`;
+    const sessionId = `ses_${crypto.randomUUID()}`;
+
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: tenantId,
+        name: "Trade Market Order Test Tenant",
+        apiKeyHash: `test-hash-${tenantId}`,
+        ownerAddress: `0x${crypto.randomUUID().replace(/-/g, "").slice(0, 40).padEnd(40, "0")}`,
+      });
+    await getDb().insert(agents).values({
+      id: agentId,
+      tenantId,
+      name: "Trade Market Order Test Agent",
+      walletAddress: "0x0000000000000000000000000000000000000001",
+    });
+    await getDb()
+      .insert(tradeSessions)
+      .values({
+        id: sessionId,
+        tenantId,
+        agentId,
+        venue: "hyperliquid",
+        walletId: "0x0000000000000000000000000000000000000001",
+        status: "active",
+        dailySpendUsd: "0",
+        dailyCapUsd: "100000",
+        perOrderCapUsd: "50",
+        leverageCap: "2",
+        allowedAssets: ["BTC", "ETH"],
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+
+    globalThis.fetch = mock(async (_input: unknown, init?: RequestInit) => {
+      const venueCall = JSON.parse(String(init?.body ?? "{}")) as { type?: string };
+      if (venueCall.type === "l2Book") {
+        return new Response(
+          JSON.stringify({ levels: [[{ px: "59000", sz: "1" }], [{ px: "60000", sz: "1" }]] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ BTC: "60000", ETH: "3000" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    process.env.STEWARD_MASTER_PASSWORD ??= "test-master-password";
+    const { createTradeRoutes } = await import("../routes/trade");
+    const { testCtx } = await import("./_ctx");
+    const app = new Hono<{
+      Variables: {
+        tenantId: string;
+        agentScope: string;
+        authType: string;
+      };
+    }>();
+    app.use("*", async (c, next) => {
+      c.set("tenantId", tenantId);
+      c.set("agentScope", agentId);
+      c.set("authType", "agent");
+      await next();
+    });
+    app.route("/v1/trade", createTradeRoutes(testCtx()));
+
+    // No limitPx: the preliminary check must not reject on a zero USD estimate
+    // ("estimated order USD is required"); the order is sized from the live book
+    // (60000 ask * 1.005 marketable markup = 60300) and the real cap verdict
+    // applies.
+    const res = await app.request("/v1/trade/hyperliquid/order", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({
+        sessionId,
+        asset: "BTC",
+        side: "buy",
+        size: 1,
+        leverage: 1,
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      code: "policy-violation",
+      reason: "per-order-cap: order $60300 exceeds cap $50",
+    });
+  });
+
+  it("SEC-114: market orders (no limitPx) are still pre-checked for venue/asset/leverage", async () => {
+    const tenantId = `tenant-trade-mktlev-${Date.now()}`;
+    const agentId = `agent-trade-mktlev-${Date.now()}`;
+    const sessionId = `ses_${crypto.randomUUID()}`;
+
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: tenantId,
+        name: "Trade Market Leverage Test Tenant",
+        apiKeyHash: `test-hash-${tenantId}`,
+        ownerAddress: `0x${crypto.randomUUID().replace(/-/g, "").slice(0, 40).padEnd(40, "0")}`,
+      });
+    await getDb().insert(agents).values({
+      id: agentId,
+      tenantId,
+      name: "Trade Market Leverage Test Agent",
+      walletAddress: "0x0000000000000000000000000000000000000001",
+    });
+    await getDb()
+      .insert(tradeSessions)
+      .values({
+        id: sessionId,
+        tenantId,
+        agentId,
+        venue: "hyperliquid",
+        walletId: "0x0000000000000000000000000000000000000001",
+        status: "active",
+        dailySpendUsd: "0",
+        dailyCapUsd: "100",
+        perOrderCapUsd: "50",
+        leverageCap: "2",
+        allowedAssets: ["BTC", "ETH"],
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+
+    process.env.STEWARD_MASTER_PASSWORD ??= "test-master-password";
+    const { createTradeRoutes } = await import("../routes/trade");
+    const { testCtx } = await import("./_ctx");
+    const app = new Hono<{
+      Variables: {
+        tenantId: string;
+        agentScope: string;
+        authType: string;
+      };
+    }>();
+    app.use("*", async (c, next) => {
+      c.set("tenantId", tenantId);
+      c.set("agentScope", agentId);
+      c.set("authType", "agent");
+      await next();
+    });
+    app.route("/v1/trade", createTradeRoutes(testCtx()));
+
+    const res = await app.request("/v1/trade/hyperliquid/order", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({
+        sessionId,
+        asset: "ETH",
+        side: "buy",
+        size: 1,
+        leverage: 3,
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      code: "policy-violation",
+      reason: "leverage-cap: leverage 3 exceeds cap 2",
+    });
+  });
+
   it("rejects non-decimal Hyperliquid prices before policy reservation", async () => {
     const tenantId = `tenant-trade-price-${Date.now()}`;
     const agentId = `agent-trade-price-${Date.now()}`;

@@ -18,7 +18,12 @@
 
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 import { agentPolicies, eq, getDb, proxyAuditLog } from "@stwd/db";
-import { evaluateTradeOrder } from "@stwd/policy-engine";
+import {
+  assetAllowlistEvaluator,
+  evaluateTradeOrder,
+  tradeLeverageCapEvaluator,
+  tradeVenueAllowlistEvaluator,
+} from "@stwd/policy-engine";
 import { checkRateLimit } from "@stwd/redis";
 import type { ApiResponse, AppVariables } from "@stwd/shared";
 import { type TradeSession, TradeSessionManager } from "@stwd/trade-sessions";
@@ -1011,7 +1016,16 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       );
     }
     if (limitPx === undefined) {
-      const preliminaryPolicy = orderPolicy(0);
+      // SEC-114: marketable order without an explicit limit — the notional is
+      // unknown until resolveSizingPx floors the price below, so the USD-cap
+      // evaluators cannot run yet (they fail closed on a zero estimate and
+      // would reject every market order). Pre-check venue/asset/leverage only;
+      // caps are still enforced on the sized notional right after.
+      const preliminaryPolicy = evaluateTradeOrder(
+        sessionPolicy,
+        { venue: "hyperliquid", asset: coin, leverage: effectiveLeverage },
+        [tradeVenueAllowlistEvaluator, assetAllowlistEvaluator, tradeLeverageCapEvaluator],
+      );
       if (!preliminaryPolicy.allow) {
         return rejectPolicy(preliminaryPolicy.reason ?? "order violates trading policy", 0);
       }
