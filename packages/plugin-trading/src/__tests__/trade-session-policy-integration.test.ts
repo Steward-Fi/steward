@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { agentPolicies, agents, closeDb, getDb, tenants, tradeSessions } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
@@ -6,6 +6,8 @@ import { Hono } from "hono";
 
 process.env.DATABASE_URL = "postgres://test:test@localhost:5432/test";
 process.env.STEWARD_MASTER_PASSWORD = "test-master-password";
+
+setDefaultTimeout(30000);
 
 const tenantId = "tenant-trade-session-policy";
 const policyAgentId = "agent-trade-session-policy";

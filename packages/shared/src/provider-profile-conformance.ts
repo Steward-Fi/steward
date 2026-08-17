@@ -60,20 +60,24 @@ export function inspectProviderProfileConformance(
 
   for (const segment of action.normalizedPath.split("/").slice(1)) {
     let decoded = segment;
-    for (let depth = 0; depth < 3; depth += 1) {
+    // Decode to a fixed point instead of assuming how many intermediaries may
+    // decode a path. Every changing decode consumes at least one `%XX` escape
+    // and therefore strictly shortens the string, so the original length is a
+    // conservative bound that cannot become an unbounded CPU loop.
+    for (let depth = 0; depth <= segment.length; depth += 1) {
       let next: string;
       try {
         next = decodeURIComponent(decoded);
       } catch {
-        if (depth === 0) violations.push("path-encoding-invalid");
+        violations.push("path-encoding-invalid");
+        break;
+      }
+      if (next === "." || next === ".." || next.includes("/") || next.includes("\\")) {
+        violations.push("path-traversal");
         break;
       }
       if (next === decoded) break;
       decoded = next;
-      if (decoded === "." || decoded === ".." || decoded.includes("/") || decoded.includes("\\")) {
-        violations.push("path-traversal");
-        break;
-      }
     }
   }
 
