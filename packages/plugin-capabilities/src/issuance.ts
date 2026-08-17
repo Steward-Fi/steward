@@ -143,7 +143,10 @@ export function clampTtlSeconds(requested: number | undefined): number | null {
 
 /** The scope string a token-mode capability token carries. Namespaced by the
  * manifest identifier so a minted token authorizes EXACTLY this capability and
- * nothing else (least privilege). */
+ * nothing else (least privilege). A capability token carries ONLY this scope —
+ * never the broad `agent` scope, which the tenant surface would accept as a
+ * general agent credential (the tenant gate also refuses any token carrying a
+ * `cap:` scope, so the two halves fail closed together). */
 export function capabilityTokenScope(manifest: string): string {
   return `cap:${manifest}`;
 }
@@ -238,7 +241,10 @@ export async function issueCapability(args: {
     };
   }
 
-  const scopes = ["agent", capabilityTokenScope(args.manifest)];
+  // Least privilege: ONLY the capability scope. Adding the broad `agent`
+  // scope here would make the token a general agent credential for up to its
+  // TTL (trade-session self-management, token-status reads, ...).
+  const scopes = [capabilityTokenScope(args.manifest)];
   let minted: { token: string; jti: string };
   try {
     minted = await args.mintToken({

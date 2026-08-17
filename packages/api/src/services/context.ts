@@ -93,6 +93,12 @@ export const isWorkersRuntime =
 export const JWT_EXPIRY = ACCESS_TOKEN_EXPIRY;
 export const AGENT_SCOPE = "agent";
 export const PROXY_SCOPE = "api:proxy";
+/** Scope prefix on tokens minted by the capability issuance layer
+ * (`cap:<manifest>`, see @stwd/plugin-capabilities — the core never imports
+ * plugin packages, so the prefix is mirrored here). These are least-privilege
+ * credentials for the capability surface ONLY; the tenant gate below refuses
+ * them so they can never act as general agent credentials. */
+export const CAPABILITY_TOKEN_SCOPE_PREFIX = "cap:";
 
 export function normalizeAgentTokenScopes(scopes?: string[]): string[] {
   if (!scopes || scopes.length === 0) return [AGENT_SCOPE];
@@ -704,7 +710,15 @@ export async function tenantAuth(
         }
 
         const isAgentToken = payload.scope === "agent" && typeof payload.agentId === "string";
+        const agentTokenScopes = normalizeAgentTokenScopes(payload.scopes);
         if (isAgentToken) {
+          // Fail closed: a capability-scoped token (`cap:<manifest>`) is a
+          // least-privilege credential for the capability surface only. Refuse
+          // it on the general tenant surface even if a minter stamped the
+          // broad `agent` scope alongside it.
+          if (agentTokenScopes.some((scope) => scope.startsWith(CAPABILITY_TOKEN_SCOPE_PREFIX))) {
+            return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
+          }
           const agent = await ensureAgentForTenant(payload.tenantId, payload.agentId as string);
           if (!agent) {
             return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 403);
@@ -793,7 +807,7 @@ export async function tenantAuth(
             "agentSubject",
             typeof tokenSubject === "string" ? tokenSubject : `agent:${payload.agentId}`,
           );
-          c.set("agentScopes", normalizeAgentTokenScopes(payload.scopes));
+          c.set("agentScopes", agentTokenScopes);
           c.set("authType", "agent-token");
         } else {
           if (typeof payload.mfaVerifiedAt === "number") {

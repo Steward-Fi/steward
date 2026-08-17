@@ -30,10 +30,12 @@ for a provider we have not deliberately classified as token-safe).
 ```
 POST /capabilities/manifest/github:app:org/issue   { "ttlSeconds": 120 }
 → { "mode": "token", "token": "<short-lived JWT>", "ttlSeconds": 120,
-    "scopes": ["agent", "cap:github:app:org"] }
+    "scopes": ["cap:github:app:org"] }
 ```
 The token is a minute-scale agent JWT scoped to exactly this capability
-(`cap:<manifest-id>`). The agent renews before expiry (`.../renew`).
+(`cap:<manifest-id>`) — it carries ONLY the `cap:` scope (never the broad
+`agent` scope) and the tenant surface refuses `cap:`-scoped tokens, so it is
+not a general agent credential. The agent renews before expiry (`.../renew`).
 
 ### broker mode
 ```
