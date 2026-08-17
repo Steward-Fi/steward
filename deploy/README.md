@@ -112,7 +112,7 @@ STEWARD_BIND_HOST=0.0.0.0
 NODE_ENV=production
 
 # Database
-DATABASE_URL=postgresql://steward:password@your-db-host/steward?sslmode=require
+DATABASE_URL=postgresql://steward:password@your-db-host/steward?sslmode=verify-full
 
 # Vault encryption — 32+ random bytes, hex-encoded
 STEWARD_MASTER_PASSWORD=<run: openssl rand -hex 32>

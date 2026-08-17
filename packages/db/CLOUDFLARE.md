@@ -23,7 +23,7 @@ TCP using `DATABASE_URL` and applies any pending files in
 # 1. Get a TCP-capable Postgres URL for your Neon database.
 #    (Neon's pooler URL works; the HTTP-only URL does not — drizzle-kit needs
 #     a real connection.)
-export DATABASE_URL="postgres://USER:PASS@ep-XYZ.us-east-2.aws.neon.tech/dbname?sslmode=require"
+export DATABASE_URL="postgres://USER:PASS@ep-XYZ.us-east-2.aws.neon.tech/dbname?sslmode=verify-full"
 
 # 2. Apply all pending migrations.
 cd packages/db

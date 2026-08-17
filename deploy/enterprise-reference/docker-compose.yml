@@ -24,6 +24,7 @@ services:
       # network, but an operator-supplied external DATABASE_URL must never
       # inherit this silently.
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:?required for the internal plaintext Postgres profile}"
+      STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,6 +76,7 @@ services:
       PASSKEY_ORIGIN: "${PASSKEY_ORIGIN:-https://steward.localhost}"
       SKIP_MIGRATIONS: "true"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:?required for the internal plaintext Postgres profile}"
+      STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
     depends_on:
       steward-migrate:
         condition: service_completed_successfully
@@ -113,6 +115,7 @@ services:
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?required}"
       STEWARD_PROXY_REQUEST_SIGNING_SECRETS: "${STEWARD_PROXY_REQUEST_SIGNING_SECRETS:?required}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:?required for the internal plaintext Postgres profile}"
+      STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
     depends_on:
       steward-api:
         condition: service_healthy

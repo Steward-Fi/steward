@@ -57,21 +57,21 @@ export function getDatabaseUrl(): string {
 }
 
 /**
- * Refuse to start in production if DATABASE_URL is not using TLS (sslmode=require
- * or stricter). Localhost connections are exempt. Set STEWARD_ALLOW_INSECURE_DB=true
- * to override for private-network deployments (logs a loud warning).
+ * Refuse to start in production if DATABASE_URL is not using authenticated TLS.
+ * Localhost connections are exempt. STEWARD_ALLOW_INSECURE_DB=true is a separate
+ * acknowledgement for intentionally plaintext private-network deployments.
  *
  * SEC-087: postgres-js treats `sslmode=require` as TLS WITHOUT server certificate
  * verification — the connection is encrypted but MITM-able on a hostile network.
  * Only `verify-ca` / `verify-full` (with `sslrootcert`) authenticate the peer.
- * `require` is still accepted (hard-rejecting it would break every existing
- * deployment; that is a product decision) but logs a loud warning steering
- * operators to `verify-full`.
+ * `require` is accepted only with STEWARD_ALLOW_UNVERIFIED_DB_TLS=true, which
+ * deliberately acknowledges encryption without peer authentication.
  */
 export function assertDatabaseUrlTls(connectionString: string): void {
   if (process.env.NODE_ENV !== "production") return;
 
   const allowInsecure = process.env.STEWARD_ALLOW_INSECURE_DB === "true";
+  const allowUnverifiedTls = process.env.STEWARD_ALLOW_UNVERIFIED_DB_TLS === "true";
   let parsed: URL;
   try {
     parsed = new URL(connectionString);
@@ -101,11 +101,17 @@ export function assertDatabaseUrlTls(connectionString: string): void {
     sslModes.length === 1 && ["require", "verify-ca", "verify-full"].includes(sslModes[0]);
   if (hasTls) {
     if (sslModes[0] === "require") {
+      if (!allowUnverifiedTls) {
+        throw new Error(
+          "DATABASE_URL sslmode=require does not authenticate the database server in " +
+            "production. Use sslmode=verify-full (recommended) or explicitly set " +
+            "STEWARD_ALLOW_UNVERIFIED_DB_TLS=true to acknowledge this MITM risk.",
+        );
+      }
       console.warn(
-        "[db] WARNING: sslmode=require encrypts the database connection but does NOT verify " +
-          "the server certificate (postgres-js treats it as TLS without peer authentication), " +
-          "so it is MITM-able on a hostile network. Use sslmode=verify-full with sslrootcert " +
-          "for production (SEC-087).",
+        "[db] WARNING: STEWARD_ALLOW_UNVERIFIED_DB_TLS=true permits sslmode=require, which " +
+          "encrypts the database connection without authenticating the server. Use " +
+          "sslmode=verify-full for production (SEC-087).",
       );
     }
     return;
@@ -120,8 +126,7 @@ export function assertDatabaseUrlTls(connectionString: string): void {
   }
 
   throw new Error(
-    "DATABASE_URL must include sslmode=verify-full (recommended, with sslrootcert) or " +
-      "sslmode=require (minimum; does not verify the server certificate) in production. " +
+    "DATABASE_URL must include sslmode=verify-full (recommended) or sslmode=verify-ca in production. " +
       "Set STEWARD_ALLOW_INSECURE_DB=true to override for private-network deployments.",
   );
 }
