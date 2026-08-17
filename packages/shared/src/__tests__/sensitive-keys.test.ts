@@ -9,6 +9,12 @@ describe("sensitive credential keys", () => {
       "passphrase",
       "wallet-passphrase",
       "auth",
+      "basicAuth",
+      "oauth",
+      "authorizationHeader",
+      "access_token_value",
+      "apiKeyValue",
+      "passwordValue",
       "clientSecretValue",
       "oauth_client_secret_value",
       "cookieHeader",
@@ -20,7 +26,16 @@ describe("sensitive credential keys", () => {
       expect(isSensitiveCredentialKey(key), key).toBe(true);
     }
 
-    for (const key of ["author", "authenticationMode", "cookiePolicy", "tokenCount", "key"]) {
+    for (const key of [
+      "author",
+      "authenticationMode",
+      "cookiePolicy",
+      "tokenAddress",
+      "tokenCount",
+      "passwordless",
+      "secretSanta",
+      "key",
+    ]) {
       expect(isSensitiveCredentialKey(key), key).toBe(false);
     }
   });
@@ -43,5 +58,18 @@ describe("sensitive credential keys", () => {
     });
     expect(containsSensitiveCredentialKey(input)).toBe(true);
     expect(invoked).toBe(false);
+  });
+
+  test("fails closed on cycles and excessive depth but permits repeated references", () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    expect(containsSensitiveCredentialKey(cyclic)).toBe(true);
+
+    let deep: Record<string, unknown> = {};
+    for (let i = 0; i < 22; i++) deep = { nested: deep };
+    expect(containsSensitiveCredentialKey(deep)).toBe(true);
+
+    const shared = { public: "safe" };
+    expect(containsSensitiveCredentialKey({ left: shared, right: shared })).toBe(false);
   });
 });

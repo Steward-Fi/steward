@@ -15,6 +15,7 @@ const SENSITIVE_CREDENTIAL_KEYS = new Set([
 ]);
 
 const SENSITIVE_CREDENTIAL_KEY_SUFFIXES = [
+  "auth",
   "authorization",
   "cookie",
   "cookieheader",
@@ -29,6 +30,8 @@ const SENSITIVE_CREDENTIAL_KEY_SUFFIXES = [
   "clientsecretvalue",
 ];
 
+const SENSITIVE_CREDENTIAL_KEY_DECORATORS = ["header", "value"];
+
 function normalizeSensitiveKey(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
@@ -36,9 +39,16 @@ function normalizeSensitiveKey(key: string): string {
 /** Return true when a field name conventionally carries credential material. */
 export function isSensitiveCredentialKey(key: string): boolean {
   const normalized = normalizeSensitiveKey(key);
-  return (
-    SENSITIVE_CREDENTIAL_KEYS.has(normalized) ||
-    SENSITIVE_CREDENTIAL_KEY_SUFFIXES.some((suffix) => normalized.endsWith(suffix))
+  const candidates = [
+    normalized,
+    ...SENSITIVE_CREDENTIAL_KEY_DECORATORS.flatMap((decorator) =>
+      normalized.endsWith(decorator) ? [normalized.slice(0, -decorator.length)] : [],
+    ),
+  ];
+  return candidates.some(
+    (candidate) =>
+      SENSITIVE_CREDENTIAL_KEYS.has(candidate) ||
+      SENSITIVE_CREDENTIAL_KEY_SUFFIXES.some((suffix) => candidate.endsWith(suffix)),
   );
 }
 

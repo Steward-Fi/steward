@@ -11,7 +11,8 @@ import type { ProviderActionInvokeInput } from "@stwd/sdk";
 import { containsSensitiveCredentialKey } from "@stwd/shared";
 import type { StewardService } from "../services/StewardService.js";
 
-function canonicalize(value: unknown, ancestors = new Set<object>()): unknown {
+function canonicalize(value: unknown, ancestors = new Set<object>(), depth = 0): unknown {
+  if (depth > 20) throw new TypeError("provider action arguments are nested too deeply");
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new TypeError("non-finite provider action number");
@@ -30,7 +31,7 @@ function canonicalize(value: unknown, ancestors = new Set<object>()): unknown {
       }
     }
     if (Array.isArray(value)) {
-      return value.map((item) => canonicalize(item, ancestors));
+      return value.map((item) => canonicalize(item, ancestors, depth + 1));
     }
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) {
@@ -39,7 +40,7 @@ function canonicalize(value: unknown, ancestors = new Set<object>()): unknown {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-        .map(([key, nested]) => [key, canonicalize(nested, ancestors)]),
+        .map(([key, nested]) => [key, canonicalize(nested, ancestors, depth + 1)]),
     );
   } finally {
     ancestors.delete(value);
@@ -116,13 +117,18 @@ export const providerAction: Action = {
     options?: HandlerOptions,
   ): Promise<ActionResult> {
     const params = options?.parameters ?? {};
+    const workspaceId = params.workspaceId;
+    const providerAccountId = params.providerAccountId;
+    const operationKey = params.operationKey;
+    const actionArguments = params.arguments;
+    const explicitIdempotencyKey = params.idempotencyKey;
     if (
-      typeof params.workspaceId !== "string" ||
-      typeof params.providerAccountId !== "string" ||
-      typeof params.operationKey !== "string" ||
-      !params.arguments ||
-      typeof params.arguments !== "object" ||
-      Array.isArray(params.arguments)
+      typeof workspaceId !== "string" ||
+      typeof providerAccountId !== "string" ||
+      typeof operationKey !== "string" ||
+      !actionArguments ||
+      typeof actionArguments !== "object" ||
+      Array.isArray(actionArguments)
     ) {
       return {
         success: false,
@@ -130,8 +136,9 @@ export const providerAction: Action = {
         text: "A governed provider action needs a workspace, provider account, operation, and public arguments.",
       };
     }
+    let canonicalArguments: Record<string, unknown>;
     try {
-      canonicalize(params.arguments);
+      canonicalArguments = canonicalize(actionArguments) as Record<string, unknown>;
     } catch {
       return {
         success: false,
@@ -139,7 +146,7 @@ export const providerAction: Action = {
         text: "Provider action was not submitted because its public arguments were not plain JSON values.",
       };
     }
-    if (containsSensitiveCredentialKey(params.arguments)) {
+    if (containsSensitiveCredentialKey(canonicalArguments)) {
       return {
         success: false,
         error: "provider credentials must not be supplied in action arguments",
@@ -147,7 +154,14 @@ export const providerAction: Action = {
       };
     }
 
-    const idempotencyKey = stableRetryKey(message, params);
+    const canonicalParams = {
+      workspaceId,
+      providerAccountId,
+      operationKey,
+      arguments: canonicalArguments,
+      idempotencyKey: explicitIdempotencyKey,
+    };
+    const idempotencyKey = stableRetryKey(message, canonicalParams);
     if (!idempotencyKey) {
       return {
         success: false,
@@ -157,10 +171,10 @@ export const providerAction: Action = {
     }
 
     const input: ProviderActionInvokeInput = {
-      workspaceId: params.workspaceId,
-      providerAccountId: params.providerAccountId,
-      operationKey: params.operationKey,
-      arguments: params.arguments as Record<string, unknown>,
+      workspaceId,
+      providerAccountId,
+      operationKey,
+      arguments: canonicalArguments,
       idempotencyKey,
     };
 

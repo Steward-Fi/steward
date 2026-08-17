@@ -115,6 +115,45 @@ describe("STEWARD_PROVIDER_ACTION", () => {
     expect(invokeProviderAction).not.toHaveBeenCalled();
   });
 
+  it("forwards the validated snapshot instead of a serialization-hook bypass", async () => {
+    const invokeProviderAction = vi.fn().mockResolvedValue({
+      id: ACTION_ID,
+      status: "stub_succeeded",
+      requestHash: `sha256:${"a".repeat(64)}`,
+      actionDigest: `sha256:${"b".repeat(64)}`,
+    });
+    const argumentsProxy = new Proxy(
+      { public: "safe" },
+      {
+        get(target, key, receiver) {
+          if (key === "toJSON") return () => ({ password: "must-not-forward" });
+          return Reflect.get(target, key, receiver);
+        },
+      },
+    );
+
+    const result = await providerAction.handler(
+      runtime({ isConnected: () => true, invokeProviderAction }),
+      { id: "message-serialization-hook" } as any,
+      undefined,
+      {
+        parameters: {
+          workspaceId: "workspace-a",
+          providerAccountId: "account-a",
+          operationKey: "github.issue.list",
+          arguments: argumentsProxy,
+          idempotencyKey: "serialization-hook-retry",
+        },
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(invokeProviderAction).toHaveBeenCalledWith(
+      expect.objectContaining({ arguments: { public: "safe" } }),
+    );
+    expect(JSON.stringify(invokeProviderAction.mock.calls[0][0])).not.toContain("must-not-forward");
+  });
+
   it("derives stable retry identity from message and canonical public parameters", async () => {
     const invokeProviderAction = vi.fn().mockResolvedValue({
       id: ACTION_ID,
@@ -216,6 +255,50 @@ describe("STEWARD_PROVIDER_ACTION", () => {
       expect(explicitRetry.success).toBe(false);
       expect(explicitRetry.error).toContain("plain JSON");
     }
+    expect(invokeProviderAction).not.toHaveBeenCalled();
+  });
+
+  it("rejects cycles, deep nesting, accessors, and custom prototypes before submission", async () => {
+    const invokeProviderAction = vi.fn();
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    let deep: Record<string, unknown> = {};
+    for (let i = 0; i < 22; i++) deep = { nested: deep };
+    let getterInvoked = false;
+    const accessor = Object.defineProperty({}, "public", {
+      enumerable: true,
+      get() {
+        getterInvoked = true;
+        return "unsafe";
+      },
+    });
+    const customPrototype = Object.create({ inherited: "not-json" }) as Record<string, unknown>;
+    customPrototype.public = "safe";
+
+    for (const [name, argumentsValue] of Object.entries({
+      cyclic,
+      deep,
+      accessor,
+      customPrototype,
+    })) {
+      const result = await providerAction.handler(
+        runtime({ isConnected: () => true, invokeProviderAction }),
+        { id: `message-${name}` } as any,
+        undefined,
+        {
+          parameters: {
+            workspaceId: "workspace-a",
+            providerAccountId: "account-a",
+            operationKey: "github.issue.list",
+            arguments: { public: argumentsValue },
+            idempotencyKey: `explicit-retry-${name}`,
+          },
+        },
+      );
+      expect(result.success, name).toBe(false);
+      expect(result.error, name).toContain("plain JSON");
+    }
+    expect(getterInvoked).toBe(false);
     expect(invokeProviderAction).not.toHaveBeenCalled();
   });
 });
