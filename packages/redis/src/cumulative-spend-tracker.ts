@@ -671,8 +671,27 @@ export async function reserveCumulativeSpendBatch(input: {
     String(RETENTION_MS),
     String(input.groups.length),
   ];
+  const seenKeys = new Set<string>();
+  let batchAuthority: string | undefined;
+  // Validate the complete batch before fencing any legacy stream. Besides
+  // keeping invalid input side-effect free, rejecting duplicate Redis keys is
+  // essential: two groups on one key would each evaluate the same prior sum
+  // before either reservation is written and could collectively exceed a cap.
   for (const group of input.groups) {
-    if (!group.stream.tenantId) throw new Error("batch stream requires tenantId");
+    if (typeof group.stream.tenantId !== "string" || group.stream.tenantId.length === 0)
+      throw new Error("batch stream requires tenantId");
+    if (typeof group.stream.agentId !== "string" || group.stream.agentId.length === 0)
+      throw new Error("batch stream requires agentId");
+    if (typeof group.stream.scopeKey !== "string") throw new Error("invalid batch stream scopeKey");
+    if (!(["operation", "agent", "grant"] as const).includes(group.stream.scope))
+      throw new Error("invalid batch stream scope");
+    if (typeof group.stream.currency !== "string" || group.stream.currency.length === 0)
+      throw new Error("batch stream requires currency");
+    const authority = `${group.stream.tenantId}\0${group.stream.agentId}`;
+    if (batchAuthority !== undefined && batchAuthority !== authority) {
+      throw new Error("cumulative spend batch must share one tenant and agent");
+    }
+    batchAuthority = authority;
     if (!isNonNegInt(group.amount)) throw new Error("invalid cumulative spend batch amount");
     if (!group.caps.length) throw new Error("batch group requires caps");
     if (
@@ -685,6 +704,11 @@ export async function reserveCumulativeSpendBatch(input: {
       if (!isNonNegInt(cap.max) || !isValidWindow(cap.windowSeconds))
         throw new Error("invalid cumulative spend batch cap");
     }
+    const key = streamKey(group.stream);
+    if (seenKeys.has(key)) throw new Error("cumulative spend batch contains a duplicate stream");
+    seenKeys.add(key);
+  }
+  for (const group of input.groups) {
     keys.push(streamKey(group.stream));
     tombstoneKeys.push(legacyReleaseTombstoneKey(group.stream));
     snapshots.push(await fenceAndSnapshotLegacyStream(group.stream, now));
@@ -794,6 +818,28 @@ export async function releaseLegacyCumulativeSpendAfterCutover(input: {
     input.stream.tenantId,
     input.reservationId,
   );
+}
+
+/** Release a tenantless v1 maxCalls reservation after its operation stream has
+ * crossed the tenant-bound cutover. A direct legacy ZREM would hit the durable
+ * STRING fence and leave a known-failed invocation permanently counted. */
+export async function releaseLegacyWindowedInvokeAfterCutover(input: {
+  tenantId: string;
+  agentId: string;
+  operationKey: string;
+  reservationId: string;
+}): Promise<void> {
+  await releaseLegacyCumulativeSpendAfterCutover({
+    stream: {
+      tenantId: input.tenantId,
+      agentId: input.agentId,
+      scope: "operation",
+      scopeKey: input.operationKey,
+      currency: WINDOWED_INVOKE_CURRENCY,
+    },
+    reservationId: input.reservationId,
+    amount: 1,
+  });
 }
 
 /**

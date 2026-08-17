@@ -26,6 +26,7 @@ import {
   getWindowedInvokeCount,
   releaseCumulativeSpend,
   releaseLegacyCumulativeSpendAfterCutover,
+  releaseLegacyWindowedInvokeAfterCutover,
   releaseWindowedInvoke,
   reserveCumulativeSpend,
   reserveCumulativeSpendBatch,
@@ -387,6 +388,96 @@ describeRedis("tenant-bound atomic reservation batches", () => {
     expect(denied.ok).toBe(false);
     expect(await getCumulativeSpendSum({ ...global, windowSeconds: 3600 })).toEqual({ sum: 0 });
     expect(await getCumulativeSpendSum({ ...workspace, windowSeconds: 3600 })).toEqual({ sum: 1 });
+  });
+
+  test("duplicate streams are rejected before they can bypass an aggregate cap", async () => {
+    const stream = {
+      tenantId: "tenant-duplicate",
+      agentId: AGENT,
+      scope: "agent" as const,
+      scopeKey: "budget:global:count",
+      currency: "__agent_budget_count__",
+    };
+    await expect(
+      reserveCumulativeSpendBatch({
+        groups: [
+          {
+            stream,
+            caps: [{ windowSeconds: 3600, max: 1 }],
+            amount: 1,
+            reservationId: "duplicate-a",
+          },
+          {
+            stream,
+            caps: [{ windowSeconds: 3600, max: 1 }],
+            amount: 1,
+            reservationId: "duplicate-b",
+          },
+        ],
+      }),
+    ).rejects.toThrow("duplicate stream");
+    expect(await getCumulativeSpendSum({ ...stream, windowSeconds: 3600 })).toEqual({ sum: 0 });
+  });
+
+  test("cross-tenant or cross-agent batches fail before Redis Cluster dispatch", async () => {
+    const group = (tenantId: string, agentId: string, reservationId: string) => ({
+      stream: {
+        tenantId,
+        agentId,
+        scope: "agent" as const,
+        scopeKey: "",
+        currency: "USD",
+      },
+      caps: [{ windowSeconds: 3600, max: 10 }],
+      amount: 1,
+      reservationId,
+    });
+    await expect(
+      reserveCumulativeSpendBatch({
+        groups: [group("tenant-a", AGENT, "tenant-a"), group("tenant-b", AGENT, "tenant-b")],
+      }),
+    ).rejects.toThrow("share one tenant and agent");
+    await expect(
+      reserveCumulativeSpendBatch({
+        groups: [group("tenant-a", AGENT, "agent-a"), group("tenant-a", `${AGENT}-b`, "agent-b")],
+      }),
+    ).rejects.toThrow("share one tenant and agent");
+  });
+
+  test("releases a v1 maxCalls slot after its legacy stream was fenced", async () => {
+    const operationKey = "legacy-windowed-release";
+    const legacy = await reserveWindowedInvoke({
+      agentId: AGENT,
+      operationKey,
+      caps: [{ windowSeconds: 3600, max: 5 }],
+      reservationId: "legacy-windowed-slot",
+    });
+    expect(legacy.ok).toBe(true);
+    expect(
+      (
+        await reserveWindowedInvoke({
+          tenantId: "tenant-windowed-release",
+          agentId: AGENT,
+          operationKey,
+          caps: [{ windowSeconds: 3600, max: 5 }],
+          reservationId: "v2-windowed-slot",
+        })
+      ).ok,
+    ).toBe(true);
+    await releaseLegacyWindowedInvokeAfterCutover({
+      tenantId: "tenant-windowed-release",
+      agentId: AGENT,
+      operationKey,
+      reservationId: "legacy-windowed-slot",
+    });
+    expect(
+      await getWindowedInvokeCount({
+        tenantId: "tenant-windowed-release",
+        agentId: AGENT,
+        operationKey,
+        windowSeconds: 3600,
+      }),
+    ).toBe(1);
   });
 
   test("a crash retry reuses every member in the batch exactly once", async () => {

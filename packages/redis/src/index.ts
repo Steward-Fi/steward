@@ -34,6 +34,7 @@ export {
   type ReserveCumulativeSpendResult,
   releaseCumulativeSpend,
   releaseLegacyCumulativeSpendAfterCutover,
+  releaseLegacyWindowedInvokeAfterCutover,
   releaseWindowedInvoke,
   reserveCumulativeSpend,
   reserveCumulativeSpendBatch,

@@ -123,6 +123,7 @@ import {
   type CumulativeSpendScope,
   releaseCumulativeSpend,
   releaseLegacyCumulativeSpendAfterCutover,
+  releaseLegacyWindowedInvokeAfterCutover,
   releaseWindowedInvoke,
   reserveCumulativeSpendBatch,
   reserveWindowedInvoke,
@@ -2843,7 +2844,16 @@ class ProviderActionService {
       ),
     );
     if (target === "released" && handles.windowedInvoke) {
-      await releaseWindowedInvoke(handles.windowedInvoke);
+      await (handles.schemaVersion === "steward.provider-policy-reservations.v1" &&
+      !handles.windowedInvoke.tenantId &&
+      generationTenantId
+        ? releaseLegacyWindowedInvokeAfterCutover({
+            tenantId: generationTenantId,
+            agentId: handles.windowedInvoke.agentId,
+            operationKey: handles.windowedInvoke.operationKey,
+            reservationId: handles.windowedInvoke.reservationId,
+          })
+        : releaseWindowedInvoke(handles.windowedInvoke));
     }
   }
 
