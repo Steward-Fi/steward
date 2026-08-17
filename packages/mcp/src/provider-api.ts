@@ -5,8 +5,14 @@ export interface ProviderApi {
   request(path: string, init?: RequestInit): Promise<unknown>;
 }
 
-const SENSITIVE_KEY = /authorization|bearer|token|secret|credential|api[-_]?key|cookie/i;
-const SECRET_TEXT = /(?:bearer\s+|(?:api[-_]?key|token|secret|credential)["'\s:=]+)[^\s,"'}]+/gi;
+// Best-effort redaction (SEC-172): keyed fields AND free-text secret shapes.
+// Coverage is deliberately conservative — over-broad patterns would redact
+// legitimate tool output (tx hashes, ids) — so the first line of defense
+// remains upstream errors not embedding secrets at all.
+const SENSITIVE_KEY =
+  /authorization|bearer|token|secret|credential|api[-_]?key|cookie|pass(?:word|phrase|wd)|private[-_]?key|jwt|signature/i;
+const SECRET_TEXT =
+  /(?:bearer\s+|(?:api[-_]?key|token|secret|credential|pass(?:word|phrase|wd)|private[-_]?key)["'\s:=]+)[^\s,"'}]+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*|\bsk-[A-Za-z0-9]{8,}|\bgh[po]_[A-Za-z0-9]{8,}|\bxox[baprs]-[A-Za-z0-9-]{8,}/gi;
 
 export function sanitizeProviderPayload(value: unknown, depth = 0): unknown {
   if (depth > 20) return "[redacted]";

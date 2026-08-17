@@ -243,4 +243,40 @@ describe("credential redaction", () => {
     expect(clean).not.toContain(canary);
     expect(clean).toContain("[redacted]");
   });
+
+  test("redacts password/private-key/jwt/signature keyed fields", () => {
+    const canary = "keyed-canary-b51f0";
+    const clean = JSON.stringify(
+      sanitizeProviderPayload({
+        password: canary,
+        passphrase: canary,
+        private_key: canary,
+        clientJwt: canary,
+        signature: canary,
+        nested: { sessionPassword: canary },
+      }),
+    );
+    expect(clean).not.toContain(canary);
+  });
+
+  test("redacts secret shapes embedded in free-text error messages", () => {
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.sigcanary01";
+    const apiKey = "sk-livecanary123456789";
+    const ghToken = "ghp_canarytoken123456";
+    const slackToken = "xoxb-canary-123456789";
+    const password = "free-text-passwd-canary";
+    const clean = sanitizeProviderPayload(
+      `upstream 500: jwt=${jwt} key=${apiKey} gh=${ghToken} slack=${slackToken} password: ${password}`,
+    ) as string;
+    for (const canary of [jwt, apiKey, ghToken, slackToken, password]) {
+      expect(clean).not.toContain(canary);
+    }
+    expect(clean).toContain("[redacted]");
+  });
+
+  test("leaves non-secret free text and identifiers intact", () => {
+    const text =
+      "order oid_123 failed: insufficient balance for 0.01 BTC; tx 0x" + "a".repeat(64);
+    expect(sanitizeProviderPayload(text)).toBe(text);
+  });
 });
