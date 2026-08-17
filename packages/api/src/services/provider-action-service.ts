@@ -140,11 +140,15 @@ const POLICY_TYPE = "capability-intent" as const;
 /** Select an externally returned reason that agrees with the composed effect.
  * Rule order is not precedence: an approval rule listed before a failed hard
  * constraint must never make a hard denial look resumable. */
-function primaryPolicyDenialReason(doc: PersistedPolicyDecisionV1): string {
+function primaryPolicyDenialCode(reasonCodes: readonly string[]): string {
   return (
-    doc.reasonCodes.find((code) => code !== "APPROVAL_REQUIRED" && code !== "POLICY_ALLOW") ??
+    reasonCodes.find((code) => code !== "APPROVAL_REQUIRED" && code !== "POLICY_ALLOW") ??
     "POLICY_HARD_DENY"
   );
+}
+
+function primaryPolicyDenialReason(doc: PersistedPolicyDecisionV1): string {
+  return primaryPolicyDenialCode(doc.reasonCodes);
 }
 
 /**
@@ -2949,7 +2953,7 @@ class ProviderActionService {
           requestHash: b.requestHash,
           actionDigest: b.actionDigest,
         };
-      const code = b.policyReasonCodes[0] ?? "POLICY_HARD_DENY";
+      const code = primaryPolicyDenialCode(b.policyReasonCodes);
       return {
         kind: "policy_denied",
         code,

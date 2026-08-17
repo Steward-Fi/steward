@@ -272,7 +272,7 @@ describe("0080 provider_action_bindings migration", () => {
     await client.close();
   });
 
-  test("0088 rejects v2 reservation handles bound to another tenant", async () => {
+  test("0092 rejects v2 reservation handles bound to another tenant", async () => {
     const client = new PGlite("memory://");
     await applyAll(client);
     await seed(client);

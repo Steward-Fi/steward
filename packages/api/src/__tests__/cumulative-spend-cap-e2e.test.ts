@@ -449,6 +449,11 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     if (t3.kind === "policy_denied") {
       expect(t3.code).toBe(PROVIDER_POLICY_REASON.CUMULATIVE_SPEND_CAP_EXCEEDED);
     }
+    const t3Replay = await proposeTweet("c".repeat(100), "cs-e2e-1c");
+    expect(t3Replay).toMatchObject({
+      kind: "policy_denied",
+      code: PROVIDER_POLICY_REASON.CUMULATIVE_SPEND_CAP_EXCEEDED,
+    });
 
     // A smaller tweet that still fits (200 + 40 = 240 <= 250) is admitted - the
     // denied invoke did NOT consume budget (its reservation was released).
