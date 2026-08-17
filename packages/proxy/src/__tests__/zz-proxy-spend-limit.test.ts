@@ -281,6 +281,16 @@ describe("proxy spend-limit enforcement", () => {
       expect(headers.get("x-steward-key")).toBeNull();
       expect(headers.get("x-steward-platform-key")).toBeNull();
       expect(headers.get("x-steward-signature")).toBeNull();
+      // SEC-097: alternate client-IP headers must not be relayed upstream.
+      expect(headers.get("x-client-ip")).toBeNull();
+      expect(headers.get("cf-connecting-ip")).toBeNull();
+      expect(headers.get("true-client-ip")).toBeNull();
+      expect(headers.get("fastly-client-ip")).toBeNull();
+      expect(headers.get("x-cluster-client-ip")).toBeNull();
+      expect(headers.get("x-original-forwarded-for")).toBeNull();
+      // SEC-099: request-signing window metadata is internal to the proxy.
+      expect(headers.get("x-steward-request-timestamp")).toBeNull();
+      expect(headers.get("x-steward-request-expires-at")).toBeNull();
       expect(headers.get("x-http-method-override")).toBeNull();
       expect(headers.get("x-method-override")).toBeNull();
       expect(headers.get("x-original-url")).toBeNull();
@@ -306,6 +316,14 @@ describe("proxy spend-limit enforcement", () => {
           "X-Steward-Key": "tenant-key",
           "X-Steward-Platform-Key": "platform-key",
           "X-Steward-Signature": "signature",
+          "X-Client-IP": "127.0.0.1",
+          "CF-Connecting-IP": "127.0.0.1",
+          "True-Client-IP": "127.0.0.1",
+          "Fastly-Client-IP": "127.0.0.1",
+          "X-Cluster-Client-IP": "127.0.0.1",
+          "X-Original-Forwarded-For": "127.0.0.1",
+          "X-Steward-Request-Timestamp": "1700000000",
+          "X-Steward-Request-Expires-At": "1700000300",
           "X-HTTP-Method-Override": "DELETE",
           "X-Method-Override": "PATCH",
           "X-Original-URL": "/v1/admin/delete-all",
@@ -317,6 +335,44 @@ describe("proxy spend-limit enforcement", () => {
 
     expect(res.status).toBe(200);
     expect(fetchCalls).toBe(1);
+  });
+
+  test("strips upstream Set-Cookie so agents never receive credential-derived sessions (SEC-098)", async () => {
+    spendResult.configured = false;
+    globalThis.fetch = (async (url: string | URL | Request, _init?: RequestInit) => {
+      fetchCalls++;
+      expect(String(url)).toBe("https://example.com/v1/echo");
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "set-cookie": "provider_session=abc123; HttpOnly; Path=/",
+        },
+      });
+    }) as typeof fetch;
+    const { handleProxy, __setCheckProxySpendLimitForTests } = await loadProxy();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+
+    const res = await handleProxy(makeContext());
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("set-cookie")).toBeNull();
+    expect(fetchCalls).toBe(1);
+  });
+
+  test("unknown injectAs fails closed with 400 and never reaches upstream (SEC-176)", async () => {
+    spendResult.configured = false;
+    route.injectAs = "carrier-pigeon";
+    const { handleProxy, __setCheckProxySpendLimitForTests } = await loadProxy();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+
+    const res = await handleProxy(makeContext());
+    const body = (await res.json()) as { error?: string };
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("Invalid credential injection configuration");
+    expect(fetchCalls).toBe(0);
+    expect(audits.some((entry) => entry?.reason === "credential-injection-failed")).toBe(true);
   });
 
   test("agent over daily budget returns 402 and does not call upstream", async () => {
