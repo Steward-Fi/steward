@@ -299,6 +299,22 @@ describe("upstream credential leases", () => {
       resource: { repositories: ["unconfigured"], permissions: { issues: "admin" } },
     });
     expect(broad).toMatchObject({ ok: false, code: "scope_denied" });
+    const inheritedPermission = await issueUpstreamCredentialLease({
+      ...issueArgs(issuer, "idempotency-prototype-permission"),
+      resource: {
+        repositories: ["steward"],
+        permissions: { toString: "admin" } as never,
+      },
+    });
+    expect(inheritedPermission).toMatchObject({ ok: false, code: "scope_denied" });
+    const unknownLevel = await issueUpstreamCredentialLease({
+      ...issueArgs(issuer, "idempotency-unknown-permission-level"),
+      resource: {
+        repositories: ["steward"],
+        permissions: { issues: "owner" } as never,
+      },
+    });
+    expect(unknownLevel).toMatchObject({ ok: false, code: "scope_denied" });
     expect(issuer.issueCalls).toBe(0);
   });
 

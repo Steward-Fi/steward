@@ -76,10 +76,17 @@ export class GitHubAppInstallationTokenIssuer implements UpstreamTokenIssuer {
         signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
       },
     );
-    if (!response.ok)
+    if (!response.ok) {
+      void response.body?.cancel().catch(() => {});
       throw new Error(`GitHub installation-token issuance failed (${response.status})`);
+    }
     const body = (await readBoundedJson(response)) as { token?: unknown; expires_at?: unknown };
-    if (typeof body.token !== "string" || typeof body.expires_at !== "string") {
+    if (
+      typeof body.token !== "string" ||
+      body.token.length === 0 ||
+      body.token.length > 4096 ||
+      typeof body.expires_at !== "string"
+    ) {
       throw new Error("GitHub installation-token response was malformed");
     }
     const expiresAt = new Date(body.expires_at);
@@ -103,8 +110,10 @@ export class GitHubAppInstallationTokenIssuer implements UpstreamTokenIssuer {
     // no longer accepts and returns 401. That is confirmation the credential is
     // unusable. A 404 is not documented for this endpoint and must not be
     // mistaken for revocation proof.
-    if (!response.ok && response.status !== 401) {
+    if (response.status !== 204 && response.status !== 401) {
+      void response.body?.cancel().catch(() => {});
       throw new Error(`GitHub installation-token revocation failed (${response.status})`);
     }
+    void response.body?.cancel().catch(() => {});
   }
 }

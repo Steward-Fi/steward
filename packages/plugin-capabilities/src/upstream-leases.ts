@@ -23,6 +23,8 @@ const REVOCATION_CLAIM_TIMEOUT_MS = 30_000;
 export const DELIVERY_ACK_TIMEOUT_MS = 30_000;
 export const MAX_UPSTREAM_LEASE_SWEEP_INTERVAL_MS = DELIVERY_ACK_TIMEOUT_MS / 2;
 export const UPSTREAM_LEASE_AUTHORITY_RECHECK_INTERVAL_MS = MAX_UPSTREAM_LEASE_SWEEP_INTERVAL_MS;
+const MAX_GITHUB_PERMISSION_COUNT = 100;
+const GITHUB_PERMISSION_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 
 export interface GitHubLeaseResource {
   repositories: string[];
@@ -214,7 +216,9 @@ export function parseGitHubLeaseConfig(constraints: unknown): GitHubAppLeaseConf
     value.issuer !== GITHUB_APP_LEASE_ISSUER ||
     typeof value.workspaceId !== "string" ||
     typeof value.appId !== "string" ||
+    !/^[1-9][0-9]{0,19}$/.test(value.appId) ||
     typeof value.installationId !== "string" ||
+    !/^[1-9][0-9]{0,19}$/.test(value.installationId) ||
     !Array.isArray(value.allowedRepositories) ||
     !value.allowedRepositories.every((entry) => typeof entry === "string") ||
     !value.allowedPermissions ||
@@ -224,9 +228,14 @@ export function parseGitHubLeaseConfig(constraints: unknown): GitHubAppLeaseConf
     return null;
   }
   const permissions = value.allowedPermissions as Record<string, unknown>;
+  const permissionEntries = Object.entries(permissions);
   if (
-    !Object.values(permissions).every(
-      (entry) => entry === "read" || entry === "write" || entry === "admin",
+    permissionEntries.length === 0 ||
+    permissionEntries.length > MAX_GITHUB_PERMISSION_COUNT ||
+    !permissionEntries.every(
+      ([name, entry]) =>
+        GITHUB_PERMISSION_NAME.test(name) &&
+        (entry === "read" || entry === "write" || entry === "admin"),
     )
   ) {
     return null;
@@ -250,6 +259,18 @@ function validateResource(
   requested: GitHubLeaseResource,
   config: GitHubAppLeaseConfig,
 ): GitHubLeaseResource | null {
+  const requestedPermissionEntries = Object.entries(requested.permissions);
+  if (
+    requestedPermissionEntries.length === 0 ||
+    requestedPermissionEntries.length > MAX_GITHUB_PERMISSION_COUNT ||
+    requestedPermissionEntries.some(
+      ([name, level]) =>
+        !GITHUB_PERMISSION_NAME.test(name.trim()) ||
+        (level !== "read" && level !== "write" && level !== "admin"),
+    )
+  ) {
+    return null;
+  }
   const normalized = canonicalGitHubLeaseResource(requested);
   if (
     normalized.repositories.length === 0 ||
@@ -263,9 +284,10 @@ function validateResource(
     return null;
   }
   const entries = Object.entries(normalized.permissions);
-  if (entries.length === 0) return null;
   for (const [permission, level] of entries) {
-    const allowed = config.allowedPermissions[permission];
+    const allowed = Object.hasOwn(config.allowedPermissions, permission)
+      ? config.allowedPermissions[permission]
+      : undefined;
     if (!allowed || permissionRank[level] > permissionRank[allowed]) return null;
   }
   return normalized;
