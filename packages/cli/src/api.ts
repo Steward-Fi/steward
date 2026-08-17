@@ -25,6 +25,45 @@ export class ApiError extends Error {
   }
 }
 
+const API_REQUEST_TIMEOUT_MS = 10_000;
+const API_RESPONSE_MAX_BYTES = 1024 * 1024;
+
+async function readBoundedResponse(res: Response): Promise<string> {
+  const declared = res.headers.get("content-length");
+  if (declared !== null) {
+    const length = Number(declared);
+    if (!Number.isSafeInteger(length) || length < 0 || length > API_RESPONSE_MAX_BYTES) {
+      void res.body?.cancel().catch(() => {});
+      throw new Error("Steward API response exceeded the 1 MiB limit");
+    }
+  }
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > API_RESPONSE_MAX_BYTES) {
+        void reader.cancel().catch(() => {});
+        throw new Error("Steward API response exceeded the 1 MiB limit");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
 function normalizeBaseUrl(value: string | undefined): string {
   return (value || process.env.STEWARD_API_URL || "http://127.0.0.1:3200").replace(/\/+$/, "");
 }
@@ -69,8 +108,9 @@ export class StewardApiClient {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(API_REQUEST_TIMEOUT_MS),
     });
-    const text = await res.text();
+    const text = await readBoundedResponse(res);
     const parsed = text ? safeJson(text) : null;
     if (!res.ok) {
       const message =

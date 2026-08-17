@@ -70,4 +70,38 @@ describe("StewardApiClient", () => {
     await expect(client.request("GET", "/agents")).rejects.toThrow(ApiError);
     await expect(client.request("GET", "/agents")).rejects.toThrow("nope");
   });
+
+  test("bounds declared and streamed API response bodies", async () => {
+    for (const response of [
+      new Response("small", { headers: { "content-length": "1048577" } }),
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array(1024 * 1024));
+            controller.enqueue(new Uint8Array([1]));
+            controller.close();
+          },
+        }),
+      ),
+    ]) {
+      const client = new StewardApiClient({
+        baseUrl: "https://api.example.test",
+        fetchImpl: (async () => response) as typeof fetch,
+      });
+      await expect(client.request("GET", "/health")).rejects.toThrow("exceeded the 1 MiB limit");
+    }
+  });
+
+  test("applies a request deadline to every API call", async () => {
+    let signal: AbortSignal | undefined;
+    const client = new StewardApiClient({
+      baseUrl: "https://api.example.test",
+      fetchImpl: (async (_url, init) => {
+        signal = init?.signal as AbortSignal;
+        return Response.json({ ok: true, data: {} });
+      }) as typeof fetch,
+    });
+    await client.request("GET", "/health");
+    expect(signal).toBeInstanceOf(AbortSignal);
+  });
 });
