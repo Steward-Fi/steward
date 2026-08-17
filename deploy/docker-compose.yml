@@ -19,7 +19,10 @@ services:
     networks:
       - milady-isolated
     ports:
-      - "3200:3200"
+      # Loopback-only: tenant keys / platform key / agent JWTs must never cross
+      # the network on plain HTTP. External access goes through the TLS
+      # terminator (deploy/nginx.conf) or an SSH tunnel — never http://<ip>:3200.
+      - "127.0.0.1:3200:3200"
     environment:
       PORT: "3200"
       STEWARD_BIND_HOST: "0.0.0.0"
@@ -37,6 +40,11 @@ services:
       CHAIN_ID: "${CHAIN_ID:-8453}"
       STEWARD_PLATFORM_KEY: "${STEWARD_PLATFORM_KEY:-}"
       SOLANA_RPC_URL: "${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}"
+      # SEC-079: the production image (ENV NODE_ENV=production) makes KeyStore
+      # throw without STEWARD_KDF_SALT, and email-code flows need the secret —
+      # the provisioner writes both into deploy/.env, so pass them through.
+      STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?Set STEWARD_KDF_SALT in .env - generate with: openssl rand -hex 32}"
+      STEWARD_EMAIL_CODE_SECRET: "${STEWARD_EMAIL_CODE_SECRET:-}"
       STEWARD_PLUGINS: "${STEWARD_PLUGINS:-}"
       WXMR_SOLANA_RPC_URL: "${WXMR_SOLANA_RPC_URL:-}"
     volumes:
@@ -62,7 +70,8 @@ services:
     networks:
       - milady-isolated
     ports:
-      - "8080:8080"
+      # Loopback-only (see steward service above): front with TLS or SSH tunnel.
+      - "127.0.0.1:8080:8080"
     environment:
       STEWARD_PROXY_PORT: "8080"
       DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@steward-db:5432/steward}"
@@ -102,7 +111,23 @@ services:
     restart: unless-stopped
     networks:
       - milady-isolated
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    # AOF persistence + bounded memory: this Redis holds the spend-limit and
+    # rate-limit enforcement counters. Without persistence any restart
+    # (redeploy, OOM, crash) silently zeroes them and agent financial policies
+    # go unenforced until counters rebuild (SEC-021). Mirrors the root
+    # docker-compose.yml settings.
+    command:
+      - "redis-server"
+      - "--appendonly"
+      - "yes"
+      - "--appendfsync"
+      - "everysec"
+      - "--maxmemory"
+      - "256mb"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+    volumes:
+      - steward-redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -134,6 +159,8 @@ volumes:
   steward-data:
     driver: local
   steward-pgdata:
+    driver: local
+  steward-redis-data:
     driver: local
 
 # ── Networks ─────────────────────────────────────────────────────────────────
