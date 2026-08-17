@@ -4,6 +4,9 @@ All notable changes to `@stwd/react` are documented here.
 
 ## Unreleased
 
+### Added
+- `StewardAuthConfig.authProxyUrl` on `StewardProvider`: forwarded to the SDK so the long-lived refresh token can be held by a same-origin HttpOnly-cookie proxy instead of JS-readable storage (SEC-018). Optional; previous behavior is unchanged when unset.
+
 ### Docs
 - Point example `baseUrl` values in JSDoc (`StewardProvider`, `StewardLogin`) and the README at a self-hosted instance (`http://localhost:3200`) instead of a hosted `api.steward.fi` URL. Steward is self-host-first today; there is no shared hosted API. Docs/comment only, no source behavior change.
 

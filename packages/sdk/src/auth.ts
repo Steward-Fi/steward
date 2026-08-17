@@ -68,6 +68,15 @@ const OAUTH_STATE_KEY = "steward_oauth_state";
 const OAUTH_VERIFIER_KEY = "steward_oauth_verifier";
 const OAUTH_TENANT_KEY = "steward_oauth_tenant";
 
+/**
+ * Header the same-origin auth proxy (see `authProxyUrl`) requires on every
+ * call. A cross-site form/fetch cannot attach custom headers without a CORS
+ * preflight, so this is CSRF defense-in-depth on top of the proxy's
+ * SameSite=Strict refresh cookie.
+ */
+const AUTH_PROXY_HEADER = "x-steward-auth-proxy";
+const AUTH_PROXY_HEADERS = { [AUTH_PROXY_HEADER]: "1" } as const;
+
 /** Kick off a token refresh when fewer than this many seconds remain on the access token */
 const REFRESH_THRESHOLD_SECS = 120;
 const GUEST_EXPIRY_WARNING_DAYS = 30;
@@ -308,6 +317,7 @@ export class StewardAuth {
   private readonly baseUrl: string;
   private readonly storage: SessionStorage;
   private readonly tenantId: string | undefined;
+  private readonly authProxyUrl: string | undefined;
   private readonly listeners: Array<(session: StewardSession | null) => void> = [];
 
   constructor({
@@ -315,11 +325,13 @@ export class StewardAuth {
     storage,
     onSessionChange,
     tenantId,
+    authProxyUrl,
     allowInsecureBaseUrl,
   }: StewardAuthConfig) {
     assertSecureBaseUrl(baseUrl, allowInsecureBaseUrl);
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.tenantId = tenantId;
+    this.authProxyUrl = authProxyUrl ? authProxyUrl.replace(/\/+$/, "") : undefined;
 
     // Use caller-provided storage only. Tokens default to memory so a browser
     // XSS cannot read long-lived refresh tokens from localStorage by default.
@@ -448,7 +460,7 @@ export class StewardAuth {
     if (!res.ok) {
       throw new StewardApiError(res.error, res.status);
     }
-    return this.storeExchangeResponse(res.data) as StewardAuthResult;
+    return (await this.storeExchangeResponse(res.data)) as StewardAuthResult;
   }
 
   /**
@@ -512,7 +524,7 @@ export class StewardAuth {
     if (!res.ok) {
       throw new StewardApiError(res.error, res.status);
     }
-    return this.storeExchangeResponse(res.data);
+    return await this.storeExchangeResponse(res.data);
   }
 
   /**
@@ -570,6 +582,9 @@ export class StewardAuth {
    * Returns the new session, or null if the refresh token is missing or invalid.
    */
   async refreshSession(): Promise<StewardSession | null> {
+    if (this.authProxyUrl) {
+      return this.refreshViaProxy();
+    }
     const refreshToken = this.getRefreshToken();
     if (!refreshToken) return null;
 
@@ -602,6 +617,19 @@ export class StewardAuth {
    * Also clears local session state.
    */
   async revokeSession(): Promise<void> {
+    if (this.authProxyUrl) {
+      // The proxy injects the cookie-held refresh token and clears the cookie.
+      await authRequest(this.authProxyUrl, "/revoke", {
+        method: "POST",
+        headers: AUTH_PROXY_HEADERS,
+        body: JSON.stringify({}),
+      }).catch(() => {
+        /* best-effort */
+      });
+      this.clearToken();
+      this.notifyListeners(null);
+      return;
+    }
     const refreshToken = this.getRefreshToken();
     if (refreshToken) {
       await authRequest(this.baseUrl, "/auth/revoke", {
@@ -694,9 +722,9 @@ export class StewardAuth {
       throw new StewardApiError(error, response.status);
     }
 
-    return this.storeExchangeResponse(
+    return (await this.storeExchangeResponse(
       payload as unknown as StewardAuthExchangeResponse,
-    ) as StewardAuthResult;
+    )) as StewardAuthResult;
   }
 
   /**
@@ -843,7 +871,7 @@ export class StewardAuth {
       throw new StewardApiError(verifyRes.error, verifyRes.status);
     }
 
-    return this.storeExchangeResponse(verifyRes.data);
+    return await this.storeExchangeResponse(verifyRes.data);
   }
 
   private async completePasskeyRegister(
@@ -904,7 +932,7 @@ export class StewardAuth {
       throw new StewardApiError(verifyRes.error, verifyRes.status);
     }
 
-    return this.storeExchangeResponse(verifyRes.data);
+    return await this.storeExchangeResponse(verifyRes.data);
   }
 
   // ─── Email magic link ───────────────────────────────────────────────────────
@@ -963,7 +991,7 @@ export class StewardAuth {
       throw new StewardApiError(res.error, res.status);
     }
 
-    return this.storeExchangeResponse(res.data);
+    return await this.storeExchangeResponse(res.data);
   }
 
   async verifyEmailSignInCode(
@@ -987,7 +1015,7 @@ export class StewardAuth {
       throw new StewardApiError(res.error, res.status);
     }
 
-    return this.storeExchangeResponse(res.data);
+    return await this.storeExchangeResponse(res.data);
   }
 
   async pollEmailSignInStatus(
@@ -1065,7 +1093,7 @@ export class StewardAuth {
       throw new StewardApiError(res.error, res.status);
     }
 
-    return this.storeExchangeResponse(res.data);
+    return await this.storeExchangeResponse(res.data);
   }
 
   // ─── WhatsApp OTP ─────────────────────────────────────────────────────────
@@ -1108,7 +1136,7 @@ export class StewardAuth {
       throw new StewardApiError(res.error, res.status);
     }
 
-    return this.storeExchangeResponse(res.data);
+    return await this.storeExchangeResponse(res.data);
   }
 
   // ─── Email OTP (Privy-style verified signup) ──────────────────────────
@@ -1201,7 +1229,7 @@ export class StewardAuth {
       throw new StewardApiError(res.error, res.status);
     }
 
-    return this.storeExchangeResponse(res.data);
+    return await this.storeExchangeResponse(res.data);
   }
 
   // ─── Telegram Login Widget ────────────────────────────────────────────────
@@ -1242,7 +1270,7 @@ export class StewardAuth {
       throw new StewardApiError(res.error, res.status);
     }
 
-    return this.storeExchangeResponse({
+    return await this.storeExchangeResponse({
       ...res.data,
       user: {
         ...res.data.user,
@@ -1275,7 +1303,7 @@ export class StewardAuth {
       throw new StewardApiError(res.error, res.status);
     }
 
-    return this.storeExchangeResponse({
+    return await this.storeExchangeResponse({
       ...res.data,
       user: {
         ...res.data.user,
@@ -1350,7 +1378,7 @@ export class StewardAuth {
       throw new StewardApiError(res.error, res.status);
     }
 
-    return this.storeAndReturn(
+    return await this.storeAndReturn(
       res.data.token,
       (res.data as { refreshToken?: string }).refreshToken ?? "",
       res.data.user,
@@ -1374,7 +1402,7 @@ export class StewardAuth {
       throw new StewardApiError(res.error, res.status);
     }
 
-    return this.storeAndReturn(
+    return await this.storeAndReturn(
       res.data.token,
       (res.data as { refreshToken?: string }).refreshToken ?? "",
       res.data.user,
@@ -1399,7 +1427,7 @@ export class StewardAuth {
       throw new StewardApiError(res.error, res.status);
     }
 
-    return this.storeAndReturn(
+    return await this.storeAndReturn(
       res.data.token,
       (res.data as { refreshToken?: string }).refreshToken ?? "",
       res.data.user,
@@ -1424,7 +1452,7 @@ export class StewardAuth {
       throw new StewardApiError(res.error, res.status);
     }
 
-    return this.storeAndReturn(
+    return await this.storeAndReturn(
       res.data.token,
       (res.data as { refreshToken?: string }).refreshToken ?? "",
       res.data.user,
@@ -1559,7 +1587,7 @@ export class StewardAuth {
       throw new StewardApiError(res.error, res.status);
     }
 
-    return this.storeAndReturn(
+    return await this.storeAndReturn(
       res.data.token,
       (res.data as { refreshToken?: string }).refreshToken ?? "",
       res.data.user,
@@ -1584,7 +1612,7 @@ export class StewardAuth {
       throw new StewardApiError(res.error, res.status);
     }
 
-    return this.storeAndReturn(
+    return await this.storeAndReturn(
       res.data.token,
       (res.data as { refreshToken?: string }).refreshToken ?? "",
       res.data.user,
@@ -1650,7 +1678,7 @@ export class StewardAuth {
       throw new StewardApiError(verifyRes.error, verifyRes.status);
     }
 
-    return this.storeAndReturn(
+    return await this.storeAndReturn(
       verifyRes.data.token,
       (verifyRes.data as { refreshToken?: string }).refreshToken ?? "",
       verifyRes.data.user,
@@ -1738,7 +1766,7 @@ export class StewardAuth {
       walletChain: verifyRes.data.walletChain ?? "ethereum",
     };
 
-    return this.storeExchangeResponse({
+    return await this.storeExchangeResponse({
       ...verifyRes.data,
       user: verifyRes.data.user ?? user,
     });
@@ -1795,7 +1823,7 @@ export class StewardAuth {
       walletChain: verifyRes.data.walletChain ?? "solana",
     };
 
-    return this.storeExchangeResponse({
+    return await this.storeExchangeResponse({
       ...verifyRes.data,
       user: verifyRes.data.user ?? user,
     });
@@ -1853,7 +1881,7 @@ export class StewardAuth {
       walletAddress: res.data.user?.walletAddress ?? res.data.address,
       walletChain: res.data.user?.walletChain,
     };
-    return this.storeExchangeResponse({
+    return await this.storeExchangeResponse({
       ...res.data,
       user: res.data.user ?? user,
     });
@@ -2048,7 +2076,7 @@ export class StewardAuth {
     this.storage.removeItem(OAUTH_VERIFIER_KEY);
     this.storage.removeItem(OAUTH_TENANT_KEY);
 
-    const result = this.storeExchangeResponse(res.data);
+    const result = await this.storeExchangeResponse(res.data);
     if ("mfaRequired" in result && result.mfaRequired) return result;
 
     return { ...result, provider };
@@ -2238,6 +2266,9 @@ export class StewardAuth {
    * Returns the new session, or null if the switch failed (user may need to re-auth).
    */
   async switchTenant(tenantId: string): Promise<StewardSession | null> {
+    if (this.authProxyUrl) {
+      return this.refreshViaProxy(tenantId);
+    }
     const refreshToken = this.getRefreshToken();
     if (!refreshToken) {
       return null;
@@ -2262,12 +2293,72 @@ export class StewardAuth {
 
   // ─── Private helpers ────────────────────────────────────────────────────────
 
-  private storeAndReturn(
+  /**
+   * Refresh the session through the same-origin auth proxy (`authProxyUrl`),
+   * which holds the refresh token in an HttpOnly cookie. The proxy rotates the
+   * cookie itself; only the new access token comes back to JS-readable storage.
+   */
+  private async refreshViaProxy(tenantId?: string): Promise<StewardSession | null> {
+    const proxyUrl = this.authProxyUrl;
+    if (!proxyUrl) return null;
+
+    let res: Awaited<ReturnType<typeof authRequest<StewardRefreshResult>>>;
+    try {
+      res = await authRequest<StewardRefreshResult>(proxyUrl, "/refresh", {
+        method: "POST",
+        headers: AUTH_PROXY_HEADERS,
+        body: JSON.stringify(tenantId ? { tenantId } : {}),
+      });
+    } catch {
+      return null;
+    }
+
+    if (!res.ok) {
+      if (res.status === 401) {
+        this.signOut();
+      }
+      return null;
+    }
+
+    this.storage.setItem(STORAGE_KEY, res.data.token);
+    const session = sessionFromToken(res.data.token);
+    this.notifyListeners(session);
+    return session;
+  }
+
+  /**
+   * Hand a freshly issued refresh token to the same-origin auth proxy, which
+   * stores it in an HttpOnly cookie. Fails closed: when the deposit cannot be
+   * completed the whole sign-in is aborted rather than silently downgrading to
+   * JS-readable token storage.
+   */
+  private async depositRefreshToken(refreshToken: string): Promise<void> {
+    const proxyUrl = this.authProxyUrl;
+    if (!proxyUrl) return;
+    let res: Awaited<ReturnType<typeof authRequest>>;
+    try {
+      res = await authRequest(proxyUrl, "/session", {
+        method: "POST",
+        headers: AUTH_PROXY_HEADERS,
+        body: JSON.stringify({ refreshToken }),
+      });
+    } catch (err) {
+      throw new StewardApiError(
+        `Failed to secure the refresh token: ${err instanceof Error ? err.message : "network error"}`,
+        0,
+      );
+    }
+    if (!res.ok) {
+      throw new StewardApiError("Failed to secure the refresh token", res.status);
+    }
+  }
+
+  private async storeAndReturn(
     token: string | undefined,
     refreshToken: string,
     user: StewardUser,
     expiresIn = 900,
-  ): StewardAuthResult {
+  ): Promise<StewardAuthResult> {
     if (!token) {
       throw new StewardApiError("Auth response did not include a session token", 0);
     }
@@ -2275,16 +2366,21 @@ export class StewardAuth {
     // Only persist the refresh token when it's a non-empty string.
     // An empty string means the API didn't issue one (e.g. SIWE flow).
     if (refreshToken) {
-      this.storage.setItem(REFRESH_TOKEN_KEY, refreshToken);
+      if (this.authProxyUrl) {
+        // HttpOnly cookie custody — never written to JS-readable storage.
+        await this.depositRefreshToken(refreshToken);
+      } else {
+        this.storage.setItem(REFRESH_TOKEN_KEY, refreshToken);
+      }
     }
     const session = sessionFromToken(token, user);
     this.notifyListeners(session);
     return { token, refreshToken, expiresIn, user };
   }
 
-  private storeExchangeResponse(
+  private async storeExchangeResponse(
     data: StewardAuthExchangeResponse,
-  ): StewardAuthResult | StewardMfaRequiredResult {
+  ): Promise<StewardAuthResult | StewardMfaRequiredResult> {
     if (data.mfaRequired) {
       if (!data.mfa) {
         throw new StewardApiError("MFA challenge is missing from auth response", 0);
@@ -2296,12 +2392,28 @@ export class StewardAuth {
         user: data.user,
       };
     }
-    return this.storeAndReturn(data.token, data.refreshToken ?? "", data.user, data.expiresIn);
+    return await this.storeAndReturn(
+      data.token,
+      data.refreshToken ?? "",
+      data.user,
+      data.expiresIn,
+    );
   }
 
   private clearToken(): void {
     this.storage.removeItem(STORAGE_KEY);
     this.storage.removeItem(REFRESH_TOKEN_KEY);
+    if (this.authProxyUrl) {
+      // Best-effort: expire the proxy-held refresh cookie too. keepalive lets
+      // the request outlive the page when sign-out is followed by navigation.
+      void authRequest(this.authProxyUrl, "/session", {
+        method: "DELETE",
+        headers: AUTH_PROXY_HEADERS,
+        keepalive: true,
+      }).catch(() => {
+        /* best-effort */
+      });
+    }
   }
 
   private notifyListeners(session: StewardSession | null): void {

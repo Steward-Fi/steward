@@ -19,6 +19,9 @@ const contextSource = readFileSync(join(apiRoot, "services", "context.ts"), "utf
 const indexSource = readFileSync(join(apiRoot, "index.ts"), "utf8");
 const webRoot = join(import.meta.dir, "..", "..", "..", "..", "web", "src");
 const webMiddlewareSource = readFileSync(join(webRoot, "middleware.ts"), "utf8");
+// The dashboard CSP is constructed in web/src/lib/csp.ts (extracted from
+// middleware.ts for unit-testing) and applied by middleware.ts.
+const webCspSource = readFileSync(join(webRoot, "lib", "csp.ts"), "utf8");
 
 describe("middleware security hardening", () => {
   it("uses durable production idempotency and avoids broad unauthenticated reservations", () => {
@@ -77,8 +80,8 @@ describe("middleware security hardening", () => {
     expect(securityHeadersSource).toContain('"Permissions-Policy"');
     expect(securityHeadersSource).toContain("Strict-Transport-Security");
     expect(webMiddlewareSource).toContain("Content-Security-Policy");
-    expect(webMiddlewareSource).toContain("frame-ancestors 'none'");
-    expect(webMiddlewareSource).toContain("object-src 'none'");
+    expect(webCspSource).toContain("frame-ancestors 'none'");
+    expect(webCspSource).toContain("object-src 'none'");
   });
 
   it("emits API security headers behaviorally and suppresses HSTS on localhost", async () => {

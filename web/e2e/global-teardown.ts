@@ -39,4 +39,9 @@ export default async function globalTeardown(): Promise<void> {
     await removeDirWithRetry(raw.dataDir);
   }
   rmSync(PID_FILE, { force: true });
+
+  // SEC-076: the harness builds .next with E2E_ALLOW_INSECURE_HTTP (no HSTS /
+  // upgrade-insecure-requests). Never leave that artifact in the working tree
+  // where it could be deployed by accident.
+  await removeDirWithRetry(join(__dirname, "..", ".next"));
 }

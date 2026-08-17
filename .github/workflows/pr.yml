@@ -138,6 +138,7 @@ jobs:
         env:
           NEXT_TELEMETRY_DISABLED: "1"
           NEXT_PUBLIC_STEWARD_API_URL: "https://eliza.steward.fi"
+          NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: ${{ secrets.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || 'ci-build-check-placeholder' }}
         run: bun run cf:build
 
       - name: Validate Worker bundle (dry-run deploy)
