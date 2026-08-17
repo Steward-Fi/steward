@@ -5,7 +5,7 @@ describe("StewardApiClient", () => {
   test("sends platform key for platform requests and unwraps ApiResponse data", async () => {
     const seen: Record<string, string> = {};
     const client = new StewardApiClient({
-      baseUrl: "http://steward.test/",
+      baseUrl: "https://steward.test/",
       platformKey: "platform-secret",
       fetchImpl: (async (_url, init) => {
         Object.assign(seen, init?.headers);
@@ -26,7 +26,7 @@ describe("StewardApiClient", () => {
   test("falls back to tenant API key (X-Steward-Key) when no bearer token is set", async () => {
     const seen: Record<string, string> = {};
     const client = new StewardApiClient({
-      baseUrl: "http://steward.test",
+      baseUrl: "https://steward.test",
       tenantId: "acme",
       tenantKey: "stw_tenant_secret",
       fetchImpl: (async (_url, init) => {
@@ -44,7 +44,7 @@ describe("StewardApiClient", () => {
   test("prefers bearer token over tenant API key when both are set", async () => {
     const seen: Record<string, string> = {};
     const client = new StewardApiClient({
-      baseUrl: "http://steward.test",
+      baseUrl: "https://steward.test",
       token: "bearer-token",
       tenantKey: "stw_tenant_secret",
       fetchImpl: (async (_url, init) => {
@@ -60,7 +60,7 @@ describe("StewardApiClient", () => {
 
   test("raises API errors with response status and message", async () => {
     const client = new StewardApiClient({
-      baseUrl: "http://steward.test",
+      baseUrl: "https://steward.test",
       fetchImpl: (async () =>
         new Response(JSON.stringify({ ok: false, error: "nope" }), {
           status: 403,
@@ -103,5 +103,15 @@ describe("StewardApiClient", () => {
     });
     await client.request("GET", "/health");
     expect(signal).toBeInstanceOf(AbortSignal);
+  });
+
+  test("rejects credential-bearing and public plaintext API URLs", () => {
+    expect(() => new StewardApiClient({ baseUrl: "http://api.example.test" })).toThrow(
+      "must use HTTPS",
+    );
+    expect(() => new StewardApiClient({ baseUrl: "https://user:secret@api.example.test" })).toThrow(
+      "must not contain embedded credentials",
+    );
+    expect(() => new StewardApiClient({ baseUrl: "http://127.0.0.1:3200" })).not.toThrow();
   });
 });

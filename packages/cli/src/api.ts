@@ -65,7 +65,22 @@ async function readBoundedResponse(res: Response): Promise<string> {
 }
 
 function normalizeBaseUrl(value: string | undefined): string {
-  return (value || process.env.STEWARD_API_URL || "http://127.0.0.1:3200").replace(/\/+$/, "");
+  const raw = (value || process.env.STEWARD_API_URL || "http://127.0.0.1:3200").replace(/\/+$/, "");
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("STEWARD_API_URL must be a valid absolute URL");
+  }
+  if (url.username || url.password) {
+    throw new Error("STEWARD_API_URL must not contain embedded credentials");
+  }
+  const loopback =
+    url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+    throw new Error("STEWARD_API_URL must use HTTPS unless it targets loopback");
+  }
+  return raw;
 }
 
 export class StewardApiClient {
