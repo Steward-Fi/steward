@@ -25,7 +25,9 @@ export type StubMode =
   | "pending"
   | "forbidden"
   | "invalid-signature"
-  | "changed-cosigner";
+  | "changed-cosigner"
+  | "missing-broadcast-proof"
+  | "wrong-chain";
 
 export interface StubSteward {
   url: string;
@@ -152,14 +154,16 @@ export function startStubSteward(kp: Keypair): StubSteward {
             tx.serialize({ requireAllSignatures: false, verifySignatures: false }),
           );
         }
+        const data: Record<string, unknown> = {
+          txId: crypto.randomUUID(),
+          signature: Buffer.from(signed).toString("base64"),
+          broadcast: false,
+          chainId: mode === "wrong-chain" ? 102 : (chainId ?? 101),
+        };
+        if (mode === "missing-broadcast-proof") delete data.broadcast;
         return json({
           ok: true,
-          data: {
-            txId: crypto.randomUUID(),
-            signature: Buffer.from(signed).toString("base64"),
-            broadcast: false,
-            chainId: chainId ?? 101,
-          },
+          data,
         });
       }
 

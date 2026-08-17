@@ -107,6 +107,32 @@ describe("sign-solana priority-fee cap", () => {
     }
   });
 
+  it("rejects non-Solana chain ids before policy evaluation or signing", async () => {
+    const context = await import("../services/context");
+    const originalSignSolanaTransaction = context.vault.signSolanaTransaction.bind(context.vault);
+    context.vault.signSolanaTransaction = async () => {
+      throw new Error("invalid chain id should not reach signing");
+    };
+    try {
+      const response = await app.request(`/vault/${AGENT_ID}/sign-solana`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          transaction: WITHIN_CAP_V0_TRANSFER,
+          chainId: 1,
+          broadcast: false,
+        }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        error: expect.stringMatching(/101/),
+      });
+    } finally {
+      context.vault.signSolanaTransaction = originalSignSolanaTransaction;
+    }
+  });
+
   it("accepts a v0 transfer whose priority fee is within the cap", async () => {
     const context = await import("../services/context");
     const originalSignSolanaTransaction = context.vault.signSolanaTransaction.bind(context.vault);

@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Keypair, SystemProgram, Transaction } from "@solana/web3.js";
-import { createStewardSolanaSigner, StewardSignerError } from "../steward-signer";
+import {
+  createStewardSolanaSigner,
+  SOLANA_MAX_TRANSACTION_BYTES,
+  StewardSignerError,
+} from "../steward-signer";
 import {
   legacyTransfer,
   SINK,
@@ -70,6 +74,12 @@ describe("createStewardSolanaSigner", () => {
     await expect(
       createStewardSolanaSigner({ agentId: AGENT_ID, bearerToken: JWT }),
     ).rejects.toThrow(/baseUrl/);
+  });
+
+  it("rejects empty agent ids and non-Solana chain ids before any API call", async () => {
+    await expect(newSigner({ agentId: " " })).rejects.toThrow(/agentId/);
+    await expect(newSigner({ chainId: 1 })).rejects.toThrow(/101.*102/);
+    expect(stub.requests).toHaveLength(0);
   });
 });
 
@@ -161,6 +171,32 @@ describe("signTransaction", () => {
     const tx = legacyTransfer(vaultKeypair.publicKey);
 
     await expect(signer.signTransaction(tx)).rejects.toThrow(/not a required transaction signer/);
+  });
+
+  it("rejects malformed and oversized transaction encodings before any vault call", async () => {
+    const signer = await newSigner();
+    const before = stub.requests.length;
+    await expect(signer.signSerializedTransaction("not base64!")).rejects.toThrow(
+      /canonical base64/,
+    );
+    await expect(
+      signer.signSerializedTransaction(
+        Buffer.alloc(SOLANA_MAX_TRANSACTION_BYTES + 1).toString("base64"),
+      ),
+    ).rejects.toThrow(/canonical base64/);
+    expect(stub.requests.length).toBe(before);
+  });
+
+  it("requires explicit non-broadcast and matching-chain proof from Steward", async () => {
+    const signer = await newSigner();
+    stub.setMode("missing-broadcast-proof");
+    await expect(signer.signTransaction(legacyTransfer(signer.publicKey))).rejects.toThrow(
+      /broadcast:false was honored/,
+    );
+    stub.setMode("wrong-chain");
+    await expect(signer.signTransaction(legacyTransfer(signer.publicKey))).rejects.toThrow(
+      /mismatched Solana chainId/,
+    );
   });
 
   it("signs a v0 versioned transaction", async () => {

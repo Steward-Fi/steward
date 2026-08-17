@@ -46,7 +46,7 @@ import { createStewardSolanaSigner, startSignerBridge } from "@stwd/solana-signe
 const signer = await createStewardSolanaSigner({ /* as above */ });
 const bridge = await startSignerBridge(signer); // 127.0.0.1, ephemeral port
 console.log(bridge.url); // hand this to AGENTNET_WALLET_REMOTE
-console.log(bridge.token); // the session's shared secret for the consumer's env
+// Pass bridge.token directly into the child process environment; do not log it.
 ```
 
 - `GET /pubkey` returns `{ address }`
@@ -60,31 +60,32 @@ requires a shared secret in the `x-steward-bridge-token` header of every
 request. The secret is `STEWARD_SIGNER_BRIDGE_TOKEN` from the env when set
 (export the same var in the consumer process so both sides read one source),
 otherwise a fresh random token per session, exposed as `bridge.token`.
-Requests without the right header get 401 before the signer is touched. For a
-consumer that cannot send headers yet, pass `token: null` to run the bridge
-open; that is an explicit choice to let any local process request signatures,
-so keep the vault's policy tight when using it.
+Requests without the right header get 401 before the signer is touched. Tokens
+must contain at least 32 bytes. There is deliberately no headerless mode:
+unrelated local processes and browser CSRF can both reach loopback ports.
 
-The bridge rejects non-loopback bind hosts, empty tokens, and request bodies
-larger than 16 KiB. Returned transactions are accepted only when the original
+The bridge binds only literal `127.0.0.1` or `::1` addresses (never a DNS
+hostname), and rejects weak tokens, concurrent signing
+requests, and request bodies larger than 16 KiB. Returned transactions are accepted only when the original
 message and existing co-signer signatures are unchanged and the declared
 Steward public key has supplied a valid Ed25519 signature.
 
 ## Blind-signing hints
 
 Transactions whose instructions Steward cannot decode (custom programs) are
-rejected fail-closed unless the server opts into audited blind signing, which
-requires advisory `to`/`value` fields. Pass a `hints` callback in the config
-(or `to`/`value` in the bridge's sign body) to supply them; the server treats
-hints as advisory only and rejects conflicts with the parsed transaction.
+rejected fail-closed unless the server operator explicitly enables unsafe blind
+signing. In that mode `to`/`value` cannot be verified from transaction bytes and
+are caller assertions, not authoritative evidence. Keep that option off for
+untrusted bridge consumers. For fully parsed transactions, Steward rejects any
+supplied hints that conflict with the parsed transaction.
 
 ## Tests
 
 `bun test` runs against a stub Steward API: request recording (headers, JWT
 shape, `broadcast:false` on every call), legacy and v0 signing, partial-sig
 preservation, refusal propagation for reject/pending/forbidden envelopes, and
-the bridge's shared-secret gate (default random token, env token, wrong or
-missing header refused before any vault call, explicit `token: null`).
+the bridge's shared-secret gate (default random token, strong env token, and
+wrong or missing headers refused before any vault call).
 
 The suite runs from a clean checkout: every fixture is created in-process
 (the stub API binds an ephemeral loopback port), and `test-preload.ts` builds

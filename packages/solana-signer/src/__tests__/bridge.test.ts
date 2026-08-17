@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test"
 import { Keypair, Transaction } from "@solana/web3.js";
 import {
   BRIDGE_MAX_BODY_BYTES,
+  BRIDGE_MIN_TOKEN_BYTES,
   BRIDGE_TOKEN_ENV,
   BRIDGE_TOKEN_HEADER,
   startSignerBridge,
@@ -32,7 +33,6 @@ beforeAll(async () => {
   });
   const bridge = await startSignerBridge(signer);
   bridgeUrl = bridge.url;
-  if (bridge.token === null) throw new Error("default bridge must arm a token");
   bridgeToken = bridge.token;
   closeBridge = bridge.close;
 });
@@ -116,6 +116,16 @@ describe("signer bridge", () => {
     expect(stub.requests.length).toBe(before);
   });
 
+  it("requires JSON content type before reading or signing", async () => {
+    const before = stub.requests.length;
+    const res = await authed("/sign-transaction", {
+      method: "POST",
+      body: JSON.stringify({ transaction: "AAAA" }),
+    });
+    expect(res.status).toBe(415);
+    expect(stub.requests.length).toBe(before);
+  });
+
   it("rejects oversized request bodies before any vault call", async () => {
     const before = stub.requests.length;
     const res = await authed("/sign-transaction", {
@@ -159,12 +169,13 @@ describe("bridge shared-secret auth", () => {
   });
 
   it(`honors ${BRIDGE_TOKEN_ENV} from the env, the var both sides read`, async () => {
-    process.env[BRIDGE_TOKEN_ENV] = "env-shared-secret";
+    const envToken = "e".repeat(BRIDGE_MIN_TOKEN_BYTES);
+    process.env[BRIDGE_TOKEN_ENV] = envToken;
     try {
       const bridge = await startSignerBridge(signer);
-      expect(bridge.token).toBe("env-shared-secret");
+      expect(bridge.token).toBe(envToken);
       const res = await fetch(`${bridge.url}/pubkey`, {
-        headers: { [BRIDGE_TOKEN_HEADER]: "env-shared-secret" },
+        headers: { [BRIDGE_TOKEN_HEADER]: envToken },
       });
       expect(res.status).toBe(200);
       await bridge.close();
@@ -173,22 +184,65 @@ describe("bridge shared-secret auth", () => {
     }
   });
 
-  it("runs open only on an explicit token: null", async () => {
-    const bridge = await startSignerBridge(signer, { token: null });
-    expect(bridge.token).toBeNull();
-    const res = await fetch(`${bridge.url}/pubkey`);
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ address: vaultKeypair.publicKey.toBase58() });
-    await bridge.close();
-  });
-
-  it("rejects an empty shared secret", async () => {
-    await expect(startSignerBridge(signer, { token: "" })).rejects.toThrow(/must not be empty/);
+  it("rejects empty and weak shared secrets", async () => {
+    await expect(startSignerBridge(signer, { token: "" })).rejects.toThrow(/at least 32 bytes/);
+    await expect(startSignerBridge(signer, { token: "too-short" })).rejects.toThrow(
+      /at least 32 bytes/,
+    );
   });
 
   it("rejects non-loopback bind hosts", async () => {
     await expect(startSignerBridge(signer, { host: "0.0.0.0" })).rejects.toThrow(
-      /must be loopback/,
+      /loopback IP literal/,
     );
+    await expect(startSignerBridge(signer, { host: "localhost" })).rejects.toThrow(
+      /loopback IP literal/,
+    );
+  });
+
+  it("allows only one signing request in flight", async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const blockingSigner: StewardSolanaSigner = {
+      address: signer.address,
+      publicKey: signer.publicKey,
+      async signTransaction(tx) {
+        return tx;
+      },
+      async signAllTransactions(txs) {
+        return txs;
+      },
+      async signSerializedTransaction(transaction) {
+        entered();
+        await blocked;
+        return transaction;
+      },
+    };
+    const concurrentBridge = await startSignerBridge(blockingSigner);
+    const tx = legacyTransfer(signer.publicKey)
+      .serialize({ requireAllSignatures: false })
+      .toString("base64");
+    const request = () =>
+      fetch(`${concurrentBridge.url}/sign-transaction`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          [BRIDGE_TOKEN_HEADER]: concurrentBridge.token,
+        },
+        body: JSON.stringify({ transaction: tx }),
+      });
+    const first = request();
+    await started;
+    const second = await request();
+    expect(second.status).toBe(429);
+    release();
+    expect((await first).status).toBe(200);
+    await concurrentBridge.close();
   });
 });

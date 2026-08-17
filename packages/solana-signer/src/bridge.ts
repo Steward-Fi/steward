@@ -17,10 +17,9 @@
 // STEWARD_SIGNER_BRIDGE_TOKEN env var when set (the same var the consumer
 // process reads to send the header), otherwise a fresh random token is
 // generated per session and exposed as `token` on the returned bridge. A
-// missing or wrong header is 401 before the signer is touched. Consumers that
-// cannot send headers yet (the current AgentNet remote-wallet draft) need the
-// operator to pass `token: null`, an explicit, visible opt-in to an open
-// loopback port.
+// missing or wrong header is 401 before the signer is touched. There is no
+// unauthenticated mode: browser CSRF and unrelated local processes can reach
+// loopback ports too.
 //
 // Policy refusals map to JSON errors with the refusal text and kind, so the
 // remote side can print WHY the vault said no instead of a bare status code.
@@ -37,6 +36,7 @@ export const BRIDGE_TOKEN_ENV = "STEWARD_SIGNER_BRIDGE_TOKEN";
 
 /** Enough for Solana's transaction limit plus JSON/hints, while bounding RAM. */
 export const BRIDGE_MAX_BODY_BYTES = 16 * 1024;
+export const BRIDGE_MIN_TOKEN_BYTES = 32;
 
 export interface SignerBridgeOptions {
   /** Bind host. Loopback by default; never expose this beyond the machine. */
@@ -46,16 +46,14 @@ export interface SignerBridgeOptions {
   /** Shared secret required in the x-steward-bridge-token header of every
    *  request. Omitted: STEWARD_SIGNER_BRIDGE_TOKEN from the env when set,
    *  else a fresh random token per session (read it from the returned
-   *  bridge's `token`). Pass null, explicitly, to run the bridge open for
-   *  consumers that cannot send headers yet; any local process can then use
-   *  the signer, so prefer the token whenever the consumer supports it. */
-  token?: string | null;
+   *  bridge's `token`). Must contain at least 32 UTF-8 bytes. */
+  token?: string;
 }
 
 export interface SignerBridge {
   url: string;
-  /** The armed shared secret, or null when the bridge was explicitly opened. */
-  token: string | null;
+  /** The armed shared secret. */
+  token: string;
   server: Server;
   close(): Promise<void>;
 }
@@ -84,7 +82,11 @@ function statusFor(kind: StewardSignerError["kind"]): number {
 
 function respond(res: ServerResponse, status: number, body: object): void {
   const payload = JSON.stringify(body);
-  res.writeHead(status, { "Content-Type": "application/json" });
+  res.writeHead(status, {
+    "Cache-Control": "no-store",
+    "Content-Type": "application/json",
+    "X-Content-Type-Options": "nosniff",
+  });
   res.end(payload);
 }
 
@@ -117,10 +119,10 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
 class PayloadTooLargeError extends Error {}
 
 function assertLoopbackHost(host: string): void {
-  if (host !== "127.0.0.1" && host !== "::1" && host !== "localhost") {
+  if (host !== "127.0.0.1" && host !== "::1") {
     throw new StewardSignerError(
       "api",
-      `signer bridge host must be loopback (127.0.0.1, ::1, or localhost), got ${host}`,
+      `signer bridge host must be a loopback IP literal (127.0.0.1 or ::1), got ${host}`,
     );
   }
 }
@@ -135,9 +137,14 @@ export async function startSignerBridge(
     options.token === undefined
       ? process.env[BRIDGE_TOKEN_ENV] || randomBytes(32).toString("hex")
       : options.token;
-  if (token !== null && token.length === 0) {
-    throw new StewardSignerError("api", "signer bridge token must not be empty");
+  if (Buffer.byteLength(token, "utf8") < BRIDGE_MIN_TOKEN_BYTES) {
+    throw new StewardSignerError(
+      "api",
+      `signer bridge token must contain at least ${BRIDGE_MIN_TOKEN_BYTES} bytes`,
+    );
   }
+
+  let signing = false;
 
   const server = createServer((req, res) => {
     void handle(req, res);
@@ -146,7 +153,7 @@ export async function startSignerBridge(
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // Auth before routing: an unauthenticated caller learns nothing and the
     // signer is never touched.
-    if (token !== null && !tokenMatches(req.headers[BRIDGE_TOKEN_HEADER], token)) {
+    if (!tokenMatches(req.headers[BRIDGE_TOKEN_HEADER], token)) {
       respond(res, 401, {
         error:
           `missing or wrong ${BRIDGE_TOKEN_HEADER} header; this bridge only answers ` +
@@ -160,26 +167,44 @@ export async function startSignerBridge(
         return;
       }
       if (req.method === "POST" && req.url === "/sign-transaction") {
-        let body: Record<string, unknown>;
+        if (signing) {
+          respond(res, 429, { error: "another signing request is already in progress" });
+          return;
+        }
+        if (!req.headers["content-type"]?.toLowerCase().startsWith("application/json")) {
+          respond(res, 415, { error: "content-type must be application/json" });
+          return;
+        }
+        // Reserve the single signing slot before the first await. Otherwise two
+        // slow/chunked bodies can both observe `signing === false` and race into
+        // the vault together after parsing.
+        signing = true;
         try {
-          body = await readJson(req);
-        } catch (err) {
-          if (err instanceof PayloadTooLargeError) {
-            respond(res, 413, { error: `request body exceeds ${BRIDGE_MAX_BODY_BYTES} bytes` });
+          let body: Record<string, unknown>;
+          try {
+            body = await readJson(req);
+          } catch (err) {
+            if (err instanceof PayloadTooLargeError) {
+              respond(res, 413, { error: `request body exceeds ${BRIDGE_MAX_BODY_BYTES} bytes` });
+              return;
+            }
+            respond(res, 400, { error: err instanceof Error ? err.message : "invalid JSON body" });
             return;
           }
-          respond(res, 400, { error: err instanceof Error ? err.message : "invalid JSON body" });
-          return;
+          if (typeof body.transaction !== "string" || body.transaction.length === 0) {
+            respond(res, 400, {
+              error: "'transaction' (base64 serialized Solana tx) is required",
+            });
+            return;
+          }
+          const transaction = await signer.signSerializedTransaction(body.transaction, {
+            to: typeof body.to === "string" ? body.to : undefined,
+            value: typeof body.value === "string" ? body.value : undefined,
+          });
+          respond(res, 200, { transaction });
+        } finally {
+          signing = false;
         }
-        if (typeof body.transaction !== "string" || body.transaction.length === 0) {
-          respond(res, 400, { error: "'transaction' (base64 serialized Solana tx) is required" });
-          return;
-        }
-        const transaction = await signer.signSerializedTransaction(body.transaction, {
-          to: typeof body.to === "string" ? body.to : undefined,
-          value: typeof body.value === "string" ? body.value : undefined,
-        });
-        respond(res, 200, { transaction });
         return;
       }
       if (req.method === "POST" && req.url === "/sign-message") {
@@ -193,7 +218,7 @@ export async function startSignerBridge(
     } catch (err) {
       const mapped = toSignerError(err);
       respond(res, statusFor(mapped.kind), {
-        error: mapped.message,
+        error: mapped.kind === "api" ? "Steward signing service failed" : mapped.message,
         kind: mapped.kind,
         ...(mapped.txId ? { txId: mapped.txId } : {}),
       });
@@ -204,6 +229,9 @@ export async function startSignerBridge(
     server.once("error", reject);
     server.listen(options.port ?? 0, host, resolve);
   });
+  server.requestTimeout = 10_000;
+  server.headersTimeout = 5_000;
+  server.keepAliveTimeout = 5_000;
   const bound = server.address();
   if (bound === null || typeof bound === "string") {
     throw new StewardSignerError("api", "signer bridge failed to bind a TCP port");

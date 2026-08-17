@@ -20,9 +20,9 @@ import { createPublicKey, verify } from "node:crypto";
 import { PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
 import { type PolicyResult, StewardApiError, StewardClient } from "@stwd/sdk";
 
-/** Advisory fields for Steward's audited blind-signing path (instructions the
- *  server cannot decode). The server treats them as hints only and rejects
- *  conflicts with the parsed transaction, so passing them is always safe. */
+/** Policy fields for the server's explicitly unsafe blind-signing mode. For
+ * parsed transactions Steward rejects conflicts; for unparsed instructions
+ * these are unverifiable caller assertions and must not be trusted. */
 export interface SolanaPolicyHints {
   to?: string;
   value?: string;
@@ -147,6 +147,30 @@ export interface StewardSolanaSigner {
   signAllTransactions<T extends Transaction | VersionedTransaction>(txs: T[]): Promise<T[]>;
   /** One round trip for callers that already hold serialized bytes (the HTTP bridge). */
   signSerializedTransaction(txBase64: string, hints?: SolanaPolicyHints): Promise<string>;
+}
+
+/** Solana's serialized transaction packet limit. Reject larger inputs locally
+ * before allocating, parsing, or sending policy-bearing bytes to Steward. */
+export const SOLANA_MAX_TRANSACTION_BYTES = 1232;
+
+function decodeCanonicalTransactionBase64(value: string): Uint8Array {
+  const maxBase64Length = Math.ceil(SOLANA_MAX_TRANSACTION_BYTES / 3) * 4;
+  if (
+    value.length === 0 ||
+    value.length > maxBase64Length ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
+  ) {
+    throw new StewardSignerError("api", "invalid canonical base64 Solana transaction");
+  }
+  const decoded = Buffer.from(value, "base64");
+  if (
+    decoded.length === 0 ||
+    decoded.length > SOLANA_MAX_TRANSACTION_BYTES ||
+    decoded.toString("base64") !== value
+  ) {
+    throw new StewardSignerError("api", "invalid canonical base64 Solana transaction");
+  }
+  return decoded;
 }
 
 function isVersioned(tx: Transaction | VersionedTransaction): tx is VersionedTransaction {
@@ -285,6 +309,13 @@ function deserializeTransaction(bytes: Uint8Array): Transaction | VersionedTrans
 export async function createStewardSolanaSigner(
   config: StewardSolanaSignerConfig,
 ): Promise<StewardSolanaSigner> {
+  if (!config.agentId.trim()) {
+    throw new StewardSignerError("api", "agentId must not be empty");
+  }
+  const chainId = config.chainId ?? 101;
+  if (chainId !== 101 && chainId !== 102) {
+    throw new StewardSignerError("api", "Solana chainId must be 101 (mainnet) or 102 (devnet)");
+  }
   const client =
     config.client ??
     new StewardClient({
@@ -294,7 +325,6 @@ export async function createStewardSolanaSigner(
       tenantId: config.tenantId,
     });
   const { agentId } = config;
-  const chainId = config.chainId ?? 101;
 
   let address = config.address;
   if (!address) {
@@ -312,7 +342,14 @@ export async function createStewardSolanaSigner(
       );
     }
   }
-  const publicKey = new PublicKey(address);
+  let publicKey: PublicKey;
+  try {
+    publicKey = new PublicKey(address);
+  } catch (err) {
+    throw new StewardSignerError("api", "Steward returned an invalid Solana address", {
+      cause: err,
+    });
+  }
 
   async function signSerializedTransaction(
     txBase64: string,
@@ -320,7 +357,7 @@ export async function createStewardSolanaSigner(
   ): Promise<string> {
     let submitted: Transaction | VersionedTransaction;
     try {
-      submitted = deserializeTransaction(Uint8Array.from(Buffer.from(txBase64, "base64")));
+      submitted = deserializeTransaction(decodeCanonicalTransactionBase64(txBase64));
     } catch (err) {
       throw toSignerError(err);
     }
@@ -338,15 +375,15 @@ export async function createStewardSolanaSigner(
     } catch (err) {
       throw toSignerError(err);
     }
-    if (result.broadcast) {
-      throw new StewardSignerError(
-        "api",
-        "Steward broadcast the transaction although broadcast:false was requested",
-      );
+    if (result.broadcast !== false) {
+      throw new StewardSignerError("api", "Steward did not prove that broadcast:false was honored");
+    }
+    if (result.chainId !== chainId) {
+      throw new StewardSignerError("api", "Steward returned a mismatched Solana chainId");
     }
     let returned: Transaction | VersionedTransaction;
     try {
-      returned = deserializeTransaction(Uint8Array.from(Buffer.from(result.signature, "base64")));
+      returned = deserializeTransaction(decodeCanonicalTransactionBase64(result.signature));
       validateSignedResponse(submitted, returned, publicKey);
     } catch (err) {
       throw toSignerError(err);
