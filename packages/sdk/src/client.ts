@@ -4624,11 +4624,13 @@ export class StewardClient {
   /** List approval queue entries for the tenant. */
   async listApprovals(opts?: {
     status?: string;
+    agentId?: string;
     limit?: number;
     offset?: number;
   }): Promise<ApprovalQueueEntry[]> {
     const params = new URLSearchParams();
     if (opts?.status) params.set("status", opts.status);
+    if (opts?.agentId) params.set("agentId", opts.agentId);
     if (opts?.limit) params.set("limit", String(opts.limit));
     if (opts?.offset) params.set("offset", String(opts.offset));
     const qs = params.toString();

@@ -5085,3 +5085,20 @@ describe("StewardClient proxy approvals", () => {
     expect(lastCapture?.url).toEndWith("/approvals/proxy/p1");
   });
 });
+
+describe("StewardClient tenant approvals", () => {
+  it("sends the agent filter with pagination parameters", async () => {
+    installMockFetch({ ok: true, data: [] });
+
+    await makeClient().listApprovals({
+      status: "pending",
+      agentId: "agent with spaces",
+      limit: 200,
+      offset: 50,
+    });
+
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/approvals?status=pending&agentId=agent+with+spaces&limit=200&offset=50",
+    );
+  });
+});

@@ -26,6 +26,9 @@ const TEST_TX_APPROVE = `test-tx-approve-${RUN_ID}`;
 const TEST_TX_DENY = `test-tx-deny-${RUN_ID}`;
 const TEST_APPROVAL_APPROVE = `test-approval-approve-${RUN_ID}`;
 const TEST_APPROVAL_DENY = `test-approval-deny-${RUN_ID}`;
+const PAGINATION_OTHER_AGENT = `approval-page-other-${RUN_ID}`;
+const PAGINATION_TARGET_TX = `approval-page-target-tx-${RUN_ID}`;
+const PAGINATION_TARGET_APPROVAL = `approval-page-target-${RUN_ID}`;
 const OWNER_USER_ID = crypto.randomUUID();
 
 let validApiKey: string;
@@ -110,15 +113,61 @@ beforeAll(async () => {
       status: "pending",
     })
     .onConflictDoNothing();
+
+  await db.insert(agents).values({
+    id: PAGINATION_OTHER_AGENT,
+    tenantId: TEST_TENANT,
+    name: "Pagination Noise Agent",
+    walletAddress: "0x2234567890123456789012345678901234567890",
+  });
+  await db.insert(transactions).values({
+    id: PAGINATION_TARGET_TX,
+    agentId: TEST_AGENT,
+    status: "pending",
+    toAddress: "0x0000000000000000000000000000000000000001",
+    value: "1",
+    chainId: 84532,
+    createdAt: new Date("2025-01-01T00:00:00.000Z"),
+  });
+  await db.insert(approvalQueue).values({
+    id: PAGINATION_TARGET_APPROVAL,
+    txId: PAGINATION_TARGET_TX,
+    agentId: TEST_AGENT,
+    status: "pending",
+    requestedAt: new Date("2025-01-01T00:00:00.000Z"),
+  });
+
+  const noiseTransactions = Array.from({ length: 51 }, (_, index) => ({
+    id: `approval-noise-tx-${RUN_ID}-${index}`,
+    agentId: PAGINATION_OTHER_AGENT,
+    status: "pending" as const,
+    toAddress: "0x0000000000000000000000000000000000000002",
+    value: "1",
+    chainId: 84532,
+    createdAt: new Date(`2026-01-01T00:${String(index).padStart(2, "0")}:00.000Z`),
+  }));
+  await db.insert(transactions).values(noiseTransactions);
+  await db.insert(approvalQueue).values(
+    noiseTransactions.map((transaction, index) => ({
+      id: `approval-noise-${RUN_ID}-${index}`,
+      txId: transaction.id,
+      agentId: PAGINATION_OTHER_AGENT,
+      status: "pending" as const,
+      requestedAt: transaction.createdAt,
+    })),
+  );
 });
 
 afterAll(async () => {
   if (SKIP) return;
   const db = getDb();
+  await db.delete(approvalQueue).where(eq(approvalQueue.agentId, PAGINATION_OTHER_AGENT));
+  await db.delete(transactions).where(eq(transactions.agentId, PAGINATION_OTHER_AGENT));
   await db.delete(approvalQueue).where(eq(approvalQueue.agentId, TEST_AGENT));
   await db.delete(transactions).where(eq(transactions.agentId, TEST_AGENT));
   await db.delete(autoApprovalRules).where(eq(autoApprovalRules.tenantId, TEST_TENANT));
   await db.delete(agents).where(eq(agents.id, TEST_AGENT));
+  await db.delete(agents).where(eq(agents.id, PAGINATION_OTHER_AGENT));
   await db.delete(userTenants).where(eq(userTenants.tenantId, TEST_TENANT));
   await db.delete(users).where(eq(users.id, OWNER_USER_ID));
   await db.delete(tenants).where(eq(tenants.id, TEST_TENANT));
@@ -167,6 +216,34 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
       expect(body.ok).toBe(true);
       // No approvals should be approved yet
       expect(body.data.length).toBe(0);
+    });
+
+    it("filters by agent before pagination when 51 newer mixed-agent rows exist", async () => {
+      const unfiltered = await fetch(`${BASE_URL}/approvals?status=pending&limit=50`, {
+        headers: adminHeaders(),
+      });
+      expect(unfiltered.status).toBe(200);
+      const unfilteredBody = await unfiltered.json();
+      expect(unfilteredBody.data).toHaveLength(50);
+      expect(
+        unfilteredBody.data.some(
+          (entry: { id: string }) => entry.id === PAGINATION_TARGET_APPROVAL,
+        ),
+      ).toBe(false);
+
+      const filtered = await fetch(
+        `${BASE_URL}/approvals?status=pending&agentId=${encodeURIComponent(TEST_AGENT)}&limit=50`,
+        { headers: adminHeaders() },
+      );
+      expect(filtered.status).toBe(200);
+      const filteredBody = await filtered.json();
+      expect(filteredBody.data.length).toBeGreaterThanOrEqual(1);
+      expect(
+        filteredBody.data.every((entry: { agentId: string }) => entry.agentId === TEST_AGENT),
+      ).toBe(true);
+      expect(
+        filteredBody.data.some((entry: { id: string }) => entry.id === PAGINATION_TARGET_APPROVAL),
+      ).toBe(true);
     });
   });
 

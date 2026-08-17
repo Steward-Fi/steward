@@ -160,11 +160,24 @@ function parseApprovalListParams(c: Context<{ Variables: AppVariables }>) {
     };
   }
 
+  const rawAgentId = c.req.query("agentId");
+  const agentId = rawAgentId?.trim();
+  if (
+    rawAgentId !== undefined &&
+    (!agentId || agentId.length > MAX_APPROVAL_TEXT_LENGTH || agentId !== rawAgentId)
+  ) {
+    return {
+      ok: false as const,
+      error: `agentId must be a non-empty string of at most ${MAX_APPROVAL_TEXT_LENGTH} characters`,
+    };
+  }
+
   return {
     ok: true as const,
     status: rawStatus as ApprovalStatusFilter,
     limit: rawLimit,
     offset: rawOffset,
+    agentId,
   };
 }
 
@@ -235,7 +248,7 @@ approvalRoutes.get("/", async (c) => {
   if (!params.ok) {
     return c.json<ApiResponse>({ ok: false, error: params.error }, 400);
   }
-  const { status: statusFilter, limit, offset } = params;
+  const { status: statusFilter, limit, offset, agentId } = params;
 
   // Join approval_queue with agents to filter by tenant
   const results = await db
@@ -265,6 +278,7 @@ approvalRoutes.get("/", async (c) => {
       and(
         eq(agents.tenantId, tenantId),
         approvalTransactionMatchesQueue,
+        agentId ? eq(approvalQueue.agentId, agentId) : undefined,
         statusFilter !== "all" ? eq(approvalQueue.status, statusFilter) : undefined,
       ),
     )
