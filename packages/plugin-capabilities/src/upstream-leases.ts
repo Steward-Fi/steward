@@ -3,10 +3,14 @@ import {
   and,
   asc,
   eq,
+  gt,
+  isNull,
   lte,
+  or,
   upstreamCredentialLeaseEvents,
   upstreamCredentialLeases,
 } from "@stwd/db";
+import { capabilities, capabilityGrants } from "./schema";
 
 export const GITHUB_APP_LEASE_ISSUER = "github-app-installation";
 export const MAX_UPSTREAM_LEASE_TTL_SECONDS = 3600;
@@ -46,6 +50,69 @@ export type ExerciseCredentialSecret = <T>(
 ) => Promise<T>;
 
 type Db = any;
+
+async function readLiveLeaseAuthority(
+  db: Db,
+  input: {
+    tenantId: string;
+    agentId: string;
+    capabilityId: string;
+    grantId: string;
+  },
+  now: Date,
+  lock = false,
+): Promise<{ secretId: string; config: GitHubAppLeaseConfig } | null> {
+  let query = db
+    .select({
+      id: capabilityGrants.id,
+      secretId: capabilities.secretId,
+      constraints: capabilities.constraints,
+    })
+    .from(capabilityGrants)
+    .innerJoin(
+      capabilities,
+      and(
+        eq(capabilities.id, capabilityGrants.capabilityId),
+        eq(capabilities.tenantId, capabilityGrants.tenantId),
+      ),
+    )
+    .where(
+      and(
+        eq(capabilityGrants.id, input.grantId),
+        eq(capabilityGrants.tenantId, input.tenantId),
+        eq(capabilityGrants.agentId, input.agentId),
+        eq(capabilityGrants.capabilityId, input.capabilityId),
+        eq(capabilityGrants.status, "active"),
+        or(isNull(capabilityGrants.expiresAt), gt(capabilityGrants.expiresAt, now)),
+        eq(capabilities.id, input.capabilityId),
+        eq(capabilities.tenantId, input.tenantId),
+        eq(capabilities.enabled, true),
+      ),
+    )
+    .limit(1);
+  if (lock) query = query.for("share");
+  const [row] = await query;
+  if (!row) return null;
+  const config = parseGitHubLeaseConfig(row.constraints);
+  return config ? { secretId: row.secretId, config } : null;
+}
+
+function leaseAuthorityDigest(secretId: string, config: GitHubAppLeaseConfig): string {
+  return sha256(
+    JSON.stringify({
+      secretId,
+      issuer: config.issuer,
+      workspaceId: config.workspaceId,
+      appId: config.appId,
+      installationId: config.installationId,
+      allowedRepositories: [...new Set(config.allowedRepositories)].sort(),
+      allowedPermissions: Object.fromEntries(
+        Object.entries(config.allowedPermissions).sort(([a], [b]) => a.localeCompare(b)),
+      ),
+      maxTtlSeconds: config.maxTtlSeconds ?? MAX_UPSTREAM_LEASE_TTL_SECONDS,
+    }),
+  );
+}
 
 export type LeaseIssueResult =
   | {
@@ -309,25 +376,53 @@ export async function issueUpstreamCredentialLease(input: {
     };
   }
   const now = input.now ?? new Date();
-  const [claim] = await input.db
-    .insert(upstreamCredentialLeases)
-    .values({
-      tenantId: input.tenantId,
-      workspaceId: input.workspaceId,
-      agentId: input.agentId,
-      grantId: input.resolved.grant.id,
-      capabilityId: input.resolved.capability.id,
-      issuer: config.issuer,
-      resource,
-      resourceHash: resourceHash(resource),
-      idempotencyKeyHash: sha256(input.idempotencyKey),
-      status: "issuing",
-      createdAt: now,
-      updatedAt: now,
-    })
-    .onConflictDoNothing()
-    .returning({ id: upstreamCredentialLeases.id });
-  if (!claim) {
+  const expectedAuthorityDigest = config
+    ? leaseAuthorityDigest(input.resolved.capability.secretId, config)
+    : "";
+  const claimResult = await input.db.transaction(async (tx: Db) => {
+    const live = await readLiveLeaseAuthority(
+      tx,
+      {
+        tenantId: input.tenantId,
+        agentId: input.agentId,
+        capabilityId: input.resolved.capability.id,
+        grantId: input.resolved.grant.id,
+      },
+      now,
+      true,
+    );
+    if (!live || leaseAuthorityDigest(live.secretId, live.config) !== expectedAuthorityDigest) {
+      return { kind: "authority_denied" as const };
+    }
+    const [claim] = await tx
+      .insert(upstreamCredentialLeases)
+      .values({
+        tenantId: input.tenantId,
+        workspaceId: input.workspaceId,
+        agentId: input.agentId,
+        grantId: input.resolved.grant.id,
+        capabilityId: input.resolved.capability.id,
+        issuer: config.issuer,
+        resource,
+        resourceHash: resourceHash(resource),
+        idempotencyKeyHash: sha256(input.idempotencyKey),
+        status: "issuing",
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoNothing()
+      .returning({ id: upstreamCredentialLeases.id });
+    return claim ? { kind: "claimed" as const, claim } : { kind: "replay" as const };
+  });
+  if (claimResult.kind === "authority_denied") {
+    return {
+      ok: false,
+      status: 403,
+      code: "binding_denied",
+      error: "grant or capability is no longer active",
+    };
+  }
+  if (claimResult.kind === "replay") {
     return {
       ok: false,
       status: 409,
@@ -335,6 +430,7 @@ export async function issueUpstreamCredentialLease(input: {
       error: "this issuance key was already consumed; credentials are never replayed",
     };
   }
+  const { claim } = claimResult;
 
   let issued: { token: string; expiresAt: Date };
   try {
@@ -387,8 +483,24 @@ export async function issueUpstreamCredentialLease(input: {
     };
   }
 
+  let authorityInvalidated = false;
   try {
     await input.db.transaction(async (tx: Db) => {
+      const live = await readLiveLeaseAuthority(
+        tx,
+        {
+          tenantId: input.tenantId,
+          agentId: input.agentId,
+          capabilityId: input.resolved.capability.id,
+          grantId: input.resolved.grant.id,
+        },
+        input.now ?? new Date(),
+        true,
+      );
+      if (!live || leaseAuthorityDigest(live.secretId, live.config) !== expectedAuthorityDigest) {
+        authorityInvalidated = true;
+        return;
+      }
       const finalized = await tx
         .update(upstreamCredentialLeases)
         .set({
@@ -419,6 +531,25 @@ export async function issueUpstreamCredentialLease(input: {
         },
       });
     });
+    if (authorityInvalidated) {
+      const revoked = await input.issuer.revoke(issued.token).then(
+        () => true,
+        () => false,
+      );
+      await recordFailure(
+        input.db,
+        claim.id,
+        input.tenantId,
+        "lease authority changed during upstream issuance",
+        revoked ? "failed" : "needs_attention",
+      );
+      return {
+        ok: false,
+        status: 409,
+        code: "lease_authority_changed",
+        error: "grant or capability changed during credential issuance",
+      };
+    }
   } catch {
     // The token only exists in this frame. If durable finalization fails, revoke
     // it before dropping the reference; a hard kill inside this tiny boundary is

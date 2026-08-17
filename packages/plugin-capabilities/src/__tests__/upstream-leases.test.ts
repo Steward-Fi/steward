@@ -1,11 +1,13 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { eq, upstreamCredentialLeaseEvents, upstreamCredentialLeases } from "@stwd/db";
 import { sql } from "drizzle-orm";
+import { capabilities, capabilityGrants } from "../schema";
 import {
   expireUpstreamCredentialLeases,
   GITHUB_APP_LEASE_ISSUER,
   issueUpstreamCredentialLease,
   revokeUpstreamCredentialLease,
+  sha256,
   type UpstreamTokenIssuer,
 } from "../upstream-leases";
 import { ensureAgent, ensureTenant, type Harness, makeHarness } from "./_harness";
@@ -18,6 +20,8 @@ const GRANT = "20000000-0000-4000-8000-000000000001";
 const TOKEN = "github_installation_token_CANARY_must_not_be_stored";
 const NOW = new Date("2026-08-16T12:00:00.000Z");
 
+setDefaultTimeout(120_000);
+
 let harness: Harness;
 let workspaceId: string;
 
@@ -27,9 +31,13 @@ class FakeIssuer implements UpstreamTokenIssuer {
   failIssue = false;
   failRevoke = false;
   expiryOffsetMs = 3_590_000;
+  issueStarted?: () => void;
+  issueBarrier?: Promise<void>;
 
   async issue() {
     this.issueCalls += 1;
+    this.issueStarted?.();
+    if (this.issueBarrier) await this.issueBarrier;
     await new Promise((resolve) => setTimeout(resolve, 10));
     if (this.failIssue) throw new Error("issuer down");
     return { token: TOKEN, expiresAt: new Date(NOW.getTime() + this.expiryOffsetMs) };
@@ -108,6 +116,26 @@ beforeEach(async () => {
   await ensureTenant(harness.db, OTHER_TENANT);
   await ensureAgent(harness.db, TENANT, AGENT);
   workspaceId = await createWorkspace(harness.db, TENANT);
+  await harness.db.insert(capabilities).values({
+    id: CAPABILITY,
+    tenantId: TENANT,
+    name: "github:app:org",
+    secretId: "30000000-0000-4000-8000-000000000001",
+    host: "api.github.com",
+    pathPattern: "/",
+    method: "POST",
+    injectAs: "header",
+    injectKey: "authorization",
+    constraints: resolved().capability.constraints,
+    enabled: true,
+  });
+  await harness.db.insert(capabilityGrants).values({
+    id: GRANT,
+    tenantId: TENANT,
+    agentId: AGENT,
+    capabilityId: CAPABILITY,
+    status: "active",
+  });
 });
 
 afterEach(async () => {
@@ -167,6 +195,77 @@ describe("upstream credential leases", () => {
     expect(broad).toMatchObject({ ok: false, code: "scope_denied" });
     expect(issuer.issueCalls).toBe(0);
   });
+
+  for (const mutation of ["revoke", "disable", "delete", "narrow"] as const) {
+    test(`a concurrent ${mutation} after the upstream claim revokes the token and delivers nothing`, async () => {
+      const issuer = new FakeIssuer();
+      let releaseIssue!: () => void;
+      issuer.issueBarrier = new Promise<void>((resolve) => {
+        releaseIssue = resolve;
+      });
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      issuer.issueStarted = markStarted;
+
+      const pending = issueUpstreamCredentialLease(
+        issueArgs(issuer, `idempotency-authority-race-${mutation}`),
+      );
+      await started;
+      if (mutation === "revoke") {
+        await harness.db
+          .update(capabilityGrants)
+          .set({ status: "revoked" })
+          .where(eq(capabilityGrants.id, GRANT));
+      } else if (mutation === "disable") {
+        await harness.db
+          .update(capabilities)
+          .set({ enabled: false })
+          .where(eq(capabilities.id, CAPABILITY));
+      } else if (mutation === "delete") {
+        await harness.db.delete(capabilityGrants).where(eq(capabilityGrants.id, GRANT));
+        await harness.db.delete(capabilities).where(eq(capabilities.id, CAPABILITY));
+      } else {
+        const narrowed = resolved().capability.constraints as Record<string, unknown>;
+        await harness.db
+          .update(capabilities)
+          .set({
+            constraints: {
+              ...narrowed,
+              upstreamLease: {
+                ...(narrowed.upstreamLease as Record<string, unknown>),
+                allowedPermissions: { issues: "read" },
+              },
+            },
+          })
+          .where(eq(capabilities.id, CAPABILITY));
+      }
+      releaseIssue();
+
+      const result = await pending;
+      expect(result).toMatchObject({
+        ok: false,
+        status: 409,
+        code: "lease_authority_changed",
+      });
+      expect("token" in result).toBe(false);
+      expect(issuer.issueCalls).toBe(1);
+      expect(issuer.revokeCalls).toBe(1);
+      const [lease] = await harness.db
+        .select()
+        .from(upstreamCredentialLeases)
+        .where(
+          eq(
+            upstreamCredentialLeases.idempotencyKeyHash,
+            sha256(`idempotency-authority-race-${mutation}`),
+          ),
+        );
+      expect(lease.status).toBe("failed");
+      expect(lease.deliveredAt).toBeNull();
+      expect(lease.tokenHash).toBeNull();
+    });
+  }
 
   test("revocation needs token proof, is single-claim, and records durable audit", async () => {
     const issuer = new FakeIssuer();
