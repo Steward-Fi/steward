@@ -1,10 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
-import { StewardService } from "../services/StewardService.js";
+import { assertSecureApiUrl, StewardService } from "../services/StewardService.js";
 
 const ACTION_A = "pa_00000000-0000-4000-8000-000000000001";
 const ACTION_B = "pa_00000000-0000-4000-8000-000000000002";
 
 describe("StewardService provider-action polling", () => {
+  it("rejects credential-bearing, public plaintext, and non-HTTP API URLs", () => {
+    expect(() => assertSecureApiUrl("https://user:secret@api.example.test")).toThrow(
+      "must not contain embedded credentials",
+    );
+    expect(() => assertSecureApiUrl("http://api.example.test")).toThrow(
+      "only allowed for localhost",
+    );
+    expect(() => assertSecureApiUrl("ftp://api.example.test")).toThrow("must use https://");
+    expect(() => assertSecureApiUrl("http://127.0.0.1:3200")).not.toThrow();
+  });
+
   it("retains one visible result per binding when a later poll fails", async () => {
     const status = {
       id: ACTION_A,
@@ -22,7 +33,7 @@ describe("StewardService provider-action polling", () => {
     };
     const get = vi.fn(async (id: string) => {
       if (id === ACTION_A) return status;
-      throw new Error("gateway timeout");
+      throw new Error("gateway timeout with token-canary");
     });
     const service = new StewardService({} as any);
     Object.assign(service as any, {
@@ -41,7 +52,8 @@ describe("StewardService provider-action polling", () => {
       polling: "error",
       id: ACTION_B,
       lastKnown: { id: ACTION_B, status: "approved", version: 3 },
-      error: { message: "gateway timeout", retryable: true },
+      error: { message: "provider action status is temporarily unavailable", retryable: true },
     });
+    expect(JSON.stringify(results)).not.toContain("token-canary");
   });
 });

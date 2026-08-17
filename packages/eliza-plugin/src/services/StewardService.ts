@@ -52,22 +52,25 @@ export type TrackedProviderAction =
  * remote Steward API over http would expose API keys / bearer tokens and signed
  * transactions to network observers. The localhost default stays usable for dev.
  */
-function assertSecureApiUrl(apiUrl: string): void {
+export function assertSecureApiUrl(apiUrl: string): void {
   let parsed: URL;
   try {
     parsed = new URL(apiUrl);
   } catch {
-    throw new Error(`[Steward] Invalid apiUrl: ${apiUrl}`);
+    throw new Error("[Steward] Invalid apiUrl");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("[Steward] apiUrl must not contain embedded credentials");
   }
   if (parsed.protocol === "http:") {
     const host = parsed.hostname;
     const isLocal =
       host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
     if (!isLocal) {
-      throw new Error(
-        `[Steward] Insecure apiUrl "${apiUrl}": http:// is only allowed for localhost. Use https:// for remote hosts.`,
-      );
+      throw new Error("[Steward] http:// apiUrl is only allowed for localhost");
     }
+  } else if (parsed.protocol !== "https:") {
+    throw new Error("[Steward] apiUrl must use https:// or loopback http://");
   }
 }
 
@@ -286,7 +289,7 @@ export class StewardService extends Service {
         id,
         lastKnown: this.providerActionLastKnown.get(id),
         error: {
-          message: cause instanceof Error ? cause.message : String(cause),
+          message: "provider action status is temporarily unavailable",
           httpStatus: cause instanceof StewardApiError ? cause.status : undefined,
           retryable: true as const,
         },

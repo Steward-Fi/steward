@@ -160,12 +160,11 @@ export const providerAction: Action = {
           approvalRequired: pending,
         },
       };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+    } catch {
       return {
         success: false,
-        error: message,
-        text: `Provider action was not submitted: ${message}`,
+        error: "provider action submission failed",
+        text: "Provider action was not submitted because Steward could not complete the request.",
       };
     }
   },
