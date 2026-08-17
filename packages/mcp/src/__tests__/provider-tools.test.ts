@@ -244,7 +244,7 @@ describe("credential redaction", () => {
     expect(clean).toContain("[redacted]");
   });
 
-  test("redacts password/private-key/jwt/signature keyed fields", () => {
+  test("redacts password/private-key/jwt/request-signature keyed fields", () => {
     const canary = "keyed-canary-b51f0";
     const clean = JSON.stringify(
       sanitizeProviderPayload({
@@ -255,7 +255,7 @@ describe("credential redaction", () => {
         clientSecretValue: canary,
         cookieHeader: canary,
         accessKeyId: canary,
-        signature: canary,
+        requestSignature: canary,
         nested: { sessionPassword: canary },
       }),
     );
@@ -271,7 +271,7 @@ describe("credential redaction", () => {
     const opaqueJwt = "opaque-jwt-canary";
     const signature = "signature-canary";
     const clean = sanitizeProviderPayload(
-      `upstream 500: jwt=${jwt} opaque jwt=${opaqueJwt} key=${apiKey} gh=${ghToken} slack=${slackToken} password: ${password} signature=${signature}`,
+      `upstream 500: jwt=${jwt} opaque jwt=${opaqueJwt} key=${apiKey} gh=${ghToken} slack=${slackToken} password: ${password} request_signature=${signature}`,
     ) as string;
     for (const canary of [jwt, opaqueJwt, apiKey, ghToken, slackToken, password, signature]) {
       expect(clean).not.toContain(canary);
@@ -313,7 +313,12 @@ describe("credential redaction", () => {
   });
 
   test("leaves non-secret free text and identifiers intact", () => {
-    const text = "order oid_123 failed: insufficient balance for 0.01 BTC; tx 0x" + "a".repeat(64);
+    const text =
+      "order oid_123 failed: insufficient balance for 0.01 BTC; transaction signature=5publicTxSignature; tx 0x" +
+      "a".repeat(64);
     expect(sanitizeProviderPayload(text)).toBe(text);
+    expect(sanitizeProviderPayload({ signature: "5publicTxSignature" })).toEqual({
+      signature: "5publicTxSignature",
+    });
   });
 });

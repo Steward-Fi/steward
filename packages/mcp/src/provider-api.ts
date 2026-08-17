@@ -11,12 +11,20 @@ export interface ProviderApi {
 // remains upstream errors not embedding secrets at all.
 function isSensitiveProviderKey(key: string): boolean {
   // Use the repository-wide classifier so this MCP boundary cannot drift
-  // behind newly recognized credential carrier names. `passwd` and
-  // signatures are retained as MCP-specific conservative additions.
-  return isSensitiveCredentialKey(key) || /passwd|signature/i.test(key);
+  // behind newly recognized credential carrier names. Generic transaction
+  // `signature` fields are public identifiers and must remain usable; only
+  // request-authentication/HMAC signatures are credentials at this boundary.
+  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return (
+    isSensitiveCredentialKey(key) ||
+    /passwd/i.test(key) ||
+    normalized === "xstewardsignature" ||
+    normalized.endsWith("requestsignature") ||
+    normalized.endsWith("hmacsignature")
+  );
 }
 const SECRET_TEXT =
-  /-----BEGIN (?:ENCRYPTED |RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:ENCRYPTED |RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----|-----BEGIN PGP PRIVATE KEY BLOCK-----[\s\S]*?-----END PGP PRIVATE KEY BLOCK-----|(?:bearer\s+|(?:auth(?:orization)?|token|secret|credential|api[-_]?key|cookie(?:[-_]?header)?|pass(?:word|phrase|wd)|private[-_]?key|jwt|signature|client[-_]?secret|access[-_]?key(?:[-_]?id)?|secret[-_]?access[-_]?key|session[-_]?(?:id|cookie)|signing[-_]?key|encryption[-_]?key|mnemonic|seed[-_]?phrase|recovery[-_]?phrase|pat)(?:\s*["']?\s*[:=]\s*["']?|\s+))[^\s,"'}]+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*|\bsk-[A-Za-z0-9_-]{8,}|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bgh[po]_[A-Za-z0-9]{8,}|\bxox[baprs]-[A-Za-z0-9-]{8,}/gi;
+  /-----BEGIN (?:ENCRYPTED |RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:ENCRYPTED |RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----|-----BEGIN PGP PRIVATE KEY BLOCK-----[\s\S]*?-----END PGP PRIVATE KEY BLOCK-----|(?:bearer\s+|(?:auth(?:orization)?|token|secret|credential|api[-_]?key|cookie(?:[-_]?header)?|pass(?:word|phrase|wd)|private[-_]?key|jwt|(?:request|hmac)[-_]?signature|x[-_]?steward[-_]?signature|client[-_]?secret|access[-_]?key(?:[-_]?id)?|secret[-_]?access[-_]?key|session[-_]?(?:id|cookie)|signing[-_]?key|encryption[-_]?key|mnemonic|seed[-_]?phrase|recovery[-_]?phrase|pat)(?:\s*["']?\s*[:=]\s*["']?|\s+))[^\s,"'}]+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*|\bsk-[A-Za-z0-9_-]{8,}|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bgh[po]_[A-Za-z0-9]{8,}|\bxox[baprs]-[A-Za-z0-9-]{8,}/gi;
 
 export function sanitizeProviderPayload(
   value: unknown,
