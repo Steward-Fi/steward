@@ -64,7 +64,9 @@ const email = (v: unknown): string => {
     labels.some((label) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label))
   )
     throw new CanonError("CANON_FIELD_TYPE_INVALID", "recipient is invalid");
-  return s.toLowerCase();
+  // Domains are case-insensitive, but preserve the local part exactly in the
+  // committed provider request so policy/review cannot silently retarget it.
+  return `${parts[0]}@${parts[1].toLowerCase()}`;
 };
 const sha = (s: string) => `sha256:${createHash("sha256").update(s).digest("hex")}`;
 
@@ -188,6 +190,12 @@ function insert(raw: unknown): GoogleActionBuild {
   if (!Array.isArray(attendees) || attendees.length > 100)
     throw new CanonError("CANON_FIELD_TYPE_INVALID", "attendees is invalid");
   const emails = [...new Set(attendees.map(email))].sort();
+  const attendeeDomainSet = [
+    ...new Set(emails.map((value) => value.slice(value.lastIndexOf("@") + 1).toLowerCase())),
+  ].sort();
+  // Bind policy/review to the exact canonical recipient set without exposing
+  // addresses in the safe summary.
+  const recipientCommitment = sha(JSON.stringify(emails));
   const body: Record<string, JsonValue> = {
     summary,
     start: { dateTime: start },
@@ -209,11 +217,19 @@ function insert(raw: unknown): GoogleActionBuild {
     safeSummary: {
       operation: "google.calendar.events.insert",
       attendeeCount: emails.length,
+      attendeeDomainSet,
+      recipientCommitment,
       summaryLength: [...summary].length,
       start,
       end,
     },
-    policyArgs: { attendeeCount: emails.length, start, end },
+    policyArgs: {
+      attendeeCount: emails.length,
+      attendeeDomainSet,
+      recipientCommitment,
+      start,
+      end,
+    },
   };
 }
 

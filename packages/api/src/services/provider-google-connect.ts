@@ -30,12 +30,14 @@
  * withTenantAuditedTransaction / appendRequiredAudit.
  */
 
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   and,
   eq,
   getDb,
+  inArray,
   providerAccounts,
+  providerGoogleCredentialLifecycles,
   type Secret,
   secrets,
   sql,
@@ -99,6 +101,8 @@ export type GoogleConnectErrorCode =
   | "GOOGLE_ACCOUNT_NOT_GOOGLE"
   | "GOOGLE_REFRESH_TOKEN_MISSING"
   | "GOOGLE_REFRESH_REVOKED"
+  | "GOOGLE_SCOPE_WIDENED"
+  | "GOOGLE_CREDENTIAL_NEEDS_ATTENTION"
   | "GOOGLE_REFRESH_FAILED";
 
 export class GoogleConnectError extends Error {
@@ -139,6 +143,7 @@ export interface GoogleTokenResponse {
 export interface GoogleUserResponse {
   sub?: string;
   email?: string;
+  email_verified?: boolean;
   name?: string;
 }
 
@@ -200,6 +205,14 @@ async function readBoundedGoogleResponse(res: Response): Promise<string> {
 }
 
 async function defaultForward(req: GoogleForwardRequest): Promise<GoogleForwardResponse> {
+  const allowed = new Map<string, "GET" | "POST">([
+    [GOOGLE_TOKEN_URL, "POST"],
+    [GOOGLE_REVOKE_URL, "POST"],
+    [GOOGLE_USERINFO_URL, "GET"],
+  ]);
+  if (allowed.get(req.url) !== req.method) {
+    throw new Error("Google provider request endpoint is not allowlisted");
+  }
   const res = await fetch(req.url, {
     method: req.method,
     headers: req.headers,
@@ -239,6 +252,8 @@ export function __setGoogleForwardForTests(fn: GoogleForwardFn | null): () => vo
 }
 
 let beforeConnectCommitForTests: (() => void | Promise<void>) | null = null;
+let afterGoogleCredentialStageForTests: (() => void | Promise<void>) | null = null;
+let afterGoogleRefreshIntentForTests: (() => void | Promise<void>) | null = null;
 
 /** Inject a failure immediately before the connect audit append. Test-only. */
 export function __setGoogleConnectCommitHookForTests(
@@ -248,6 +263,28 @@ export function __setGoogleConnectCommitHookForTests(
   beforeConnectCommitForTests = hook;
   return () => {
     beforeConnectCommitForTests = previous;
+  };
+}
+
+/** Inject a crash after a one-time upstream response is durably encrypted. */
+export function __setGoogleCredentialStageHookForTests(
+  hook: (() => void | Promise<void>) | null,
+): () => void {
+  const previous = afterGoogleCredentialStageForTests;
+  afterGoogleCredentialStageForTests = hook;
+  return () => {
+    afterGoogleCredentialStageForTests = previous;
+  };
+}
+
+/** Inject a crash after the refresh intent commits but before provider I/O. */
+export function __setGoogleRefreshIntentHookForTests(
+  hook: (() => void | Promise<void>) | null,
+): () => void {
+  const previous = afterGoogleRefreshIntentForTests;
+  afterGoogleRefreshIntentForTests = hook;
+  return () => {
+    afterGoogleRefreshIntentForTests = previous;
   };
 }
 
@@ -420,27 +457,32 @@ function normalizeScopes(scopes?: string[]): string[] {
   return [...new Set(filtered)];
 }
 
-function validateGrantedScopes(
-  rawScope: string | undefined,
-  allowedScopes: readonly string[],
-  errorCode: "GOOGLE_TOKEN_EXCHANGE_FAILED" | "GOOGLE_REFRESH_FAILED",
+function boundedString(value: unknown, max: number): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= max;
+}
+
+function isReasonableEmail(value: string): boolean {
+  return value.length <= 512 && !/[\r\n\0]/.test(value) && /^[^@\s]+@[^@\s]+$/.test(value);
+}
+
+function parseGrantedScopes(
+  scope: unknown,
+  fallback: string[],
+  code: "GOOGLE_TOKEN_EXCHANGE_FAILED" | "GOOGLE_REFRESH_FAILED",
 ): string[] {
-  const granted = rawScope
-    ? [...new Set(rawScope.split(/\s+/).filter(Boolean))]
-    : [...allowedScopes];
-  const allowed = new Set(allowedScopes);
-  if (
-    granted.length === 0 ||
-    granted.length > GOOGLE_DEFAULT_SCOPES.length ||
-    granted.some((scope) => !allowed.has(scope))
-  ) {
-    throw new GoogleConnectError(
-      errorCode,
-      502,
-      "Google returned scopes outside the requested grant",
-    );
+  if (scope === undefined) return fallback;
+  if (typeof scope !== "string" || scope.length > 32_768) {
+    throw new GoogleConnectError(code, 502, "Google token scope invalid");
   }
-  return granted;
+  const scopes = [...new Set(scope.split(/\s+/).filter(Boolean))];
+  if (
+    scopes.length === 0 ||
+    scopes.length > 64 ||
+    scopes.some((value) => value.length > 512 || !/^[\x21-\x7e]+$/.test(value))
+  ) {
+    throw new GoogleConnectError(code, 502, "Google token scope invalid");
+  }
+  return scopes;
 }
 
 function stateStoreKey(state: string): string {
@@ -497,6 +539,201 @@ export interface CompleteConnectResult {
   scopesGranted: string[];
   credentialVersion: number;
   reconnected: boolean;
+}
+
+interface GoogleLifecycleSecret {
+  schemaVersion: "steward.provider-google.lifecycle.v1";
+  token: GoogleTokenResponse;
+}
+
+async function stageGoogleCredentialResponse(input: {
+  tenantId: string;
+  workspaceId: string;
+  vault: SecretVault;
+  kind: "connect_exchange" | "refresh_rotation";
+  token: GoogleTokenResponse;
+  providerAccountId?: string;
+  expectedAccountRevision?: number;
+}): Promise<string> {
+  const lifecycleId = randomUUID();
+  await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
+    const tx = txRaw as DbExecutor;
+    const secret = await input.vault.createSecretWithinTx(
+      tx,
+      input.tenantId,
+      `provider-google-lifecycle:${lifecycleId}`,
+      JSON.stringify({
+        schemaVersion: "steward.provider-google.lifecycle.v1",
+        token: input.token,
+      } satisfies GoogleLifecycleSecret),
+      { description: "Encrypted transient Google OAuth recovery material" },
+    );
+    await tx.insert(providerGoogleCredentialLifecycles).values({
+      id: lifecycleId,
+      tenantId: input.tenantId,
+      workspaceId: input.workspaceId,
+      providerAccountId: input.providerAccountId ?? null,
+      kind: input.kind,
+      state: "credential_staged",
+      credentialSecretId: secret.id,
+      expectedAccountRevision: input.expectedAccountRevision ?? null,
+    });
+    await append({
+      tenantId: input.tenantId,
+      actorType: "system",
+      actorId: "system",
+      action: `provider.google.${input.kind}.credential_staged`,
+      resourceType: "provider_google_credential_lifecycle",
+      resourceId: lifecycleId,
+      metadata: {
+        workspaceId: input.workspaceId,
+        providerAccountId: input.providerAccountId ?? null,
+      },
+    });
+  });
+  await afterGoogleCredentialStageForTests?.();
+  return lifecycleId;
+}
+
+function assertScopeSubset(
+  granted: string[],
+  allowed: readonly string[],
+  code: "GOOGLE_TOKEN_EXCHANGE_FAILED" | "GOOGLE_REFRESH_FAILED",
+): void {
+  const allow = new Set(allowed);
+  if (granted.some((scope) => !allow.has(scope))) {
+    throw new GoogleConnectError(
+      "GOOGLE_SCOPE_WIDENED",
+      502,
+      `${code}: Google widened OAuth scope`,
+    );
+  }
+}
+
+async function setGoogleLifecycleState(
+  tenantId: string,
+  lifecycleId: string,
+  state: "revocation_pending" | "adopted" | "revoked" | "needs_attention",
+  lastErrorCode: string | null = null,
+): Promise<void> {
+  await withTenantAuditedTransaction(tenantId, async (txRaw, append) => {
+    const tx = txRaw as DbExecutor;
+    const [existing] = await tx
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(
+        and(
+          eq(providerGoogleCredentialLifecycles.tenantId, tenantId),
+          eq(providerGoogleCredentialLifecycles.id, lifecycleId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    if (!existing) return;
+    const [row] = await tx
+      .update(providerGoogleCredentialLifecycles)
+      .set({
+        state,
+        lastErrorCode,
+        ...(state === "adopted" || state === "revoked" ? { credentialSecretId: null } : {}),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(providerGoogleCredentialLifecycles.tenantId, tenantId),
+          eq(providerGoogleCredentialLifecycles.id, lifecycleId),
+        ),
+      )
+      .returning();
+    if (!row) return;
+    if ((state === "adopted" || state === "revoked") && existing.credentialSecretId) {
+      await tx
+        .delete(secrets)
+        .where(and(eq(secrets.tenantId, tenantId), eq(secrets.id, existing.credentialSecretId)));
+    }
+    await append({
+      tenantId,
+      actorType: "system",
+      actorId: "system",
+      action: `provider.google.lifecycle.${state}`,
+      resourceType: "provider_google_credential_lifecycle",
+      resourceId: lifecycleId,
+      metadata: { kind: row.kind, providerAccountId: row.providerAccountId, lastErrorCode },
+    });
+  });
+}
+
+/** Retry a durable revocation handle. Terminal rows are strict single-use. */
+export async function reconcileGoogleCredentialRevocation(input: {
+  tenantId: string;
+  lifecycleId: string;
+  vault: SecretVault;
+  config: GoogleConnectConfig;
+}): Promise<"revoked" | "needs_attention" | "already_terminal"> {
+  const db = getDb() as DbExecutor;
+  const [row] = await db
+    .select()
+    .from(providerGoogleCredentialLifecycles)
+    .where(
+      and(
+        eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+        eq(providerGoogleCredentialLifecycles.id, input.lifecycleId),
+      ),
+    )
+    .limit(1);
+  if (
+    !row ||
+    (row.state !== "revocation_pending" &&
+      row.state !== "needs_attention" &&
+      !(row.kind === "connect_exchange" && row.state === "credential_staged"))
+  ) {
+    return "already_terminal";
+  }
+  if (!row.credentialSecretId) {
+    await setGoogleLifecycleState(
+      input.tenantId,
+      input.lifecycleId,
+      "needs_attention",
+      "MISSING_HANDLE",
+    );
+    return "needs_attention";
+  }
+  try {
+    const [secret] = (await db
+      .select()
+      .from(secrets)
+      .where(and(eq(secrets.tenantId, input.tenantId), eq(secrets.id, row.credentialSecretId)))
+      .limit(1)) as Secret[];
+    if (!secret) throw new Error("missing encrypted revocation handle");
+    const parsed = JSON.parse(
+      input.vault.decryptSecretRow(input.tenantId, secret),
+    ) as GoogleLifecycleSecret;
+    if (parsed.schemaVersion !== "steward.provider-google.lifecycle.v1")
+      throw new Error("invalid handle");
+    const token = boundedString(parsed.token.refresh_token, 16_384)
+      ? parsed.token.refresh_token
+      : boundedString(parsed.token.access_token, 16_384)
+        ? parsed.token.access_token
+        : null;
+    if (!token) throw new Error("invalid handle");
+    const response = await forwardImpl({
+      url: GOOGLE_REVOKE_URL,
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+      body: new URLSearchParams({ token, client_id: input.config.clientId }).toString(),
+    });
+    if (!response.ok) throw new Error("revoker rejected handle");
+    await setGoogleLifecycleState(input.tenantId, input.lifecycleId, "revoked");
+    return "revoked";
+  } catch {
+    await setGoogleLifecycleState(
+      input.tenantId,
+      input.lifecycleId,
+      "needs_attention",
+      "REVOCATION_FAILED",
+    );
+    return "needs_attention";
+  }
 }
 
 export async function completeGoogleConnect(
@@ -567,42 +804,67 @@ export async function completeGoogleConnect(
     redirectUri: input.redirectUri,
     verifier: parsedToken.verifier,
   });
-  // 4. Consume the state EXACTLY ONCE after the authorization code has been
-  //    successfully spent. The code cannot be retried at Google, so every later
-  //    local validation/persistence failure burns the state and compensates by
-  //    revoking the newly issued grant. A concurrent
+  // The code exchange is a one-way boundary. Encrypt its response immediately,
+  // before identity lookup or state consumption, so every later failure has a
+  // durable revocation handle instead of relying on process-local best effort.
+  const lifecycleId = await stageGoogleCredentialResponse({
+    tenantId: input.tenantId,
+    workspaceId: input.workspaceId,
+    vault: input.vault,
+    kind: "connect_exchange",
+    token: tokenRes,
+  });
+  const failIssuedCredential = async (reason: string): Promise<void> => {
+    await setGoogleLifecycleState(input.tenantId, lifecycleId, "revocation_pending", reason);
+    await reconcileGoogleCredentialRevocation({
+      tenantId: input.tenantId,
+      lifecycleId,
+      vault: input.vault,
+      config: input.config,
+    });
+  };
+  if (typeof tokenRes.refresh_token !== "string" || tokenRes.refresh_token.length === 0) {
+    await failIssuedCredential("REFRESH_TOKEN_MISSING");
+    throw new GoogleConnectError(
+      "GOOGLE_REFRESH_TOKEN_MISSING",
+      502,
+      "Google authorization did not issue offline access; reconnect with consent required",
+    );
+  }
+
+  let scopesGranted: string[];
+  try {
+    validateTokenEnvelope(tokenRes, "GOOGLE_TOKEN_EXCHANGE_FAILED");
+    scopesGranted = parseGrantedScopes(
+      tokenRes.scope,
+      record.scopes,
+      "GOOGLE_TOKEN_EXCHANGE_FAILED",
+    );
+    assertScopeSubset(scopesGranted, record.scopes, "GOOGLE_TOKEN_EXCHANGE_FAILED");
+  } catch (error) {
+    await failIssuedCredential("SCOPE_WIDENED");
+    throw error;
+  }
+
+  // 4. Identify the connected account.
+  let identity: GoogleIdentity;
+  try {
+    identity = await fetchGoogleIdentity(tokenRes.access_token);
+  } catch (error) {
+    await failIssuedCredential("IDENTITY_FAILED");
+    throw error;
+  }
+
+  // 5. Consume the state EXACTLY ONCE, only after upstream success. A concurrent
   //    duplicate callback loses the race and gets GOOGLE_STATE_REUSED.
   const consumed = await input.store.consume(key);
   if (consumed !== raw) {
     // This callback already obtained live credentials before it lost the
     // single-use-state race. Revoke them so a duplicate callback cannot leave
     // an untracked grant at Google.
-    await revokeIssuedTokensBestEffort(input.config, tokenRes);
+    await failIssuedCredential("STATE_REUSED");
     throw new GoogleConnectError("GOOGLE_STATE_REUSED", 401, "connect state already used");
   }
-
-  let identity: GoogleIdentity;
-  let scopesGranted: string[];
-  try {
-    assertGoogleTokenResponse(tokenRes, "GOOGLE_TOKEN_EXCHANGE_FAILED");
-    if (typeof tokenRes.refresh_token !== "string" || tokenRes.refresh_token.length === 0) {
-      throw new GoogleConnectError(
-        "GOOGLE_REFRESH_TOKEN_MISSING",
-        502,
-        "Google authorization did not issue offline access; reconnect with consent required",
-      );
-    }
-    scopesGranted = validateGrantedScopes(
-      tokenRes.scope,
-      record.scopes,
-      "GOOGLE_TOKEN_EXCHANGE_FAILED",
-    );
-    identity = await fetchGoogleIdentity(tokenRes.access_token);
-  } catch (error) {
-    await revokeIssuedTokensBestEffort(input.config, tokenRes);
-    throw error;
-  }
-
   const obtainedAt = new Date();
   const expiresAt =
     typeof tokenRes.expires_in === "number"
@@ -627,7 +889,7 @@ export async function completeGoogleConnect(
   //    all inside one tenant-audited transaction so the audit event commits with
   //    the state mutation.
   try {
-    return await persistConnectedAccount({
+    const result = await persistConnectedAccount({
       tenantId: input.tenantId,
       workspaceId: input.workspaceId,
       callerUserId: input.callerUserId,
@@ -636,36 +898,16 @@ export async function completeGoogleConnect(
       payload,
       scopesGranted,
       requestId: input.requestId ?? null,
+      lifecycleId,
     });
+    return result;
   } catch (error) {
     // The authorization code has already been exchanged and the state consumed,
     // so persistence cannot be retried safely. Compensate by revoking the newly
     // issued Google grant. The database transaction below guarantees the old
     // account/credential remains intact on reconnect failure.
-    await revokeIssuedTokensBestEffort(input.config, tokenRes);
+    await failIssuedCredential("PERSIST_FAILED");
     throw error;
-  }
-}
-
-async function revokeIssuedTokensBestEffort(
-  config: GoogleConnectConfig,
-  tokenRes: GoogleTokenResponse,
-): Promise<void> {
-  const token = tokenRes.refresh_token || tokenRes.access_token;
-  if (!token) return;
-  try {
-    await forwardImpl({
-      url: GOOGLE_REVOKE_URL,
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Accept: "application/json",
-      },
-      body: new URLSearchParams({ token, client_id: config.clientId }).toString(),
-    });
-  } catch {
-    // Best effort only: preserve the original persistence/race failure. Google
-    // credentials are never written to logs or returned from this path.
   }
 }
 
@@ -691,14 +933,11 @@ async function fetchGoogleIdentity(accessToken: string): Promise<GoogleIdentity>
   const data = res.json as GoogleUserResponse | null;
   if (
     !data ||
-    typeof data.sub !== "string" ||
-    data.sub.length < 1 ||
-    data.sub.length > 512 ||
-    typeof data.email !== "string" ||
-    data.email.length < 3 ||
-    data.email.length > 512 ||
-    /[\u0000-\u0020\u007f]/.test(data.email) ||
-    !/^[^@]+@[^@]+$/.test(data.email) ||
+    data.email_verified !== true ||
+    !boundedString(data.sub, 255) ||
+    !/^[A-Za-z0-9._~-]+$/.test(data.sub) ||
+    !boundedString(data.email, 512) ||
+    !isReasonableEmail(data.email) ||
     (data.name !== undefined && (typeof data.name !== "string" || data.name.length > 512))
   ) {
     throw new GoogleConnectError(
@@ -710,47 +949,21 @@ async function fetchGoogleIdentity(accessToken: string): Promise<GoogleIdentity>
   return { id: data.sub, email: data.email, name: data.name ?? "" };
 }
 
-function assertGoogleTokenResponse(
+function validateTokenEnvelope(
   parsed: GoogleTokenResponse,
   code: "GOOGLE_TOKEN_EXCHANGE_FAILED" | "GOOGLE_REFRESH_FAILED",
 ): void {
-  const fail = (message: string) => {
-    throw new GoogleConnectError(code, 502, message);
-  };
   if (
-    typeof parsed.access_token !== "string" ||
-    parsed.access_token.length < 1 ||
-    parsed.access_token.length > 16_384
+    !boundedString(parsed.access_token, 16_384) ||
+    (parsed.refresh_token !== undefined && !boundedString(parsed.refresh_token, 16_384)) ||
+    (parsed.token_type !== undefined &&
+      (typeof parsed.token_type !== "string" || parsed.token_type.toLowerCase() !== "bearer")) ||
+    (parsed.expires_in !== undefined &&
+      (!Number.isSafeInteger(parsed.expires_in) ||
+        parsed.expires_in < 1 ||
+        parsed.expires_in > 31_536_000))
   ) {
-    fail("Google token response contained an invalid access_token");
-  }
-  if (
-    parsed.refresh_token !== undefined &&
-    (typeof parsed.refresh_token !== "string" ||
-      parsed.refresh_token.length < 1 ||
-      parsed.refresh_token.length > 16_384)
-  ) {
-    fail("Google token response contained an invalid refresh_token");
-  }
-  if (
-    parsed.token_type !== undefined &&
-    (typeof parsed.token_type !== "string" || parsed.token_type.toLowerCase() !== "bearer")
-  ) {
-    fail("Google token response contained an invalid token_type");
-  }
-  if (
-    parsed.scope !== undefined &&
-    (typeof parsed.scope !== "string" || parsed.scope.length > 32_768)
-  ) {
-    fail("Google token response contained invalid scopes");
-  }
-  if (
-    parsed.expires_in !== undefined &&
-    (!Number.isSafeInteger(parsed.expires_in) ||
-      parsed.expires_in <= 0 ||
-      parsed.expires_in > 30 * 24 * 60 * 60)
-  ) {
-    fail("Google token response contained an invalid expires_in");
+    throw new GoogleConnectError(code, 502, "Google token response invalid");
   }
 }
 
@@ -780,7 +993,7 @@ async function exchangeAuthorizationCode(input: ExchangeInput): Promise<GoogleTo
     body: body.toString(),
   });
   const parsed = res.json as GoogleTokenResponse | null;
-  if (!res.ok || !parsed || typeof parsed !== "object") {
+  if (!res.ok || !parsed || typeof parsed.access_token !== "string") {
     throw new GoogleConnectError(
       "GOOGLE_TOKEN_EXCHANGE_FAILED",
       502,
@@ -800,6 +1013,7 @@ interface PersistInput {
   payload: GoogleCredentialPayload;
   scopesGranted: string[];
   requestId: string | null;
+  lifecycleId: string;
 }
 
 /** Deterministic per-account secret name so reconnect targets the same lineage. */
@@ -923,6 +1137,47 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
       },
     });
 
+    const [lifecycleBeforeAdoption] = await tx
+      .select({ credentialSecretId: providerGoogleCredentialLifecycles.credentialSecretId })
+      .from(providerGoogleCredentialLifecycles)
+      .where(
+        and(
+          eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+          eq(providerGoogleCredentialLifecycles.id, input.lifecycleId),
+          eq(providerGoogleCredentialLifecycles.state, "credential_staged"),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    const [lifecycle] = await tx
+      .update(providerGoogleCredentialLifecycles)
+      .set({ state: "adopted", credentialSecretId: null, updatedAt: new Date() })
+      .where(
+        and(
+          eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+          eq(providerGoogleCredentialLifecycles.id, input.lifecycleId),
+          eq(providerGoogleCredentialLifecycles.state, "credential_staged"),
+        ),
+      )
+      .returning();
+    if (!lifecycle) {
+      throw new GoogleConnectError(
+        "GOOGLE_CREDENTIAL_NEEDS_ATTENTION",
+        409,
+        "connect lifecycle changed before adoption",
+      );
+    }
+    if (lifecycleBeforeAdoption?.credentialSecretId) {
+      await tx
+        .delete(secrets)
+        .where(
+          and(
+            eq(secrets.tenantId, input.tenantId),
+            eq(secrets.id, lifecycleBeforeAdoption.credentialSecretId),
+          ),
+        );
+    }
+
     return {
       providerAccountId,
       googleUserId: input.identity.id,
@@ -972,16 +1227,14 @@ export interface RefreshResult {
  * pointing at a superseded (already-rotated-away) refresh token.
  */
 export async function refreshGoogleProviderCredential(input: RefreshInput): Promise<RefreshResult> {
-  // The tx returns a discriminated outcome. A `revoked` outcome COMMITS the
-  // degrade + audit, then we throw AFTER the commit so the failure signal does
-  // not roll back the very degrade it is reporting (fail closed + durable).
-  type Outcome = { kind: "ok"; result: RefreshResult } | { kind: "revoked" };
-  const outcome = await withTenantAuditedTransaction<Outcome>(
+  type Prepared =
+    | { kind: "fresh"; result: RefreshResult }
+    | { kind: "wait"; lifecycleId: string }
+    | { kind: "call"; lifecycleId: string; refreshToken: string; allowedScopes: string[] };
+  const prepared = await withTenantAuditedTransaction<Prepared>(
     input.tenantId,
     async (txRaw, append) => {
       const tx = txRaw as DbExecutor;
-
-      // Acquire the per-account row lock first. Everything below runs under it.
       const [account] = await tx
         .select()
         .from(providerAccounts)
@@ -993,33 +1246,7 @@ export async function refreshGoogleProviderCredential(input: RefreshInput): Prom
         )
         .limit(1)
         .for("update");
-
-      if (!account)
-        throw new GoogleConnectError("GOOGLE_ACCOUNT_NOT_FOUND", 404, "provider account not found");
-      // Cross-workspace IDOR guard: the account MUST belong to the workspace the
-      // caller was authorized for. 404 (not 403) so account existence in another
-      // workspace does not leak.
-      if (account.workspaceId !== input.workspaceId) {
-        throw new GoogleConnectError("GOOGLE_ACCOUNT_NOT_FOUND", 404, "provider account not found");
-      }
-      if (account.adapterKey !== GOOGLE_ADAPTER_KEY) {
-        throw new GoogleConnectError(
-          "GOOGLE_ACCOUNT_NOT_GOOGLE",
-          400,
-          "provider account is not a Google account",
-        );
-      }
-      // Do NOT resurrect a locally revoked/disconnected account via refresh. A
-      // revoked account requires a fresh OAuth connect to become active again;
-      // silently reactivating it (especially after a best-effort upstream revoke
-      // failed) would restore an account the operator intended to kill.
-      if (account.status !== "active") {
-        throw new GoogleConnectError(
-          "GOOGLE_REFRESH_REVOKED",
-          409,
-          "provider account is not active; reconnect required",
-        );
-      }
+      assertRefreshAccount(account, input.workspaceId);
       if (!account.credentialSecretId || account.credentialVersion == null) {
         throw new GoogleConnectError(
           "GOOGLE_REFRESH_TOKEN_MISSING",
@@ -1027,21 +1254,15 @@ export async function refreshGoogleProviderCredential(input: RefreshInput): Prom
           "account has no credential",
         );
       }
-
-      // Load the CURRENT credential under the lock.
       const current = await loadCredential(
         input.vault,
         input.tenantId,
         account.credentialSecretId,
         tx,
       );
-
-      // Single-flight fast path: a concurrent winner already rotated us to a fresh
-      // token while we waited for the lock. If not forced and the token is still
-      // valid, skip the network call entirely.
       if (!input.force && !isNearExpiry(current.expiresAt)) {
         return {
-          kind: "ok",
+          kind: "fresh",
           result: {
             refreshed: false,
             credentialVersion: account.credentialVersion,
@@ -1049,83 +1270,417 @@ export async function refreshGoogleProviderCredential(input: RefreshInput): Prom
           },
         };
       }
-
-      if (!current.refreshToken) {
+      if (!current.refreshToken)
         throw new GoogleConnectError(
           "GOOGLE_REFRESH_TOKEN_MISSING",
           409,
           "no refresh token on record",
         );
-      }
-
-      // Spend the rotating refresh token exactly once (still holding the lock).
-      const tokenRes = await refreshGoogleUpstream(
-        input.config,
-        current.refreshToken,
-        current.payload.scopesGranted,
-      );
-
-      if (tokenRes.revoked) {
-        const [degraded] = await tx
-          .update(providerAccounts)
-          .set({ status: "revoked", revision: account.revision + 1, updatedAt: new Date() })
+      const [activeLifecycle] = await tx
+        .select({ id: providerGoogleCredentialLifecycles.id })
+        .from(providerGoogleCredentialLifecycles)
+        .where(
+          and(
+            eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+            eq(providerGoogleCredentialLifecycles.providerAccountId, account.id),
+            eq(providerGoogleCredentialLifecycles.kind, "refresh_rotation"),
+            inArray(providerGoogleCredentialLifecycles.state, ["inflight", "credential_staged"]),
+          ),
+        )
+        .limit(1);
+      if (activeLifecycle) return { kind: "wait", lifecycleId: activeLifecycle.id };
+      const lifecycleId = randomUUID();
+      await tx.insert(providerGoogleCredentialLifecycles).values({
+        id: lifecycleId,
+        tenantId: input.tenantId,
+        workspaceId: account.workspaceId,
+        providerAccountId: account.id,
+        kind: "refresh_rotation",
+        state: "inflight",
+        expectedAccountRevision: account.revision,
+      });
+      await append({
+        tenantId: input.tenantId,
+        actorType: input.actorId ? "user" : "system",
+        actorId: input.actorId ?? "system",
+        action: "provider.google.refresh.intent_staged",
+        resourceType: "provider_google_credential_lifecycle",
+        resourceId: lifecycleId,
+        metadata: {
+          workspaceId: account.workspaceId,
+          providerAccountId: account.id,
+          expectedAccountRevision: account.revision,
+          requestId: input.requestId ?? null,
+        },
+      });
+      return {
+        kind: "call",
+        lifecycleId,
+        refreshToken: current.refreshToken,
+        allowedScopes: current.payload.scopesGranted,
+      };
+    },
+  );
+  if (prepared.kind === "fresh") return prepared.result;
+  if (prepared.kind === "wait") {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const [row] = await (getDb() as DbExecutor)
+        .select({ state: providerGoogleCredentialLifecycles.state })
+        .from(providerGoogleCredentialLifecycles)
+        .where(
+          and(
+            eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+            eq(providerGoogleCredentialLifecycles.id, prepared.lifecycleId),
+          ),
+        )
+        .limit(1);
+      if (row?.state === "adopted") {
+        const [account] = await (getDb() as DbExecutor)
+          .select()
+          .from(providerAccounts)
           .where(
             and(
               eq(providerAccounts.tenantId, input.tenantId),
-              eq(providerAccounts.id, account.id),
-              eq(providerAccounts.revision, account.revision),
+              eq(providerAccounts.id, input.accountId),
             ),
           )
-          .returning();
-        await append({
-          tenantId: input.tenantId,
-          actorType: input.actorId ? "user" : "system",
-          actorId: input.actorId ?? "system",
-          action: "provider.google.refresh.revoked",
-          resourceType: "provider_account",
-          resourceId: account.id,
-          metadata: {
-            workspaceId: account.workspaceId,
-            googleUserId: account.externalRef,
-            previousRevision: account.revision,
-            newRevision: degraded?.revision ?? null,
-            requestId: input.requestId ?? null,
-          },
-        });
-        // COMMIT the degrade + audit; the caller-facing failure is thrown below.
-        return { kind: "revoked" };
+          .limit(1);
+        if (account?.credentialVersion != null) {
+          const credential = account.credentialSecretId
+            ? await loadCredential(input.vault, input.tenantId, account.credentialSecretId)
+            : null;
+          return {
+            refreshed: false,
+            credentialVersion: account.credentialVersion,
+            expiresAt: credential?.expiresAt ?? null,
+          };
+        }
       }
+      if (row?.state === "needs_attention" || row?.state === "revoked") {
+        throw new GoogleConnectError(
+          "GOOGLE_CREDENTIAL_NEEDS_ATTENTION",
+          409,
+          "concurrent refresh did not complete",
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new GoogleConnectError(
+      "GOOGLE_CREDENTIAL_NEEDS_ATTENTION",
+      409,
+      "concurrent refresh is still in progress",
+    );
+  }
 
-      // Rotate the vault secret to a new version with the freshly issued tokens.
+  await afterGoogleRefreshIntentForTests?.();
+
+  let tokenRes: RefreshUpstreamResult;
+  try {
+    tokenRes = await refreshGoogleUpstream(input.config, prepared.refreshToken);
+  } catch (error) {
+    await disableGoogleAccountForLifecycle(input, prepared.lifecycleId, "REFRESH_OUTCOME_UNKNOWN");
+    throw error;
+  }
+  if (tokenRes.revoked) {
+    await revokeGoogleAccountForLifecycle(input, prepared.lifecycleId);
+    throw new GoogleConnectError("GOOGLE_REFRESH_REVOKED", 409, "Google refresh token revoked");
+  }
+  // Encrypt the provider response before any semantic parsing that can fail.
+  // A malformed/widened scope must still leave a revocable, single-use handle.
+  const staged = await stageRefreshResponse(input, prepared.lifecycleId, tokenRes);
+  try {
+    validateTokenEnvelope(tokenRes.raw, "GOOGLE_REFRESH_FAILED");
+    const returnedScopes = parseGrantedScopes(
+      tokenRes.scope,
+      prepared.allowedScopes,
+      "GOOGLE_REFRESH_FAILED",
+    );
+    assertScopeSubset(returnedScopes, prepared.allowedScopes, "GOOGLE_REFRESH_FAILED");
+  } catch (error) {
+    await disableGoogleAccountForLifecycle(input, prepared.lifecycleId, "SCOPE_WIDENED");
+    await setGoogleLifecycleState(
+      input.tenantId,
+      prepared.lifecycleId,
+      "revocation_pending",
+      "SCOPE_WIDENED",
+    );
+    await reconcileGoogleCredentialRevocation({
+      tenantId: input.tenantId,
+      lifecycleId: staged,
+      vault: input.vault,
+      config: input.config,
+    });
+    throw error;
+  }
+  return reconcileGoogleRefreshLifecycle({ ...input, lifecycleId: prepared.lifecycleId });
+}
+
+function assertRefreshAccount(
+  account: typeof providerAccounts.$inferSelect | undefined,
+  workspaceId: string,
+): asserts account is typeof providerAccounts.$inferSelect {
+  if (!account || account.workspaceId !== workspaceId)
+    throw new GoogleConnectError("GOOGLE_ACCOUNT_NOT_FOUND", 404, "provider account not found");
+  if (account.adapterKey !== GOOGLE_ADAPTER_KEY)
+    throw new GoogleConnectError(
+      "GOOGLE_ACCOUNT_NOT_GOOGLE",
+      400,
+      "provider account is not a Google account",
+    );
+  if (account.status !== "active")
+    throw new GoogleConnectError(
+      "GOOGLE_REFRESH_REVOKED",
+      409,
+      "provider account is not active; reconnect required",
+    );
+}
+
+async function stageRefreshResponse(
+  input: RefreshInput,
+  lifecycleId: string,
+  token: RefreshUpstreamResult,
+): Promise<string> {
+  await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
+    const tx = txRaw as DbExecutor;
+    const secret = await input.vault.createSecretWithinTx(
+      tx,
+      input.tenantId,
+      `provider-google-lifecycle:${lifecycleId}`,
+      JSON.stringify({
+        schemaVersion: "steward.provider-google.lifecycle.v1",
+        token: token.raw,
+      } satisfies GoogleLifecycleSecret),
+      { description: "Encrypted transient Google OAuth recovery material" },
+    );
+    const [updated] = await tx
+      .update(providerGoogleCredentialLifecycles)
+      .set({ state: "credential_staged", credentialSecretId: secret.id, updatedAt: new Date() })
+      .where(
+        and(
+          eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+          eq(providerGoogleCredentialLifecycles.id, lifecycleId),
+          eq(providerGoogleCredentialLifecycles.state, "inflight"),
+        ),
+      )
+      .returning();
+    if (!updated)
+      throw new GoogleConnectError(
+        "GOOGLE_CREDENTIAL_NEEDS_ATTENTION",
+        409,
+        "refresh lifecycle changed",
+      );
+    await append({
+      tenantId: input.tenantId,
+      actorType: "system",
+      actorId: "system",
+      action: "provider.google.refresh.credential_staged",
+      resourceType: "provider_google_credential_lifecycle",
+      resourceId: lifecycleId,
+      metadata: { providerAccountId: input.accountId },
+    });
+  });
+  await afterGoogleCredentialStageForTests?.();
+  return lifecycleId;
+}
+
+async function disableGoogleAccountForLifecycle(
+  input: RefreshInput,
+  lifecycleId: string,
+  reason: string,
+): Promise<void> {
+  await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
+    const tx = txRaw as DbExecutor;
+    await tx
+      .update(providerAccounts)
+      .set({
+        status: "disabled",
+        revision: sql`${providerAccounts.revision} + 1`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(providerAccounts.tenantId, input.tenantId),
+          eq(providerAccounts.id, input.accountId),
+        ),
+      );
+    await tx
+      .update(providerGoogleCredentialLifecycles)
+      .set({ state: "needs_attention", lastErrorCode: reason, updatedAt: new Date() })
+      .where(
+        and(
+          eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+          eq(providerGoogleCredentialLifecycles.id, lifecycleId),
+        ),
+      );
+    await append({
+      tenantId: input.tenantId,
+      actorType: "system",
+      actorId: "system",
+      action: "provider.google.refresh.needs_attention",
+      resourceType: "provider_account",
+      resourceId: input.accountId,
+      metadata: { lifecycleId, reason, workspaceId: input.workspaceId },
+    });
+  });
+}
+
+async function revokeGoogleAccountForLifecycle(
+  input: RefreshInput,
+  lifecycleId: string,
+): Promise<void> {
+  await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
+    const tx = txRaw as DbExecutor;
+    await tx
+      .update(providerAccounts)
+      .set({
+        status: "revoked",
+        revision: sql`${providerAccounts.revision} + 1`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(providerAccounts.tenantId, input.tenantId),
+          eq(providerAccounts.id, input.accountId),
+        ),
+      );
+    await tx
+      .update(providerGoogleCredentialLifecycles)
+      .set({ state: "revoked", updatedAt: new Date() })
+      .where(
+        and(
+          eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+          eq(providerGoogleCredentialLifecycles.id, lifecycleId),
+        ),
+      );
+    await append({
+      tenantId: input.tenantId,
+      actorType: "system",
+      actorId: "system",
+      action: "provider.google.refresh.revoked",
+      resourceType: "provider_account",
+      resourceId: input.accountId,
+      metadata: { lifecycleId, workspaceId: input.workspaceId },
+    });
+  });
+}
+
+/** Adopt a staged rotating response without making another provider call. */
+export async function reconcileGoogleRefreshLifecycle(
+  input: RefreshInput & { lifecycleId: string },
+): Promise<RefreshResult> {
+  const [snapshot] = await (getDb() as DbExecutor)
+    .select({ state: providerGoogleCredentialLifecycles.state })
+    .from(providerGoogleCredentialLifecycles)
+    .where(
+      and(
+        eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+        eq(providerGoogleCredentialLifecycles.id, input.lifecycleId),
+      ),
+    )
+    .limit(1);
+  if (snapshot?.state === "inflight") {
+    // An intent without a staged response may have crossed the provider
+    // boundary before the process died. Never spend its refresh token again.
+    await disableGoogleAccountForLifecycle(input, input.lifecycleId, "REFRESH_OUTCOME_UNKNOWN");
+    throw new GoogleConnectError(
+      "GOOGLE_CREDENTIAL_NEEDS_ATTENTION",
+      409,
+      "refresh outcome is unknown; reconnect required",
+    );
+  }
+  try {
+    return await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
+      const tx = txRaw as DbExecutor;
+      const [lifecycle] = await tx
+        .select()
+        .from(providerGoogleCredentialLifecycles)
+        .where(
+          and(
+            eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+            eq(providerGoogleCredentialLifecycles.id, input.lifecycleId),
+          ),
+        )
+        .limit(1)
+        .for("update");
+      if (!lifecycle || lifecycle.state !== "credential_staged" || !lifecycle.credentialSecretId)
+        throw new GoogleConnectError(
+          "GOOGLE_CREDENTIAL_NEEDS_ATTENTION",
+          409,
+          "no staged refresh credential",
+        );
+      const [account] = await tx
+        .select()
+        .from(providerAccounts)
+        .where(
+          and(
+            eq(providerAccounts.tenantId, input.tenantId),
+            eq(providerAccounts.id, input.accountId),
+          ),
+        )
+        .limit(1)
+        .for("update");
+      assertRefreshAccount(account, input.workspaceId);
+      if (account.revision !== lifecycle.expectedAccountRevision || !account.credentialSecretId)
+        throw new GoogleConnectError(
+          "GOOGLE_CREDENTIAL_NEEDS_ATTENTION",
+          409,
+          "refresh account revision changed",
+        );
+      const current = await loadCredential(
+        input.vault,
+        input.tenantId,
+        account.credentialSecretId,
+        tx,
+      );
+      const [secret] = (await tx
+        .select()
+        .from(secrets)
+        .where(
+          and(eq(secrets.tenantId, input.tenantId), eq(secrets.id, lifecycle.credentialSecretId)),
+        )
+        .limit(1)) as Secret[];
+      if (!secret)
+        throw new GoogleConnectError(
+          "GOOGLE_CREDENTIAL_NEEDS_ATTENTION",
+          409,
+          "staged refresh credential missing",
+        );
+      const staged = JSON.parse(
+        input.vault.decryptSecretRow(input.tenantId, secret),
+      ) as GoogleLifecycleSecret;
+      validateTokenEnvelope(staged.token, "GOOGLE_REFRESH_FAILED");
+      const scopes = parseGrantedScopes(
+        staged.token.scope,
+        current.payload.scopesGranted,
+        "GOOGLE_REFRESH_FAILED",
+      );
+      assertScopeSubset(scopes, current.payload.scopesGranted, "GOOGLE_REFRESH_FAILED");
       const obtainedAt = new Date();
       const expiresAt =
-        typeof tokenRes.expiresIn === "number"
-          ? new Date(obtainedAt.getTime() + tokenRes.expiresIn * 1000)
+        typeof staged.token.expires_in === "number"
+          ? new Date(obtainedAt.getTime() + staged.token.expires_in * 1000)
           : null;
-      const newPayload: GoogleCredentialPayload = {
+      const payload: GoogleCredentialPayload = {
         ...current.payload,
-        accessToken: tokenRes.accessToken,
-        // Google commonly retains the existing refresh token. If it returns a
-        // replacement, rotate atomically to the new value.
-        refreshToken: tokenRes.refreshToken ?? current.refreshToken,
-        scopesGranted: tokenRes.scopes ?? current.payload.scopesGranted,
+        accessToken: staged.token.access_token,
+        refreshToken: staged.token.refresh_token ?? current.refreshToken,
+        scopesGranted: scopes,
         obtainedAt: obtainedAt.toISOString(),
-        expiresAt: expiresAt ? expiresAt.toISOString() : null,
+        expiresAt: expiresAt?.toISOString() ?? null,
       };
       const meta = await input.vault.rotateSecretWithinTx(
         tx,
         input.tenantId,
         current.secretName,
-        JSON.stringify(newPayload),
+        JSON.stringify(payload),
       );
-
       const [updated] = await tx
         .update(providerAccounts)
         .set({
           credentialSecretId: meta.id,
           credentialVersion: meta.version,
-          status: "active",
           revision: account.revision + 1,
+          status: "active",
           updatedAt: new Date(),
         })
         .where(
@@ -1135,15 +1690,28 @@ export async function refreshGoogleProviderCredential(input: RefreshInput): Prom
             eq(providerAccounts.revision, account.revision),
           ),
         )
-        .returning();
+        .returning({ id: providerAccounts.id });
       if (!updated) {
         throw new GoogleConnectError(
-          "GOOGLE_REFRESH_FAILED",
+          "GOOGLE_CREDENTIAL_NEEDS_ATTENTION",
           409,
-          "account revision conflict on refresh",
+          "refresh account changed before adoption",
         );
       }
-
+      await tx
+        .update(providerGoogleCredentialLifecycles)
+        .set({ state: "adopted", credentialSecretId: null, updatedAt: new Date() })
+        .where(
+          and(
+            eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+            eq(providerGoogleCredentialLifecycles.id, lifecycle.id),
+          ),
+        );
+      await tx
+        .delete(secrets)
+        .where(
+          and(eq(secrets.tenantId, input.tenantId), eq(secrets.id, lifecycle.credentialSecretId)),
+        );
       await append({
         tenantId: input.tenantId,
         actorType: input.actorId ? "user" : "system",
@@ -1152,29 +1720,36 @@ export async function refreshGoogleProviderCredential(input: RefreshInput): Prom
         resourceType: "provider_account",
         resourceId: account.id,
         metadata: {
-          workspaceId: account.workspaceId,
-          googleUserId: account.externalRef,
-          credentialSecretId: meta.id,
+          lifecycleId: lifecycle.id,
           credentialVersion: meta.version,
+          workspaceId: input.workspaceId,
           requestId: input.requestId ?? null,
         },
       });
-
-      return {
-        kind: "ok",
-        result: {
-          refreshed: true,
-          credentialVersion: meta.version,
-          expiresAt: newPayload.expiresAt,
-        },
-      };
-    },
-  );
-
-  if (outcome.kind === "revoked") {
-    throw new GoogleConnectError("GOOGLE_REFRESH_REVOKED", 409, "Google refresh token revoked");
+      return { refreshed: true, credentialVersion: meta.version, expiresAt: payload.expiresAt };
+    });
+  } catch (error) {
+    if (snapshot?.state === "credential_staged") {
+      // The one-time response exists but could not be adopted (scope mismatch,
+      // revision race, corrupt payload, or DB failure after staging). Freeze the
+      // local authority and compensate from the encrypted handle; never retry
+      // the old rotating refresh token.
+      await disableGoogleAccountForLifecycle(input, input.lifecycleId, "STAGED_ADOPTION_FAILED");
+      await setGoogleLifecycleState(
+        input.tenantId,
+        input.lifecycleId,
+        "revocation_pending",
+        "STAGED_ADOPTION_FAILED",
+      );
+      await reconcileGoogleCredentialRevocation({
+        tenantId: input.tenantId,
+        lifecycleId: input.lifecycleId,
+        vault: input.vault,
+        config: input.config,
+      });
+    }
+    throw error;
   }
-  return outcome.result;
 }
 
 interface LoadedCredential {
@@ -1287,14 +1862,14 @@ interface RefreshUpstreamResult {
   revoked: boolean;
   accessToken: string;
   refreshToken?: string;
-  scopes?: string[];
+  scope?: string;
   expiresIn?: number;
+  raw: GoogleTokenResponse;
 }
 
 async function refreshGoogleUpstream(
   config: GoogleConnectConfig,
   refreshToken: string,
-  allowedScopes: readonly string[],
 ): Promise<RefreshUpstreamResult> {
   const body = new URLSearchParams({
     grant_type: "refresh_token",
@@ -1315,7 +1890,7 @@ async function refreshGoogleUpstream(
   if (!res.ok) {
     // invalid_grant => the refresh token was revoked or already rotated away.
     if (parsed?.error === "invalid_grant") {
-      return { revoked: true, accessToken: "" };
+      return { revoked: true, accessToken: "", raw: parsed };
     }
     throw new GoogleConnectError(
       "GOOGLE_REFRESH_FAILED",
@@ -1323,31 +1898,21 @@ async function refreshGoogleUpstream(
       `Google refresh failed (${res.status})`,
     );
   }
-  if (!parsed || typeof parsed.access_token !== "string") {
+  if (!parsed || typeof parsed !== "object") {
     throw new GoogleConnectError(
       "GOOGLE_REFRESH_FAILED",
       502,
-      "Google refresh response missing access_token",
+      "Google refresh response was not an object",
     );
   }
-  try {
-    assertGoogleTokenResponse(parsed, "GOOGLE_REFRESH_FAILED");
-    const scopes = validateGrantedScopes(parsed.scope, allowedScopes, "GOOGLE_REFRESH_FAILED");
-    return {
-      revoked: false,
-      accessToken: parsed.access_token,
-      refreshToken: parsed.refresh_token,
-      scopes,
-      expiresIn: parsed.expires_in,
-    };
-  } catch {
-    // A 2xx refresh response means Google may already have rotated away the
-    // stored refresh token. If its credential envelope is malformed, the old
-    // credential can no longer be trusted as live. Revoke what we can and drive
-    // the caller through the durable fail-closed revocation path.
-    await revokeIssuedTokensBestEffort(config, parsed);
-    return { revoked: true, accessToken: "" };
-  }
+  return {
+    revoked: false,
+    accessToken: typeof parsed.access_token === "string" ? parsed.access_token : "",
+    refreshToken: parsed.refresh_token,
+    scope: parsed.scope,
+    expiresIn: parsed.expires_in,
+    raw: parsed,
+  };
 }
 
 // ── Disconnect ────────────────────────────────────────────────────────────────

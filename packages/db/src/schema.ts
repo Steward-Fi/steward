@@ -2026,6 +2026,69 @@ export const providerAccounts = pgTable(
   }),
 );
 
+/**
+ * Durable hand-off journal for OAuth responses that cannot be replayed safely.
+ * Token material is never stored here: credentialSecretId points at a
+ * tenant-bound, encrypted vault row.  The journal lets recovery distinguish a
+ * request that has not called the provider from one whose one-time response
+ * must be adopted or revoked.
+ */
+export const providerGoogleCredentialLifecycles = pgTable(
+  "provider_google_credential_lifecycles",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    providerAccountId: uuid("provider_account_id"),
+    kind: varchar("kind", { length: 32 }).notNull(),
+    state: varchar("state", { length: 32 }).notNull(),
+    credentialSecretId: uuid("credential_secret_id"),
+    expectedAccountRevision: integer("expected_account_revision"),
+    attempts: integer("attempts").notNull().default(0),
+    lastErrorCode: varchar("last_error_code", { length: 64 }),
+    ...timestamps,
+  },
+  (table) => ({
+    workspaceFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId],
+      foreignColumns: [workspaces.tenantId, workspaces.id],
+      name: "provider_google_lifecycle_workspace_fk",
+    }).onDelete("cascade"),
+    accountFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId, table.providerAccountId],
+      foreignColumns: [
+        providerAccounts.tenantId,
+        providerAccounts.workspaceId,
+        providerAccounts.id,
+      ],
+      name: "provider_google_lifecycle_account_fk",
+    }).onDelete("cascade"),
+    secretFk: foreignKey({
+      columns: [table.tenantId, table.credentialSecretId],
+      foreignColumns: [secrets.tenantId, secrets.id],
+      name: "provider_google_lifecycle_secret_fk",
+    }).onDelete("restrict"),
+    stateCheck: check(
+      "provider_google_lifecycle_state_check",
+      sql`${table.state} IN ('inflight', 'credential_staged', 'revocation_pending', 'adopted', 'revoked', 'needs_attention')`,
+    ),
+    kindCheck: check(
+      "provider_google_lifecycle_kind_check",
+      sql`${table.kind} IN ('connect_exchange', 'refresh_rotation')`,
+    ),
+    accountStateIdx: index("provider_google_lifecycle_account_state_idx").on(
+      table.tenantId,
+      table.providerAccountId,
+      table.state,
+    ),
+    activeRefreshIdx: uniqueIndex("provider_google_lifecycle_active_refresh_idx")
+      .on(table.tenantId, table.providerAccountId)
+      .where(
+        sql`${table.kind} = 'refresh_rotation' AND ${table.state} IN ('inflight', 'credential_staged')`,
+      ),
+  }),
+);
+
 // NOTE: owner immutability enforced by `provider_operations_immutable_owner`
 // trigger in 0079 raw SQL. Not visible to drizzle-kit.
 export const providerOperations = pgTable(
@@ -2191,6 +2254,8 @@ export const providerGrants = pgTable(
 
 export type Workspace = typeof workspaces.$inferSelect;
 export type ProviderAccount = typeof providerAccounts.$inferSelect;
+export type ProviderGoogleCredentialLifecycle =
+  typeof providerGoogleCredentialLifecycles.$inferSelect;
 export type ProviderOperation = typeof providerOperations.$inferSelect;
 export type ProviderRoleBinding = typeof providerRoleBindings.$inferSelect;
 export type ProviderGrant = typeof providerGrants.$inferSelect;

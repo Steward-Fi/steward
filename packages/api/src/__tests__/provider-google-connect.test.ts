@@ -23,6 +23,7 @@ import {
   closeDb,
   getDb,
   providerAccounts,
+  providerGoogleCredentialLifecycles,
   providerRoleBindings,
   secrets,
   tenants,
@@ -37,7 +38,9 @@ import { providerAuthorityStore } from "../services/provider-authority-store";
 import {
   __runDefaultGoogleForwardForTests,
   __setGoogleConnectCommitHookForTests,
+  __setGoogleCredentialStageHookForTests,
   __setGoogleForwardForTests,
+  __setGoogleRefreshIntentHookForTests,
   assertGoogleConnectStoreIsSafe,
   completeGoogleConnect,
   disconnectGoogleProviderCredential,
@@ -49,6 +52,8 @@ import {
   googleCredentialSecretName,
   initiateGoogleConnect,
   type PendingConnectStore,
+  reconcileGoogleCredentialRevocation,
+  reconcileGoogleRefreshLifecycle,
   refreshGoogleProviderCredential,
   resolveGoogleConnectConfig,
 } from "../services/provider-google-connect";
@@ -125,8 +130,9 @@ interface FakeXOptions {
     expires_in: number;
   }>;
   exchangeStatus?: number;
-  identity?: { sub: string; email: string; name: string };
+  identity?: { sub: string; email: string; email_verified?: boolean; name: string };
   identityStatus?: number;
+  revokeStatus?: number;
   refreshResponses?: Array<{
     status: number;
     body: Record<string, unknown>;
@@ -184,13 +190,15 @@ function installFakeX(opts: FakeXOptions = {}): {
       const identity = opts.identity ?? {
         sub: "google-user-123",
         email: "solsundial@example.com",
+        email_verified: true,
         name: "Sol",
       };
+      identity.email_verified ??= true;
       return jsonResponse(200, identity);
     }
     if (req.url.endsWith("/revoke")) {
       counters.revoke += 1;
-      return jsonResponse(200, {});
+      return jsonResponse(opts.revokeStatus ?? 200, {});
     }
     throw new Error(`unexpected Google call: ${req.url}`);
   };
@@ -291,14 +299,21 @@ beforeAll(async () => {
 afterAll(async () => {
   __setGoogleForwardForTests(null);
   __setGoogleConnectCommitHookForTests(null);
+  __setGoogleCredentialStageHookForTests(null);
+  __setGoogleRefreshIntentHookForTests(null);
   await closeDb();
 });
 
 afterEach(async () => {
   __setGoogleForwardForTests(null);
   __setGoogleConnectCommitHookForTests(null);
+  __setGoogleCredentialStageHookForTests(null);
+  __setGoogleRefreshIntentHookForTests(null);
   // Reset connected accounts + credential secrets between tests.
   const db = getDb();
+  await db
+    .delete(providerGoogleCredentialLifecycles)
+    .where(eq(providerGoogleCredentialLifecycles.tenantId, TENANT));
   await db.delete(providerAccounts).where(eq(providerAccounts.tenantId, TENANT));
   await db.delete(secrets).where(eq(secrets.tenantId, TENANT));
 });
@@ -308,7 +323,7 @@ async function connectHappy(
   store: MemoryConnectStore,
   overrides: {
     userId?: string;
-    identity?: { sub: string; email: string; name: string };
+    identity?: { sub: string; email: string; email_verified?: boolean; name: string };
     exchangeToken?: FakeXOptions["exchangeToken"];
   } = {},
 ) {
@@ -493,6 +508,131 @@ describe("connect", () => {
     ).toHaveLength(0);
     expect(await db.select().from(secrets).where(eq(secrets.tenantId, TENANT))).toHaveLength(0);
     expect(fake.counters.revoke).toBe(1);
+    fake.restore();
+  });
+
+  test("scope widening is rejected and the issued grant is revoked", async () => {
+    const store = new MemoryConnectStore();
+    const fake = installFakeX({
+      exchangeToken: {
+        scope: "openid email https://www.googleapis.com/auth/drive",
+      },
+    });
+    const initiated = await initiateGoogleConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+    });
+    await expect(
+      completeGoogleConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store,
+        vault,
+      }),
+    ).rejects.toMatchObject({ code: "GOOGLE_SCOPE_WIDENED" });
+    expect(fake.counters.revoke).toBe(1);
+    fake.restore();
+  });
+
+  test("post-exchange crash leaves an encrypted single-use revocation handle", async () => {
+    const store = new MemoryConnectStore();
+    const fake = installFakeX();
+    const initiated = await initiateGoogleConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+    });
+    const restoreHook = __setGoogleCredentialStageHookForTests(() => {
+      throw new Error("crash after durable stage");
+    });
+    await expect(
+      completeGoogleConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store,
+        vault,
+      }),
+    ).rejects.toThrow("crash after durable stage");
+    restoreHook();
+    const [lifecycle] = await getDb()
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.tenantId, TENANT));
+    expect(lifecycle.state).toBe("credential_staged");
+    await expect(
+      reconcileGoogleCredentialRevocation({
+        tenantId: TENANT,
+        lifecycleId: lifecycle.id,
+        vault,
+        config: CONFIG,
+      }),
+    ).resolves.toBe("revoked");
+    await expect(
+      reconcileGoogleCredentialRevocation({
+        tenantId: TENANT,
+        lifecycleId: lifecycle.id,
+        vault,
+        config: CONFIG,
+      }),
+    ).resolves.toBe("already_terminal");
+    expect(fake.counters.revoke).toBe(1);
+    fake.restore();
+  });
+
+  test("revoker failure is durably classified needs_attention without leaking the handle", async () => {
+    const store = new MemoryConnectStore();
+    const fake = installFakeX({
+      revokeStatus: 503,
+      exchangeToken: { scope: "openid https://www.googleapis.com/auth/drive" },
+    });
+    const initiated = await initiateGoogleConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+    });
+    await expect(
+      completeGoogleConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store,
+        vault,
+      }),
+    ).rejects.toMatchObject({ code: "GOOGLE_SCOPE_WIDENED" });
+    const [lifecycle] = await getDb()
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.tenantId, TENANT));
+    expect(lifecycle.state).toBe("needs_attention");
+    expect(JSON.stringify(lifecycle)).not.toContain("access-initial");
+    expect(JSON.stringify(lifecycle)).not.toContain("refresh-initial");
     fake.restore();
   });
 
@@ -774,7 +914,7 @@ describe("connect state validation", () => {
     ok.restore();
   });
 
-  test("missing offline refresh token revokes the issued access token and consumes spent state", async () => {
+  test("missing offline refresh token revokes the issued access token without consuming state", async () => {
     const store = new MemoryConnectStore();
     const initiated = await initiateGoogleConnect({
       tenantId: TENANT,
@@ -803,14 +943,14 @@ describe("connect state validation", () => {
     expect(fake.counters.revoke).toBe(1);
     fake.restore();
     const ok = installFakeX();
-    await expect(completeGoogleConnect(args)).rejects.toMatchObject({
-      code: "GOOGLE_STATE_INVALID",
+    await expect(completeGoogleConnect(args)).resolves.toMatchObject({
+      googleUserId: "google-user-123",
     });
-    expect(ok.counters.exchange).toBe(0);
+    expect(ok.counters.exchange).toBe(1);
     ok.restore();
   });
 
-  test("malformed successful token exchange revokes credentials and consumes spent state", async () => {
+  test("malformed successful token exchange revokes credentials without consuming state", async () => {
     const store = new MemoryConnectStore();
     const initiated = await initiateGoogleConnect({
       tenantId: TENANT,
@@ -839,9 +979,12 @@ describe("connect state validation", () => {
       code: "GOOGLE_TOKEN_EXCHANGE_FAILED",
     });
     expect(fake.counters.revoke).toBe(1);
-    await expect(completeGoogleConnect(args)).rejects.toMatchObject({
-      code: "GOOGLE_STATE_INVALID",
+    fake.restore();
+    const ok = installFakeX();
+    await expect(completeGoogleConnect(args)).resolves.toMatchObject({
+      googleUserId: "google-user-123",
     });
+    ok.restore();
     expect(fake.counters.exchange).toBe(1);
     fake.restore();
   });
@@ -876,7 +1019,7 @@ describe("connect state validation", () => {
         store,
         vault,
       }),
-    ).rejects.toMatchObject({ code: "GOOGLE_TOKEN_EXCHANGE_FAILED" });
+    ).rejects.toMatchObject({ code: "GOOGLE_SCOPE_WIDENED" });
     expect(fake.counters.revoke).toBe(1);
     expect(fake.counters.identity).toBe(0);
     expect(
@@ -885,7 +1028,7 @@ describe("connect state validation", () => {
     fake.restore();
   });
 
-  test("identity failure revokes the issued grant and consumes spent state", async () => {
+  test("identity failure revokes the issued grant without consuming state", async () => {
     const store = new MemoryConnectStore();
     const initiated = await initiateGoogleConnect({
       tenantId: TENANT,
@@ -912,11 +1055,13 @@ describe("connect state validation", () => {
       code: "GOOGLE_IDENTITY_FAILED",
     });
     expect(fake.counters.revoke).toBe(1);
-    await expect(completeGoogleConnect(args)).rejects.toMatchObject({
-      code: "GOOGLE_STATE_INVALID",
-    });
-    expect(fake.counters.exchange).toBe(1);
     fake.restore();
+    const ok = installFakeX();
+    await expect(completeGoogleConnect(args)).resolves.toMatchObject({
+      googleUserId: "google-user-123",
+    });
+    expect(ok.counters.exchange).toBe(1);
+    ok.restore();
   });
 });
 
@@ -973,29 +1118,92 @@ describe("refresh", () => {
         config: CONFIG,
         force: true,
       }),
-    ).rejects.toMatchObject({ code: "GOOGLE_REFRESH_REVOKED" });
+    ).rejects.toMatchObject({ code: "GOOGLE_REFRESH_FAILED" });
     expect(await decryptCredential(completed.providerAccountId)).toEqual(before);
     const [account] = await getDb()
       .select()
       .from(providerAccounts)
       .where(eq(providerAccounts.id, completed.providerAccountId));
-    expect(account.status).toBe("revoked");
+    expect(account.status).toBe("disabled");
     expect(fake.counters.revoke).toBe(1);
     fake.restore();
   });
 
-  test("refresh cannot broaden the current grant and durably revokes on violation", async () => {
-    const { completed } = await connectHappy(new MemoryConnectStore());
-    const before = await decryptCredential(completed.providerAccountId);
+  test("crash after rotated response staging reconciles without a second refresh call", async () => {
+    const store = new MemoryConnectStore();
+    const { completed } = await connectHappy(store);
+    const fake = installFakeX();
+    const restoreHook = __setGoogleCredentialStageHookForTests(() => {
+      throw new Error("crash after rotated credential stage");
+    });
+    const refreshInput = {
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      accountId: completed.providerAccountId,
+      vault,
+      config: CONFIG,
+      force: true,
+    };
+    await expect(refreshGoogleProviderCredential(refreshInput)).rejects.toThrow(
+      "crash after rotated credential stage",
+    );
+    restoreHook();
+    const [lifecycle] = await getDb()
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.kind, "refresh_rotation"));
+    expect(lifecycle.state).toBe("credential_staged");
+    await expect(
+      reconcileGoogleRefreshLifecycle({ ...refreshInput, lifecycleId: lifecycle.id }),
+    ).resolves.toMatchObject({ refreshed: true, credentialVersion: 2 });
+    expect(fake.counters.refresh).toBe(1);
+    expect((await decryptCredential(completed.providerAccountId)).refreshToken).toBe(
+      "refresh-rotated-1",
+    );
+    fake.restore();
+  });
+
+  test("crash after durable refresh intent never spends the token during reconciliation", async () => {
+    const store = new MemoryConnectStore();
+    const { completed } = await connectHappy(store);
+    const fake = installFakeX();
+    const restoreHook = __setGoogleRefreshIntentHookForTests(() => {
+      throw new Error("crash after refresh intent");
+    });
+    const refreshInput = {
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      accountId: completed.providerAccountId,
+      vault,
+      config: CONFIG,
+      force: true,
+    };
+    await expect(refreshGoogleProviderCredential(refreshInput)).rejects.toThrow(
+      "crash after refresh intent",
+    );
+    restoreHook();
+    const [lifecycle] = await getDb()
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.kind, "refresh_rotation"));
+    expect(lifecycle.state).toBe("inflight");
+    await expect(
+      reconcileGoogleRefreshLifecycle({ ...refreshInput, lifecycleId: lifecycle.id }),
+    ).rejects.toMatchObject({ code: "GOOGLE_CREDENTIAL_NEEDS_ATTENTION" });
+    expect(fake.counters.refresh).toBe(0);
+  });
+
+  test("refresh scope widening is revoked and freezes the local account", async () => {
+    const store = new MemoryConnectStore();
+    const { completed } = await connectHappy(store);
     const fake = installFakeX({
       refreshResponses: [
         {
           status: 200,
           body: {
-            access_token: "access-overbroad",
-            refresh_token: "refresh-overbroad",
-            scope:
-              "openid email https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/drive",
+            access_token: "widened-access",
+            refresh_token: "widened-refresh",
+            scope: "openid email https://www.googleapis.com/auth/drive",
             expires_in: 7200,
           },
         },
@@ -1010,13 +1218,13 @@ describe("refresh", () => {
         config: CONFIG,
         force: true,
       }),
-    ).rejects.toMatchObject({ code: "GOOGLE_REFRESH_REVOKED" });
-    expect(await decryptCredential(completed.providerAccountId)).toEqual(before);
+    ).rejects.toMatchObject({ code: "GOOGLE_SCOPE_WIDENED" });
     const [account] = await getDb()
       .select()
       .from(providerAccounts)
       .where(eq(providerAccounts.id, completed.providerAccountId));
-    expect(account.status).toBe("revoked");
+    expect(account.status).toBe("disabled");
+    expect(fake.counters.refresh).toBe(1);
     expect(fake.counters.revoke).toBe(1);
     fake.restore();
   });
