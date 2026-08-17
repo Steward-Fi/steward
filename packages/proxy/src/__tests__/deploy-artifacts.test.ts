@@ -101,6 +101,34 @@ describe("#101 deploy/DEPLOYMENT.md docs reconciled with fail-closed code", () =
   });
 });
 
+describe("SEC-081 enterprise backup service keeps the DSN out of container env and dumps owner-only", () => {
+  const compose = readFileSync(
+    join(DEPLOY_DIR, "enterprise-reference", "docker-compose.yml"),
+    "utf8",
+  );
+  const lines = compose.split("\n");
+  const start = lines.findIndex((l) => /^\s{2}backup:\s*$/.test(l));
+  const body: string[] = [];
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const l = lines[i];
+    if (/^\s{2}\S/.test(l) || /^\S/.test(l)) break;
+    body.push(l);
+  }
+  const backup = body.join("\n");
+
+  test("backup service does not carry DATABASE_URL in container env (docker inspect)", () => {
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(/environment:/.test(backup)).toBe(false);
+    // DSN is sourced from the mounted env file instead.
+    expect(backup).toContain("/run/steward/env");
+    expect(backup).toContain("./.env:/run/steward/env:ro");
+  });
+
+  test("dumps are written owner-only (umask 077)", () => {
+    expect(backup).toContain("umask 077");
+  });
+});
+
 describe("SEC-079 deploy/docker-compose.yml passes vault/email secrets through", () => {
   const compose = read("docker-compose.yml");
 
