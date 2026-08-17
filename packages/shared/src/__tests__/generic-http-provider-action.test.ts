@@ -261,6 +261,31 @@ describe("descriptor validation", () => {
     expect(performance.now() - started).toBeLessThan(1_000);
   });
 
+  it("keeps an escaped character-class hyphen literal instead of widening it to a range", () => {
+    const descriptor = validateGenericHttpDescriptor({
+      ...GENERIC_GOLDEN_DESCRIPTOR_B,
+      body: {
+        contentType: "application/json",
+        fields: [
+          {
+            name: "value",
+            type: "string",
+            required: true,
+            pattern: "^[a\\-z]{1,8}$",
+            maxBytes: 8,
+          },
+        ],
+      },
+      projection: { policyArgs: ["value"], safeSummary: [] },
+    });
+    expect(() =>
+      buildGenericHttpAction("literal-hyphen.test", descriptor, "POST", { value: "a-z" }),
+    ).not.toThrow();
+    expect(() =>
+      buildGenericHttpAction("literal-hyphen.test", descriptor, "POST", { value: "m" }),
+    ).toThrow("fails pattern");
+  });
+
   it("rejects an IP-literal origin (SSRF-adjacent)", () => {
     expect(descriptorDenies({ ...GENERIC_GOLDEN_DESCRIPTOR_A, origin: "https://127.0.0.1" })).toBe(
       "CANON_DESCRIPTOR_ORIGIN_INVALID",

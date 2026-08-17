@@ -342,30 +342,34 @@ function parseClassMatcher(
     patternFail(code, where, "empty or negated character class");
   }
 
-  const points: number[] = [];
+  const atoms: Array<{ point: number; escaped: boolean }> = [];
   for (let i = 0; i < content.length; i++) {
     let char = content[i];
+    let escapedChar = false;
     if (char === "\\") {
       char = content[++i];
       if (!char || !"\\]-".includes(char)) {
         patternFail(code, where, "unsupported character-class escape");
       }
+      escapedChar = true;
     }
     const point = char.codePointAt(0);
     if (point === undefined || point > 0x7f) {
       patternFail(code, where, "patterns must use ASCII syntax");
     }
-    points.push(point);
+    atoms.push({ point, escaped: escapedChar });
   }
 
   const ranges: Array<[number, number]> = [];
-  for (let i = 0; i < points.length; i++) {
-    if (i + 2 < points.length && points[i + 1] === 0x2d) {
-      if (points[i] > points[i + 2]) patternFail(code, where, "reversed character range");
-      ranges.push([points[i], points[i + 2]]);
+  for (let i = 0; i < atoms.length; i++) {
+    if (i + 2 < atoms.length && atoms[i + 1].point === 0x2d && !atoms[i + 1].escaped) {
+      if (atoms[i].point > atoms[i + 2].point) {
+        patternFail(code, where, "reversed character range");
+      }
+      ranges.push([atoms[i].point, atoms[i + 2].point]);
       i += 2;
     } else {
-      ranges.push([points[i], points[i]]);
+      ranges.push([atoms[i].point, atoms[i].point]);
     }
   }
   return {
