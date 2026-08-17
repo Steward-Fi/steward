@@ -78,6 +78,7 @@ let handleProxy: typeof import("../handlers/proxy")["handleProxy"];
 
 let captured: { url: string; method: string } | null = null;
 let capturedBody: string | null = null;
+let capturedHeaders: Record<string, string> | null = null;
 // Set true when the forwarder's streaming response body is cancelled/drained.
 // Proves the governed dispatcher releases the proxy in-flight slot (codex P2).
 let streamingBodyCancelled = false;
@@ -469,8 +470,9 @@ beforeAll(async () => {
   dispatchGovernedExecution = dispatchMod.dispatchGovernedExecution;
 
   proxyMod.__setResolveProxyHostForTests(async () => [{ address: "140.82.112.6", family: 4 }]);
-  proxyMod.__setForwardProxyRequestForTests(async (url, method, _headers, body) => {
+  proxyMod.__setForwardProxyRequestForTests(async (url, method, headers, body) => {
     captured = { url: url.toString(), method };
+    capturedHeaders = Object.fromEntries(headers.entries());
     // Capture the exact outbound body bytes (JCS-serialized by the dispatcher) so
     // tests can assert byte-fidelity of the forwarded request (codex P2).
     capturedBody = null;
@@ -550,6 +552,7 @@ afterAll(async () => {
 beforeEach(async () => {
   captured = null;
   capturedBody = null;
+  capturedHeaders = null;
   streamingBodyCancelled = false;
   forwarderMode = "ok";
   const db = getDb();
@@ -812,12 +815,15 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
         method: "POST",
       });
       expect(capturedBody).toBe('{"name":"widget"}');
+      expect(capturedHeaders?.authorization).toBe("ghp_test_token");
+      expect(JSON.stringify(result)).not.toContain("ghp_test_token");
       const evidence = await getDb()
         .select({ action: auditEvents.action })
         .from(auditEvents)
         .where(and(eq(auditEvents.tenantId, IDS.tenant), eq(auditEvents.resourceId, intentId)));
       expect(evidence.map((row) => row.action)).toContain("provider.execution.dispatched");
       expect(evidence.map((row) => row.action)).toContain("provider.execution.succeeded");
+      expect(JSON.stringify(evidence)).not.toContain("ghp_test_token");
     } finally {
       if (saved === undefined) delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
       else process.env.STEWARD_PROXY_ALLOWED_HOSTS = saved;

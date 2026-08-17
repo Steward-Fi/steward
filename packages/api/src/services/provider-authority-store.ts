@@ -15,6 +15,7 @@ import {
 import {
   GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
   genericDescriptorAllowsExactPath,
+  genericDescriptorGovernedRoutePattern,
   PROVIDER_ACCESS_REASON,
   type ProviderAccessDecisionV1,
   type ProviderAccessRequestV1,
@@ -146,6 +147,24 @@ function operationIncluded(keys: string[], operationKey: string): boolean {
 function subset(candidate: string[], allowed: string[]): boolean {
   const set = new Set(allowed);
   return candidate.every((key) => set.has(key));
+}
+
+function routePatternsOverlap(a: string, b: string, kind: "host" | "path"): boolean {
+  if (a === b || a === "*" || b === "*") return true;
+  if (kind === "host") {
+    const suffixA = a.startsWith("*.") ? a.slice(1) : null;
+    const suffixB = b.startsWith("*.") ? b.slice(1) : null;
+    if (suffixA && suffixB) return suffixA.endsWith(suffixB) || suffixB.endsWith(suffixA);
+    if (suffixA) return b.endsWith(suffixA) && b.length > suffixA.length;
+    if (suffixB) return a.endsWith(suffixB) && a.length > suffixB.length;
+    return false;
+  }
+  const prefixA = a === "/*" ? "/" : a.endsWith("/*") ? a.slice(0, -1) : null;
+  const prefixB = b === "/*" ? "/" : b.endsWith("/*") ? b.slice(0, -1) : null;
+  if (prefixA && prefixB) return prefixA.startsWith(prefixB) || prefixB.startsWith(prefixA);
+  if (prefixA) return b.startsWith(prefixA);
+  if (prefixB) return a.startsWith(prefixB);
+  return false;
 }
 
 export class ProviderAuthorityStore {
@@ -620,6 +639,14 @@ export class ProviderAuthorityStore {
       allowedMethods = [fixedMethod];
     }
     if (input.secretRouteId) {
+      const credentialSecretId = account.credentialSecretId;
+      if (!credentialSecretId) {
+        throw new ProviderAuthorityError(
+          "provider account has no credential binding",
+          "forbidden",
+          403,
+        );
+      }
       const [route] = await this.db()
         .select()
         .from(secretRoutes)
@@ -643,6 +670,10 @@ export class ProviderAuthorityStore {
         : Boolean(route?.pathPattern && !route.pathPattern.includes("*"));
       if (
         !route ||
+        route.secretId !== credentialSecretId ||
+        !route.agentId ||
+        route.authorityMode !== "legacy" ||
+        route.providerOperationId !== null ||
         route.hostPattern !== expectedHost ||
         !method ||
         !allowedMethods.includes(method) ||
@@ -650,6 +681,36 @@ export class ProviderAuthorityStore {
       ) {
         throw new ProviderAuthorityError(
           "route target would widen the adapter operation",
+          "forbidden",
+          403,
+        );
+      }
+      const promotedPath = genericDescriptor
+        ? genericDescriptorGovernedRoutePattern(genericDescriptor)
+        : route.pathPattern;
+      const siblings = await this.db()
+        .select()
+        .from(secretRoutes)
+        .where(
+          and(
+            eq(secretRoutes.tenantId, ctx.tenantId),
+            eq(secretRoutes.agentId, route.agentId),
+            eq(secretRoutes.enabled, true),
+          ),
+        );
+      const ambiguous = siblings.some((candidate) => {
+        if (candidate.id === route.id) return false;
+        const leftMethod = (candidate.method ?? "*").toUpperCase();
+        const rightMethod = (route.method ?? "*").toUpperCase();
+        return (
+          (leftMethod === "*" || rightMethod === "*" || leftMethod === rightMethod) &&
+          routePatternsOverlap(candidate.hostPattern, route.hostPattern, "host") &&
+          routePatternsOverlap(candidate.pathPattern ?? "/*", promotedPath ?? "/*", "path")
+        );
+      });
+      if (ambiguous) {
+        throw new ProviderAuthorityError(
+          "credential route overlaps another enabled route for this agent",
           "forbidden",
           403,
         );
@@ -702,6 +763,42 @@ export class ProviderAuthorityStore {
           responseProfile: input.responseProfile ?? {},
         })
         .returning();
+      if (input.secretRouteId) {
+        const credentialSecretId = account.credentialSecretId;
+        if (!credentialSecretId) {
+          throw new ProviderAuthorityError(
+            "provider account has no credential binding",
+            "forbidden",
+            403,
+          );
+        }
+        const [boundRoute] = await tx
+          .update(secretRoutes)
+          .set({
+            authorityMode: "governed_v2",
+            providerOperationId: row.id,
+            ...(genericDescriptor
+              ? { pathPattern: genericDescriptorGovernedRoutePattern(genericDescriptor) }
+              : {}),
+          })
+          .where(
+            and(
+              eq(secretRoutes.id, input.secretRouteId),
+              eq(secretRoutes.tenantId, ctx.tenantId),
+              eq(secretRoutes.secretId, credentialSecretId),
+              eq(secretRoutes.authorityMode, "legacy"),
+              sql`${secretRoutes.providerOperationId} IS NULL`,
+            ),
+          )
+          .returning();
+        if (!boundRoute) {
+          throw new ProviderAuthorityError(
+            "credential route changed during operation registration",
+            "revision_conflict",
+            409,
+          );
+        }
+      }
       return row;
     });
   }

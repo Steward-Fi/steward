@@ -284,8 +284,9 @@ function assertExactKeys(
 /**
  * Operator regexes execute on request data, so accept only a deliberately
  * finite-time subset: anchored expressions, bounded repetition, no lookaround,
- * backreferences, unbounded quantifiers, or quantified groups. This preserves
- * useful character classes/alternation while excluding common ReDoS shapes.
+ * backreferences, unbounded quantifiers, top-level alternation, or quantified
+ * groups. Grouped alternation remains useful; top-level `^a$|b$` is rejected
+ * because the second branch is not anchored at the start.
  */
 function validateSafeRegex(
   pattern: unknown,
@@ -297,7 +298,32 @@ function validateSafeRegex(
   const p = pattern as string;
   if (!p.startsWith("^") || !p.endsWith("$"))
     descriptorFail(code, `${where}: pattern must be anchored ^...$`);
-  if (/\(\?/.test(p) || /\\[1-9]/.test(p) || /[*+]/.test(p) || /\)\s*(?:\?|\{)/.test(p))
+  let depth = 0;
+  let inClass = false;
+  let escaped = false;
+  let topLevelAlternation = false;
+  for (const char of p.slice(1, -1)) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "[") inClass = true;
+    else if (char === "]") inClass = false;
+    else if (!inClass && char === "(") depth++;
+    else if (!inClass && char === ")") depth--;
+    else if (!inClass && char === "|" && depth === 0) topLevelAlternation = true;
+  }
+  if (
+    /\(\?/.test(p) ||
+    /\\[1-9]/.test(p) ||
+    /[*+]/.test(p) ||
+    topLevelAlternation ||
+    /\)\s*(?:\?|\{)/.test(p)
+  )
     descriptorFail(code, `${where}: unsafe regex construct`);
   for (const match of p.matchAll(/\{(\d+)(?:,(\d*))?\}/g)) {
     const min = Number(match[1]);
@@ -838,6 +864,27 @@ export function genericDescriptorAllowsExactPath(
     }
   }
   return true;
+}
+
+/**
+ * Derive the credential-route matcher used only after a route is atomically
+ * promoted to governed authority and bound to this operation. Literal-only
+ * templates stay exact; dynamic templates use the longest literal prefix.
+ * The execution nonce still binds the full canonical target/action digest, so
+ * this matcher is discovery only and cannot authorize an arbitrary suffix.
+ */
+export function genericDescriptorGovernedRoutePattern(
+  descriptor: GenericHttpOperationDescriptorV1,
+): string {
+  const literalPrefix: string[] = [];
+  for (const segment of descriptor.pathTemplate) {
+    if (segment.literal === undefined) break;
+    literalPrefix.push(segment.literal);
+  }
+  if (literalPrefix.length === descriptor.pathTemplate.length) {
+    return `/${literalPrefix.map(encodeRfc3986).join("/")}`;
+  }
+  return literalPrefix.length > 0 ? `/${literalPrefix.map(encodeRfc3986).join("/")}/*` : "/*";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

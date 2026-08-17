@@ -37,6 +37,7 @@ import {
   providerGrants,
   providerOperations,
   providerRoleBindings,
+  secretRoutes,
   workspaces,
 } from "@stwd/db";
 import {
@@ -63,6 +64,7 @@ import {
   type GenericHttpActionBuild,
   type GenericHttpCanonicalActionV1,
   type GithubCanonicalActionV1,
+  genericDescriptorGovernedRoutePattern,
   isConfigDrivenProfile,
   isGenericDescriptorError,
   jcsStringify,
@@ -668,6 +670,14 @@ class ProviderActionService {
       if (e instanceof UnregisteredProfileError) throw new CanonError(e.code);
       throw e;
     }
+    if (build.action.profile === GENERIC_HTTP_PROVIDER_ACTION_PROFILE) {
+      await this.assertGenericCredentialRouteBinding(
+        actorAgentId,
+        account,
+        operation,
+        build as GenericHttpActionBuild,
+      );
+    }
 
     // Compute the canonical action digest + request envelope/hash up-front (they
     // are pure and needed for the binding + idempotency conflict check).
@@ -1198,6 +1208,47 @@ class ProviderActionService {
     // consumption site; asserted here at build time too).
     assertRegisteredProfile(built.action.profile);
     return built;
+  }
+
+  private async assertGenericCredentialRouteBinding(
+    actorAgentId: string,
+    account: typeof providerAccounts.$inferSelect,
+    operation: typeof providerOperations.$inferSelect,
+    build: GenericHttpActionBuild,
+  ): Promise<void> {
+    if (!operation.secretRouteId || !account.credentialSecretId) {
+      throw new CanonError("CANON_ORIGIN_NOT_ALLOWED", "generic operation has no credential route");
+    }
+    const [route] = await this.db()
+      .select()
+      .from(secretRoutes)
+      .where(
+        and(
+          eq(secretRoutes.id, operation.secretRouteId),
+          eq(secretRoutes.tenantId, operation.tenantId),
+        ),
+      )
+      .limit(1);
+    const targetHost = new URL(build.action.origin).hostname;
+    if (
+      !route ||
+      !route.enabled ||
+      route.authorityMode !== "governed_v2" ||
+      route.providerOperationId !== operation.id ||
+      route.secretId !== account.credentialSecretId ||
+      route.agentId !== actorAgentId ||
+      route.hostPattern !== targetHost ||
+      route.pathPattern !==
+        genericDescriptorGovernedRoutePattern(
+          validateGenericHttpDescriptor(operation.requestProfile.operationDescriptor),
+        ) ||
+      route.method?.toUpperCase() !== build.action.method
+    ) {
+      throw new CanonError(
+        "CANON_ORIGIN_NOT_ALLOWED",
+        "generic action is outside its exact governed credential route binding",
+      );
+    }
   }
 
   // ── Scope resolution (pre-intent) ──

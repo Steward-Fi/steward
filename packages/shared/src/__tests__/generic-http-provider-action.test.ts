@@ -226,7 +226,14 @@ describe("descriptor validation", () => {
   });
 
   it("rejects ReDoS-capable operator regexes", () => {
-    for (const pattern of ["^(a+)+$", "^(a|aa)*$", "^(?=a).+$", "^(a)\\1$", "^a{1,}$"]) {
+    for (const pattern of [
+      "^(a+)+$",
+      "^(a|aa)*$",
+      "^(?=a).+$",
+      "^(a)\\1$",
+      "^a{1,}$",
+      "^admin$|user$",
+    ]) {
       expect(
         descriptorDenies({
           ...GENERIC_GOLDEN_DESCRIPTOR_A,

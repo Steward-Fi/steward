@@ -37,6 +37,7 @@ import {
   agents,
   approvalQueue,
   closeDb,
+  executionAuthorizationNonces,
   getDb,
   intents,
   providerAccounts,
@@ -45,6 +46,7 @@ import {
   providerGrants,
   providerOperations,
   providerRoleBindings,
+  proxyAuditLog,
   secretRoutes,
   secrets,
   tenants,
@@ -54,8 +56,12 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { GENERIC_HTTP_PROVIDER_ACTION_PROFILE } from "@stwd/shared";
-import { eq } from "drizzle-orm";
+import { KeyStore } from "@stwd/vault";
+import { desc, eq } from "drizzle-orm";
+import { Hono } from "hono";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
+import { providerAuthorityRoutes } from "../routes/provider-authority";
+import type { AppVariables } from "../services/context";
 import { providerActionService } from "../services/provider-action-service";
 import { providerApprovalService } from "../services/provider-approval";
 import { providerAuthorityStore } from "../services/provider-authority-store";
@@ -74,6 +80,7 @@ const G = {
   ROUTE_LIST: "62000000-0000-4000-8000-000000000001",
   ROUTE_CREATE: "62000000-0000-4000-8000-000000000002",
   ROUTE_QUORUM: "62000000-0000-4000-8000-000000000003",
+  ROUTE_AUTHORED: "62000000-0000-4000-8000-000000000004",
   GRANTOR: "12000000-0000-4000-8000-000000000001",
   APPROVER: "82000000-0000-4000-8000-000000000001",
   APPROVER2: "82000000-0000-4000-8000-000000000002",
@@ -88,6 +95,11 @@ const OP_CREATE_KEY = "acme.item.create";
 const OP_QUORUM_KEY = "acme.item.quorum";
 const OP_AUTHORED_KEY = "acme.item.authored";
 const FUTURE = new Date(Date.now() + 365 * 24 * 3600_000);
+const GENERIC_TOKEN_SENTINEL = "generic_secret_canary_0123456789";
+let dispatchGovernedExecution: typeof import("@stwd/proxy/src/handlers/governed-execution")["dispatchGovernedExecution"];
+let capturedForward:
+  | { url: string; method: string; headers: Record<string, string>; body: string }
+  | undefined;
 
 function principal(): ProviderPrincipalV1 {
   return {
@@ -164,6 +176,10 @@ const CREATE_DESCRIPTOR = {
   },
   projection: { policyArgs: ["priority"], safeSummary: ["title", "priority"] },
 };
+const AUTHORED_DESCRIPTOR = {
+  ...CREATE_DESCRIPTOR,
+  pathTemplate: [{ literal: "v1" }, { literal: "authored-items" }],
+};
 
 function route(id: string, path: string, method: string) {
   return {
@@ -175,11 +191,22 @@ function route(id: string, path: string, method: string) {
     method,
     injectAs: "header" as const,
     injectKey: "authorization",
+    agentId: G.AGENT,
   };
 }
 
 async function seedGeneric() {
   const db = getDb();
+  const keyStore = new KeyStore(
+    process.env.STEWARD_MASTER_PASSWORD ?? "generic-http-test-master",
+    undefined,
+    "secret-vault",
+  );
+  const encrypted = keyStore.encrypt(GENERIC_TOKEN_SENTINEL, {
+    tenantId: G.TENANT,
+    name: "acme-api-key",
+    version: 1,
+  });
   await db.insert(tenants).values([{ id: G.TENANT, name: "G", apiKeyHash: "hg" }]);
   await db.insert(users).values([
     { id: G.GRANTOR, email: "gg@t.test" },
@@ -201,10 +228,10 @@ async function seedGeneric() {
       id: G.SECRET,
       tenantId: G.TENANT,
       name: "acme-api-key",
-      ciphertext: "x",
-      iv: "x",
-      authTag: "x",
-      salt: "x",
+      ciphertext: encrypted.ciphertext,
+      iv: encrypted.iv,
+      authTag: encrypted.tag,
+      salt: encrypted.salt,
       version: 1,
     },
   ]);
@@ -214,6 +241,7 @@ async function seedGeneric() {
       route(G.ROUTE_LIST, "/v1/projects", "GET"),
       route(G.ROUTE_CREATE, "/v1/items", "POST"),
       route(G.ROUTE_QUORUM, "/v1/items", "POST"),
+      route(G.ROUTE_AUTHORED, "/v1/authored-items", "POST"),
     ]);
   await db.insert(workspaces).values([
     {
@@ -284,6 +312,16 @@ async function seedGeneric() {
       },
     },
   ]);
+  for (const [routeId, operationId, pathPattern] of [
+    [G.ROUTE_LIST, G.OP_LIST, "/v1/projects/*"],
+    [G.ROUTE_CREATE, G.OP_CREATE, "/v1/items"],
+    [G.ROUTE_QUORUM, G.OP_QUORUM, "/v1/items"],
+  ] as const) {
+    await db
+      .update(secretRoutes)
+      .set({ authorityMode: "governed_v2", providerOperationId: operationId, pathPattern })
+      .where(eq(secretRoutes.id, routeId));
+  }
   await db.insert(providerGrants).values([
     {
       id: G.GRANT,
@@ -410,6 +448,7 @@ async function wipe() {
   await db.delete(intents);
   await db.delete(providerGrants);
   await db.delete(providerRoleBindings);
+  await db.update(secretRoutes).set({ authorityMode: "legacy", providerOperationId: null });
   await db.delete(providerOperations);
   await db.delete(providerAccounts);
   await db.delete(secretRoutes);
@@ -428,12 +467,28 @@ describe("#201 generic-http governed provider-action E2E", () => {
     process.env.STEWARD_EXECUTION_AUTH_SECRET ||= "1".repeat(64);
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => client.close());
+    const proxy = await import("@stwd/proxy/src/handlers/proxy");
+    ({ dispatchGovernedExecution } = await import("@stwd/proxy/src/handlers/governed-execution"));
+    proxy.__setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
+    proxy.__setForwardProxyRequestForTests(async (url, method, headers, body) => {
+      const bytes = body
+        ? new Uint8Array(await new Response(body).arrayBuffer())
+        : new Uint8Array();
+      capturedForward = {
+        url: url.toString(),
+        method,
+        headers: Object.fromEntries(headers.entries()),
+        body: new TextDecoder().decode(bytes),
+      };
+      return new Response('{"ok":true}', { status: 200 });
+    });
   });
   afterAll(async () => {
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
   });
   beforeEach(async () => {
+    capturedForward = undefined;
     await wipe();
     await seedGeneric();
   });
@@ -476,30 +531,46 @@ describe("#201 generic-http governed provider-action E2E", () => {
   });
 
   test("operator path: register a validated generic operation, then invoke it", async () => {
-    const operation = await providerAuthorityStore.registerOperation(
-      {
-        tenantId: G.TENANT,
-        actorUserId: G.GRANTOR,
-        tenantRole: "owner",
-        mfaVerifiedAt: Date.now(),
-        idempotencyKey: "generic-author-operation-1",
-        expectedRevision: 1,
-        reason: "register governed Acme write",
-        audit: async () => {},
-      },
-      G.ACCOUNT,
-      {
+    const app = new Hono<{ Variables: AppVariables }>();
+    app.use("*", async (c, next) => {
+      c.set("tenantId", G.TENANT);
+      c.set("tenantRole", "owner");
+      c.set("userId", G.GRANTOR);
+      c.set("authType", "session-jwt");
+      c.set("sessionMfaVerifiedAt", Date.now());
+      c.set("requestId", "generic-public-authoring");
+      await next();
+    });
+    app.route("/v2", providerAuthorityRoutes);
+    const response = await app.request(`/v2/provider-accounts/${G.ACCOUNT}/operations`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "generic-author-op-1" },
+      body: JSON.stringify({
         operationKey: OP_AUTHORED_KEY,
         riskClass: "write",
-        secretRouteId: G.ROUTE_CREATE,
+        secretRouteId: G.ROUTE_AUTHORED,
         requestProfile: {
           profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
-          operationDescriptor: CREATE_DESCRIPTOR,
+          operationDescriptor: AUTHORED_DESCRIPTOR,
           policyRules: approvalRules(OP_AUTHORED_KEY),
         },
-      },
-    );
+        expectedRevision: 1,
+        reason: "register governed Acme write",
+      }),
+    });
+    expect(response.status).toBe(201);
+    const operation = (await response.json()).data;
     expect(operation.operationKey).toBe(OP_AUTHORED_KEY);
+    const [boundRoute] = await getDb()
+      .select()
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, G.ROUTE_AUTHORED));
+    expect(boundRoute).toMatchObject({
+      authorityMode: "governed_v2",
+      providerOperationId: operation.id,
+      pathPattern: "/v1/authored-items",
+      agentId: G.AGENT,
+    });
 
     await getDb()
       .update(providerGrants)
@@ -516,6 +587,42 @@ describe("#201 generic-http governed provider-action E2E", () => {
       "ghauthor01",
     );
     expect(out.kind).toBe("approval_required");
+    if (out.kind !== "approval_required") throw new Error(`got ${out.kind}`);
+    const approved = await providerApprovalService.decide(
+      decideInput(out.intentId, out.requestHash, out.actionDigest, G.APPROVER, "public-op-decide"),
+    );
+    expect(approved.ok).toBe(true);
+    const resumed = await providerApprovalService.resume({
+      intentId: out.intentId,
+      tenantId: G.TENANT,
+      caller: { agentId: G.AGENT },
+    });
+    expect(resumed.ok).toBe(true);
+    const dispatched = await dispatchGovernedExecution(out.intentId, G.TENANT);
+    if (!dispatched.ok) {
+      const diagnostics = await getDb()
+        .select({ reason: proxyAuditLog.reason, statusCode: proxyAuditLog.statusCode })
+        .from(proxyAuditLog)
+        .orderBy(desc(proxyAuditLog.createdAt))
+        .limit(3);
+      const [liveRoute] = await getDb()
+        .select()
+        .from(secretRoutes)
+        .where(eq(secretRoutes.id, G.ROUTE_AUTHORED));
+      const [nonce] = await getDb()
+        .select()
+        .from(executionAuthorizationNonces)
+        .where(eq(executionAuthorizationNonces.intentId, out.intentId));
+      throw new Error(JSON.stringify({ dispatched, diagnostics, liveRoute, nonce }));
+    }
+    expect(dispatched).toMatchObject({ ok: true, dispatchState: "succeeded" });
+    expect(capturedForward).toMatchObject({
+      url: "https://api.example.com/v1/authored-items",
+      method: "POST",
+      headers: { authorization: GENERIC_TOKEN_SENTINEL },
+    });
+    expect(capturedForward?.body).toBe('{"priority":2,"title":"operator-authored ticket"}');
+    expect(JSON.stringify(dispatched)).not.toContain(GENERIC_TOKEN_SENTINEL);
   });
 
   test("operator path rejects malformed descriptors and widening credential routes before commit", async () => {
@@ -533,10 +640,10 @@ describe("#201 generic-http governed provider-action E2E", () => {
       providerAuthorityStore.registerOperation(baseContext, G.ACCOUNT, {
         operationKey: OP_AUTHORED_KEY,
         riskClass: "write",
-        secretRouteId: G.ROUTE_CREATE,
+        secretRouteId: G.ROUTE_AUTHORED,
         requestProfile: {
           profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
-          operationDescriptor: { ...CREATE_DESCRIPTOR, origin: "https://169.254.169.254" },
+          operationDescriptor: { ...AUTHORED_DESCRIPTOR, origin: "https://169.254.169.254" },
         },
       }),
     ).rejects.toMatchObject({ code: "bad_request", status: 400 });
@@ -549,6 +656,26 @@ describe("#201 generic-http governed provider-action E2E", () => {
           operationKey: OP_AUTHORED_KEY,
           riskClass: "write",
           secretRouteId: G.ROUTE_LIST,
+          requestProfile: {
+            profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+            operationDescriptor: CREATE_DESCRIPTOR,
+          },
+        },
+      ),
+    ).rejects.toMatchObject({ code: "forbidden", status: 403 });
+
+    await getDb()
+      .update(secretRoutes)
+      .set({ pathPattern: "/v1/items" })
+      .where(eq(secretRoutes.id, G.ROUTE_AUTHORED));
+    await expect(
+      providerAuthorityStore.registerOperation(
+        { ...baseContext, idempotencyKey: "generic-author-operation-4" },
+        G.ACCOUNT,
+        {
+          operationKey: OP_AUTHORED_KEY,
+          riskClass: "write",
+          secretRouteId: G.ROUTE_AUTHORED,
           requestProfile: {
             profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
             operationDescriptor: CREATE_DESCRIPTOR,
