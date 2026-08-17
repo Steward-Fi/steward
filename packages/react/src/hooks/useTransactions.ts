@@ -1,6 +1,7 @@
 import type { TxRecord, TxStatus } from "@stwd/sdk";
 import { useCallback, useEffect, useState } from "react";
 import { useStewardContext } from "../provider.js";
+import { getAllTransactions } from "../utils/transactions.js";
 
 interface UseTransactionsOpts {
   pageSize?: number;
@@ -25,9 +26,9 @@ export function filterTransactions(
 
 /**
  * Paginated transaction history.
- * There is no paginated list endpoint; the hook fetches the credentialed
- * history through StewardClient and filters/paginates client-side. Raw
- * fetch is never used, so credentials always attach (SEC-195).
+ * The hook exhausts the credentialed transaction-list endpoint and then
+ * filters/paginates client-side. Raw fetch is never used, so credentials
+ * always attach and histories over 100 rows are not truncated (SEC-195).
  */
 export function useTransactions(opts: UseTransactionsOpts = {}) {
   const { client, agentId, pollInterval } = useStewardContext();
@@ -40,7 +41,7 @@ export function useTransactions(opts: UseTransactionsOpts = {}) {
 
   const fetchTransactions = useCallback(async () => {
     try {
-      const records = await client.getTransactionHistory(agentId);
+      const records = await getAllTransactions(client, agentId);
       setAllTransactions(filterTransactions(records, { status, chainId }));
       setError(null);
     } catch (err) {

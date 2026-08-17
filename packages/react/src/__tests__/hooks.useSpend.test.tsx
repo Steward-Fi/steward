@@ -1,7 +1,7 @@
 /**
  * Tests for useSpend().
  *
- * Stats are derived from the credentialed client.getTransactionHistory —
+ * Stats are derived from the credentialed client.listTransactions —
  * the old raw-fetch /agents/:id/spend-stats endpoint never existed on the
  * API and sent no credentials (SEC-195 regression).
  *
@@ -14,7 +14,11 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import * as React from "react";
 import { renderToString } from "react-dom/server";
 
-const getTransactionHistoryMock = mock(async (_agentId: string) => [] as any[]);
+const listTransactionsMock = mock(async (_agentId: string, _opts: unknown) => ({
+  transactions: [] as any[],
+  limit: 200,
+  offset: 0,
+}));
 
 // NOTE: bun's `mock.module` is process-global; this suite is run
 // one-file-per-process by the package's test script. Run individual files
@@ -22,7 +26,7 @@ const getTransactionHistoryMock = mock(async (_agentId: string) => [] as any[]);
 mock.module("../provider.js", () => ({
   useStewardContext: () => ({
     client: {
-      getTransactionHistory: getTransactionHistoryMock,
+      listTransactions: listTransactionsMock,
     },
     agentId: "a b",
     pollInterval: 30000,
@@ -71,8 +75,12 @@ let fetchMock: ReturnType<typeof mock>;
 
 describe("useSpend()", () => {
   beforeEach(() => {
-    getTransactionHistoryMock.mockClear();
-    getTransactionHistoryMock.mockImplementation(async () => []);
+    listTransactionsMock.mockClear();
+    listTransactionsMock.mockImplementation(async () => ({
+      transactions: [],
+      limit: 200,
+      offset: 0,
+    }));
     fetchMock = mock(async () => {
       throw new Error("raw fetch must not be used");
     });
@@ -93,8 +101,8 @@ describe("useSpend()", () => {
   test("refetch derives stats from the credentialed history only", async () => {
     const api = captureHook();
     await api.refetch();
-    expect(getTransactionHistoryMock).toHaveBeenCalledTimes(1);
-    expect(getTransactionHistoryMock.mock.calls[0]?.[0]).toBe("a b");
+    expect(listTransactionsMock).toHaveBeenCalledTimes(1);
+    expect(listTransactionsMock).toHaveBeenCalledWith("a b", { limit: 200, offset: 0 });
     // SEC-195: no credential-less raw fetch on any path.
     expect(fetchMock).not.toHaveBeenCalled();
   });

@@ -1,9 +1,8 @@
 /**
  * Tests for useTransactions().
  *
- * The hook fetches the credentialed history via client.getTransactionHistory
- * and filters/paginates client-side — the old raw-fetch "paginated endpoint"
- * never existed on the API and sent no credentials (SEC-195 regression).
+ * The hook exhausts the credentialed listTransactions endpoint and
+ * filters/paginates client-side (SEC-195 regression).
  *
  * The test runner has no jsdom and renderToString does not flush effects, so
  * we assert on the mocked client calls and thrown errors via an SSR probe,
@@ -15,7 +14,11 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import * as React from "react";
 import { renderToString } from "react-dom/server";
 
-const getTransactionHistoryMock = mock(async (_agentId: string) => [] as any[]);
+const listTransactionsMock = mock(async (_agentId: string, _opts: unknown) => ({
+  transactions: [] as any[],
+  limit: 200,
+  offset: 0,
+}));
 
 // NOTE: bun's `mock.module` is process-global; this suite is run
 // one-file-per-process by the package's test script. Run individual files
@@ -23,7 +26,7 @@ const getTransactionHistoryMock = mock(async (_agentId: string) => [] as any[]);
 mock.module("../provider.js", () => ({
   useStewardContext: () => ({
     client: {
-      getTransactionHistory: getTransactionHistoryMock,
+      listTransactions: listTransactionsMock,
     },
     agentId: "agent/1",
     pollInterval: 30000,
@@ -68,8 +71,12 @@ let fetchMock: ReturnType<typeof mock>;
 
 describe("useTransactions()", () => {
   beforeEach(() => {
-    getTransactionHistoryMock.mockClear();
-    getTransactionHistoryMock.mockImplementation(async () => []);
+    listTransactionsMock.mockClear();
+    listTransactionsMock.mockImplementation(async () => ({
+      transactions: [],
+      limit: 200,
+      offset: 0,
+    }));
     fetchMock = mock(async () => {
       throw new Error("raw fetch must not be used");
     });
@@ -94,21 +101,21 @@ describe("useTransactions()", () => {
   test("refetch loads history through the credentialed client only", async () => {
     const api = captureHook();
     await api.refetch();
-    expect(getTransactionHistoryMock).toHaveBeenCalledTimes(1);
-    expect(getTransactionHistoryMock.mock.calls[0]?.[0]).toBe("agent/1");
+    expect(listTransactionsMock).toHaveBeenCalledTimes(1);
+    expect(listTransactionsMock).toHaveBeenCalledWith("agent/1", { limit: 200, offset: 0 });
     // SEC-195: no credential-less raw fetch on any path.
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   test("client errors do not reject refetch (state updates are SSR-invisible)", async () => {
-    getTransactionHistoryMock.mockImplementation(async () => {
+    listTransactionsMock.mockImplementation(async () => {
       throw new Error("history unavailable");
     });
     const api = captureHook();
     // The hook catches client errors into its error state; SSR cannot observe
     // the state write, but the call must resolve and never touch raw fetch.
     await api.refetch();
-    expect(getTransactionHistoryMock).toHaveBeenCalledTimes(1);
+    expect(listTransactionsMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

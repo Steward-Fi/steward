@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useStewardContext } from "../provider.js";
 import type { SpendStats } from "../types.js";
 import { formatWei } from "../utils/format.js";
+import { getAllTransactions } from "../utils/transactions.js";
 
 type SpendRange = "24h" | "7d" | "30d" | "all";
 
@@ -120,7 +121,7 @@ export function useSpend(range: SpendRange = "7d") {
 
   const fetchStats = useCallback(async () => {
     try {
-      const records = await client.getTransactionHistory(agentId);
+      const records = await getAllTransactions(client, agentId);
       setStats(computeSpendStats(range, records));
       setError(null);
     } catch (err) {

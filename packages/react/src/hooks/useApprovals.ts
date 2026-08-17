@@ -36,9 +36,9 @@ export function toQueueEntry(entry: SdkApprovalQueueEntry): ApprovalQueueEntry {
 /**
  * Approval queue with approve/reject actions.
  *
- * All calls route through the credentialed StewardClient (tenant-scoped
- * `/approvals` endpoints) — never raw fetch — so approvals cannot become
- * unauthenticated mutations behind an ambient-auth deployment (SEC-195).
+ * All calls route through the credentialed StewardClient — never raw fetch.
+ * Vault approvals use the vault execution route so policy is revalidated and
+ * the approved transaction is actually signed/broadcast (SEC-195).
  */
 export function useApprovals(refreshInterval?: number) {
   const { client, agentId, pollInterval } = useStewardContext();
@@ -72,13 +72,13 @@ export function useApprovals(refreshInterval?: number) {
     async (txId: string) => {
       setIsResolving(true);
       try {
-        await client.approveTransaction(txId);
+        await client.approveVaultTransaction(agentId, txId);
         setPending((prev) => prev.filter((a) => a.txId !== txId));
       } finally {
         setIsResolving(false);
       }
     },
-    [client],
+    [client, agentId],
   );
 
   const reject = useCallback(

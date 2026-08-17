@@ -2,7 +2,7 @@
  * Tests for useApprovals().
  *
  * The hook routes every call through the credentialed StewardClient
- * (listApprovals / approveTransaction / denyTransaction) — raw fetch must
+ * (listApprovals / approveVaultTransaction / denyTransaction) — raw fetch must
  * never be used, so credentials always attach (SEC-195 regression).
  *
  * The test runner has no jsdom and renderToString does not flush effects, so
@@ -15,7 +15,7 @@ import * as React from "react";
 import { renderToString } from "react-dom/server";
 
 const listApprovalsMock = mock(async (_opts?: { status?: string }) => [] as any[]);
-const approveTransactionMock = mock(async (_txId: string) => ({}) as any);
+const approveVaultTransactionMock = mock(async (_agentId: string, _txId: string) => ({}) as any);
 const denyTransactionMock = mock(async (_txId: string, _reason: string) => ({}) as any);
 
 // NOTE: bun's `mock.module` is process-global; this suite is run
@@ -25,7 +25,7 @@ mock.module("../provider.js", () => ({
   useStewardContext: () => ({
     client: {
       listApprovals: listApprovalsMock,
-      approveTransaction: approveTransactionMock,
+      approveVaultTransaction: approveVaultTransactionMock,
       denyTransaction: denyTransactionMock,
     },
     agentId: "agent x",
@@ -61,7 +61,7 @@ describe("useApprovals()", () => {
   beforeEach(() => {
     listApprovalsMock.mockClear();
     listApprovalsMock.mockImplementation(async () => []);
-    approveTransactionMock.mockClear();
+    approveVaultTransactionMock.mockClear();
     denyTransactionMock.mockClear();
     fetchMock = mock(async () => {
       throw new Error("raw fetch must not be used");
@@ -95,13 +95,13 @@ describe("useApprovals()", () => {
   test("approve() goes through the credentialed client", async () => {
     const api = captureHook();
     await api.approve("tx-123");
-    expect(approveTransactionMock).toHaveBeenCalledTimes(1);
-    expect(approveTransactionMock.mock.calls[0]?.[0]).toBe("tx-123");
+    expect(approveVaultTransactionMock).toHaveBeenCalledTimes(1);
+    expect(approveVaultTransactionMock).toHaveBeenCalledWith("agent x", "tx-123");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   test("approve() propagates client errors", async () => {
-    approveTransactionMock.mockImplementation(async () => {
+    approveVaultTransactionMock.mockImplementation(async () => {
       throw new Error("Approve failed: 500");
     });
     const api = captureHook();
