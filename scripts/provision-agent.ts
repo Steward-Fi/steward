@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
-import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import { getDb, tenants } from "@stwd/db";
 import { eq } from "drizzle-orm";
 import { createAgentToken, DEFAULT_TENANT_ID, vault } from "../packages/api/src/services/context";
 import { TradeSessionManager } from "../packages/trade-sessions/src/index";
+import { type DefaultTenantStore, ensureDefaultTenant } from "./lib/default-tenant";
 
 const USAGE = `Usage:
   bun run scripts/provision-agent.ts <agentId> <ownerAddress>
@@ -19,21 +20,24 @@ function requireArg(value: string | undefined, name: string): string {
   return value.trim();
 }
 
-async function ensureDefaultTenant(ownerAddress: string) {
-  const db = getDb();
-  const [existing] = await db
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(eq(tenants.id, DEFAULT_TENANT_ID));
-  if (existing) return;
-
-  await db.insert(tenants).values({
-    id: DEFAULT_TENANT_ID,
-    name: "Default Steward Tenant",
-    apiKeyHash: createHash("sha256").update(`provision-agent:${DEFAULT_TENANT_ID}`).digest("hex"),
-    ownerAddress,
-  });
-}
+// Drizzle-backed store for the default-tenant key logic (SEC-012). The key
+// itself is generated inside ensureDefaultTenant and only ever printed once
+// to the operator — never logged elsewhere or stored in plaintext.
+const defaultTenantStore: DefaultTenantStore = {
+  async getApiKeyHash(tenantId) {
+    const [row] = await getDb()
+      .select({ apiKeyHash: tenants.apiKeyHash })
+      .from(tenants)
+      .where(eq(tenants.id, tenantId));
+    return row?.apiKeyHash ?? null;
+  },
+  async insertTenant(values) {
+    await getDb().insert(tenants).values(values);
+  },
+  async rotateApiKeyHash(tenantId, apiKeyHash) {
+    await getDb().update(tenants).set({ apiKeyHash }).where(eq(tenants.id, tenantId));
+  },
+};
 
 async function ensureAgent(agentId: string, ownerAddress: string) {
   try {
@@ -72,7 +76,11 @@ async function main() {
   const agentId = requireArg(process.argv[2], "agentId");
   const ownerAddress = requireArg(process.argv[3], "ownerAddress");
 
-  await ensureDefaultTenant(ownerAddress);
+  const tenantResult = await ensureDefaultTenant(defaultTenantStore, {
+    tenantId: DEFAULT_TENANT_ID,
+    tenantName: "Default Steward Tenant",
+    ownerAddress,
+  });
 
   const { agent, created: agentCreated } = await ensureAgent(agentId, ownerAddress);
   const { wallet, created: walletCreated } = await ensureHyperliquidWallet(agentId);
@@ -97,6 +105,16 @@ async function main() {
 
   console.log("Steward Sol provisioning complete");
   console.log("================================");
+  if (tenantResult.status === "created") {
+    console.log(
+      `Default tenant created. API key (shown ONCE — save it now): ${tenantResult.apiKey}`,
+    );
+  } else if (tenantResult.status === "rotated") {
+    console.log("⚠  ROTATED the default tenant API key: the previous key was publicly");
+    console.log("   derivable (sha256 of a string published in this repo, SEC-012) and is");
+    console.log("   now INVALID. Update any client still using it.");
+    console.log(`   New API key (shown ONCE — save it now): ${tenantResult.apiKey}`);
+  }
   console.log(`Agent ID: ${agent.id} (${agentCreated ? "created" : "existing"})`);
   console.log(`Owner address: ${ownerAddress}`);
   console.log(`HL deposit address: ${wallet.address} (${walletCreated ? "created" : "existing"})`);
@@ -115,7 +133,14 @@ async function main() {
   );
 }
 
-main().catch((err) => {
-  console.error(err instanceof Error ? err.stack || err.message : err);
-  process.exit(1);
-});
+function isMain(): boolean {
+  const entry = process.argv[1] ? resolve(process.argv[1]) : "";
+  return import.meta.url === new URL(`file://${entry}`).href;
+}
+
+if (isMain()) {
+  main().catch((err) => {
+    console.error(err instanceof Error ? err.stack || err.message : err);
+    process.exit(1);
+  });
+}
