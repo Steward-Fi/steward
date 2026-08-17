@@ -7,6 +7,10 @@
  * Each configurable action maps to a distinct engine outcome when the score is
  * below `minScore` (or when no score is available and `fallbackAction` applies):
  *   - `approve`          → `passed: true` (the policy does not block this tx).
+ *                         EXCEPTION: as a `fallbackAction` with NO score wired
+ *                         it fails closed (deny) — otherwise every rule is a
+ *                         hidden default-allow while no score source exists
+ *                         (SEC-040).
  *   - `require-approval` → `passed: false` + `requiresManualApproval: true`
  *                          (the engine routes the tx to the manual-approval
  *                          queue instead of hard-rejecting it).
@@ -66,7 +70,19 @@ export function evaluateReputationThreshold(
   const base = { policyId: rule.id, type: rule.type } as const;
 
   if (ctx.reputationScore === undefined || ctx.reputationScore === null) {
-    // No score available, use fallback action.
+    // No score available. FAIL CLOSED on an `approve` fallback: no caller in
+    // the API wires a reputation score, so honoring `fallbackAction:
+    // "approve"` would make every reputation-threshold rule a silent
+    // default-allow (SEC-040). Manual-review and block fallbacks keep their
+    // semantics.
+    if (config.fallbackAction === "approve") {
+      return {
+        ...base,
+        passed: false,
+        reason:
+          "No reputation score available; fallbackAction \"approve\" is not permitted without a wired score (fail closed)",
+      };
+    }
     return resultForUnmetThreshold(
       base,
       config.fallbackAction,
