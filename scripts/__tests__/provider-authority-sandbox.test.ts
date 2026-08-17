@@ -21,7 +21,11 @@ import {
   validateServiceUrl,
   verifyInstallationScope,
 } from "../lib/provider-authority-sandbox-lib.mjs";
-import { runDispatchChild } from "../provider-authority-sandbox.mjs";
+import {
+  prepareApprovedWrite,
+  requireRawCaseManifest,
+  runDispatchChild,
+} from "../provider-authority-sandbox.mjs";
 
 const servers: Server[] = [];
 afterEach(() => servers.splice(0).forEach((server) => server.close()));
@@ -242,13 +246,60 @@ describe("provider authority sandbox operator primitives", () => {
     await expect(
       verifyInstallationScope(
         {
-          token: "token",
+          token: "ghs_SCOPE_CANARY_MUST_NOT_LEAK",
           permissions: { metadata: "read", issues: "write", contents: "read" },
           repositorySelection: "selected",
         },
         { owner: "sandbox-owner", repo: "sandbox-repo", apiBase: base },
       ),
     ).rejects.toThrow("permissions");
+    try {
+      await verifyInstallationScope(
+        {
+          token: "ghs_SCOPE_CANARY_MUST_NOT_LEAK",
+          permissions: { metadata: "read" },
+          repositorySelection: "selected",
+        },
+        { owner: "sandbox-owner", repo: "sandbox-repo", apiBase: base },
+      );
+    } catch (error) {
+      expect(String(error)).not.toContain("ghs_SCOPE_CANARY_MUST_NOT_LEAK");
+    }
+  });
+
+  it("uses the no-body execute contract and accepts the live raw case shape", async () => {
+    const calls: Array<{ path: string; options: RequestInit }> = [];
+    const stewardImpl = async (
+      _env: Record<string, string>,
+      path: string,
+      _token: string,
+      options: RequestInit = {},
+    ) => {
+      calls.push({ path, options });
+      if (path === "/v2/provider-actions") {
+        return {
+          id: "pa_test",
+          status: "pending_approval",
+          requestHash: `sha256:${"a".repeat(64)}`,
+          actionDigest: `sha256:${"b".repeat(64)}`,
+        };
+      }
+      if (path.endsWith("/approval") && options.method !== "POST") {
+        return { data: { version: 1 } };
+      }
+      if (path.endsWith("/execute")) return { status: "execution_ready" };
+      return { status: "approved" };
+    };
+    await prepareApprovedWrite(envFixture(), "marker", "body", stewardImpl);
+    const execute = calls.find((call) => call.path.endsWith("/execute"));
+    expect(execute?.options).toEqual({ method: "POST" });
+    expect(execute?.options.body).toBeUndefined();
+
+    const raw = { schemaVersion: "steward.provider-case-manifest.v1", caseId: "pa_test" };
+    expect(requireRawCaseManifest(raw, "pa_test")).toBe(raw);
+    expect(() => requireRawCaseManifest({ manifest: raw }, "pa_test")).toThrow(
+      "expected case manifest",
+    );
   });
 
   it("finds a marker across bounded pagination and reports a bounded miss", async () => {

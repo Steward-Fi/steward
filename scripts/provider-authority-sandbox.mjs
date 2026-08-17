@@ -58,8 +58,8 @@ async function steward(env, path, token, options = {}) {
   return body;
 }
 
-async function prepareApprovedWrite(env, marker, body) {
-  const created = await steward(env, "/v2/provider-actions", env.STEWARD_AGENT_JWT, {
+export async function prepareApprovedWrite(env, marker, body, stewardImpl = steward) {
+  const created = await stewardImpl(env, "/v2/provider-actions", env.STEWARD_AGENT_JWT, {
     method: "POST",
     body: JSON.stringify({
       workspaceId: env.STEWARD_SANDBOX_WORKSPACE_ID,
@@ -77,13 +77,13 @@ async function prepareApprovedWrite(env, marker, body) {
   if (!created.id || created.status !== "pending_approval") {
     throw new Error("provider action did not require approval");
   }
-  const approvalResponse = await steward(
+  const approvalResponse = await stewardImpl(
     env,
     `/v2/provider-actions/${encodeURIComponent(created.id)}/approval`,
     env.STEWARD_APPROVER_JWT,
   );
   const approval = approvalResponse.data ?? approvalResponse;
-  await steward(
+  await stewardImpl(
     env,
     `/v2/provider-actions/${encodeURIComponent(created.id)}/approval`,
     env.STEWARD_APPROVER_JWT,
@@ -99,17 +99,24 @@ async function prepareApprovedWrite(env, marker, body) {
       }),
     },
   );
-  const executeResponse = await steward(
+  const executeResponse = await stewardImpl(
     env,
     `/v2/provider-actions/${encodeURIComponent(created.id)}/execute`,
     env.STEWARD_AGENT_JWT,
-    { method: "POST", body: "{}" },
+    { method: "POST" },
   );
   const execution = executeResponse.data ?? executeResponse;
   if (execution.status !== "execution_ready") {
     throw new Error(`execute did not reach execution_ready (got ${execution.status ?? "unknown"})`);
   }
   return created;
+}
+
+export function requireRawCaseManifest(caseRecord, intentId) {
+  if (!caseRecord || caseRecord.caseId !== intentId) {
+    throw new Error("live case response did not contain the expected case manifest");
+  }
+  return caseRecord;
 }
 
 export function runDispatchChild(
@@ -389,6 +396,10 @@ async function main() {
     githubToken = reconciliationInstallation.token;
     activeGithubTokens.add(githubToken);
     secretValues.push(githubToken);
+    await verifyInstallationScope(reconciliationInstallation, {
+      owner: env.STEWARD_SANDBOX_GITHUB_OWNER,
+      repo: env.STEWARD_SANDBOX_GITHUB_REPO,
+    });
     const reconciliation = await reconcileGithubMarker({
       apiBase: env.GITHUB_API_URL,
       owner: env.STEWARD_SANDBOX_GITHUB_OWNER,
@@ -420,10 +431,9 @@ async function main() {
       `/v2/provider-actions/${encodeURIComponent(intentId)}/case`,
       env.STEWARD_APPROVER_JWT,
     );
-    const caseManifest = caseRecord?.manifest;
-    if (!caseManifest || caseManifest.caseId !== intentId) {
-      throw new Error("live case response did not contain the expected case manifest");
-    }
+    // The live `/case` route returns ProviderCaseManifestV1 directly (unlike
+    // approval detail, which uses an `{ ok, data }` envelope).
+    const caseManifest = requireRawCaseManifest(caseRecord, intentId);
     const evidence = await steward(
       env,
       `/v2/provider-actions/${encodeURIComponent(intentId)}/evidence`,
