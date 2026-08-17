@@ -65,7 +65,15 @@ describe("external key custody contract", () => {
   });
 
   test("normalizes provider-signing registrations without private-key exportability", () => {
-    const normalized = normalizeExternalKeyHandleRegistration(request, registration());
+    const normalized = normalizeExternalKeyHandleRegistration(
+      request,
+      registration({
+        tenantId: request.tenantId,
+        agentId: request.agentId,
+        chainFamily: request.chainFamily,
+        address: request.address,
+      }),
+    );
 
     expect(normalized.tenantId).toBe("tenant");
     expect(normalized.agentId).toBe("agent");
@@ -74,6 +82,30 @@ describe("external key custody contract", () => {
     expect(normalized.venue).toBe("hsm-primary");
     expect(normalized.exportablePrivateKey).toBe(false);
     expect(normalized.signingAvailability).toBe("provider-signing");
+  });
+
+  test("rejects provider responses that change the requested identity binding", () => {
+    const bound = registration({
+      tenantId: request.tenantId,
+      agentId: request.agentId,
+      chainFamily: request.chainFamily,
+      address: request.address,
+    });
+    expect(() =>
+      normalizeExternalKeyHandleRegistration(request, { ...bound, tenantId: "other-tenant" }),
+    ).toThrow("did not preserve the requested identity binding");
+    expect(() =>
+      normalizeExternalKeyHandleRegistration(request, {
+        ...bound,
+        handle: { ...bound.handle, keyId: "different-key" },
+      }),
+    ).toThrow("did not preserve the requested identity binding");
+    expect(() =>
+      normalizeExternalKeyHandleRegistration(request, {
+        ...bound,
+        address: "0x2222222222222222222222222222222222222222",
+      }),
+    ).toThrow("did not preserve the requested identity binding");
   });
 
   test("rejects private material in nested provider values", () => {
@@ -89,6 +121,27 @@ describe("external key custody contract", () => {
     expect(() =>
       assertNoExternalPrivateKeyMaterial({ metadata: { nested: { seedPhrase: "words" } } }),
     ).toThrow("must not contain private key material");
+    expect(() =>
+      assertNoExternalPrivateKeyMaterial({ metadata: { recoveryPhrase: "words" } }),
+    ).toThrow("must not contain private key material");
+  });
+
+  test("rejects cyclic, accessor, and custom-prototype provider values", () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    expect(() => assertNoExternalPrivateKeyMaterial(cyclic)).toThrow("cyclic references");
+
+    const accessor = Object.defineProperty({}, "privateKey", {
+      enumerable: false,
+      get: () => "must-not-run",
+    });
+    expect(() => assertNoExternalPrivateKeyMaterial(accessor)).toThrow(
+      "must not contain private key material",
+    );
+
+    expect(() => assertNoExternalPrivateKeyMaterial(new Map([["label", "value"]]))).toThrow(
+      "plain data only",
+    );
   });
 
   test("keeps fail-closed error surfaces explicit", () => {

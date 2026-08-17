@@ -96,12 +96,21 @@ export function assertExternalKeyCustodyProviderV1(provider: ExternalKeyCustodyP
 const PRIVATE_MATERIAL_FIELD_NAMES = new Set([
   "privatekey",
   "secretkey",
+  "signingkey",
+  "encryptionkey",
   "keymaterial",
   "plaintextkey",
   "mnemonic",
+  "recoveryphrase",
   "seed",
   "seedphrase",
+  "secretaccesskey",
+  "awssecretaccesskey",
+  "sessiontoken",
 ]);
+
+const MAX_EXTERNAL_CUSTODY_OBJECT_DEPTH = 32;
+const MAX_EXTERNAL_CUSTODY_OBJECT_NODES = 10_000;
 
 export function externalKeyCustodyUnavailableError(): Error {
   return new Error(
@@ -120,21 +129,80 @@ export function externalKeyPrivateExportUnavailableError(): Error {
 }
 
 export function assertNoExternalPrivateKeyMaterial(value: unknown, path = "request"): void {
-  if (value === null || value === undefined) return;
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => assertNoExternalPrivateKeyMaterial(item, `${path}[${index}]`));
-    return;
-  }
-  if (typeof value !== "object") return;
+  const seen = new WeakSet<object>();
+  let visitedNodes = 0;
 
-  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
-    // Normalize separators/casing so aliases such as private_key, private-key,
-    // seedPhrase and KEY_MATERIAL cannot bypass the provider boundary.
-    const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
-    if (PRIVATE_MATERIAL_FIELD_NAMES.has(normalizedKey)) {
-      throw new Error(`External key custody ${path}.${key} must not contain private key material`);
+  function visit(current: unknown, currentPath: string, depth: number): void {
+    if (current === null || current === undefined || typeof current !== "object") return;
+    if (depth > MAX_EXTERNAL_CUSTODY_OBJECT_DEPTH) {
+      throw new Error(`External key custody ${currentPath} exceeds the maximum nesting depth`);
     }
-    assertNoExternalPrivateKeyMaterial(nested, `${path}.${key}`);
+    if (++visitedNodes > MAX_EXTERNAL_CUSTODY_OBJECT_NODES) {
+      throw new Error("External key custody object exceeds the maximum size");
+    }
+    if (seen.has(current)) {
+      throw new Error(`External key custody ${currentPath} must not contain cyclic references`);
+    }
+    seen.add(current);
+
+    if (current instanceof Date) {
+      if (!Number.isFinite(current.getTime())) {
+        throw new Error(`External key custody ${currentPath} contains an invalid date`);
+      }
+      seen.delete(current);
+      return;
+    }
+
+    const prototype = Object.getPrototypeOf(current);
+    if (prototype !== Object.prototype && prototype !== null && !Array.isArray(current)) {
+      throw new Error(`External key custody ${currentPath} must contain plain data only`);
+    }
+
+    for (const key of Reflect.ownKeys(current)) {
+      if (typeof key !== "string") {
+        throw new Error(`External key custody ${currentPath} must not contain symbol properties`);
+      }
+      const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (PRIVATE_MATERIAL_FIELD_NAMES.has(normalizedKey)) {
+        throw new Error(
+          `External key custody ${currentPath}.${key} must not contain private key material`,
+        );
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(current, key);
+      if (!descriptor || !("value" in descriptor)) {
+        throw new Error(`External key custody ${currentPath}.${key} must be a data property`);
+      }
+      visit(descriptor.value, `${currentPath}.${key}`, depth + 1);
+    }
+    seen.delete(current);
+  }
+
+  visit(value, path, 0);
+}
+
+function sameAddress(chainFamily: ChainFamily, actual: string, expected: string): boolean {
+  return chainFamily === "evm"
+    ? actual.toLowerCase() === expected.toLowerCase()
+    : actual === expected;
+}
+
+function assertRegistrationIdentityBinding(
+  request: ExternalKeyHandleImportRequest,
+  registration: ExternalKeyHandleRegistration,
+): void {
+  if (
+    registration.tenantId !== request.tenantId ||
+    registration.agentId !== request.agentId ||
+    registration.chainFamily !== request.chainFamily ||
+    !sameAddress(request.chainFamily, registration.address, request.address) ||
+    registration.handle.providerId !== request.handle.providerId ||
+    registration.handle.keyId !== request.handle.keyId ||
+    registration.handle.version !== request.handle.version ||
+    registration.handle.region !== request.handle.region
+  ) {
+    throw new Error(
+      "External key custody provider did not preserve the requested identity binding",
+    );
   }
 }
 
@@ -143,6 +211,7 @@ export function normalizeExternalKeyHandleRegistration(
   registration: ExternalKeyHandleRegistration,
 ): ExternalKeyHandleRegistration {
   assertNoExternalPrivateKeyMaterial(registration, "registration");
+  assertRegistrationIdentityBinding(request, registration);
   if (registration.exportablePrivateKey !== false) {
     throw new Error("External key custody registration must not be private-key exportable");
   }

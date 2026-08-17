@@ -26,6 +26,7 @@ import {
 } from "./external-key-custody";
 
 const AWS_PROVIDER_ID = "aws-kms";
+const DEFAULT_EXTERNAL_REQUEST_TIMEOUT_MS = 10_000;
 const SECP256K1_ORDER = BigInt(
   "0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
 );
@@ -63,7 +64,7 @@ interface AwsSignOutput {
 }
 
 export interface AwsKmsSigningClientLike {
-  send(command: unknown): Promise<unknown>;
+  send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown>;
 }
 
 export interface AwsKmsEvmRpc {
@@ -82,6 +83,7 @@ export interface AwsKmsExternalKeyCustodyOptions {
   maxGasLimit?: bigint;
   maxGasPriceWei?: bigint;
   maxTotalFeeWei?: bigint;
+  requestTimeoutMs?: number;
 }
 
 function positiveBigIntEnv(name: string): bigint {
@@ -224,6 +226,34 @@ function assertEvmRequest(request: ExternalKeySignTransactionRequest): void {
     throw new Error("AWS KMS external custody data must be hex encoded");
   }
   if (!request.rpcUrl?.trim()) throw new Error("AWS KMS external custody requires an EVM RPC URL");
+  validateEvmRpcTransport(request.rpcUrl);
+}
+
+function isPrivateHttpHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host === "::1" || host.endsWith(".localhost")) return true;
+  if (!host.includes(".")) return true;
+  if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)) return true;
+  const match = /^172\.(\d+)\./.exec(host);
+  return !!match && Number(match[1]) >= 16 && Number(match[1]) <= 31;
+}
+
+function validateEvmRpcTransport(rawUrl: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error("AWS KMS external custody EVM RPC must be a valid HTTP(S) URL");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("AWS KMS external custody EVM RPC must not embed URL credentials");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("AWS KMS external custody EVM RPC must use HTTP(S)");
+  }
+  if (parsed.protocol === "http:" && !isPrivateHttpHost(parsed.hostname)) {
+    throw new Error("AWS KMS external custody EVM RPC must use HTTPS for a non-private host");
+  }
 }
 
 function assertHandleRegion(handleRegion: string | undefined, configuredRegion: string): void {
@@ -254,8 +284,10 @@ function assertCanonicalKmsKeyArn(keyId: string, region: string): void {
   }
 }
 
-function defaultRpcFactory(rpcUrl: string): AwsKmsEvmRpc {
-  const client = createPublicClient({ transport: http(rpcUrl) });
+function defaultRpcFactory(rpcUrl: string, timeoutMs: number): AwsKmsEvmRpc {
+  const client = createPublicClient({
+    transport: http(rpcUrl, { retryCount: 0, timeout: timeoutMs }),
+  });
   return {
     getChainId() {
       return client.getChainId();
@@ -298,13 +330,19 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
   private readonly maxGasLimit?: bigint;
   private readonly maxGasPriceWei?: bigint;
   private readonly maxTotalFeeWei?: bigint;
+  private readonly requestTimeoutMs: number;
 
   constructor(options: AwsKmsExternalKeyCustodyOptions = {}) {
     assertAwsRegion(options.region);
     this.client = options.client;
     this.clientIsInjected = Boolean(options.client);
     this.region = options.region;
-    this.rpcFactory = options.rpcFactory ?? defaultRpcFactory;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_EXTERNAL_REQUEST_TIMEOUT_MS;
+    if (!Number.isSafeInteger(this.requestTimeoutMs) || this.requestTimeoutMs <= 0) {
+      throw new Error("AWS KMS external custody requestTimeoutMs must be a positive safe integer");
+    }
+    this.rpcFactory =
+      options.rpcFactory ?? ((rpcUrl) => defaultRpcFactory(rpcUrl, this.requestTimeoutMs));
     this.maxGasLimit = options.maxGasLimit;
     this.maxGasPriceWei = options.maxGasPriceWei;
     this.maxTotalFeeWei = options.maxTotalFeeWei;
@@ -387,10 +425,13 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
     }
 
     const rpc = this.rpcFactory(request.rpcUrl!);
-    if ((await rpc.getChainId()) !== request.chainId) {
+    if ((await this.withDeadline(rpc.getChainId(), "RPC chain lookup")) !== request.chainId) {
       throw new Error("AWS KMS RPC endpoint is connected to the wrong chainId");
     }
-    const transaction = await rpc.prepareTransaction(request, expectedAddress);
+    const transaction = await this.withDeadline(
+      rpc.prepareTransaction(request, expectedAddress),
+      "RPC transaction preparation",
+    );
     if (transaction.type !== undefined && transaction.type !== "legacy") {
       throw new Error("AWS KMS reference custody supports legacy EIP-155 transactions only");
     }
@@ -431,9 +472,7 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
 
     const unsigned = serializeTransaction(transaction);
     const digest = keccak256(unsigned);
-    const response = (await (
-      await this.getClient()
-    ).send(
+    const response = (await this.sendKms(
       await this.createSignCommand({
         KeyId: request.handle.keyId,
         Message: hexToBytes(digest),
@@ -476,7 +515,9 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
       v: yParity === 0 ? 27n : 28n,
     });
     const expectedTransactionHash = keccak256(serialized);
-    const result = request.broadcast ? await rpc.broadcast(serialized) : serialized;
+    const result = request.broadcast
+      ? await this.withDeadline(rpc.broadcast(serialized), "RPC broadcast")
+      : serialized;
     if (request.broadcast && result.toLowerCase() !== expectedTransactionHash.toLowerCase()) {
       throw new Error("AWS KMS RPC returned a transaction hash that does not match signed bytes");
     }
@@ -486,14 +527,42 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
   private async resolveSigningIdentity(
     keyId: string,
   ): Promise<{ address: Address; keyId: string }> {
-    const response = (await (
-      await this.getClient()
-    ).send(await this.createGetPublicKeyCommand({ KeyId: keyId }))) as AwsGetPublicKeyOutput;
+    const response = (await this.sendKms(
+      await this.createGetPublicKeyCommand({ KeyId: keyId }),
+    )) as AwsGetPublicKeyOutput;
     const signingKey = assertAwsSigningKey(response);
     return {
       address: evmAddressFromSpki(signingKey.publicKey),
       keyId: signingKey.keyId,
     };
+  }
+
+  private async sendKms(command: unknown): Promise<unknown> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    try {
+      return await this.withDeadline(
+        (await this.getClient()).send(command, { abortSignal: controller.signal }),
+        "KMS request",
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async withDeadline<T>(promise: Promise<T>, operation: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`AWS KMS external custody ${operation} timed out`)),
+        this.requestTimeoutMs,
+      );
+    });
+    try {
+      return await Promise.race([promise, deadline]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private async getClient(): Promise<AwsKmsSigningClientLike> {

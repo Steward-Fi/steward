@@ -179,6 +179,67 @@ function providerFor(kms: MockKms, rpc: MockRpc): AwsKmsExternalKeyCustodyProvid
 }
 
 describe("AWS KMS asymmetric external custody", () => {
+  test("bounds stalled KMS calls with an abortable deadline", async () => {
+    const privateKey = secp256k1.utils.randomPrivateKey();
+    let observedSignal: AbortSignal | undefined;
+    const provider = new AwsKmsExternalKeyCustodyProvider({
+      client: {
+        send(_command, options) {
+          observedSignal = options?.abortSignal;
+          return new Promise(() => {});
+        },
+      },
+      region: "us-east-1",
+      requestTimeoutMs: 10,
+      rpcFactory: () => new MockRpc(),
+      maxGasLimit: 100_000n,
+      maxGasPriceWei: 2_000_000_000n,
+      maxTotalFeeWei: 100_000_000_000_000n,
+    });
+
+    await expect(provider.registerKeyHandle(registrationRequest(privateKey))).rejects.toThrow(
+      "KMS request timed out",
+    );
+    expect(observedSignal?.aborted).toBe(true);
+  });
+
+  test("bounds stalled RPC preparation", async () => {
+    const privateKey = secp256k1.utils.randomPrivateKey();
+    const rpc = new MockRpc();
+    rpc.prepareTransaction = () => new Promise(() => {});
+    const provider = new AwsKmsExternalKeyCustodyProvider({
+      client: new MockKms(privateKey),
+      region: "us-east-1",
+      requestTimeoutMs: 10,
+      rpcFactory: () => rpc,
+      maxGasLimit: 100_000n,
+      maxGasPriceWei: 2_000_000_000n,
+      maxTotalFeeWei: 100_000_000_000_000n,
+    });
+
+    await expect(provider.signTransaction(signRequest(privateKey))).rejects.toThrow(
+      "RPC transaction preparation timed out",
+    );
+  });
+
+  test("rejects unsafe RPC transports before contacting KMS", async () => {
+    const privateKey = secp256k1.utils.randomPrivateKey();
+    const kms = new MockKms(privateKey);
+    const provider = providerFor(kms, new MockRpc());
+
+    await expect(
+      provider.signTransaction(
+        signRequest(privateKey, { rpcUrl: "http://public-rpc.example.test" }),
+      ),
+    ).rejects.toThrow("must use HTTPS for a non-private host");
+    await expect(
+      provider.signTransaction(
+        signRequest(privateKey, { rpcUrl: "https://user:secret@rpc.example.test" }),
+      ),
+    ).rejects.toThrow("must not embed URL credentials");
+    expect(kms.commands).toHaveLength(0);
+  });
+
   test("passes the reusable external custody v1 conformance contract", async () => {
     const privateKey = secp256k1.utils.randomPrivateKey();
     const result = await runExternalKeyCustodyV1Conformance({
