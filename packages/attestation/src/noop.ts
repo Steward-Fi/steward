@@ -7,6 +7,11 @@ import type {
 
 export interface NoopDevProviderOptions {
   allowUnverified?: boolean;
+  /**
+   * Dual consent for the insecure dev escape hatch, mirroring the repo-wide
+   * STEWARD_ALLOW_DEV_SECRETS convention. Defaults to the env var.
+   */
+  allowDevSecrets?: boolean;
   environment?: string;
   now?: () => Date;
 }
@@ -18,13 +23,30 @@ export class NoopDevAttestationProvider implements AttestationProvider {
   private readonly now: () => Date;
 
   constructor(options: NoopDevProviderOptions = {}) {
-    this.allowUnverified =
+    const requested =
       options.allowUnverified ?? process.env.STEWARD_ATTESTATION_NOOP_ALLOW === "true";
     this.environment = options.environment ?? process.env.NODE_ENV ?? "development";
     this.now = options.now ?? (() => new Date());
-    if (this.allowUnverified && this.environment === "production") {
+    // SEC-029: keying the insecure mode solely on NODE_ENV means any
+    // deployment that forgets NODE_ENV=production gets vacuous-green quotes.
+    // Require dual consent like every other dev escape hatch in this repo:
+    // STEWARD_ATTESTATION_NOOP_ALLOW=true AND STEWARD_ALLOW_DEV_SECRETS=true,
+    // and never in production.
+    const devSecretsAllowed =
+      options.allowDevSecrets ??
+      (process.env.STEWARD_ALLOW_DEV_SECRETS === "true" ||
+        process.env.STEWARD_ALLOW_DEV_SECRET === "true");
+    if (requested && this.environment === "production") {
       throw new Error("noop-dev attestation cannot be explicitly allowed in production");
     }
+    if (requested && !devSecretsAllowed) {
+      throw new Error(
+        "noop-dev attestation requires dual consent: set STEWARD_ALLOW_DEV_SECRETS=true " +
+          "alongside STEWARD_ATTESTATION_NOOP_ALLOW=true (local development only; never set " +
+          "these in a shared or production environment)",
+      );
+    }
+    this.allowUnverified = requested;
   }
 
   async generateQuote(request: AttestationQuoteRequest = {}): Promise<AttestationQuote> {
