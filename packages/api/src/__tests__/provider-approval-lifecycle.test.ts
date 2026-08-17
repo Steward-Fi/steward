@@ -241,6 +241,35 @@ describe("PR3 approval lifecycle", () => {
       .from(executionAuthorizationNonces)
       .where(eq(executionAuthorizationNonces.intentId, intentId));
     expect(after.length).toBe(1);
+
+    // Presence is insufficient: corrupting the frozen decision hash must stop
+    // the idempotent path before it can mint another durable authorization.
+    await getDb()
+      .delete(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.intentId, intentId));
+    await getDb().execute(
+      sql`DROP TRIGGER provider_action_bindings_immutable ON provider_action_bindings`,
+    );
+    await getDb()
+      .update(providerActionBindings)
+      .set({ executionPolicyDecisionHash: `sha256:${"0".repeat(64)}` })
+      .where(eq(providerActionBindings.intentId, intentId));
+    await getDb().execute(sql`
+      CREATE TRIGGER provider_action_bindings_immutable
+      BEFORE UPDATE ON provider_action_bindings
+      FOR EACH ROW EXECUTE FUNCTION steward_provider_action_binding_guard()
+    `);
+    expect(await providerApprovalService.resume({ intentId, tenantId: F.TENANT })).toEqual({
+      ok: false,
+      code: "EXECUTION_POLICY_EVIDENCE_MISSING",
+      httpStatus: 409,
+    });
+    expect(
+      await getDb()
+        .select({ id: executionAuthorizationNonces.authorizationId })
+        .from(executionAuthorizationNonces)
+        .where(eq(executionAuthorizationNonces.intentId, intentId)),
+    ).toHaveLength(0);
   });
 
   test("#239 rollout: resume never mints for a legacy execution_ready row without policy evidence", async () => {

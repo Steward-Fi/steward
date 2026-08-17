@@ -45,6 +45,7 @@ import {
   type ProviderApprovalAuditPayloadV1,
   type ProviderApprovalCommitmentV1,
   sha256HexPrefixed,
+  verifyProviderExecutionPolicyEvidence,
 } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";
 import {
@@ -1943,6 +1944,22 @@ class ProviderApprovalService {
               !binding.executionPolicyDecision ||
               !binding.executionPolicyDecisionHash ||
               !binding.executionPolicyEvaluatedAt
+            ) {
+              return fail("EXECUTION_POLICY_EVIDENCE_MISSING", 409);
+            }
+            if (
+              !verifyProviderExecutionPolicyEvidence(
+                binding.executionPolicyDecision,
+                binding.executionPolicyDecisionHash,
+                {
+                  decisionId: binding.executionPolicyDecisionId,
+                  intentId: binding.intentId,
+                  requestHash: binding.requestHash,
+                  actionDigest: binding.actionDigest,
+                  operationId: binding.operationId,
+                  policyRevisionHash: binding.executionPolicyRevisionHash,
+                },
+              )
             ) {
               return fail("EXECUTION_POLICY_EVIDENCE_MISSING", 409);
             }

@@ -720,6 +720,35 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(nonce.status).toBe("active");
   });
 
+  it("#239 rollout: corrupt execute-time policy evidence never claims or dispatches", async () => {
+    const { intentId, authorizationId } = await seedExecutionReady();
+    const db = getDb();
+    await db.execute(
+      sql`DROP TRIGGER provider_action_bindings_immutable ON provider_action_bindings`,
+    );
+    await db
+      .update(providerActionBindings)
+      .set({ executionPolicyDecisionHash: `sha256:${"0".repeat(64)}` })
+      .where(eq(providerActionBindings.intentId, intentId));
+    await db.execute(sql`
+      CREATE TRIGGER provider_action_bindings_immutable
+      BEFORE UPDATE ON provider_action_bindings
+      FOR EACH ROW EXECUTE FUNCTION steward_provider_action_binding_guard()
+    `);
+
+    expect(await dispatchGovernedExecution(intentId, IDS.tenant)).toMatchObject({
+      ok: false,
+      code: "EXEC_AUTH_POLICY_EVIDENCE_MISSING",
+      httpStatus: 409,
+    });
+    const [nonce] = await db
+      .select({ status: executionAuthorizationNonces.status })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(nonce.status).toBe("active");
+    expect(captured).toBeNull();
+  });
+
   it("happy path: gate permits, claim consumes exactly once, one dispatch", async () => {
     const { intentId, authorizationId } = await seedExecutionReady();
     const res = await dispatchGovernedExecution(intentId, IDS.tenant);

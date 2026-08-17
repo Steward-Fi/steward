@@ -842,6 +842,48 @@ export interface ProviderExecutionCommitmentV2 {
   keyId: string;
 }
 
+export interface ProviderExecutionPolicyEvidenceExpectation {
+  decisionId: string;
+  intentId: string;
+  requestHash: string;
+  actionDigest: string;
+  operationId: string;
+  policyRevisionHash: string;
+}
+
+/**
+ * Verify the complete execute-time policy evidence before an authorization is
+ * minted or claimed. Keeping this check shared prevents the API and proxy
+ * boundaries from accepting different evidence shapes during rollout.
+ */
+export function verifyProviderExecutionPolicyEvidence(
+  decision: unknown,
+  decisionHash: string | null | undefined,
+  expected: ProviderExecutionPolicyEvidenceExpectation,
+): boolean {
+  if (!decision || typeof decision !== "object" || Array.isArray(decision) || !decisionHash) {
+    return false;
+  }
+  const doc = decision as Record<string, unknown>;
+  if (
+    doc.schemaVersion !== "steward.provider-policy-decision.v1" ||
+    doc.decisionId !== expected.decisionId ||
+    doc.intentId !== expected.intentId ||
+    doc.requestHash !== expected.requestHash ||
+    doc.actionDigest !== expected.actionDigest ||
+    doc.operationId !== expected.operationId ||
+    doc.policyRevisionHash !== expected.policyRevisionHash ||
+    (doc.effect !== "allow" && doc.effect !== "approval_required")
+  ) {
+    return false;
+  }
+  try {
+    return sha256HexPrefixed(jcsStringify(doc)) === decisionHash;
+  } catch {
+    return false;
+  }
+}
+
 function toExecutionCommitmentObject(c: ProviderExecutionCommitmentV2): Record<string, unknown> {
   // Build a plain object graph (no class instances) so the JCS serializer never
   // sees a Date/Map/etc. Property order here is irrelevant (JCS re-sorts).

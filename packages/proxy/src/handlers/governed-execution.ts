@@ -52,9 +52,9 @@ import {
   observeNonceClaimContention,
   type ProviderApprovalCommitmentV1,
   serializeCanonicalOutboundQuery,
-  sha256HexPrefixed,
   strictParseJson,
   verifyProviderExecutionCommitmentV2,
+  verifyProviderExecutionPolicyEvidence,
 } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";
 import type { Context } from "hono";
@@ -315,12 +315,14 @@ export async function dispatchGovernedExecution(
     !executionPolicy ||
     !loaded.executionPolicyDecisionHash ||
     !loaded.executionPolicyEvaluatedAt ||
-    executionPolicy.decisionId !== loaded.executionPolicyDecisionId ||
-    executionPolicy.intentId !== loaded.intentId ||
-    executionPolicy.requestHash !== loaded.requestHash ||
-    executionPolicy.actionDigest !== loaded.actionDigest ||
-    executionPolicy.policyRevisionHash !== loaded.executionPolicyRevisionHash ||
-    sha256HexPrefixed(jcsStringify(executionPolicy)) !== loaded.executionPolicyDecisionHash
+    !verifyProviderExecutionPolicyEvidence(executionPolicy, loaded.executionPolicyDecisionHash, {
+      decisionId: loaded.executionPolicyDecisionId,
+      intentId: loaded.intentId,
+      requestHash: loaded.requestHash,
+      actionDigest: loaded.actionDigest,
+      operationId: loaded.operationId,
+      policyRevisionHash: loaded.executionPolicyRevisionHash,
+    })
   ) {
     return deny("EXEC_AUTH_POLICY_EVIDENCE_MISSING", 409, intentId, {
       executionId: loaded.executionId,
