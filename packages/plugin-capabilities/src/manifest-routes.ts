@@ -15,9 +15,9 @@
  *          scoped token; broker mode returns a delegation descriptor. Renewal is
  *          the same fully-checked path (revocation lands at the next renewal).
  *
- * There is deliberately NO agent-facing revoke route: revocation is an OPERATOR
- * act (disable capability / revoke grant via the existing CRUD), effective at the
- * agent's next renewal. The short TTL bounds the window (<5min, Pillar-A green).
+ * Capability/grant revocation remains an OPERATOR act through the existing CRUD.
+ * An agent may only revoke an upstream credential lease issued to its own
+ * manifest identity; it cannot alter the underlying grant authority.
  */
 
 import type { ApiResponse, AppVariables } from "@stwd/shared";

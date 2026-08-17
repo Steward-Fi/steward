@@ -328,6 +328,62 @@ describe("AgentClient — clock-skew tolerance", () => {
   });
 });
 
+describe("AgentClient — bounded credential transport", () => {
+  test("rejects public plaintext and credential-bearing base URLs", async () => {
+    const kp = await generateMockKeyPair();
+    const keypair = await AgentKeypair.fromPkcs8Base64(kp.pkcs8Base64);
+    expect(
+      () =>
+        new AgentClient({
+          baseUrl: "http://steward.example.test",
+          agentId: AGENT_ID,
+          keypair,
+        }),
+    ).toThrow("must use HTTPS");
+    expect(
+      () =>
+        new AgentClient({
+          baseUrl: "https://user:secret@steward.example.test",
+          agentId: AGENT_ID,
+          keypair,
+        }),
+    ).toThrow("must not embed credentials");
+  });
+
+  test("disables redirects and aborts a stalled authenticated request", async () => {
+    const { client } = await setup();
+    await client.enroll();
+    let redirect: RequestRedirect | undefined;
+    let signal: AbortSignal | undefined;
+    (client as unknown as { requestTimeoutMs: number }).requestTimeoutMs = 10;
+    (client as unknown as { fetchImpl: typeof fetch }).fetchImpl = async (_url, init) => {
+      redirect = init?.redirect;
+      signal = init?.signal as AbortSignal;
+      return new Promise(() => {});
+    };
+
+    await expect(client.manifest()).rejects.toMatchObject({
+      message: "network request timed out",
+      status: 0,
+    });
+    expect(redirect).toBe("error");
+    expect(signal?.aborted).toBe(true);
+  });
+
+  test("rejects oversized authenticated responses before parsing", async () => {
+    const { client } = await setup();
+    await client.enroll();
+    (client as unknown as { fetchImpl: typeof fetch }).fetchImpl = async () =>
+      new Response("{}", {
+        status: 200,
+        headers: { "content-length": String(1024 * 1024 + 1) },
+      });
+    await expect(client.manifest()).rejects.toMatchObject({
+      message: "response exceeded maximum size",
+    });
+  });
+});
+
 describe("AgentKeypair — key never leaks", () => {
   test("toString / toJSON / inspect are redacted", async () => {
     const kp = await generateMockKeyPair();

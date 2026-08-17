@@ -169,6 +169,8 @@ export interface AgentClientConfig {
   now?: () => number;
   /** injectable fetch (tests / custom transport). */
   fetchImpl?: typeof fetch;
+  /** Per-header and per-body transport deadline in ms. Default 10000. */
+  requestTimeoutMs?: number;
   /**
    * Tolerance (seconds) applied when reading a token's `exp` claim, to absorb
    * modest client/server clock skew when scheduling renewal. Default 30s.
@@ -211,6 +213,7 @@ export class AgentClient {
   private readonly now: () => number;
   private readonly fetchImpl: typeof fetch;
   private readonly clockSkewToleranceMs: number;
+  private readonly requestTimeoutMs: number;
 
   private token: string | null = null;
   private tenantId: string | null = null;
@@ -238,6 +241,14 @@ export class AgentClient {
     this.now = config.now ?? (() => Date.now());
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.clockSkewToleranceMs = (config.clockSkewToleranceSeconds ?? 30) * 1000;
+    this.requestTimeoutMs = config.requestTimeoutMs ?? 10_000;
+    if (
+      !Number.isSafeInteger(this.requestTimeoutMs) ||
+      this.requestTimeoutMs < 10 ||
+      this.requestTimeoutMs > 60_000
+    ) {
+      throw new Error("requestTimeoutMs must be an integer from 10 to 60000");
+    }
   }
 
   // ── observability ───────────────────────────────────────────────────────────
@@ -512,7 +523,7 @@ export class AgentClient {
     if (!this.isEnrolled() || !this.token) {
       throw new NotEnrolledError();
     }
-    const res = await this.fetchImpl(
+    const res = await this.request(
       `${this.baseUrl}/capabilities/${encodeURIComponent(name)}/invoke`,
       {
         method: "POST",
@@ -523,9 +534,7 @@ export class AgentClient {
         },
         body: JSON.stringify(payload ?? {}),
       },
-    ).catch((e: unknown) => {
-      throw new AgentClientError(e instanceof Error ? e.message : "network error", 0);
-    });
+    );
 
     // 202 approval-pending: A1 returns { ok:true, data:{ approvalId, status:"pending" } }.
     if (res.status === 202) {
@@ -561,12 +570,10 @@ export class AgentClient {
 
   // ── transport ─────────────────────────────────────────────────────────────────
   private async postPublic<T>(path: string, body: unknown): Promise<T> {
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+    const res = await this.request(`${this.baseUrl}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify(body),
-    }).catch((e: unknown) => {
-      throw new AgentClientError(e instanceof Error ? e.message : "network error", 0);
     });
     return this.unwrap<T>(res);
   }
@@ -589,7 +596,7 @@ export class AgentClient {
     extraHeaders?: Record<string, string>,
   ): Promise<T> {
     if (!this.isEnrolled() || !this.token) throw new NotEnrolledError();
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+    const res = await this.request(`${this.baseUrl}${path}`, {
       method,
       headers: {
         "Content-Type": "application/json",
@@ -598,8 +605,6 @@ export class AgentClient {
         ...extraHeaders,
       },
       body: method === "POST" ? JSON.stringify(body ?? {}) : undefined,
-    }).catch((e: unknown) => {
-      throw new AgentClientError(e instanceof Error ? e.message : "network error", 0);
     });
     if (res.status === 401) {
       this.failClosed("authed request rejected with 401 (token revoked or expired)");
@@ -619,13 +624,83 @@ export class AgentClient {
   }
 
   private async safeJson(res: Response): Promise<Record<string, unknown> | null> {
-    const text = await res.text().catch(() => "");
+    const maxBytes = 1024 * 1024;
+    const declared = res.headers.get("content-length");
+    if (declared !== null) {
+      const length = Number(declared);
+      if (!Number.isSafeInteger(length) || length < 0 || length > maxBytes) {
+        void res.body?.cancel().catch(() => undefined);
+        throw new AgentClientError("response exceeded maximum size", res.status);
+      }
+    }
+    if (!res.body) return null;
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new AgentClientError("response body timed out", 0));
+        void Promise.resolve(reader.cancel()).catch(() => undefined);
+      }, this.requestTimeoutMs);
+    });
+    try {
+      while (true) {
+        const { done, value } = await Promise.race([reader.read(), deadline]);
+        if (done) break;
+        total += value.byteLength;
+        if (total > maxBytes) {
+          void Promise.resolve(reader.cancel()).catch(() => undefined);
+          throw new AgentClientError("response exceeded maximum size", res.status);
+        }
+        chunks.push(value);
+      }
+    } catch (error) {
+      if (error instanceof AgentClientError) throw error;
+      throw new AgentClientError("response body could not be read", 0);
+    } finally {
+      if (timer) clearTimeout(timer);
+      try {
+        reader.releaseLock();
+      } catch {
+        // Cancellation must not replace the fixed transport error.
+      }
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const text = new TextDecoder().decode(bytes);
     if (!text) return null;
     try {
       const parsed = JSON.parse(text);
       return isRecord(parsed) ? parsed : { data: parsed };
     } catch {
       return null;
+    }
+  }
+
+  private async request(url: string, init: RequestInit): Promise<Response> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new AgentClientError("network request timed out", 0));
+        controller.abort();
+      }, this.requestTimeoutMs);
+    });
+    try {
+      return await Promise.race([
+        this.fetchImpl(url, { ...init, redirect: "error", signal: controller.signal }),
+        deadline,
+      ]);
+    } catch (error) {
+      if (error instanceof AgentClientError) throw error;
+      throw new AgentClientError("network request failed", 0);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 }
