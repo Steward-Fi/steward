@@ -790,16 +790,47 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
       origin: "https://api.customer.example",
       normalizedPath: "/v1/items",
       orderedQueryPairs: [["mode", "safe"]],
-      selectedHeaders: [["accept", "application/json"]],
+      selectedHeaders: [
+        ["accept", "application/json"],
+        ["content-type", "application/json"],
+      ],
       canonicalBody: { name: "widget" },
     };
     await getDb()
       .update(secretRoutes)
       .set({ hostPattern: "api.customer.example", pathPattern: "/v1/items", method: "POST" })
       .where(eq(secretRoutes.id, IDS.route));
+    await getDb()
+      .update(providerOperations)
+      .set({
+        requestProfile: {
+          profile: "generic-http.provider-action.v1",
+          operationDescriptor: {
+            profile: "generic-http.provider-action.v1",
+            origin: "https://api.customer.example",
+            methods: ["POST"],
+            pathTemplate: [{ literal: "v1" }, { literal: "items" }],
+            query: [{ name: "mode", type: "string", pattern: "^safe$" }],
+            headers: [{ name: "accept", value: "application/json" }],
+            body: {
+              contentType: "application/json",
+              fields: [{ name: "name", type: "string", pattern: "^.{1,64}$", maxBytes: 64 }],
+            },
+            projection: { policyArgs: [], safeSummary: ["name"] },
+          },
+        },
+      })
+      .where(eq(providerOperations.id, IDS.operation));
+    // The fixture authors the descriptor before minting and verifies the exact
+    // operation revision that the binding will carry.
     await getDb().execute(
       sql`UPDATE secret_routes SET authority_revision = 1 WHERE id = ${IDS.route}`,
     );
+    const [configuredOperation] = await getDb()
+      .select({ revision: providerOperations.revision })
+      .from(providerOperations)
+      .where(eq(providerOperations.id, IDS.operation));
+    expect(configuredOperation.revision).toBe(1);
     const saved = process.env.STEWARD_PROXY_ALLOWED_HOSTS;
     delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
     try {
@@ -828,6 +859,83 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
       if (saved === undefined) delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
       else process.env.STEWARD_PROXY_ALLOWED_HOSTS = saved;
     }
+  });
+
+  it("denies a credential carrier in persisted canonical bytes before claim or forward", async () => {
+    const poisoned = {
+      ...ACTION,
+      selectedHeaders: [["authorization", "registered-malicious-canary"]] as Array<
+        [string, string]
+      >,
+    };
+    const { intentId, authorizationId } = await seedExecutionReady({ action: poisoned });
+    const result = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(result).toMatchObject({
+      ok: false,
+      code: "EXEC_AUTH_STALE_DEPENDENCY",
+      httpStatus: 409,
+    });
+    const [nonce] = await getDb()
+      .select({ status: executionAuthorizationNonces.status })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(nonce.status).toBe("active");
+    expect(captured).toBeNull();
+  });
+
+  it("denies an action-controlled origin before claim or forward", async () => {
+    const poisoned = { ...ACTION, origin: "https://attacker.example" };
+    const { intentId, authorizationId } = await seedExecutionReady({ action: poisoned });
+    const result = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(result).toMatchObject({
+      ok: false,
+      code: "EXEC_AUTH_STALE_DEPENDENCY",
+      httpStatus: 409,
+    });
+    const [nonce] = await getDb()
+      .select({ status: executionAuthorizationNonces.status })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(nonce.status).toBe("active");
+    expect(captured).toBeNull();
+  });
+
+  it("derives a generic origin from the bound operation descriptor, not action bytes", async () => {
+    await getDb()
+      .update(providerOperations)
+      .set({
+        requestProfile: {
+          profile: "generic-http.provider-action.v1",
+          operationDescriptor: {
+            profile: "generic-http.provider-action.v1",
+            origin: "https://api.customer.example",
+            methods: ["GET"],
+            pathTemplate: [{ literal: "v1" }, { literal: "items" }],
+            projection: { policyArgs: [], safeSummary: [] },
+          },
+        },
+      })
+      .where(eq(providerOperations.id, IDS.operation));
+    const poisonedAction: GenericHttpCanonicalActionV1 = {
+      profile: "generic-http.provider-action.v1",
+      method: "GET",
+      origin: "https://attacker.example",
+      normalizedPath: "/v1/items",
+      orderedQueryPairs: [],
+      selectedHeaders: [],
+      canonicalBody: null,
+    };
+    const poisoned = await seedExecutionReady({ action: poisonedAction });
+    expect(await dispatchGovernedExecution(poisoned.intentId, IDS.tenant)).toMatchObject({
+      ok: false,
+      code: "EXEC_AUTH_STALE_DEPENDENCY",
+    });
+    const [nonce] = await getDb()
+      .select({ status: executionAuthorizationNonces.status })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, poisoned.authorizationId));
+    expect(nonce.status).toBe("active");
+    expect(captured).toBeNull();
   });
 
   it("K01/P43: two concurrent claims → exactly one consumes, one dispatch", async () => {

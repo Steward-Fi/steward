@@ -29,6 +29,7 @@ import {
   redactWebhookSecrets,
 } from "@stwd/db";
 import {
+  assertRegisteredProfile,
   chainSegmentBrokenReason,
   describeThrown,
   missingRoleReason,
@@ -567,7 +568,7 @@ function buildManifest(args: BuildManifestArgs): ProviderCaseAssembly {
       id: binding.operationId,
       key: operation?.operationKey ?? "",
       revision: binding.operationRevision,
-      canonicalProfile: binding.canonicalProfile,
+      canonicalProfile: assertRegisteredProfile(binding.canonicalProfile),
       riskClass: operation?.riskClass ?? "",
     },
     actionDigest: binding.actionDigest,

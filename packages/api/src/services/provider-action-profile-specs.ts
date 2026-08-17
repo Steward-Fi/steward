@@ -24,23 +24,34 @@ import {
 
 export type AdapterFixedActionBuild = GithubActionBuild | XActionBuild;
 
+function fixedProfileOrigins(profile: string): readonly string[] {
+  const descriptor = getProfileDescriptor(profile);
+  if (!descriptor || descriptor.kind !== "adapter-fixed") {
+    throw new Error(`adapter-fixed profile metadata missing for '${profile}'`);
+  }
+  return descriptor.allowedOrigins;
+}
+
 export type ProductionProviderProfileSpec =
   | {
       readonly profile: typeof GITHUB_PROVIDER_ACTION_PROFILE;
       readonly kind: "adapter-fixed";
       readonly operationKeys: readonly GithubOperationKey[];
+      readonly allowedOrigins: readonly string[];
       build(operationKey: GithubOperationKey, args: unknown): GithubActionBuild;
     }
   | {
       readonly profile: typeof X_PROVIDER_ACTION_PROFILE;
       readonly kind: "adapter-fixed";
       readonly operationKeys: readonly XOperationKey[];
+      readonly allowedOrigins: readonly string[];
       build(operationKey: XOperationKey, args: unknown): XActionBuild;
     }
   | {
       readonly profile: typeof GENERIC_HTTP_PROVIDER_ACTION_PROFILE;
       readonly kind: "config-driven";
       readonly operationKeys: readonly [];
+      allowedOrigins(descriptor: GenericHttpOperationDescriptorV1): readonly string[];
       build(
         operationKey: string,
         args: unknown,
@@ -53,6 +64,7 @@ const GITHUB_SPEC = Object.freeze({
   profile: GITHUB_PROVIDER_ACTION_PROFILE,
   kind: "adapter-fixed" as const,
   operationKeys: Object.freeze([...GITHUB_OPERATION_KEYS]),
+  allowedOrigins: fixedProfileOrigins(GITHUB_PROVIDER_ACTION_PROFILE),
   build: buildGithubAction,
 });
 
@@ -60,6 +72,7 @@ const X_SPEC = Object.freeze({
   profile: X_PROVIDER_ACTION_PROFILE,
   kind: "adapter-fixed" as const,
   operationKeys: Object.freeze([...X_OPERATION_KEYS]),
+  allowedOrigins: fixedProfileOrigins(X_PROVIDER_ACTION_PROFILE),
   build: buildXAction,
 });
 
@@ -67,6 +80,8 @@ const GENERIC_HTTP_SPEC = Object.freeze({
   profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
   kind: "config-driven" as const,
   operationKeys: Object.freeze([]) as readonly [],
+  allowedOrigins: (descriptor: GenericHttpOperationDescriptorV1) =>
+    Object.freeze([descriptor.origin]),
   build: (
     operationKey: string,
     args: unknown,
