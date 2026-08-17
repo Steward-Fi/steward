@@ -156,7 +156,8 @@ const HELP = `steward CLI
 Usage:
   steward init [--env .env] [--force] [--migrate]
   steward doctor [--strict] [--json]
-  steward tenant create --id ID --name NAME --api-key KEY
+  steward tenant create --id ID --name NAME [--api-key-file F] [--api-key-env VAR]
+                        (key via stdin/--api-key-file/--api-key-env preferred; --api-key warns)
   steward agent create --name NAME [--id ID]
   steward agent token --agent-id ID [--expires-in 24h] [--scopes agent,api:proxy]
   steward secret add --name NAME [--file F] [--description TEXT]   (value via stdin or --file preferred; --value warns)
@@ -210,7 +211,7 @@ function createContext(flags: Record<string, string | boolean>): CommandContext 
 
 async function tenantCommand(action: string | undefined, ctx: CommandContext) {
   if (action !== "create") throw new Error("Supported tenant command: tenant create");
-  const apiKey = required(stringFlag(ctx.flags, "api-key"), "api-key");
+  const apiKey = readTenantApiKey(ctx.flags);
   const body = {
     id: required(stringFlag(ctx.flags, "id"), "id"),
     name: required(stringFlag(ctx.flags, "name"), "name"),
@@ -270,6 +271,43 @@ export function readSecretValue(flags: Record<string, string | boolean>): string
   }
   throw new Error(
     "secret value required: pipe it on stdin, pass --file <path>, or (discouraged) --value",
+  );
+}
+
+/**
+ * Read the tenant API key for `tenant create`. Preferred sources are
+ * --api-key-file, --api-key-env, or stdin so the plaintext credential never
+ * lands in shell history or `ps` output. --api-key remains for backward
+ * compatibility but warns loudly (same treatment as readSecretValue above).
+ */
+export function readTenantApiKey(flags: Record<string, string | boolean>): string {
+  const file = stringFlag(flags, "api-key-file");
+  if (file) {
+    // Strip a single trailing newline (editors add one) but keep interior bytes.
+    return readFileSync(file, "utf8").replace(/\n$/, "");
+  }
+  const envVar = stringFlag(flags, "api-key-env");
+  if (envVar) {
+    const value = process.env[envVar];
+    if (value) return value;
+    throw new Error(`--api-key-env: environment variable '${envVar}' is unset or empty`);
+  }
+  const flagValue = stringFlag(flags, "api-key");
+  if (flagValue !== undefined) {
+    console.error(
+      "[steward] WARNING: --api-key places the credential in shell history and process listings. " +
+        "Prefer --api-key-file <path>, --api-key-env <VAR>, or stdin: " +
+        'printf %s "$KEY" | steward tenant create --id ID --name NAME',
+    );
+    return flagValue;
+  }
+  if (!process.stdin.isTTY) {
+    const data = readFileSync(0, "utf8").replace(/\n$/, "");
+    if (data) return data;
+  }
+  throw new Error(
+    "tenant API key required: pipe it on stdin, pass --api-key-file <path>, " +
+      "--api-key-env <VAR>, or (discouraged) --api-key",
   );
 }
 
