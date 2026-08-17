@@ -1296,6 +1296,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         funderAddress: string;
         walletAddress: string;
         signatureType: number;
+        clobUrl?: string;
       }
     | { ok: false; reason: "wallet-not-found" | "creds-not-provisioned" | "derive-failed" };
 
@@ -1304,8 +1305,31 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   // signer deterministically yields the same creds, so a cache miss safely
   // re-derives. TTL bounds exposure + tolerates a CLOB key rotation.
   const PM_CREDS_CACHE_TTL_SECONDS = 6 * 60 * 60; // 6h
-  function pmCredsCacheKey(tenantId: string, agentId: string, walletAddress: string): string {
-    return `pm:clob-l2:${tenantId}:${agentId}:${walletAddress.toLowerCase()}`;
+
+  // Optional endpoint override for deterministic integration environments and
+  // compatible CLOB gateways. It is deployment configuration, not a test-creds
+  // bypass: the real clob-client still performs L1 derivation, EIP-712 signing,
+  // L2 HMAC auth, and order serialization against the configured HTTP edge.
+  function configuredPolymarketClobUrl(): string | undefined {
+    const raw = process.env.POLYMARKET_CLOB_API_URL?.trim();
+    if (!raw) return undefined;
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new Error("POLYMARKET_CLOB_API_URL must use http or https");
+    }
+    return url.toString().replace(/\/$/, "");
+  }
+
+  function pmCredsCacheKey(
+    tenantId: string,
+    agentId: string,
+    walletAddress: string,
+    clobUrl?: string,
+  ): string {
+    // Credentials are scoped to the CLOB/gateway that issued them. Partitioning
+    // prevents an endpoint override from reusing a different gateway's cached key.
+    const endpoint = encodeURIComponent(clobUrl ?? "default");
+    return `pm:clob-l2:${tenantId}:${agentId}:${walletAddress.toLowerCase()}:${endpoint}`;
   }
 
   /**
@@ -1317,10 +1341,11 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     tenantId: string,
     agentId: string,
     walletAddress: string,
+    clobUrl?: string,
   ): Promise<void> {
     const redis = getRedisClient();
     if (!redis) return;
-    await redis.del(pmCredsCacheKey(tenantId, agentId, walletAddress)).catch(() => 0);
+    await redis.del(pmCredsCacheKey(tenantId, agentId, walletAddress, clobUrl)).catch(() => 0);
   }
 
   async function resolvePolymarketCreds(
@@ -1345,6 +1370,13 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     const funderAddress = funderMeta ?? walletAddress;
     const signatureType = funderMeta ? POLY_GNOSIS_SAFE_SIGNATURE_TYPE : POLY_EOA_SIGNATURE_TYPE;
 
+    let clobUrl: string | undefined;
+    try {
+      clobUrl = configuredPolymarketClobUrl();
+    } catch {
+      return { ok: false, reason: "derive-failed" };
+    }
+
     // 2) L2 CLOB apiCredentials. Test-only deterministic seam first (inert in prod).
     if (process.env.STEWARD_PM_TEST_CREDS === "1") {
       return {
@@ -1353,12 +1385,13 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         funderAddress,
         walletAddress,
         signatureType,
+        ...(clobUrl ? { clobUrl } : {}),
       };
     }
 
     // 2a) Redis cache.
     const redis = getRedisClient();
-    const cacheKey = pmCredsCacheKey(tenantId, agentId, walletAddress);
+    const cacheKey = pmCredsCacheKey(tenantId, agentId, walletAddress, clobUrl);
     if (redis) {
       try {
         const cached = await redis.get(cacheKey);
@@ -1371,6 +1404,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               funderAddress,
               walletAddress,
               signatureType,
+              ...(clobUrl ? { clobUrl } : {}),
             };
           }
         }
@@ -1383,7 +1417,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     let apiCredentials: PolymarketAccount["apiCredentials"];
     try {
       const signer = buildPolymarketVaultSigner(tenantId, agentId, walletAddress);
-      apiCredentials = await deriveApiCredentials(signer);
+      apiCredentials = await deriveApiCredentials(signer, clobUrl ? { clobUrl } : {});
     } catch {
       return { ok: false, reason: "derive-failed" };
     }
@@ -1393,7 +1427,14 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         .catch(() => undefined);
     }
 
-    return { ok: true, apiCredentials, funderAddress, walletAddress, signatureType };
+    return {
+      ok: true,
+      apiCredentials,
+      funderAddress,
+      walletAddress,
+      signatureType,
+      ...(clobUrl ? { clobUrl } : {}),
+    };
   }
 
   /**
@@ -1622,7 +1663,10 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       signer,
       signatureType: creds.signatureType,
     };
-    const adapter = new PolymarketExecutionAdapter(account, { builder: resolveBuilderConfig() });
+    const adapter = new PolymarketExecutionAdapter(account, {
+      builder: resolveBuilderConfig(),
+      ...(creds.clobUrl ? { clobUrl: creds.clobUrl } : {}),
+    });
 
     const orderRequest: PolymarketOrderRequest = {
       tokenId: body.tokenId,
@@ -1684,7 +1728,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           // A 401 here means the cached L2 creds were rotated/revoked CLOB-side.
           // Drop them so the NEXT order re-derives from L1 (self-healing).
           if (isPolymarketUnauthorized(err)) {
-            await invalidatePolymarketCredsCache(tenantId, agentId, creds.walletAddress);
+            await invalidatePolymarketCredsCache(
+              tenantId,
+              agentId,
+              creds.walletAddress,
+              creds.clobUrl,
+            );
           }
           await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
             sessionId: session.id,
@@ -1715,7 +1764,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           // cached L2 creds were rotated/revoked — drop them so the next order
           // re-derives from L1 (self-healing), regardless of attempted-vs-not.
           if (isPolymarketUnauthorized(err)) {
-            await invalidatePolymarketCredsCache(tenantId, agentId, creds.walletAddress);
+            await invalidatePolymarketCredsCache(
+              tenantId,
+              agentId,
+              creds.walletAddress,
+              creds.clobUrl,
+            );
           }
           // A not-attempted failure (CLOB client/builder construction threw before
           // any POST) means nothing reached the venue → RELEASE spend, return 400.
@@ -1778,7 +1832,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             isPolymarketUnauthorized(result) ||
             /\b401\b|unauthor|invalid api|invalid.*key|api key/i.test(result.errorMsg ?? "")
           ) {
-            await invalidatePolymarketCredsCache(tenantId, agentId, creds.walletAddress);
+            await invalidatePolymarketCredsCache(
+              tenantId,
+              agentId,
+              creds.walletAddress,
+              creds.clobUrl,
+            );
           }
           await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
             sessionId: session.id,

@@ -42,24 +42,17 @@ process.env.STEWARD_MASTER_PASSWORD = "auth-import-session-store-sources-master-
 process.env.STEWARD_SESSION_SECRET =
   "auth-import-session-store-sources-session-secret-with-enough-entropy";
 
-const { getAuthStoreSources, initAuthStores } = await import("../routes/auth");
+const { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } = await import(
+  "../routes/auth"
+);
 
 describe("auth import-session store source tracking", () => {
-  const originalAllowMemoryImportSessionStore =
-    process.env.STEWARD_ALLOW_MEMORY_IMPORT_SESSION_STORE;
-
   afterEach(() => {
     redisClient = null;
     redisSetMock.mockClear();
     redisGetMock.mockClear();
     redisGetdelMock.mockClear();
     redisDelMock.mockClear();
-
-    if (originalAllowMemoryImportSessionStore === undefined) {
-      delete process.env.STEWARD_ALLOW_MEMORY_IMPORT_SESSION_STORE;
-    } else {
-      process.env.STEWARD_ALLOW_MEMORY_IMPORT_SESSION_STORE = originalAllowMemoryImportSessionStore;
-    }
   });
 
   it("defaults import-session store source to memory before startup initialization", () => {
@@ -100,6 +93,77 @@ describe("auth import-session store source tracking", () => {
   });
 });
 
+describe("production auth-store startup gate", () => {
+  const originalNodeEnv = process.env.NODE_ENV;
+  const originalRuntime = process.env.STEWARD_RUNTIME;
+  const originalAcknowledgement = process.env.STEWARD_ALLOW_MEMORY_AUTH_STORES;
+
+  afterEach(() => {
+    if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = originalNodeEnv;
+    if (originalRuntime === undefined) delete process.env.STEWARD_RUNTIME;
+    else process.env.STEWARD_RUNTIME = originalRuntime;
+    if (originalAcknowledgement === undefined) delete process.env.STEWARD_ALLOW_MEMORY_AUTH_STORES;
+    else process.env.STEWARD_ALLOW_MEMORY_AUTH_STORES = originalAcknowledgement;
+  });
+
+  it("fails closed when any production auth store is process-local", () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.STEWARD_ALLOW_MEMORY_AUTH_STORES;
+
+    expect(() =>
+      assertAuthStoresAreSafe({
+        challenge: "postgres",
+        token: "postgres",
+        siweNonce: "memory",
+        mfa: "postgres",
+        importSession: "postgres",
+      }),
+    ).toThrow("memory-backed stores: siweNonce");
+  });
+
+  it("requires durable stores on Workers even when NODE_ENV is unset", () => {
+    delete process.env.NODE_ENV;
+    process.env.STEWARD_RUNTIME = "workers";
+    delete process.env.STEWARD_ALLOW_MEMORY_AUTH_STORES;
+
+    expect(() =>
+      assertAuthStoresAreSafe({
+        challenge: "memory",
+        token: "memory",
+        siweNonce: "memory",
+        mfa: "memory",
+        importSession: "memory",
+      }),
+    ).toThrow("Durable auth storage is required");
+  });
+
+  it("accepts all-durable stores and an explicit single-instance acknowledgement", () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.STEWARD_ALLOW_MEMORY_AUTH_STORES;
+    expect(() =>
+      assertAuthStoresAreSafe({
+        challenge: "redis",
+        token: "redis",
+        siweNonce: "redis",
+        mfa: "redis",
+        importSession: "redis",
+      }),
+    ).not.toThrow();
+
+    process.env.STEWARD_ALLOW_MEMORY_AUTH_STORES = "true";
+    expect(() =>
+      assertAuthStoresAreSafe({
+        challenge: "memory",
+        token: "memory",
+        siweNonce: "memory",
+        mfa: "memory",
+        importSession: "memory",
+      }),
+    ).not.toThrow();
+  });
+});
+
 describe("readiness import-session memory gate", () => {
   it("keeps this readiness coverage source-only so importing the test does not start the server", () => {
     expect(testSource).toContain('readFileSync(join(apiRoot, "index.ts"), "utf8")');
@@ -107,7 +171,7 @@ describe("readiness import-session memory gate", () => {
     expect(testSource).not.toContain(`${"from"} "../index"`);
   });
 
-  it("keeps /ready wired to fail production memory import-session storage unless explicitly allowed", () => {
+  it("keeps /ready wired to fail production memory auth storage unless explicitly allowed", () => {
     // Importing src/index.ts starts migrations, schedulers, and Bun.serve at module load,
     // so keep this as a focused wiring check around the readiness boundary.
     const readyRouteStart = indexSource.indexOf('app.get("/ready"');
@@ -119,12 +183,10 @@ describe("readiness import-session memory gate", () => {
     );
 
     expect(readyRoute).toContain("getAuthStoreSources()");
-    expect(readyRoute).toContain("checks.importSessionStore");
-    expect(readyRoute).toContain("STEWARD_ALLOW_MEMORY_IMPORT_SESSION_STORE");
+    expect(readyRoute).toContain("checks.authStores");
+    expect(readyRoute).toContain("STEWARD_ALLOW_MEMORY_AUTH_STORES");
     expect(readyRoute).toContain('process.env.NODE_ENV !== "production"');
-    expect(readyRoute).toContain('storeSources.importSession !== "memory"');
-    expect(readyRoute).toContain(
-      "Encrypted import sessions are using memory storage in production",
-    );
+    expect(readyRoute).toContain('source === "memory"');
+    expect(readyRoute).toContain("Production auth stores using memory");
   });
 });

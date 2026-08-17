@@ -112,6 +112,8 @@ export interface ContractAllowlistConfig {
         spenderBlocklist?: string[];
         fromAllowlist?: string[];
         fromBlocklist?: string[];
+        /** Maximum native chain value, in decimal wei, permitted with this selector. */
+        maxNativeValueWei?: string;
         maxAmount?: string;
       }
     >;

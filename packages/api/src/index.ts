@@ -18,7 +18,7 @@ import { shouldUsePGLite } from "@stwd/db/pglite";
 import { sql } from "drizzle-orm";
 import { composeApp } from "./compose";
 import { initRedis, shutdownRedis } from "./middleware/redis";
-import { getAuthStoreSources, initAuthStores } from "./routes/auth";
+import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
 import {
   API_VERSION,
   type ApiResponse,
@@ -125,14 +125,19 @@ app.get("/ready", async (c) => {
   }
 
   const storeSources = getAuthStoreSources();
-  const importSessionMemoryAllowed =
-    process.env.STEWARD_ALLOW_MEMORY_IMPORT_SESSION_STORE === "true" ||
+  const memoryAuthStores = Object.entries(storeSources)
+    .filter(([, source]) => source === "memory")
+    .map(([name]) => name);
+  const memoryAuthStoresAllowed =
+    process.env.STEWARD_ALLOW_MEMORY_AUTH_STORES === "true" ||
     process.env.NODE_ENV !== "production";
-  checks.importSessionStore = {
-    ok: storeSources.importSession !== "memory" || importSessionMemoryAllowed,
-    source: storeSources.importSession,
-    ...(storeSources.importSession === "memory" && !importSessionMemoryAllowed
-      ? { error: "Encrypted import sessions are using memory storage in production" }
+  checks.authStores = {
+    ok: memoryAuthStores.length === 0 || memoryAuthStoresAllowed,
+    source: Object.entries(storeSources)
+      .map(([name, source]) => `${name}:${source}`)
+      .join(","),
+    ...(memoryAuthStores.length > 0 && !memoryAuthStoresAllowed
+      ? { error: `Production auth stores using memory: ${memoryAuthStores.join(", ")}` }
       : {}),
   };
 
@@ -199,6 +204,21 @@ if (shouldUsePGLite()) {
   }
 }
 
+// ─── Redis + auth stores (blocking — must complete before serving traffic) ──
+
+let redisOk = false;
+try {
+  redisOk = await initRedis();
+} catch (err) {
+  console.warn("[steward] Redis initialization failed; trying Postgres auth storage:", err);
+}
+
+// Postgres is the durable fallback for the long-lived server when Redis is not
+// available. buildBackend probes every namespace; the assertion below turns
+// any production fallback to process-local memory into a startup failure.
+await initAuthStores(migrationsRan && !redisOk);
+assertAuthStoresAreSafe();
+
 // ─── Data retention scheduler (SOC2 CC2) ────────────────────────────────────
 
 if (migrationsRan) {
@@ -211,26 +231,6 @@ if (migrationsRan) {
 // initialize throws here, so production never falls back to local AES.
 getConfiguredVault();
 console.log(configuredVaultStartupLogLine());
-
-// ─── Redis + auth store initialization (non-blocking) ───────────────────────
-
-initRedis()
-  .then((redisOk) => {
-    // usePostgres=true when migrations have run, so auth_kv_store table exists.
-    const usePostgres = migrationsRan && !redisOk;
-    return initAuthStores(usePostgres).then(() => {
-      const { importSession } = getAuthStoreSources();
-      if (importSession === "memory") {
-        console.warn(
-          "[steward] encrypted import sessions are using memory storage; one-time import sessions will not survive restarts or multi-instance routing",
-        );
-      }
-    });
-  })
-  .catch((err) => {
-    console.warn("[steward] Redis/auth store initialization failed, using in-memory stores:", err);
-    initAuthStores(false).catch(() => {});
-  });
 
 // ─── Server ───────────────────────────────────────────────────────────────────
 

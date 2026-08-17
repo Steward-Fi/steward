@@ -186,7 +186,8 @@ Steward backup.
 | `CHAIN_ID` | Default EVM chain id | `84532` in auth/platform context, `8453` in some vault routes; Compose sets `8453` | Must parse as an integer. Prefer setting explicitly. |
 | `STEWARD_PLUGINS` | Comma-separated optional API plugins | none | Add `wxmr` to enable the Monero-on-Solana bridge provider, for example `wxmr` or `trading,wxmr`. Unknown names fail startup. |
 | `WXMR_SOLANA_RPC_URL` | Solana mainnet RPC used to verify the wxmr bridge's global and connected-wallet withdrawal fees | `SOLANA_RPC_URL`, then Solana's public mainnet endpoint | Optional; use a reliable operator-controlled HTTPS RPC in production. Plain HTTP is accepted only on loopback. Only used when the `wxmr` plugin is enabled. |
-| `REDIS_URL` | Redis for rate limiting, token/challenge stores, proxy spend tracking/cache | none | Optional, but recommended for production. Without it some stores are in-memory or Postgres-backed depending on startup state. |
+| `REDIS_URL` | Redis for rate limiting, token/challenge stores, proxy spend tracking/cache | none | Optional when Postgres is available; production fails startup if auth stores cannot initialize on Redis or Postgres. |
+| `STEWARD_ALLOW_MEMORY_AUTH_STORES` | Explicit single-instance acknowledgement for restart-unsafe auth state | none | Never recommended for multi-instance production. Exact `true` is required before production/Workers may use memory-backed challenge, token, nonce, MFA, or import-session state. |
 | `RESEND_API_KEY` | Email magic-link delivery | none | If absent, email auth logs/dev-returns tokens instead of sending mail. |
 | `EMAIL_FROM` | Magic-link sender | `login@localhost` in `.env.example`/Compose; code fallback is `login@steward.fi` | Must be accepted by your mail provider when email delivery is enabled. |
 | `APP_URL` | Public base URL for auth links/callbacks | `http://localhost:3200` in `.env.example`/Compose; production OAuth requires an explicit public value | Set to your app/API-facing URL for magic links. |
@@ -209,15 +210,15 @@ Steward backup.
 | `SKIP_MIGRATIONS` | Disable API startup migrations | false | Set `true` or `1` only when another process applies migrations. |
 | `STEWARD_MONERO_WALLET_RPC_URL` | monero-wallet-rpc sidecar endpoint | none | Empty disables Monero: every Monero endpoint fails closed with 503. In Compose use `http://monero-wallet-rpc:18083/json_rpc`. |
 | `MONERO_WALLET_RPC_PASSWORD` | Password for the sidecar's `--rpc-login` (username `steward`) | none | Required when the `monero` Compose profile is enabled; Compose mounts it into the sidecar as a secret and derives `STEWARD_MONERO_WALLET_RPC_LOGIN` from it. |
-| `STEWARD_MONERO_DAEMON_URL` | Remote Monero daemon used for chain height at wallet creation | `http://node.sethforprivacy.com:18089` | Restricted public RPC is sufficient; keys never reach the daemon. Stagenet: `:38089`. |
-| `MONERO_DAEMON_ADDRESS` | Daemon `host:port` the sidecar syncs wallets against | `node.sethforprivacy.com:18089` | Keep consistent with `STEWARD_MONERO_DAEMON_URL`. A public node operator can correlate your IP with wallet activity — run your own daemon or Tor if that matters. |
+| `STEWARD_MONERO_DAEMON_URL` | Explicit Monero daemon URL used for chain height at wallet creation | — (required when Monero is enabled) | Use HTTPS for remote daemons. Prefer a daemon you operate; a third-party node can correlate your IP with wallet activity. |
+| `MONERO_DAEMON_ADDRESS` | Explicit daemon `host:port` the sidecar syncs wallets against | — (required when Monero is enabled) | Keep consistent with `STEWARD_MONERO_DAEMON_URL`. Prefer a daemon you operate or an appropriately protected private-network endpoint. |
 | `STEWARD_MONERO_NETWORK` | Monero network of the sidecar | `mainnet` | `mainnet` or `stagenet`; must match the sidecar's flags (add `--stagenet` there for stagenet). |
 | `STEWARD_MAX_MONERO_FEE_PICONERO` | Fee ceiling for Monero transfers | `100000000000` (0.1 XMR) | Transfers whose network fee exceeds this are rejected before relay. |
 
 ### Monero support (optional)
 
 Monero runs as an opt-in Compose profile: the official `monero-wallet-rpc`
-(wallet2) container connects to a remote public daemon with
+(wallet2) container connects to an explicitly configured daemon with
 `--untrusted-daemon`, so there is no local `monerod` and no blockchain
 storage. The vault generates keys in-process, stores them AAD-encrypted in
 Postgres (canonical), and rehydrates sidecar wallet files on demand — new
@@ -226,8 +227,10 @@ stays incremental. USD-denominated policy rules fail closed for Monero (no
 XMR price source); use piconero-denominated limits. Enable with:
 
 ```bash
-# .env: set MONERO_WALLET_RPC_PASSWORD and
-#        STEWARD_MONERO_WALLET_RPC_URL=http://monero-wallet-rpc:18083/json_rpc
+# .env: set MONERO_WALLET_RPC_PASSWORD,
+#        STEWARD_MONERO_WALLET_RPC_URL=http://monero-wallet-rpc:18083/json_rpc,
+#        MONERO_DAEMON_ADDRESS=<trusted-tls-daemon-host>:18089, and
+#        STEWARD_MONERO_DAEMON_URL=https://<trusted-tls-daemon-host>:18089
 COMPOSE_PROFILES=monero docker compose up -d
 ```
 

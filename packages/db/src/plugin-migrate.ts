@@ -110,7 +110,6 @@ export interface RunPluginMigrationsOptions {
    * a drizzle migrator-compatible db handle. defaults to a fresh postgres-js
    * `createDb().db`. injected by tests to run against a PGLite/other harness.
    */
-  // biome-ignore lint/suspicious/noExplicitAny: drizzle's `migrate` is typed per
   // driver (postgres-js/pglite/neon); we accept any drizzle db whose driver's
   // `migrate` shares the MigrationConfig contract. the runner stays driver-neutral.
   db?: any;
@@ -119,7 +118,6 @@ export interface RunPluginMigrationsOptions {
    * the client paired with the default `db`. only consulted when
    * `useAdvisoryLock` is true.
    */
-  // biome-ignore lint/suspicious/noExplicitAny: postgres-js client tagged-template
   // surface; injected harnesses (PGLite) don't take the advisory-lock path.
   client?: any;
   /**
@@ -133,7 +131,6 @@ export interface RunPluginMigrationsOptions {
    * migrator. injected by tests so a PGLite db uses the pglite migrator (both
    * share the `MigrationConfig` shape, so the call site is identical).
    */
-  // biome-ignore lint/suspicious/noExplicitAny: per-driver migrator function; all
   // drivers' `migrate` share the (db, MigrationConfig) signature.
   migrateFn?: (
     db: any,

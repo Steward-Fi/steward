@@ -107,6 +107,89 @@ describe("Contract Allowlist Policy", () => {
     expect(result.passed).toBe(true);
   });
 
+  it("enforces selector-level native value caps", async () => {
+    const cappedSelector = "0x12345678";
+    const cappedRule = makeContractAllowlistRule({
+      contracts: [
+        {
+          address: contract,
+          selectors: [cappedSelector],
+          constraints: { [cappedSelector]: { maxNativeValueWei: "10" } },
+        },
+      ],
+    });
+    const result = await evaluatePolicy(
+      cappedRule,
+      makeContext({
+        request: {
+          ...makeContext().request,
+          to: contract,
+          value: "11",
+          data: `${cappedSelector}00`,
+        },
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("maxNativeValueWei");
+  });
+
+  it("looks up selector constraints case-insensitively", async () => {
+    const mixedCaseSelector = "0xAbCdEf12";
+    const cappedRule = makeContractAllowlistRule({
+      contracts: [
+        {
+          address: contract,
+          selectors: [mixedCaseSelector],
+          constraints: { [mixedCaseSelector]: { maxNativeValueWei: "10" } },
+        },
+      ],
+    });
+    const result = await evaluatePolicy(
+      cappedRule,
+      makeContext({
+        request: {
+          ...makeContext().request,
+          to: contract,
+          value: "10",
+          data: "0xabcdef1200",
+        },
+      }),
+    );
+
+    expect(result.passed).toBe(true);
+  });
+
+  it("prefers an exact lowercase selector constraint over an earlier folded duplicate", async () => {
+    const exactSelector = "0xabcdef12";
+    const cappedRule = makeContractAllowlistRule({
+      contracts: [
+        {
+          address: contract,
+          selectors: [exactSelector],
+          constraints: {
+            "0xAbCdEf12": { maxNativeValueWei: "10" },
+            [exactSelector]: { maxNativeValueWei: "1" },
+          },
+        },
+      ],
+    });
+    const result = await evaluatePolicy(
+      cappedRule,
+      makeContext({
+        request: {
+          ...makeContext().request,
+          to: contract,
+          value: "2",
+          data: `${exactSelector}00`,
+        },
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("exceeds selector maxNativeValueWei 1");
+  });
+
   it("fails when selector is not allowed for the contract", async () => {
     const result = await evaluatePolicy(
       rule,

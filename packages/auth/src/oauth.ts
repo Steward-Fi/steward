@@ -23,6 +23,60 @@
 import { createHash, randomBytes } from "node:crypto";
 import { APPLE_ISSUER, APPLE_JWKS_URI, verifyAppleIdToken } from "./apple";
 
+const OAUTH_PROVIDER_TIMEOUT_MS = 10_000;
+const MAX_OAUTH_PROVIDER_RESPONSE_BYTES = 1024 * 1024;
+
+async function discardProviderBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Cancellation errors are also provider-controlled stream failures. Never
+    // let them replace the sanitized operation/status error below.
+  }
+}
+
+async function readBoundedProviderJson(response: Response, operation: string): Promise<unknown> {
+  const declaredLength = response.headers.get("content-length");
+  if (declaredLength) {
+    const bytes = Number(declaredLength);
+    if (!Number.isFinite(bytes) || bytes < 0 || bytes > MAX_OAUTH_PROVIDER_RESPONSE_BYTES) {
+      await discardProviderBody(response);
+      throw new Error(`${operation} returned an oversized response`);
+    }
+  }
+
+  if (!response.body) throw new Error(`${operation} returned an empty response`);
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_OAUTH_PROVIDER_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw new Error(`${operation} returned an oversized response`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw new Error(`${operation} returned invalid JSON`);
+  }
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface OAuthProvider {
@@ -631,14 +685,30 @@ export class OAuthClient {
         Accept: "application/json",
       },
       body: body.toString(),
+      signal: AbortSignal.timeout(OAUTH_PROVIDER_TIMEOUT_MS),
     });
 
     if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Token exchange failed (${res.status}): ${text}`);
+      // Provider bodies are untrusted and can reflect codes, tokens, or verbose
+      // diagnostics. API callers surface this message, so retain only status.
+      await discardProviderBody(res);
+      throw new Error(`Token exchange failed (${res.status})`);
     }
 
-    const tokenResponse = (await res.json()) as OAuthTokenResponse;
+    const tokenResponse = (await readBoundedProviderJson(
+      res,
+      "Token exchange",
+    )) as OAuthTokenResponse;
+    if (
+      !tokenResponse ||
+      typeof tokenResponse !== "object" ||
+      typeof tokenResponse.access_token !== "string" ||
+      tokenResponse.access_token.trim().length === 0 ||
+      typeof tokenResponse.token_type !== "string" ||
+      tokenResponse.token_type.trim().length === 0
+    ) {
+      throw new Error("Token exchange returned an invalid token response");
+    }
 
     // For OIDC providers the identity is carried by the id_token, which has no
     // userinfo equivalent. Capture it here so getUserInfo() can verify it. Fail
@@ -690,14 +760,19 @@ export class OAuthClient {
         Authorization: `Bearer ${accessToken}`,
         Accept: "application/json",
       },
+      signal: AbortSignal.timeout(OAUTH_PROVIDER_TIMEOUT_MS),
     });
 
     if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`getUserInfo failed (${res.status}): ${text}`);
+      await discardProviderBody(res);
+      throw new Error(`getUserInfo failed (${res.status})`);
     }
 
-    const raw = (await res.json()) as Record<string, unknown>;
+    const parsed = await readBoundedProviderJson(res, "getUserInfo");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("getUserInfo returned an invalid response");
+    }
+    const raw = parsed as Record<string, unknown>;
 
     // Twitter v2 wraps user data in a `data` envelope
     const data: Record<string, unknown> =
@@ -782,14 +857,15 @@ export class OAuthClient {
         Authorization: `Bearer ${accessToken}`,
         Accept: "application/json",
       },
+      signal: AbortSignal.timeout(OAUTH_PROVIDER_TIMEOUT_MS),
     });
 
     if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`getPrimaryEmail failed (${res.status}): ${text}`);
+      await discardProviderBody(res);
+      throw new Error(`getPrimaryEmail failed (${res.status})`);
     }
 
-    const raw = await res.json();
+    const raw = await readBoundedProviderJson(res, "getPrimaryEmail");
     if (!Array.isArray(raw)) return null;
 
     const emails = raw.filter(

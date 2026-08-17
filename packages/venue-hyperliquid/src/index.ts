@@ -48,6 +48,11 @@ const withdrawPrimaryType = ["HyperliquidTransaction:", "With", "draw"].join("")
 const sendAssetPrimaryType = "HyperliquidTransaction:SendAsset";
 const usdSendPrimaryType = "HyperliquidTransaction:UsdSend";
 const approveBuilderFeePrimaryType = "HyperliquidTransaction:ApproveBuilderFee";
+// Keep approval aligned with the adapter's maximum configured builder fee
+// (100 tenths of a basis point = 10 bps = 0.1%). Approving an arbitrary string
+// or a much larger percentage would let a compromised builder configuration
+// charge materially more than Steward itself will stamp on an order.
+const MAX_APPROVED_BUILDER_FEE_PERCENT = 0.1;
 const DEFAULT_FETCH_TIMEOUT_MS = Number(process.env.HYPERLIQUID_FETCH_TIMEOUT_MS ?? 10_000);
 
 const BUILDER_PERP_ASSET_ID_OFFSET = 100_000;
@@ -843,11 +848,18 @@ function normalizeApproveBuilderFeeParams(params: ApproveBuilderFeeParams, nonce
   const builder = String(params.builder).toLowerCase();
   if (!/^0x[0-9a-f]{40}$/.test(builder))
     throw new Error(`invalid approveBuilderFee builder: ${params.builder}`);
+  const maxFeeRate = String(params.maxFeeRate).trim();
+  const match = /^(?:0|[1-9]\d*)(?:\.(\d{1,6}))?%$/.exec(maxFeeRate);
+  if (!match || Number(maxFeeRate.slice(0, -1)) > MAX_APPROVED_BUILDER_FEE_PERCENT) {
+    throw new Error(
+      `approveBuilderFee maxFeeRate must be a percentage between 0% and ${MAX_APPROVED_BUILDER_FEE_PERCENT}%`,
+    );
+  }
   return {
     type: "approveBuilderFee",
     hyperliquidChain: params.hyperliquidChain ?? "Mainnet",
     signatureChainId: WITHDRAW_SIGNATURE_CHAIN_ID,
-    maxFeeRate: String(params.maxFeeRate),
+    maxFeeRate,
     builder,
     nonce,
   };

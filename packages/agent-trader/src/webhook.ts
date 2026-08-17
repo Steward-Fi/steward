@@ -17,6 +17,12 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { verifyWebhookSignature } from "@stwd/sdk";
 import type { WebhookEvent } from "@stwd/shared";
 import { logError, logInfo, logWebhook } from "./logger.js";
+import {
+  MemoryWebhookDeliveryStore,
+  SINGLE_INSTANCE_REPLAY_ACK_ENV,
+  WEBHOOK_DELIVERY_REPLAY_TTL_MS,
+  type WebhookDeliveryStore,
+} from "./webhook-delivery-store.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -34,6 +40,7 @@ export interface WebhookServerOptions {
   expectedTenantId?: string;
   allowedAgentIds?: string[];
   maxBodyBytes?: number;
+  deliveryStore?: WebhookDeliveryStore;
 }
 
 // ─── Internal state ────────────────────────────────────────────────────────────
@@ -58,7 +65,6 @@ interface WebhookHeaders {
 }
 
 const DEFAULT_MAX_WEBHOOK_BODY_BYTES = 256 * 1024;
-
 /**
  * Whether unsigned webhooks are permitted. The escape hatch is for local dev
  * only and is hard-disabled in production: mirroring the proxy's
@@ -156,10 +162,21 @@ export function createWebhookServer(
       "Webhook secret is required. Set STEWARD_AGENT_TRADER_ALLOW_UNSIGNED_WEBHOOKS=true only for local development.",
     );
   }
+  if (
+    secret &&
+    process.env.NODE_ENV === "production" &&
+    !options.deliveryStore?.durable &&
+    process.env[SINGLE_INSTANCE_REPLAY_ACK_ENV] !== "true"
+  ) {
+    throw new Error(
+      `Durable webhook replay storage is required in production. Configure REDIS_URL/Upstash, or set ${SINGLE_INSTANCE_REPLAY_ACK_ENV}=true only for a guaranteed single-instance deployment.`,
+    );
+  }
   const handlers = buildHandlerMap();
   let stopFn: (() => Promise<void>) | null = null;
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_WEBHOOK_BODY_BYTES;
   const allowedAgentIds = new Set(options.allowedAgentIds ?? []);
+  const deliveryStore = options.deliveryStore ?? new MemoryWebhookDeliveryStore();
 
   const handleRequest = async (
     body: string,
@@ -195,11 +212,36 @@ export function createWebhookServer(
     if (!eventAgentId) {
       return { status: 400, message: "Invalid event payload" };
     }
+    const signedEventType = headers.get("x-steward-event");
+    if (secret && signedEventType !== event.type) {
+      return { status: 401, message: "Webhook event type mismatch" };
+    }
     if (options.expectedTenantId && event.tenantId !== options.expectedTenantId) {
       return { status: 403, message: "Webhook tenant mismatch" };
     }
     if (allowedAgentIds.size > 0 && !allowedAgentIds.has(eventAgentId)) {
       return { status: 403, message: "Webhook agent is not allowed" };
+    }
+
+    if (secret) {
+      const deliveryId = headers.get("x-steward-delivery-id");
+      if (!deliveryId) return { status: 401, message: "Webhook delivery id is required" };
+      // Length-prefix both attacker-influenced values: a delimiter-only scope
+      // would make (`a:b`, `c`) collide with (`a`, `b:c`) across tenants.
+      const deliveryScope = `${event.tenantId.length}:${event.tenantId}${deliveryId.length}:${deliveryId}`;
+      let claimed: boolean;
+      try {
+        claimed = await deliveryStore.claim(deliveryScope, WEBHOOK_DELIVERY_REPLAY_TTL_MS);
+      } catch (err) {
+        logError("Webhook replay store claim failed", err, { eventType: event.type });
+        return { status: 503, message: "Webhook replay protection unavailable" };
+      }
+      if (!claimed) {
+        // A sender may retry because the original 200 was lost. Acknowledge the
+        // duplicate as success while suppressing dispatch, otherwise well-behaved
+        // webhook senders can retry a safely consumed delivery forever.
+        return { status: 200, message: "Webhook delivery already processed" };
+      }
     }
 
     logWebhook({

@@ -23,10 +23,12 @@
 import type { AppVariables, StewardPlugin } from "@stwd/shared";
 import type { Hono } from "hono";
 import type { StewardAppContext } from "./context";
+import { createEvmSwapRoutes } from "./routes/evm-swap";
 import { createOperatorRecoveryRoutes } from "./routes/operator-recovery";
 import { createTradeRoutes } from "./routes/trade";
 
 export type { StewardAppContext } from "./context";
+export { createEvmSwapRoutes } from "./routes/evm-swap";
 export { createOperatorRecoveryRoutes } from "./routes/operator-recovery";
 export { createTradeRoutes } from "./routes/trade";
 
@@ -42,6 +44,11 @@ export type StewardApiPlugin = StewardPlugin<StewardApp, StewardAppContext>;
  * from `@stwd/api`'s app.ts so the trade-routing knowledge lives with the trade
  * plugin. Exported so the plugin's own middleware (and tests) can branch on it.
  */
+export const isAgentOrderPath = (path: string): boolean =>
+  path.endsWith("/trade/hyperliquid/order") ||
+  path.endsWith("/trade/polymarket/order") ||
+  path.endsWith("/trade/evm/swap/prepare");
+
 export const isOperatorRecoveryPath = (path: string): boolean =>
   path.endsWith("/close-all") ||
   path.endsWith("/withdraw") ||
@@ -98,24 +105,35 @@ export const tradingPlugin: StewardApiPlugin = {
     const { requireAgentJwt, operatorAuth, tenantAuth } = ctx;
 
     // ── trade-specific auth middleware (verbatim from app.ts ~lines 172-182) ──
-    app.use("/trade/hyperliquid/order", (c, next) => requireAgentJwt(c, next));
-    app.use("/v1/trade/hyperliquid/order", (c, next) => requireAgentJwt(c, next));
+    for (const path of [
+      "/trade/hyperliquid/order",
+      "/v1/trade/hyperliquid/order",
+      "/trade/polymarket/order",
+      "/v1/trade/polymarket/order",
+      "/trade/evm/swap/prepare",
+      "/v1/trade/evm/swap/prepare",
+    ]) {
+      app.use(path, (c, next) => requireAgentJwt(c, next));
+    }
     app.use("/trade", (c, next) => tenantAuth(c, next));
     app.use("/trade/*", (c, next) => {
-      if (c.req.path.endsWith("/trade/hyperliquid/order")) return next();
+      if (isAgentOrderPath(c.req.path)) return next();
       if (isOperatorRecoveryPath(c.req.path)) return operatorAuth(c, next);
       return tenantAuth(c, next);
     });
     app.use("/v1/trade", (c, next) => tenantAuth(c, next));
     app.use("/v1/trade/*", (c, next) => {
-      if (c.req.path.endsWith("/v1/trade/hyperliquid/order")) return next();
+      if (isAgentOrderPath(c.req.path)) return next();
       if (isOperatorRecoveryPath(c.req.path)) return operatorAuth(c, next);
       return tenantAuth(c, next);
     });
 
     // ── route mounts (verbatim order from app.ts) ─────────────────────────────
     const tradeRoutes = createTradeRoutes(ctx);
+    const evmSwapRoutes = createEvmSwapRoutes(ctx);
     const operatorRecoveryRoutes = createOperatorRecoveryRoutes(ctx);
+    app.route("/trade", evmSwapRoutes);
+    app.route("/v1/trade", evmSwapRoutes);
     app.route("/trade", tradeRoutes);
     app.route("/v1/trade", tradeRoutes);
     app.route("/trade", operatorRecoveryRoutes);

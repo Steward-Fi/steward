@@ -240,7 +240,7 @@ curl -fsS https://<host>/ready | jq .
 ```
 
 `/ready` returns `{ status: "ready", checks: { migrations, database, vault,
-importSessionStore } }` with HTTP 200 only when all checks pass. a 503 here means
+authStores } }` with HTTP 200 only when all checks pass. a 503 here means
 a required env var is missing (most commonly `STEWARD_MASTER_PASSWORD` or a bad
 `DATABASE_URL`) — fix env and redeploy.
 

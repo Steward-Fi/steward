@@ -107,6 +107,19 @@ export function isRejectedPostOrder(raw: RawPostOrderResult): boolean {
   return false;
 }
 
+function isAmbiguousPostError(raw: RawPostOrderResult): boolean {
+  // Some CLOB responses populate more than one status field and may leave the
+  // first one empty. Inspect every populated field so an ambiguous transport
+  // result cannot be misclassified as a definitive rejection.
+  const detail = [raw.error, raw.errorMsg, raw.status]
+    .filter((value): value is string | number => value !== undefined && value !== null)
+    .map((value) => String(value).toLowerCase())
+    .join(" ");
+  return /\bsocket\b|timeout|timed out|econn|network|bad gateway|status unknown|unconfirmed/.test(
+    detail,
+  );
+}
+
 // USDC + outcome-token base-unit scale (6 decimals). The CLOB can report the
 // post-order making/taking amounts either as human-readable units (what matchr
 // observed live and consumed directly) or as 6-decimal base-unit strings
@@ -366,6 +379,12 @@ export class PolymarketExecutionAdapter {
       signed,
       isMarketable ? OrderType.FOK : OrderType.GTC,
     )) as RawPostOrderResult;
+    if (isAmbiguousPostError(raw)) {
+      const detail = [raw.error, raw.errorMsg, raw.status].find(
+        (value) => value !== undefined && value !== null && String(value).trim() !== "",
+      );
+      throw new Error(detail === undefined ? "Polymarket post status unknown" : String(detail));
+    }
 
     const reqAmount = Number.parseFloat(String(req.amount));
     const reqPrice = Number.parseFloat(String(req.price));

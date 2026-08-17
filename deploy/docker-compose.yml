@@ -12,7 +12,7 @@ services:
   steward:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile
+      dockerfile: Dockerfile
     image: steward:latest
     container_name: steward
     restart: unless-stopped
@@ -55,7 +55,7 @@ services:
   steward-proxy:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile
+      dockerfile: Dockerfile
     image: steward:latest
     container_name: steward-proxy
     restart: unless-stopped
@@ -97,7 +97,7 @@ services:
   # Required by steward-proxy in production: with NODE_ENV=production and no
   # STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL=true, the proxy fails CLOSED without Redis.
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
     container_name: steward-redis
     restart: unless-stopped
     networks:
@@ -111,7 +111,7 @@ services:
 
   # ── PostgreSQL (managed) ─────────────────────────────────────────────────────
   steward-db:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     container_name: steward-db
     restart: unless-stopped
     networks:

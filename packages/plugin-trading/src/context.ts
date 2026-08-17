@@ -14,6 +14,7 @@
  * the plugin may freely depend on), never against `@stwd/api`.
  */
 
+import type { AdapterRegistry } from "@stwd/adapters";
 import type { getDb } from "@stwd/db";
 import type { PolicyEngine } from "@stwd/policy-engine";
 import type { IoredisLike } from "@stwd/redis";
@@ -45,6 +46,25 @@ export interface AgentTokenStatus {
   observedAt: number;
 }
 
+export interface EvmSimulationRequest {
+  chainId: number;
+  from: string;
+  to: string;
+  value: string;
+  data: string;
+  intentHash: string;
+}
+
+export interface EvmSimulationResult {
+  ok: boolean;
+  gasEstimate?: string;
+  revertReason?: string;
+}
+
+export interface EvmSimulator {
+  simulate(request: EvmSimulationRequest): Promise<EvmSimulationResult>;
+}
+
 /** a hono middleware over the steward app's per-request variables. */
 export type StewardMiddleware = (
   c: Context<{ Variables: AppVariables }>,
@@ -63,6 +83,8 @@ export interface StewardAppContext {
   vault: Vault;
   policyEngine: PolicyEngine;
   priceOracle: PriceOracle;
+  adapterRegistry: AdapterRegistry;
+  evmSimulator: EvmSimulator | null;
 
   // ── core helpers (from @stwd/api services/context) ────────────────────────
   ensureAgentForTenant(tenantId: string, agentId: string): Promise<AgentIdentity | undefined>;

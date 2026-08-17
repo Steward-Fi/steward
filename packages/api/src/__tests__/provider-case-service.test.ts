@@ -126,7 +126,6 @@ describe("PR5 provider-case service", () => {
     // The allowed-stub path has no execution nonce, so execution is null; assert
     // the manifest carries no `providerIdempotencyKey` (raw) key at all.
     expect(json).not.toContain('providerIdempotencyKey":');
-    expect(json.includes("providerIdempotencyKeyHash") ? true : true).toBe(true);
   });
 
   test("event-theft: a foreign event with mismatched metadata.intentId is dropped (N23)", async () => {

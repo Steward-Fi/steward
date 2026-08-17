@@ -31,8 +31,8 @@ const SPEND_LIMIT_AGENT_ID = `monero-spend-agent-${Date.now()}`;
 const FROZEN_AGENT_ID = `monero-frozen-agent-${Date.now()}`;
 
 const SCOPE = "monero:mainnet:0";
-const FAKE_WALLET_RPC_URL = "http://monero-wallet-rpc.invalid:18083/json_rpc";
-const FAKE_DAEMON_URL = "http://monero-daemon.invalid:18089";
+const FAKE_WALLET_RPC_URL = "http://monero-wallet-rpc:18083/json_rpc";
+const FAKE_DAEMON_URL = "http://monero-daemon:18089";
 const SCRIPTED_TX_HASH = "ab".repeat(32);
 const SCRIPTED_FEE_PICONERO = 25_000_000n;
 
@@ -81,7 +81,7 @@ function installScriptedMoneroRpc() {
     if (url.startsWith(FAKE_DAEMON_URL)) {
       return new Response(JSON.stringify({ status: "OK", height: 3_400_000 }), { status: 200 });
     }
-    if (!url.startsWith("http://monero-wallet-rpc.invalid")) {
+    if (!url.startsWith("http://monero-wallet-rpc")) {
       return realFetch(input as RequestInfo, init);
     }
     const body = JSON.parse(String(init?.body)) as {

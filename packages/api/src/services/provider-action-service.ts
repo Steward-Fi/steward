@@ -50,6 +50,7 @@ import {
 import type { GithubActionBuild } from "@stwd/provider-github";
 import type { XActionBuild } from "@stwd/provider-x";
 import {
+  computeProviderPolicyInputDigest,
   type GithubCanonicalActionV1,
   jcsStringify,
   type ProviderRequestEnvelopeV1,
@@ -378,6 +379,12 @@ class ProviderActionService {
     // Compute the canonical action digest + request envelope/hash up-front (they
     // are pure and needed for the binding + idempotency conflict check).
     const actionDigest = sha256HexPrefixed(jcsStringify(this.canonicalActionObject(build.action)));
+    // Idempotency identity includes every adapter-validated policy input, not
+    // only the outbound HTTP action. This is deliberately a separate,
+    // domain-separated digest: policy-only signals such as X `summoned` must
+    // conflict when changed without contaminating the canonical action digest.
+    // `policyText` is a separate in-memory channel and is never included here.
+    const policyInputDigest = computeProviderPolicyInputDigest(build.policyArgs);
     const canonicalBytes = jcsStringify(this.canonicalActionObject(build.action));
 
     // Idempotency replay lookup on the real operation id.
@@ -395,11 +402,20 @@ class ProviderActionService {
       )
       .limit(1);
     if (priorBinding) {
-      // A replay MUST match on the durable action binding. requestedAt/nonce
-      // differ per call, so we compare the ACTION binding (digest + resource),
-      // not the request hash which intentionally varies. Any different
-      // action/resource for the same key => conflict.
-      if (priorBinding.actionDigest !== actionDigest) {
+      // A replay MUST match both the durable outbound action and the validated
+      // policy inputs that authorized it. requestedAt/nonce differ per call, so
+      // requestHash itself is not the replay key. New bindings persist the
+      // policy-input digest inside their immutable, request-hash-bound envelope.
+      // Legacy envelopes have no such member and retain the historical
+      // action-only replay behavior; this is a bounded compatibility path for
+      // pre-rollout rows, never used by a newly-created binding.
+      const persistedPolicyInputDigest = (priorBinding.requestEnvelope as Record<string, unknown>)
+        .policyInputDigest;
+      if (
+        priorBinding.actionDigest !== actionDigest ||
+        (persistedPolicyInputDigest !== undefined &&
+          persistedPolicyInputDigest !== policyInputDigest)
+      ) {
         return {
           kind: "replay_conflict",
           code: "REPLAY_IDEMPOTENCY_CONFLICT",
@@ -473,6 +489,7 @@ class ProviderActionService {
           operationId: txOperation.id,
           operationRevision: txOperation.revision,
           actionDigest,
+          policyInputDigest,
         });
         requestHash = sha256HexPrefixed(jcsStringify(this.envelopeObject(envelope)));
 
@@ -1621,6 +1638,7 @@ class ProviderActionService {
       operationId: string;
       operationRevision: number;
       actionDigest: string;
+      policyInputDigest: string;
     },
   ): ProviderRequestEnvelopeV1 {
     return {
@@ -1632,6 +1650,7 @@ class ProviderActionService {
       operationId: ids.operationId,
       operationRevision: ids.operationRevision,
       actionDigest: ids.actionDigest,
+      policyInputDigest: ids.policyInputDigest,
       idempotencyKeyHash: input.idempotencyKeyHash,
       requestedAt: input.requestedAt,
       expiresAt: input.expiresAt,
@@ -1640,7 +1659,7 @@ class ProviderActionService {
   }
 
   private envelopeObject(e: ProviderRequestEnvelopeV1): Record<string, unknown> {
-    return {
+    const envelope: Record<string, unknown> = {
       schemaVersion: e.schemaVersion,
       tenantId: e.tenantId,
       workspaceId: e.workspaceId,
@@ -1654,6 +1673,8 @@ class ProviderActionService {
       expiresAt: e.expiresAt,
       nonce: e.nonce,
     };
+    if (e.policyInputDigest !== undefined) envelope.policyInputDigest = e.policyInputDigest;
+    return envelope;
   }
 
   /**

@@ -232,6 +232,8 @@ function validatePolicyConfig(policy: PolicyRule): string | null {
               areOptionalEvmAddresses(constraint.spenderBlocklist) &&
               areOptionalEvmAddresses(constraint.fromAllowlist) &&
               areOptionalEvmAddresses(constraint.fromBlocklist) &&
+              (constraint.maxNativeValueWei === undefined ||
+                isWeiString(constraint.maxNativeValueWei)) &&
               (constraint.maxAmount === undefined || isWeiString(constraint.maxAmount))
             );
           });

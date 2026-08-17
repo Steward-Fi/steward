@@ -14,6 +14,7 @@ import {
   type OtpTemplateData,
   type RenderedMagicLinkTemplate,
 } from "./email-templates";
+import { isDevSecretAllowed } from "./jwt";
 import { TokenStore } from "./token-store";
 
 // ---------------------------------------------------------------------------
@@ -316,9 +317,19 @@ export class EmailAuth {
     this.replyTo = config.replyTo;
     this.templateId = config.templateId;
     this.subjectOverride = config.subjectOverride;
-    const configuredCodeSecret = config.codeVerifierSecret || process.env.STEWARD_EMAIL_CODE_SECRET;
-    if (!configuredCodeSecret && process.env.NODE_ENV === "production") {
-      throw new Error("STEWARD_EMAIL_CODE_SECRET is required in production");
+    const configuredCodeSecret =
+      config.codeVerifierSecret?.trim() || process.env.STEWARD_EMAIL_CODE_SECRET?.trim() || "";
+    if (!configuredCodeSecret) {
+      // Tests intentionally use an isolated deterministic fallback. Every
+      // runnable non-test environment must explicitly opt in to that fallback,
+      // matching the repository-wide dev-secret policy.
+      if (process.env.NODE_ENV !== "test" && !isDevSecretAllowed()) {
+        throw new Error(
+          "STEWARD_EMAIL_CODE_SECRET is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev secret.",
+        );
+      }
+    } else if (process.env.NODE_ENV === "production" && configuredCodeSecret.length < 32) {
+      throw new Error("STEWARD_EMAIL_CODE_SECRET must be at least 32 characters in production");
     }
     this.codeVerifierSecret = configuredCodeSecret || "steward-development-email-login-secret";
     this.templateRenderer = config.templateRenderer ?? defaultTemplateRenderer;

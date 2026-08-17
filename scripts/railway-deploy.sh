@@ -84,6 +84,14 @@ if [[ -z "$IMAGE_TAG" ]]; then
   exit 1
 fi
 
+# OCI/Docker tags are at most 128 characters and contain only this conservative
+# subset. Reject whitespace, shell-like syntax, slashes, and control characters
+# before the value reaches logs or a deployment API.
+if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+  fail "Invalid image tag: expected an OCI tag (letters, digits, _, ., -; max 128 chars)"
+  exit 1
+fi
+
 if [[ -z "${RAILWAY_TOKEN:-}" ]]; then
   fail "RAILWAY_TOKEN environment variable is required"
   exit 1
@@ -237,14 +245,22 @@ dump_failure() {
   resp=$(gql_raw "$q")
   build_logs=$(echo "${resp:-}" | jq -r '.data.buildLogs[]?.message // empty' 2>/dev/null)
   fail "---- build logs ----"
-  [[ -n "$build_logs" ]] && echo "$build_logs" >&2 || fail "${resp:-<empty response>}"
+  if [[ -n "$build_logs" ]]; then
+    echo "$build_logs" >&2
+  else
+    fail "${resp:-<empty response>}"
+  fi
 
   q=$(jq -n --arg id "$DEPLOY_ID" \
     '{query: "query($id: String!) { deploymentLogs(deploymentId: $id, limit: 200) { message } }", variables: {id: $id}}')
   resp=$(gql_raw "$q")
   deploy_logs=$(echo "${resp:-}" | jq -r '.data.deploymentLogs[]?.message // empty' 2>/dev/null)
   fail "---- deploy logs ----"
-  [[ -n "$deploy_logs" ]] && echo "$deploy_logs" >&2 || fail "${resp:-<empty response>}"
+  if [[ -n "$deploy_logs" ]]; then
+    echo "$deploy_logs" >&2
+  else
+    fail "${resp:-<empty response>}"
+  fi
   fail "----------------------------------------"
 
   [[ -z "$build_logs" && -z "$deploy_logs" ]] && LOGS_EMPTY=1

@@ -19,6 +19,12 @@ on:
       - "packages/**/package.json"
       - ".github/workflows/docker.yml"
 
+# A branch tag is mutable. Do not let a slower build for an older push finish
+# after a newer build and overwrite `:develop` / `:main` with stale bytes.
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
@@ -34,12 +40,12 @@ jobs:
     steps:
       # Checkout the repository
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Authenticate with GHCR when publishing images from push events.
       - name: Login to GHCR
         if: github.event_name == 'push'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -47,7 +53,7 @@ jobs:
 
       # Enable BuildKit for layer caching and multi-platform builds
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       # Generate image tags and labels from git metadata
       # - branch pushes get the branch name as tag (e.g. develop)
@@ -55,7 +61,7 @@ jobs:
       # - version tags also get "latest"
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ghcr.io/steward-fi/steward
           tags: |
@@ -63,11 +69,13 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            # Immutable tag consumed by the staging workflow.
+            type=sha,format=long
 
       # Build pull requests to validate the Dockerfile; publish images for pushes
       # to develop and version tags so deploys can pull the expected tags.
       - name: Build and optionally push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           push: ${{ github.event_name == 'push' }}
@@ -75,7 +83,10 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          provenance: false
+          # Attach verifiable build metadata and an SPDX software bill of
+          # materials to published images. Both remain local on PR dry-runs.
+          provenance: mode=max
+          sbom: true
           build-args: |
             CACHE_BUST=${{ github.sha }}
 
