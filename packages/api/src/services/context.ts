@@ -418,6 +418,10 @@ export const defaultTenantReady = db
   .values({
     id: DEFAULT_TENANT_ID,
     name: "Default Tenant",
+    // SEC-145: despite the variable name, STEWARD_DEFAULT_TENANT_KEY must be
+    // the sha256 hex hash of the plaintext key — it is stored verbatim as
+    // apiKeyHash and compared against sha256(X-Steward-Key). A plaintext
+    // value fails closed (default tenant unreachable); empty stays 403.
     apiKeyHash: process.env.STEWARD_DEFAULT_TENANT_KEY || "",
   })
   .onConflictDoNothing();
