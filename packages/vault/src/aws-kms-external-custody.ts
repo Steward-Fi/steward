@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { secp256k1 } from "@noble/curves/secp256k1";
 import {
   type Address,
@@ -229,13 +230,50 @@ function assertEvmRequest(request: ExternalKeySignTransactionRequest): void {
   validateEvmRpcTransport(request.rpcUrl);
 }
 
+function isPrivateIpv4(host: string): boolean {
+  const octets = host.split(".").map(Number);
+  if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet))) return false;
+  const [first, second] = octets;
+  return (
+    first === 10 ||
+    first === 127 ||
+    (first === 169 && second === 254) ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168)
+  );
+}
+
+function parseIpv6Words(host: string): number[] | null {
+  const halves = host.split("::");
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const omitted = 8 - left.length - right.length;
+  if ((halves.length === 1 && omitted !== 0) || omitted < 0) return null;
+  const words = [...left, ...Array(omitted).fill("0"), ...right].map((word) =>
+    Number.parseInt(word, 16),
+  );
+  return words.length === 8 && words.every((word) => Number.isInteger(word)) ? words : null;
+}
+
+function isPrivateIpv6(host: string): boolean {
+  const words = parseIpv6Words(host);
+  if (!words) return false;
+  const loopback = words.slice(0, 7).every((word) => word === 0) && words[7] === 1;
+  const uniqueLocal = (words[0] & 0xfe00) === 0xfc00;
+  const linkLocal = (words[0] & 0xffc0) === 0xfe80;
+  const ipv4Mapped = words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff;
+  if (!ipv4Mapped) return loopback || uniqueLocal || linkLocal;
+  return isPrivateIpv4(`${words[6] >> 8}.${words[6] & 0xff}.${words[7] >> 8}.${words[7] & 0xff}`);
+}
+
 function isPrivateHttpHost(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (host === "localhost" || host === "::1" || host.endsWith(".localhost")) return true;
-  if (!host.includes(".")) return true;
-  if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)) return true;
-  const match = /^172\.(\d+)\./.exec(host);
-  return !!match && Number(match[1]) >= 16 && Number(match[1]) <= 31;
+  const ipVersion = isIP(host);
+  if (ipVersion === 4) return isPrivateIpv4(host);
+  if (ipVersion === 6) return isPrivateIpv6(host);
+  return false;
 }
 
 function validateEvmRpcTransport(rawUrl: string): void {

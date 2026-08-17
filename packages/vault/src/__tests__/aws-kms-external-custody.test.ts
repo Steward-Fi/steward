@@ -237,7 +237,41 @@ describe("AWS KMS asymmetric external custody", () => {
         signRequest(privateKey, { rpcUrl: "https://user:secret@rpc.example.test" }),
       ),
     ).rejects.toThrow("must not embed URL credentials");
+    await expect(
+      provider.signTransaction(
+        signRequest(privateKey, { rpcUrl: "http://[2606:4700:4700::1111]" }),
+      ),
+    ).rejects.toThrow("must use HTTPS for a non-private host");
+    await expect(
+      provider.signTransaction(signRequest(privateKey, { rpcUrl: "http://1.1.1.1" })),
+    ).rejects.toThrow("must use HTTPS for a non-private host");
+    await expect(
+      provider.signTransaction(signRequest(privateKey, { rpcUrl: "http://public-rpc" })),
+    ).rejects.toThrow("must use HTTPS for a non-private host");
     expect(kms.commands).toHaveLength(0);
+  });
+
+  test("allows HTTP only for loopback, private, and link-local RPC hosts", async () => {
+    const privateRpcUrls = [
+      "http://localhost:8545",
+      "http://127.0.0.1:8545",
+      "http://10.0.0.1:8545",
+      "http://172.16.0.1:8545",
+      "http://192.168.0.1:8545",
+      "http://169.254.1.1:8545",
+      "http://[::1]:8545",
+      "http://[fd00::1]:8545",
+      "http://[fe80::1]:8545",
+      "http://[::ffff:127.0.0.1]:8545",
+    ];
+    for (const rpcUrl of privateRpcUrls) {
+      const privateKey = secp256k1.utils.randomPrivateKey();
+      await expect(
+        providerFor(new MockKms(privateKey), new MockRpc()).signTransaction(
+          signRequest(privateKey, { rpcUrl }),
+        ),
+      ).resolves.toMatchObject({ broadcast: false });
+    }
   });
 
   test("passes the reusable external custody v1 conformance contract", async () => {
