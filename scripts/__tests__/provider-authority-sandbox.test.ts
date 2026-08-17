@@ -12,9 +12,11 @@ import {
   mintInstallationToken,
   parseRetryAfter,
   reconcileGithubMarker,
+  requestJson,
   scrub,
   validateBuildPrerequisites,
   validateEnvironment,
+  validateServiceUrl,
 } from "../lib/provider-authority-sandbox-lib.mjs";
 import { runDispatchChild } from "../provider-authority-sandbox.mjs";
 
@@ -32,7 +34,7 @@ async function fakeServer(handler: Parameters<typeof createServer>[0]) {
 
 function envFixture() {
   const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-  return Object.fromEntries(
+  const env = Object.fromEntries(
     [
       "GITHUB_APP_ID",
       "GITHUB_APP_INSTALLATION_ID",
@@ -61,6 +63,8 @@ function envFixture() {
         ],
       ]),
   );
+  env.STEWARD_API_URL = "https://steward.sandbox.test";
+  return env;
 }
 
 describe("provider authority sandbox operator primitives", () => {
@@ -89,6 +93,35 @@ describe("provider authority sandbox operator primitives", () => {
       globalThis.fetch = original;
     }
     expect(calls).toBe(0);
+  });
+
+  it("rejects credential-bearing and public plaintext service URLs", () => {
+    expect(() => validateServiceUrl("STEWARD_API_URL", "http://api.example.test")).toThrow(
+      "must use HTTPS",
+    );
+    expect(() => validateServiceUrl("GITHUB_API_URL", "https://user:secret@github.test")).toThrow(
+      "must not contain credentials",
+    );
+    expect(() => validateServiceUrl("GITHUB_API_URL", "http://127.0.0.1:3000")).not.toThrow();
+  });
+
+  it("bounds declared and streamed HTTP bodies", async () => {
+    for (const response of [
+      new Response("{}", { headers: { "content-length": "1048577" } }),
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array(1024 * 1024));
+            controller.enqueue(new Uint8Array([1]));
+            controller.close();
+          },
+        }),
+      ),
+    ]) {
+      await expect(
+        requestJson("https://api.example.test", {}, (async () => response) as typeof fetch),
+      ).rejects.toThrow("exceeded the 1 MiB sandbox limit");
+    }
   });
 
   it("fails closed with the exact build prerequisite command", () => {

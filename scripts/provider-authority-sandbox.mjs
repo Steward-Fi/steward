@@ -19,6 +19,7 @@ const OUT_DIR = join(ROOT, "artifacts", "provider-authority", "sandbox");
 const CLAIM =
   "Live behavior is recorded exactly as observed. Hermetic classification is not a live " +
   "rate-limit observation; Gate D remains STOP unless every required live observation passes.";
+const MAX_CHILD_OUTPUT_BYTES = 1024 * 1024;
 
 function fail(message) {
   console.error(`[sandbox] FAIL (fail-closed): ${message}`);
@@ -63,8 +64,14 @@ export function runDispatchChild(
     let stdout = "";
     let stderr = "";
     let reachedAfterUpstream = false;
+    let outputExceeded = false;
     let killTimer;
     child.stdout.on("data", (chunk) => {
+      if (Buffer.byteLength(stdout) + chunk.byteLength > MAX_CHILD_OUTPUT_BYTES) {
+        outputExceeded = true;
+        child.kill("SIGKILL");
+        return;
+      }
       stdout += chunk;
       if (pauseAfterUpstream && stdout.includes('"phase":"after_upstream"')) {
         reachedAfterUpstream = true;
@@ -72,6 +79,11 @@ export function runDispatchChild(
       }
     });
     child.stderr.on("data", (chunk) => {
+      if (Buffer.byteLength(stderr) + chunk.byteLength > MAX_CHILD_OUTPUT_BYTES) {
+        outputExceeded = true;
+        child.kill("SIGKILL");
+        return;
+      }
       stderr += chunk;
     });
     const safetyTimer = setTimeout(() => child.kill("SIGKILL"), 60_000);
@@ -93,6 +105,7 @@ export function runDispatchChild(
         stderr,
         reachedAfterUpstream,
         timedOut: signal === "SIGKILL" && reachedAfterUpstream,
+        outputExceeded,
       });
     });
   });
@@ -253,7 +266,13 @@ async function main() {
     // window without weakening the server or adding a forgeable dispatch route.
     const first = await runDispatchChild(env, intentId, {
       pauseAfterUpstream: true,
-      timeoutMs: Number(env.STEWARD_SANDBOX_CHILD_TIMEOUT_MS ?? 2_000),
+      timeoutMs: (() => {
+        const value = Number(env.STEWARD_SANDBOX_CHILD_TIMEOUT_MS ?? 2_000);
+        if (!Number.isSafeInteger(value) || value < 100 || value > 30_000) {
+          throw new Error("STEWARD_SANDBOX_CHILD_TIMEOUT_MS must be an integer from 100 to 30000");
+        }
+        return value;
+      })(),
     });
     if (!first.timedOut || !first.reachedAfterUpstream) {
       throw new Error("crash-window worker did not prove the post-upstream barrier");

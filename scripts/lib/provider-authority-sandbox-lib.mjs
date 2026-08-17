@@ -30,6 +30,24 @@ const REQUIRED_BUILD_OUTPUTS = [
   "packages/redis/dist/index.js",
   "packages/attestation/dist/index.js",
 ];
+const REQUEST_TIMEOUT_MS = 10_000;
+const RESPONSE_MAX_BYTES = 1024 * 1024;
+
+export function validateServiceUrl(name, value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${name} must be a valid absolute URL`);
+  }
+  if (url.username || url.password) throw new Error(`${name} must not contain credentials`);
+  const loopback =
+    url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+    throw new Error(`${name} must use HTTPS unless it targets loopback`);
+  }
+  return url.toString().replace(/\/$/, "");
+}
 
 export function validateBuildPrerequisites(root) {
   const missing = REQUIRED_BUILD_OUTPUTS.filter((path) => !existsSync(join(root, path)));
@@ -108,6 +126,8 @@ export function validateEnvironment(env) {
     if (placeholders.length) parts.push(`placeholder value(s): ${placeholders.join(", ")}`);
     throw new Error(parts.join("; "));
   }
+  validateServiceUrl("STEWARD_API_URL", env.STEWARD_API_URL);
+  if (env.GITHUB_API_URL) validateServiceUrl("GITHUB_API_URL", env.GITHUB_API_URL);
 }
 
 const b64url = (value) => Buffer.from(value).toString("base64url");
@@ -123,8 +143,39 @@ export function mintGithubAppJwt(appId, privateKey, now = Math.floor(Date.now() 
 }
 
 export async function requestJson(url, options, fetchImpl = fetch) {
-  const response = await fetchImpl(url, options);
-  const text = await response.text();
+  const response = await fetchImpl(url, {
+    ...options,
+    signal: options?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  const declared = response.headers.get("content-length");
+  if (declared !== null) {
+    const length = Number(declared);
+    if (!Number.isSafeInteger(length) || length < 0 || length > RESPONSE_MAX_BYTES) {
+      void response.body?.cancel().catch(() => {});
+      throw new Error("HTTP response exceeded the 1 MiB sandbox limit");
+    }
+  }
+  let text = "";
+  if (response.body) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > RESPONSE_MAX_BYTES) {
+          void reader.cancel().catch(() => {});
+          throw new Error("HTTP response exceeded the 1 MiB sandbox limit");
+        }
+        text += decoder.decode(value, { stream: true });
+      }
+      text += decoder.decode();
+    } finally {
+      reader.releaseLock();
+    }
+  }
   let body = null;
   if (text) {
     try {
@@ -138,7 +189,7 @@ export async function requestJson(url, options, fetchImpl = fetch) {
 
 export async function mintInstallationToken(env, fetchImpl = fetch) {
   const jwt = mintGithubAppJwt(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY);
-  const base = (env.GITHUB_API_URL ?? "https://api.github.com").replace(/\/$/, "");
+  const base = validateServiceUrl("GITHUB_API_URL", env.GITHUB_API_URL ?? "https://api.github.com");
   const { response, body } = await requestJson(
     `${base}/app/installations/${encodeURIComponent(env.GITHUB_APP_INSTALLATION_ID)}/access_tokens`,
     {
@@ -202,14 +253,18 @@ export async function reconcileGithubMarker({
     for (let page = 1; page <= maxPages; page++) {
       requests++;
       const url = `${apiBase.replace(/\/$/, "")}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${encodeURIComponent(pullNumber)}/comments?per_page=100&page=${page}`;
-      const response = await fetchImpl(url, {
-        headers: {
-          accept: "application/vnd.github+json",
-          authorization: `Bearer ${token}`,
-          "user-agent": "steward-gate-d-sandbox",
-          "x-github-api-version": "2022-11-28",
+      const { response, body: rows } = await requestJson(
+        url,
+        {
+          headers: {
+            accept: "application/vnd.github+json",
+            authorization: `Bearer ${token}`,
+            "user-agent": "steward-gate-d-sandbox",
+            "x-github-api-version": "2022-11-28",
+          },
         },
-      });
+        fetchImpl,
+      );
       const classification = classifyGithubResponse(response.status, response.headers);
       observations.push({
         attempt,
@@ -223,7 +278,6 @@ export async function reconcileGithubMarker({
         break;
       }
       if (!response.ok) return { outcome: "indeterminate", requests, observations, classification };
-      const rows = await response.json();
       if (!Array.isArray(rows))
         return {
           outcome: "indeterminate",
