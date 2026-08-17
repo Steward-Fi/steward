@@ -72,6 +72,7 @@ export class GitHubAppInstallationTokenIssuer implements UpstreamTokenIssuer {
           repositories: input.resource.repositories,
           permissions: input.resource.permissions,
         }),
+        redirect: "error",
         signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
       },
     );
@@ -95,6 +96,7 @@ export class GitHubAppInstallationTokenIssuer implements UpstreamTokenIssuer {
         "User-Agent": "steward-credential-lease",
         "X-GitHub-Api-Version": "2022-11-28",
       },
+      redirect: "error",
       signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
     });
     if (!response.ok && response.status !== 404) {

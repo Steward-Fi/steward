@@ -35,12 +35,15 @@ describe("GitHub App upstream issuer transport", () => {
 
   test("applies deadlines without exposing upstream response bodies", async () => {
     let signal: AbortSignal | undefined;
+    let redirect: RequestRedirect | undefined;
     const canary = "upstream-secret-canary";
     const issuer = new GitHubAppInstallationTokenIssuer((async (_url, init) => {
       signal = init?.signal as AbortSignal;
+      redirect = init?.redirect;
       return new Response(canary, { status: 502 });
     }) as typeof fetch);
     await expect(issuer.issue(request)).rejects.not.toThrow(canary);
     expect(signal).toBeInstanceOf(AbortSignal);
+    expect(redirect).toBe("error");
   });
 });
