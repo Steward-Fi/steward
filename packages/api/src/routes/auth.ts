@@ -1133,7 +1133,7 @@ function originHostFromRequest(c: Context): string | undefined {
 function requiredOriginHostFromRequest(c: Context): string | null {
   const originHost = originHostFromRequest(c);
   if (!originHost) return null;
-  return getAllowedSiweDomains(c).includes(originHost) ? originHost : null;
+  return getAllowedSiweDomains().includes(originHost) ? originHost : null;
 }
 
 async function setSiweNonce(nonce: string, record: SiweNonceRecord): Promise<void> {
@@ -2344,7 +2344,7 @@ function ethereumWalletTenantId(address: string): string {
   return `eth:${address.toLowerCase()}`;
 }
 
-function getAllowedSiweDomains(c?: Context): string[] {
+function getAllowedSiweDomains(): string[] {
   const raw = process.env.SIWE_ALLOWED_DOMAINS?.trim();
   if (raw) {
     const domains = raw
@@ -2358,10 +2358,10 @@ function getAllowedSiweDomains(c?: Context): string[] {
   try {
     return [new URL(appUrl).host.toLowerCase()];
   } catch {
-    if (process.env.NODE_ENV !== "production") {
-      const host = c?.req.header("host")?.trim().toLowerCase();
-      if (host) return [host];
-    }
+    // SEC-144: fail closed. Never derive allowed SIWE domains from the
+    // request Host header — a missing or invalid APP_URL must not silently
+    // disable domain binding. Set SIWE_ALLOWED_DOMAINS (or a valid APP_URL)
+    // explicitly.
     return [];
   }
 }
@@ -2685,7 +2685,7 @@ async function requiredTelegramOriginHostFromRequest(
   if (!originHost) return null;
 
   if (!tenantId) {
-    return getAllowedSiweDomains(c).includes(originHost) ? originHost : null;
+    return getAllowedSiweDomains().includes(originHost) ? originHost : null;
   }
 
   const [row] = await getDb()
@@ -4525,7 +4525,7 @@ auth.post("/farcaster/verify", async (c) => {
   let farcasterUser: Awaited<ReturnType<typeof verifyFarcasterLogin>>;
   try {
     farcasterUser = await verifyFarcasterLogin(farcasterPayload, {
-      expectedDomain: getAllowedSiweDomains(c),
+      expectedDomain: getAllowedSiweDomains(),
       maxMessageAgeMs: 10 * 60 * 1000,
     });
   } catch (error) {
@@ -5625,7 +5625,7 @@ auth.get("/nonce", async (c) => {
     );
   }
   await setSiweNonce(nonce, {
-    allowedDomains: getAllowedSiweDomains(c),
+    allowedDomains: getAllowedSiweDomains(),
     originHost,
     tenantId: tenantId || undefined,
   });
@@ -5697,7 +5697,7 @@ auth.post("/verify", async (c) => {
     }
   }
 
-  const allowedDomains = getAllowedSiweDomains(c);
+  const allowedDomains = getAllowedSiweDomains();
   if (!allowedDomains.includes(siweMessage.domain.toLowerCase())) {
     return c.json<ApiResponse>({ ok: false, error: "SIWE domain not allowed" }, 401);
   }
@@ -5922,7 +5922,7 @@ auth.post("/verify/solana", async (c) => {
     );
   }
 
-  const allowedDomains = getAllowedSiweDomains(c);
+  const allowedDomains = getAllowedSiweDomains();
   if (!allowedDomains.includes(parsed.domain.toLowerCase())) {
     return c.json<ApiResponse>({ ok: false, error: "SIWS domain not allowed" }, 401);
   }
