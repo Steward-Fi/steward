@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { GithubOperationKey } from "@stwd/provider-github";
 import type { SlackOperationKey } from "@stwd/provider-slack";
+import type { GoogleOperationKey } from "@stwd/provider-google";
 import type { XOperationKey } from "@stwd/provider-x";
 import { parseGovernedCanonicalActionForDispatch } from "@stwd/proxy/src/handlers/governed-execution";
 import {
@@ -9,6 +10,7 @@ import {
   GENERIC_GOLDEN_DESCRIPTOR_A,
   GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
   GITHUB_PROVIDER_ACTION_PROFILE,
+  GOOGLE_PROVIDER_ACTION_PROFILE,
   inspectProviderProfileConformance,
   jcsStringify,
   REGISTERED_PROFILES,
@@ -45,6 +47,13 @@ const FIXTURES = {
     args: { user: "U12345678" },
     traversalArgs: { user: ".." },
     traversalCode: "CANON_PATH_SEGMENT_INVALID",
+  },
+  [GOOGLE_PROVIDER_ACTION_PROFILE]: {
+    operationKey: "google.calendar.events.list" as const,
+    method: undefined,
+    args: { maxResults: 50 },
+    traversalArgs: { maxResults: 50 },
+    traversalCode: "CANON_FIELD_TYPE_INVALID",
   },
   [GENERIC_HTTP_PROVIDER_ACTION_PROFILE]: {
     operationKey: "generic.items.list",
@@ -102,6 +111,25 @@ const OPERATION_FIXTURES = {
       args: { user: "U12345678" },
     },
   ],
+  [GOOGLE_PROVIDER_ACTION_PROFILE]: [
+    {
+      operationKey: "google.gmail.messages.send",
+      args: { to: ["person@example.com"], subject: "hello", body: "world" },
+    },
+    {
+      operationKey: "google.calendar.events.list",
+      args: { maxResults: 50 },
+    },
+    {
+      operationKey: "google.calendar.events.insert",
+      args: {
+        summary: "meeting",
+        start: "2026-08-17T10:00:00Z",
+        end: "2026-08-17T11:00:00Z",
+        attendees: ["person@example.com"],
+      },
+    },
+  ],
   [GENERIC_HTTP_PROVIDER_ACTION_PROFILE]: [
     {
       operationKey: "generic.items.list",
@@ -130,6 +158,8 @@ function buildFromProductionSpec(
       return spec.build(fixture.operationKey as XOperationKey, args);
     case SLACK_PROVIDER_ACTION_PROFILE:
       return spec.build(fixture.operationKey as SlackOperationKey, args);
+    case GOOGLE_PROVIDER_ACTION_PROFILE:
+      return spec.build(fixture.operationKey as GoogleOperationKey, args);
     case GENERIC_HTTP_PROVIDER_ACTION_PROFILE:
       return spec.build(
         fixture.operationKey,

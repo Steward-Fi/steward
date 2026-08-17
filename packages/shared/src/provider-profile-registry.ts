@@ -11,18 +11,19 @@
  * Registration is compile-time (a frozen set here), not runtime-mutable, so the
  * registry cannot be widened by an attacker-controlled value. Adding a profile
  * is a code change plus its adapter and matching database constraint migration.
- * github + x + Slack + generic-http are the registered members; github/x remain
- * BYTE-IDENTICAL in behavior (their profile
+ * github + x + Slack + Google Workspace + generic-http are the registered members;
+ * github/x remain BYTE-IDENTICAL in behavior (their profile
  * string value is unchanged, so the golden digest corpus does not move).
  *
  * A profile descriptor also records whether the profile is "config-driven"
  * (operator authors a per-operation descriptor, e.g. generic-http) or
- * "adapter-fixed" (a hardcoded adapter, e.g. github/x/Slack). The service uses this to
+ * "adapter-fixed" (a hardcoded adapter, e.g. github/x/Slack/Google). The service uses this to
  * decide whether to load + validate a stored operation descriptor before
  * building the action.
  */
 
 import { GENERIC_HTTP_PROVIDER_ACTION_PROFILE } from "./generic-http-provider-action.js";
+import { GOOGLE_PROVIDER_ACTION_PROFILE } from "./google-provider-action.js";
 import { GITHUB_PROVIDER_ACTION_PROFILE } from "./provider-action.js";
 import { SLACK_PROVIDER_ACTION_PROFILE } from "./slack-provider-action.js";
 import { X_PROVIDER_ACTION_PROFILE } from "./x-provider-action.js";
@@ -50,7 +51,7 @@ export type ProviderProfileDescriptor =
 /**
  * The registered profiles. FROZEN: this is the single source of truth for which
  * profile strings are legal anywhere in the provider-action pipeline. github,
- * x, and Slack are adapter-fixed; generic-http is config-driven.
+ * x, Slack, and Google Workspace are adapter-fixed; generic-http is config-driven.
  */
 const REGISTRY: ReadonlyMap<string, ProviderProfileDescriptor> = new Map([
   [
@@ -78,6 +79,15 @@ const REGISTRY: ReadonlyMap<string, ProviderProfileDescriptor> = new Map([
       kind: "adapter-fixed",
       label: "Slack",
       allowedOrigins: Object.freeze(["https://slack.com"]),
+    }),
+  ],
+  [
+    GOOGLE_PROVIDER_ACTION_PROFILE,
+    Object.freeze<ProviderProfileDescriptor>({
+      profile: GOOGLE_PROVIDER_ACTION_PROFILE,
+      kind: "adapter-fixed",
+      label: "Google Workspace",
+      allowedOrigins: Object.freeze(["https://gmail.googleapis.com", "https://www.googleapis.com"]),
     }),
   ],
   [
