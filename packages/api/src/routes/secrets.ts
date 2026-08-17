@@ -20,7 +20,11 @@ import {
 import { SecretVault, validateSecretRouteConfig } from "@stwd/vault";
 import { and, eq, inArray } from "drizzle-orm";
 import { type Context, Hono } from "hono";
-import { type AuditEventInput, writeAuditEvent } from "../services/audit";
+import {
+  type AuditEventInput,
+  withTenantAuditedTransaction,
+  writeAuditEvent,
+} from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
@@ -34,9 +38,6 @@ import {
 import {
   assertGovernedRouteUpdateIsSafe,
   assertNoOppositeAuthorityOverlap,
-  compensateCreatedSecretRoute,
-  compensateDeletedSecretRoute,
-  compensateUpdatedSecretRoute,
   lockSecretRouteNamespaces,
   SecretRouteAuthorityConflict,
 } from "../services/secret-route-authority";
@@ -52,13 +53,23 @@ async function writeSecretsAudit(
   c: Context<{ Variables: AppVariables }>,
   event: Omit<AuditEventInput, "ipAddress" | "userAgent" | "requestId">,
 ): Promise<void> {
-  await writeAuditEvent({
+  await writeAuditEvent(secretsAuditEvent(c, event));
+}
+
+function secretsAuditEvent(
+  c: Context<{ Variables: AppVariables }>,
+  event: Omit<AuditEventInput, "ipAddress" | "userAgent" | "requestId">,
+): AuditEventInput {
+  return {
     ...event,
     ipAddress: c.req.header("x-forwarded-for") ?? null,
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
-  });
+  };
 }
+
+type VaultDb = ReturnType<typeof getVaultDb>;
+type VaultTx = Parameters<Parameters<VaultDb["transaction"]>[0]>[0];
 
 // Route-config validation (host allowlist, path/method/injectAs/injectKey/
 // injectFormat rules, per-host strictness) lives in the shared
@@ -479,7 +490,8 @@ secretsRoutes.post("/routes", async (c) => {
         approvalConfig: routeInput.approvalConfig ?? {},
       },
     });
-    const route = await getVaultDb().transaction(async (tx) => {
+    const route = await withTenantAuditedTransaction(tenantId, async (txRaw, appendAudit) => {
+      const tx = txRaw as VaultTx;
       await lockSecretRouteNamespaces(tx, tenantId, [routeInput.agentId]);
       const created = await sv.createRouteWithinTx(tx, tenantId, routeInput.secretId, {
         agentId: routeInput.agentId,
@@ -498,34 +510,31 @@ secretsRoutes.post("/routes", async (c) => {
         ...created,
         agentId: routeInput.agentId,
       });
+      await appendAudit(
+        secretsAuditEvent(c, {
+          tenantId,
+          actorType: "user",
+          actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
+          action: "secret_route.create",
+          resourceType: "secret_route",
+          resourceId: created.id,
+          metadata: {
+            secretId: routeInput.secretId,
+            agentId: routeInput.agentId,
+            hostPattern: routeInput.hostPattern,
+            pathPattern: routeInput.pathPattern,
+            method: routeInput.method,
+            injectAs: routeInput.injectAs,
+            injectKey: routeInput.injectKey,
+            priority: routeInput.priority ?? 0,
+            enabled: routeInput.enabled ?? true,
+            requiresApproval: routeInput.requiresApproval ?? false,
+            approvalConfig: routeInput.approvalConfig ?? {},
+          },
+        }),
+      );
       return created;
     });
-    try {
-      await writeSecretsAudit(c, {
-        tenantId,
-        actorType: "user",
-        actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
-        action: "secret_route.create",
-        resourceType: "secret_route",
-        resourceId: route.id,
-        metadata: {
-          secretId: routeInput.secretId,
-          agentId: routeInput.agentId,
-          hostPattern: routeInput.hostPattern,
-          pathPattern: routeInput.pathPattern,
-          method: routeInput.method,
-          injectAs: routeInput.injectAs,
-          injectKey: routeInput.injectKey,
-          priority: routeInput.priority ?? 0,
-          enabled: routeInput.enabled ?? true,
-          requiresApproval: routeInput.requiresApproval ?? false,
-          approvalConfig: routeInput.approvalConfig ?? {},
-        },
-      });
-    } catch (err) {
-      await compensateCreatedSecretRoute(getVaultDb(), route);
-      throw err;
-    }
     return c.json<ApiResponse>({ ok: true, data: route }, 201);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Unknown error";
@@ -635,7 +644,8 @@ secretsRoutes.put("/routes/:id", async (c) => {
   });
   let updated: Awaited<ReturnType<typeof sv.updateRoute>>;
   try {
-    updated = await getVaultDb().transaction(async (tx) => {
+    updated = await withTenantAuditedTransaction(tenantId, async (txRaw, appendAudit) => {
+      const tx = txRaw as VaultTx;
       const [currentBeforeLock] = await tx
         .select()
         .from(secretRouteRows)
@@ -665,6 +675,17 @@ secretsRoutes.put("/routes/:id", async (c) => {
           ...changed,
           agentId: destinationAgentId,
         });
+        await appendAudit(
+          secretsAuditEvent(c, {
+            tenantId,
+            actorType: "user",
+            actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
+            action: "secret_route.update",
+            resourceType: "secret_route",
+            resourceId: routeId,
+            metadata: { before: current, after: changed },
+          }),
+        );
       }
       return changed;
     });
@@ -677,21 +698,6 @@ secretsRoutes.put("/routes/:id", async (c) => {
 
   if (!updated) {
     return c.json<ApiResponse>({ ok: false, error: "Route not found" }, 404);
-  }
-
-  try {
-    await writeSecretsAudit(c, {
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
-      action: "secret_route.update",
-      resourceType: "secret_route",
-      resourceId: routeId,
-      metadata: { before: existing, after: updated },
-    });
-  } catch (err) {
-    await compensateUpdatedSecretRoute(getVaultDb(), existing, updated);
-    throw err;
   }
 
   return c.json<ApiResponse>({ ok: true, data: updated });
@@ -718,25 +724,55 @@ secretsRoutes.delete("/routes/:id", async (c) => {
     resourceId: routeId,
     metadata: { deleted: existing },
   });
-  const deleted = await sv.deleteRoute(tenantId, routeId);
+  let deleted: typeof secretRouteRows.$inferSelect | null;
+  try {
+    deleted = await withTenantAuditedTransaction(tenantId, async (txRaw, appendAudit) => {
+      const tx = txRaw as VaultTx;
+      const [currentBeforeLock] = await tx
+        .select()
+        .from(secretRouteRows)
+        .where(and(eq(secretRouteRows.id, routeId), eq(secretRouteRows.tenantId, tenantId)))
+        .limit(1);
+      if (!currentBeforeLock) return null;
+      if (!currentBeforeLock.agentId) {
+        throw new SecretRouteAuthorityConflict("route has no agent namespace");
+      }
+      await lockSecretRouteNamespaces(tx, tenantId, [currentBeforeLock.agentId]);
+      const [current] = await tx
+        .select()
+        .from(secretRouteRows)
+        .where(and(eq(secretRouteRows.id, routeId), eq(secretRouteRows.tenantId, tenantId)))
+        .limit(1);
+      if (!current || current.agentId !== currentBeforeLock.agentId) {
+        throw new SecretRouteAuthorityConflict("route changed during delete");
+      }
+      const [removed] = await tx
+        .delete(secretRouteRows)
+        .where(and(eq(secretRouteRows.id, routeId), eq(secretRouteRows.tenantId, tenantId)))
+        .returning();
+      if (!removed) return null;
+      await appendAudit(
+        secretsAuditEvent(c, {
+          tenantId,
+          actorType: "user",
+          actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
+          action: "secret_route.delete",
+          resourceType: "secret_route",
+          resourceId: routeId,
+          metadata: { deleted: current },
+        }),
+      );
+      return removed;
+    });
+  } catch (e) {
+    if (e instanceof SecretRouteAuthorityConflict) {
+      return c.json<ApiResponse>({ ok: false, error: e.message }, 409);
+    }
+    throw e;
+  }
 
   if (!deleted) {
     return c.json<ApiResponse>({ ok: false, error: "Route not found" }, 404);
-  }
-
-  try {
-    await writeSecretsAudit(c, {
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? c.get("authType") ?? tenantId,
-      action: "secret_route.delete",
-      resourceType: "secret_route",
-      resourceId: routeId,
-      metadata: { deleted: existing },
-    });
-  } catch (err) {
-    await compensateDeletedSecretRoute(getVaultDb(), existing);
-    throw err;
   }
 
   return c.json<ApiResponse>({ ok: true, data: { deleted: routeId } });

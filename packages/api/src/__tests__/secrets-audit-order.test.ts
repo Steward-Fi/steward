@@ -23,9 +23,9 @@ function routeBody(start: string, end: string): string {
 describe("secret route audit ordering", () => {
   it("writes authorization audit events before sensitive secret mutations", () => {
     expectBefore('action: "secret.create.authorized"', "sv.createSecret");
-    expectBefore('action: "secret_route.create.authorized"', "sv.createRoute");
-    expectBefore('action: "secret_route.update.authorized"', "sv.updateRoute");
-    expectBefore('action: "secret_route.delete.authorized"', "sv.deleteRoute");
+    expectBefore('action: "secret_route.create.authorized"', "sv.createRouteWithinTx");
+    expectBefore('action: "secret_route.update.authorized"', "sv.updateRouteWithinTx");
+    expectBefore('action: "secret_route.delete.authorized"', ".delete(secretRouteRows)");
     expectBefore('action: "secret.rotate.authorized"', "sv.rotateSecret");
     expectBefore('action: "secret.delete.authorized"', "sv.deleteSecret");
   });
@@ -44,7 +44,7 @@ describe("secret route audit ordering", () => {
     expect(updateRoute).not.toContain("sv.updateRouteWithinTx(tx, tenantId, routeId, body)");
   });
 
-  it("rolls back reversible secret mutations when final audit writes fail", () => {
+  it("atomically commits secret route mutations with their final audit events", () => {
     const createSecretRoute = routeBody('secretsRoutes.post("/",', "/** GET /secrets");
     expect(createSecretRoute).toContain('action: "secret.create"');
     expect(createSecretRoute).toContain(".update(secretRows)");
@@ -52,22 +52,38 @@ describe("secret route audit ordering", () => {
     expect(createSecretRoute).toContain("eq(secretRows.id, secret.id)");
 
     const createRoute = routeBody('secretsRoutes.post("/routes"', "/** GET /secrets/routes");
+    expect(createRoute).toContain("withTenantAuditedTransaction(tenantId");
+    expect(createRoute).toContain("await appendAudit(");
     expect(createRoute).toContain('action: "secret_route.create"');
-    expect(createRoute).toContain("compensateCreatedSecretRoute(getVaultDb(), route)");
+    expect(createRoute).not.toContain("sv.deleteRoute(tenantId, route.id)");
 
     const updateRoute = routeBody(
       'secretsRoutes.put("/routes/:id"',
       "/** DELETE /secrets/routes/:id",
     );
+    expect(updateRoute).toContain("withTenantAuditedTransaction(tenantId");
+    expect(updateRoute).toContain("await appendAudit(");
     expect(updateRoute).toContain('action: "secret_route.update"');
-    expect(updateRoute).toContain("compensateUpdatedSecretRoute(getVaultDb(), existing, updated)");
+    expect(updateRoute).not.toContain("hostPattern: existing.hostPattern");
+    expect(updateRoute).not.toContain("injectFormat: existing.injectFormat");
 
     const deleteRoute = routeBody(
       'secretsRoutes.delete("/routes/:id"',
       "// ─── Secret CRUD (by ID)",
     );
+    expect(deleteRoute).toContain("withTenantAuditedTransaction(tenantId");
+    expect(deleteRoute).toContain("await appendAudit(");
     expect(deleteRoute).toContain('action: "secret_route.delete"');
-    expect(deleteRoute).toContain("compensateDeletedSecretRoute(getVaultDb(), existing)");
+    expect(deleteRoute).not.toContain(".insert(secretRouteRows).values");
+    expect(deleteRoute).not.toContain("id: existing.id");
+    expect(deleteRoute).not.toContain("secretId: existing.secretId");
+
+    for (const body of [createRoute, updateRoute, deleteRoute]) {
+      expect(body).toContain("lockSecretRouteNamespaces(");
+    }
+
+    // Secret CRUD still uses explicit compensating transactions where its
+    // vault abstraction does not expose within-transaction mutation helpers.
 
     for (const marker of ['secretsRoutes.put("/:id"', 'secretsRoutes.post("/:id/rotate"']) {
       const rotateRoute = routeSource.slice(routeSource.indexOf(marker));
