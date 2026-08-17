@@ -99,6 +99,8 @@ describe("STEWARD_PROVIDER_ACTION", () => {
       "apiKeys",
       "private_key_headers",
       "sessionCookieHeaderValues",
+      "awsAccessKey",
+      "secretKeyHeader",
     ];
     for (const key of credentialKeys) {
       const result = await providerAction.handler(
@@ -157,6 +159,66 @@ describe("STEWARD_PROVIDER_ACTION", () => {
       expect.objectContaining({ arguments: { public: "safe" } }),
     );
     expect(JSON.stringify(invokeProviderAction.mock.calls[0][0])).not.toContain("must-not-forward");
+  });
+
+  it("copies one descriptor snapshot without invoking Proxy get traps", async () => {
+    const invokeProviderAction = vi.fn().mockResolvedValue({
+      id: ACTION_ID,
+      status: "stub_succeeded",
+      requestHash: `sha256:${"a".repeat(64)}`,
+      actionDigest: `sha256:${"b".repeat(64)}`,
+    });
+    let ownKeysCalls = 0;
+    let publicDescriptorCalls = 0;
+    let getCalls = 0;
+    let arrayGetCalls = 0;
+    const arrayProxy = new Proxy(["safe"], {
+      get() {
+        arrayGetCalls += 1;
+        throw new Error("array Proxy get trap must not run during canonicalization");
+      },
+    });
+    const argumentsProxy = new Proxy(
+      { public: arrayProxy },
+      {
+        ownKeys(target) {
+          ownKeysCalls += 1;
+          return Reflect.ownKeys(target);
+        },
+        getOwnPropertyDescriptor(target, key) {
+          if (key === "public") publicDescriptorCalls += 1;
+          return Reflect.getOwnPropertyDescriptor(target, key);
+        },
+        get() {
+          getCalls += 1;
+          throw new Error("Proxy get trap must not run during canonicalization");
+        },
+      },
+    );
+
+    const result = await providerAction.handler(
+      runtime({ isConnected: () => true, invokeProviderAction }),
+      { id: "message-single-snapshot" } as any,
+      undefined,
+      {
+        parameters: {
+          workspaceId: "workspace-a",
+          providerAccountId: "account-a",
+          operationKey: "github.issue.list",
+          arguments: argumentsProxy,
+          idempotencyKey: "single-snapshot-retry",
+        },
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(ownKeysCalls).toBe(1);
+    expect(publicDescriptorCalls).toBe(1);
+    expect(getCalls).toBe(0);
+    expect(arrayGetCalls).toBe(0);
+    expect(invokeProviderAction).toHaveBeenCalledWith(
+      expect.objectContaining({ arguments: { public: ["safe"] } }),
+    );
   });
 
   it("derives stable retry identity from message and canonical public parameters", async () => {

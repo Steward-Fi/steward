@@ -8,7 +8,7 @@ import type {
   State,
 } from "@elizaos/core";
 import type { ProviderActionInvokeInput } from "@stwd/sdk";
-import { containsSensitiveCredentialKey } from "@stwd/shared";
+import { containsSensitiveCredentialKey } from "@stwd/shared/sensitive-keys";
 import type { StewardService } from "../services/StewardService.js";
 
 function canonicalize(value: unknown, ancestors = new Set<object>(), depth = 0): unknown {
@@ -22,25 +22,56 @@ function canonicalize(value: unknown, ancestors = new Set<object>(), depth = 0):
   if (ancestors.has(value)) throw new TypeError("cyclic provider action arguments");
   ancestors.add(value);
   try {
-    if (Object.hasOwn(value, "toJSON")) {
+    const isArray = Array.isArray(value);
+    const prototype = Object.getPrototypeOf(value);
+    if (
+      (isArray && prototype !== Array.prototype) ||
+      (!isArray && prototype !== Object.prototype && prototype !== null)
+    ) {
+      throw new TypeError("provider action arguments must contain only plain records");
+    }
+
+    // Capture property metadata exactly once. Traversing `Object.entries(value)`
+    // after validating descriptors would perform a second reflective pass and
+    // invoke Proxy `get` traps. Copying descriptor values gives validation,
+    // retry hashing, and the eventual wire request one immutable snapshot.
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    if (Object.hasOwn(descriptors, "toJSON")) {
       throw new TypeError("provider action arguments must not define toJSON");
     }
-    for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+    for (const descriptor of Object.values(descriptors)) {
       if (descriptor.enumerable && !("value" in descriptor)) {
         throw new TypeError("provider action arguments must not contain accessors");
       }
     }
-    if (Array.isArray(value)) {
-      return value.map((item) => canonicalize(item, ancestors, depth + 1));
-    }
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) {
-      throw new TypeError("provider action arguments must contain only plain records");
+    if (isArray) {
+      const length = descriptors.length;
+      if (!("value" in length) || !Number.isSafeInteger(length.value) || length.value < 0) {
+        throw new TypeError("provider action array length is invalid");
+      }
+      const snapshot: unknown[] = [];
+      snapshot.length = length.value;
+      for (const [key, descriptor] of Object.entries(descriptors)) {
+        if (!/^(?:0|[1-9]\d*)$/.test(key)) continue;
+        const index = Number(key);
+        if (!Number.isSafeInteger(index) || index >= length.value || index >= 0xffff_ffff) continue;
+        if (!("value" in descriptor)) {
+          throw new TypeError("provider action arguments must not contain accessors");
+        }
+        snapshot[index] = canonicalize(descriptor.value, ancestors, depth + 1);
+      }
+      return snapshot;
     }
     return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
+      Object.entries(descriptors)
+        .filter(([, descriptor]) => descriptor.enumerable)
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-        .map(([key, nested]) => [key, canonicalize(nested, ancestors, depth + 1)]),
+        .map(([key, descriptor]) => {
+          if (!("value" in descriptor)) {
+            throw new TypeError("provider action arguments must not contain accessors");
+          }
+          return [key, canonicalize(descriptor.value, ancestors, depth + 1)];
+        }),
     );
   } finally {
     ancestors.delete(value);
