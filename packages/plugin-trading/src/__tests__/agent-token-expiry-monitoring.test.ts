@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
-import { generateApiKey } from "@stwd/auth";
+import { generateApiKey, signAgentToken } from "@stwd/auth";
 import { closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
@@ -8,6 +8,8 @@ import { exportJWK, generateKeyPair, SignJWT } from "jose";
 const TENANT_ID = "test-agent-token-expiry";
 const TENANT_NO_KEY_ID = "test-agent-token-expiry-no-key";
 const AGENT_ID = "test-token-watch-agent";
+const OTHER_TENANT_ID = "test-agent-token-expiry-other";
+const FOREIGN_AGENT_ID = "test-token-watch-foreign";
 const KID = "test-agent-token-kid";
 
 const auditEvents: Array<{ action: string; metadata?: Record<string, unknown>; actorId?: string }> =
@@ -43,6 +45,9 @@ beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.DATABASE_URL ??= "postgres://test:test@localhost:5432/test";
   process.env.STEWARD_MASTER_PASSWORD ??= "test-master-password";
+  // Platform agent-token signing (SEC-091 test): tenantAuth verifies Bearer
+  // tokens with the canonical JWT secret, so configure one explicitly.
+  process.env.STEWARD_JWT_SECRET ??= "test-jwt-secret-32-chars-minimum!!!!";
 
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
@@ -87,12 +92,22 @@ beforeAll(async () => {
         name: "Agent Token Expiry No Key Tenant",
         apiKeyHash: "",
       },
+      {
+        id: OTHER_TENANT_ID,
+        name: "Agent Token Expiry Other Tenant",
+        // api_key_hash has a unique index; a second "" row would be silently
+        // dropped by onConflictDoNothing and break the agents FK below.
+        apiKeyHash: "not-a-real-key-hash-other-tenant",
+      },
     ])
     .onConflictDoNothing();
 
   // PR #79 hardening: requireAgentJwt rejects tokens for agents that are not
   // registered for the tenant, so provision the agent (and its signing key).
   await contextModule.vault.createAgent(TENANT_ID, AGENT_ID, "Token Watch Agent");
+  // SEC-091: a second tenant with its own agent, used to prove the token-status
+  // route no longer leaks cross-tenant agent/token state.
+  await contextModule.vault.createAgent(OTHER_TENANT_ID, FOREIGN_AGENT_ID, "Foreign Token Watch");
 });
 
 afterAll(async () => {
@@ -116,6 +131,23 @@ async function signTradeToken(expiresAt: number): Promise<string> {
   })
     .setProtectedHeader({ alg: "RS256", typ: "JWT", kid: KID })
     .setSubject(`agent:${AGENT_ID}`)
+    .setIssuer("eliza-cloud")
+    .setAudience("steward")
+    .setIssuedAt(now - 10)
+    .setNotBefore(now - 10)
+    .setExpirationTime(expiresAt)
+    .sign(privateKey);
+}
+
+async function signForeignTradeToken(expiresAt: number): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  return new SignJWT({
+    agent_id: FOREIGN_AGENT_ID,
+    tenant_id: OTHER_TENANT_ID,
+    scopes: ["trade:order"],
+  })
+    .setProtectedHeader({ alg: "RS256", typ: "JWT", kid: KID })
+    .setSubject(`agent:${FOREIGN_AGENT_ID}`)
     .setIssuer("eliza-cloud")
     .setAudience("steward")
     .setIssuedAt(now - 10)
@@ -233,5 +265,66 @@ describe("agent trade token expiry monitoring", () => {
     expect(observedBody.data.agentId).toBe(AGENT_ID);
     expect(observedBody.data.exp).toBe(exp);
     expect(observedBody.data.expiresInSeconds).toBeGreaterThan(0);
+  });
+
+  it("SEC-091: reports a foreign tenant's agent as unknown even when its token was observed", async () => {
+    // Observe the foreign agent's token through the order endpoint (records
+    // global agent-token status), then query it with THIS tenant's api key.
+    const exp = Math.floor(Date.now() / 1000) + 600;
+    const foreignToken = await signForeignTradeToken(exp);
+    const agentJwtApp = buildAgentJwtApp();
+    const observedWrite = await agentJwtApp.request("/v1/trade/hyperliquid/order", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${foreignToken}`,
+        "X-Steward-Tenant": OTHER_TENANT_ID,
+      },
+    });
+    expect(observedWrite.status).toBe(200);
+
+    const app = buildTokenStatusApp();
+    const crossTenant = await app.request(
+      `/v1/trade/token-status?agentId=${encodeURIComponent(FOREIGN_AGENT_ID)}`,
+      {
+        headers: {
+          "X-Steward-Tenant": TENANT_ID,
+          "X-Steward-Key": apiKey,
+        },
+      },
+    );
+    expect(crossTenant.status).toBe(200);
+    const crossTenantBody = (await crossTenant.json()) as {
+      data: { status: string; exp: number | null };
+    };
+    // A foreign tenant's agent is indistinguishable from a nonexistent one.
+    expect(crossTenantBody.data.status).toBe("unknown");
+    expect(crossTenantBody.data.exp).toBeNull();
+  });
+
+  it("SEC-091: forbids an agent-scoped token from querying another agent's token status", async () => {
+    const token = await signAgentToken({ agentId: AGENT_ID, tenantId: TENANT_ID });
+    const app = buildTokenStatusApp();
+
+    const other = await app.request("/v1/trade/token-status?agentId=some-other-agent", {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "X-Steward-Tenant": TENANT_ID,
+      },
+    });
+    expect(other.status).toBe(403);
+
+    const self = await app.request(
+      `/v1/trade/token-status?agentId=${encodeURIComponent(AGENT_ID)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "X-Steward-Tenant": TENANT_ID,
+        },
+      },
+    );
+    expect(self.status).toBe(200);
+    const selfBody = (await self.json()) as { data: { status: string } };
+    // Status store is cleared in beforeEach; self-query returns the unknown shape.
+    expect(selfBody.data.status).toBe("unknown");
   });
 });

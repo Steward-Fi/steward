@@ -29,15 +29,34 @@ export interface AgentLoop {
 
 // ─── Agent wallet cache ────────────────────────────────────────────────────────
 
-const walletCache = new Map<string, string>(); // agentId → walletAddress
+// SEC-188: cache entries expire so a wallet rotation is picked up on a later
+// tick instead of trading against a stale address forever. The map is keyed by
+// agentId, so its size is bounded by the configured agent set.
+const WALLET_CACHE_TTL_MS = 5 * 60 * 1000;
+let walletCacheTtlMs = WALLET_CACHE_TTL_MS;
+const walletCache = new Map<string, { address: string; expiresAt: number }>(); // agentId → wallet
+
+/** Test-only: clear the wallet cache + restore the default TTL. */
+export function clearWalletCacheForTest(): void {
+  walletCache.clear();
+  walletCacheTtlMs = WALLET_CACHE_TTL_MS;
+}
+
+/** Test-only: override the wallet-cache TTL (SEC-188 expiry regression tests). */
+export function setWalletCacheTtlForTest(ttlMs: number): void {
+  walletCacheTtlMs = ttlMs;
+}
 
 async function resolveWallet(steward: StewardClient, agentId: string): Promise<string | null> {
   const cachedWallet = walletCache.get(agentId);
-  if (cachedWallet) return cachedWallet;
+  if (cachedWallet && cachedWallet.expiresAt > Date.now()) return cachedWallet.address;
 
   try {
     const agent = await steward.getAgent(agentId);
-    walletCache.set(agentId, agent.walletAddress);
+    walletCache.set(agentId, {
+      address: agent.walletAddress,
+      expiresAt: Date.now() + walletCacheTtlMs,
+    });
     return agent.walletAddress;
   } catch (err) {
     logError("Could not resolve agent wallet address", err, { agentId });

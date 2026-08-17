@@ -89,11 +89,26 @@ function allowUnsignedWebhooks(): boolean {
 // ─── Loader ──────────────────────────────────────────────────────────────────
 
 function loadJsonConfig(path: string): Partial<TraderConfig> {
+  let raw: string;
   try {
-    const raw = readFileSync(path, "utf-8");
+    raw = readFileSync(path, "utf-8");
+  } catch (err) {
+    // A MISSING config file is fine (env-only configuration); any other read
+    // failure is not.
+    if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") return {};
+    throw err;
+  }
+  try {
     return JSON.parse(raw) as Partial<TraderConfig>;
-  } catch {
-    return {};
+  } catch (err) {
+    // SEC-188: a config file that exists but does not parse must fail fast.
+    // Silently starting on defaults (apiKey "", localhost API) masks operator
+    // error and points the trader at the wrong backend.
+    throw new Error(
+      `agent-trader config at ${path} exists but could not be parsed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
   }
 }
 
