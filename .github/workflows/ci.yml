@@ -234,7 +234,9 @@ jobs:
           STEWARD_EMAIL_CODE_SECRET: "ci-email-code-secret-must-be-at-least-32-chars-long"
           STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "ci-audit-hmac-key-must-be-at-least-32-bytes-long"
-          SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
+          # Include the exact loopback host exercised by the smoke client; SIWE
+          # binding compares URL.host, including non-default ports.
+          SIWE_ALLOWED_DOMAINS: "steward.fi,localhost,127.0.0.1:3200"
           # The whole api suite drives this one server from a single IP; the
           # default 100-req/60s per-IP gate 429s the sharded test flood.
           STEWARD_RATE_LIMIT_MAX_REQUESTS: "1000000"
@@ -278,7 +280,7 @@ jobs:
           STEWARD_EMAIL_CODE_SECRET: "ci-email-code-secret-must-be-at-least-32-chars-long"
           STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "ci-audit-hmac-key-must-be-at-least-32-bytes-long"
-          SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
+          SIWE_ALLOWED_DOMAINS: "steward.fi,localhost,127.0.0.1:3200"
 
       - name: Stop API test server
         if: always()
