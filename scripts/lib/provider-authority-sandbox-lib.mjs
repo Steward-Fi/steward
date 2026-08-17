@@ -24,6 +24,8 @@ export const REQUIRED_ENV = [
   "STEWARD_AUDIT_SIGNING_KEY",
 ];
 
+export const GITHUB_API_BASE = "https://api.github.com";
+
 const PLACEHOLDER_RE = /(change[-_]?me|placeholder|example|your[-_]|xxx+|todo)/i;
 const REQUIRED_BUILD_OUTPUTS = [
   "packages/shared/dist/index.js",
@@ -126,8 +128,19 @@ export function validateEnvironment(env) {
     if (placeholders.length) parts.push(`placeholder value(s): ${placeholders.join(", ")}`);
     throw new Error(parts.join("; "));
   }
-  validateServiceUrl("STEWARD_API_URL", env.STEWARD_API_URL);
-  if (env.GITHUB_API_URL) validateServiceUrl("GITHUB_API_URL", env.GITHUB_API_URL);
+  const stewardBase = validateServiceUrl("STEWARD_API_URL", env.STEWARD_API_URL);
+  const stewardUrl = new URL(stewardBase);
+  if (stewardUrl.search || stewardUrl.hash) {
+    throw new Error("STEWARD_API_URL must not contain a query or fragment");
+  }
+  // This acceptance is specifically for github.com. An inherited API override
+  // must never redirect an App JWT or installation token to an arbitrary host.
+  if (
+    env.GITHUB_API_URL &&
+    validateServiceUrl("GITHUB_API_URL", env.GITHUB_API_URL) !== GITHUB_API_BASE
+  ) {
+    throw new Error("GITHUB_API_URL must be https://api.github.com for the Gate D sandbox");
+  }
 }
 
 const b64url = (value) => Buffer.from(value).toString("base64url");
@@ -189,7 +202,7 @@ export async function requestJson(url, options, fetchImpl = fetch) {
   return { response, body };
 }
 
-export async function mintInstallationToken(env, fetchImpl = fetch) {
+export async function mintInstallationCredential(env, fetchImpl = fetch) {
   const jwt = mintGithubAppJwt(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY);
   const base = validateServiceUrl("GITHUB_API_URL", env.GITHUB_API_URL ?? "https://api.github.com");
   const { response, body } = await requestJson(
@@ -208,7 +221,76 @@ export async function mintInstallationToken(env, fetchImpl = fetch) {
   if (!response.ok || typeof body?.token !== "string") {
     throw new Error(`GitHub installation token mint failed (${response.status})`);
   }
-  return body.token;
+  const expiresAt = Date.parse(body.expires_at);
+  const remainingMs = expiresAt - Date.now();
+  if (!Number.isFinite(expiresAt) || remainingMs <= 0 || remainingMs > 65 * 60 * 1000) {
+    throw new Error("GitHub installation token did not have the expected short lifetime");
+  }
+  return {
+    token: body.token,
+    expiresAt: body.expires_at,
+    permissions: body.permissions ?? null,
+    repositorySelection: body.repository_selection ?? null,
+  };
+}
+
+export async function mintInstallationToken(env, fetchImpl = fetch) {
+  return (await mintInstallationCredential(env, fetchImpl)).token;
+}
+
+export async function verifyInstallationScope(
+  { token, permissions, repositorySelection },
+  { owner, repo, apiBase = GITHUB_API_BASE, fetchImpl = fetch },
+) {
+  const expectedPermissions = { issues: "write", metadata: "read" };
+  if (
+    repositorySelection !== "selected" ||
+    JSON.stringify(Object.fromEntries(Object.entries(permissions ?? {}).sort())) !==
+      JSON.stringify(expectedPermissions)
+  ) {
+    throw new Error(
+      "GitHub App installation permissions are not exactly metadata:read + issues:write",
+    );
+  }
+  const { response, body } = await requestJson(
+    `${apiBase.replace(/\/$/, "")}/installation/repositories?per_page=100`,
+    {
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${token}`,
+        "user-agent": "steward-gate-d-sandbox",
+        "x-github-api-version": "2022-11-28",
+      },
+    },
+    fetchImpl,
+  );
+  const expected = `${owner}/${repo}`.toLowerCase();
+  if (
+    !response.ok ||
+    body?.total_count !== 1 ||
+    !Array.isArray(body.repositories) ||
+    body.repositories.length !== 1 ||
+    body.repositories[0]?.full_name?.toLowerCase() !== expected
+  ) {
+    throw new Error("GitHub App installation must be limited to the one declared sandbox repo");
+  }
+}
+
+export async function revokeInstallationToken(token, fetchImpl = fetch) {
+  const response = await fetchImpl(`${GITHUB_API_BASE}/installation/token`, {
+    method: "DELETE",
+    redirect: "error",
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${token}`,
+      "user-agent": "steward-gate-d-sandbox",
+      "x-github-api-version": "2022-11-28",
+    },
+  });
+  if (response.status !== 204) {
+    throw new Error(`GitHub installation token revocation failed (${response.status})`);
+  }
 }
 
 export function parseRetryAfter(value, capMs, now = Date.now()) {
@@ -234,9 +316,13 @@ export function classifyGithubResponse(status, headers = new Headers()) {
   return { classification: "ok", boundedFailure: false };
 }
 
+export function isLiveRateLimitObservation(observation) {
+  return observation?.classification === "rate_limited" && observation.retryAfter !== null;
+}
+
 /** Bounded, read-only reconciliation; this function never writes provider data. */
 export async function reconcileGithubMarker({
-  apiBase = "https://api.github.com",
+  apiBase = GITHUB_API_BASE,
   owner,
   repo,
   pullNumber,
@@ -252,6 +338,7 @@ export async function reconcileGithubMarker({
   let requests = 0;
   let rateLimited = false;
   const observations = [];
+  let paginationBoundExhausted = false;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     for (let page = 1; page <= maxPages; page++) {
       requests++;
@@ -274,6 +361,7 @@ export async function reconcileGithubMarker({
         page,
         status: response.status,
         classification: classification.classification,
+        retryAfter: classification.retryAfter ?? null,
       });
       if (classification.classification === "rate_limited") {
         rateLimited = true;
@@ -291,6 +379,7 @@ export async function reconcileGithubMarker({
       const found = rows.find((row) => typeof row?.body === "string" && row.body.includes(marker));
       if (found) return { outcome: "found", requests, observations, commentId: found.id ?? null };
       if (rows.length < 100) break;
+      if (page === maxPages) paginationBoundExhausted = true;
     }
     if (attempt < maxAttempts) await sleep(Math.min(250 * attempt, retryAfterCapMs));
   }
@@ -300,6 +389,14 @@ export async function reconcileGithubMarker({
       requests,
       observations,
       classification: { classification: "rate_limited", boundedFailure: true },
+    };
+  }
+  if (paginationBoundExhausted) {
+    return {
+      outcome: "indeterminate",
+      requests,
+      observations,
+      classification: { classification: "pagination_bound_exhausted", boundedFailure: true },
     };
   }
   return { outcome: "definitive_miss", requests, observations };

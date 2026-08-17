@@ -1,17 +1,20 @@
 #!/usr/bin/env node
 /** Gate D operator harness. It never persists or prints a provider credential. */
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   buildDispatchEnvironment,
-  mintInstallationToken,
+  isLiveRateLimitObservation,
+  mintInstallationCredential,
   reconcileGithubMarker,
   requestJson,
+  revokeInstallationToken,
   scrub,
   validateBuildPrerequisites,
   validateEnvironment,
+  verifyInstallationScope,
 } from "./lib/provider-authority-sandbox-lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -20,6 +23,15 @@ const CLAIM =
   "Live behavior is recorded exactly as observed. Hermetic classification is not a live " +
   "rate-limit observation; Gate D remains STOP unless every required live observation passes.";
 const MAX_CHILD_OUTPUT_BYTES = 1024 * 1024;
+const ARTIFACT_NAMES = [
+  "test-report.json",
+  "image-commit.txt",
+  "dispatch-count.json",
+  "verifier-report.txt",
+  "canary-report.json",
+  "provider-reconciliation.json",
+  "manifest.json",
+];
 
 function fail(message) {
   console.error(`[sandbox] FAIL (fail-closed): ${message}`);
@@ -44,6 +56,60 @@ async function steward(env, path, token, options = {}) {
     throw new Error(`Steward ${options.method ?? "GET"} ${path} failed (${response.status})`);
   }
   return body;
+}
+
+async function prepareApprovedWrite(env, marker, body) {
+  const created = await steward(env, "/v2/provider-actions", env.STEWARD_AGENT_JWT, {
+    method: "POST",
+    body: JSON.stringify({
+      workspaceId: env.STEWARD_SANDBOX_WORKSPACE_ID,
+      providerAccountId: env.STEWARD_SANDBOX_PROVIDER_ACCOUNT_ID,
+      operationKey: "github.pr.comment.create",
+      arguments: {
+        owner: env.STEWARD_SANDBOX_GITHUB_OWNER,
+        repo: env.STEWARD_SANDBOX_GITHUB_REPO,
+        pullNumber: Number(env.STEWARD_SANDBOX_GITHUB_PR_NUMBER),
+        body,
+      },
+      idempotencyKey: `gate-d-${marker}`,
+    }),
+  });
+  if (!created.id || created.status !== "pending_approval") {
+    throw new Error("provider action did not require approval");
+  }
+  const approvalResponse = await steward(
+    env,
+    `/v2/provider-actions/${encodeURIComponent(created.id)}/approval`,
+    env.STEWARD_APPROVER_JWT,
+  );
+  const approval = approvalResponse.data ?? approvalResponse;
+  await steward(
+    env,
+    `/v2/provider-actions/${encodeURIComponent(created.id)}/approval`,
+    env.STEWARD_APPROVER_JWT,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        decision: "approve",
+        expectedVersion: approval.version,
+        expectedRequestHash: created.requestHash,
+        expectedActionDigest: created.actionDigest,
+        reason: "throwaway Gate D sandbox",
+        idempotencyKey: `approve-${marker}`,
+      }),
+    },
+  );
+  const executeResponse = await steward(
+    env,
+    `/v2/provider-actions/${encodeURIComponent(created.id)}/execute`,
+    env.STEWARD_AGENT_JWT,
+    { method: "POST", body: "{}" },
+  );
+  const execution = executeResponse.data ?? executeResponse;
+  if (execution.status !== "execution_ready") {
+    throw new Error(`execute did not reach execution_ready (got ${execution.status ?? "unknown"})`);
+  }
+  return created;
 }
 
 export function runDispatchChild(
@@ -138,7 +204,13 @@ async function main() {
   }
 
   mkdirSync(OUT_DIR, { recursive: true });
+  // A failed rerun must not inherit a manifest or supporting file from an older
+  // run. The manifest is written last, so its presence means this invocation
+  // completed the entire artifact pipeline.
+  for (const name of [...ARTIFACT_NAMES, ".evidence-for-verifier.json", ".tampered-evidence.json"])
+    rmSync(join(OUT_DIR, name), { force: true });
   let githubToken;
+  const activeGithubTokens = new Set();
   const marker = `steward-gate-d:${crypto.randomUUID()}`;
   const report = {
     schemaVersion: 2,
@@ -157,9 +229,19 @@ async function main() {
   ].filter((value) => typeof value === "string");
 
   try {
-    githubToken = await mintInstallationToken(env);
+    const installation = await mintInstallationCredential(env);
+    githubToken = installation.token;
+    activeGithubTokens.add(githubToken);
     secretValues.push(githubToken);
-    report.steps.push({ id: "setup-token", status: "pass", detail: "installation token minted" });
+    await verifyInstallationScope(installation, {
+      owner: env.STEWARD_SANDBOX_GITHUB_OWNER,
+      repo: env.STEWARD_SANDBOX_GITHUB_REPO,
+    });
+    report.steps.push({
+      id: "setup-token",
+      status: "pass",
+      detail: "short-lived token minted; exact permissions and one-repo scope verified",
+    });
 
     await steward(
       env,
@@ -212,54 +294,39 @@ async function main() {
     }
     report.steps.push({ id: "M03", status: "pass", detail: "cross-scope probe returned 404" });
 
-    const created = await steward(env, "/v2/provider-actions", env.STEWARD_AGENT_JWT, {
-      method: "POST",
-      body: JSON.stringify({
-        workspaceId: env.STEWARD_SANDBOX_WORKSPACE_ID,
-        providerAccountId: env.STEWARD_SANDBOX_PROVIDER_ACCOUNT_ID,
-        operationKey: "github.pr.comment.create",
-        arguments: {
-          owner: env.STEWARD_SANDBOX_GITHUB_OWNER,
-          repo: env.STEWARD_SANDBOX_GITHUB_REPO,
-          pullNumber: Number(env.STEWARD_SANDBOX_GITHUB_PR_NUMBER),
-          body: `Steward Gate D sandbox marker: ${marker}`,
-        },
-        idempotencyKey: `gate-d-${marker}`,
-      }),
-    });
-    const intentId = created.id;
-    if (!intentId || created.status !== "pending_approval") {
-      throw new Error("provider action did not require approval");
+    // Mint against secret version N, then rotate the same in-memory credential
+    // to version N+1. The old authorization must fail before decrypt/forward.
+    const staleMarker = `${marker}:stale-secret`;
+    const staleCreated = await prepareApprovedWrite(
+      env,
+      staleMarker,
+      `Steward Gate D stale probe (must not post): ${staleMarker}`,
+    );
+    await steward(
+      env,
+      `/secrets/${encodeURIComponent(env.STEWARD_SANDBOX_SECRET_ID)}/rotate`,
+      env.STEWARD_APPROVER_JWT,
+      { method: "POST", body: JSON.stringify({ value: installation.token }) },
+    );
+    const staleDispatch = await runDispatchChild(env, staleCreated.id);
+    if (staleDispatch.result?.code !== "EXEC_AUTH_STALE_SECRET") {
+      throw new Error(
+        `M05 stale-secret probe did not fail before forward (got ${staleDispatch.result?.code ?? "no result"})`,
+      );
     }
+    report.steps.push({
+      id: "M05",
+      status: "pass",
+      detail: "live post-mint secret rotation denied dispatch before provider I/O",
+    });
+
+    const created = await prepareApprovedWrite(
+      env,
+      marker,
+      `Steward Gate D sandbox marker: ${marker}`,
+    );
+    const intentId = created.id;
     report.steps.push({ id: "M04", status: "pass", detail: "write required approval" });
-    const approvalResponse = await steward(
-      env,
-      `/v2/provider-actions/${encodeURIComponent(intentId)}/approval`,
-      env.STEWARD_APPROVER_JWT,
-    );
-    const approval = approvalResponse.data ?? approvalResponse;
-    await steward(
-      env,
-      `/v2/provider-actions/${encodeURIComponent(intentId)}/approval`,
-      env.STEWARD_APPROVER_JWT,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          decision: "approve",
-          expectedVersion: approval.version,
-          expectedRequestHash: created.requestHash,
-          expectedActionDigest: created.actionDigest,
-          reason: "throwaway Gate D sandbox",
-          idempotencyKey: `approve-${marker}`,
-        }),
-      },
-    );
-    await steward(
-      env,
-      `/v2/provider-actions/${encodeURIComponent(intentId)}/execute`,
-      env.STEWARD_AGENT_JWT,
-      { method: "POST", body: "{}" },
-    );
     report.steps.push({ id: "M06", status: "pass", detail: "recent-MFA approval accepted" });
     report.steps.push({
       id: "M09",
@@ -271,25 +338,33 @@ async function main() {
     // This worker reaches the real default forwarder, receives the upstream
     // response, then pauses. Killing only that child models the exact crash
     // window without weakening the server or adding a forgeable dispatch route.
-    const first = await runDispatchChild(env, intentId, {
-      pauseAfterUpstream: true,
-      timeoutMs: (() => {
-        const value = Number(env.STEWARD_SANDBOX_CHILD_TIMEOUT_MS ?? 2_000);
-        if (!Number.isSafeInteger(value) || value < 100 || value > 30_000) {
-          throw new Error("STEWARD_SANDBOX_CHILD_TIMEOUT_MS must be an integer from 100 to 30000");
-        }
-        return value;
-      })(),
-    });
-    if (first.spawnError) throw new Error("crash-window child failed to spawn");
-    if (first.outputExceeded) throw new Error("crash-window child exceeded the output limit");
-    if (!first.timedOut || !first.reachedAfterUpstream) {
-      throw new Error("crash-window worker did not prove the post-upstream barrier");
+    const childTimeoutMs = Number(env.STEWARD_SANDBOX_CHILD_TIMEOUT_MS ?? 2_000);
+    if (!Number.isSafeInteger(childTimeoutMs) || childTimeoutMs < 100 || childTimeoutMs >= 30_000) {
+      throw new Error("STEWARD_SANDBOX_CHILD_TIMEOUT_MS must be an integer from 100 through 29999");
+    }
+    const racers = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        runDispatchChild(env, intentId, { pauseAfterUpstream: true, timeoutMs: childTimeoutMs }),
+      ),
+    );
+    const winners = racers.filter((result) => result.timedOut && result.reachedAfterUpstream);
+    const losers = racers.filter((result) => !result.timedOut);
+    if (
+      racers.some((result) => result.spawnError || result.outputExceeded) ||
+      winners.length !== 1 ||
+      losers.length !== 7 ||
+      losers.some(
+        (result) => !["EXEC_AUTH_CLAIM_LOST", "EXEC_TERMINAL_STATE"].includes(result.result?.code),
+      )
+    ) {
+      throw new Error("M07 concurrent workers did not produce exactly one upstream winner");
     }
     const replay = await runDispatchChild(env, intentId);
     if (replay.spawnError) throw new Error("replay child failed to spawn");
     if (replay.outputExceeded) throw new Error("replay child exceeded the output limit");
-    const childOutput = `${first.stdout}\n${first.stderr}\n${replay.stdout}\n${replay.stderr}`;
+    const childOutput = [...racers, replay]
+      .map((result) => `${result.stdout}\n${result.stderr}`)
+      .join("\n");
     if (secretValues.some((value) => value.length >= 4 && childOutput.includes(value))) {
       throw new Error("credential canary appeared in dispatch child output");
     }
@@ -297,21 +372,22 @@ async function main() {
       throw new Error("fresh-worker replay was not rejected as terminal");
     }
     report.steps.push({
-      id: "M08/M14-M15",
+      id: "M07",
+      status: "pass",
+      detail: "eight live workers raced; exactly one crossed the upstream barrier",
+    });
+    report.steps.push({
+      id: "M08/M14",
       status: "pass",
       detail: "isolated post-upstream crash window; fresh-worker replay rejected",
       replay: replay.result,
     });
-    report.steps.push({
-      id: "M05/M07",
-      status: "covered_hermetically_only",
-      detail:
-        "stale-route and concurrent-dispatch mutation cases are not induced in the live sandbox",
-    });
 
     // Mint a separate, fresh read token only in memory. Reconciliation is
     // bounded provider GET; Steward has no reconciliation service to overclaim.
-    githubToken = await mintInstallationToken(env);
+    const reconciliationInstallation = await mintInstallationCredential(env);
+    githubToken = reconciliationInstallation.token;
+    activeGithubTokens.add(githubToken);
     secretValues.push(githubToken);
     const reconciliation = await reconcileGithubMarker({
       apiBase: env.GITHUB_API_URL,
@@ -328,16 +404,45 @@ async function main() {
       outcome: reconciliation.outcome,
     });
 
-    const caseManifest = await steward(
+    for (const token of [...activeGithubTokens]) {
+      await revokeInstallationToken(token);
+      activeGithubTokens.delete(token);
+    }
+    githubToken = undefined;
+    report.steps.push({
+      id: "setup-token-revocation",
+      status: "pass",
+      detail: "all minted installation tokens revoked; vaulted dispatch token is inert",
+    });
+
+    const caseRecord = await steward(
       env,
       `/v2/provider-actions/${encodeURIComponent(intentId)}/case`,
       env.STEWARD_APPROVER_JWT,
     );
+    const caseManifest = caseRecord?.manifest;
+    if (!caseManifest || caseManifest.caseId !== intentId) {
+      throw new Error("live case response did not contain the expected case manifest");
+    }
     const evidence = await steward(
       env,
       `/v2/provider-actions/${encodeURIComponent(intentId)}/evidence`,
       env.STEWARD_APPROVER_JWT,
     );
+    const sensitiveEvidenceSurface = JSON.stringify({ caseRecord, evidence });
+    if (
+      secretValues.some((value) => value.length >= 4 && sensitiveEvidenceSurface.includes(value)) ||
+      /Bearer\s+[A-Za-z0-9._~-]+|(?:gh[psuor]_|github_pat_)[A-Za-z0-9_]+|-----BEGIN [^-]+-----/i.test(
+        sensitiveEvidenceSurface,
+      )
+    ) {
+      throw new Error("M15 credential material appeared in the live case/evidence response");
+    }
+    report.steps.push({
+      id: "M15",
+      status: "pass",
+      detail: "live case and evidence responses contained no credential material",
+    });
     // Evidence is a mode-0600 verifier input only and is deleted after both
     // checks. The stable artifact set records the verifier result, not a second
     // potentially sensitive copy of the bundle.
@@ -371,18 +476,22 @@ async function main() {
     unlinkSync(tamperedPath);
     unlinkSync(evidencePath);
     const verifierOk = clean.exitCode === 0 && dirty.exitCode === 1;
+    const honestIncompleteCase =
+      ["incomplete", "unknown"].includes(caseManifest.completeness) &&
+      ["executing", "outcome_unknown"].includes(caseManifest.terminalState) &&
+      Array.isArray(caseManifest.incompletenessReasons) &&
+      caseManifest.incompletenessReasons.length > 0;
     report.steps.push({
       id: "M18",
-      status: verifierOk ? "pass" : "stop",
-      caseVersion: caseManifest.version ?? null,
+      status: verifierOk && honestIncompleteCase ? "pass" : "stop",
+      caseVersion: caseManifest.schemaVersion ?? null,
       completeness: caseManifest.completeness ?? null,
+      terminalState: caseManifest.terminalState ?? null,
     });
 
     // GitHub may not emit a real rate limit during this run. Never induce abuse
     // or turn the hermetic classifier proof into a fabricated live observation.
-    const liveRateLimitObserved = reconciliation.observations.some(
-      (observation) => observation.status === 403 || observation.status === 429,
-    );
+    const liveRateLimitObserved = reconciliation.observations.some(isLiveRateLimitObservation);
     report.steps.push({
       id: "M16",
       status: liveRateLimitObserved ? "pass" : "not_observed",
@@ -391,13 +500,24 @@ async function main() {
         : "403/429 classifier is hermetically tested; no live response was manufactured",
     });
     report.gateD =
-      reconciliation.outcome === "found" && verifierOk && liveRateLimitObserved ? "GO" : "STOP";
+      reconciliation.outcome === "found" &&
+      verifierOk &&
+      honestIncompleteCase &&
+      liveRateLimitObserved
+        ? "GO"
+        : "STOP";
     const git = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: ROOT });
     const sha = git.exitCode === 0 ? git.stdout.toString().trim() : "unknown";
     writeArtifact("image-commit.txt", sha, secretValues);
     writeArtifact(
       "dispatch-count.json",
-      { firstWorker: "killed_after_upstream", replay: replay.result, expectedProviderPosts: 1 },
+      {
+        concurrentWorkers: racers.length,
+        upstreamWinners: winners.length,
+        winner: "killed_after_upstream",
+        replay: replay.result,
+        expectedProviderPosts: 1,
+      },
       secretValues,
     );
     writeArtifact(
@@ -406,6 +526,28 @@ async function main() {
       secretValues,
     );
     writeArtifact("test-report.json", report, secretValues);
+    const artifactText = [
+      "test-report.json",
+      "image-commit.txt",
+      "dispatch-count.json",
+      "verifier-report.txt",
+      "provider-reconciliation.json",
+    ]
+      .map((name) => readFileSync(join(OUT_DIR, name), "utf8"))
+      .join("\n");
+    if (secretValues.some((value) => value.length >= 4 && artifactText.includes(value))) {
+      throw new Error("credential canary appeared in persisted artifacts");
+    }
+    writeArtifact(
+      "canary-report.json",
+      { clean: true, note: "all persisted artifacts passed the literal credential sweep" },
+      secretValues,
+    );
+    const canaryText = readFileSync(join(OUT_DIR, "canary-report.json"), "utf8");
+    if (secretValues.some((value) => value.length >= 4 && canaryText.includes(value))) {
+      throw new Error("credential canary appeared in canary report");
+    }
+    // The manifest is the completion marker and is deliberately written last.
     writeArtifact(
       "manifest.json",
       {
@@ -424,28 +566,6 @@ async function main() {
       },
       secretValues,
     );
-    const artifactText = [
-      "test-report.json",
-      "image-commit.txt",
-      "dispatch-count.json",
-      "verifier-report.txt",
-      "provider-reconciliation.json",
-      "manifest.json",
-    ]
-      .map((name) => readFileSync(join(OUT_DIR, name), "utf8"))
-      .join("\n");
-    if (secretValues.some((value) => value.length >= 4 && artifactText.includes(value))) {
-      throw new Error("credential canary appeared in persisted artifacts");
-    }
-    writeArtifact(
-      "canary-report.json",
-      { clean: true, note: "all persisted artifacts passed the literal credential sweep" },
-      secretValues,
-    );
-    const canaryText = readFileSync(join(OUT_DIR, "canary-report.json"), "utf8");
-    if (secretValues.some((value) => value.length >= 4 && canaryText.includes(value))) {
-      throw new Error("credential canary appeared in canary report");
-    }
     console.log(
       `[sandbox] completed honest live observation; Gate D ${report.gateD}; artifacts: ${OUT_DIR}`,
     );
@@ -459,6 +579,18 @@ async function main() {
     fail(error.message);
   } finally {
     githubToken = undefined;
+    // Best-effort cleanup on every failure path. A cleanup failure is reported
+    // without printing the token; GitHub's normal one-hour expiry remains the
+    // final backstop if the provider is unreachable.
+    for (const token of [...activeGithubTokens]) {
+      try {
+        await revokeInstallationToken(token);
+        activeGithubTokens.delete(token);
+      } catch (error) {
+        console.error(`[sandbox] token cleanup warning: ${error.message}`);
+        process.exitCode = 1;
+      }
+    }
     for (const name of [".evidence-for-verifier.json", ".tampered-evidence.json"]) {
       const path = join(OUT_DIR, name);
       if (existsSync(path)) unlinkSync(path);

@@ -8,15 +8,18 @@ import { join } from "node:path";
 import {
   buildDispatchEnvironment,
   classifyGithubResponse,
+  isLiveRateLimitObservation,
   mintGithubAppJwt,
-  mintInstallationToken,
+  mintInstallationCredential,
   parseRetryAfter,
   reconcileGithubMarker,
   requestJson,
+  revokeInstallationToken,
   scrub,
   validateBuildPrerequisites,
   validateEnvironment,
   validateServiceUrl,
+  verifyInstallationScope,
 } from "../lib/provider-authority-sandbox-lib.mjs";
 import { runDispatchChild } from "../provider-authority-sandbox.mjs";
 
@@ -183,19 +186,69 @@ describe("provider authority sandbox operator primitives", () => {
       expect(request.method).toBe("POST");
       expect(request.headers.authorization).toStartWith("Bearer ey");
       response.writeHead(201, { "content-type": "application/json" });
-      response.end(JSON.stringify({ token: canary }));
+      response.end(
+        JSON.stringify({
+          token: canary,
+          expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+          permissions: { metadata: "read", issues: "write" },
+          repository_selection: "selected",
+        }),
+      );
     });
-    expect(
-      await mintInstallationToken({
-        GITHUB_APP_ID: "42",
-        GITHUB_APP_INSTALLATION_ID: "7",
-        GITHUB_APP_PRIVATE_KEY: pem,
-        GITHUB_API_URL: base,
-      }),
-    ).toBe(canary);
+    const credential = await mintInstallationCredential({
+      GITHUB_APP_ID: "42",
+      GITHUB_APP_INSTALLATION_ID: "7",
+      GITHUB_APP_PRIVATE_KEY: pem,
+      GITHUB_API_URL: base,
+    });
+    expect(credential.token).toBe(canary);
+    expect(credential.permissions).toEqual({ metadata: "read", issues: "write" });
     expect(scrub({ authorization: `Bearer ${canary}`, token: canary }, [canary])).not.toContain(
       canary,
     );
+
+    let revokedAuthorization = "";
+    await revokeInstallationToken(canary, async (_url, options) => {
+      revokedAuthorization = new Headers(options?.headers).get("authorization") ?? "";
+      return new Response(null, { status: 204 });
+    });
+    expect(revokedAuthorization).toBe(`Bearer ${canary}`);
+  });
+
+  it("rejects API redirection and verifies exact App permissions and repository scope", async () => {
+    const env = envFixture();
+    env.GITHUB_API_URL = "https://attacker.example";
+    expect(() => validateEnvironment(env)).toThrow("https://api.github.com");
+
+    const base = await fakeServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          total_count: 1,
+          repositories: [{ full_name: "sandbox-owner/sandbox-repo" }],
+        }),
+      );
+    });
+    await expect(
+      verifyInstallationScope(
+        {
+          token: "token",
+          permissions: { metadata: "read", issues: "write" },
+          repositorySelection: "selected",
+        },
+        { owner: "sandbox-owner", repo: "sandbox-repo", apiBase: base },
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      verifyInstallationScope(
+        {
+          token: "token",
+          permissions: { metadata: "read", issues: "write", contents: "read" },
+          repositorySelection: "selected",
+        },
+        { owner: "sandbox-owner", repo: "sandbox-repo", apiBase: base },
+      ),
+    ).rejects.toThrow("permissions");
   });
 
   it("finds a marker across bounded pagination and reports a bounded miss", async () => {
@@ -239,6 +292,20 @@ describe("provider authority sandbox operator primitives", () => {
     });
     expect(miss.outcome).toBe("definitive_miss");
     expect(miss.requests).toBe(2);
+
+    const truncated = await reconcileGithubMarker({
+      owner: "o",
+      repo: "r",
+      pullNumber: 1,
+      marker: "absent",
+      token: "secret",
+      maxAttempts: 1,
+      maxPages: 1,
+      fetchImpl: async () =>
+        Response.json(Array.from({ length: 100 }, (_, id) => ({ id, body: "other" }))),
+    });
+    expect(truncated.outcome).toBe("indeterminate");
+    expect(truncated.classification.classification).toBe("pagination_bound_exhausted");
   });
 
   it("classifies 403/429 and caps Retry-After", async () => {
@@ -247,6 +314,20 @@ describe("provider authority sandbox operator primitives", () => {
     );
     expect(classifyGithubResponse(403).classification).toBe("request_failure");
     expect(classifyGithubResponse(429).boundedFailure).toBe(true);
+    expect(
+      isLiveRateLimitObservation({
+        status: 403,
+        classification: "request_failure",
+        retryAfter: null,
+      }),
+    ).toBe(false);
+    expect(
+      isLiveRateLimitObservation({
+        status: 429,
+        classification: "rate_limited",
+        retryAfter: "1",
+      }),
+    ).toBe(true);
     expect(parseRetryAfter("99", 1500)).toBe(1500);
     const waits: number[] = [];
     const result = await reconcileGithubMarker({

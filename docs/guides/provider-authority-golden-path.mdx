@@ -100,8 +100,12 @@ execute over the public API, then starts an isolated local worker that imports
 `dispatchGovernedExecution`. There is intentionally no public dispatch route.
 
 The write operation (`github.pr.comment.create`) is **not** natively idempotent
-at GitHub. The harness pauses the isolated worker after the upstream response,
-kills it to model the crash window, and proves a fresh worker cannot re-post.
+at GitHub. The harness first rotates the sandbox secret after mint to prove stale
+credentials fail before provider I/O. It then races eight isolated workers,
+pauses the single upstream winner after the response, kills it to model the
+crash window, and proves a fresh worker cannot re-post. Every minted GitHub
+installation token is explicitly revoked after reconciliation (with GitHub's
+short expiry as the failure-path backstop).
 Because Steward has no live reconciliation service, the harness then performs a
 bounded, paginated, read-only GitHub marker lookup and records that distinction
 in `provider-reconciliation.json`. A missing marker is a Gate D STOP, not a
