@@ -5071,7 +5071,19 @@ user.post("/me/wallet/sign", async (c) => {
       403,
     );
   }
-  const signRequest: SignRequest = { ...signBody, tenantId, agentId, chainId };
+  // Build the SignRequest from its declared fields only (never spread the raw
+  // body): extra body fields must not reach the policy engine or the vault —
+  // e.g. a smuggled `destination` previously shadowed `to` in the
+  // approved-addresses evaluator while the vault signed `to` (SEC-001).
+  const signRequest: SignRequest = {
+    tenantId,
+    agentId,
+    to: signBody.to,
+    value: signBody.value,
+    data: typeof signBody.data === "string" ? signBody.data : undefined,
+    chainId,
+    broadcast: shouldBroadcast,
+  };
 
   // Fetch active policies
   const db = getDb();

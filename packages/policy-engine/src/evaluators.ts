@@ -540,20 +540,12 @@ function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): Pol
 }
 
 function getApprovedAddressTarget(request: SignRequest): string | undefined {
-  const withdrawalRequest = request as SignRequest & {
-    destination?: unknown;
-    action?: { destination?: unknown };
-    withdraw?: { destination?: unknown };
-  };
-
-  if (typeof withdrawalRequest.destination === "string") return withdrawalRequest.destination;
-  if (typeof withdrawalRequest.action?.destination === "string") {
-    return withdrawalRequest.action.destination;
-  }
-  if (typeof withdrawalRequest.withdraw?.destination === "string") {
-    return withdrawalRequest.withdraw.destination;
-  }
-
+  // ONLY `request.to` is authoritative: it is the address the vault actually
+  // signs for. Envelope shadow fields (`destination`, `action.destination`,
+  // `withdraw.destination`) were once honored for a server-built withdraw flow
+  // that now passes `to` explicitly — keeping them lets a caller smuggle a
+  // whitelisted `destination` past the whitelist while signing to an arbitrary
+  // `to` (SEC-001).
   return request.to;
 }
 

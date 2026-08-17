@@ -860,26 +860,30 @@ describe("Approved Addresses Policy", () => {
     expect(result.passed).toBe(true);
   });
 
-  it("passes withdrawal when destination is approved", async () => {
-    const destination = "0xfeed00000000000000000000000000000000beef";
+  it("ignores a smuggled destination field — request.to is authoritative (SEC-001)", async () => {
+    const whitelisted = "0xfeed00000000000000000000000000000000beef";
     const rule = makeAddressRule({
-      addresses: [destination],
+      addresses: [whitelisted],
       mode: "whitelist",
     });
 
+    // { to: <attacker>, destination: <whitelisted> } must NOT pass: the engine
+    // evaluates only the address actually signed (`to`), never envelope shadow
+    // fields.
     const ctx = makeContext({
       request: {
         ...makeContext().request,
         to: "0x0000000000000000000000000000000000000000",
-        destination,
+        destination: whitelisted,
       } as SignRequest & { destination: string },
     });
     const result = await evaluatePolicy(rule, ctx);
 
-    expect(result.passed).toBe(true);
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("not in whitelist");
   });
 
-  it("rejects withdrawal when destination is not approved", async () => {
+  it("passes when request.to is approved even if a shadow destination is not", async () => {
     const destination = "0xfeed00000000000000000000000000000000beef";
     const rule = makeAddressRule({
       addresses: ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
@@ -889,15 +893,19 @@ describe("Approved Addresses Policy", () => {
     const ctx = makeContext({
       request: {
         ...makeContext().request,
-        to: "0x0000000000000000000000000000000000000000",
+        to: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         destination,
-      } as SignRequest & { destination: string },
+        action: { destination },
+        withdraw: { destination },
+      } as SignRequest & {
+        destination: string;
+        action: { destination: string };
+        withdraw: { destination: string };
+      },
     });
     const result = await evaluatePolicy(rule, ctx);
 
-    expect(result.passed).toBe(false);
-    expect(result.reason).toContain("Destination address");
-    expect(result.reason).toContain("not in whitelist");
+    expect(result.passed).toBe(true);
   });
 });
 
