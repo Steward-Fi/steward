@@ -8,6 +8,8 @@
  *
  * contribution points demonstrated:
  *   1. route       - `register(app, ctx)` mounts GET /example/ping -> { ok: true }.
+ *                      (deliberately UNAUTHENTICATED hello-world — SEC-173; do
+ *                      not copy the ungated pattern for real routes.)
  *   2. policy rule - a custom "example-business-hours" rule the engine evaluates.
  *   3. webhook     - declares the "example.pinged" event type.
  *   4. migration   - points at this package's own drizzle folder (one CREATE TABLE).
@@ -77,6 +79,12 @@ export const examplePlugin: StewardApiPlugin = {
   //    than to prove the seam works. real plugins gate routes with ctx auth
   //    middleware (ctx.requireAgentJwt / ctx.operatorAuth / ctx.tenantAuth).
   register(app: StewardApp, _ctx: StewardAppContext): void {
+    // SECURITY (SEC-173): this route is deliberately UNAUTHENTICATED so the
+    // hello-world stays dependency-free — its payload is a constant and
+    // touches nothing. DO NOT copy this pattern: any route that reads or
+    // mutates real state MUST be mounted behind ctx auth middleware
+    // (ctx.operatorAuth / ctx.tenantAuth / ctx.requireAgentJwt). If you enable
+    // this plugin in a deployment, treat /example/ping as public.
     app.get("/example/ping", (c) => c.json({ ok: true }));
   },
 

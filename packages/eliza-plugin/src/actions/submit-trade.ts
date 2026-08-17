@@ -9,6 +9,7 @@ import type {
   Memory,
   State,
 } from "@elizaos/core";
+import { assertSecureApiUrl } from "../services/StewardService.js";
 
 const ACTION_NAME = "SUBMIT_TRADE";
 const DEFAULT_LEVERAGE = 1;
@@ -75,7 +76,11 @@ function stewardJwt(runtime: IAgentRuntime): string | undefined {
 }
 
 function stewardApiUrl(runtime: IAgentRuntime): string | undefined {
-  return envValue(runtime, "STEWARD_API_URL")?.replace(/\/+$/, "");
+  const apiUrl = envValue(runtime, "STEWARD_API_URL")?.replace(/\/+$/, "");
+  // Reject plaintext non-localhost URLs here too: this action reads the env URL
+  // directly and would otherwise send the agent JWT in cleartext.
+  if (apiUrl) assertSecureApiUrl(apiUrl);
+  return apiUrl;
 }
 
 function configuredSessionId(runtime: IAgentRuntime): string | undefined {
@@ -244,7 +249,12 @@ async function postOrder(
 }
 
 async function hasActiveSession(runtime: IAgentRuntime): Promise<boolean> {
-  const apiUrl = stewardApiUrl(runtime);
+  let apiUrl: string | undefined;
+  try {
+    apiUrl = stewardApiUrl(runtime);
+  } catch {
+    return false;
+  }
   const jwt = stewardJwt(runtime);
   const sessionId = configuredSessionId(runtime);
   if (!apiUrl || !jwt || !sessionId) return false;
@@ -398,7 +408,7 @@ export const submitTradeAction: Action = {
       data = result.data;
     } catch (err) {
       const text =
-        err instanceof Error && /STEWARD_API_URL|STEWARD_JWT/.test(err.message)
+        err instanceof Error && /STEWARD_API_URL|STEWARD_JWT|apiUrl/.test(err.message)
           ? "Trading is unavailable because Steward JWT/API env is not configured."
           : "venue error, will retry later";
       await callback?.({ text, action: ACTION_NAME }, ACTION_NAME);

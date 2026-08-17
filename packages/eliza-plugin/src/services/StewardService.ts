@@ -386,6 +386,11 @@ export class StewardService extends Service {
     }
     assertSecureApiUrl(config.proxyUrl);
 
+    // StewardProxyClient signs whenever a signing secret is supplied; the
+    // regression suite pins that invariant even when explicit enforcement is
+    // off. This flag controls the separate fail-closed rule for deployments
+    // where a secret is mandatory but absent. Unsigned operation is reserved
+    // for local dev where no secret exists and enforcement is off.
     const signingRequired =
       process.env.NODE_ENV === "production" ||
       process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE === "true";

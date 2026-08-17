@@ -48,8 +48,9 @@ export interface RegistrationResult {
   payload: AgentRegistrationPayload;
   /**
    * True only when the registration was confirmed against a real, configured
-   * on-chain registry. Callers MUST NOT treat the result as authoritative when
-   * this is false.
+   * on-chain registry — via the single configured `rpcUrl`, whose operator is
+   * trusted absolutely (see SEC-112 note on RegistryConfig.rpcUrl). Callers
+   * MUST NOT treat the result as authoritative when this is false.
    */
   verified: boolean;
 }
@@ -58,7 +59,9 @@ export interface RegistrationResult {
  * Aggregated reputation for a registered agent.
  *
  * `verified` is true only when the score was read from a real, configured
- * on-chain reputation registry. When false, the numeric `score*` fields are
+ * on-chain reputation registry — via the single configured `rpcUrl`, whose
+ * operator is trusted absolutely (see SEC-112 note on RegistryConfig.rpcUrl).
+ * When false, the numeric `score*` fields are
  * absent (undefined) — they must never be presented as authoritative on-chain
  * data and must not be displayed as a real "score of 0".
  */
@@ -87,6 +90,13 @@ export interface FeedbackSignal {
 export interface RegistryConfig {
   chainId: number;
   name: string;
+  /**
+   * Single RPC endpoint ALL "verified" chain reads trust. Whatever this one
+   * endpoint returns is what `verified: true` attests to — there is no quorum
+   * or second-source check. Point it at operator-controlled (ideally
+   * redundant) infrastructure in production; the public defaults in
+   * REGISTRY_CONFIGS are dev/testnet conveniences only.
+   */
   rpcUrl: string;
   /** Backward-compatible alias for identityRegistry. */
   registryAddress: Address;
