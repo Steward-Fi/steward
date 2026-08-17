@@ -448,7 +448,7 @@ function authRateLimitOutageAllow(endpoint: string, err?: unknown): boolean {
  * @param max      - Max requests in the window (×5 for coarse fallback subjects)
  * @param subjectOverride - Per-target subject (e.g. destination email); hashed at key build
  */
-async function checkAuthRateLimit(
+export async function checkAuthRateLimit(
   c: Context,
   endpoint: string,
   windowMs: number,
@@ -1283,6 +1283,13 @@ function getChallengeStore(): ChallengeStore {
   _challengeStore ??= new ChallengeStore();
   return _challengeStore;
 }
+
+/**
+ * Exported for the public agent-enroll routes: enrollment challenges must
+ * share this initialized (Redis/Postgres in production) store instead of the
+ * auth package's process-local memory singleton (SEC-052).
+ */
+export { getChallengeStore as getAuthChallengeStore };
 
 function getOAuthCodeStore(): ChallengeStore {
   _oauthCodeStore ??= new ChallengeStore({ ttlMs: OAUTH_CODE_TTL_MS });

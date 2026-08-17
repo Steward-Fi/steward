@@ -47,6 +47,11 @@ export const AGENT_ENROLL_DOMAIN = "steward:agent-enroll:v1";
  * immediately at boot; a stale challenge is worthless. */
 export const AGENT_ENROLL_CHALLENGE_TTL_MS = 2 * 60 * 1000;
 
+/** Agent-id shape accepted by the enrollment core (matches the API's
+ * isValidAgentId / agents schema charset). The id is embedded in challenge
+ * store keys, so the length cap bounds per-challenge memory (SEC-051). */
+export const AGENT_ENROLL_AGENT_ID_RE = /^[a-zA-Z0-9_\-.:]{1,128}$/;
+
 /** Key namespace inside the ChallengeStore so agent-enroll nonces never collide
  * with WebAuthn challenges sharing the same backend. */
 function challengeKey(agentId: string, nonce: string): string {
@@ -97,6 +102,9 @@ export async function issueEnrollChallenge(
 ): Promise<IssueChallengeResult> {
   const trimmed = typeof agentId === "string" ? agentId.trim() : "";
   if (!trimmed) return { ok: false, error: "agentId required" };
+  if (!AGENT_ENROLL_AGENT_ID_RE.test(trimmed)) {
+    return { ok: false, error: "invalid agentId" };
+  }
   const now = opts.now ?? Date.now();
   const ttlMs = opts.ttlMs ?? AGENT_ENROLL_CHALLENGE_TTL_MS;
   const nonce = randomUUID();
@@ -185,6 +193,9 @@ export async function verifyEnrollResponse(
   const signature = typeof input.signature === "string" ? input.signature.trim() : "";
   if (!agentId || !nonce || !signature) {
     return { ok: false, error: "agentId, nonce and signature required", code: "invalid_input" };
+  }
+  if (!AGENT_ENROLL_AGENT_ID_RE.test(agentId)) {
+    return { ok: false, error: "invalid agentId", code: "invalid_input" };
   }
 
   const now = input.now ?? Date.now();
