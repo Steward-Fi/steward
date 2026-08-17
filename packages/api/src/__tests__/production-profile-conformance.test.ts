@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import type { GithubOperationKey } from "@stwd/provider-github";
+import type { XOperationKey } from "@stwd/provider-x";
 import {
   CanonError,
   GENERIC_GOLDEN_DESCRIPTOR_A,
@@ -50,18 +52,64 @@ const FIXTURES = {
   },
 } as const;
 
+const OPERATION_FIXTURES = {
+  [GITHUB_PROVIDER_ACTION_PROFILE]: [
+    {
+      operationKey: "github.issue.list",
+      args: { owner: "octo", repo: "hello", state: "open", perPage: 30 },
+    },
+    {
+      operationKey: "github.pr.comment.create",
+      args: { owner: "octo", repo: "hello", pullNumber: 42, body: "looks good" },
+    },
+  ],
+  [X_PROVIDER_ACTION_PROFILE]: [
+    {
+      operationKey: "x.tweet.create",
+      args: { text: "hello world", summoned: false },
+    },
+    {
+      operationKey: "x.tweet.delete",
+      args: { tweetId: "1234567890" },
+    },
+    {
+      operationKey: "x.user.me.read",
+      args: {},
+    },
+  ],
+  [GENERIC_HTTP_PROVIDER_ACTION_PROFILE]: [
+    {
+      operationKey: "generic.items.list",
+      method: "GET",
+      args: {
+        org: "octo",
+        projectId: "123e4567-e89b-42d3-a456-426614174000",
+        state: "open",
+        perPage: 30,
+      },
+    },
+  ],
+} as const;
+
+type OperationFixture = (typeof OPERATION_FIXTURES)[keyof typeof OPERATION_FIXTURES][number];
+
 function buildFromProductionSpec(
   spec: ProductionProviderProfileSpec,
   args: Record<string, unknown>,
+  fixture: OperationFixture = FIXTURES[spec.profile],
 ) {
-  const fixture = FIXTURES[spec.profile];
   switch (spec.profile) {
     case GITHUB_PROVIDER_ACTION_PROFILE:
-      return spec.build(fixture.operationKey, args);
+      return spec.build(fixture.operationKey as GithubOperationKey, args);
     case X_PROVIDER_ACTION_PROFILE:
-      return spec.build(fixture.operationKey, args);
+      return spec.build(fixture.operationKey as XOperationKey, args);
     case GENERIC_HTTP_PROVIDER_ACTION_PROFILE:
-      return spec.build(fixture.operationKey, args, fixture.method, GENERIC_DESCRIPTOR);
+      return spec.build(
+        fixture.operationKey,
+        args,
+        "method" in fixture ? fixture.method : undefined,
+        GENERIC_DESCRIPTOR,
+      );
   }
 }
 
@@ -85,31 +133,39 @@ describe("#220 executable provider profile conformance", () => {
   });
 
   for (const spec of PRODUCTION_PROVIDER_PROFILE_SPECS) {
-    it(`${spec.profile}: production builder is deterministic and credential-noninterfering`, () => {
-      const fixture = FIXTURES[spec.profile];
-      const first = buildFromProductionSpec(spec, { ...fixture.args });
-      const reordered = buildFromProductionSpec(
-        spec,
-        Object.fromEntries(Object.entries(fixture.args).reverse()),
-      );
-      expect(jcsStringify(first.action)).toBe(jcsStringify(reordered.action));
-      expect(inspectProviderProfileConformance(spec.profile, first.action)).toEqual([]);
-
+    it(`${spec.profile}: every production operation is deterministic and credential-noninterfering`, () => {
+      const fixtures = OPERATION_FIXTURES[spec.profile];
+      if (spec.kind === "adapter-fixed") {
+        expect(fixtures.map((fixture) => fixture.operationKey).sort()).toEqual(
+          [...spec.operationKeys].sort(),
+        );
+      }
       const canaries = {
         authorization: "profile-auth-canary",
         apiKey: "profile-api-key-canary",
         password: "profile-password-canary",
         privateKeyPem: "profile-private-key-canary",
       };
-      for (const [key, value] of Object.entries(canaries)) {
-        const codeA = thrownCode(() =>
-          buildFromProductionSpec(spec, { ...fixture.args, [key]: value }),
+      for (const fixture of fixtures) {
+        const first = buildFromProductionSpec(spec, { ...fixture.args }, fixture);
+        const reordered = buildFromProductionSpec(
+          spec,
+          Object.fromEntries(Object.entries(fixture.args).reverse()),
+          fixture,
         );
-        const codeB = thrownCode(() =>
-          buildFromProductionSpec(spec, { ...fixture.args, [key]: value }),
-        );
-        expect(codeA).toBe("CANON_UNKNOWN_FIELD");
-        expect(codeB).toBe(codeA);
+        expect(jcsStringify(first.action)).toBe(jcsStringify(reordered.action));
+        expect(inspectProviderProfileConformance(spec.profile, first.action)).toEqual([]);
+
+        for (const [key, value] of Object.entries(canaries)) {
+          const codeA = thrownCode(() =>
+            buildFromProductionSpec(spec, { ...fixture.args, [key]: value }, fixture),
+          );
+          const codeB = thrownCode(() =>
+            buildFromProductionSpec(spec, { ...fixture.args, [key]: value }, fixture),
+          );
+          expect(codeA).toBe("CANON_UNKNOWN_FIELD");
+          expect(codeB).toBe(codeA);
+        }
       }
     });
 

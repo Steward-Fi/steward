@@ -88,6 +88,9 @@ const SPEC_BY_PROFILE: ReadonlyMap<string, ProductionProviderProfileSpec> = new 
 );
 
 // Fail at module load if the metadata registry and executable registry drift.
+if (SPEC_BY_PROFILE.size !== PRODUCTION_PROVIDER_PROFILE_SPECS.length) {
+  throw new Error("duplicate executable provider profile");
+}
 const productionProfiles = [...SPEC_BY_PROFILE.keys()].sort();
 const registeredProfiles = [...REGISTERED_PROFILES].sort();
 if (JSON.stringify(productionProfiles) !== JSON.stringify(registeredProfiles)) {
@@ -97,6 +100,18 @@ for (const spec of PRODUCTION_PROVIDER_PROFILE_SPECS) {
   const descriptor = getProfileDescriptor(spec.profile);
   if (!descriptor || descriptor.kind !== spec.kind) {
     throw new Error(`provider profile kind drift for '${spec.profile}'`);
+  }
+}
+const operationOwners = new Map<string, string>();
+for (const spec of PRODUCTION_PROVIDER_PROFILE_SPECS) {
+  for (const operationKey of spec.operationKeys) {
+    const existingOwner = operationOwners.get(operationKey);
+    if (existingOwner) {
+      throw new Error(
+        `provider operation '${operationKey}' is owned by both '${existingOwner}' and '${spec.profile}'`,
+      );
+    }
+    operationOwners.set(operationKey, spec.profile);
   }
 }
 
