@@ -154,6 +154,19 @@ function isSlackBotTokenCredential(value: string): boolean {
   return suffix.length >= 10 && !/[^A-Za-z0-9-]/.test(suffix);
 }
 
+export function extractProviderCredentialForHost(host: string, credential: string): string {
+  if (host !== "gmail.googleapis.com" && host !== "www.googleapis.com") return credential;
+  const parsed = safeJsonParseString<Record<string, unknown>>(credential);
+  if (
+    parsed?.schemaVersion !== "steward.provider-google.credential.v1" ||
+    typeof parsed.accessToken !== "string" ||
+    parsed.accessToken.length < 1 ||
+    parsed.accessToken.length > 16_384
+  )
+    throw new Error("invalid Google OAuth credential envelope");
+  return parsed.accessToken;
+}
+
 // ─── Credential injection ────────────────────────────────────────────────────
 
 /**
@@ -1735,6 +1748,9 @@ export async function handleProxy(c: Context): Promise<Response> {
   let credential: string;
   try {
     credential = await decryptSecret(tenantId, route.secretId);
+    // Only Google's short-lived access token crosses the provider boundary.
+    // Its refresh token remains server-side inside the encrypted envelope.
+    credential = extractProviderCredentialForHost(target.host, credential);
   } catch (err) {
     console.error(`[proxy] Failed to decrypt secret ${route.secretId}:`, err);
     await recordAudit({

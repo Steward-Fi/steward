@@ -1,0 +1,11 @@
+{
+  "name": "@stwd/provider-google",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": { "build": "tsc --noEmit", "test": "bun test" },
+  "dependencies": { "@stwd/shared": "workspace:*" },
+  "devDependencies": { "@types/bun": "^1.3.8", "typescript": "^5.9.3" }
+}

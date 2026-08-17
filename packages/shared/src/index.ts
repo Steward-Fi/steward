@@ -42,6 +42,7 @@ export * from "./types/venue.js";
 export { WebhookEventRegistry } from "./webhook-event-registry.js";
 export * from "./x-provider-action.js";
 export * from "./x-summon-attestation.js";
+export * from "./google-provider-action.js";
 
 // ─── Tenancy ───
 

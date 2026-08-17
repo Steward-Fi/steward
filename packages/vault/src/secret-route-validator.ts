@@ -30,6 +30,8 @@ export const DEFAULT_SECRET_ROUTE_HOSTS = [
   "api.github.com",
   "api.x.com",
   "slack.com",
+  "gmail.googleapis.com",
+  "www.googleapis.com",
 ] as const;
 
 /**
@@ -112,6 +114,16 @@ export const STRICT_HOSTS: Record<
   },
   "slack.com": {
     minPathSegments: 2,
+    requireExplicitMethod: true,
+    disallowPathWildcards: true,
+  },
+  "gmail.googleapis.com": {
+    minPathSegments: 5,
+    requireExplicitMethod: true,
+    disallowPathWildcards: true,
+  },
+  "www.googleapis.com": {
+    minPathSegments: 5,
     requireExplicitMethod: true,
     disallowPathWildcards: true,
   },

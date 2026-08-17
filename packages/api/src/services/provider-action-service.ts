@@ -61,6 +61,11 @@ import {
   type SlackActionBuild,
   type SlackOperationKey,
 } from "@stwd/provider-slack";
+import {
+  buildGoogleAction,
+  type GoogleActionBuild,
+  type GoogleOperationKey,
+} from "@stwd/provider-google";
 import { buildXAction, type XActionBuild, type XOperationKey } from "@stwd/provider-x";
 import {
   assertRegisteredProfile,
@@ -101,8 +106,9 @@ import {
  */
 export type ConcreteProviderActionBuild =
   | GithubActionBuild
-  | XActionBuild
   | SlackActionBuild
+  | GoogleActionBuild
+  | XActionBuild
   | GenericHttpActionBuild;
 
 /**
@@ -123,6 +129,7 @@ export type ProviderActionBuild = ConcreteProviderActionBuild | DeferredGenericB
 /** The structurally-shared canonical action shape every adapter emits. */
 type AnyCanonicalActionV1 =
   | GithubCanonicalActionV1
+  | GoogleActionBuild["action"]
   | XCanonicalActionV1
   | SlackCanonicalActionV1
   | GenericHttpCanonicalActionV1;
@@ -593,6 +600,47 @@ function rebuildApprovedAction(
       (pair) => Array.isArray(pair) && pair.length === 2 && pair[0] === "user",
     )?.[1];
     return buildSlackAction(operationKey as SlackOperationKey, { user });
+  }
+  if (operationKey === "google.gmail.messages.send") {
+    const raw = typeof body?.raw === "string" ? body.raw : "";
+    const padded = raw.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(raw.length / 4) * 4, "=");
+    const message = Buffer.from(padded, "base64").toString("utf8");
+    const match = /^To: ([^\r\n]+)\r\nSubject: ([^\r\n]+)\r\nContent-Type: text\/plain; charset=utf-8\r\nMIME-Version: 1\.0\r\n\r\n([\s\S]+)$/.exec(
+      message,
+    );
+    return buildGoogleAction(operationKey as GoogleOperationKey, {
+      to: match?.[1]?.split(", "),
+      subject: match?.[2],
+      body: match?.[3],
+    });
+  }
+  if (operationKey === "google.calendar.events.list") {
+    const query = Array.isArray(action.orderedQueryPairs) ? action.orderedQueryPairs : [];
+    const q = new Map<string, unknown>();
+    for (const pair of query) {
+      if (Array.isArray(pair) && pair.length === 2 && typeof pair[0] === "string") {
+        q.set(pair[0], pair[1]);
+      }
+    }
+    return buildGoogleAction(operationKey as GoogleOperationKey, {
+      ...(q.has("timeMin") ? { timeMin: q.get("timeMin") } : {}),
+      ...(q.has("timeMax") ? { timeMax: q.get("timeMax") } : {}),
+      ...(q.has("maxResults") ? { maxResults: Number(q.get("maxResults")) } : {}),
+      ...(q.has("pageToken") ? { pageToken: q.get("pageToken") } : {}),
+    });
+  }
+  if (operationKey === "google.calendar.events.insert") {
+    const start = body?.start === undefined ? undefined : asRecord(body.start);
+    const end = body?.end === undefined ? undefined : asRecord(body.end);
+    const attendees = Array.isArray(body?.attendees)
+      ? body.attendees.map((attendee) => asRecord(attendee).email)
+      : undefined;
+    return buildGoogleAction(operationKey as GoogleOperationKey, {
+      summary: body?.summary,
+      start: start?.dateTime,
+      end: end?.dateTime,
+      ...(attendees !== undefined ? { attendees } : {}),
+    });
   }
   throw new Error(`unsupported provider operation '${operationKey}'`);
 }
