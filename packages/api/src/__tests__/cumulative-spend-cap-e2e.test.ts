@@ -38,6 +38,7 @@ import {
 import {
   agents,
   approvalQueue,
+  auditEvents,
   closeDb,
   getDb,
   intents,
@@ -66,7 +67,7 @@ import {
   getRedis,
   reserveCumulativeSpend,
 } from "@stwd/redis";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import {
   __setReservationReconciliationFaultForTests,
@@ -629,11 +630,24 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
       .where(eq(providerActionBindings.intentId, queued.intentId));
     expect(binding.status).toBe("approved");
     expect(binding.executionPolicyDecision).toBeNull();
+    // Resume denials are written by withTenantAuditedTransaction directly to
+    // the canonical HMAC-chained audit log. The provider-action outbox is used
+    // by the initial decision path and is not the resume audit sink.
     const events = await getDb()
       .select()
-      .from(providerActionAuditOutbox)
-      .where(eq(providerActionAuditOutbox.intentId, queued.intentId));
-    expect(events.some((event) => event.action === "provider.budget.exhausted")).toBe(true);
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, CS.TENANT),
+          eq(auditEvents.resourceId, queued.intentId),
+          eq(auditEvents.action, "provider.budget.exhausted"),
+        ),
+      );
+    expect(events).toHaveLength(1);
+    expect(events[0]?.metadata).toMatchObject({
+      intentId: queued.intentId,
+      reasonCode: "PROVIDER_AGENT_BUDGET_EXHAUSTED",
+    });
   });
 
   test("#240 crash after terminal commit: C2 settles persisted handles exactly once under a worker race", async () => {
