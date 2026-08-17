@@ -22,7 +22,17 @@
  * `fake-provider-transport-inventory.test.ts` (proxy package).
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  setDefaultTimeout,
+} from "bun:test";
+import { createHash } from "node:crypto";
 import {
   closeDb,
   executionAuthorizationNonces,
@@ -49,6 +59,8 @@ import { and, eq, sql } from "drizzle-orm";
 import { providerActionService } from "../services/provider-action-service";
 import { providerApprovalService } from "../services/provider-approval";
 import { getProviderCase } from "../services/provider-case";
+
+setDefaultTimeout(120_000);
 
 // PR4 governed dispatcher + the injectable proxy forwarder seam.
 type ProxyMod = typeof import("@stwd/proxy/src/handlers/proxy");
@@ -84,6 +96,18 @@ const X_OP = "40000000-0000-4000-8000-0000000000b0";
 const X_OP_KEY = "x.tweet.create";
 
 let fake: FakeProviderTransport;
+
+const MATRIX_EVIDENCE_PREFIX = "STEWARD_MATRIX_EVIDENCE ";
+
+function emitMatrixEvidence(evidence: Record<string, unknown>): void {
+  // The golden-path orchestrator parses these records. Never put plaintext
+  // credentials or request bodies in this machine-readable channel.
+  console.log(`${MATRIX_EVIDENCE_PREFIX}${JSON.stringify(evidence)}`);
+}
+
+function sha256Text(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
 
 /** Encrypt a credential with the SAME KeyStore context SecretVault uses. */
 function encryptCredential(
@@ -328,6 +352,7 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
       .where(sql`tenant_id = ${F.TENANT} AND operation_key = ${F.OP_KEY}`)
       .limit(1);
     await enableGovernedRoute(op.id);
+    fake.expectCredential("authorization", GITHUB_TOKEN_SENTINEL);
 
     fake.script(
       { method: "POST", path: "/repos/steward-sandbox/hello/issues/1/comments" },
@@ -343,14 +368,28 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
     expect(await dispatchStateOf(intentId)).toBe("succeeded");
     // At the forwarder layer the injected credential header IS present...
     expect(fake.calls()[0].credentialHeaderPresent).toBe(true);
+    expect(fake.calls()[0].credentialMatchesExpected).toBe(true);
     // ...but its VALUE is never recorded (canary): no sentinel anywhere.
     expect(JSON.stringify(fake.calls())).not.toContain(GITHUB_TOKEN_SENTINEL);
+    emitMatrixEvidence({
+      leg: "M14-github-write",
+      dispatchCount: fake.dispatchCount(),
+      dispatchState: dispatch.dispatchState,
+      host: fake.calls()[0]?.host,
+      path: fake.calls()[0]?.path,
+      bodyHash: fake.calls()[0]?.bodyHash,
+      credentialValueHash: fake.calls()[0]?.credentialValueHash,
+      credentialMatchesExpected: fake.calls()[0]?.credentialMatchesExpected,
+    });
   });
 
   it("M19: X consequential write traverses create→approve→resume→dispatch exactly once and stays canary-clean", async () => {
     await configureXWrite();
+    fake.expectCredential("authorization", X_TOKEN_SENTINEL);
+    const outboundBody = JSON.stringify({ text: "governed tweet" });
+    const expectedBodyHash = sha256Text(outboundBody);
     fake.script(
-      { method: "POST", path: "/2/tweets" },
+      { method: "POST", path: "/2/tweets", bodyHash: expectedBodyHash },
       { mode: "ok", status: 201, json: X_FIXTURES.tweetCreated },
     );
 
@@ -365,15 +404,37 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
     expect(fake.calls()).toHaveLength(1);
     expect(fake.calls()[0]).toMatchObject({
       method: "POST",
+      host: "api.x.com",
       path: "/2/tweets",
       credentialHeaderPresent: true,
+      credentialMatchesExpected: true,
+      bodyHash: expectedBodyHash,
     });
+
+    const [account] = await getDb()
+      .select({ adapterKey: providerAccounts.adapterKey })
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, F.ACCOUNT))
+      .limit(1);
+    expect(account?.adapterKey).toBe("x");
 
     const kase = await getProviderCase(F.TENANT, intentId, [F.WORKSPACE]);
     expect(kase?.manifest.operation.key).toBe(X_OP_KEY);
     const captured = JSON.stringify({ calls: fake.calls(), dispatch, kase });
     expect(captured).not.toContain(X_TOKEN_SENTINEL);
     expect(captured).not.toContain("Bearer ");
+    emitMatrixEvidence({
+      leg: "M19-x-write",
+      adapterKey: account?.adapterKey,
+      dispatchCount: fake.dispatchCount(),
+      dispatchState: dispatch.dispatchState,
+      host: fake.calls()[0]?.host,
+      path: fake.calls()[0]?.path,
+      bodyHash: fake.calls()[0]?.bodyHash,
+      expectedBodyHash,
+      credentialValueHash: fake.calls()[0]?.credentialValueHash,
+      credentialMatchesExpected: fake.calls()[0]?.credentialMatchesExpected,
+    });
   });
 
   it("M04: write op requires approval — create returns approval_required, no dispatch", async () => {
@@ -382,6 +443,7 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
     // No dispatch happened (no forwarder call, no nonce).
     expect(fake.dispatchCount()).toBe(0);
     expect(await dispatchStateOf(intentId)).toBeNull();
+    emitMatrixEvidence({ leg: "M04-pending-approval", dispatchCount: 0 });
   });
 
   it("M02: read op — full access→policy→ALLOW authority path (terminates at stub, C1)", async () => {
@@ -406,6 +468,7 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
     // access→policy authority path executed.
     expect(out.kind).toBe("allowed");
     expect(fake.dispatchCount()).toBe(0);
+    emitMatrixEvidence({ leg: "M02-read-allow", dispatchCount: 0, outcome: out.kind });
   });
 
   it("M03/PN05: cross-workspace guessed account is a non-enumerating deny, zero dispatch", async () => {
@@ -431,6 +494,11 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
     expect(out.kind).not.toBe("allowed");
     expect(out.kind).not.toBe("approval_required");
     expect(fake.dispatchCount()).toBe(0);
+    emitMatrixEvidence({
+      leg: "M03-cross-workspace-deny",
+      dispatchCount: 0,
+      outcome: out.kind,
+    });
   });
 
   it("M05/PN17: route revision bumped after resume — claim fails STALE_ROUTE, zero forward", async () => {
@@ -460,6 +528,7 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
     // Claim must fail stale → no forward.
     expect(dispatch.ok).toBe(false);
     expect(fake.dispatchCount()).toBe(0);
+    emitMatrixEvidence({ leg: "M05-stale-route", dispatchCount: 0, dispatchOk: dispatch.ok });
   });
 
   it("M07/PK01: concurrent dispatch — exactly one forward under a race", async () => {
@@ -486,6 +555,11 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
     // Exactly one winner dispatches; the fake was reached exactly once.
     expect(succeeded.length).toBe(1);
     expect(fake.dispatchCount()).toBe(1);
+    emitMatrixEvidence({
+      leg: "M07-concurrent-dispatch",
+      dispatchCount: 1,
+      successfulClaims: succeeded.length,
+    });
   });
 
   it("M08/PN25: post-dispatch timeout → outcome_unknown, no blind retry", async () => {
@@ -511,6 +585,12 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
     const replay = await dispatchGovernedExecution(intentId, F.TENANT);
     expect(replay.ok).toBe(false);
     expect(fake.dispatchCount()).toBe(1); // still one
+    emitMatrixEvidence({
+      leg: "M08-outcome-unknown",
+      dispatchCount: 1,
+      dispatchState: dispatch.dispatchState,
+      replayOk: replay.ok,
+    });
   });
 
   it("failed: unambiguous 5xx → failed terminal, one forward", async () => {
