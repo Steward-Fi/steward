@@ -26,6 +26,7 @@ export type StubMode =
   | "forbidden"
   | "invalid-signature"
   | "changed-cosigner"
+  | "injected-cosigner"
   | "missing-broadcast-proof"
   | "wrong-chain";
 
@@ -149,6 +150,9 @@ export function startStubSteward(kp: Keypair): StubSteward {
           }
           if (mode === "changed-cosigner" && tx.signatures[1]?.signature) {
             tx.signatures[1].signature[0] ^= 1;
+          }
+          if (mode === "injected-cosigner" && tx.signatures[1]) {
+            tx.signatures[1].signature = new Uint8Array(64).fill(1);
           }
           signed = new Uint8Array(
             tx.serialize({ requireAllSignatures: false, verifySignatures: false }),

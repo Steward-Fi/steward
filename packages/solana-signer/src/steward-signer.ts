@@ -177,10 +177,6 @@ function isVersioned(tx: Transaction | VersionedTransaction): tx is VersionedTra
   return "version" in tx;
 }
 
-function hasSignature(signature: Uint8Array | null): signature is Uint8Array {
-  return signature !== null && signature.some((byte) => byte !== 0);
-}
-
 function assertSameBytes(actual: Uint8Array, expected: Uint8Array, message: string): void {
   if (!Buffer.from(actual).equals(Buffer.from(expected))) {
     throw new StewardSignerError("api", message);
@@ -233,11 +229,11 @@ function validateSignedResponse(
     }
     for (let index = 0; index < submitted.signatures.length; index += 1) {
       const prior = submitted.signatures[index];
-      if (index !== signerIndex && hasSignature(prior)) {
+      if (index !== signerIndex) {
         assertSameBytes(
           returned.signatures[index] ?? new Uint8Array(),
           prior,
-          "Steward changed an existing co-signer signature",
+          "Steward changed a co-signer signature slot",
         );
       }
     }
@@ -270,12 +266,18 @@ function validateSignedResponse(
   }
   for (let index = 0; index < submittedLegacy.signatures.length; index += 1) {
     const prior = submittedLegacy.signatures[index]?.signature;
-    if (index !== signerIndex && hasSignature(prior)) {
+    if (index !== signerIndex) {
       const returnedSignature = returnedLegacy.signatures[index]?.signature;
-      if (!returnedSignature) {
-        throw new StewardSignerError("api", "Steward removed an existing co-signer signature");
+      if (prior === null || prior === undefined) {
+        if (returnedSignature !== null && returnedSignature !== undefined) {
+          throw new StewardSignerError("api", "Steward changed a co-signer signature slot");
+        }
+      } else {
+        if (!returnedSignature) {
+          throw new StewardSignerError("api", "Steward changed a co-signer signature slot");
+        }
+        assertSameBytes(returnedSignature, prior, "Steward changed a co-signer signature slot");
       }
-      assertSameBytes(returnedSignature, prior, "Steward changed an existing co-signer signature");
     }
   }
   const stewardSignature = returnedLegacy.signatures[signerIndex]?.signature;

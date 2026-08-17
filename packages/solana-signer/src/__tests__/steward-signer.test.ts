@@ -162,7 +162,21 @@ describe("signTransaction", () => {
     tx.partialSign(coSigner);
     stub.setMode("changed-cosigner");
 
-    await expect(signer.signTransaction(tx)).rejects.toThrow(/changed an existing co-signer/);
+    await expect(signer.signTransaction(tx)).rejects.toThrow(/changed a co-signer/);
+  });
+
+  it("rejects a response that injects a previously absent co-signer signature", async () => {
+    const signer = await newSigner();
+    const coSigner = Keypair.fromSeed(new Uint8Array(32).fill(6));
+    const tx = new Transaction().add(
+      SystemProgram.transfer({ fromPubkey: signer.publicKey, toPubkey: SINK, lamports: 1_000 }),
+      SystemProgram.transfer({ fromPubkey: coSigner.publicKey, toPubkey: SINK, lamports: 1 }),
+    );
+    tx.recentBlockhash = STUB_BLOCKHASH;
+    tx.feePayer = signer.publicKey;
+    stub.setMode("injected-cosigner");
+
+    await expect(signer.signTransaction(tx)).rejects.toThrow(/changed a co-signer/);
   });
 
   it("rejects a configured Steward address that is not a required signer", async () => {
