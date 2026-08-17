@@ -22,6 +22,7 @@ import {
   ensureTenant,
   type Harness,
   makeHarness,
+  type TestDb,
   totalRouteCount,
 } from "./_harness";
 
@@ -32,7 +33,7 @@ let tenantId: string;
 let secretId: string;
 
 /** a minimal injected context: the routes use db + safeJsonParse + writeAuditEvent. */
-function buildCtx(db: unknown): StewardAppContext {
+function buildCtx(db: TestDb): StewardAppContext {
   return {
     db,
     // note (any is intentional): unused-by-routes ctx members are stubbed.
@@ -60,6 +61,13 @@ function buildCtx(db: unknown): StewardAppContext {
     async writeAuditEvent() {
       /* no-op audit sink for tests */
     },
+    async withTenantAuditedTransaction(_tenantId, fn) {
+      return db.transaction((tx: unknown) =>
+        fn(tx, async () => {
+          /* no-op required audit append for route-behavior tests */
+        }),
+      );
+    },
     async getAgentTokenStatus() {
       return null;
     },
@@ -80,7 +88,7 @@ type AuthOpts = {
 };
 
 /** build an app whose test middleware stamps the auth variables per request. */
-function buildApp(db: unknown, auth: AuthOpts): Hono<{ Variables: AppVariables }> {
+function buildApp(db: TestDb, auth: AuthOpts): Hono<{ Variables: AppVariables }> {
   const app = new Hono<{ Variables: AppVariables }>();
   app.use("*", async (c, next) => {
     c.set("tenantId", tenantId);
@@ -96,7 +104,7 @@ function buildApp(db: unknown, auth: AuthOpts): Hono<{ Variables: AppVariables }
 }
 
 /** an authorized (owner + recent MFA) app. */
-function authedApp(db: unknown) {
+function authedApp(db: TestDb) {
   return buildApp(db, { authType: "session-jwt", role: "owner", mfa: true });
 }
 
