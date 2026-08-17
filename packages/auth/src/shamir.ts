@@ -13,14 +13,19 @@
  * layered above this module — Shamir itself just guarantees the math.
  *
  * Wire format per share: byte 0 = x-coordinate (1..255), bytes 1.. = y bytes
- * for each byte of the secret. Encoded as hex for transport. The threshold
- * is intentionally NOT in the share — callers must communicate it out of
- * band (or layer it on with a versioned envelope) so the share itself
- * doesn't leak the recovery policy.
+ * of the split payload. The payload is `version(1) || secret || checksum(4)`
+ * where checksum is the first 4 bytes of SHA-256(secret) — so combine can
+ * detect corrupted, mixed, or from-a-different-split shares instead of
+ * silently returning a wrong secret (SEC-142). Encoded as hex for transport.
+ * The threshold is intentionally NOT in the share — callers must communicate
+ * it out of band and pass it to combineShares so under-quorum input errors
+ * instead of interpolating garbage.
  *
  * GF(2^8) arithmetic uses the AES polynomial (0x11b). Exponent/log tables
  * are computed once at module load.
  */
+
+import { createHash } from "node:crypto";
 
 const PRIM = 0x11b; // x^8 + x^4 + x^3 + x + 1
 const EXP = new Uint8Array(512);
@@ -62,6 +67,18 @@ function evalPoly(coeffs: Uint8Array, x: number): number {
   return acc;
 }
 
+const SHARE_FORMAT_VERSION = 0x01;
+const SECRET_CHECKSUM_BYTES = 4;
+/** Generous cap — secrets here are keys, mnemonics, vault passwords. */
+const MAX_SECRET_BYTES = 4096;
+
+function secretChecksum(secret: Uint8Array): Uint8Array {
+  return new Uint8Array(createHash("sha256").update(secret).digest()).subarray(
+    0,
+    SECRET_CHECKSUM_BYTES,
+  );
+}
+
 export interface SplitOptions {
   /** Optional deterministic RNG for tests. MUST NOT be set in production. */
   random?: (n: number) => Uint8Array;
@@ -87,6 +104,9 @@ export function splitSecret(
   if (secret.length === 0) {
     throw new Error("secret must be non-empty");
   }
+  if (secret.length > MAX_SECRET_BYTES) {
+    throw new Error(`secret must be at most ${MAX_SECRET_BYTES} bytes`);
+  }
 
   const random =
     options.random ??
@@ -96,16 +116,23 @@ export function splitSecret(
       return buf;
     });
 
-  // Per-byte independent polynomial: constant term is the secret byte; the
+  // Split the envelope payload (version || secret || checksum), not the raw
+  // secret, so combineShares can detect bad input (SEC-142).
+  const payload = new Uint8Array(1 + secret.length + SECRET_CHECKSUM_BYTES);
+  payload[0] = SHARE_FORMAT_VERSION;
+  payload.set(secret, 1);
+  payload.set(secretChecksum(secret), 1 + secret.length);
+
+  // Per-byte independent polynomial: constant term is the payload byte; the
   // other (threshold-1) coefficients are uniform random in GF(2^8).
   const out: number[][] = [];
   for (let x = 1; x <= shares; x++) {
     out.push([x]);
   }
 
-  for (let i = 0; i < secret.length; i++) {
+  for (let i = 0; i < payload.length; i++) {
     const coeffs = new Uint8Array(threshold);
-    coeffs[0] = secret[i];
+    coeffs[0] = payload[i];
     const r = random(threshold - 1);
     for (let j = 1; j < threshold; j++) coeffs[j] = r[j - 1];
     for (let s = 0; s < shares; s++) {
@@ -116,8 +143,15 @@ export function splitSecret(
   return out.map((bytes) => bytes.map((b) => b.toString(16).padStart(2, "0")).join(""));
 }
 
+const MAX_SHARE_HEX_LENGTH = 2 * (1 + 1 + MAX_SECRET_BYTES + SECRET_CHECKSUM_BYTES);
+
 function parseShare(hex: string): { x: number; y: Uint8Array } {
-  if (typeof hex !== "string" || hex.length < 4 || hex.length % 2 !== 0) {
+  if (
+    typeof hex !== "string" ||
+    hex.length < 4 ||
+    hex.length > MAX_SHARE_HEX_LENGTH ||
+    hex.length % 2 !== 0
+  ) {
     throw new Error("share: invalid hex length");
   }
   if (!/^[0-9a-fA-F]+$/.test(hex)) {
@@ -136,10 +170,18 @@ function parseShare(hex: string): { x: number; y: Uint8Array } {
  * supplied at call time, not embedded in each share — see file header). All
  * shares MUST have been produced from the same split, with the same secret
  * length. Duplicate x-coordinates are rejected.
+ *
+ * Fails closed: fewer than `threshold` shares is an error, and the
+ * reconstructed payload must carry the expected version byte and a valid
+ * secret checksum — corrupted shares, shares from different splits, or a
+ * wrong threshold surface as a thrown error, never a silently wrong secret.
  */
-export function combineShares(hexShares: string[]): Uint8Array {
-  if (!Array.isArray(hexShares) || hexShares.length < 2) {
-    throw new Error("combineShares: at least 2 shares are required");
+export function combineShares(hexShares: string[], threshold: number): Uint8Array {
+  if (!Number.isInteger(threshold) || threshold < 2 || threshold > 255) {
+    throw new Error("threshold must be an integer in [2, 255]");
+  }
+  if (!Array.isArray(hexShares) || hexShares.length < threshold) {
+    throw new Error("combineShares: fewer shares than the threshold");
   }
   const parsed = hexShares.map(parseShare);
   const xs = parsed.map((p) => p.x);
@@ -153,7 +195,7 @@ export function combineShares(hexShares: string[]): Uint8Array {
     }
   }
 
-  const secret = new Uint8Array(len);
+  const payload = new Uint8Array(len);
   for (let i = 0; i < len; i++) {
     // Lagrange interpolation at x=0 over GF(2^8).
     let acc = 0;
@@ -167,7 +209,25 @@ export function combineShares(hexShares: string[]): Uint8Array {
       }
       acc ^= gfMul(parsed[j].y[i], gfDiv(num, den));
     }
-    secret[i] = acc;
+    payload[i] = acc;
   }
-  return secret;
+
+  // Envelope validation: version byte + truncated-SHA-256 integrity check.
+  if (payload.length < 1 + 1 + SECRET_CHECKSUM_BYTES) {
+    throw new Error("combineShares: reconstructed payload is too short");
+  }
+  if (payload[0] !== SHARE_FORMAT_VERSION) {
+    throw new Error("combineShares: unsupported share format version");
+  }
+  const secret = payload.subarray(1, payload.length - SECRET_CHECKSUM_BYTES);
+  const expected = secretChecksum(secret);
+  const actual = payload.subarray(payload.length - SECRET_CHECKSUM_BYTES);
+  let diff = 0;
+  for (let i = 0; i < SECRET_CHECKSUM_BYTES; i++) diff |= expected[i] ^ actual[i];
+  if (diff !== 0) {
+    throw new Error(
+      "combineShares: integrity check failed — shares are corrupted, mixed, or from different splits",
+    );
+  }
+  return new Uint8Array(secret);
 }
