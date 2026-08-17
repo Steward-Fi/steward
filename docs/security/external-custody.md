@@ -102,8 +102,17 @@ For an EVM transaction the provider:
 7. derives `yParity` only by recovering the registered address;
 8. broadcasts only after that recovery succeeds and requires the RPC-returned hash to equal the local hash of the signed bytes.
 
+If the RPC connection fails after submission, Steward never reposts the signed
+transaction. It performs one read-only lookup by the locally derived hash. A
+found transaction is treated as broadcast; otherwise the transaction is stored
+as `outcome_unknown` and the API returns HTTP 202 with that hash for operator
+reconciliation. Approval remains consumed, so callers must reconcile rather
+than retry.
+
 A malformed response, wrong key, wrong address, unsupported algorithm, mutated
-RPC preparation, missing RPC, or KMS error fails closed before broadcast.
+RPC preparation, missing RPC, or KMS error fails closed before broadcast. RPC
+and provider error details are never returned to API clients because endpoint
+URLs can contain credentials.
 
 ## Writing another provider
 

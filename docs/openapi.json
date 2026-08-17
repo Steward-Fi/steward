@@ -96737,6 +96737,507 @@
         }
       }
     },
+    "/vault/{agentId}/sign": {
+      "parameters": [
+        {
+          "name": "agentId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "Vault"
+        ],
+        "summary": "Sign or broadcast a governed transaction",
+        "description": "Evaluates current agent policy and signs a transaction. Broadcast requests require an Idempotency-Key. HTTP 202 may mean either pending_approval or outcome_unknown; outcome_unknown includes the deterministic transaction hash and requires receipt reconciliation before any retry.",
+        "security": [
+          {
+            "tenantApiKey": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "to",
+                  "value"
+                ],
+                "properties": {
+                  "to": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  },
+                  "data": {
+                    "type": "string"
+                  },
+                  "chainId": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "nonce": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "gasLimit": {
+                    "type": "string"
+                  },
+                  "broadcast": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "venue": {
+                    "type": "string"
+                  },
+                  "walletAddress": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "txId"
+                      ],
+                      "properties": {
+                        "txId": {
+                          "type": "string"
+                        },
+                        "txHash": {
+                          "type": "string"
+                        },
+                        "signedTx": {
+                          "type": "string"
+                        }
+                      },
+                      "oneOf": [
+                        {
+                          "required": [
+                            "txHash"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "signedTx"
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "ok",
+                        "error",
+                        "data"
+                      ],
+                      "properties": {
+                        "ok": {
+                          "type": "boolean",
+                          "const": false
+                        },
+                        "error": {
+                          "type": "string"
+                        },
+                        "data": {
+                          "type": "object",
+                          "required": [
+                            "txId",
+                            "status",
+                            "results"
+                          ],
+                          "properties": {
+                            "txId": {
+                              "type": "string"
+                            },
+                            "status": {
+                              "type": "string",
+                              "const": "pending_approval"
+                            },
+                            "results": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "additionalProperties": true
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "ok",
+                        "error",
+                        "data"
+                      ],
+                      "properties": {
+                        "ok": {
+                          "type": "boolean",
+                          "const": false
+                        },
+                        "error": {
+                          "type": "string"
+                        },
+                        "data": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "code",
+                            "txId",
+                            "txHash",
+                            "reconciliationRequired"
+                          ],
+                          "properties": {
+                            "code": {
+                              "type": "string",
+                              "const": "external_broadcast_outcome_unknown"
+                            },
+                            "txId": {
+                              "type": "string"
+                            },
+                            "txHash": {
+                              "type": "string"
+                            },
+                            "reconciliationRequired": {
+                              "type": "boolean",
+                              "const": true
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Steward-Request-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Expires-At",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signing-Key-Id",
+            "in": "header",
+            "required": false,
+            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-steward-hardening": {
+          "sensitive": true,
+          "sensitivePrefix": "/vault",
+          "requestExpiry": {
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "acceptedHeaders": [
+              "X-Steward-Request-Timestamp",
+              "X-Steward-Request-Expires-At"
+            ]
+          },
+          "authorizationSignature": {
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
+            "header": "X-Steward-Signature",
+            "schemes": [
+              "v1=hmac-sha256",
+              "p256=ecdsa-secp256r1"
+            ],
+            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+          },
+          "idempotency": {
+            "header": "Idempotency-Key",
+            "requiredForSignedRequests": true,
+            "replayStorage": "enabled when callers provide a key in a replay-safe authenticated context"
+          }
+        }
+      }
+    },
     "/vault/{agentId}/actions/transfer/quote": {
       "parameters": [
         {
@@ -97365,7 +97866,8 @@
                             "signed",
                             "broadcast",
                             "confirmed",
-                            "failed"
+                            "failed",
+                            "outcome_unknown"
                           ]
                         },
                         "chainId": {
@@ -97478,7 +97980,8 @@
                             "signed",
                             "broadcast",
                             "confirmed",
-                            "failed"
+                            "failed",
+                            "outcome_unknown"
                           ]
                         },
                         "chainId": {
@@ -98456,7 +98959,8 @@
                             "signed",
                             "broadcast",
                             "confirmed",
-                            "failed"
+                            "failed",
+                            "outcome_unknown"
                           ]
                         },
                         "chainId": {

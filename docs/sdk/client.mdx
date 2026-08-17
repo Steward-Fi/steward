@@ -107,7 +107,13 @@ interface SignTransactionInput {
 type SignTransactionResult =
   | { txHash: string }              // Broadcast success
   | { signedTx: string }            // Sign-only (broadcast: false)
-  | { status: "pending_approval"; results: PolicyResult[] }; // Queued
+  | { status: "pending_approval"; results: PolicyResult[] } // Queued
+  | {
+      code: "external_broadcast_outcome_unknown";
+      txId: string;
+      txHash: string;
+      reconciliationRequired: true;
+    }; // Reconcile txHash before retrying
 ```
 
 ```typescript
@@ -121,6 +127,8 @@ if ("txHash" in result) {
   console.log("TX hash:", result.txHash);
 } else if ("signedTx" in result) {
   console.log("Signed TX:", result.signedTx);
+} else if (result.code === "external_broadcast_outcome_unknown") {
+  console.log("Reconcile before retrying:", result.txHash);
 } else {
   console.log("Needs approval:", result.results);
 }

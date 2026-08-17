@@ -1482,6 +1482,74 @@ const walletActionSponsorshipSchema: JsonSchema = {
   },
 };
 
+const vaultSignInputSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["to", "value"],
+  properties: {
+    to: stringSchema,
+    value: stringSchema,
+    data: stringSchema,
+    chainId: { type: "integer", minimum: 1 },
+    nonce: { type: "integer", minimum: 0 },
+    gasLimit: stringSchema,
+    broadcast: { type: "boolean", default: true },
+    venue: stringSchema,
+    walletAddress: stringSchema,
+  },
+};
+
+const vaultSignSuccessSchema: JsonSchema = {
+  type: "object",
+  required: ["txId"],
+  properties: {
+    txId: stringSchema,
+    txHash: stringSchema,
+    signedTx: stringSchema,
+  },
+  oneOf: [{ required: ["txHash"] }, { required: ["signedTx"] }],
+};
+
+const vaultSignPendingSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["ok", "error", "data"],
+  properties: {
+    ok: { type: "boolean", const: false },
+    error: stringSchema,
+    data: {
+      type: "object",
+      required: ["txId", "status", "results"],
+      properties: {
+        txId: stringSchema,
+        status: { type: "string", const: "pending_approval" },
+        results: { type: "array", items: metadataSchema },
+      },
+    },
+  },
+};
+
+const vaultSignOutcomeUnknownSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["ok", "error", "data"],
+  properties: {
+    ok: { type: "boolean", const: false },
+    error: stringSchema,
+    data: {
+      type: "object",
+      additionalProperties: false,
+      required: ["code", "txId", "txHash", "reconciliationRequired"],
+      properties: {
+        code: { type: "string", const: "external_broadcast_outcome_unknown" },
+        txId: stringSchema,
+        txHash: stringSchema,
+        reconciliationRequired: { type: "boolean", const: true },
+      },
+    },
+  },
+};
+
 const transferActionInputSchema: JsonSchema = {
   type: "object",
   required: ["to"],
@@ -1522,7 +1590,15 @@ const transferActionSchema: JsonSchema = {
     type: { type: "string", const: "transfer" },
     status: {
       type: "string",
-      enum: ["pending_approval", "rejected", "signed", "broadcast", "confirmed", "failed"],
+      enum: [
+        "pending_approval",
+        "rejected",
+        "signed",
+        "broadcast",
+        "confirmed",
+        "failed",
+        "outcome_unknown",
+      ],
     },
     chainId: { type: "integer", minimum: 1 },
     to: stringSchema,
@@ -6646,6 +6722,27 @@ export function getOpenApiSpec() {
           requestBody: jsonRequestBody(encryptedKeyImportSubmitRequestSchema),
           responses: {
             "200": jsonResponse(apiResponse(encryptedKeyImportResultSchema)),
+            ...errorResponses(),
+          },
+        },
+      },
+      "/vault/{agentId}/sign": {
+        parameters: [parameter("agentId", "path")],
+        post: {
+          tags: ["Vault"],
+          summary: "Sign or broadcast a governed transaction",
+          description:
+            "Evaluates current agent policy and signs a transaction. Broadcast requests require an Idempotency-Key. HTTP 202 may mean either pending_approval or outcome_unknown; outcome_unknown includes the deterministic transaction hash and requires receipt reconciliation before any retry.",
+          security: [{ tenantApiKey: [] }, { bearerAuth: [] }],
+          requestBody: jsonRequestBody(vaultSignInputSchema),
+          responses: {
+            "200": jsonResponse(apiResponse(vaultSignSuccessSchema)),
+            "202": jsonResponse({
+              oneOf: [vaultSignPendingSchema, vaultSignOutcomeUnknownSchema],
+            }),
+            "428": jsonResponse(errorResponse()),
+            "500": jsonResponse(errorResponse()),
+            "502": jsonResponse(errorResponse()),
             ...errorResponses(),
           },
         },
