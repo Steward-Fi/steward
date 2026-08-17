@@ -1,6 +1,21 @@
-import { CanonError, decodeUtf8Strict, jcsStringify, strictParseJson } from "./provider-action.js";
+import {
+  buildGenericHttpAction,
+  GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+  type GenericHttpOperationDescriptorV1,
+  type GenericSegmentType,
+  genericDescriptorAllowsExactPath,
+  validateGenericHttpDescriptor,
+} from "./generic-http-provider-action.js";
+import {
+  CanonError,
+  decodeUtf8Strict,
+  GITHUB_PROVIDER_ACTION_PROFILE,
+  jcsStringify,
+  strictParseJson,
+} from "./provider-action.js";
 import { assertRegisteredProfile } from "./provider-profile-registry.js";
 import { containsSensitiveCredentialKey, isSensitiveCredentialKey } from "./sensitive-keys.js";
+import { X_PROVIDER_ACTION_PROFILE } from "./x-provider-action.js";
 
 export interface ConformanceCanonicalAction {
   profile: string;
@@ -10,6 +25,119 @@ export interface ConformanceCanonicalAction {
   orderedQueryPairs: Array<[string, string]>;
   selectedHeaders: Array<[string, string]>;
   canonicalBody: unknown;
+}
+
+export interface ProviderOperationTargetContext {
+  operationKey: string;
+  requestProfile: Record<string, unknown>;
+}
+
+function recoveredGenericScalar(value: string, type: GenericSegmentType): unknown {
+  if (type !== "int") return value;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) throw new Error("generic integer is not safe");
+  return parsed;
+}
+
+/** Rebuild config-driven bytes from the persisted descriptor, not caller labels. */
+function genericActionMatchesDescriptor(
+  action: ConformanceCanonicalAction,
+  operationKey: string,
+  descriptor: GenericHttpOperationDescriptorV1,
+): boolean {
+  try {
+    const pathParts = action.normalizedPath.split("/").slice(1);
+    if (pathParts.length !== descriptor.pathTemplate.length) return false;
+    const args: Record<string, unknown> = {};
+    for (let i = 0; i < descriptor.pathTemplate.length; i++) {
+      const param = descriptor.pathTemplate[i].param;
+      if (!param) continue;
+      args[param.name] = recoveredGenericScalar(decodeURIComponent(pathParts[i]), param.type);
+    }
+    const query = new Map((descriptor.query ?? []).map((item) => [item.name, item]));
+    for (const [name, value] of action.orderedQueryPairs) {
+      const spec = query.get(name);
+      if (!spec || name in args) return false;
+      args[name] = recoveredGenericScalar(value, spec.type);
+    }
+    if (action.canonicalBody !== null) {
+      if (typeof action.canonicalBody !== "object" || Array.isArray(action.canonicalBody)) {
+        return false;
+      }
+      for (const [name, value] of Object.entries(action.canonicalBody)) {
+        if (name in args) return false;
+        args[name] = value;
+      }
+    }
+    const rebuilt = buildGenericHttpAction(operationKey, descriptor, action.method, args);
+    return jcsStringify(rebuilt.action) === jcsStringify(action);
+  } catch {
+    return false;
+  }
+}
+
+/** Enforce the adapter operation's exact target at the last pre-claim boundary. */
+export function inspectProviderOperationTargetConformance(
+  action: ConformanceCanonicalAction,
+  context: ProviderOperationTargetContext,
+): string[] {
+  const violations: string[] = [];
+  const exact = (origin: string, method: string, path: string | RegExp) => {
+    if (action.origin !== origin) violations.push("operation-origin-mismatch");
+    if (action.method !== method) violations.push("operation-method-mismatch");
+    if (
+      typeof path === "string" ? action.normalizedPath !== path : !path.test(action.normalizedPath)
+    ) {
+      violations.push("operation-path-mismatch");
+    }
+  };
+
+  if (action.profile === GITHUB_PROVIDER_ACTION_PROFILE) {
+    if (context.operationKey === "github.issue.list") {
+      exact("https://api.github.com", "GET", /^\/repos\/[^/]+\/[^/]+\/issues$/);
+    } else if (context.operationKey === "github.pr.comment.create") {
+      exact(
+        "https://api.github.com",
+        "POST",
+        /^\/repos\/[^/]+\/[^/]+\/issues\/[1-9][0-9]*\/comments$/,
+      );
+    } else {
+      violations.push("operation-key-unsupported");
+    }
+  } else if (action.profile === X_PROVIDER_ACTION_PROFILE) {
+    if (context.operationKey === "x.tweet.create") {
+      exact("https://api.x.com", "POST", "/2/tweets");
+    } else if (context.operationKey === "x.tweet.delete") {
+      exact("https://api.x.com", "DELETE", /^\/2\/tweets\/[0-9]{1,25}$/);
+    } else if (context.operationKey === "x.user.me.read") {
+      exact("https://api.x.com", "GET", "/2/users/me");
+    } else {
+      violations.push("operation-key-unsupported");
+    }
+  } else if (action.profile === GENERIC_HTTP_PROVIDER_ACTION_PROFILE) {
+    let descriptor: GenericHttpOperationDescriptorV1;
+    try {
+      if (context.requestProfile.profile !== GENERIC_HTTP_PROVIDER_ACTION_PROFILE) {
+        throw new Error("profile mismatch");
+      }
+      descriptor = validateGenericHttpDescriptor(context.requestProfile.operationDescriptor);
+    } catch {
+      return ["operation-descriptor-invalid"];
+    }
+    if (action.origin !== descriptor.origin) violations.push("operation-origin-mismatch");
+    if (!descriptor.methods.includes(action.method as never)) {
+      violations.push("operation-method-mismatch");
+    }
+    if (!genericDescriptorAllowsExactPath(descriptor, action.normalizedPath)) {
+      violations.push("operation-path-mismatch");
+    }
+    if (!genericActionMatchesDescriptor(action, context.operationKey, descriptor)) {
+      violations.push("operation-descriptor-mismatch");
+    }
+  } else {
+    violations.push("operation-profile-unsupported");
+  }
+  return [...new Set(violations)].sort();
 }
 
 const CANONICAL_ACTION_KEYS = Object.freeze([
@@ -49,6 +177,7 @@ export function parseCanonicalProviderActionBytes(
   bytes: Uint8Array,
   expectedProfile: string,
   allowedOrigins: readonly string[],
+  operation: ProviderOperationTargetContext,
 ): ConformanceCanonicalAction {
   const text = decodeUtf8Strict(bytes);
   const parsed = strictParseJson(text);
@@ -73,22 +202,10 @@ export function parseCanonicalProviderActionBytes(
   assertRegisteredProfile(expectedProfile);
   assertRegisteredProfile(record.profile);
   const action = record as unknown as ConformanceCanonicalAction;
-  // Profile builders may deliberately allow provider-specific JSON media types
-  // (for example GitHub vendor JSON), so this shared parser enforces every
-  // profile-independent invariant and leaves the exact media allowlist to the
-  // registered API builder.
-  const violations = inspectProviderProfileConformance(
-    expectedProfile,
-    allowedOrigins,
-    action,
-  ).filter(
-    (violation) =>
-      violation !== "content-type-unsupported" &&
-      // Existing digest-tamper probes deliberately produce this state and must
-      // reach the signed digest comparison. The API builder remains the owner
-      // of body/media coupling for newly created actions.
-      violation !== "body-content-type-missing",
-  );
+  const violations = [
+    ...inspectProviderProfileConformance(expectedProfile, allowedOrigins, action),
+    ...inspectProviderOperationTargetConformance(action, operation),
+  ];
   if (violations.length > 0) {
     throw new CanonError(
       violations.includes("credential-header")
