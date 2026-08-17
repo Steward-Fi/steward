@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, scryptSync } from "node:crypto";
 import {
   calculateJwkThumbprint,
   exportJWK,
@@ -68,6 +68,34 @@ let warnedDeprecatedSessionSecret = false;
 let warnedEmbeddedMasterFallback = false;
 let warnedDevSecret = false;
 
+/**
+ * Embedded-mode JWT secret derivation cache. Deriving via scrypt costs ~50ms,
+ * and getJwtSecret() runs on every token sign/verify, so the derived key is
+ * memoized per distinct source password.
+ */
+let embeddedJwtDerivation: { source: string; derived: string } | null = null;
+
+/**
+ * Derive the embedded-mode JWT signing secret from STEWARD_MASTER_PASSWORD.
+ *
+ * The raw master password is NEVER used as the JWT secret (SEC-013): every
+ * issued HS256 JWT would otherwise be an unlimited fast offline brute-force
+ * oracle against the same password that encrypts vault keys. Instead the JWT
+ * secret is scrypt-derived with a domain-separation label (same idiom as the
+ * vault's KeyStore domains), so the JWT key is cryptographically independent
+ * from the vault root key and offline guesses cost a scrypt each.
+ */
+function deriveEmbeddedJwtSecret(masterPassword: string): string {
+  if (embeddedJwtDerivation && embeddedJwtDerivation.source === masterPassword) {
+    return embeddedJwtDerivation.derived;
+  }
+  const derived = (scryptSync(masterPassword, "steward-kdf:jwt-signing:v1", 32) as Buffer).toString(
+    "hex",
+  );
+  embeddedJwtDerivation = { source: masterPassword, derived };
+  return derived;
+}
+
 function isEmbeddedMode(): boolean {
   return (
     process.env.STEWARD_EMBEDDED === "true" ||
@@ -112,7 +140,7 @@ function warnOnce(kind: "session" | "master" | "dev", warn: ((message: string) =
     if (warnedEmbeddedMasterFallback) return;
     warnedEmbeddedMasterFallback = true;
     warn(
-      "⚠️ [EMBEDDED/DEV ONLY] Falling back to STEWARD_MASTER_PASSWORD for JWTs. Set STEWARD_JWT_SECRET for server deployments.",
+      "⚠️ [EMBEDDED/DEV ONLY] Deriving the JWT secret from STEWARD_MASTER_PASSWORD via domain-separated scrypt. Set STEWARD_JWT_SECRET for server deployments.",
     );
     return;
   }
@@ -128,7 +156,8 @@ function warnOnce(kind: "session" | "master" | "dev", warn: ((message: string) =
  *
  * Canonical env var: STEWARD_JWT_SECRET.
  * Deprecated compatibility fallback: STEWARD_SESSION_SECRET.
- * STEWARD_MASTER_PASSWORD is only accepted in embedded/local dev mode.
+ * In embedded/local dev mode only, STEWARD_MASTER_PASSWORD is accepted as
+ * derivation input — never used verbatim (see deriveEmbeddedJwtSecret).
  */
 export function getJwtSecret(options: JwtSecretOptions = {}): string {
   const nodeEnv = options.nodeEnv ?? process.env.NODE_ENV;
@@ -152,7 +181,7 @@ export function getJwtSecret(options: JwtSecretOptions = {}): string {
     warnOnce("session", warn);
   } else if (isEmbeddedMode() && process.env.STEWARD_MASTER_PASSWORD) {
     sourceName = "STEWARD_MASTER_PASSWORD";
-    secret = process.env.STEWARD_MASTER_PASSWORD;
+    secret = deriveEmbeddedJwtSecret(process.env.STEWARD_MASTER_PASSWORD);
     warnOnce("master", warn);
   } else {
     sourceName = "dev-secret";
