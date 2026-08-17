@@ -57,15 +57,27 @@ migrations are forward-only.
 
 ## Schema compatibility with neon-http
 
-The neon-http driver uses Neon's serverless HTTP transport. It supports the
-full Postgres SQL surface that Steward uses (DDL, prepared statements,
-transactions). The constructs Steward does NOT use, and which would not work
-over HTTP, are:
+The neon-http driver uses Neon's serverless HTTP transport. The constructs
+that would not work over HTTP, and Steward's actual posture on each, are:
 
-- `LISTEN` / `NOTIFY` — pubsub
-- Advisory locks (`pg_advisory_lock`)
-- `COPY` streaming
-- Long-running transactions across multiple statements
-
-Verified against `packages/db/src/schema.ts` and `schema-auth.ts`: none of
-these are used.
+- `LISTEN` / `NOTIFY` — not used anywhere.
+- `COPY` streaming — not used anywhere.
+- Advisory locks — **used, contrary to an earlier version of this note**
+  (SEC-166):
+  - `pg_advisory_lock` is taken by the TCP migrator (`src/migrate.ts`,
+    `src/plugin-migrate.ts`). That runs pre-deploy over a real TCP connection
+    (see above), never from the Worker, so neon-http is unaffected.
+  - `pg_advisory_xact_lock` is taken by the audit chain on EVERY non-PGLite
+    append (`src/audit-chain.ts`), to serialize per-tenant chain extensions.
+    On Workers it never executes: drizzle's neon-http driver throws
+    `No transactions support in neon-http driver` from `db.transaction()`,
+    so `writeAuditEvent` / `withTenantAuditedTransaction` reject before the
+    lock — or the INSERT — runs. Audited writes on Workers therefore FAIL
+    CLOSED (the audited action is denied); the chain is never silently
+    skipped. This contract is pinned by
+    `src/__tests__/audit-chain-workers.test.ts`. A drizzle upgrade that adds
+    neon-http transaction support breaks that test on purpose: the Workers
+    audit posture (including whether the advisory lock still serializes
+    correctly over the HTTP transport) must be re-reviewed before adopting it.
+- Long-running multi-statement transactions — the audit chain relies on them
+  on postgres-js; on neon-http they fail closed as described above.

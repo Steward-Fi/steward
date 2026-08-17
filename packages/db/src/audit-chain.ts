@@ -229,13 +229,23 @@ function computeHmac(key: Uint8Array, prevHash: Uint8Array, canonical: string): 
 function isAuditSequenceConflict(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const code = "code" in err ? (err as { code?: unknown }).code : undefined;
-  if (code === "23505" || code === "40001") return true;
   const message = err instanceof Error ? err.message : String(err);
-  return (
-    message.includes("audit_events_tenant_seq_idx") ||
-    message.includes("duplicate key value violates unique constraint") ||
-    message.includes("could not serialize access")
-  );
+  // Serialization failures (SQLSTATE 40001) are always transient — retry.
+  if (code === "40001" || message.includes("could not serialize access")) return true;
+  // Unique violations (23505) are retried ONLY when they name the per-tenant
+  // seq index — i.e. an actual audit-chain seq race. SEC-167: matching the
+  // bare 23505 code / generic duplicate-key text retried ANY unique violation
+  // raised inside withTenantAuditedTransaction's fn (e.g. a genuine conflict
+  // in the caller's own mutations) 5 times — wasted work, and it leaned on
+  // every caller's retry-idempotency contract for no reason.
+  const constraint =
+    "constraint_name" in err
+      ? (err as { constraint_name?: unknown }).constraint_name
+      : "constraint" in err
+        ? (err as { constraint?: unknown }).constraint
+        : undefined;
+  if (constraint === "audit_events_tenant_seq_idx") return true;
+  return message.includes("audit_events_tenant_seq_idx");
 }
 
 function rowsFromExecute<T>(result: unknown): T[] {
