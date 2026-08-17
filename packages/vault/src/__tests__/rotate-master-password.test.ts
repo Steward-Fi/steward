@@ -128,6 +128,7 @@ describe("master-password rotation (DB-backed, real encrypt paths)", () => {
     // A venue-scoped wallet (non-null venue in the AAD).
     await vault.createWallet({
       agentId: "agent-a",
+      tenantId: TENANT_ID,
       venue: "hyperliquid",
       chainType: "evm",
       purpose: "perp",

@@ -535,7 +535,7 @@ export class SecretVault {
           const plaintext = this.legacyKeyStore.decrypt(encrypted, context);
           if (!options?.dryRun) {
             const reEncrypted = this.keyStore.encrypt(plaintext, context);
-            await db
+            const rewritten = await db
               .update(secrets)
               .set({
                 ciphertext: reEncrypted.ciphertext,
@@ -543,7 +543,25 @@ export class SecretVault {
                 authTag: reEncrypted.tag,
                 salt: reEncrypted.salt,
               })
-              .where(eq(secrets.id, row.id));
+              // Compare-and-set all authenticated bytes. A concurrent master
+              // password rotation or secret rewrite must win rather than be
+              // silently overwritten with ciphertext derived from our stale
+              // read. The enclosing migration transaction will roll back if
+              // this row changed after classification.
+              .where(
+                and(
+                  eq(secrets.id, row.id),
+                  eq(secrets.ciphertext, row.ciphertext),
+                  eq(secrets.iv, row.iv),
+                  eq(secrets.authTag, row.authTag),
+                  eq(secrets.salt, row.salt),
+                ),
+              )
+              .returning({ id: secrets.id });
+            if (rewritten.length !== 1) {
+              result.failed.push(row.id);
+              continue;
+            }
           }
           result.migrated += 1;
         } catch {

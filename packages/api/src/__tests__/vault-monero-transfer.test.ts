@@ -215,7 +215,11 @@ describe("vault Monero transfer + balance routes", () => {
       FROZEN_AGENT_ID,
     ]) {
       await setupVault.createAgent(TENANT_ID, agentId, `Agent ${agentId}`);
-      const wallet = await setupVault.createWallet({ agentId, chainType: "monero" });
+      const wallet = await setupVault.createWallet({
+        tenantId: TENANT_ID,
+        agentId,
+        chainType: "monero",
+      });
       if (agentId === AGENT_ID) walletAddress = wallet.address;
     }
 
