@@ -14,6 +14,11 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    # Major action upgrades can change runtime/permissions semantics and need a
+    # deliberate manual migration. Security updates are unaffected.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   # Keep digest-pinned base images in the root Dockerfile current.
   - package-ecosystem: "docker"
@@ -21,6 +26,12 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    # Keep routine automation to patch/minor image updates; major base-runtime
+    # changes require an explicit compatibility review. Security updates still
+    # bypass update-type filtering.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   # bun workspaces (root package.json + packages/* + web/): security updates
   # only. Routine version bumps stay a deliberate, lockfile-reviewed process.

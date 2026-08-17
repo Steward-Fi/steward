@@ -213,8 +213,8 @@ describe("SEC-161 enterprise data-plane network isolation", () => {
       expect(serviceBlock(name)).not.toContain("- steward-backend");
     }
     for (const name of ["steward-api", "steward-proxy", "steward-migrate", "backup"]) {
-      expect(serviceBlock(name)).toContain("- steward-backend");
-      expect(serviceBlock(name)).toContain("- steward-data");
+      expect(serviceBlock(name)).toMatch(/steward-backend:[\s\S]*?gw_priority: 1/);
+      expect(serviceBlock(name)).toContain("steward-data: {}");
     }
     expect(compose).toMatch(/steward-data:\n\s+driver: bridge\n\s+internal: true/);
   });
