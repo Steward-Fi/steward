@@ -33,8 +33,11 @@ export {
 export {
   AuditCheckpointAnchorError,
   type AuditCheckpointAnchorMode,
+  type AuditCheckpointAnchorProof,
+  type AuditCheckpointAnchorProofVerifier,
   type AuditCheckpointAnchorSink,
   type AuditCheckpointAnchorSinkFactory,
+  type CustomCheckpointAnchorProof,
   type Rfc3161CheckpointAnchorProof,
   Rfc3161TimestampSink,
   registerAuditCheckpointAnchorSink,

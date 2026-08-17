@@ -148,20 +148,92 @@ describe("audit checkpoint anchoring", () => {
     expect(() => configuredAuditCheckpointAnchor()).toThrow("HTTPS");
   });
 
-  it("routes an explicitly registered custom witness through the pluggable interface", () => {
+  it("routes and verifies a provider-native custom witness proof", async () => {
+    const signed = checkpoint();
+    let verified = 0;
     const sink = {
       id: "customer-log",
-      async anchor(): Promise<never> {
-        throw new Error("not invoked by configuration discovery");
+      async anchor() {
+        return {
+          v: 1 as const,
+          type: "custom" as const,
+          provider: "customer-log",
+          sinkId: "customer-log",
+          hashAlgorithm: "sha256" as const,
+          checkpointDigest: auditCheckpointAnchorDigest(signed),
+          verifiedAt: "2026-08-16T00:00:00.000Z",
+          evidence: { logIndex: 42, inclusionProof: ["aa", "bb"] },
+        };
       },
     };
-    const unregister = registerAuditCheckpointAnchorSink("customer-log", () => sink);
+    const verifier = (_checkpoint: unknown, proof: { evidence: Record<string, unknown> }) => {
+      expect(proof.evidence.logIndex).toBe(42);
+      verified++;
+    };
+    const unregister = registerAuditCheckpointAnchorSink("customer-log", () => sink, verifier);
     try {
       process.env.STEWARD_AUDIT_CHECKPOINT_ANCHOR_MODE = "required";
       process.env.STEWARD_AUDIT_CHECKPOINT_ANCHOR_PROVIDER = "customer-log";
-      expect(configuredAuditCheckpointAnchor()).toEqual({ mode: "required", sink });
+      const configured = configuredAuditCheckpointAnchor();
+      expect(configured).toEqual({
+        mode: "required",
+        provider: "customer-log",
+        sink,
+        verify: verifier,
+      });
+      const proof = await maybeAnchorAuditCheckpoint(signed, configured);
+      expect(proof).toMatchObject({
+        type: "custom",
+        provider: "customer-log",
+        checkpointDigest: auditCheckpointAnchorDigest(signed),
+      });
+      expect(verified).toBe(1);
     } finally {
       unregister();
     }
+  });
+
+  it("rejects unverified or incorrectly bound custom witness evidence", async () => {
+    const signed = checkpoint();
+    const customSink = (checkpointDigest: string) => ({
+      id: "customer-log",
+      async anchor() {
+        return {
+          v: 1 as const,
+          type: "custom" as const,
+          provider: "customer-log",
+          sinkId: "customer-log",
+          hashAlgorithm: "sha256" as const,
+          checkpointDigest,
+          verifiedAt: "2026-08-16T00:00:00.000Z",
+          evidence: { treeHead: "signed-head" },
+        };
+      },
+    });
+    await expect(
+      maybeAnchorAuditCheckpoint(signed, {
+        mode: "required",
+        provider: "customer-log",
+        sink: customSink(auditCheckpointAnchorDigest(signed)),
+      }),
+    ).rejects.toThrow("requires a proof verifier");
+    await expect(
+      maybeAnchorAuditCheckpoint(signed, {
+        mode: "required",
+        provider: "customer-log",
+        sink: customSink("00".repeat(32)),
+        verify: () => undefined,
+      }),
+    ).rejects.toThrow("does not bind");
+    await expect(
+      maybeAnchorAuditCheckpoint(signed, {
+        mode: "required",
+        provider: "customer-log",
+        sink: customSink(auditCheckpointAnchorDigest(signed)),
+        verify: () => {
+          throw new AuditCheckpointAnchorError("inclusion proof rejected");
+        },
+      }),
+    ).rejects.toThrow("inclusion proof rejected");
   });
 });

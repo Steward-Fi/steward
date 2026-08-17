@@ -35,31 +35,67 @@ export interface Rfc3161CheckpointAnchorProof {
   timestampResponse: string;
 }
 
+/** Provider-native evidence from an operator-registered append-only witness. */
+export interface CustomCheckpointAnchorProof {
+  v: 1;
+  type: "custom";
+  /** Must equal the provider name used at registration/configuration. */
+  provider: string;
+  sinkId: string;
+  hashAlgorithm: "sha256";
+  /** SHA-256 of canonicalCheckpointBytes(checkpoint.payload). */
+  checkpointDigest: string;
+  /** Time at which the registered verifier accepted this exact proof. */
+  verifiedAt: string;
+  /** Opaque, JSON-serializable provider proof retained append-only in the bundle/DB. */
+  evidence: Record<string, unknown>;
+}
+
+export type AuditCheckpointAnchorProof = Rfc3161CheckpointAnchorProof | CustomCheckpointAnchorProof;
+
 export interface AuditCheckpointAnchorSink {
   readonly id: string;
-  anchor(checkpoint: SignedCheckpoint): Promise<Rfc3161CheckpointAnchorProof>;
+  anchor(checkpoint: SignedCheckpoint): Promise<AuditCheckpointAnchorProof>;
 }
 
 export type AuditCheckpointAnchorSinkFactory = () => AuditCheckpointAnchorSink;
+export type AuditCheckpointAnchorProofVerifier = (
+  checkpoint: SignedCheckpoint,
+  proof: CustomCheckpointAnchorProof,
+) => Promise<void> | void;
 
-const registeredSinkFactories = new Map<string, AuditCheckpointAnchorSinkFactory>();
+interface RegisteredAnchorProvider {
+  factory: AuditCheckpointAnchorSinkFactory;
+  verify: AuditCheckpointAnchorProofVerifier;
+}
+
+const registeredSinkProviders = new Map<string, RegisteredAnchorProvider>();
 
 /** Register an operator-supplied append-only witness implementation. */
 export function registerAuditCheckpointAnchorSink(
   provider: string,
   factory: AuditCheckpointAnchorSinkFactory,
+  verify: AuditCheckpointAnchorProofVerifier,
 ): () => void {
   if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(provider) || provider === "rfc3161") {
     throw new AuditCheckpointAnchorError("Custom checkpoint anchor provider name is invalid");
   }
-  if (registeredSinkFactories.has(provider)) {
+  if (typeof verify !== "function") {
+    throw new AuditCheckpointAnchorError(
+      "Custom checkpoint anchor provider requires a proof verifier",
+    );
+  }
+  if (registeredSinkProviders.has(provider)) {
     throw new AuditCheckpointAnchorError(
       `Checkpoint anchor provider ${provider} is already registered`,
     );
   }
-  registeredSinkFactories.set(provider, factory);
+  const registration = { factory, verify };
+  registeredSinkProviders.set(provider, registration);
   return () => {
-    if (registeredSinkFactories.get(provider) === factory) registeredSinkFactories.delete(provider);
+    if (registeredSinkProviders.get(provider) === registration) {
+      registeredSinkProviders.delete(provider);
+    }
   };
 }
 
@@ -512,18 +548,25 @@ function configuredMode(): AuditCheckpointAnchorMode {
 export function configuredAuditCheckpointAnchor(): {
   mode: AuditCheckpointAnchorMode;
   sink?: AuditCheckpointAnchorSink;
+  provider?: string;
+  verify?: AuditCheckpointAnchorProofVerifier;
 } {
   const mode = configuredMode();
   if (mode === "off") return { mode };
   const provider = process.env.STEWARD_AUDIT_CHECKPOINT_ANCHOR_PROVIDER?.trim() || "rfc3161";
   if (provider !== "rfc3161") {
-    const factory = registeredSinkFactories.get(provider);
-    if (!factory) {
+    const registration = registeredSinkProviders.get(provider);
+    if (!registration) {
       throw new AuditCheckpointAnchorError(
         `Checkpoint anchor provider ${provider} is not registered`,
       );
     }
-    return { mode, sink: factory() };
+    return {
+      mode,
+      provider,
+      sink: registration.factory(),
+      verify: registration.verify,
+    };
   }
   const url = process.env.STEWARD_AUDIT_RFC3161_URL?.trim();
   if (!url) {
@@ -549,6 +592,7 @@ export function configuredAuditCheckpointAnchor(): {
   };
   return {
     mode,
+    provider: "rfc3161",
     sink: new Rfc3161TimestampSink({
       url,
       timeoutMs,
@@ -561,17 +605,84 @@ export function configuredAuditCheckpointAnchor(): {
   };
 }
 
+function assertCustomAnchorProofShape(
+  checkpoint: SignedCheckpoint,
+  sink: AuditCheckpointAnchorSink,
+  provider: string,
+  proof: AuditCheckpointAnchorProof,
+): asserts proof is CustomCheckpointAnchorProof {
+  if (proof.type !== "custom") {
+    throw new AuditCheckpointAnchorError(
+      "Custom checkpoint anchor sink returned a non-custom proof",
+    );
+  }
+  if (
+    proof.v !== 1 ||
+    proof.provider !== provider ||
+    proof.sinkId !== sink.id ||
+    proof.hashAlgorithm !== "sha256" ||
+    proof.checkpointDigest !== auditCheckpointAnchorDigest(checkpoint) ||
+    !Number.isFinite(Date.parse(proof.verifiedAt)) ||
+    !proof.evidence ||
+    typeof proof.evidence !== "object" ||
+    Array.isArray(proof.evidence)
+  ) {
+    throw new AuditCheckpointAnchorError(
+      "Custom checkpoint anchor proof does not bind the configured provider, sink, and checkpoint",
+    );
+  }
+  let encoded: string;
+  try {
+    encoded = JSON.stringify(proof.evidence);
+  } catch {
+    throw new AuditCheckpointAnchorError(
+      "Custom checkpoint anchor evidence must be JSON serializable",
+    );
+  }
+  if (!encoded || new TextEncoder().encode(encoded).length > 1024 * 1024) {
+    throw new AuditCheckpointAnchorError(
+      "Custom checkpoint anchor evidence must be non-empty and at most 1 MiB",
+    );
+  }
+}
+
 /** Anchor according to environment policy; required mode never degrades silently. */
 export async function maybeAnchorAuditCheckpoint(
   checkpoint: SignedCheckpoint,
-  configured = configuredAuditCheckpointAnchor(),
-): Promise<Rfc3161CheckpointAnchorProof | undefined> {
+  configured: {
+    mode: AuditCheckpointAnchorMode;
+    sink?: AuditCheckpointAnchorSink;
+    provider?: string;
+    verify?: AuditCheckpointAnchorProofVerifier;
+  } = configuredAuditCheckpointAnchor(),
+): Promise<AuditCheckpointAnchorProof | undefined> {
   if (configured.mode === "off") return undefined;
   if (!configured.sink) {
     throw new AuditCheckpointAnchorError("Checkpoint anchor sink is not configured");
   }
   try {
-    return await configured.sink.anchor(checkpoint);
+    const proof = await configured.sink.anchor(checkpoint);
+    const provider = configured.provider ?? proof.type;
+    if (provider === "rfc3161") {
+      if (
+        proof.type !== "rfc3161" ||
+        proof.sinkId !== configured.sink.id ||
+        proof.checkpointDigest !== auditCheckpointAnchorDigest(checkpoint)
+      ) {
+        throw new AuditCheckpointAnchorError(
+          "RFC 3161 checkpoint proof does not bind the configured sink and checkpoint",
+        );
+      }
+      return proof;
+    }
+    if (!configured.verify) {
+      throw new AuditCheckpointAnchorError(
+        "Custom checkpoint anchor provider requires a proof verifier",
+      );
+    }
+    assertCustomAnchorProofShape(checkpoint, configured.sink, provider, proof);
+    await configured.verify(checkpoint, proof);
+    return { ...proof, verifiedAt: new Date().toISOString() };
   } catch (error) {
     if (configured.mode === "required") {
       throw error instanceof AuditCheckpointAnchorError

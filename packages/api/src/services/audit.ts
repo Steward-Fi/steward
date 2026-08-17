@@ -37,9 +37,9 @@ import {
 } from "./audit-checkpoint";
 import {
   AuditCheckpointAnchorError,
+  type AuditCheckpointAnchorProof,
   configuredAuditCheckpointAnchor,
   maybeAnchorAuditCheckpoint,
-  type Rfc3161CheckpointAnchorProof,
 } from "./audit-checkpoint-anchor";
 import { API_VERSION } from "./version";
 
@@ -571,7 +571,7 @@ export interface SignedAuditBundle {
     payload: CheckpointPayload;
     signature: string;
     publicKey: string;
-    anchor?: Rfc3161CheckpointAnchorProof;
+    anchor?: AuditCheckpointAnchorProof;
   };
   generatedAt: string;
 }

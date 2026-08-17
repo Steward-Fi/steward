@@ -61,7 +61,14 @@ monitor for successful persisted proofs.
 
 Self-hosted API compositions can implement `AuditCheckpointAnchorSink` and
 register a named provider with `registerAuditCheckpointAnchorSink` before
-serving evidence routes. Selecting an unregistered provider fails closed.
+serving evidence routes. A custom registration must include both a sink and a
+proof verifier. Its sink returns a discriminated `type: "custom"` proof with the
+configured provider/sink IDs, exact checkpoint digest, and provider-native JSON
+evidence. Steward validates those bindings and runs the registered verifier
+before persisting or returning the proof; missing or rejected verification fails
+closed in `required` mode. This preserves a custom witness's native proof instead
+of representing it as RFC 3161 evidence. Selecting an unregistered provider fails
+closed.
 
 ## Offline verification
 
@@ -99,3 +106,8 @@ node scripts/verify-evidence-bundle.mjs bundle.json \
 Without `--tsa-ca`, an included token is reported as present but untrusted. The
 bundle-carried token and any bundle-carried identity are never treated as their
 own trust root.
+
+The bundled CLI verifies RFC 3161 proofs only. A `type: "custom"` proof remains
+bound to the signed checkpoint and was verified by the registered application
+verifier at acquisition, but auditors must independently verify its `evidence`
+with the corresponding witness-specific tooling and trust material.
