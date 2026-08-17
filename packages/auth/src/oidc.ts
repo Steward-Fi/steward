@@ -344,6 +344,9 @@ export async function verifyOidcJwt(
     issuer: provider.issuer,
     audience: provider.audience,
     algorithms,
+    // Fail closed on non-compliant IdPs: an id_token without exp/iat never
+    // expires (jose only validates exp when present) and cannot be age-bound.
+    requiredClaims: ["exp", "iat"],
   });
 
   // OIDC Core §3.1.3.7: the `azp` (authorized party) claim, when present, MUST
