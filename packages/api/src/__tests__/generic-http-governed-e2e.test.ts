@@ -53,6 +53,7 @@ import {
   tenants,
   users,
   userTenants,
+  withTenantAuditedTransaction,
   workspaces,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -65,7 +66,10 @@ import { providerAuthorityRoutes } from "../routes/provider-authority";
 import type { AppVariables } from "../services/context";
 import { providerActionService } from "../services/provider-action-service";
 import { providerApprovalService } from "../services/provider-approval";
-import { providerAuthorityStore } from "../services/provider-authority-store";
+import {
+  ProviderAuthorityStore,
+  providerAuthorityStore,
+} from "../services/provider-authority-store";
 
 setDefaultTimeout(120_000);
 
@@ -827,6 +831,62 @@ describe("#201 generic-http governed provider-action E2E", () => {
       .from(providerOperations)
       .where(eq(providerOperations.operationKey, OP_AUTHORED_KEY));
     expect(rows).toHaveLength(0);
+  });
+
+  test("required final audit failure rolls back provider operation registration and route promotion", async () => {
+    const store = new ProviderAuthorityStore((tenantId, fn) =>
+      withTenantAuditedTransaction(tenantId, (tx) =>
+        fn(tx, async () => {
+          throw new Error("injected required audit failure");
+        }),
+      ),
+    );
+
+    await expect(
+      store.registerOperation(
+        {
+          tenantId: G.TENANT,
+          actorUserId: G.GRANTOR,
+          tenantRole: "owner",
+          mfaVerifiedAt: Date.now(),
+          idempotencyKey: "generic-author-audit-failure",
+          expectedRevision: 1,
+          reason: "prove final audit rollback",
+          audit: async () => {},
+        },
+        G.ACCOUNT,
+        {
+          operationKey: OP_AUTHORED_KEY,
+          riskClass: "write",
+          secretRouteId: G.ROUTE_AUTHORED,
+          requestProfile: {
+            profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+            operationDescriptor: AUTHORED_DESCRIPTOR,
+          },
+        },
+      ),
+    ).rejects.toThrow("injected required audit failure");
+
+    const [account] = await getDb()
+      .select({ revision: providerAccounts.revision })
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, G.ACCOUNT));
+    const operations = await getDb()
+      .select()
+      .from(providerOperations)
+      .where(eq(providerOperations.operationKey, OP_AUTHORED_KEY));
+    const [routeAfter] = await getDb()
+      .select()
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, G.ROUTE_AUTHORED));
+
+    expect(account?.revision).toBe(1);
+    expect(operations).toHaveLength(0);
+    expect(routeAfter).toMatchObject({
+      authorityMode: "legacy",
+      providerOperationId: null,
+      pathPattern: "/v1/authored-items",
+    });
   });
 
   test("E2E read path: allow-only reaches the in-process stub with no approval", async () => {

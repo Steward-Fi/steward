@@ -160,6 +160,10 @@ function subset(candidate: string[], allowed: string[]): boolean {
 }
 
 export class ProviderAuthorityStore {
+  constructor(
+    private readonly runAuditedTransaction: typeof withTenantAuditedTransaction = withTenantAuditedTransaction,
+  ) {}
+
   private db() {
     return getDb();
   }
@@ -731,7 +735,7 @@ export class ProviderAuthorityStore {
         reason: ctx.reason,
       },
     });
-    return withTenantAuditedTransaction(ctx.tenantId, async (txRaw, appendRequiredAudit) => {
+    return this.runAuditedTransaction(ctx.tenantId, async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as RouteAuthorityTx;
       if (input.secretRouteId) {
         const [routeBeforeLock] = await tx
