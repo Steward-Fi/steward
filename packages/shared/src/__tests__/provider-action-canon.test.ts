@@ -415,6 +415,18 @@ describe("jcsStringify rejects non-JSON runtime values", () => {
   });
   it("non-integer runtime number", () =>
     expectCanon(() => jcsStringify({ a: 1.5 }), "CANON_RUNTIME_VALUE_UNSUPPORTED"));
+  it("accessor property — getter is rejected, never invoked (SEC-191)", () => {
+    let getterRan = false;
+    const exotic = Object.defineProperty({}, "a", {
+      enumerable: true,
+      get() {
+        getterRan = true;
+        return 1;
+      },
+    });
+    expectCanon(() => jcsStringify(exotic), "CANON_RUNTIME_VALUE_UNSUPPORTED");
+    expect(getterRan).toBe(false);
+  });
 });
 
 describe("jcs key ordering (UTF-16 code units)", () => {
