@@ -955,6 +955,7 @@ describe("vault EVM execution gateway", () => {
   });
 
   it("keeps an ambiguous external broadcast terminal when its vault write fails and never reopens approval", async () => {
+    await seedExternalCustodyAgent();
     const txId = "tx-ext-custody-outcome-unknown";
     const txHash = `0x${"ef".repeat(32)}`;
     const walletAddress = "0x00000000000000000000000000000000000000ff";
