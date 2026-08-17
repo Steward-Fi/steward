@@ -204,6 +204,7 @@ async function defaultForward(req: GoogleForwardRequest): Promise<GoogleForwardR
     method: req.method,
     headers: req.headers,
     body: req.body,
+    redirect: "error",
     signal: AbortSignal.timeout(GOOGLE_FORWARD_TIMEOUT_MS),
   });
   const text = await readBoundedGoogleResponse(res);
@@ -431,12 +432,22 @@ export interface ParsedConnectToken {
 
 export function parseConnectToken(token: string): ParsedConnectToken | null {
   try {
+    if (typeof token !== "string" || token.length < 1 || token.length > 1024) return null;
     const json = base64ToUtf8(token);
-    const parsed = JSON.parse(json) as ParsedConnectToken;
-    if (typeof parsed.state !== "string" || typeof parsed.verifier !== "string") {
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed) ||
+      Object.keys(parsed).sort().join(",") !== "state,verifier" ||
+      typeof parsed.state !== "string" ||
+      !/^[a-f0-9]{64}$/.test(parsed.state) ||
+      typeof parsed.verifier !== "string" ||
+      !/^[a-f0-9]{96}$/.test(parsed.verifier)
+    ) {
       return null;
     }
-    return parsed;
+    return { state: parsed.state, verifier: parsed.verifier };
   } catch {
     return null;
   }
@@ -482,6 +493,26 @@ export async function completeGoogleConnect(
   } catch {
     throw new GoogleConnectError("GOOGLE_STATE_INVALID", 400, "malformed connect state");
   }
+  if (
+    record.schemaVersion !== "steward.provider-google.pending-connect.v1" ||
+    typeof record.tenantId !== "string" ||
+    typeof record.workspaceId !== "string" ||
+    typeof record.initiatedByUserId !== "string" ||
+    typeof record.redirectUri !== "string" ||
+    !/^[a-f0-9]{64}$/.test(record.verifierHash) ||
+    !Array.isArray(record.scopes) ||
+    record.scopes.length > GOOGLE_DEFAULT_SCOPES.length ||
+    !record.scopes.every((scope) => (GOOGLE_DEFAULT_SCOPES as readonly string[]).includes(scope))
+  ) {
+    throw new GoogleConnectError("GOOGLE_STATE_INVALID", 400, "malformed connect state");
+  }
+  const createdAt = Date.parse(record.createdAt);
+  if (!Number.isFinite(createdAt) || createdAt > Date.now() + 60_000) {
+    throw new GoogleConnectError("GOOGLE_STATE_INVALID", 400, "malformed connect state");
+  }
+  if (Date.now() - createdAt > GOOGLE_CONNECT_STATE_TTL_MS) {
+    throw new GoogleConnectError("GOOGLE_STATE_EXPIRED", 401, "connect state expired");
+  }
 
   // Bind the state to THIS tenant/workspace/caller — a state minted for another
   // workspace cannot be replayed here.
@@ -514,18 +545,10 @@ export async function completeGoogleConnect(
     redirectUri: input.redirectUri,
     verifier: parsedToken.verifier,
   });
-  if (typeof tokenRes.refresh_token !== "string" || tokenRes.refresh_token.length === 0) {
-    throw new GoogleConnectError(
-      "GOOGLE_REFRESH_TOKEN_MISSING",
-      502,
-      "Google authorization did not issue offline access; reconnect with consent required",
-    );
-  }
-
-  // 4. Identify the connected account.
-  const identity = await fetchGoogleIdentity(tokenRes.access_token);
-
-  // 5. Consume the state EXACTLY ONCE, only after upstream success. A concurrent
+  // 4. Consume the state EXACTLY ONCE after the authorization code has been
+  //    successfully spent. The code cannot be retried at Google, so every later
+  //    local validation/persistence failure burns the state and compensates by
+  //    revoking the newly issued grant. A concurrent
   //    duplicate callback loses the race and gets GOOGLE_STATE_REUSED.
   const consumed = await input.store.consume(key);
   if (consumed !== raw) {
@@ -534,6 +557,22 @@ export async function completeGoogleConnect(
     // an untracked grant at Google.
     await revokeIssuedTokensBestEffort(input.config, tokenRes);
     throw new GoogleConnectError("GOOGLE_STATE_REUSED", 401, "connect state already used");
+  }
+
+  let identity: GoogleIdentity;
+  try {
+    assertGoogleTokenResponse(tokenRes, "GOOGLE_TOKEN_EXCHANGE_FAILED");
+    if (typeof tokenRes.refresh_token !== "string" || tokenRes.refresh_token.length === 0) {
+      throw new GoogleConnectError(
+        "GOOGLE_REFRESH_TOKEN_MISSING",
+        502,
+        "Google authorization did not issue offline access; reconnect with consent required",
+      );
+    }
+    identity = await fetchGoogleIdentity(tokenRes.access_token);
+  } catch (error) {
+    await revokeIssuedTokensBestEffort(input.config, tokenRes);
+    throw error;
   }
 
   const scopesGranted = tokenRes.scope
@@ -555,6 +594,9 @@ export async function completeGoogleConnect(
     obtainedAt: obtainedAt.toISOString(),
     expiresAt: expiresAt ? expiresAt.toISOString() : null,
   };
+  // Validate the exact persisted envelope before encrypting it. This applies
+  // the same bounds used on every later decrypt/refresh path.
+  parseGoogleCredential(JSON.stringify(payload));
 
   // 6. Persist tokens as a versioned vault secret + create/update the account,
   //    all inside one tenant-audited transaction so the audit event commits with
@@ -622,7 +664,18 @@ async function fetchGoogleIdentity(accessToken: string): Promise<GoogleIdentity>
     );
   }
   const data = res.json as GoogleUserResponse | null;
-  if (!data?.sub || !data.email) {
+  if (
+    !data ||
+    typeof data.sub !== "string" ||
+    data.sub.length < 1 ||
+    data.sub.length > 512 ||
+    typeof data.email !== "string" ||
+    data.email.length < 3 ||
+    data.email.length > 512 ||
+    /[\u0000-\u0020\u007f]/.test(data.email) ||
+    !/^[^@]+@[^@]+$/.test(data.email) ||
+    (data.name !== undefined && (typeof data.name !== "string" || data.name.length > 512))
+  ) {
     throw new GoogleConnectError(
       "GOOGLE_IDENTITY_FAILED",
       502,
@@ -630,6 +683,50 @@ async function fetchGoogleIdentity(accessToken: string): Promise<GoogleIdentity>
     );
   }
   return { id: data.sub, email: data.email, name: data.name ?? "" };
+}
+
+function assertGoogleTokenResponse(
+  parsed: GoogleTokenResponse,
+  code: "GOOGLE_TOKEN_EXCHANGE_FAILED" | "GOOGLE_REFRESH_FAILED",
+): void {
+  const fail = (message: string) => {
+    throw new GoogleConnectError(code, 502, message);
+  };
+  if (
+    typeof parsed.access_token !== "string" ||
+    parsed.access_token.length < 1 ||
+    parsed.access_token.length > 16_384
+  ) {
+    fail("Google token response contained an invalid access_token");
+  }
+  if (
+    parsed.refresh_token !== undefined &&
+    (typeof parsed.refresh_token !== "string" ||
+      parsed.refresh_token.length < 1 ||
+      parsed.refresh_token.length > 16_384)
+  ) {
+    fail("Google token response contained an invalid refresh_token");
+  }
+  if (
+    parsed.token_type !== undefined &&
+    (typeof parsed.token_type !== "string" || parsed.token_type.toLowerCase() !== "bearer")
+  ) {
+    fail("Google token response contained an invalid token_type");
+  }
+  if (
+    parsed.scope !== undefined &&
+    (typeof parsed.scope !== "string" || parsed.scope.length > 32_768)
+  ) {
+    fail("Google token response contained invalid scopes");
+  }
+  if (
+    parsed.expires_in !== undefined &&
+    (!Number.isSafeInteger(parsed.expires_in) ||
+      parsed.expires_in <= 0 ||
+      parsed.expires_in > 30 * 24 * 60 * 60)
+  ) {
+    fail("Google token response contained an invalid expires_in");
+  }
 }
 
 interface ExchangeInput {
@@ -658,7 +755,7 @@ async function exchangeAuthorizationCode(input: ExchangeInput): Promise<GoogleTo
     body: body.toString(),
   });
   const parsed = res.json as GoogleTokenResponse | null;
-  if (!res.ok || !parsed || typeof parsed.access_token !== "string") {
+  if (!res.ok || !parsed || typeof parsed !== "object") {
     throw new GoogleConnectError(
       "GOOGLE_TOKEN_EXCHANGE_FAILED",
       502,
@@ -1198,6 +1295,16 @@ async function refreshGoogleUpstream(
       502,
       "Google refresh response missing access_token",
     );
+  }
+  try {
+    assertGoogleTokenResponse(parsed, "GOOGLE_REFRESH_FAILED");
+  } catch {
+    // A 2xx refresh response means Google may already have rotated away the
+    // stored refresh token. If its credential envelope is malformed, the old
+    // credential can no longer be trusted as live. Revoke what we can and drive
+    // the caller through the durable fail-closed revocation path.
+    await revokeIssuedTokensBestEffort(config, parsed);
+    return { revoked: true, accessToken: "" };
   }
   return {
     revoked: false,

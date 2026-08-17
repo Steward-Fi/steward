@@ -761,7 +761,7 @@ describe("connect state validation", () => {
     ok.restore();
   });
 
-  test("missing offline refresh token fails closed without consuming state", async () => {
+  test("missing offline refresh token revokes the issued access token and consumes spent state", async () => {
     const store = new MemoryConnectStore();
     const initiated = await initiateGoogleConnect({
       tenantId: TENANT,
@@ -787,12 +787,84 @@ describe("connect state validation", () => {
     await expect(completeGoogleConnect(args)).rejects.toMatchObject({
       code: "GOOGLE_REFRESH_TOKEN_MISSING",
     });
+    expect(fake.counters.revoke).toBe(1);
     fake.restore();
     const ok = installFakeX();
-    await expect(completeGoogleConnect(args)).resolves.toMatchObject({
-      googleUserId: "google-user-123",
+    await expect(completeGoogleConnect(args)).rejects.toMatchObject({
+      code: "GOOGLE_STATE_INVALID",
     });
+    expect(ok.counters.exchange).toBe(0);
     ok.restore();
+  });
+
+  test("malformed successful token exchange revokes credentials and consumes spent state", async () => {
+    const store = new MemoryConnectStore();
+    const initiated = await initiateGoogleConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+    });
+    const fake = installFakeX({
+      exchangeToken: { access_token: "", refresh_token: "refresh-issued" },
+    });
+    const args = {
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      callerUserId: ADMIN,
+      code: "auth-code",
+      state: initiated.state,
+      connectToken: initiated.connectToken,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+      vault,
+    };
+    await expect(completeGoogleConnect(args)).rejects.toMatchObject({
+      code: "GOOGLE_TOKEN_EXCHANGE_FAILED",
+    });
+    expect(fake.counters.revoke).toBe(1);
+    await expect(completeGoogleConnect(args)).rejects.toMatchObject({
+      code: "GOOGLE_STATE_INVALID",
+    });
+    expect(fake.counters.exchange).toBe(1);
+    fake.restore();
+  });
+
+  test("identity failure revokes the issued grant and consumes spent state", async () => {
+    const store = new MemoryConnectStore();
+    const initiated = await initiateGoogleConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+    });
+    const fake = installFakeX({ identityStatus: 503 });
+    const args = {
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      callerUserId: ADMIN,
+      code: "auth-code",
+      state: initiated.state,
+      connectToken: initiated.connectToken,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+      vault,
+    };
+    await expect(completeGoogleConnect(args)).rejects.toMatchObject({
+      code: "GOOGLE_IDENTITY_FAILED",
+    });
+    expect(fake.counters.revoke).toBe(1);
+    await expect(completeGoogleConnect(args)).rejects.toMatchObject({
+      code: "GOOGLE_STATE_INVALID",
+    });
+    expect(fake.counters.exchange).toBe(1);
+    fake.restore();
   });
 });
 
@@ -822,6 +894,42 @@ describe("refresh", () => {
 
     const events = await readAuditActions(TENANT);
     expect(events.includes("provider.google.refresh.completed")).toBe(true);
+  });
+
+  test("malformed refresh success revokes the account without rotating the stored credential", async () => {
+    const store = new MemoryConnectStore();
+    const { completed } = await connectHappy(store);
+    const before = await decryptCredential(completed.providerAccountId);
+    const fake = installFakeX({
+      refreshResponses: [
+        {
+          status: 200,
+          body: {
+            access_token: "",
+            refresh_token: "refresh-attacker-controlled",
+            expires_in: Number.POSITIVE_INFINITY,
+          },
+        },
+      ],
+    });
+    await expect(
+      refreshGoogleProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        vault,
+        config: CONFIG,
+        force: true,
+      }),
+    ).rejects.toMatchObject({ code: "GOOGLE_REFRESH_REVOKED" });
+    expect(await decryptCredential(completed.providerAccountId)).toEqual(before);
+    const [account] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(account.status).toBe("revoked");
+    expect(fake.counters.revoke).toBe(1);
+    fake.restore();
   });
 
   test("SINGLE-FLIGHT: two concurrent refreshes of a near-expiry token make exactly ONE token call", async () => {
@@ -1148,11 +1256,14 @@ test("provider connect rejects process-local state in multi-instance runtimes", 
 
 test("real Google transport rejects oversized provider responses before parsing", async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () =>
-    new Response("{}", {
+  let requestInit: RequestInit | undefined;
+  globalThis.fetch = (async (_input, init) => {
+    requestInit = init;
+    return new Response("{}", {
       status: 200,
       headers: { "content-type": "application/json", "content-length": "1048577" },
-    })) as typeof fetch;
+    });
+  }) as typeof fetch;
   try {
     await expect(
       __runDefaultGoogleForwardForTests({
@@ -1161,6 +1272,8 @@ test("real Google transport rejects oversized provider responses before parsing"
         headers: { accept: "application/json" },
       }),
     ).rejects.toThrow("Google provider response exceeded maximum size");
+    expect(requestInit?.redirect).toBe("error");
+    expect(requestInit?.signal).toBeInstanceOf(AbortSignal);
   } finally {
     globalThis.fetch = originalFetch;
   }

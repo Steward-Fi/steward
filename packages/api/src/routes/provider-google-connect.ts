@@ -183,7 +183,10 @@ const handleCallback = async (c: RouteContext): Promise<Response> => {
   }>(c);
   if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON body" }, 400);
   if (typeof body.error === "string" && body.error.length > 0) {
-    return c.json<ApiResponse>({ ok: false, error: `Google OAuth error: ${body.error}` }, 400);
+    const providerCode = /^[a-z0-9_.-]{1,128}$/i.test(body.error)
+      ? body.error
+      : "authorization_failed";
+    return c.json<ApiResponse>({ ok: false, error: `Google OAuth error: ${providerCode}` }, 400);
   }
   const workspaceId = typeof body.workspaceId === "string" ? body.workspaceId : "";
   const code = typeof body.code === "string" ? body.code : "";
