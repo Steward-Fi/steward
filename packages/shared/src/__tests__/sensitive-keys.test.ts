@@ -78,6 +78,26 @@ describe("sensitive credential keys", () => {
     expect(containsSensitiveCredentialKey({ public: { labels: ["safe"] } })).toBe(false);
   });
 
+  test("finds private-key armor under innocuous fields without rejecting public armor", () => {
+    for (const value of [
+      "-----BEGIN PRIVATE KEY-----\nsecret",
+      "-----BEGIN ENCRYPTED PRIVATE KEY-----\nsecret",
+      "-----BEGIN RSA PRIVATE KEY-----\nsecret",
+      "-----BEGIN EC PRIVATE KEY-----\nsecret",
+      "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret",
+      "-----BEGIN PGP PRIVATE KEY BLOCK-----\nsecret",
+    ]) {
+      expect(containsSensitiveCredentialKey({ data: value }), value).toBe(true);
+    }
+
+    expect(containsSensitiveCredentialKey({ data: "-----BEGIN PUBLIC KEY-----\npublic" })).toBe(
+      false,
+    );
+    expect(containsSensitiveCredentialKey({ data: "-----BEGIN CERTIFICATE-----\npublic" })).toBe(
+      false,
+    );
+  });
+
   test("fails closed without invoking accessors", () => {
     let invoked = false;
     const nested = Object.defineProperty({}, "public", {
