@@ -11,6 +11,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {
+  __resetAuditHmacKeyCacheForTests,
+  type AppendRequiredAudit,
+  appendAuditEventWithinTx,
+} from "@stwd/db";
 import type { AppVariables } from "@stwd/shared";
 import { Hono } from "hono";
 import type { StewardAppContext } from "../context";
@@ -31,6 +36,7 @@ setDefaultTimeout(30000);
 let harness: Harness | null = null;
 let tenantId: string;
 let secretId: string;
+const originalAuditHmacKey = process.env.STEWARD_AUDIT_HMAC_KEY;
 
 /** a minimal injected context: the routes use db + safeJsonParse + writeAuditEvent. */
 function buildCtx(db: TestDb): StewardAppContext {
@@ -61,12 +67,13 @@ function buildCtx(db: TestDb): StewardAppContext {
     async writeAuditEvent() {
       /* no-op audit sink for tests */
     },
-    async withTenantAuditedTransaction(_tenantId, fn) {
-      return db.transaction((tx: unknown) =>
-        fn(tx, async () => {
-          /* no-op required audit append for route-behavior tests */
-        }),
-      );
+    withTenantAuditedTransaction<T>(
+      _tenantId: string,
+      fn: (tx: unknown, appendRequiredAudit: AppendRequiredAudit) => Promise<T>,
+    ) {
+      return (
+        db as { transaction<R>(callback: (tx: unknown) => Promise<R>): Promise<R> }
+      ).transaction((tx) => fn(tx, (event) => appendAuditEventWithinTx(tx as never, event)));
     },
     async getAgentTokenStatus() {
       return null;
@@ -118,6 +125,8 @@ const GH_BODY = {
 };
 
 beforeEach(async () => {
+  process.env.STEWARD_AUDIT_HMAC_KEY = "capability-routes-test-audit-key-with-enough-entropy";
+  __resetAuditHmacKeyCacheForTests();
   harness = await makeHarness();
   tenantId = `tenant-${crypto.randomUUID()}`;
   await ensureTenant(harness.db, tenantId);
@@ -127,6 +136,12 @@ beforeEach(async () => {
 afterEach(async () => {
   await harness?.close();
   harness = null;
+  if (originalAuditHmacKey === undefined) {
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
+  } else {
+    process.env.STEWARD_AUDIT_HMAC_KEY = originalAuditHmacKey;
+  }
+  __resetAuditHmacKeyCacheForTests();
 });
 
 async function createCap(
