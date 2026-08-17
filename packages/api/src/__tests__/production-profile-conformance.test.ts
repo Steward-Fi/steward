@@ -233,6 +233,24 @@ describe("#220 executable provider profile conformance", () => {
     ).toEqual(["method-not-canonical", "origin-not-canonical-https"]);
   });
 
+  it("mutation proof catches nested-encoded path traversal", () => {
+    const spec = PRODUCTION_PROVIDER_PROFILE_SPECS.find(
+      (candidate) => candidate.profile === GITHUB_PROVIDER_ACTION_PROFILE,
+    );
+    if (!spec) throw new Error("github production profile missing");
+    const built = buildFromProductionSpec(spec, {
+      ...FIXTURES[GITHUB_PROVIDER_ACTION_PROFILE].args,
+    });
+    for (const segment of ["%252e%252e", "%252f", "%255c"]) {
+      expect(
+        inspectProviderProfileConformance(spec.profile, {
+          ...built.action,
+          normalizedPath: `/repos/${segment}/hello/issues`,
+        }),
+      ).toContain("path-traversal");
+    }
+  });
+
   it("mutation proof catches duplicate query/header names and unsupported content type", () => {
     for (const spec of PRODUCTION_PROVIDER_PROFILE_SPECS) {
       const built = buildFromProductionSpec(spec, { ...FIXTURES[spec.profile].args });

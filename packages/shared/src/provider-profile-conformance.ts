@@ -59,15 +59,21 @@ export function inspectProviderProfileConformance(
   if (!action.normalizedPath.startsWith("/")) violations.push("path-not-absolute");
 
   for (const segment of action.normalizedPath.split("/").slice(1)) {
-    let decoded: string;
-    try {
-      decoded = decodeURIComponent(segment);
-    } catch {
-      violations.push("path-encoding-invalid");
-      continue;
-    }
-    if (decoded === "." || decoded === ".." || decoded.includes("/") || decoded.includes("\\")) {
-      violations.push("path-traversal");
+    let decoded = segment;
+    for (let depth = 0; depth < 3; depth += 1) {
+      let next: string;
+      try {
+        next = decodeURIComponent(decoded);
+      } catch {
+        if (depth === 0) violations.push("path-encoding-invalid");
+        break;
+      }
+      if (next === decoded) break;
+      decoded = next;
+      if (decoded === "." || decoded === ".." || decoded.includes("/") || decoded.includes("\\")) {
+        violations.push("path-traversal");
+        break;
+      }
     }
   }
 
