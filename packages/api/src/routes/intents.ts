@@ -31,6 +31,7 @@ import {
   transactions,
   vault,
 } from "../services/context";
+import { redactSignedTransactions, toIntentResponse } from "../services/intent-response";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
@@ -1030,75 +1031,6 @@ async function assertIntentAuthorizationBaselineCurrent(row: typeof intents.$inf
       409,
     );
   }
-}
-
-function toIntentResponse(row: typeof intents.$inferSelect) {
-  return {
-    id: row.id,
-    intent_id: row.id,
-    tenantId: row.tenantId,
-    agentId: row.agentId,
-    wallet_id: row.agentId,
-    intentType: row.intentType,
-    intent_type: row.intentType,
-    status: row.status,
-    resourceType: row.resourceType,
-    resource_id: row.resourceId,
-    resourceId: row.resourceId,
-    createdByType: row.createdByType,
-    created_by_id: row.createdById,
-    createdById: row.createdById,
-    created_by_display_name: row.createdByDisplayName,
-    createdByDisplayName: row.createdByDisplayName,
-    authorizationDetails: row.authorizationDetails,
-    authorization_details: row.authorizationDetails,
-    payload: row.payload,
-    executionResult: redactSignedTransactions(row.executionResult),
-    execution_result: redactSignedTransactions(row.executionResult),
-    expiresAt: row.expiresAt,
-    expires_at: row.expiresAt?.getTime() ?? null,
-    authorizedBy: row.authorizedBy,
-    authorized_by: row.authorizedBy,
-    canceledAt: row.canceledAt,
-    canceledBy: row.canceledBy,
-    canceled_by: row.canceledBy,
-    cancellationReason: row.cancellationReason,
-    cancellation_reason: row.cancellationReason,
-    expiredAt: row.expiredAt,
-    expiredBy: row.expiredBy,
-    expired_by: row.expiredBy,
-    rejectedAt: row.rejectedAt,
-    rejectedBy: row.rejectedBy,
-    rejected_by: row.rejectedBy,
-    rejectionReason: row.rejectionReason,
-    rejection_reason: row.rejectionReason,
-    executedBy: row.executedBy,
-    executed_by: row.executedBy,
-    failedAt: row.failedAt,
-    failedBy: row.failedBy,
-    failed_by: row.failedBy,
-    failureReason: row.failureReason,
-    failure_reason: row.failureReason,
-    createdAt: row.createdAt,
-    created_at: row.createdAt.getTime(),
-    updatedAt: row.updatedAt,
-    authorizedAt: row.authorizedAt,
-    executedAt: row.executedAt,
-  };
-}
-
-function redactSignedTransactions(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redactSignedTransactions);
-  if (!value || typeof value !== "object") return value;
-  const redacted: Record<string, unknown> = {};
-  for (const [key, nested] of Object.entries(value)) {
-    if (key === "signedTx" || key === "signed_tx") {
-      redacted[key] = "[redacted]";
-    } else {
-      redacted[key] = redactSignedTransactions(nested);
-    }
-  }
-  return redacted;
 }
 
 async function writeIntentAudit(
