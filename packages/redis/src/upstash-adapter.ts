@@ -86,6 +86,12 @@ export interface IoredisPipelineLike {
   hset(key: string, field: string, value: string): IoredisPipelineLike;
   expire(key: string, ttlSeconds: number): IoredisPipelineLike;
   /**
+   * Queue a server-side Lua script inside the transaction. ioredis positional
+   * form (numKeys, ...keysThenArgs) — the Upstash implementation maps it to
+   * (script, keys[], args[]). Used by the spend-tracker settle clamp.
+   */
+  eval(script: string, numKeys: number, ...args: (string | number)[]): IoredisPipelineLike;
+  /**
    * Returns ioredis-style [err, value] tuples for each queued command, in
    * order. Errors are swallowed into the per-command tuple so callers see
    * `null` in the err slot on success and an Error instance on failure.
@@ -139,6 +145,14 @@ class UpstashPipeline implements IoredisPipelineLike {
 
   expire(key: string, ttlSeconds: number): IoredisPipelineLike {
     this.ops.push((m) => m.expire(key, ttlSeconds));
+    return this;
+  }
+
+  eval(script: string, numKeys: number, ...args: (string | number)[]): IoredisPipelineLike {
+    // Same positional→array mapping as the client-level eval below.
+    const keys = args.slice(0, numKeys).map(String);
+    const argv = args.slice(numKeys).map(String);
+    this.ops.push((m) => m.eval(script, keys, argv));
     return this;
   }
 

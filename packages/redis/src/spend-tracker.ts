@@ -53,6 +53,20 @@ redis.call('EXPIRE', KEYS[1], tonumber(ARGV[4]))
 return {1, settled, after}
 `;
 
+// ARGV: releaseUnits. Returns reservedAfter.
+// Decrement `reserved` but FLOOR AT ZERO: a double-settle (caller bug) must
+// not drive the field negative — a negative `reserved` would subtract from
+// the effective spend in checkSpendLimit/reserveSpend and silently free
+// budget (fail-open). SEC-168. Atomic so a concurrent reserve cannot observe
+// a transient negative either.
+const SETTLE_RESERVED_LUA = `
+local release = tonumber(ARGV[1])
+local current = tonumber(redis.call('HGET', KEYS[1], 'reserved') or '0')
+local after = math.max(0, current - release)
+redis.call('HSET', KEYS[1], 'reserved', after)
+return after
+`;
+
 /**
  * Get the date key for a given period.
  * - day:   "2026-03-27"
@@ -269,7 +283,8 @@ export async function settleReservedSpend(
   const pipeline = redis.multi();
 
   for (const { period, key } of settlementBuckets) {
-    pipeline.hincrby(key, "reserved", -reservedUnits);
+    // SEC-168: clamped Lua decrement — never let `reserved` go negative.
+    pipeline.eval(SETTLE_RESERVED_LUA, 1, key, String(reservedUnits));
     if (actualUnits > 0) {
       pipeline.hincrby(key, "total", actualUnits);
       pipeline.hincrby(key, `host:${host}`, actualUnits);

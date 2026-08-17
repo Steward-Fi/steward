@@ -84,7 +84,10 @@ export class WebhookEventRegistry {
    * contribute" surface.
    */
   describeContributions(): Record<string, string[]> {
-    const out: Record<string, string[]> = {};
+    // SEC-192: null-prototype — a plugin literally named "__proto__" assigned
+    // through a plain object literal would set the prototype and silently
+    // vanish from JSON diagnostics.
+    const out: Record<string, string[]> = Object.create(null);
     for (const [plugin, names] of this.pluginEvents) {
       out[plugin] = [...names].sort();
     }

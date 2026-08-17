@@ -591,7 +591,18 @@ function serializeObject(obj: Record<string, unknown>): string {
   const keys = Object.keys(obj).sort(compareUtf16);
   const parts: string[] = [];
   for (const k of keys) {
-    const val = obj[k];
+    // Read via the property descriptor, NOT obj[k]: an accessor property
+    // would run user code, and a value-changing getter could desync
+    // mint-vs-verify digests. SEC-191: the header contract rejects getter
+    // side effects — enforce it instead of invoking them (fail closed).
+    const desc = Object.getOwnPropertyDescriptor(obj, k);
+    if (!desc || desc.get !== undefined || desc.set !== undefined) {
+      fail(
+        "CANON_RUNTIME_VALUE_UNSUPPORTED",
+        `member '${k}' is an accessor property (getter side effects are rejected)`,
+      );
+    }
+    const val = desc.value;
     // JCS drops nothing: an explicit `undefined` member is a runtime error here
     // (it is not a JSON value). Members we intend to omit must be omitted by the
     // builder, never present-as-undefined.
