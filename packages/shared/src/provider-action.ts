@@ -41,6 +41,7 @@ export const CANON_ERROR_CODES = [
   "CANON_INVALID_UTF8",
   "CANON_JSON_SYNTAX_INVALID",
   "CANON_JSON_DUPLICATE_KEY",
+  "CANON_JSON_FORBIDDEN_KEY",
   "CANON_JSON_SHAPE_INVALID",
   "CANON_UNKNOWN_FIELD",
   "CANON_REQUIRED_FIELD_MISSING",
@@ -106,6 +107,7 @@ const CANON_ERROR_HTTP: Record<CanonErrorCode, number> = {
   CANON_INVALID_UTF8: 400,
   CANON_JSON_SYNTAX_INVALID: 400,
   CANON_JSON_DUPLICATE_KEY: 400,
+  CANON_JSON_FORBIDDEN_KEY: 400,
   CANON_JSON_SHAPE_INVALID: 400,
   CANON_UNKNOWN_FIELD: 400,
   CANON_REQUIRED_FIELD_MISSING: 400,
@@ -203,6 +205,9 @@ export const MIN_SAFE_JSON_INT = -9007199254740991;
 // duplicate keys (Conflict 10) and accepts numbers we must reject. This is a
 // bespoke recursive-descent parser over a UTF-8 string that:
 //   - rejects duplicate member names at EVERY depth (CANON_JSON_DUPLICATE_KEY);
+//   - rejects `__proto__`/`constructor`/`prototype` member names at EVERY depth
+//     (CANON_JSON_FORBIDDEN_KEY) — plain assignment would replace the result's
+//     prototype or silently drop the member instead of creating an own key;
 //   - rejects the profile-forbidden number lexemes (decimals/exp/leading-zero/-0);
 //   - rejects trailing tokens, comments, trailing commas, BOM;
 //   - rejects lone surrogates in strings (CANON_UNICODE_INVALID);
@@ -266,6 +271,15 @@ class JsonScanner {
       this.ws();
       if (this.s[this.i] !== '"') fail("CANON_JSON_SYNTAX_INVALID", "expected object key string");
       const key = this.string();
+      // Prototype-pollution guard: a member named `__proto__` never becomes an
+      // own property under plain assignment (an object value REPLACES the
+      // result's prototype; a primitive is silently dropped), and
+      // `constructor`/`prototype` reads follow the prototype chain. These keys
+      // are ambiguous across JS consumer patterns, so reject them outright
+      // instead of silently collapsing them.
+      if (key === "__proto__" || key === "constructor" || key === "prototype") {
+        fail("CANON_JSON_FORBIDDEN_KEY", `forbidden object key ${JSON.stringify(key)}`);
+      }
       if (seen.has(key)) fail("CANON_JSON_DUPLICATE_KEY", `duplicate key ${JSON.stringify(key)}`);
       seen.add(key);
       this.ws();
