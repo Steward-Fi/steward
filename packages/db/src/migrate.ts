@@ -21,6 +21,36 @@ interface Journal {
   entries: JournalEntry[];
 }
 
+/**
+ * The legacy `psql -f` deploy loop was retired when this migrator was
+ * introduced; the journal tip at that moment was 0024_audit_events. A legacy
+ * DB is therefore only provably migrated through that tag — entries past it
+ * must be APPLIED by the migrator, never seeded.
+ */
+export const LEGACY_BACKFILL_TIP_TAG = "0024_audit_events";
+
+/**
+ * Fingerprint proving a legacy DB actually reached the psql-era tip: the
+ * newest table 0024 created. `public.tenants` (0000) alone says nothing about
+ * how far the psql loop got before the DB was frozen.
+ */
+export const LEGACY_BACKFILL_FINGERPRINT_TABLE = "public.audit_events";
+
+/**
+ * Select the journal entries a legacy DB may be seeded with: everything up to
+ * and including the psql-era tip. Throws if the tip is absent from the
+ * journal (should never happen — it is a historical entry).
+ */
+export function selectLegacyBackfillEntries(journal: Journal): JournalEntry[] {
+  const tipIndex = journal.entries.findIndex((entry) => entry.tag === LEGACY_BACKFILL_TIP_TAG);
+  if (tipIndex === -1) {
+    throw new Error(
+      `[migrate] Backfill-era tip ${LEGACY_BACKFILL_TIP_TAG} is missing from the migration journal; refusing to seed a legacy DB`,
+    );
+  }
+  return journal.entries.slice(0, tipIndex + 1);
+}
+
 function readJournal(): Journal {
   const path = `${MIGRATIONS_FOLDER}/meta/_journal.json`;
   return JSON.parse(readFileSync(path, "utf-8")) as Journal;
@@ -42,7 +72,11 @@ function hashMigration(tag: string): string {
  * used to `psql -f` each .sql by hand), we backfill `drizzle.__drizzle_migrations`
  * from the journal so the migrator doesn't try to re-apply non-idempotent DDL.
  * Heuristic: if `__drizzle_migrations` is empty AND `tenants` exists (was
- * created by 0000), assume all journal entries are already applied.
+ * created by 0000), the DB came from the psql loop. We then FINGERPRINT the
+ * psql-era tip (`LEGACY_BACKFILL_FINGERPRINT_TABLE`, created by 0024) and seed
+ * only the entries through that tip — seeding the whole current journal would
+ * silently skip every migration between the DB's true tip and now, including
+ * constraint-only hardening migrations whose absence produces no runtime error.
  */
 export async function runMigrations(): Promise<{ applied: string[] }> {
   const { client, db } = createDb();
@@ -75,10 +109,28 @@ export async function runMigrations(): Promise<{ applied: string[] }> {
 
       // Backfill: legacy DB previously migrated by the psql loop.
       if (existingRows.length === 0 && tenantsExists[0]?.r) {
+        // Fingerprint the psql-era tip before trusting the heuristic: a DB
+        // frozen at an older tip must fail loudly here, not be seeded with
+        // migrations it never applied.
+        const fingerprint = (await client`
+          SELECT to_regclass(${LEGACY_BACKFILL_FINGERPRINT_TABLE}) AS r
+        `) as Array<{ r: string | null }>;
+        if (!fingerprint[0]?.r) {
+          throw new Error(
+            `[migrate] Legacy DB detected (public.tenants exists) but fingerprint table ` +
+              `${LEGACY_BACKFILL_FINGERPRINT_TABLE} is missing — the DB predates migration ` +
+              `${LEGACY_BACKFILL_TIP_TAG}. Refusing to seed __drizzle_migrations: entries past ` +
+              `the DB's true tip would be silently skipped (including security-hardening ` +
+              `migrations). Reconcile the schema manually, then re-run migrations.`,
+          );
+        }
+        const backfillEntries = selectLegacyBackfillEntries(journal);
         console.log(
-          `[migrate] Legacy DB detected — seeding __drizzle_migrations with ${journal.entries.length} historical entries`,
+          `[migrate] Legacy DB detected — seeding __drizzle_migrations with ${backfillEntries.length} ` +
+            `entries through ${LEGACY_BACKFILL_TIP_TAG}; the migrator will apply the remaining ` +
+            `${journal.entries.length - backfillEntries.length} journal entrie(s) normally`,
         );
-        for (const entry of journal.entries) {
+        for (const entry of backfillEntries) {
           const hash = hashMigration(entry.tag);
           await client`
             INSERT INTO drizzle.__drizzle_migrations ("hash", "created_at")
