@@ -101,6 +101,46 @@ describe("#101 deploy/DEPLOYMENT.md docs reconciled with fail-closed code", () =
   });
 });
 
+describe("SEC-011 deploy/docker-compose.yml publishes no port on all interfaces", () => {
+  const compose = read("docker-compose.yml");
+
+  test("every published port is bound to 127.0.0.1", () => {
+    // Collect the entries of each `ports:` list. A bare "3200:3200" binds
+    // 0.0.0.0 — the API and credential proxy would be reachable on every host
+    // interface over plain HTTP, bypassing the nginx TLS layer (upstreams point
+    // at 127.0.0.1).
+    const lines = compose.split("\n");
+    const published: string[] = [];
+    let inPorts = false;
+    for (const line of lines) {
+      if (/^\s+ports:\s*$/.test(line)) {
+        inPorts = true;
+        continue;
+      }
+      if (inPorts) {
+        const m = line.match(/^\s+-\s+"?([^"\s]+)"?\s*$/);
+        if (m) {
+          published.push(m[1]);
+        } else if (line.trim() !== "" && !line.trim().startsWith("#")) {
+          inPorts = false;
+        }
+      }
+    }
+    expect(published.length).toBeGreaterThan(0);
+    for (const mapping of published) {
+      expect(mapping.startsWith("127.0.0.1:")).toBe(true);
+    }
+  });
+
+  test("provision-steward-node.sh does not advertise plain-HTTP external access", () => {
+    const script = read("provision-steward-node.sh");
+    // Pre-fix: `echo "    STEWARD_API_URL=http://${NODE_IP}:3200"` told operators
+    // to drive tenant keys / platform key / agent JWTs over cleartext HTTP.
+    expect(/STEWARD_API_URL=http:\/\/\$\{NODE_IP\}/.test(script)).toBe(false);
+    expect(/Steward URL:\s+http:\/\/\$\{NODE_IP\}/.test(script)).toBe(false);
+  });
+});
+
 describe("#111 deploy/provision-steward-node.sh does not leak secrets", () => {
   const script = read("provision-steward-node.sh");
   const lines = script.split("\n");

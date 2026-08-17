@@ -33,7 +33,8 @@ Steward runs as two **systemd services** on each Milady node, built from source 
 │    └─ Reach proxy at:   http://172.18.0.1:8080        │
 │       (Docker bridge gateway IP)                      │
 │                                                       │
-│  External: <your-domain> → milady-core-1:3200         │
+│  External: <your-domain> → TLS terminator (nginx/deploy/nginx.conf)        │
+│            → 127.0.0.1:3200 (never plain HTTP to a node IP)                 │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -628,10 +629,9 @@ curl -sf "$BASE/webhooks/$WEBHOOK_ID/deliveries" \
 The repo includes a full E2E test script that validates the complete flow:
 
 ```bash
-# Run against a specific node
-STEWARD_URL=http://88.99.66.168:3200 bun run scripts/e2e-integration-test.ts
-
-# Run against local
+# Run against a specific node via SSH tunnel (node ports are loopback-only —
+# never point STEWARD_URL at http://<node-ip>:3200 over the internet):
+#   ssh -L 3200:localhost:3200 root@<node-ip>
 STEWARD_URL=http://localhost:3200 bun run scripts/e2e-integration-test.ts
 
 # With proxy (default: STEWARD_URL with :3200 → :8080)

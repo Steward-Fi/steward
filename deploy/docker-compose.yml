@@ -19,7 +19,10 @@ services:
     networks:
       - milady-isolated
     ports:
-      - "3200:3200"
+      # Loopback-only: tenant keys / platform key / agent JWTs must never cross
+      # the network on plain HTTP. External access goes through the TLS
+      # terminator (deploy/nginx.conf) or an SSH tunnel — never http://<ip>:3200.
+      - "127.0.0.1:3200:3200"
     environment:
       PORT: "3200"
       STEWARD_BIND_HOST: "0.0.0.0"
@@ -62,7 +65,8 @@ services:
     networks:
       - milady-isolated
     ports:
-      - "8080:8080"
+      # Loopback-only (see steward service above): front with TLS or SSH tunnel.
+      - "127.0.0.1:8080:8080"
     environment:
       STEWARD_PROXY_PORT: "8080"
       DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@steward-db:5432/steward}"
