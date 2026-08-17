@@ -64,6 +64,7 @@ async function ensureHyperliquidWallet(agentId: string) {
   } catch {
     const created = await vault.createWallet({
       agentId,
+      tenantId: DEFAULT_TENANT_ID,
       venue: "hyperliquid",
       chainType: "evm",
       purpose: "hyperliquid-deposit",

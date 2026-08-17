@@ -107,6 +107,7 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
 
     const wallet = await vault.createWallet({
       agentId: "sol",
+      tenantId: TENANT_ID,
       venue: "hyperliquid",
       chainType: "evm",
       purpose: "perp",
@@ -124,6 +125,7 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
 
     const wallet = await vault.createWallet({
       agentId: "sol",
+      tenantId: TENANT_ID,
       venue: "drift",
       chainType: "solana",
     });
@@ -140,6 +142,7 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
     await vault.createAgent(TENANT_ID, "sol", "Sol");
     const created = await vault.createWallet({
       agentId: "sol",
+      tenantId: TENANT_ID,
       venue: "hyperliquid",
       chainType: "evm",
     });
@@ -191,12 +194,22 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
 
   test("createWallet enforces venue uniqueness per (agentId, chainFamily)", async () => {
     await vault.createAgent(TENANT_ID, "sol", "Sol");
-    await vault.createWallet({ agentId: "sol", venue: "hyperliquid", chainType: "evm" });
+    await vault.createWallet({
+      tenantId: TENANT_ID,
+      agentId: "sol",
+      venue: "hyperliquid",
+      chainType: "evm",
+    });
 
     // Second insert for the same (agentId, chainFamily, venue) tuple must
     // be rejected by the unique index from migration 0022.
     await expect(
-      vault.createWallet({ agentId: "sol", venue: "hyperliquid", chainType: "evm" }),
+      vault.createWallet({
+        tenantId: TENANT_ID,
+        agentId: "sol",
+        venue: "hyperliquid",
+        chainType: "evm",
+      }),
     ).rejects.toThrow();
   });
 
@@ -204,12 +217,14 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
     await vault.createAgent(TENANT_ID, "sol", "Sol");
     const hl = await vault.createWallet({
       agentId: "sol",
+      tenantId: TENANT_ID,
       venue: "hyperliquid",
       chainType: "evm",
       purpose: "perp",
     });
     const pm = await vault.createWallet({
       agentId: "sol",
+      tenantId: TENANT_ID,
       venue: "polymarket",
       chainType: "evm",
       purpose: "predictions",
@@ -225,7 +240,12 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
 
   test("legacy + venue-scoped wallets coexist for the same agent + chainFamily", async () => {
     const identity = await vault.createAgent(TENANT_ID, "sol", "Sol");
-    await vault.createWallet({ agentId: "sol", venue: "hyperliquid", chainType: "evm" });
+    await vault.createWallet({
+      tenantId: TENANT_ID,
+      agentId: "sol",
+      venue: "hyperliquid",
+      chainType: "evm",
+    });
 
     const legacy = await vault.getWallet({ agentId: "sol", chainId: 8453 });
     const hl = await vault.getWallet({ agentId: "sol", venue: "hyperliquid" });
@@ -236,9 +256,24 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
 
   test("listWallets returns every wallet across venues and chain families", async () => {
     await vault.createAgent(TENANT_ID, "sol", "Sol");
-    await vault.createWallet({ agentId: "sol", venue: "hyperliquid", chainType: "evm" });
-    await vault.createWallet({ agentId: "sol", venue: "polymarket", chainType: "evm" });
-    await vault.createWallet({ agentId: "sol", venue: "drift", chainType: "solana" });
+    await vault.createWallet({
+      tenantId: TENANT_ID,
+      agentId: "sol",
+      venue: "hyperliquid",
+      chainType: "evm",
+    });
+    await vault.createWallet({
+      tenantId: TENANT_ID,
+      agentId: "sol",
+      venue: "polymarket",
+      chainType: "evm",
+    });
+    await vault.createWallet({
+      tenantId: TENANT_ID,
+      agentId: "sol",
+      venue: "drift",
+      chainType: "solana",
+    });
 
     const all = await vault.listWallets({ agentId: "sol" });
 
@@ -260,6 +295,7 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
 
     const wallet = await vault.createWallet({
       agentId: "satoshi",
+      tenantId: TENANT_ID,
       chainType: "bitcoin",
       bitcoin: { network: "mainnet", addressType: "p2wpkh" },
     });
@@ -283,6 +319,7 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
     await vault.createAgent(TENANT_ID, "satoshi", "Satoshi");
     const created = await vault.createWallet({
       agentId: "satoshi",
+      tenantId: TENANT_ID,
       chainType: "bitcoin",
       bitcoin: { network: "testnet", addressType: "p2tr", account: 1, index: 7 },
     });
@@ -308,6 +345,7 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
     await vault.createAgent(TENANT_ID, "satoshi", "Satoshi");
     const created = await vault.createWallet({
       agentId: "satoshi",
+      tenantId: TENANT_ID,
       chainType: "bitcoin",
       bitcoin: { network: "testnet", addressType: "p2tr", account: 2, index: 9 },
     });
@@ -347,13 +385,23 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
   test("createWallet rejects unknown chainType", async () => {
     await vault.createAgent(TENANT_ID, "sol", "Sol");
     await expect(
-      vault.createWallet({ agentId: "sol", venue: "x", chainType: "unknown" as any }),
+      vault.createWallet({
+        tenantId: TENANT_ID,
+        agentId: "sol",
+        venue: "x",
+        chainType: "unknown" as any,
+      }),
     ).rejects.toThrow(/unsupported chainType/);
   });
 
   test("createWallet rejects unknown agentId with a clear error (no FK leak)", async () => {
     await expect(
-      vault.createWallet({ agentId: "ghost", venue: "hyperliquid", chainType: "evm" }),
+      vault.createWallet({
+        tenantId: TENANT_ID,
+        agentId: "ghost",
+        venue: "hyperliquid",
+        chainType: "evm",
+      }),
     ).rejects.toThrow(/Agent ghost not found/);
   });
 
@@ -374,7 +422,7 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
       (await vault.listWallets({ agentId: "sol" })).filter((w) => w.venue === "hyperliquid"),
     ).toHaveLength(0);
 
-    // The matching tenant passes, and omitting tenantId stays backward compatible.
+    // The matching tenant passes.
     const asserted = await vault.createWallet({
       agentId: "sol",
       tenantId: TENANT_ID,
@@ -382,18 +430,13 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
       chainType: "evm",
     });
     expect(asserted.venue).toBe("hyperliquid");
-    const unasserted = await vault.createWallet({
-      agentId: "sol",
-      venue: "polymarket",
-      chainType: "evm",
-    });
-    expect(unasserted.venue).toBe("polymarket");
   });
 
   test("private key is never returned by createWallet", async () => {
     await vault.createAgent(TENANT_ID, "sol", "Sol");
     const wallet = await vault.createWallet({
       agentId: "sol",
+      tenantId: TENANT_ID,
       venue: "hyperliquid",
       chainType: "evm",
     });

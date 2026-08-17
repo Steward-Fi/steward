@@ -184,6 +184,61 @@ describe("SEC-164 legacy-root secret re-encryption", () => {
     expect(res).toEqual({ scanned: 3, migrated: 0, alreadyDomainSeparated: 3, failed: [] });
   });
 
+  it("does not overwrite a concurrent secret re-encryption from a stale classified row", async () => {
+    const concurrent = await insertLegacySecret("legacy-concurrent", "stale-value");
+    const context = contextFor(concurrent);
+    const replacement = domainRoot().encrypt("concurrent-value", context);
+    const realDb = getDb();
+    const originalUpdate = realDb.update.bind(realDb);
+    let injected = false;
+    const migrationDb = new Proxy(realDb, {
+      get(target, property, receiver) {
+        if (property !== "update") return Reflect.get(target, property, receiver);
+        return ((table: Parameters<typeof originalUpdate>[0]) => {
+          const updateBuilder = originalUpdate(table);
+          return {
+            set(values: Parameters<typeof updateBuilder.set>[0]) {
+              const setBuilder = updateBuilder.set(values);
+              return {
+                where(condition: Parameters<typeof setBuilder.where>[0]) {
+                  const whereBuilder = setBuilder.where(condition);
+                  return {
+                    async returning(fields: Parameters<typeof whereBuilder.returning>[0]) {
+                      if (!injected) {
+                        injected = true;
+                        // Deterministically emulate a password rotation after
+                        // classification and immediately before our stale CAS.
+                        await originalUpdate(secrets)
+                          .set({
+                            ciphertext: replacement.ciphertext,
+                            iv: replacement.iv,
+                            authTag: replacement.tag,
+                            salt: replacement.salt,
+                          })
+                          .where(eq(secrets.id, concurrent.id));
+                      }
+                      return whereBuilder.returning(fields);
+                    },
+                  };
+                },
+              };
+            },
+          };
+        }) as typeof realDb.update;
+      },
+    });
+
+    try {
+      const res = await vault.migrateLegacyRootSecrets({ db: migrationDb });
+      expect(res.failed).toContain(concurrent.id);
+      expect(res.migrated).toBe(0);
+      const row = await freshRow(concurrent.id);
+      expect(domainRoot().decrypt(rawEnc(row), context)).toBe("concurrent-value");
+    } finally {
+      await getDb().delete(secrets).where(eq(secrets.id, concurrent.id));
+    }
+  });
+
   it("fails closed with the fallback disabled, until the row is migrated", async () => {
     const late = await insertLegacySecret("legacy-late", "legacy-value-c");
     process.env.STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK = "false";
