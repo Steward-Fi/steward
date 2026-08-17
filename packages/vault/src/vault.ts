@@ -168,6 +168,14 @@ export interface SignBitcoinPsbtRequest {
   walletScope: string;
   psbtBase64: string;
   finalize?: boolean;
+  /**
+   * SEC-163: explicit caller attestation that edge policy (inspectBitcoinPsbt
+   * + spend/fee evaluation) approved this PSBT. The vault layer performs no
+   * fee/output policy of its own — it signs any PSBT with ≥1 input spendable
+   * by the wallet key — so signing REQUIRES this flag. Never forward
+   * client-controlled input into it.
+   */
+  allowBlindSign?: boolean;
 }
 
 export interface InspectBitcoinPsbtResult {
@@ -2689,6 +2697,23 @@ export class Vault {
       venue: null,
     });
 
+    // SEC-163: fail closed on blind signing. Without the expectedTo/
+    // expectedValue envelope the vault applies no recipient/amount assertion,
+    // so the caller must explicitly attest that its own edge policy evaluation
+    // approved the transaction. Checked after the signing freeze (a freeze
+    // must still report as a freeze) and before any key material is touched.
+    if (request.expectedTo === undefined && request.expectedValue === undefined) {
+      if (request.allowBlindSign !== true) {
+        throw new Error(
+          "Solana transaction signing without a policy envelope requires allowBlindSign: true " +
+            "(caller attestation that edge policy approved the transaction)",
+        );
+      }
+      console.warn(
+        `[Vault] BLIND Solana sign (no policy envelope, caller-attested): tenant=${request.tenantId} agent=${request.agentId} chainId=${request.chainId ?? 101} broadcast=${request.broadcast !== false}`,
+      );
+    }
+
     // Resolve Solana key: prefer encryptedChainKeys (multi-wallet), fall back to
     // legacy encryptedKeys when the agent has a Solana walletAddress.
     let secretKey: string;
@@ -3153,6 +3178,18 @@ export class Vault {
       chainFamily: "bitcoin",
       venue: walletScope,
     });
+
+    // SEC-163: the vault layer applies no fee/output policy to PSBTs — it
+    // signs any PSBT with ≥1 input spendable by the wallet key. Signing is
+    // therefore only permitted when the caller explicitly attests that edge
+    // policy (inspectBitcoinPsbt + spend/fee evaluation) already approved
+    // this exact payload. Checked after the freeze gate, before key access.
+    if (request.allowBlindSign !== true) {
+      throw new Error(
+        "Bitcoin PSBT signing requires allowBlindSign: true " +
+          "(caller attestation that edge policy approved the PSBT)",
+      );
+    }
 
     const [wallet] = await db
       .select({
