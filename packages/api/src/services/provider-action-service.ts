@@ -1025,15 +1025,33 @@ class ProviderActionService {
       };
     }
     // Record the narrow allowed_stub -> stub_succeeded|stub_failed transition.
-    await this.db()
-      .update(providerActionBindings)
-      .set({ status: stub.status, updatedAt: new Date() })
-      .where(
-        and(
-          eq(providerActionBindings.intentId, intentId),
-          eq(providerActionBindings.status, "allowed_stub"),
-        ),
-      );
+    // A pre-terminal C2 sweep can defer this reservation for 15 seconds because
+    // allowed_stub has no safe settle/release target. Make an unclaimed pending
+    // generation immediately due in the same transaction as the terminal state
+    // change so this request's scoped reconciliation cannot miss it.
+    await this.db().transaction(async (tx) => {
+      const transitioned = await tx
+        .update(providerActionBindings)
+        .set({ status: stub.status, updatedAt: new Date() })
+        .where(
+          and(
+            eq(providerActionBindings.intentId, intentId),
+            eq(providerActionBindings.status, "allowed_stub"),
+          ),
+        )
+        .returning({ intentId: providerActionBindings.intentId });
+      if (transitioned.length === 0) return;
+      await tx
+        .update(providerActionReservationGenerations)
+        .set({ nextRetryAt: null })
+        .where(
+          and(
+            eq(providerActionReservationGenerations.intentId, intentId),
+            eq(providerActionReservationGenerations.state, "pending"),
+            sql`${providerActionReservationGenerations.claimedBy} IS NULL`,
+          ),
+        );
+    });
     // #240: status is the durable outcome source. Reconcile only AFTER the
     // terminal transition so a crash at any instruction boundary is retryable.
     await this.reconcilePolicyReservations(tenantId, intentId);

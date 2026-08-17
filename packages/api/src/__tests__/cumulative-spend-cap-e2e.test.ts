@@ -506,20 +506,10 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
       .from(providerActionBindings)
       .where(eq(providerActionBindings.intentId, out.intentId));
     expect(binding.status).toBe("stub_succeeded");
-    let [crashed] = await getDb()
+    const [crashed] = await getDb()
       .select()
       .from(providerActionReservationGenerations)
       .where(eq(providerActionReservationGenerations.intentId, out.intentId));
-    // A concurrent C2 sweep may claim this row between the terminal binding
-    // update and the scoped reconciliation above. Wait for that in-flight
-    // worker to persist the injected failure before asserting its retry state.
-    for (let poll = 0; crashed?.attempts === 0 && poll < 50; poll += 1) {
-      await Bun.sleep(20);
-      [crashed] = await getDb()
-        .select()
-        .from(providerActionReservationGenerations)
-        .where(eq(providerActionReservationGenerations.intentId, out.intentId));
-    }
     expect(crashed.state).toBe("pending");
     expect(crashed.attempts).toBe(1);
     expect(crashed.lastError).toContain("injected crash");
