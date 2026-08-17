@@ -44,6 +44,12 @@ import {
   sql,
 } from "@stwd/db";
 import {
+  assertGovernedRouteUpdateIsSafe,
+  assertNoOppositeAuthorityOverlap,
+  lockSecretRouteNamespaces,
+  SecretRouteAuthorityConflict,
+} from "@stwd/vault";
+import {
   type Capability,
   type CapabilityGrant,
   capabilities,
@@ -214,8 +220,23 @@ export class CapabilityStore {
       const [current] = await tx
         .select()
         .from(capabilities)
-        .where(and(eq(capabilities.id, id), eq(capabilities.tenantId, tenantId)));
+        .where(and(eq(capabilities.id, id), eq(capabilities.tenantId, tenantId)))
+        .for("update");
       if (!current) return null;
+
+      // Capability row first, then sorted agent namespaces everywhere. Holding
+      // the capability row prevents a concurrent grant from appearing after the
+      // namespace inventory is read, while the sorted namespace lock prevents
+      // route edits/promotions from racing this rewrite.
+      const grants: CapabilityGrant[] = await tx
+        .select()
+        .from(capabilityGrants)
+        .where(and(eq(capabilityGrants.tenantId, tenantId), eq(capabilityGrants.capabilityId, id)));
+      await lockSecretRouteNamespaces(
+        tx,
+        tenantId,
+        grants.map((grant) => grant.agentId),
+      );
 
       const set: Record<string, unknown> = { updatedAt: now };
       if (patch.spec) {
@@ -240,18 +261,30 @@ export class CapabilityStore {
       const merged: CapabilityRouteFields = patch.spec ? { ...patch.spec } : current;
       const willBeEnabled = patch.enabled ?? current.enabled;
 
-      const grants: CapabilityGrant[] = await tx
-        .select()
-        .from(capabilityGrants)
-        .where(and(eq(capabilityGrants.tenantId, tenantId), eq(capabilityGrants.capabilityId, id)));
-
       for (const grant of grants) {
         if (!grant.secretRouteId) continue;
         // a route stays enabled only if the capability is enabled AND the grant
         // is active + unexpired. otherwise it is disabled (fail-closed).
         const grantUsable = grant.status === "active" && !isExpired(grant.expiresAt, now);
         const routeEnabled = willBeEnabled && grantUsable;
-        await tx
+        const [existingRoute] = await tx
+          .select()
+          .from(secretRoutes)
+          .where(and(eq(secretRoutes.id, grant.secretRouteId), eq(secretRoutes.tenantId, tenantId)))
+          .limit(1);
+        if (!existingRoute) continue;
+        assertGovernedRouteUpdateIsSafe(existingRoute, {
+          secretId: merged.secretId,
+          agentId: grant.agentId,
+          hostPattern: merged.host,
+          pathPattern: merged.pathPattern,
+          method: merged.method,
+          injectAs: merged.injectAs,
+          injectKey: merged.injectKey,
+          injectFormat: merged.injectFormat,
+          enabled: routeEnabled,
+        });
+        const [changedRoute] = await tx
           .update(secretRoutes)
           .set({
             secretId: merged.secretId,
@@ -263,9 +296,14 @@ export class CapabilityStore {
             injectFormat: merged.injectFormat,
             enabled: routeEnabled,
           })
-          .where(
-            and(eq(secretRoutes.id, grant.secretRouteId), eq(secretRoutes.tenantId, tenantId)),
-          );
+          .where(and(eq(secretRoutes.id, grant.secretRouteId), eq(secretRoutes.tenantId, tenantId)))
+          .returning();
+        if (changedRoute) {
+          await assertNoOppositeAuthorityOverlap(tx, {
+            ...changedRoute,
+            agentId: grant.agentId,
+          });
+        }
       }
 
       return updated;
@@ -283,7 +321,8 @@ export class CapabilityStore {
       const [current] = await tx
         .select()
         .from(capabilities)
-        .where(and(eq(capabilities.id, id), eq(capabilities.tenantId, tenantId)));
+        .where(and(eq(capabilities.id, id), eq(capabilities.tenantId, tenantId)))
+        .for("update");
       if (!current) return false;
 
       const grants: CapabilityGrant[] = await tx
@@ -442,7 +481,8 @@ export class CapabilityStore {
         .from(capabilities)
         .where(
           and(eq(capabilities.id, input.capabilityId), eq(capabilities.tenantId, input.tenantId)),
-        );
+        )
+        .for("update");
       if (!cap) return null;
 
       // agent must exist under this tenant (mirrors SecretVault.createRoute's
@@ -452,6 +492,7 @@ export class CapabilityStore {
         .from(agents)
         .where(and(eq(agents.id, input.agentId), eq(agents.tenantId, input.tenantId)));
       if (!agent) throw new AgentNotFoundError(input.agentId, input.tenantId);
+      await lockSecretRouteNamespaces(tx, input.tenantId, [input.agentId]);
 
       // reject a duplicate grant PROACTIVELY (before materializing a route), so
       // the unique(tenant, agent, capability) constraint is surfaced as a typed
@@ -476,6 +517,10 @@ export class CapabilityStore {
         .insert(secretRoutes)
         .values(routeValuesFor(input.tenantId, input.agentId, cap, routeEnabled))
         .returning();
+      await assertNoOppositeAuthorityOverlap(tx, {
+        ...route,
+        agentId: input.agentId,
+      });
 
       const [grant] = await tx
         .insert(capabilityGrants)
@@ -535,6 +580,8 @@ export class AgentNotFoundError extends Error {
     this.name = "AgentNotFoundError";
   }
 }
+
+export { SecretRouteAuthorityConflict };
 
 /**
  * Thrown when an agent is already granted a capability (the

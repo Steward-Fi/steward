@@ -125,6 +125,7 @@ export async function ensureGovernedRoute(
     method: string;
     injectAs?: string;
     injectKey?: string;
+    existingRouteId?: string;
   },
 ): Promise<string> {
   const q = async (query: ReturnType<typeof rawSql>): Promise<Array<Record<string, unknown>>> => {
@@ -151,13 +152,16 @@ export async function ensureGovernedRoute(
   );
   const accountId = accRows[0].id as string;
   // Legacy route first (governed CHECK forbids provider_operation_id on legacy).
-  const routeRows = await q(
-    rawSql`INSERT INTO secret_routes
-             (tenant_id, agent_id, secret_id, host_pattern, path_pattern, method, inject_as, inject_key, authority_mode)
-           VALUES (${tenantId}, ${agentId}, ${secretId}, ${opts.hostPattern}, ${opts.pathPattern},
-                   ${opts.method}, ${injectAs}, ${injectKey}, 'legacy') RETURNING id`,
-  );
-  const routeId = routeRows[0].id as string;
+  let routeId = opts.existingRouteId;
+  if (!routeId) {
+    const routeRows = await q(
+      rawSql`INSERT INTO secret_routes
+               (tenant_id, agent_id, secret_id, host_pattern, path_pattern, method, inject_as, inject_key, authority_mode)
+             VALUES (${tenantId}, ${agentId}, ${secretId}, ${opts.hostPattern}, ${opts.pathPattern},
+                     ${opts.method}, ${injectAs}, ${injectKey}, 'legacy') RETURNING id`,
+    );
+    routeId = routeRows[0].id as string;
+  }
   const opRows = await q(
     rawSql`INSERT INTO provider_operations
              (tenant_id, workspace_id, provider_account_id, operation_key, risk_class, secret_route_id)

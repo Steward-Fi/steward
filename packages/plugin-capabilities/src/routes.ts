@@ -18,7 +18,12 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import type { StewardAppContext } from "./context";
 import type { Capability, CapabilityGrant } from "./schema";
-import { AgentNotFoundError, CapabilityStore, GrantExistsError } from "./store";
+import {
+  AgentNotFoundError,
+  CapabilityStore,
+  GrantExistsError,
+  SecretRouteAuthorityConflict,
+} from "./store";
 import {
   createCapabilitySchema,
   createGrantSchema,
@@ -300,6 +305,9 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
       });
       return c.json<ApiResponse>({ ok: true, data: toCapabilityView(updated) });
     } catch (e) {
+      if (e instanceof SecretRouteAuthorityConflict) {
+        return c.json<ApiResponse>({ ok: false, error: e.message }, 409);
+      }
       return errorResponse(c, e);
     }
   });
@@ -379,6 +387,9 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
           { ok: false, error: "agent already granted this capability" },
           409,
         );
+      }
+      if (e instanceof SecretRouteAuthorityConflict) {
+        return c.json<ApiResponse>({ ok: false, error: e.message }, 409);
       }
       return errorResponse(c, e);
     }
