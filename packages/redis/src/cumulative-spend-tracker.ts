@@ -129,6 +129,13 @@ export interface CumulativeSpendSnapshot {
   sum: number;
 }
 
+let beforeCumulativeSpendSumImportForTests: (() => Promise<void>) | undefined;
+
+/** Deterministic interleaving seam for the legacy-release/import race test. */
+export function __setBeforeCumulativeSpendSumImportForTests(hook?: () => Promise<void>): void {
+  beforeCumulativeSpendSumImportForTests = hook;
+}
+
 function streamKey(s: CumulativeSpendStream): string {
   // scopeKey/currency are operator/adapter-derived tags; encode to keep the key
   // delimiter-safe. Deliberately NO window/max in the key (codex P1): the stream
@@ -407,11 +414,29 @@ local now = tonumber(ARGV[1])
 local windowStart = tonumber(ARGV[2])
 local retentionCutoff = tonumber(ARGV[3])
 local nLegacy = tonumber(ARGV[4])
-local cursor = 5
+local useTombstones = tonumber(ARGV[5])
+local cursor = 6
 for i = 1, nLegacy do
   local member = ARGV[cursor]; cursor = cursor + 1
   local score = tonumber(ARGV[cursor]); cursor = cursor + 1
-  redis.call('ZADD', KEYS[1], score, member)
+  local bar = string.find(member, '|', 1, true)
+  local tombstoned = bar and useTombstones == 1 and
+    redis.call('SISMEMBER', KEYS[2], string.sub(member, 1, bar - 1)) == 1
+  if not tombstoned then
+    redis.call('ZADD', KEYS[1], score, member)
+  end
+end
+-- A release racing an earlier importer may have installed its monotonic
+-- tombstone after the importer read the fenced snapshot. Remove every matching
+-- live identity in this same-slot atomic script before computing the sum.
+if useTombstones == 1 then
+  local live = redis.call('ZRANGE', KEYS[1], 0, -1)
+  for i = 1, #live do
+    local bar = string.find(live[i], '|', 1, true)
+    if bar and redis.call('SISMEMBER', KEYS[2], string.sub(live[i], 1, bar - 1)) == 1 then
+      redis.call('ZREM', KEYS[1], live[i])
+    end
+  end
 end
 redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, retentionCutoff)
 local members = redis.call('ZRANGEBYSCORE', KEYS[1], '(' .. windowStart, now)
@@ -790,15 +815,21 @@ export async function getCumulativeSpendSum(
     const legacyEntries = input.tenantId
       ? (await fenceAndSnapshotLegacyStream({ ...input, tenantId: input.tenantId }, now)).entries
       : [];
+    await beforeCumulativeSpendSumImportForTests?.();
     const legacyArgs = legacyEntries.flatMap(([member, score]) => [member, String(score)]);
+    const tombstoneKey = input.tenantId
+      ? legacyReleaseTombstoneKey({ ...input, tenantId: input.tenantId })
+      : undefined;
     const res = (await redis.eval(
       SUM_LUA,
-      1,
+      tombstoneKey ? 2 : 1,
       key,
+      ...(tombstoneKey ? [tombstoneKey] : []),
       String(now),
       String(windowStart),
       String(retentionCutoff),
       String(legacyEntries.length),
+      tombstoneKey ? "1" : "0",
       ...legacyArgs,
     )) as [number];
     const [sum] = res;

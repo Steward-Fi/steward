@@ -20,6 +20,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { disconnectRedis, getRedis } from "../client.js";
 import {
+  __setBeforeCumulativeSpendSumImportForTests,
   cumulativeSpendStreamKeyForTest,
   getCumulativeSpendSum,
   getWindowedInvokeCount,
@@ -51,11 +52,13 @@ async function cleanup() {
 }
 
 beforeEach(async () => {
+  __setBeforeCumulativeSpendSumImportForTests();
   if (!runRedis) return;
   await cleanup();
 });
 
 afterAll(async () => {
+  __setBeforeCumulativeSpendSumImportForTests();
   if (!runRedis) return;
   await cleanup();
   await disconnectRedis();
@@ -279,6 +282,55 @@ describeRedis("tenant-bound atomic reservation batches", () => {
         }),
       ).toEqual({ sum: 3 });
     }
+  });
+
+  test("a release after advisory snapshot-read cannot be resurrected by SUM import", async () => {
+    const common = {
+      agentId: AGENT,
+      scope: "operation" as const,
+      scopeKey: "legacy-release-sum-race",
+      currency: "USD",
+    };
+    const stream = { ...common, tenantId: "tenant-release-sum-race" };
+    const caps = [{ windowSeconds: 3600, max: 10 }];
+    await reserveCumulativeSpend({
+      stream: common,
+      caps,
+      amount: 7,
+      reservationId: "legacy-sum-race",
+    });
+
+    let snapshotRead!: () => void;
+    const snapshotReady = new Promise<void>((resolve) => {
+      snapshotRead = resolve;
+    });
+    let continueImport!: () => void;
+    const importBarrier = new Promise<void>((resolve) => {
+      continueImport = resolve;
+    });
+    __setBeforeCumulativeSpendSumImportForTests(async () => {
+      snapshotRead();
+      await importBarrier;
+    });
+    const sumPending = getCumulativeSpendSum({ ...stream, windowSeconds: 3600 });
+    await snapshotReady;
+    await releaseLegacyCumulativeSpendAfterCutover({
+      stream,
+      reservationId: "legacy-sum-race",
+      amount: 7,
+    });
+    continueImport();
+    expect(await sumPending).toEqual({ sum: 0 });
+    __setBeforeCumulativeSpendSumImportForTests();
+
+    expect(
+      await reserveCumulativeSpend({
+        stream,
+        caps,
+        amount: 4,
+        reservationId: "after-sum-race",
+      }),
+    ).toMatchObject({ ok: true, priorSums: [0] });
   });
 
   test("the same agent id in two tenants has independent history", async () => {
