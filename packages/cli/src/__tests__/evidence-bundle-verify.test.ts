@@ -53,10 +53,7 @@ describe("evidence bundle offline verification", () => {
         ],
         { cwd: dir, stdout: "pipe", stderr: "pipe" },
       );
-      const [stderr, exitCode] = await Promise.all([
-        new Response(proc.stderr).text(),
-        proc.exited,
-      ]);
+      const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
 
       // The decoy next to the operator's CWD must never run.
       expect(existsSync(marker)).toBe(false);
