@@ -3,6 +3,7 @@ import type { GithubOperationKey } from "@stwd/provider-github";
 import type { XOperationKey } from "@stwd/provider-x";
 import { parseGovernedCanonicalActionForDispatch } from "@stwd/proxy/src/handlers/governed-execution";
 import {
+  buildGenericHttpAction,
   CanonError,
   GENERIC_GOLDEN_DESCRIPTOR_A,
   GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
@@ -195,6 +196,109 @@ describe("#220 executable provider profile conformance", () => {
     expect(new Set(PRODUCTION_PROVIDER_PROFILE_SPECS.map((spec) => spec.profile)).size).toBe(
       REGISTERED_PROFILES.length,
     );
+  });
+
+  it("the proxy parser reconstructs every fixed operation and rejects widened fields", () => {
+    for (const spec of PRODUCTION_PROVIDER_PROFILE_SPECS) {
+      if (spec.kind !== "adapter-fixed") continue;
+      for (const fixture of OPERATION_FIXTURES[spec.profile]) {
+        const built = buildFromProductionSpec(spec, { ...fixture.args }, fixture);
+        const parse = (action: typeof built.action) =>
+          parseGovernedCanonicalActionForDispatch(
+            new TextEncoder().encode(jcsStringify(action)),
+            spec.profile,
+            spec.allowedOrigins,
+            { operationKey: fixture.operationKey, requestProfile: { profile: spec.profile } },
+          );
+
+        expect(jcsStringify(parse(built.action))).toBe(jcsStringify(built.action));
+        expect(() =>
+          parse({
+            ...built.action,
+            orderedQueryPairs: [...built.action.orderedQueryPairs, ["x-extra", "1"]],
+          }),
+        ).toThrow("operation-action-mismatch");
+        expect(() =>
+          parse({
+            ...built.action,
+            selectedHeaders: [...built.action.selectedHeaders, ["x-extra", "ok"]],
+          }),
+        ).toThrow("operation-action-mismatch");
+      }
+    }
+  });
+
+  it("the proxy parser rejects widened or type-confused fixed bodies", () => {
+    const github = PRODUCTION_PROVIDER_PROFILE_SPECS.find(
+      (candidate) => candidate.profile === GITHUB_PROVIDER_ACTION_PROFILE,
+    );
+    const x = PRODUCTION_PROVIDER_PROFILE_SPECS.find(
+      (candidate) => candidate.profile === X_PROVIDER_ACTION_PROFILE,
+    );
+    if (!github || github.kind !== "adapter-fixed" || !x || x.kind !== "adapter-fixed") {
+      throw new Error("fixed production profiles missing");
+    }
+
+    const commentFixture = OPERATION_FIXTURES[GITHUB_PROVIDER_ACTION_PROFILE][1];
+    const comment = buildFromProductionSpec(github, { ...commentFixture.args }, commentFixture);
+    expect(() =>
+      parseGovernedCanonicalActionForDispatch(
+        new TextEncoder().encode(
+          jcsStringify({ ...comment.action, canonicalBody: { body: "looks good", extra: true } }),
+        ),
+        github.profile,
+        github.allowedOrigins,
+        { operationKey: commentFixture.operationKey, requestProfile: { profile: github.profile } },
+      ),
+    ).toThrow("operation-action-mismatch");
+
+    const tweetFixture = OPERATION_FIXTURES[X_PROVIDER_ACTION_PROFILE][0];
+    const tweet = buildFromProductionSpec(x, { ...tweetFixture.args }, tweetFixture);
+    expect(() =>
+      parseGovernedCanonicalActionForDispatch(
+        new TextEncoder().encode(jcsStringify({ ...tweet.action, canonicalBody: null })),
+        x.profile,
+        x.allowedOrigins,
+        { operationKey: tweetFixture.operationKey, requestProfile: { profile: x.profile } },
+      ),
+    ).toThrow("operation-action-mismatch");
+    expect(() =>
+      parseGovernedCanonicalActionForDispatch(
+        new TextEncoder().encode(
+          jcsStringify({
+            ...tweet.action,
+            canonicalBody: { text: "hello world", reply: { in_reply_to_tweet_id: 123 } },
+          }),
+        ),
+        x.profile,
+        x.allowedOrigins,
+        { operationKey: tweetFixture.operationKey, requestProfile: { profile: x.profile } },
+      ),
+    ).toThrow("operation-action-mismatch");
+  });
+
+  it("accepts a descriptor-backed generic HEAD action at the proxy boundary", () => {
+    const descriptor = validateGenericHttpDescriptor({
+      profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+      origin: "https://api.example.com",
+      methods: ["HEAD"],
+      pathTemplate: [{ literal: "v1" }, { literal: "health" }],
+      projection: { policyArgs: [], safeSummary: [] },
+    });
+    const built = buildGenericHttpAction("generic.health.head", descriptor, "HEAD", {});
+    const parsed = parseGovernedCanonicalActionForDispatch(
+      new TextEncoder().encode(jcsStringify(built.action)),
+      GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+      [descriptor.origin],
+      {
+        operationKey: "generic.health.head",
+        requestProfile: {
+          profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+          operationDescriptor: descriptor,
+        },
+      },
+    );
+    expect(jcsStringify(parsed)).toBe(jcsStringify(built.action));
   });
 
   for (const spec of PRODUCTION_PROVIDER_PROFILE_SPECS) {

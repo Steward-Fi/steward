@@ -136,7 +136,10 @@ const ACTION: GithubCanonicalActionV1 = {
     ["per_page", "30"],
     ["state", "open"],
   ],
-  selectedHeaders: [["accept", "application/vnd.github+json"]],
+  selectedHeaders: [
+    ["accept", "application/vnd.github+json"],
+    ["x-github-api-version", "2022-11-28"],
+  ],
   canonicalBody: null,
 };
 

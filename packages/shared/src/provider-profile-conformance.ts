@@ -76,6 +76,130 @@ function genericActionMatchesDescriptor(
   }
 }
 
+function pairsEqual(actual: Array<[string, string]>, expected: Array<[string, string]>): boolean {
+  return jcsStringify(actual) === jcsStringify(expected);
+}
+
+function exactObject(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    jcsStringify(Object.keys(value).sort()) === jcsStringify([...keys].sort())
+  );
+}
+
+function validGithubIssueQuery(pairs: Array<[string, string]>): boolean {
+  const allowed = new Map<string, (value: string) => boolean>([
+    ["direction", (value) => value === "asc" || value === "desc"],
+    ["page", (value) => /^[1-9][0-9]{0,9}$/.test(value) && Number(value) <= 2147483647],
+    ["per_page", (value) => /^(?:[1-9]|[1-9][0-9]|100)$/.test(value)],
+    ["sort", (value) => ["created", "updated", "comments"].includes(value)],
+    ["state", (value) => ["open", "closed", "all"].includes(value)],
+  ]);
+  let previous = "";
+  for (const [name, value] of pairs) {
+    const validator = allowed.get(name);
+    if (!validator || name <= previous || !validator(value)) return false;
+    previous = name;
+  }
+  return true;
+}
+
+function validTweetBody(value: unknown): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  if (!exactObject(value, Object.hasOwn(value, "reply") ? ["reply", "text"] : ["text"])) {
+    return false;
+  }
+  if (typeof value.text !== "string" || value.text !== value.text.trim()) return false;
+  if ([...value.text].length < 1 || [...value.text].length > 280) return false;
+  if ("reply" in value) {
+    if (!exactObject(value.reply, ["in_reply_to_tweet_id"])) return false;
+    if (typeof value.reply.in_reply_to_tweet_id !== "string") return false;
+    if (!/^[0-9]{1,25}$/.test(value.reply.in_reply_to_tweet_id)) return false;
+  }
+  return true;
+}
+
+/** Exact adapter-fixed reconstruction contract for every registered operation. */
+function fixedActionMatchesOperation(
+  action: ConformanceCanonicalAction,
+  operationKey: string,
+): boolean {
+  const githubHeaders: Array<[string, string]> = [
+    ["accept", "application/vnd.github+json"],
+    ["x-github-api-version", "2022-11-28"],
+  ];
+  switch (operationKey) {
+    case "github.issue.list":
+      return (
+        action.profile === GITHUB_PROVIDER_ACTION_PROFILE &&
+        action.origin === "https://api.github.com" &&
+        action.method === "GET" &&
+        /^\/repos\/[A-Za-z0-9][A-Za-z0-9-]{0,38}\/(?!\.{1,2}(?:\/|$))[A-Za-z0-9._-]{1,100}\/issues$/.test(
+          action.normalizedPath,
+        ) &&
+        validGithubIssueQuery(action.orderedQueryPairs) &&
+        pairsEqual(action.selectedHeaders, githubHeaders) &&
+        action.canonicalBody === null
+      );
+    case "github.pr.comment.create": {
+      if (!exactObject(action.canonicalBody, ["body"])) return false;
+      const body = action.canonicalBody.body;
+      return (
+        action.profile === GITHUB_PROVIDER_ACTION_PROFILE &&
+        action.origin === "https://api.github.com" &&
+        action.method === "POST" &&
+        /^\/repos\/[A-Za-z0-9][A-Za-z0-9-]{0,38}\/(?!\.{1,2}(?:\/|$))[A-Za-z0-9._-]{1,100}\/issues\/[1-9][0-9]{0,9}\/comments$/.test(
+          action.normalizedPath,
+        ) &&
+        Number(action.normalizedPath.split("/").at(-2)) <= 2147483647 &&
+        action.orderedQueryPairs.length === 0 &&
+        pairsEqual(action.selectedHeaders, [
+          ["accept", "application/vnd.github+json"],
+          ["content-type", "application/json"],
+          ["x-github-api-version", "2022-11-28"],
+        ]) &&
+        typeof body === "string" &&
+        body.length > 0 &&
+        new TextEncoder().encode(body).byteLength <= 65536
+      );
+    }
+    case "x.tweet.create":
+      return (
+        action.profile === X_PROVIDER_ACTION_PROFILE &&
+        action.origin === "https://api.x.com" &&
+        action.method === "POST" &&
+        action.normalizedPath === "/2/tweets" &&
+        action.orderedQueryPairs.length === 0 &&
+        pairsEqual(action.selectedHeaders, [["content-type", "application/json"]]) &&
+        validTweetBody(action.canonicalBody)
+      );
+    case "x.tweet.delete":
+      return (
+        action.profile === X_PROVIDER_ACTION_PROFILE &&
+        action.origin === "https://api.x.com" &&
+        action.method === "DELETE" &&
+        /^\/2\/tweets\/[0-9]{1,25}$/.test(action.normalizedPath) &&
+        action.orderedQueryPairs.length === 0 &&
+        action.selectedHeaders.length === 0 &&
+        action.canonicalBody === null
+      );
+    case "x.user.me.read":
+      return (
+        action.profile === X_PROVIDER_ACTION_PROFILE &&
+        action.origin === "https://api.x.com" &&
+        action.method === "GET" &&
+        action.normalizedPath === "/2/users/me" &&
+        pairsEqual(action.orderedQueryPairs, [["user.fields", "id,name,username"]]) &&
+        action.selectedHeaders.length === 0 &&
+        action.canonicalBody === null
+      );
+    default:
+      return false;
+  }
+}
+
 /** Enforce the adapter operation's exact target at the last pre-claim boundary. */
 export function inspectProviderOperationTargetConformance(
   action: ConformanceCanonicalAction,
@@ -104,6 +228,9 @@ export function inspectProviderOperationTargetConformance(
     } else {
       violations.push("operation-key-unsupported");
     }
+    if (!fixedActionMatchesOperation(action, context.operationKey)) {
+      violations.push("operation-action-mismatch");
+    }
   } else if (action.profile === X_PROVIDER_ACTION_PROFILE) {
     if (context.operationKey === "x.tweet.create") {
       exact("https://api.x.com", "POST", "/2/tweets");
@@ -113,6 +240,9 @@ export function inspectProviderOperationTargetConformance(
       exact("https://api.x.com", "GET", "/2/users/me");
     } else {
       violations.push("operation-key-unsupported");
+    }
+    if (!fixedActionMatchesOperation(action, context.operationKey)) {
+      violations.push("operation-action-mismatch");
     }
   } else if (action.profile === GENERIC_HTTP_PROVIDER_ACTION_PROFILE) {
     let descriptor: GenericHttpOperationDescriptorV1;
@@ -263,7 +393,7 @@ export function inspectProviderProfileConformance(
   }
   if (allowedOrigins.length === 0) violations.push("origin-policy-missing");
   if (!allowedOrigins.includes(action.origin)) violations.push("origin-not-allowed");
-  if (!/^(?:GET|POST|PUT|PATCH|DELETE)$/.test(action.method)) {
+  if (!/^(?:GET|POST|PUT|PATCH|DELETE|HEAD)$/.test(action.method)) {
     violations.push("method-not-canonical");
   }
   if (!action.normalizedPath.startsWith("/")) violations.push("path-not-absolute");
