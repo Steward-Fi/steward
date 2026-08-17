@@ -448,6 +448,47 @@ describe("Spending Limit Policy", () => {
     expect(result.reason).toContain("daily spending limit");
   });
 
+  // ─── Mixed wei + USD limits are conjunctive (SEC-037) ────────────────────
+
+  const ethPriceOracle = {
+    getNativeUsdPrice: async () => 2000,
+    getTokenUsdPrice: async () => null,
+    weiToUsd: async (wei: string) => (Number(BigInt(wei)) / 1e18) * 2000,
+    usdToWei: async () => null,
+  };
+
+  it("enforces an explicit wei cap even when a USD limit is also configured", async () => {
+    const rule = makeSpendingRule({
+      maxPerTx: "10000000000000000", // 0.01 ETH
+      maxPerDayUsd: 5000, // USD daily cap the tx satisfies ($2000 < $5000)
+    });
+
+    const ctx = makeContext({
+      request: { ...makeContext().request, value: "1000000000000000000" }, // 1 ETH
+      priceOracle: ethPriceOracle,
+    });
+    const result = await evaluatePolicy(rule, ctx);
+
+    // Previously the USD branch returned early and the wei cap never fired.
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("per-tx limit");
+  });
+
+  it("passes a mixed wei+USD config only when both limits hold", async () => {
+    const rule = makeSpendingRule({
+      maxPerTx: "10000000000000000", // 0.01 ETH
+      maxPerDayUsd: 5000,
+    });
+
+    const ctx = makeContext({
+      request: { ...makeContext().request, value: "5000000000000000" }, // 0.005 ETH = $10
+      priceOracle: ethPriceOracle,
+    });
+    const result = await evaluatePolicy(rule, ctx);
+
+    expect(result.passed).toBe(true);
+  });
+
   // ─── Per-tx boundary tests ─────────────────────────────────────────────
 
   it("passes when value is exactly at the per-tx limit (boundary)", async () => {

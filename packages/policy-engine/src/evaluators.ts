@@ -452,10 +452,21 @@ async function evaluateSpendingLimit(
       }
     }
 
-    return { ...base, passed: true };
+    // USD limits hold. Wei-denominated caps declared in the SAME config are
+    // conjunctive, not alternative: previously any USD field short-circuited
+    // the whole wei section, so an operator's per-tx wei cap silently went
+    // unenforced (SEC-037). Fall through to the wei evaluation — undeclared
+    // wei fields normalize to MAX_UINT256, so only explicit caps bite.
+    if (
+      rule.config.maxPerTx === undefined &&
+      rule.config.maxPerDay === undefined &&
+      rule.config.maxPerWeek === undefined
+    ) {
+      return { ...base, passed: true };
+    }
   }
 
-  // ── Wei-based evaluation (legacy / fallback) ────────────────────────────────
+  // ── Wei-based evaluation (legacy / fallback, and conjunctive with USD) ──────
   // ATOMICITY CONTRACT: this evaluator is pure — it compares the caller-supplied
   // spentToday/spentThisWeek counters and reserves/commits nothing. Concurrency
   // safety for the daily/weekly caps is the CALLER's responsibility: the spend
