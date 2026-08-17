@@ -308,6 +308,24 @@ describe("durable audit retention archives", () => {
       sql`DELETE FROM audit_archives WHERE id = ${exported.archiveId}::uuid AND tenant_id = ${TENANT}`,
     );
 
+    const unsafeManifest = {
+      ...exported.manifest,
+      chunks: [{ ...exported.manifest.chunks[0], file: "../outside.jsonl" }],
+    };
+    const unsafeManifestBytes = Buffer.from(canonical(unsafeManifest));
+    await expect(
+      beginAuditArchiveRestore({
+        tenantId: TENANT,
+        manifest: unsafeManifest,
+        manifestSha256: createHash("sha256").update(unsafeManifestBytes).digest("hex"),
+        signature: signBytes(
+          null,
+          unsafeManifestBytes,
+          parseSigningKey(ARCHIVE_SIGNING_KEY),
+        ).toString("base64"),
+      }),
+    ).rejects.toThrow("manifest chunk 0 is invalid");
+
     const started = await beginAuditArchiveRestore({
       tenantId: TENANT,
       manifest: exported.manifest,

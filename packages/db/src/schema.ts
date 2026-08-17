@@ -2627,6 +2627,7 @@ export const auditRetentionPolicies = pgTable(
       "audit_retention_chunk_bounds",
       sql`${table.archiveChunkSize} BETWEEN 1 AND 10000`,
     ),
+    revisionPositive: check("audit_retention_revision_positive", sql`${table.revision} > 0`),
   }),
 );
 
@@ -2659,11 +2660,50 @@ export const auditArchives = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    tenantRangeUnique: uniqueIndex("audit_archives_tenant_range_unique").on(
-      table.tenantId,
-      table.fromSeq,
-      table.toSeq,
+    rangeValid: check(
+      "audit_archives_range_valid",
+      sql`${table.fromSeq} > 0 AND ${table.toSeq} >= ${table.fromSeq}`,
     ),
+    countValid: check(
+      "audit_archives_count_valid",
+      sql`${table.eventCount} = ${table.toSeq} - ${table.fromSeq} + 1`,
+    ),
+    statusValid: check(
+      "audit_archives_status_valid",
+      sql`${table.status} IN ('building', 'sealed', 'pruned')`,
+    ),
+    sourceValid: check(
+      "audit_archives_source_valid",
+      sql`${table.source} IN ('native', 'imported')`,
+    ),
+    policyRevisionValid: check(
+      "audit_archives_policy_revision_valid",
+      sql`${table.retentionPolicyRevision} IS NULL OR ${table.retentionPolicyRevision} > 0`,
+    ),
+    sealedFieldsValid: check(
+      "audit_archives_sealed_fields_valid",
+      sql`${table.status} = 'building' OR
+          (${table.manifest} IS NOT NULL AND ${table.manifestSha256} ~ '^[0-9a-f]{64}$' AND
+           ${table.signature} IS NOT NULL AND ${table.signingKeyId} IS NOT NULL AND
+           ${table.sealedAt} IS NOT NULL)`,
+    ),
+    durabilityAckComplete: check(
+      "audit_archives_durability_ack_complete",
+      sql`(${table.durabilityAck} IS NULL AND ${table.durabilityAckKeyId} IS NULL AND
+           ${table.durabilityAckSignature} IS NULL AND ${table.durabilityAckSha256} IS NULL AND
+           ${table.durabilityAckAt} IS NULL) OR
+          (${table.durabilityAck} IS NOT NULL AND ${table.durabilityAckKeyId} IS NOT NULL AND
+           ${table.durabilityAckSignature} IS NOT NULL AND
+           ${table.durabilityAckSha256} ~ '^[0-9a-f]{64}$' AND ${table.durabilityAckAt} IS NOT NULL)`,
+    ),
+    nativeAuthorityUnique: uniqueIndex("audit_archives_native_authority_unique")
+      .on(
+        table.tenantId,
+        table.fromSeq,
+        table.toSeq,
+        sql`COALESCE(${table.retentionPolicyRevision}, 0)`,
+      )
+      .where(sql`${table.source} = 'native'`),
     tenantCreatedIdx: index("audit_archives_tenant_created_idx").on(
       table.tenantId,
       table.createdAt,
@@ -2697,6 +2737,15 @@ export const auditArchiveChunks = pgTable(
       name: "audit_archive_chunks_pk",
       columns: [table.archiveId, table.chunkIndex],
     }),
+    rangeValid: check(
+      "audit_archive_chunks_range_valid",
+      sql`${table.chunkIndex} >= 0 AND ${table.fromSeq} > 0 AND ${table.toSeq} >= ${table.fromSeq}`,
+    ),
+    countValid: check(
+      "audit_archive_chunks_count_valid",
+      sql`${table.eventCount} = ${table.toSeq} - ${table.fromSeq} + 1 AND ${table.eventCount} BETWEEN 1 AND 10000`,
+    ),
+    bytesValid: check("audit_archive_chunks_bytes_valid", sql`${table.byteLength} > 0`),
   }),
 );
 

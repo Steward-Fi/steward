@@ -1035,6 +1035,14 @@ function verifySuppliedArchiveManifest(input: {
     manifest.fromSeq < 1 ||
     manifest.toSeq < manifest.fromSeq ||
     manifest.eventCount !== manifest.toSeq - manifest.fromSeq + 1 ||
+    manifest.eventCount > MAX_ARCHIVE_EVENTS_PER_RUN ||
+    typeof manifest.createdAt !== "string" ||
+    !Number.isFinite(Date.parse(manifest.createdAt)) ||
+    new Date(manifest.createdAt).toISOString() !== manifest.createdAt ||
+    manifest.format !== "application/x-ndjson" ||
+    (manifest.retentionPolicyRevision !== null &&
+      (!Number.isSafeInteger(manifest.retentionPolicyRevision) ||
+        manifest.retentionPolicyRevision < 1)) ||
     !Array.isArray(manifest.chunks) ||
     manifest.chunks.length < 1 ||
     !/^[0-9a-f]{64}$/.test(manifest.startPrevHash) ||
@@ -1042,6 +1050,35 @@ function verifySuppliedArchiveManifest(input: {
     !KEY_ID_PATTERN.test(manifest.signingKeyId)
   ) {
     throw new Error("Restored audit archive manifest is invalid");
+  }
+  let expectedSeq = manifest.fromSeq;
+  let observedEvents = 0;
+  for (let index = 0; index < manifest.chunks.length; index++) {
+    const chunk = manifest.chunks[index];
+    if (
+      !chunk ||
+      chunk.index !== index ||
+      chunk.file !== `chunk-${String(index).padStart(6, "0")}.jsonl` ||
+      !Number.isSafeInteger(chunk.fromSeq) ||
+      !Number.isSafeInteger(chunk.toSeq) ||
+      !Number.isSafeInteger(chunk.eventCount) ||
+      !Number.isSafeInteger(chunk.byteLength) ||
+      chunk.fromSeq !== expectedSeq ||
+      chunk.toSeq < chunk.fromSeq ||
+      chunk.eventCount !== chunk.toSeq - chunk.fromSeq + 1 ||
+      chunk.eventCount < MIN_ARCHIVE_CHUNK_SIZE ||
+      chunk.eventCount > MAX_ARCHIVE_CHUNK_SIZE ||
+      chunk.byteLength < 1 ||
+      chunk.byteLength > 25 * 1024 * 1024 ||
+      !/^[0-9a-f]{64}$/.test(chunk.sha256)
+    ) {
+      throw new Error(`Restored audit archive manifest chunk ${index} is invalid`);
+    }
+    expectedSeq = chunk.toSeq + 1;
+    observedEvents += chunk.eventCount;
+  }
+  if (expectedSeq !== manifest.toSeq + 1 || observedEvents !== manifest.eventCount) {
+    throw new Error("Restored audit archive manifest chunk coverage is invalid");
   }
   const bytes = canonicalBytes(manifest);
   if (sha256Hex(bytes) !== input.manifestSha256) {
