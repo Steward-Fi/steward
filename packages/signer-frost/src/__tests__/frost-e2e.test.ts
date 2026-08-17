@@ -14,6 +14,10 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { statSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { join } from "node:path";
 
 import { FrostSignerBackend } from "../frost-signer-backend";
 import { ShareClient } from "../sidecar-client";
@@ -26,6 +30,7 @@ beforeAll(async () => {
   cluster = await startFrostCluster(2, 3);
   backend = new FrostSignerBackend({
     shareEndpoints: cluster.endpoints,
+    shareAuthTokens: cluster.authTokens,
     threshold: cluster.threshold,
     groupPublicKeyHex: cluster.groupPublicKeyHex,
   });
@@ -94,7 +99,7 @@ describe("FROST-secp256k1 2-of-3 threshold signing (E2E, real sidecars)", () => 
 
   test("NEGATIVE: 1 of 3 shares CANNOT produce a valid signature", async () => {
     // Drive the protocol by hand with a SINGLE share against a 2-of-3 group.
-    const only = new ShareClient(cluster.endpoints[0]);
+    const only = new ShareClient(cluster.endpoints[0], cluster.authTokens[0]);
     const msg = digest(0x44);
     const msgHex = Array.from(msg, (b) => b.toString(16).padStart(2, "0")).join("");
 
@@ -110,8 +115,8 @@ describe("FROST-secp256k1 2-of-3 threshold signing (E2E, real sidecars)", () => 
     // Even if an attacker obtains ONE well-formed signature share (simulated by
     // building a 2-party signing package but only submitting one share to
     // aggregate), aggregation to a valid group signature must fail.
-    const s0 = new ShareClient(cluster.endpoints[0]);
-    const s1 = new ShareClient(cluster.endpoints[1]);
+    const s0 = new ShareClient(cluster.endpoints[0], cluster.authTokens[0]);
+    const s1 = new ShareClient(cluster.endpoints[1], cluster.authTokens[1]);
     const msg = digest(0x55);
     const msgHex = Array.from(msg, (b) => b.toString(16).padStart(2, "0")).join("");
 
@@ -152,5 +157,97 @@ describe("FROST-secp256k1 2-of-3 threshold signing (E2E, real sidecars)", () => 
     expect(sig.signature.length).toBe(65); // compressed R (33) ‖ z (32)
     expect(cluster.groupPublicKeyHex.length).toBe(66); // 33-byte compressed pubkey
     expect(sig.recid).toBeUndefined(); // Schnorr has no ECDSA recovery id
+  });
+
+  // SEC-025: the share service must reject unauthenticated signing requests.
+  test("SEC-025: share endpoints reject requests without the bearer token", async () => {
+    const unauthenticated = new ShareClient(cluster.endpoints[0]);
+    await expect(unauthenticated.commit()).rejects.toThrow(/401|unauthorized/);
+    const wrongToken = new ShareClient(cluster.endpoints[0], "wrong-token");
+    await expect(wrongToken.commit()).rejects.toThrow(/401|unauthorized/);
+  });
+
+  // SEC-084: a caller-supplied ref must match the backend's configured group.
+  test("SEC-084: sign() rejects a ref that mismatches the configured group", async () => {
+    const ref = backend.keyRef();
+    await expect(backend.sign({ ...ref, threshold: 1 }, digest(0x88))).rejects.toThrow(
+      /threshold|backend/,
+    );
+    await expect(
+      backend.sign({ ...ref, publicKey: `0x${"00".repeat(33)}` }, digest(0x88)),
+    ).rejects.toThrow(/public key/);
+    await expect(backend.sign({ ...ref, groupId: "other-group" }, digest(0x88))).rejects.toThrow(
+      /groupId/,
+    );
+  });
+
+  // SEC-026: a malicious aggregating share can substitute the message in the
+  // signing package and report valid:true. The coordinator must independently
+  // verify the aggregate over the ORIGINAL message via a different share.
+  test("SEC-026: aggregator message substitution is detected", async () => {
+    // Honest signature over message B, to be replayed by the evil aggregator.
+    const msgA = digest(0xaa);
+    const msgB = digest(0xbb);
+    const sigB = await backend.sign(backend.keyRef(), msgB);
+    const sigBHex = Array.from(sigB.signature, (b) => b.toString(16).padStart(2, "0")).join("");
+
+    // Evil "share 0": proxies public ops to the honest share 0 but answers
+    // /aggregate with a signature over a DIFFERENT message plus valid:true.
+    const proxy = async (path: string, body: unknown) => {
+      const res = await fetch(`${cluster.endpoints[0]}${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${cluster.authTokens[0]}`,
+        },
+        body: JSON.stringify(body ?? {}),
+      });
+      return res.text();
+    };
+    const evil = createHttpServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk as Buffer);
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      res.setHeader("content-type", "application/json");
+      if (req.url === "/aggregate") {
+        res.end(
+          JSON.stringify({
+            signature_hex: sigBHex,
+            group_public_key_hex: cluster.groupPublicKeyHex,
+            valid: true,
+          }),
+        );
+        return;
+      }
+      res.end(await proxy(req.url ?? "", body));
+    });
+    await new Promise<void>((resolve) => evil.listen(0, "127.0.0.1", resolve));
+    const evilPort = (evil.address() as AddressInfo).port;
+
+    try {
+      const victim = new FrostSignerBackend({
+        shareEndpoints: [
+          `http://127.0.0.1:${evilPort}`,
+          cluster.endpoints[1],
+          cluster.endpoints[2],
+        ],
+        shareAuthTokens: [undefined, cluster.authTokens[1], cluster.authTokens[2]],
+        threshold: 2,
+        groupPublicKeyHex: cluster.groupPublicKeyHex,
+      });
+      await expect(victim.sign(victim.keyRef(), msgA)).rejects.toThrow(/independent verification/);
+    } finally {
+      evil.close();
+    }
+  });
+
+  // SEC-083: keygen must write secret share files with owner-only permissions.
+  test("SEC-083: keygen writes share files with 0600 permissions", () => {
+    if (process.platform === "win32") return;
+    for (let i = 1; i <= cluster.participants; i++) {
+      const idHex = i.toString(16).padStart(64, "0");
+      const mode = statSync(join(cluster.shareDir, `share-${idHex}.json`)).mode & 0o777;
+      expect(mode.toString(8)).toBe("600");
+    }
   });
 });

@@ -27,6 +27,12 @@ import { ShareClient } from "./sidecar-client";
 export interface FrostSignerBackendOptions {
   /** Base URLs of the running share sidecars, e.g. ["http://127.0.0.1:7401", ...]. */
   shareEndpoints: string[];
+  /**
+   * SEC-025: bearer token(s) authenticating this coordinator to the share
+   * sidecars (required by the sidecars). A single string applies to every
+   * share; an array maps one token per endpoint (per-share tokens).
+   */
+  shareAuthTokens: string | readonly (string | undefined)[];
   /** t — shares required to sign. */
   threshold: number;
   /**
@@ -78,7 +84,11 @@ export class FrostSignerBackend implements SignerBackend {
         `need at least threshold=${opts.threshold} share endpoints, got ${opts.shareEndpoints.length}`,
       );
     }
-    this.shares = opts.shareEndpoints.map((u) => new ShareClient(u));
+    const perShareTokens =
+      typeof opts.shareAuthTokens === "string"
+        ? opts.shareEndpoints.map(() => opts.shareAuthTokens as string)
+        : (opts.shareAuthTokens ?? []);
+    this.shares = opts.shareEndpoints.map((u, i) => new ShareClient(u, perShareTokens[i]));
     this.threshold = opts.threshold;
     this.participants = opts.shareEndpoints.length;
     this.groupPublicKeyHex = opts.groupPublicKeyHex.replace(/^0x/, "");
@@ -125,7 +135,25 @@ export class FrostSignerBackend implements SignerBackend {
    * the FROST crate itself, not by a hand-rolled count check.
    */
   async sign(ref: ThresholdKeyRef, message: Uint8Array): Promise<ThresholdSignature> {
-    const quorum = this.shares.slice(0, ref.threshold);
+    // SEC-084: never trust a caller-supplied ref for quorum sizing — it must
+    // describe exactly the group this backend was configured with.
+    if (ref.scheme !== "frost-secp256k1") {
+      throw new Error(`ref scheme ${ref.scheme} is not this backend's frost-secp256k1 group`);
+    }
+    if (ref.threshold !== this.threshold || ref.participants !== this.participants) {
+      throw new Error(
+        `ref describes ${ref.threshold}-of-${ref.participants} but this backend is ` +
+          `${this.threshold}-of-${this.participants}`,
+      );
+    }
+    if (ref.publicKey.replace(/^0x/, "") !== this.groupPublicKeyHex) {
+      throw new Error("ref public key does not match the backend's configured group key");
+    }
+    if (ref.groupId !== this.groupId) {
+      throw new Error("ref groupId does not match the backend's configured group");
+    }
+
+    const quorum = this.shares.slice(0, this.threshold);
     const messageHex = toHex(message);
 
     // Round 1: collect commitments + remember nonce ids per share.
@@ -146,6 +174,23 @@ export class FrostSignerBackend implements SignerBackend {
     // Aggregate + verify (public op).
     const agg = await quorum[0].aggregate(signingPackageHex, shareMap);
     if (!agg.valid) throw new Error("aggregated signature failed verification against group key");
+
+    // SEC-026: the aggregating share is trusted for neither message binding
+    // nor validity — it could substitute the message in the signing package
+    // and then report valid:true. Pin the group key, then independently
+    // verify the returned signature over the ORIGINAL message via a share
+    // that did not aggregate (preferring one outside the signing quorum).
+    if (agg.groupPublicKeyHex.replace(/^0x/, "") !== this.groupPublicKeyHex) {
+      throw new Error("aggregated signature was produced under a different group key");
+    }
+    const independent =
+      this.shares.slice(this.threshold)[0] ?? this.shares.find((s) => s !== quorum[0]) ?? quorum[0];
+    const bound = await independent.verify(messageHex, agg.signatureHex);
+    if (!bound) {
+      throw new Error(
+        "independent verification failed: aggregated signature does not verify over the requested message",
+      );
+    }
 
     return { signature: fromHex(agg.signatureHex) };
   }
