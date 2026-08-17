@@ -84,6 +84,10 @@ export interface StewardAppContext {
 
   // ── auth middleware the plugin installs on its own routes ─────────────────
   requireAgentJwt: StewardMiddleware;
+  /** capability-surface agent authenticator: verifies the agent JWT WITHOUT the
+   * legacy `trade:order` scope gate — capability authz is the grant +
+   * capability-intent policy (default-deny), not the trading scope. */
+  requireCapabilityAgentJwt: StewardMiddleware;
   operatorAuth: StewardMiddleware;
   tenantAuth: (
     c: Context<{ Variables: AppVariables }>,

@@ -96,6 +96,7 @@ function buildCtx(db: unknown): StewardAppContext {
       return null;
     },
     async requireAgentJwt() {},
+    async requireCapabilityAgentJwt() {},
     async operatorAuth() {},
     async tenantAuth() {},
   } as unknown as StewardAppContext;

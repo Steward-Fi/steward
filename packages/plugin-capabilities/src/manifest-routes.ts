@@ -1,9 +1,10 @@
 /**
  * manifest-routes.ts — agent-facing manifest + issuance/renewal surface (A1).
  *
- * These routes are AGENT-token authed (the same requireAgentJwt gate the invoke
- * path uses); agent identity comes from the token (c.get("agentScope")), never
- * the body. They layer on the existing capability store + the issuance core:
+ * These routes are AGENT-token authed (the same capability agent-jwt gate the
+ * invoke path uses — no `trade:order` scope requirement); agent identity comes
+ * from the token (c.get("agentScope")), never the body. They layer on the
+ * existing capability store + the issuance core:
  *
  *   GET  /capabilities/manifest
  *        → list THIS agent's manifest (provider:kind entries it may request).

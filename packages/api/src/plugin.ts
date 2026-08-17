@@ -56,7 +56,11 @@ import {
 import type { PluginMigrationSource, StewardPlugin } from "@stwd/shared";
 import { WebhookEventRegistry } from "@stwd/shared";
 import type { Hono } from "hono";
-import { requireAgentJwt, requireProviderAgentJwt } from "./middleware/agent-jwt";
+import {
+  requireAgentJwt,
+  requireCapabilityAgentJwt,
+  requireProviderAgentJwt,
+} from "./middleware/agent-jwt";
 import { operatorAuth } from "./middleware/operator-auth";
 import { getRedisClient } from "./middleware/redis";
 import { getAgentTokenStatus } from "./services/agent-token-status";
@@ -166,6 +170,14 @@ export interface StewardAppContext {
   getRedisClient: typeof getRedisClient;
   requireAgentJwt: typeof requireAgentJwt;
   /**
+   * Capability-surface authenticator: verifies the agent JWT and installs the
+   * context WITHOUT the legacy `trade:order` scope gate. Capability invoke /
+   * manifest / issuance routes use this — their authorization is the
+   * capability grant + capability-intent policy (default-deny), not the
+   * trading scope. It is a NEW field and does NOT replace `requireAgentJwt`.
+   */
+  requireCapabilityAgentJwt: typeof requireCapabilityAgentJwt;
+  /**
    * PR2 provider-action authenticator: verifies the agent JWT and installs the
    * runtime-neutral principal WITHOUT a trading/proxy scope check. Provider-action
    * routes use this; it is a NEW field and does NOT replace `requireAgentJwt`.
@@ -214,6 +226,7 @@ export function buildPluginContext(): StewardAppContext {
     getAgentTokenStatus,
     getRedisClient,
     requireAgentJwt,
+    requireCapabilityAgentJwt,
     requireProviderAgentJwt,
     operatorAuth,
     tenantAuth,

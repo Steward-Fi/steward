@@ -392,6 +392,37 @@ export async function requireAgentJwt(c: Context<{ Variables: AppVariables }>, n
 }
 
 /**
+ * CAPABILITY middleware. Authenticates the agent JWT and installs context with
+ * NO `trade:order` requirement. The agent-facing capability surface (invoke /
+ * manifest / issuance) is authorized per-call by the capability grant +
+ * capability-intent policy (default-deny), never by the trading scope — so
+ * requiring `trade:order` here both locked out capability-only agents and
+ * handed every trading agent implicit capability access (scope conflation).
+ * Wire behavior matches the legacy gate this replaces on that surface.
+ */
+export async function requireCapabilityAgentJwt(
+  c: Context<{ Variables: AppVariables }>,
+  next: Next,
+) {
+  const auth = await authenticateAgentJwt(c);
+  if (isAgentJwtFailure(auth)) {
+    if (auth.kind === "tenant-not-found") {
+      return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+    }
+    if (auth.kind === "agent-not-registered") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Forbidden: agent is not registered for tenant" },
+        403,
+      );
+    }
+    return invalid(c, auth.reason, 401);
+  }
+
+  await installAgentJwtContext(c, auth);
+  return next();
+}
+
+/**
  * PROVIDER-ACTION middleware. Authenticates the agent JWT and installs context
  * with NO trading or proxy scope check — provider authority is decided later by
  * bindings/grants, never by token scope. ONLY provider-action routes use this.

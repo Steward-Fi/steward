@@ -91,6 +91,7 @@ function buildCtx(db: TestDb): StewardAppContext {
       return null;
     },
     async requireAgentJwt() {},
+    async requireCapabilityAgentJwt() {},
     async operatorAuth() {},
     async tenantAuth() {},
     // note (any is intentional): the test ctx satisfies the used subset.
