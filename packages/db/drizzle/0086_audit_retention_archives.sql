@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS "audit_archive_chunks" (
     CHECK ("chunk_index" >= 0 AND "from_seq" > 0 AND "to_seq" >= "from_seq"),
   CONSTRAINT "audit_archive_chunks_count_valid"
     CHECK ("event_count" = "to_seq" - "from_seq" + 1 AND "event_count" BETWEEN 1 AND 10000),
-  CONSTRAINT "audit_archive_chunks_bytes_valid" CHECK ("byte_length" > 0)
+  CONSTRAINT "audit_archive_chunks_bytes_valid" CHECK ("byte_length" BETWEEN 1 AND 1048576)
 );
 
 -- A durability attestation and archive provenance are write-once authority.

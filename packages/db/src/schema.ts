@@ -2745,7 +2745,10 @@ export const auditArchiveChunks = pgTable(
       "audit_archive_chunks_count_valid",
       sql`${table.eventCount} = ${table.toSeq} - ${table.fromSeq} + 1 AND ${table.eventCount} BETWEEN 1 AND 10000`,
     ),
-    bytesValid: check("audit_archive_chunks_bytes_valid", sql`${table.byteLength} > 0`),
+    bytesValid: check(
+      "audit_archive_chunks_bytes_valid",
+      sql`${table.byteLength} BETWEEN 1 AND 1048576`,
+    ),
   }),
 );
 

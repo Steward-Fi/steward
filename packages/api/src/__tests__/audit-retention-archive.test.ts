@@ -15,6 +15,7 @@ import {
   getAuditArchiveChunk,
   getAuditArchiveManifest,
   listAuditArchives,
+  MAX_ARCHIVE_CHUNK_BYTES,
   pruneSealedAuditArchive,
   putAuditArchiveRestoreChunk,
   recordAuditArchiveDurabilityAcknowledgement,
@@ -31,20 +32,12 @@ const ACK_KEYS = generateKeyPairSync("ed25519");
 let policyRevision = 0;
 
 describe("archive restore request boundary", () => {
-  it("authenticates and MFA-gates before granting the narrow 25 MiB body exception", () => {
+  it("keeps every generated restore chunk within the composed app body limit", () => {
     const appSource = readFileSync(join(import.meta.dir, "..", "app.ts"), "utf8");
-    const tenantAuthIndex = appSource.indexOf(
-      "app.use(archiveRestoreChunkPath, (c, next) => tenantAuth(c, next))",
-    );
-    const mfaGateIndex = appSource.indexOf(
-      "app.use(archiveRestoreChunkPath, auditOwnerAdminMfaGate)",
-    );
-    const bodyLimitIndex = appSource.indexOf('app.use("*", (c, next) =>');
-    expect(tenantAuthIndex).toBeGreaterThanOrEqual(0);
-    expect(mfaGateIndex).toBeGreaterThan(tenantAuthIndex);
-    expect(bodyLimitIndex).toBeGreaterThan(mfaGateIndex);
+    expect(MAX_ARCHIVE_CHUNK_BYTES).toBe(1024 * 1024);
     expect(appSource).toContain("maxSize: MAX_ARCHIVE_CHUNK_BYTES");
-    expect(appSource).toContain("maxSize: 1024 * 1024");
+    expect(appSource).not.toContain("archiveChunkBodyLimit");
+    expect(appSource).not.toContain("25MiB");
   });
 });
 
@@ -202,18 +195,35 @@ describe("durable audit retention archives", () => {
         { cwd: join(import.meta.dir, "../../../.."), encoding: "utf8" },
       );
       expect(verifier.status).toBe(0);
-      const integrityOnly = spawnSync(
+      const wrongTrustRoot = spawnSync(
+        "node",
+        [
+          "scripts/verify-audit-archive.mjs",
+          join(directory, "manifest.json"),
+          directory,
+          "--expected-key-fingerprint",
+          "0".repeat(64),
+        ],
+        { cwd: join(import.meta.dir, "../../../.."), encoding: "utf8" },
+      );
+      expect(wrongTrustRoot.status).toBe(1);
+      expect(wrongTrustRoot.stderr).toContain("does not match the trusted key");
+      const noTrustMode = spawnSync(
         "node",
         ["scripts/verify-audit-archive.mjs", join(directory, "manifest.json"), directory],
         { cwd: join(import.meta.dir, "../../../.."), encoding: "utf8" },
       );
-      expect(integrityOnly.status).toBe(0);
-      expect(integrityOnly.stderr).toContain("verifies archive integrity only");
-      expect(integrityOnly.stdout).toContain("PASS (integrity only");
+      expect(noTrustMode.status).toBe(1);
+      expect(noTrustMode.stderr).toContain("choose exactly one trust mode");
       writeFileSync(join(directory, sealed.manifest.chunks[0].file), "tampered\n");
       const tampered = spawnSync(
         "node",
-        ["scripts/verify-audit-archive.mjs", join(directory, "manifest.json"), directory],
+        [
+          "scripts/verify-audit-archive.mjs",
+          join(directory, "manifest.json"),
+          directory,
+          "--integrity-only",
+        ],
         { cwd: join(import.meta.dir, "../../../.."), encoding: "utf8" },
       );
       expect(tampered.status).toBe(1);
@@ -419,5 +429,31 @@ describe("durable audit retention archives", () => {
     });
     expect(governed.archiveId).not.toBe(manual.archiveId);
     expect(governed.manifest.retentionPolicyRevision).toBe(policy.revision);
+  });
+
+  it("splits archive chunks by public upload bytes as well as event count", async () => {
+    const before = await getDb().execute(
+      sql`SELECT COALESCE(MAX(seq), 0)::int AS seq FROM audit_events WHERE tenant_id = ${OTHER}`,
+    );
+    const fromSeq = Number(rows<{ seq: number }>(before)[0].seq) + 1;
+    for (let i = 0; i < 3; i++) {
+      await writeAuditEvent({
+        tenantId: OTHER,
+        actorType: "system",
+        action: "archive.byte-split.fixture",
+        metadata: { i, padding: "x".repeat(400_000) },
+      });
+    }
+    const archive = await createAuditArchive({
+      tenantId: OTHER,
+      fromSeq,
+      toSeq: fromSeq + 2,
+      chunkSize: 3,
+    });
+    expect(archive.manifest.chunks).toHaveLength(2);
+    expect(archive.manifest.chunks.map((chunk) => chunk.eventCount)).toEqual([2, 1]);
+    expect(
+      archive.manifest.chunks.every((chunk) => chunk.byteLength <= MAX_ARCHIVE_CHUNK_BYTES),
+    ).toBe(true);
   });
 });

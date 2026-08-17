@@ -13,6 +13,11 @@ Steward audit events are retained indefinitely unless an owner or administrator 
 7. Repeat `POST /audit/retention/run`. In one transaction Steward locks the tenant, policy, archive, and **all** chunk rows; re-hashes and parses every JSONL event; verifies the trusted manifest and external acknowledgement; appends authorization evidence; deletes the exact live prefix; advances the floor; marks the archive pruned; and appends completion evidence. Any error rolls back all of those changes.
 8. List archives with `steward audit list`. Restore an interrupted export with `steward audit restore --in DIR`; chunk uploads are digest-checked and idempotent. Restored archives are permanently marked `imported` and can never authorize deletion from a live chain.
 
+Archive chunks are capped at 1 MiB so every archive emitted by Steward remains
+restorable through the public API's bounded request surface. `archiveChunkSize`
+is a maximum event count; Steward splits earlier when the encoded byte limit is
+reached and fails closed if one audit event alone cannot fit.
+
 You can also download `GET /audit/archives/:archiveId` and each `GET /audit/archives/:archiveId/chunks/:index` directly. Store the response as `manifest.json` and chunks under the filenames in `manifest.chunks`. Verify offline:
 
 ```sh
@@ -22,6 +27,12 @@ node scripts/verify-audit-archive.mjs manifest.json . \
 ```
 
 The verifier checks the trusted signing-key fingerprint, Ed25519 signature, canonical manifest digest, safe chunk names, exact bytes and hashes, tenant/range/count consistency, and chain linkage. A bundle without an independently trusted fingerprint is self-signed evidence and must not be treated as proof of operator identity.
+
+`steward audit export --verify` therefore requires `--fp` from an independent
+trusted channel. For troubleshooting byte integrity only, use the explicitly
+weaker `--integrity-only` flag; its output states that signer identity was not
+authenticated. A key id alone is not a trust anchor because it is part of the
+signed, attacker-replaceable envelope.
 
 ## Durability and limits
 

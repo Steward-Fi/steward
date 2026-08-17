@@ -35,15 +35,19 @@ function sha256(value) {
 const manifestPath = process.argv[2];
 if (!manifestPath) {
   console.error(
-    "usage: node scripts/verify-audit-archive.mjs <manifest.json> [archive-directory] [--expected-key-fingerprint <sha256>] [--expected-key-id <id>]",
+    "usage: node scripts/verify-audit-archive.mjs <manifest.json> [archive-directory] (--expected-key-fingerprint <sha256> | --integrity-only) [--expected-key-id <id>]",
   );
   process.exit(2);
 }
 const archiveDir = process.argv[3] || dirname(manifestPath);
 const fingerprintFlag = process.argv.indexOf("--expected-key-fingerprint");
 const expectedFingerprint = fingerprintFlag >= 0 ? process.argv[fingerprintFlag + 1] : undefined;
+const integrityOnly = process.argv.includes("--integrity-only");
 const keyIdFlag = process.argv.indexOf("--expected-key-id");
 const expectedKeyId = keyIdFlag >= 0 ? process.argv[keyIdFlag + 1] : undefined;
+if (fingerprintFlag >= 0 === integrityOnly) {
+  fail("choose exactly one trust mode: --expected-key-fingerprint or --integrity-only");
+}
 if (fingerprintFlag >= 0 && !/^[0-9a-f]{64}$/i.test(expectedFingerprint ?? "")) {
   fail("expected key fingerprint must be exactly 64 hexadecimal characters");
 }
@@ -143,5 +147,9 @@ console.log(`  archive: ${manifest.archiveId}`);
 console.log(`  tenant:  ${manifest.tenantId}`);
 console.log(`  events:  ${manifest.eventCount} (seq ${manifest.fromSeq}..${manifest.toSeq})`);
 console.log(`  chunks:  ${manifest.chunks.length}`);
-console.log("  manifest signature: Ed25519 OK");
+console.log(
+  integrityOnly
+    ? "  manifest signature: Ed25519 self-consistency OK (identity NOT authenticated)"
+    : "  manifest signature: Ed25519 OK against trusted fingerprint",
+);
 console.log("  JSONL hashes/linkage: OK");

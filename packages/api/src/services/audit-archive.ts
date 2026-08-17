@@ -11,7 +11,10 @@ export const MAX_AUDIT_RETENTION_DAYS = 3650;
 export const MIN_ARCHIVE_CHUNK_SIZE = 1;
 export const MAX_ARCHIVE_CHUNK_SIZE = 10_000;
 export const MAX_ARCHIVE_EVENTS_PER_RUN = 50_000;
-export const MAX_ARCHIVE_CHUNK_BYTES = 25 * 1024 * 1024;
+/** Must stay aligned with the fully composed app's global request-body limit.
+ * Restore uploads are exact signed JSONL chunks, so every archive we create
+ * must be uploadable again through the public API. */
+export const MAX_ARCHIVE_CHUNK_BYTES = 1024 * 1024;
 
 export interface AuditRetentionPolicyValue {
   tenantId: string;
@@ -620,7 +623,8 @@ export async function createAuditArchive(input: {
     let firstRow: AuditEventRow | undefined;
     let lastRow: AuditEventRow | undefined;
     let observedCount = 0;
-    for (let cursor = input.fromSeq, index = 0; cursor <= input.toSeq; index++) {
+    let index = 0;
+    for (let cursor = input.fromSeq; cursor <= input.toSeq; ) {
       const chunkTo = Math.min(input.toSeq, cursor + input.chunkSize - 1);
       const rows = rowsFromExecute<AuditEventRow>(
         await tx.execute(sql`
@@ -647,33 +651,55 @@ export async function createAuditArchive(input: {
       if (lastRow && bytesToHex(rows[0].prev_hash) !== bytesToHex(lastRow.hmac)) {
         throw new Error(`Audit archive source chain is broken at seq ${cursor}`);
       }
-      firstRow ??= rows[0];
-      lastRow = rows[rows.length - 1];
-      observedCount += rows.length;
-      const jsonl = `${rows.map(archiveLine).join("\n")}\n`;
-      const chunkByteLength = new TextEncoder().encode(jsonl).length;
-      if (chunkByteLength > MAX_ARCHIVE_CHUNK_BYTES) {
-        throw new Error(
-          `Audit archive chunk exceeds ${MAX_ARCHIVE_CHUNK_BYTES} bytes; reduce archiveChunkSize`,
-        );
+      const encoded = rows.map((row) => {
+        const line = `${archiveLine(row)}\n`;
+        return { row, line, byteLength: new TextEncoder().encode(line).length };
+      });
+      for (const item of encoded) {
+        if (item.byteLength > MAX_ARCHIVE_CHUNK_BYTES) {
+          throw new Error(
+            `Audit event at seq ${Number(item.row.seq)} exceeds the public archive chunk limit`,
+          );
+        }
       }
-      const chunk = {
-        index,
-        fromSeq: cursor,
-        toSeq: chunkTo,
-        eventCount: rows.length,
-        sha256: sha256Hex(jsonl),
-        byteLength: chunkByteLength,
-        file: `chunk-${String(index).padStart(6, "0")}.jsonl`,
-      };
-      await tx.execute(sql`
-        INSERT INTO audit_archive_chunks
-          (archive_id, chunk_index, from_seq, to_seq, event_count, sha256, byte_length, jsonl)
-        VALUES
-          (${archiveId}::uuid, ${index}, ${cursor}, ${chunkTo}, ${rows.length}, ${chunk.sha256},
-           ${chunk.byteLength}, ${jsonl})
-      `);
-      chunks.push(chunk);
+      for (let offset = 0; offset < encoded.length; ) {
+        const batchStart = offset;
+        let byteLength = 0;
+        while (
+          offset < encoded.length &&
+          byteLength + encoded[offset].byteLength <= MAX_ARCHIVE_CHUNK_BYTES
+        ) {
+          byteLength += encoded[offset].byteLength;
+          offset++;
+        }
+        const batch = encoded.slice(batchStart, offset);
+        const batchFirst = batch[0].row;
+        const batchLast = batch[batch.length - 1].row;
+        const fromSeq = Number(batchFirst.seq);
+        const toSeq = Number(batchLast.seq);
+        const jsonl = batch.map((item) => item.line).join("");
+        const chunk = {
+          index,
+          fromSeq,
+          toSeq,
+          eventCount: batch.length,
+          sha256: sha256Hex(jsonl),
+          byteLength,
+          file: `chunk-${String(index).padStart(6, "0")}.jsonl`,
+        };
+        await tx.execute(sql`
+          INSERT INTO audit_archive_chunks
+            (archive_id, chunk_index, from_seq, to_seq, event_count, sha256, byte_length, jsonl)
+          VALUES
+            (${archiveId}::uuid, ${index}, ${fromSeq}, ${toSeq}, ${batch.length}, ${chunk.sha256},
+             ${chunk.byteLength}, ${jsonl})
+        `);
+        chunks.push(chunk);
+        firstRow ??= batchFirst;
+        lastRow = batchLast;
+        observedCount += batch.length;
+        index++;
+      }
       cursor = chunkTo + 1;
     }
     if (!firstRow || !lastRow || observedCount !== eventCount) {
@@ -1173,7 +1199,7 @@ export async function putAuditArchiveRestoreChunk(input: {
   jsonl: string;
 }): Promise<{ reused: boolean }> {
   if (new TextEncoder().encode(input.jsonl).length > MAX_ARCHIVE_CHUNK_BYTES) {
-    throw new Error("Restored audit archive chunk exceeds 25 MiB");
+    throw new Error("Restored audit archive chunk exceeds the public 1 MiB limit");
   }
   return getDb().transaction(async (tx) => {
     await lockTenantAuditWriter(tx, input.tenantId);

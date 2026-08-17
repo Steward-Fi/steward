@@ -42,11 +42,38 @@ export function assertSafeArchiveChunks(
       (chunk.byteLength !== undefined &&
         (!Number.isSafeInteger(chunk.byteLength) ||
           chunk.byteLength < 1 ||
-          chunk.byteLength > 25 * 1024 * 1024))
+          chunk.byteLength > 1024 * 1024))
     ) {
       throw new Error(`Archive manifest chunk ${index} is invalid or unsafe`);
     }
   }
+}
+
+export type AuditArchiveVerificationMode = "none" | "trusted" | "integrity-only";
+
+/** A signature checked only against the key shipped in the same envelope
+ * proves self-consistency, not the identity of the signer. */
+export function auditArchiveVerificationMode(flags: Record<string, string | boolean>): {
+  mode: AuditArchiveVerificationMode;
+  fingerprint?: string;
+  keyId?: string;
+} {
+  const verifyTrusted = boolFlag(flags, "verify");
+  const integrityOnly = boolFlag(flags, "integrity-only");
+  const fingerprint = stringFlag(flags, "fp");
+  const keyId = stringFlag(flags, "key-id");
+  if (verifyTrusted && integrityOnly) {
+    throw new Error("--verify and --integrity-only are mutually exclusive");
+  }
+  if (verifyTrusted && !fingerprint) {
+    throw new Error("--verify requires --fp from an independent trusted channel");
+  }
+  if (integrityOnly && fingerprint) {
+    throw new Error("Use --verify with --fp for trusted verification");
+  }
+  if (verifyTrusted) return { mode: "trusted", fingerprint, keyId };
+  if (integrityOnly) return { mode: "integrity-only", keyId };
+  return { mode: "none" };
 }
 
 const HELP = `steward CLI
@@ -63,7 +90,8 @@ Usage:
   steward policy set --name NAME --rules '[...]' [--description TEXT] [--agent-id ID]
   steward approvals list|stats|approve|deny ...
   steward audit bundle [--from 1] [--to N] [--out bundle.json] [--verify]
-  steward audit export --from N --to N --out DIR [--chunk-size N] [--verify] [--fp HEX] [--key-id ID]
+  steward audit export --from N --to N --out DIR [--chunk-size N] [--verify --fp HEX] [--key-id ID]
+                       [--integrity-only]
   steward audit list [--limit N] [--before ISO_TIMESTAMP]
   steward audit restore --in DIR
   steward audit acknowledge --archive-id ID --file signed-ack.json
@@ -315,6 +343,9 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
     return { started, completed };
   }
   if (action === "export") {
+    // Validate the requested trust claim before creating an archive or writing
+    // any local files. A malformed verification request must have no effects.
+    const verification = auditArchiveVerificationMode(ctx.flags);
     const fromSeq = intFlag(ctx.flags, "from");
     const toSeq = intFlag(ctx.flags, "to");
     if (fromSeq === undefined) throw new Error("--from is required");
@@ -370,20 +401,32 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
       }
       writeFileSync(path, jsonl, { mode: 0o600, flag: "wx" });
     }
-    if (boolFlag(ctx.flags, "verify")) {
+    if (verification.mode !== "none") {
       const args = [
         join(import.meta.dir, "../../../scripts/verify-audit-archive.mjs"),
         manifestPath,
         out,
       ];
-      const fingerprint = stringFlag(ctx.flags, "fp");
-      if (fingerprint) args.push("--expected-key-fingerprint", fingerprint);
-      const keyId = stringFlag(ctx.flags, "key-id");
-      if (keyId) args.push("--expected-key-id", keyId);
+      if (verification.fingerprint) {
+        args.push("--expected-key-fingerprint", verification.fingerprint);
+      }
+      if (verification.keyId) args.push("--expected-key-id", verification.keyId);
+      if (verification.mode === "integrity-only") {
+        args.push("--integrity-only");
+        console.error(
+          "INTEGRITY ONLY: the embedded signing key is not an independent trust anchor; " +
+            "this does not authenticate the archive signer.",
+        );
+      }
       const result = spawnSync(process.execPath, args, { stdio: "inherit" });
       if (result.status !== 0) throw new Error("Offline audit archive verification failed");
     }
-    return { archiveId: archive.archiveId, wrote: out, chunks: archive.manifest.chunks.length };
+    return {
+      archiveId: archive.archiveId,
+      wrote: out,
+      chunks: archive.manifest.chunks.length,
+      verification: verification.mode,
+    };
   }
   if (action !== "bundle") {
     throw new Error("Supported audit commands: audit bundle|export|list|restore|acknowledge");
