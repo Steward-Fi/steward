@@ -17,6 +17,16 @@ describe("Google OAuth credential envelope", () => {
       "refresh-canary",
     );
   });
+  it("never forwards a Google credential envelope to a non-Google host", () => {
+    const value = JSON.stringify({
+      schemaVersion: "steward.provider-google.credential.v1",
+      accessToken: "access-canary",
+      refreshToken: "refresh-canary",
+    });
+    expect(() => extractProviderCredentialForHost("api.openai.com", value)).toThrow(
+      "Google OAuth credential used for a non-Google host",
+    );
+  });
   it("fails closed for malformed/wrong-schema envelopes", () => {
     expect(() =>
       extractProviderCredentialForHost("www.googleapis.com", "refresh-canary"),

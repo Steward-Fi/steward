@@ -56,6 +56,8 @@ export interface Env {
   EMAIL_AUTH_REDIRECT_BASE_URL?: string;
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
+  GOOGLE_PROVIDER_CLIENT_ID?: string;
+  GOOGLE_PROVIDER_CLIENT_SECRET?: string;
   DISCORD_CLIENT_ID?: string;
   DISCORD_CLIENT_SECRET?: string;
   GITHUB_CLIENT_ID?: string;

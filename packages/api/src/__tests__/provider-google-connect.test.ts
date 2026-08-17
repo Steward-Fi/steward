@@ -37,6 +37,7 @@ import { providerAuthorityStore } from "../services/provider-authority-store";
 import {
   __runDefaultGoogleForwardForTests,
   __setGoogleForwardForTests,
+  assertGoogleConnectStoreIsSafe,
   completeGoogleConnect,
   disconnectGoogleProviderCredential,
   GOOGLE_ADAPTER_KEY,
@@ -48,6 +49,7 @@ import {
   initiateGoogleConnect,
   type PendingConnectStore,
   refreshGoogleProviderCredential,
+  resolveGoogleConnectConfig,
 } from "../services/provider-google-connect";
 
 setDefaultTimeout(120_000);
@@ -967,6 +969,33 @@ test("GoogleConnectError carries code + http status", () => {
   const e = new GoogleConnectError("GOOGLE_STATE_INVALID", 401);
   expect(e.code).toBe("GOOGLE_STATE_INVALID");
   expect(e.httpStatus).toBe(401);
+});
+
+test("provider connect uses OAuth credentials isolated from human login", () => {
+  expect(
+    resolveGoogleConnectConfig({
+      GOOGLE_CLIENT_ID: "human-login-client",
+      GOOGLE_CLIENT_SECRET: "human-login-secret",
+      GOOGLE_PROVIDER_CLIENT_ID: "provider-client",
+      GOOGLE_PROVIDER_CLIENT_SECRET: "provider-secret",
+    }),
+  ).toEqual({ clientId: "provider-client", clientSecret: "provider-secret" });
+  expect(() =>
+    resolveGoogleConnectConfig({
+      GOOGLE_CLIENT_ID: "human-login-client",
+      GOOGLE_CLIENT_SECRET: "human-login-secret",
+    }),
+  ).toThrow("GOOGLE_PROVIDER_CLIENT_ID and GOOGLE_PROVIDER_CLIENT_SECRET");
+});
+
+test("provider connect rejects process-local state in multi-instance runtimes", () => {
+  expect(() => assertGoogleConnectStoreIsSafe("memory", { NODE_ENV: "production" })).toThrow(
+    "Durable storage is required for Google provider-connect state",
+  );
+  expect(() => assertGoogleConnectStoreIsSafe("memory", { STEWARD_RUNTIME: "workers" })).toThrow();
+  expect(() =>
+    assertGoogleConnectStoreIsSafe("postgres", { NODE_ENV: "production" }),
+  ).not.toThrow();
 });
 
 test("real Google transport rejects oversized provider responses before parsing", async () => {

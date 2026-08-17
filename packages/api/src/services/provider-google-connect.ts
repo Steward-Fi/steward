@@ -72,6 +72,20 @@ export const GOOGLE_REFRESH_SKEW_MS = 5 * 60 * 1000;
  *  enough to bound replay exposure. */
 export const GOOGLE_CONNECT_STATE_TTL_MS = 10 * 60 * 1000;
 
+export function assertGoogleConnectStoreIsSafe(
+  source: "redis" | "postgres" | "memory",
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  const requiresDurableStore = env.NODE_ENV === "production" || env.STEWARD_RUNTIME === "workers";
+  if (
+    requiresDurableStore &&
+    source === "memory" &&
+    env.STEWARD_ALLOW_MEMORY_AUTH_STORES !== "true"
+  ) {
+    throw new Error("Durable storage is required for Google provider-connect state");
+  }
+}
+
 // ── Errors ────────────────────────────────────────────────────────────────────
 export type GoogleConnectErrorCode =
   | "GOOGLE_CONFIG_MISSING"
@@ -230,20 +244,20 @@ export interface GoogleConnectConfig {
 }
 
 /**
- * Resolve provider-connect X credentials from env. These are DISTINCT from the
- * user-auth `TWITTER_CLIENT_ID` / `TWITTER_CLIENT_SECRET` (login plane). See
+ * Resolve provider-connect Google credentials from env. These are DISTINCT from
+ * the user-auth `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (login plane). See
  * .env.example for the separation rationale.
  */
 export function resolveGoogleConnectConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): GoogleConnectConfig {
-  const clientId = env.GOOGLE_CLIENT_ID?.trim();
-  const clientSecret = env.GOOGLE_CLIENT_SECRET?.trim();
+  const clientId = env.GOOGLE_PROVIDER_CLIENT_ID?.trim();
+  const clientSecret = env.GOOGLE_PROVIDER_CLIENT_SECRET?.trim();
   if (!clientId || !clientSecret) {
     throw new GoogleConnectError(
       "GOOGLE_CONFIG_MISSING",
       503,
-      "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are required for provider-account Google connect",
+      "GOOGLE_PROVIDER_CLIENT_ID and GOOGLE_PROVIDER_CLIENT_SECRET are required for provider-account Google connect",
     );
   }
   return { clientId, clientSecret };

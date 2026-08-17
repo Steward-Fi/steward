@@ -155,10 +155,17 @@ function isSlackBotTokenCredential(value: string): boolean {
 }
 
 export function extractProviderCredentialForHost(host: string, credential: string): string {
-  if (host !== "gmail.googleapis.com" && host !== "www.googleapis.com") return credential;
   const parsed = safeJsonParseString<Record<string, unknown>>(credential);
+  const googleHost = host === "gmail.googleapis.com" || host === "www.googleapis.com";
+  if (parsed?.schemaVersion !== "steward.provider-google.credential.v1") {
+    if (googleHost) throw new Error("invalid Google OAuth credential envelope");
+    return credential;
+  }
+  // Bind the credential type to its intended provider. Merely transforming the
+  // envelope when the destination happens to be Google would let a misbound
+  // route forward the whole JSON value, including the server-held refresh token.
+  if (!googleHost) throw new Error("Google OAuth credential used for a non-Google host");
   if (
-    parsed?.schemaVersion !== "steward.provider-google.credential.v1" ||
     typeof parsed.accessToken !== "string" ||
     parsed.accessToken.length < 1 ||
     parsed.accessToken.length > 16_384

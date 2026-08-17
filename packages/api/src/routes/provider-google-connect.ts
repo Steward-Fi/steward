@@ -31,6 +31,7 @@ import {
 } from "../services/context";
 import { providerAuthorityStore } from "../services/provider-authority-store";
 import {
+  assertGoogleConnectStoreIsSafe,
   completeGoogleConnect,
   disconnectGoogleProviderCredential,
   GOOGLE_CONNECT_STATE_TTL_MS,
@@ -54,7 +55,8 @@ async function getConnectStore(): Promise<PendingConnectStore> {
   const { getRedisClient } = await import("../middleware/redis.js");
   const redisClient = getRedisClient();
   const usePostgres = process.env.STEWARD_AUTH_STORE_BACKEND === "postgres";
-  const { backend } = await buildBackend("challenge", redisClient, usePostgres);
+  const { backend, source } = await buildBackend("challenge", redisClient, usePostgres);
+  assertGoogleConnectStoreIsSafe(source);
   // TTL is fixed at construction; the store's set() ignores a per-call ttl.
   const store = new ChallengeStore({ backend, ttlMs: GOOGLE_CONNECT_STATE_TTL_MS });
   _connectStore = {
