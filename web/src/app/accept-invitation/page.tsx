@@ -4,7 +4,7 @@ import { useAuth } from "@stwd/react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import type React from "react";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useState } from "react";
 import { API_URL } from "@/lib/api";
 
 type AcceptState = "idle" | "accepting" | "accepted" | "error";
@@ -41,15 +41,16 @@ function AcceptInvitationInner() {
   const [state, setState] = useState<AcceptState>("idle");
   const [message, setMessage] = useState<string | null>(null);
 
-  useEffect(() => {
+  // SEC-075: never auto-accept on page load. Joining a tenant is a
+  // security-relevant account change and must require an explicit click from
+  // the signed-in user — merely opening a crafted link must not fire the POST.
+  function handleAccept() {
     const sessionToken = auth.getToken();
     if (!tenantId || !token || !sessionToken || state !== "idle") return;
 
-    let cancelled = false;
     setState("accepting");
     acceptInvitation(tenantId, token, sessionToken)
       .then((result) => {
-        if (cancelled) return;
         setState("accepted");
         setMessage(
           result?.alreadyMember
@@ -58,18 +59,14 @@ function AcceptInvitationInner() {
         );
       })
       .catch((error) => {
-        if (cancelled) return;
         setState("error");
         setMessage(error instanceof Error ? error.message : "Failed to accept invitation");
       });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [auth, tenantId, token, state]);
+  }
 
   const missingParams = !tenantId || !token;
   const needsLogin = !missingParams && !auth.getToken();
+  const showConfirm = !missingParams && !needsLogin && state === "idle";
 
   return (
     <div className="min-h-screen bg-bg flex items-center justify-center px-4">
@@ -82,7 +79,9 @@ function AcceptInvitationInner() {
               ? "Sign in with the invited email, then reopen this invitation link."
               : state === "accepting"
                 ? "Accepting invitation..."
-                : message}
+                : showConfirm
+                  ? `You've been invited to join ${tenantId}. Review the tenant before accepting — only continue if you expected this invitation.`
+                  : message}
         </div>
         <div className="mt-6 flex gap-3">
           {needsLogin ? (
@@ -92,6 +91,23 @@ function AcceptInvitationInner() {
             >
               Sign in
             </Link>
+          ) : null}
+          {showConfirm ? (
+            <>
+              <button
+                type="button"
+                onClick={handleAccept}
+                className="bg-accent px-4 py-2 text-sm font-medium text-bg hover:bg-accent-hover transition-colors"
+              >
+                Accept invitation
+              </button>
+              <Link
+                href="/dashboard"
+                className="border border-border px-4 py-2 text-sm text-text-secondary hover:text-text transition-colors"
+              >
+                Decline
+              </Link>
+            </>
           ) : null}
           {state === "accepted" ? (
             <Link
