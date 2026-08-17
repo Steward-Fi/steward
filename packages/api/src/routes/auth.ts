@@ -6633,14 +6633,21 @@ auth.post("/mfa/totp/complete", async (c) => {
 
   let method: "totp" | "recovery_code" = "totp";
   if (hasRecoveryCode) {
+    // SEC-146: consume the challenge BEFORE burning the recovery code. The
+    // burn is irreversible, so a concurrent completion must lose on the
+    // challenge consume — not forfeit a valid recovery code to a 401.
+    // Consequence: an invalid recovery code now consumes the challenge too
+    // (each guess needs a fresh MFA challenge), which is the fail-closed
+    // direction — the per-challenge attempt counter no longer applies here.
+    if ((await getMfaBackend().consume(challengeKey)) === null) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid or expired MFA challenge" }, 401);
+    }
     const verified = await verifyRecoveryCode(
       recoveryCodeStore,
       challenge.userId,
       body.recoveryCode ?? "",
     );
     if (!verified.valid) {
-      const failures = await recordTotpVerifyFailure(attemptScope);
-      if (failures >= TOTP_VERIFY_MAX_FAILED_ATTEMPTS) await getMfaBackend().delete(challengeKey);
       return c.json<ApiResponse>({ ok: false, error: "Invalid code" }, 401);
     }
     method = "recovery_code";
@@ -6658,9 +6665,6 @@ auth.post("/mfa/totp/complete", async (c) => {
       ...verified.stored,
       lastAcceptedStep: verified.acceptedStep,
     });
-  }
-  if (hasRecoveryCode && (await getMfaBackend().consume(challengeKey)) === null) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired MFA challenge" }, 401);
   }
   await clearTotpVerifyFailures(attemptScope);
 
