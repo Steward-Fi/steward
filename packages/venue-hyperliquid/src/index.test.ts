@@ -898,6 +898,56 @@ describe("Hyperliquid withdraw (user-signed action)", () => {
       signature: signed.signature,
     });
   });
+
+  test("SEC-113: submitWithdraw applies the default fetch timeout (and respects a caller signal)", async () => {
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const adapter = new HyperliquidAdapter(
+      {
+        async signTypedData(i) {
+          return account.signTypedData({
+            domain: i.domain,
+            types: i.types,
+            primaryType: i.primaryType,
+            message: i.value,
+          });
+        },
+      },
+      "sol",
+      WALLET,
+      { transport: { fetch: async () => new Response("{}", { status: 200 }) } },
+    );
+    const signed = await adapter.signWithdraw({
+      amount: "100",
+      destination: "0xABCDEF0123456789abcdef0123456789ABCDEF01",
+      time: NONCE,
+    });
+
+    // No caller signal -> the venue default timeout is applied.
+    let seenSignal: unknown;
+    await adapter.submitWithdraw(signed, {
+      transport: {
+        async fetch(_input, init) {
+          seenSignal = init?.signal;
+          return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+        },
+      },
+    });
+    expect(seenSignal).toBeInstanceOf(AbortSignal);
+
+    // A caller-provided signal is never overridden.
+    const callerSignal = new AbortController().signal;
+    seenSignal = undefined;
+    await adapter.submitWithdraw(signed, {
+      transport: {
+        async fetch(_input, init) {
+          seenSignal = init?.signal;
+          return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+        },
+      },
+      signal: callerSignal,
+    });
+    expect(seenSignal).toBe(callerSignal);
+  });
 });
 
 describe("Hyperliquid close-all", () => {

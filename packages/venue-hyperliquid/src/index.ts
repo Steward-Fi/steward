@@ -946,15 +946,23 @@ export function toWithdrawAction(params: WithdrawParams): Record<string, unknown
 
 export async function submitWithdraw(
   signed: SignedWithdraw,
-  options: { transport?: HyperliquidTransport; baseUrl?: string } = {},
+  options: { transport?: HyperliquidTransport; baseUrl?: string; signal?: AbortSignal } = {},
 ) {
   const transport = options.transport ?? { fetch };
   const baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
-  const r = await transport.fetch(`${baseUrl}/exchange`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(signedWithdrawSchema.parse(signed)),
-  });
+  // SEC-113: every other venue call goes through withTimeoutSignal; a stalled
+  // HL endpoint must not hang the operator withdraw request (or extend the
+  // submission-fence advisory-lock hold for fenced callers). A caller-provided
+  // signal always takes precedence over the default timeout.
+  const r = await transport.fetch(
+    `${baseUrl}/exchange`,
+    withTimeoutSignal({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(signedWithdrawSchema.parse(signed)),
+      signal: options.signal,
+    }),
+  );
   const j = await r.json().catch(() => null);
   if (!r.ok) throw new Error(`Hyperliquid exchange returned ${r.status}: ${JSON.stringify(j)}`);
   return j;
@@ -1516,8 +1524,15 @@ export class HyperliquidAdapter {
       signature: { r: s.r, s: s.s, v: Number(s.v) },
     });
   }
-  submitWithdraw(signed: SignedWithdraw) {
-    return submitWithdraw(signed, { transport: this.transport, baseUrl: this.baseUrl });
+  submitWithdraw(
+    signed: SignedWithdraw,
+    options: { transport?: HyperliquidTransport; baseUrl?: string; signal?: AbortSignal } = {},
+  ) {
+    return submitWithdraw(signed, {
+      transport: options.transport ?? this.transport,
+      baseUrl: options.baseUrl ?? this.baseUrl,
+      signal: options.signal,
+    });
   }
   // Build a reduce-only market order on the OPPOSITE side of the open position
   // (long => sell, short => buy), sized abs(szi), then sign + submit it.
