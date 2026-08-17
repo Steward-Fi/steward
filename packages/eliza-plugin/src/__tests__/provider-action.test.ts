@@ -82,6 +82,145 @@ describe("STEWARD_PROVIDER_ACTION", () => {
     expect(invokeProviderAction).not.toHaveBeenCalled();
   });
 
+  it("rejects the full nested credential-key vocabulary without false negatives", async () => {
+    const invokeProviderAction = vi.fn();
+    const credentialKeys = [
+      "password",
+      "databasePassword",
+      "passphrase",
+      "wallet_passphrase",
+      "auth",
+      "clientSecretValue",
+      "oauth-client-secret-value",
+      "cookieHeader",
+      "session_cookie_header",
+      "authorizationHeaderValue",
+      "credential_headers",
+      "apiKeys",
+      "private_key_headers",
+      "sessionCookieHeaderValues",
+      "awsAccessKey",
+      "secretKeyHeader",
+    ];
+    for (const key of credentialKeys) {
+      const result = await providerAction.handler(
+        runtime({ isConnected: () => true, invokeProviderAction }),
+        { id: `message-${key}` } as any,
+        undefined,
+        {
+          parameters: {
+            workspaceId: "workspace-a",
+            providerAccountId: "account-a",
+            operationKey: "github.issue.list",
+            arguments: { public: [{ nested: { [key]: "must-not-forward" } }] },
+          },
+        },
+      );
+      expect(result.success, key).toBe(false);
+      expect(result.error, key).toContain("credentials");
+    }
+    expect(invokeProviderAction).not.toHaveBeenCalled();
+  });
+
+  it("forwards the validated snapshot instead of a serialization-hook bypass", async () => {
+    const invokeProviderAction = vi.fn().mockResolvedValue({
+      id: ACTION_ID,
+      status: "stub_succeeded",
+      requestHash: `sha256:${"a".repeat(64)}`,
+      actionDigest: `sha256:${"b".repeat(64)}`,
+    });
+    const argumentsProxy = new Proxy(
+      { public: "safe" },
+      {
+        get(target, key, receiver) {
+          if (key === "toJSON") return () => ({ password: "must-not-forward" });
+          return Reflect.get(target, key, receiver);
+        },
+      },
+    );
+
+    const result = await providerAction.handler(
+      runtime({ isConnected: () => true, invokeProviderAction }),
+      { id: "message-serialization-hook" } as any,
+      undefined,
+      {
+        parameters: {
+          workspaceId: "workspace-a",
+          providerAccountId: "account-a",
+          operationKey: "github.issue.list",
+          arguments: argumentsProxy,
+          idempotencyKey: "serialization-hook-retry",
+        },
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(invokeProviderAction).toHaveBeenCalledWith(
+      expect.objectContaining({ arguments: { public: "safe" } }),
+    );
+    expect(JSON.stringify(invokeProviderAction.mock.calls[0][0])).not.toContain("must-not-forward");
+  });
+
+  it("copies one descriptor snapshot without invoking Proxy get traps", async () => {
+    const invokeProviderAction = vi.fn().mockResolvedValue({
+      id: ACTION_ID,
+      status: "stub_succeeded",
+      requestHash: `sha256:${"a".repeat(64)}`,
+      actionDigest: `sha256:${"b".repeat(64)}`,
+    });
+    let ownKeysCalls = 0;
+    let publicDescriptorCalls = 0;
+    let getCalls = 0;
+    let arrayGetCalls = 0;
+    const arrayProxy = new Proxy(["safe"], {
+      get() {
+        arrayGetCalls += 1;
+        throw new Error("array Proxy get trap must not run during canonicalization");
+      },
+    });
+    const argumentsProxy = new Proxy(
+      { public: arrayProxy },
+      {
+        ownKeys(target) {
+          ownKeysCalls += 1;
+          return Reflect.ownKeys(target);
+        },
+        getOwnPropertyDescriptor(target, key) {
+          if (key === "public") publicDescriptorCalls += 1;
+          return Reflect.getOwnPropertyDescriptor(target, key);
+        },
+        get() {
+          getCalls += 1;
+          throw new Error("Proxy get trap must not run during canonicalization");
+        },
+      },
+    );
+
+    const result = await providerAction.handler(
+      runtime({ isConnected: () => true, invokeProviderAction }),
+      { id: "message-single-snapshot" } as any,
+      undefined,
+      {
+        parameters: {
+          workspaceId: "workspace-a",
+          providerAccountId: "account-a",
+          operationKey: "github.issue.list",
+          arguments: argumentsProxy,
+          idempotencyKey: "single-snapshot-retry",
+        },
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(ownKeysCalls).toBe(1);
+    expect(publicDescriptorCalls).toBe(1);
+    expect(getCalls).toBe(0);
+    expect(arrayGetCalls).toBe(0);
+    expect(invokeProviderAction).toHaveBeenCalledWith(
+      expect.objectContaining({ arguments: { public: ["safe"] } }),
+    );
+  });
+
   it("derives stable retry identity from message and canonical public parameters", async () => {
     const invokeProviderAction = vi.fn().mockResolvedValue({
       id: ACTION_ID,
@@ -183,6 +322,50 @@ describe("STEWARD_PROVIDER_ACTION", () => {
       expect(explicitRetry.success).toBe(false);
       expect(explicitRetry.error).toContain("plain JSON");
     }
+    expect(invokeProviderAction).not.toHaveBeenCalled();
+  });
+
+  it("rejects cycles, deep nesting, accessors, and custom prototypes before submission", async () => {
+    const invokeProviderAction = vi.fn();
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    let deep: Record<string, unknown> = {};
+    for (let i = 0; i < 22; i++) deep = { nested: deep };
+    let getterInvoked = false;
+    const accessor = Object.defineProperty({}, "public", {
+      enumerable: true,
+      get() {
+        getterInvoked = true;
+        return "unsafe";
+      },
+    });
+    const customPrototype = Object.create({ inherited: "not-json" }) as Record<string, unknown>;
+    customPrototype.public = "safe";
+
+    for (const [name, argumentsValue] of Object.entries({
+      cyclic,
+      deep,
+      accessor,
+      customPrototype,
+    })) {
+      const result = await providerAction.handler(
+        runtime({ isConnected: () => true, invokeProviderAction }),
+        { id: `message-${name}` } as any,
+        undefined,
+        {
+          parameters: {
+            workspaceId: "workspace-a",
+            providerAccountId: "account-a",
+            operationKey: "github.issue.list",
+            arguments: { public: argumentsValue },
+            idempotencyKey: `explicit-retry-${name}`,
+          },
+        },
+      );
+      expect(result.success, name).toBe(false);
+      expect(result.error, name).toContain("plain JSON");
+    }
+    expect(getterInvoked).toBe(false);
     expect(invokeProviderAction).not.toHaveBeenCalled();
   });
 });

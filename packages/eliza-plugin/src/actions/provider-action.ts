@@ -8,21 +8,11 @@ import type {
   State,
 } from "@elizaos/core";
 import type { ProviderActionInvokeInput } from "@stwd/sdk";
+import { containsSensitiveCredentialKey } from "@stwd/shared/sensitive-keys";
 import type { StewardService } from "../services/StewardService.js";
 
-const CREDENTIAL_KEY =
-  /(?:authorization|cookie|token|secret|credential|api[-_]?key|private[-_]?key)$/i;
-
-function containsCredentialKey(value: unknown, depth = 0): boolean {
-  if (depth > 20) return true;
-  if (Array.isArray(value)) return value.some((item) => containsCredentialKey(item, depth + 1));
-  if (!value || typeof value !== "object") return false;
-  return Object.entries(value).some(
-    ([key, nested]) => CREDENTIAL_KEY.test(key) || containsCredentialKey(nested, depth + 1),
-  );
-}
-
-function canonicalize(value: unknown, ancestors = new Set<object>()): unknown {
+function canonicalize(value: unknown, ancestors = new Set<object>(), depth = 0): unknown {
+  if (depth > 20) throw new TypeError("provider action arguments are nested too deeply");
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new TypeError("non-finite provider action number");
@@ -32,25 +22,56 @@ function canonicalize(value: unknown, ancestors = new Set<object>()): unknown {
   if (ancestors.has(value)) throw new TypeError("cyclic provider action arguments");
   ancestors.add(value);
   try {
-    if (Object.hasOwn(value, "toJSON")) {
+    const isArray = Array.isArray(value);
+    const prototype = Object.getPrototypeOf(value);
+    if (
+      (isArray && prototype !== Array.prototype) ||
+      (!isArray && prototype !== Object.prototype && prototype !== null)
+    ) {
+      throw new TypeError("provider action arguments must contain only plain records");
+    }
+
+    // Capture property metadata exactly once. Traversing `Object.entries(value)`
+    // after validating descriptors would perform a second reflective pass and
+    // invoke Proxy `get` traps. Copying descriptor values gives validation,
+    // retry hashing, and the eventual wire request one immutable snapshot.
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    if (Object.hasOwn(descriptors, "toJSON")) {
       throw new TypeError("provider action arguments must not define toJSON");
     }
-    for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+    for (const descriptor of Object.values(descriptors)) {
       if (descriptor.enumerable && !("value" in descriptor)) {
         throw new TypeError("provider action arguments must not contain accessors");
       }
     }
-    if (Array.isArray(value)) {
-      return value.map((item) => canonicalize(item, ancestors));
-    }
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) {
-      throw new TypeError("provider action arguments must contain only plain records");
+    if (isArray) {
+      const length = descriptors.length;
+      if (!("value" in length) || !Number.isSafeInteger(length.value) || length.value < 0) {
+        throw new TypeError("provider action array length is invalid");
+      }
+      const snapshot: unknown[] = [];
+      snapshot.length = length.value;
+      for (const [key, descriptor] of Object.entries(descriptors)) {
+        if (!/^(?:0|[1-9]\d*)$/.test(key)) continue;
+        const index = Number(key);
+        if (!Number.isSafeInteger(index) || index >= length.value || index >= 0xffff_ffff) continue;
+        if (!("value" in descriptor)) {
+          throw new TypeError("provider action arguments must not contain accessors");
+        }
+        snapshot[index] = canonicalize(descriptor.value, ancestors, depth + 1);
+      }
+      return snapshot;
     }
     return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
+      Object.entries(descriptors)
+        .filter(([, descriptor]) => descriptor.enumerable)
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-        .map(([key, nested]) => [key, canonicalize(nested, ancestors)]),
+        .map(([key, descriptor]) => {
+          if (!("value" in descriptor)) {
+            throw new TypeError("provider action arguments must not contain accessors");
+          }
+          return [key, canonicalize(descriptor.value, ancestors, depth + 1)];
+        }),
     );
   } finally {
     ancestors.delete(value);
@@ -127,13 +148,18 @@ export const providerAction: Action = {
     options?: HandlerOptions,
   ): Promise<ActionResult> {
     const params = options?.parameters ?? {};
+    const workspaceId = params.workspaceId;
+    const providerAccountId = params.providerAccountId;
+    const operationKey = params.operationKey;
+    const actionArguments = params.arguments;
+    const explicitIdempotencyKey = params.idempotencyKey;
     if (
-      typeof params.workspaceId !== "string" ||
-      typeof params.providerAccountId !== "string" ||
-      typeof params.operationKey !== "string" ||
-      !params.arguments ||
-      typeof params.arguments !== "object" ||
-      Array.isArray(params.arguments)
+      typeof workspaceId !== "string" ||
+      typeof providerAccountId !== "string" ||
+      typeof operationKey !== "string" ||
+      !actionArguments ||
+      typeof actionArguments !== "object" ||
+      Array.isArray(actionArguments)
     ) {
       return {
         success: false,
@@ -141,15 +167,9 @@ export const providerAction: Action = {
         text: "A governed provider action needs a workspace, provider account, operation, and public arguments.",
       };
     }
-    if (containsCredentialKey(params.arguments)) {
-      return {
-        success: false,
-        error: "provider credentials must not be supplied in action arguments",
-        text: "Provider credentials stay in Steward and cannot be passed by the agent.",
-      };
-    }
+    let canonicalArguments: Record<string, unknown>;
     try {
-      canonicalize(params.arguments);
+      canonicalArguments = canonicalize(actionArguments) as Record<string, unknown>;
     } catch {
       return {
         success: false,
@@ -157,8 +177,22 @@ export const providerAction: Action = {
         text: "Provider action was not submitted because its public arguments were not plain JSON values.",
       };
     }
+    if (containsSensitiveCredentialKey(canonicalArguments)) {
+      return {
+        success: false,
+        error: "provider credentials must not be supplied in action arguments",
+        text: "Provider credentials stay in Steward and cannot be passed by the agent.",
+      };
+    }
 
-    const idempotencyKey = stableRetryKey(message, params);
+    const canonicalParams = {
+      workspaceId,
+      providerAccountId,
+      operationKey,
+      arguments: canonicalArguments,
+      idempotencyKey: explicitIdempotencyKey,
+    };
+    const idempotencyKey = stableRetryKey(message, canonicalParams);
     if (!idempotencyKey) {
       return {
         success: false,
@@ -168,10 +202,10 @@ export const providerAction: Action = {
     }
 
     const input: ProviderActionInvokeInput = {
-      workspaceId: params.workspaceId,
-      providerAccountId: params.providerAccountId,
-      operationKey: params.operationKey,
-      arguments: params.arguments as Record<string, unknown>,
+      workspaceId,
+      providerAccountId,
+      operationKey,
+      arguments: canonicalArguments,
       idempotencyKey,
     };
 

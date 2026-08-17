@@ -27,6 +27,7 @@
     "@stwd/db": "workspace:*",
     "@stwd/proxy": "workspace:*",
     "@stwd/proxy-client": "workspace:*",
+    "@stwd/shared": "workspace:*",
     "@types/node": "^25.5.0",
     "hono": "^4.12.34",
     "tsup": "^8.0.0",
