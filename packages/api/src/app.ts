@@ -180,7 +180,12 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
   app.use("/secrets", (c, next) => tenantAuth(c, next));
   app.use("/secrets/*", (c, next) => tenantAuth(c, next));
   app.use("/tenants/:id", (c, next) => {
-    if (c.req.method === "POST" && c.req.path === "/tenants") return next();
+    // POST /tenants (creation) is intentionally NOT gated here: this middleware
+    // is keyed on `/tenants/:id`, a pattern hono never matches against the bare
+    // `/tenants` path, so creation is protected solely by the route-level
+    // platformAuthMiddleware() + platform scopes in routes/tenants.ts. (SEC-149:
+    // a previous `POST /tenants` passthrough branch here was dead code and has
+    // been removed so the guard boundary stays honest.)
     // GET /tenants/config (no id) is a public discovery endpoint used by the
     // @stwd/sdk React provider to fetch default-tenant policy/theme/feature
     // flags before the user has authenticated. The :id wildcard would otherwise
