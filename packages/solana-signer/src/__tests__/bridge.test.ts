@@ -1,0 +1,168 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { Keypair, Transaction } from "@solana/web3.js";
+import { BRIDGE_TOKEN_ENV, BRIDGE_TOKEN_HEADER, startSignerBridge } from "../bridge";
+import { createStewardSolanaSigner, type StewardSolanaSigner } from "../steward-signer";
+import { legacyTransfer, type StubSteward, startStubSteward } from "./harness";
+
+const vaultKeypair = Keypair.fromSeed(new Uint8Array(32).fill(11));
+
+let stub: StubSteward;
+let signer: StewardSolanaSigner;
+let bridgeUrl: string;
+let bridgeToken: string;
+let closeBridge: () => Promise<void>;
+let envTokenBefore: string | undefined;
+
+beforeAll(async () => {
+  // The suite must see the DEFAULT token path (a random per-session secret),
+  // so shield it from any ambient env token; restored in afterAll.
+  envTokenBefore = process.env[BRIDGE_TOKEN_ENV];
+  delete process.env[BRIDGE_TOKEN_ENV];
+
+  stub = startStubSteward(vaultKeypair);
+  signer = await createStewardSolanaSigner({
+    baseUrl: stub.url,
+    agentId: "agent-bridge",
+    bearerToken: "stub.jwt.token",
+  });
+  const bridge = await startSignerBridge(signer);
+  bridgeUrl = bridge.url;
+  if (bridge.token === null) throw new Error("default bridge must arm a token");
+  bridgeToken = bridge.token;
+  closeBridge = bridge.close;
+});
+
+afterAll(async () => {
+  await closeBridge();
+  stub.stop();
+  if (envTokenBefore !== undefined) process.env[BRIDGE_TOKEN_ENV] = envTokenBefore;
+});
+
+beforeEach(() => {
+  stub.setMode("sign");
+});
+
+/** fetch with this session's shared secret in the bridge token header. */
+function authed(path: string, init: RequestInit = {}): Promise<Response> {
+  return fetch(`${bridgeUrl}${path}`, {
+    ...init,
+    headers: { ...(init.headers ?? {}), [BRIDGE_TOKEN_HEADER]: bridgeToken },
+  });
+}
+
+describe("signer bridge", () => {
+  it("serves the agent address on GET /pubkey", async () => {
+    const res = await authed("/pubkey");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ address: vaultKeypair.publicKey.toBase58() });
+  });
+
+  it("round-trips a serialized transaction through /sign-transaction", async () => {
+    const tx = legacyTransfer(vaultKeypair.publicKey);
+    const unsigned = tx.serialize({ requireAllSignatures: false }).toString("base64");
+
+    const res = await authed("/sign-transaction", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transaction: unsigned }),
+    });
+    expect(res.status).toBe(200);
+    const { transaction } = (await res.json()) as { transaction: string };
+    const signed = Transaction.from(Buffer.from(transaction, "base64"));
+    expect(signed.verifySignatures()).toBe(true);
+  });
+
+  it("maps a policy refusal to a clean 403 JSON error", async () => {
+    stub.setMode("reject");
+    const tx = legacyTransfer(vaultKeypair.publicKey);
+    const unsigned = tx.serialize({ requireAllSignatures: false }).toString("base64");
+
+    const res = await authed("/sign-transaction", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transaction: unsigned }),
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string; kind: string; txId?: string };
+    expect(body.kind).toBe("policy_rejected");
+    expect(body.txId).toBe("tx-reject-1");
+    expect(body.error).toContain("daily cap 0.5 SOL exceeded");
+  });
+
+  it("fails closed on /sign-message with 501", async () => {
+    const res = await authed("/sign-message", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: Buffer.from("hello").toString("base64") }),
+    });
+    expect(res.status).toBe(501);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/not raw messages/);
+  });
+
+  it("rejects a missing transaction field with 400 before any vault call", async () => {
+    const before = stub.requests.length;
+    const res = await authed("/sign-transaction", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+    expect(stub.requests.length).toBe(before);
+  });
+});
+
+describe("bridge shared-secret auth", () => {
+  it("arms a random per-session token by default", () => {
+    expect(bridgeToken).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("refuses a request without the token header, before any vault call", async () => {
+    const before = stub.requests.length;
+    const tx = legacyTransfer(vaultKeypair.publicKey);
+    const unsigned = tx.serialize({ requireAllSignatures: false }).toString("base64");
+    const res = await fetch(`${bridgeUrl}/sign-transaction`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transaction: unsigned }),
+    });
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain(BRIDGE_TOKEN_HEADER);
+    expect(stub.requests.length).toBe(before);
+
+    const pubkey = await fetch(`${bridgeUrl}/pubkey`);
+    expect(pubkey.status).toBe(401);
+  });
+
+  it("refuses a wrong token with 401", async () => {
+    const res = await fetch(`${bridgeUrl}/pubkey`, {
+      headers: { [BRIDGE_TOKEN_HEADER]: `${bridgeToken}x` },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it(`honors ${BRIDGE_TOKEN_ENV} from the env, the var both sides read`, async () => {
+    process.env[BRIDGE_TOKEN_ENV] = "env-shared-secret";
+    try {
+      const bridge = await startSignerBridge(signer);
+      expect(bridge.token).toBe("env-shared-secret");
+      const res = await fetch(`${bridge.url}/pubkey`, {
+        headers: { [BRIDGE_TOKEN_HEADER]: "env-shared-secret" },
+      });
+      expect(res.status).toBe(200);
+      await bridge.close();
+    } finally {
+      delete process.env[BRIDGE_TOKEN_ENV];
+    }
+  });
+
+  it("runs open only on an explicit token: null", async () => {
+    const bridge = await startSignerBridge(signer, { token: null });
+    expect(bridge.token).toBeNull();
+    const res = await fetch(`${bridge.url}/pubkey`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ address: vaultKeypair.publicKey.toBase58() });
+    await bridge.close();
+  });
+});

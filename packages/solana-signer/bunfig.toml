@@ -1,0 +1,8 @@
+# Test bootstrap for @stwd/solana-signer, the same preload pattern @stwd/api
+# uses. The signer imports @stwd/sdk, whose package entry is dist/index.js, a
+# tsc build output that a clean checkout does not have. test-preload.ts
+# creates that one missing artifact itself, so `bun test` is green from a
+# clean checkout after `bun install`, with no manual build step and no
+# reliance on another package's leftover state.
+[test]
+preload = ["./test-preload.ts"]

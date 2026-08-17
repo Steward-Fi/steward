@@ -482,6 +482,17 @@
         "@types/node": "^25.5.0",
       },
     },
+    "packages/solana-signer": {
+      "name": "@stwd/solana-signer",
+      "version": "0.1.0",
+      "dependencies": {
+        "@solana/web3.js": "^1.98.0",
+        "@stwd/sdk": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^25.5.0",
+      },
+    },
     "packages/trade-sessions": {
       "name": "@stwd/trade-sessions",
       "version": "0.1.1",
@@ -1763,6 +1774,8 @@
     "@stwd/shared": ["@stwd/shared@workspace:packages/shared"],
 
     "@stwd/signer-frost": ["@stwd/signer-frost@workspace:packages/signer-frost"],
+
+    "@stwd/solana-signer": ["@stwd/solana-signer@workspace:packages/solana-signer"],
 
     "@stwd/trade-sessions": ["@stwd/trade-sessions@workspace:packages/trade-sessions"],
 
