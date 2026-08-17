@@ -36,6 +36,7 @@ import {
   GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
   GITHUB_PROVIDER_ACTION_PROFILE,
   REGISTERED_PROFILES,
+  SLACK_PROVIDER_ACTION_PROFILE,
   X_PROVIDER_ACTION_PROFILE,
 } from "@stwd/shared";
 import { KeyStore } from "@stwd/vault";
@@ -77,6 +78,16 @@ const PROFILES = [
     method: "POST",
     path: "/2/tweets",
     args: { text: "boundary proof", summoned: false },
+    requestProfile: {},
+  },
+  {
+    profile: SLACK_PROVIDER_ACTION_PROFILE,
+    adapterKey: "slack",
+    operationKey: "slack.chat.postMessage",
+    host: "slack.com",
+    method: "POST",
+    path: "/api/chat.postMessage",
+    args: { channel: "C12345678", text: "boundary proof" },
     requestProfile: {},
   },
   {
@@ -149,8 +160,9 @@ beforeAll(async () => {
   process.env.STEWARD_AUDIT_HMAC_KEY = "0".repeat(64);
   process.env.STEWARD_EXECUTION_AUTH_SECRET = "1".repeat(64);
   process.env.STEWARD_MASTER_PASSWORD = "profile-boundary-master-password";
-  process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS = "api.github.com,api.x.com,api.example.com";
-  process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.github.com,api.x.com,api.example.com";
+  process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS =
+    "api.github.com,api.x.com,slack.com,api.example.com";
+  process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.github.com,api.x.com,slack.com,api.example.com";
   process.env.STEWARD_JWT_SECRET = "profile-boundary-jwt-secret-0123456789abcdef0123456789";
   const signingKeys = generateKeyPairSync("ed25519");
   process.env.STEWARD_AUDIT_SIGNING_KEY = signingKeys.privateKey

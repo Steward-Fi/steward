@@ -51,6 +51,7 @@ export type ProductionProviderProfileSpec =
       readonly profile: typeof SLACK_PROVIDER_ACTION_PROFILE;
       readonly kind: "adapter-fixed";
       readonly operationKeys: readonly SlackOperationKey[];
+      readonly allowedOrigins: readonly string[];
       build(operationKey: SlackOperationKey, args: unknown): SlackActionBuild;
     }
   | {
@@ -93,6 +94,7 @@ const SLACK_SPEC = Object.freeze({
   profile: SLACK_PROVIDER_ACTION_PROFILE,
   kind: "adapter-fixed" as const,
   operationKeys: Object.freeze([...SLACK_OPERATION_KEYS]),
+  allowedOrigins: fixedProfileOrigins(SLACK_PROVIDER_ACTION_PROFILE),
   build: buildSlackAction,
 });
 

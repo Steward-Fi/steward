@@ -77,6 +77,7 @@ const REGISTRY: ReadonlyMap<string, ProviderProfileDescriptor> = new Map([
       profile: SLACK_PROVIDER_ACTION_PROFILE,
       kind: "adapter-fixed",
       label: "Slack",
+      allowedOrigins: Object.freeze(["https://slack.com"]),
     }),
   ],
   [
