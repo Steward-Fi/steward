@@ -137,7 +137,11 @@ export {
   STRICT_HOSTS,
   validateSecretRouteConfig,
 } from "./secret-route-validator";
-export type { CreateSecretOptions, SecretMetadata } from "./secret-vault";
+export type {
+  CreateSecretOptions,
+  LegacyRootSecretMigration,
+  SecretMetadata,
+} from "./secret-vault";
 export { SecretVault } from "./secret-vault";
 export type {
   SignerBackend,

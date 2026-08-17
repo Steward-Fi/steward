@@ -106,11 +106,15 @@ describe("sign-solana — parser-derived policy wiring", () => {
   it("only passes the legacy single-transfer envelope for a single native SOL transfer", () => {
     const route = routeSlice();
     const guard = route.indexOf("const isSingleNativeTransfer =");
-    const envelopeSpread = route.indexOf(
-      "isSingleNativeTransfer ? { expectedTo: toAddress, expectedValue: txValue } : {}",
-    );
     expect(guard).toBeGreaterThanOrEqual(0);
-    expect(envelopeSpread).toBeGreaterThan(guard);
+    // Whitespace-normalized so formatter rewrapping does not break the wiring
+    // assertion: the envelope stays conditioned on the guard, and (SEC-163)
+    // every other shape must carry the explicit blind-sign attestation.
+    const normalized = route.replace(/\s+/g, " ");
+    const envelopeSpread = normalized.indexOf(
+      "isSingleNativeTransfer ? { expectedTo: toAddress, expectedValue: txValue } : { allowBlindSign: true }",
+    );
+    expect(envelopeSpread).toBeGreaterThanOrEqual(0);
     expect(route).toContain('instructionType === "system:Transfer"');
   });
 
