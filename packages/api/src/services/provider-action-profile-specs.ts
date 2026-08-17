@@ -24,6 +24,14 @@ import {
 
 export type AdapterFixedActionBuild = GithubActionBuild | XActionBuild;
 
+function fixedProfileOrigins(profile: string): readonly string[] {
+  const descriptor = getProfileDescriptor(profile);
+  if (!descriptor || descriptor.kind !== "adapter-fixed") {
+    throw new Error(`adapter-fixed profile metadata missing for '${profile}'`);
+  }
+  return descriptor.allowedOrigins;
+}
+
 export type ProductionProviderProfileSpec =
   | {
       readonly profile: typeof GITHUB_PROVIDER_ACTION_PROFILE;
@@ -56,7 +64,7 @@ const GITHUB_SPEC = Object.freeze({
   profile: GITHUB_PROVIDER_ACTION_PROFILE,
   kind: "adapter-fixed" as const,
   operationKeys: Object.freeze([...GITHUB_OPERATION_KEYS]),
-  allowedOrigins: Object.freeze(["https://api.github.com"]),
+  allowedOrigins: fixedProfileOrigins(GITHUB_PROVIDER_ACTION_PROFILE),
   build: buildGithubAction,
 });
 
@@ -64,7 +72,7 @@ const X_SPEC = Object.freeze({
   profile: X_PROVIDER_ACTION_PROFILE,
   kind: "adapter-fixed" as const,
   operationKeys: Object.freeze([...X_OPERATION_KEYS]),
-  allowedOrigins: Object.freeze(["https://api.x.com"]),
+  allowedOrigins: fixedProfileOrigins(X_PROVIDER_ACTION_PROFILE),
   build: buildXAction,
 });
 

@@ -159,7 +159,11 @@ function runFullBoundaryConformance(
   expect(jcsStringify(wireAction)).toBe(wireText);
 
   // Exact parser used by the governed proxy dispatch boundary.
-  const proxyAction = parseGovernedCanonicalActionForDispatch(new TextEncoder().encode(wireText));
+  const proxyAction = parseGovernedCanonicalActionForDispatch(
+    new TextEncoder().encode(wireText),
+    spec.profile,
+    allowedOrigins,
+  );
   expect(jcsStringify(proxyAction)).toBe(wireText);
 
   // Approval reconstruction binds the registered profile and action digest.
@@ -358,8 +362,43 @@ describe("#220 executable provider profile conformance", () => {
       >,
     };
     expect(() =>
-      parseGovernedCanonicalActionForDispatch(new TextEncoder().encode(jcsStringify(malicious))),
+      parseGovernedCanonicalActionForDispatch(
+        new TextEncoder().encode(jcsStringify(malicious)),
+        spec.profile,
+        allowedOriginsFromProductionSpec(spec),
+      ),
     ).toThrow("canonical action conformance failed");
+  });
+
+  it("proxy parsing binds profile, origin, and the shared credential vocabulary externally", () => {
+    const spec = PRODUCTION_PROVIDER_PROFILE_SPECS.find(
+      (candidate) => candidate.profile === GITHUB_PROVIDER_ACTION_PROFILE,
+    );
+    if (!spec) throw new Error("github production profile missing");
+    const built = buildFromProductionSpec(spec, FIXTURES[GITHUB_PROVIDER_ACTION_PROFILE].args);
+    const parse = (action: typeof built.action) =>
+      parseGovernedCanonicalActionForDispatch(
+        new TextEncoder().encode(jcsStringify(action)),
+        spec.profile,
+        allowedOriginsFromProductionSpec(spec),
+      );
+
+    expect(() => parse({ ...built.action, origin: "https://attacker.example" })).toThrow(
+      "origin-not-allowed",
+    );
+    expect(() => parse({ ...built.action, profile: X_PROVIDER_ACTION_PROFILE })).toThrow(
+      "profile-mismatch",
+    );
+
+    for (const key of ["auth", "passphrase", "clientSecretValue", "cookieHeader"]) {
+      expect(() =>
+        parse({
+          ...built.action,
+          canonicalBody: { nested: { [key]: "registered-malicious-canary" } },
+          selectedHeaders: [["content-type", "application/json"]],
+        }),
+      ).toThrow("credential-body-field");
+    }
   });
 
   it("mutation proof catches an SSRF origin and noncanonical method", () => {
@@ -422,7 +461,7 @@ describe("#220 executable provider profile conformance", () => {
       ...FIXTURES[GITHUB_PROVIDER_ACTION_PROFILE].args,
     });
     expect(
-      inspectProviderProfileConformance(spec.profile, {
+      inspectProviderProfileConformance(spec.profile, allowedOriginsFromProductionSpec(spec), {
         ...built.action,
         normalizedPath: "/repos/%25ZZ/hello/issues",
       }),

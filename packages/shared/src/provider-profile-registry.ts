@@ -28,13 +28,22 @@ import { X_PROVIDER_ACTION_PROFILE } from "./x-provider-action.js";
 /** Whether a profile's operation shape is fixed by an adapter or authored by config. */
 export type ProfileKind = "adapter-fixed" | "config-driven";
 
-export interface ProviderProfileDescriptor {
+interface ProviderProfileDescriptorBase {
   /** The stable wire profile string (also stamped into every canonical action). */
   profile: string;
-  kind: ProfileKind;
   /** Human label for logs/UX (never on the digest surface). */
   label: string;
 }
+
+export type ProviderProfileDescriptor =
+  | (ProviderProfileDescriptorBase & {
+      kind: "adapter-fixed";
+      /** Exact origins emitted by the hard-coded adapter. */
+      allowedOrigins: readonly string[];
+    })
+  | (ProviderProfileDescriptorBase & {
+      kind: "config-driven";
+    });
 
 /**
  * The registered profiles. FROZEN: this is the single source of truth for which
@@ -48,6 +57,7 @@ const REGISTRY: ReadonlyMap<string, ProviderProfileDescriptor> = new Map([
       profile: GITHUB_PROVIDER_ACTION_PROFILE,
       kind: "adapter-fixed",
       label: "GitHub",
+      allowedOrigins: Object.freeze(["https://api.github.com"]),
     }),
   ],
   [
@@ -56,6 +66,7 @@ const REGISTRY: ReadonlyMap<string, ProviderProfileDescriptor> = new Map([
       profile: X_PROVIDER_ACTION_PROFILE,
       kind: "adapter-fixed",
       label: "X",
+      allowedOrigins: Object.freeze(["https://api.x.com"]),
     }),
   ],
   [

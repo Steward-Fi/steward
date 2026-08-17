@@ -48,13 +48,16 @@ import {
   computeApprovalCommitmentHash,
   computeProviderExecutionCommitmentHash,
   type GithubCanonicalActionV1,
+  getProfileDescriptor,
   isExecutionAuthV2SecretConfigured,
+  isGenericDescriptorError,
   isUnregisteredProfileError,
   jcsStringify,
   observeNonceClaimContention,
   type ProviderApprovalCommitmentV1,
   parseCanonicalProviderActionBytes,
   serializeCanonicalOutboundQuery,
+  validateGenericHttpDescriptor,
   verifyProviderExecutionCommitmentV2,
   verifyProviderExecutionPolicyEvidence,
 } from "@stwd/shared";
@@ -207,8 +210,48 @@ async function loadGovernedExecution(
   const q = queueRows[0];
   if (!q || !q.approvalCommitment) return null;
 
+  // Origin policy is independent of the action bytes. Fixed adapters use their
+  // compile-time registry allowlist; config-driven operations use the validated
+  // descriptor from the exact operation revision bound to this execution.
+  const operationRows = await db
+    .select({
+      requestProfile: providerOperations.requestProfile,
+      revision: providerOperations.revision,
+    })
+    .from(providerOperations)
+    .where(
+      and(
+        eq(providerOperations.tenantId, tenantId),
+        eq(providerOperations.workspaceId, binding.workspaceId),
+        eq(providerOperations.providerAccountId, binding.providerAccountId),
+        eq(providerOperations.id, binding.operationId),
+      ),
+    )
+    .limit(1);
+  const operation = operationRows[0];
+  if (!operation) return null;
+  if (operation.revision !== binding.operationRevision) {
+    throw new CanonError("CANON_JSON_SHAPE_INVALID", "operation revision does not match binding");
+  }
+  const profile = assertRegisteredProfile(binding.canonicalProfile);
+  const profileDescriptor = getProfileDescriptor(profile);
+  if (!profileDescriptor) return null;
+  let allowedOrigins: readonly string[];
+  if (profileDescriptor.kind === "adapter-fixed") {
+    allowedOrigins = profileDescriptor.allowedOrigins;
+  } else {
+    if (operation.requestProfile.profile !== profile) {
+      throw new CanonError("CANON_JSON_SHAPE_INVALID", "operation profile does not match binding");
+    }
+    allowedOrigins = [
+      validateGenericHttpDescriptor(operation.requestProfile.operationDescriptor).origin,
+    ];
+  }
+
   const canonicalAction = parseGovernedCanonicalActionForDispatch(
     new Uint8Array(binding.canonicalActionBytes as Uint8Array),
+    profile,
+    allowedOrigins,
   );
 
   return {
@@ -253,8 +296,14 @@ async function loadGovernedExecution(
 
 export function parseGovernedCanonicalActionForDispatch(
   bytes: Uint8Array,
+  expectedProfile: string,
+  allowedOrigins: readonly string[],
 ): GithubCanonicalActionV1 {
-  return parseCanonicalProviderActionBytes(bytes) as GithubCanonicalActionV1;
+  return parseCanonicalProviderActionBytes(
+    bytes,
+    expectedProfile,
+    allowedOrigins,
+  ) as GithubCanonicalActionV1;
 }
 
 function deny(
@@ -294,7 +343,11 @@ export async function dispatchGovernedExecution(
   } catch (error) {
     // Corrupt/noncanonical persisted bytes are an authority dependency failure,
     // never an uncaught 500 and never a reason to claim/decrypt/forward.
-    if (error instanceof CanonError || isUnregisteredProfileError(error)) {
+    if (
+      error instanceof CanonError ||
+      isGenericDescriptorError(error) ||
+      isUnregisteredProfileError(error)
+    ) {
       return deny("EXEC_AUTH_STALE_DEPENDENCY", 409, intentId);
     }
     throw error;
