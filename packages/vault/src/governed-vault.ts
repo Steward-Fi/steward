@@ -13,7 +13,8 @@ export type ExecutionAuthorizationConsumeCallback = (
     tenantId: string;
     agentId: string;
     capability: "wallet.sign_transaction";
-    backend: "local-vault";
+    backend: "local-vault" | "external-custody";
+    backendIdentityDigest?: string;
     payloadDigest: string;
   },
 ) => Promise<void>;
@@ -91,11 +92,16 @@ export class GovernedVault {
     }
 
     try {
+      const backend = options.executionAuthorization.backend;
+      if (backend !== "local-vault" && backend !== "external-custody") {
+        throw new GovernedVaultError("Unsupported custody backend", "authorization_rejected");
+      }
       await this.consumeExecutionAuthorization(options.executionAuthorization, {
         tenantId: request.tenantId,
         agentId: request.agentId,
         capability: "wallet.sign_transaction",
-        backend: "local-vault",
+        backend,
+        backendIdentityDigest: options.executionAuthorization.backendIdentityDigest,
         payloadDigest: options.executionPayloadDigest,
       });
     } catch (error) {
@@ -111,14 +117,15 @@ export class GovernedVault {
       ...rawOptions
     } = options;
     // Bind the raw signer to the SAME custody backend this governed
-    // authorization was consumed against ("local-vault"). The raw vault
+    // authorization was consumed against. The raw vault
     // re-resolves the backend from the fresh wallet lookup it will sign with
     // and fails closed (BackendBindingMismatchError) if the wallet has flipped
     // to third-party custody since resolveExecutionBackend ran, closing the
     // resolution->sign TOCTOU before any external provider is reached.
     return this.rawVault.signTransaction(request, {
       ...rawOptions,
-      expectedBackend: "local-vault",
+      expectedBackend: options.executionAuthorization.backend as "local-vault" | "external-custody",
+      expectedBackendIdentityDigest: options.executionAuthorization.backendIdentityDigest,
     });
   }
 }

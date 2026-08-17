@@ -75,6 +75,8 @@ export interface ExecutionAuthorization {
   capability: ExecutionCapability;
   payloadDigest: string;
   backend: "local-vault" | "external-custody" | "credential-proxy";
+  /** SHA-256 commitment to provider/key/version/region/address for external custody. */
+  backendIdentityDigest?: string;
   policyRevisionHash?: string;
   approvalId?: string;
   nonce: string;

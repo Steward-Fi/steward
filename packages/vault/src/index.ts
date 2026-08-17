@@ -1,3 +1,13 @@
+export type {
+  AwsKmsEvmRpc,
+  AwsKmsExternalKeyCustodyOptions,
+  AwsKmsSigningClientLike,
+} from "./aws-kms-external-custody";
+export {
+  AWS_KMS_EXTERNAL_CUSTODY_PROVIDER_ID,
+  AwsKmsExternalKeyCustodyProvider,
+  decodeAwsKmsEcdsaSignature,
+} from "./aws-kms-external-custody";
 export type { BitcoinPsbtOutput, SignBitcoinPsbtOptions } from "./bitcoin-psbt";
 export {
   extractBitcoinPsbtOutputs,
@@ -34,7 +44,9 @@ export type {
   ExternalKeySignTransactionResult,
 } from "./external-key-custody";
 export {
+  assertExternalKeyCustodyProviderV1,
   assertNoExternalPrivateKeyMaterial,
+  EXTERNAL_KEY_CUSTODY_CONTRACT_VERSION,
   externalKeyCustodyUnavailableError,
   externalKeyPrivateExportUnavailableError,
   externalKeySigningUnavailableError,
@@ -42,6 +54,11 @@ export {
   InMemoryExternalKeyCustodyProvider,
   normalizeExternalKeyHandleRegistration,
 } from "./external-key-custody";
+export type {
+  ExternalKeyCustodyV1ConformanceResult,
+  ExternalKeyCustodyV1ConformanceSubject,
+} from "./external-key-custody-conformance";
+export { runExternalKeyCustodyV1Conformance } from "./external-key-custody-conformance";
 export type {
   ExecutionAuthorizationConsumeCallback,
   GovernedSignTransactionOptions,
@@ -205,4 +222,9 @@ export type {
   SignBitcoinPsbtResult,
   VaultConfig,
 } from "./vault";
-export { BackendBindingMismatchError, Vault, Vault as VaultClient } from "./vault";
+export {
+  BackendBindingMismatchError,
+  externalCustodyIdentityDigest,
+  Vault,
+  Vault as VaultClient,
+} from "./vault";
