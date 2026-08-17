@@ -2380,6 +2380,8 @@ class ProviderActionService {
         ok: false;
         code: string;
         httpStatus: number;
+        decision?: PersistedPolicyDecisionV1;
+        decisionHash?: string;
         exhaustedBudgets?: AgentBudgetResult[];
         autoFreeze?: boolean;
       }
@@ -2427,6 +2429,8 @@ class ProviderActionService {
         ok: false,
         code: policy.doc.reasonCodes[0] ?? "POLICY_HARD_DENY",
         httpStatus: policy.doc.reasonCodes[0] === AGENT_BUDGET_UNAVAILABLE ? 503 : 403,
+        decision: policy.doc,
+        decisionHash: sha256HexPrefixed(jcsStringify(policy.doc)),
         exhaustedBudgets: policy.exhaustedBudgets,
         autoFreeze: policy.autoFreeze,
       };
