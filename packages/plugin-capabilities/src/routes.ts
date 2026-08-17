@@ -16,6 +16,7 @@
 import type { ApiResponse, AppVariables } from "@stwd/shared";
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { trustedClientIp } from "./client-ip";
 import type { AuditEventInput, StewardAppContext } from "./context";
 import type { Capability, CapabilityGrant } from "./schema";
 import {
@@ -133,7 +134,9 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
       resourceType: event.resourceType,
       resourceId: event.resourceId,
       metadata: event.metadata,
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      // the raw x-forwarded-for header is caller-spoofable; record only an IP
+      // derived from the platform-trusted proxy chain (NULL when none).
+      ipAddress: trustedClientIp(c) ?? null,
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
     };
