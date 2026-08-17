@@ -290,6 +290,18 @@ export interface StewardPendingApproval {
   results: PolicyResult[];
 }
 
+/**
+ * The provider produced a deterministic transaction hash, but Steward could
+ * not prove whether the upstream broadcast was accepted. Callers must
+ * reconcile `txHash` and must not submit the intent again.
+ */
+export interface StewardBroadcastOutcomeUnknown {
+  code: "external_broadcast_outcome_unknown";
+  txId: string;
+  txHash: string;
+  reconciliationRequired: true;
+}
+
 export interface StewardHistoryEntry {
   timestamp: number;
   value: string;
@@ -866,7 +878,8 @@ export type GetHistoryResult = StewardHistoryEntry[];
 export type SignTransactionResult =
   | { txHash: string; caip2?: string }
   | { signedTx: string; caip2?: string }
-  | StewardPendingApproval;
+  | StewardPendingApproval
+  | StewardBroadcastOutcomeUnknown;
 export interface TransferActionQuoteInput {
   to: string;
   /** ERC20 token contract address. Defaults to native chain asset. */
@@ -1358,6 +1371,16 @@ export function isStewardMfaRequiredError(
   error: unknown,
 ): error is StewardApiError<StewardMfaRequiredErrorData> {
   return error instanceof StewardApiError && error.mfaRequired;
+}
+
+export function isStewardBroadcastOutcomeUnknown(
+  result: SignTransactionResult,
+): result is StewardBroadcastOutcomeUnknown {
+  return (
+    "code" in result &&
+    result.code === "external_broadcast_outcome_unknown" &&
+    result.reconciliationRequired === true
+  );
 }
 
 function isBrowserRuntime(): boolean {
@@ -2114,7 +2137,7 @@ export class StewardClient {
   ): Promise<SignTransactionResult> {
     const response = await this.request<
       { txHash: string },
-      StewardPendingApproval | StewardErrorResponse
+      StewardPendingApproval | StewardBroadcastOutcomeUnknown | StewardErrorResponse
     >(`/vault/${encodeURIComponent(agentId)}/sign`, {
       method: "POST",
       headers: signerHeaders(options),
@@ -2126,6 +2149,10 @@ export class StewardClient {
     }
 
     if (response.status === 202 && this.isPendingApproval(response.data)) {
+      return response.data;
+    }
+
+    if (response.status === 202 && this.isBroadcastOutcomeUnknown(response.data)) {
       return response.data;
     }
 
@@ -5801,8 +5828,32 @@ export class StewardClient {
   }
 
   private isPendingApproval(
-    data: StewardPendingApproval | StewardErrorResponse | undefined,
+    data:
+      | StewardPendingApproval
+      | StewardBroadcastOutcomeUnknown
+      | StewardErrorResponse
+      | undefined,
   ): data is StewardPendingApproval {
     return typeof data !== "undefined" && "status" in data && data.status === "pending_approval";
+  }
+
+  private isBroadcastOutcomeUnknown(
+    data:
+      | StewardPendingApproval
+      | StewardBroadcastOutcomeUnknown
+      | StewardErrorResponse
+      | undefined,
+  ): data is StewardBroadcastOutcomeUnknown {
+    return (
+      typeof data !== "undefined" &&
+      "code" in data &&
+      data.code === "external_broadcast_outcome_unknown" &&
+      "reconciliationRequired" in data &&
+      data.reconciliationRequired === true &&
+      "txHash" in data &&
+      typeof data.txHash === "string" &&
+      "txId" in data &&
+      typeof data.txId === "string"
+    );
   }
 }

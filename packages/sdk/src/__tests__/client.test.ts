@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
+  isStewardBroadcastOutcomeUnknown,
   isStewardMfaRequiredError,
   type SignTransactionInput,
   type SignUserOperationInput,
@@ -4778,6 +4779,37 @@ describe("Response parsing", () => {
       value: "5000000000000000000",
     });
     expect((result as { status: string }).status).toBe("pending_approval");
+  });
+
+  it("signTransaction returns a typed outcome_unknown result when status is 202", async () => {
+    const txHash = `0x${"ab".repeat(32)}`;
+    installMockFetch(
+      {
+        ok: false,
+        error: "Broadcast outcome is unknown; reconcile the transaction hash before retrying",
+        data: {
+          code: "external_broadcast_outcome_unknown",
+          txId: "tx-outcome-unknown",
+          txHash,
+          reconciliationRequired: true,
+        },
+      },
+      202,
+    );
+
+    const result = await makeClient().signTransaction("agent-1", {
+      to: "0x1234567890123456789012345678901234567890",
+      value: "1",
+    });
+
+    expect(isStewardBroadcastOutcomeUnknown(result)).toBe(true);
+    if (!isStewardBroadcastOutcomeUnknown(result)) throw new Error("expected outcome_unknown");
+    expect(result).toEqual({
+      code: "external_broadcast_outcome_unknown",
+      txId: "tx-outcome-unknown",
+      txHash,
+      reconciliationRequired: true,
+    });
   });
 
   it("signMessage returns signature string", async () => {

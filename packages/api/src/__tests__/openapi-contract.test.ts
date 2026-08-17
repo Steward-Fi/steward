@@ -62,6 +62,18 @@ describe("generated OpenAPI contract", () => {
     expect(spec.paths).toHaveProperty("/platform/users/wallet/external-id/connect-or-create");
     expect(spec.paths).toHaveProperty("/platform/apps/gas_spend");
     expect(spec.paths).toHaveProperty("/vault/{agentId}/transactions");
+    expect(spec.paths).toHaveProperty("/vault/{agentId}/sign");
+    const signOperation = spec.paths["/vault/{agentId}/sign"].post;
+    expect(signOperation.responses).toHaveProperty("202");
+    const signAcceptedVariants = signOperation.responses["202"].content["application/json"].schema
+      .oneOf as Array<Record<string, unknown>>;
+    expect(signAcceptedVariants).toHaveLength(2);
+    expect(signAcceptedVariants[1].properties.data.properties.code.const).toBe(
+      "external_broadcast_outcome_unknown",
+    );
+    expect(signAcceptedVariants[1].properties.data.properties.reconciliationRequired.const).toBe(
+      true,
+    );
     expect(spec.paths).toHaveProperty("/vault/{agentId}/actions/transfer/quote");
     expect(spec.paths).toHaveProperty("/vault/{agentId}/actions/transfer");
     expect(spec.paths).toHaveProperty("/vault/{agentId}/actions/send-calls");

@@ -15,7 +15,12 @@ import {
   type KeyObject,
   randomBytes,
 } from "node:crypto";
-import { tenantConfigs as tenantConfigsTable, users, userTenants } from "@stwd/db";
+import {
+  executionAuthorizationNonces,
+  tenantConfigs as tenantConfigsTable,
+  users,
+  userTenants,
+} from "@stwd/db";
 import { recordAggregationEvent } from "@stwd/redis";
 import {
   ExecutionPayloadNormalizationError,
@@ -2310,6 +2315,68 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       );
     }
 
+    const idempotencyKey = c.req.header("Idempotency-Key");
+    if (isEvmSignRequest && idempotencyKey && executionPayloadDigest) {
+      const [priorAuthorization] = await db
+        .select({
+          requestId: executionAuthorizationNonces.requestId,
+          payloadDigest: executionAuthorizationNonces.payloadDigest,
+        })
+        .from(executionAuthorizationNonces)
+        .where(
+          and(
+            eq(executionAuthorizationNonces.tenantId, tenantId),
+            eq(executionAuthorizationNonces.agentId, agentId),
+            eq(executionAuthorizationNonces.idempotencyKey, idempotencyKey),
+          ),
+        )
+        .orderBy(desc(executionAuthorizationNonces.issuedAt))
+        .limit(1);
+      if (priorAuthorization) {
+        if (priorAuthorization.payloadDigest !== executionPayloadDigest) {
+          return c.json<ApiResponse>(
+            { ok: false, error: "Idempotency-Key was already used for a different transaction" },
+            409,
+          );
+        }
+        const [priorTransaction] = await db
+          .select({ status: transactions.status, txHash: transactions.txHash })
+          .from(transactions)
+          .where(
+            and(
+              eq(transactions.id, priorAuthorization.requestId),
+              eq(transactions.agentId, agentId),
+            ),
+          );
+        if (priorTransaction?.status === "outcome_unknown" && priorTransaction.txHash) {
+          const response = externalBroadcastOutcomeUnknownResponse(
+            c,
+            new ExternalBroadcastOutcomeUnknownError(priorTransaction.txHash),
+            priorAuthorization.requestId,
+          );
+          if (!response) throw new Error("invariant: outcome_unknown response was not constructed");
+          return response;
+        }
+        if (
+          priorTransaction?.txHash &&
+          (priorTransaction.status === "broadcast" || priorTransaction.status === "confirmed")
+        ) {
+          return c.json<ApiResponse<{ txId: string; txHash: string }>>({
+            ok: true,
+            data: { txId: priorAuthorization.requestId, txHash: priorTransaction.txHash },
+          });
+        }
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: "Transaction execution is already recorded; inspect its status before retrying",
+            data: { txId: priorAuthorization.requestId, status: priorTransaction?.status },
+          },
+          409,
+        );
+      }
+    }
+
     const executionTxId = crypto.randomUUID();
     try {
       const txId = executionTxId;
@@ -2325,7 +2392,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
               backend: executionTarget.backend,
               backendIdentityDigest: executionTarget.backendIdentityDigest,
               policyRevisionHash: executionPolicyRevisionHash ?? undefined,
-              idempotencyKey: c.req.header("Idempotency-Key") ?? undefined,
+              idempotencyKey: idempotencyKey ?? undefined,
             })
           : null;
       if (executionAuthorization && executionPayloadDigest) {
@@ -2346,6 +2413,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
           },
         });
       }
+
       await writeVaultAudit(c, {
         tenantId,
         actorType: "agent",
@@ -2380,6 +2448,31 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
                     capability: expected.capability,
                     backend: expected.backend,
                   },
+                });
+                // Stage the governed intent after authorization consumption but
+                // before the raw signer can perform external I/O. This exact
+                // row is the durable recovery anchor if the provider returns a
+                // hash and Vault.recordSignedTransaction subsequently fails.
+                await db.insert(transactions).values({
+                  id: txId,
+                  agentId,
+                  status: "approved",
+                  toAddress: signRequest.to,
+                  value: signRequest.value,
+                  data: signRequest.data,
+                  chainId: resolvedChainId,
+                  executionPayloadDigest,
+                  executionPolicyRevisionHash,
+                  executionBackend: executionTarget.backend,
+                  executionBackendIdentityDigest: executionTarget.backendIdentityDigest,
+                  policyResults: evaluation.results,
+                  actionPayload: transactionActionPayload({
+                    broadcast: shouldBroadcast,
+                    nonce: signRequest.nonce,
+                    gasLimit: signRequest.gasLimit,
+                    venue: signRequest.venue,
+                    walletAddress: signRequest.walletAddress,
+                  }),
                 });
               } catch (error) {
                 await writeVaultAudit(c, {
@@ -2512,6 +2605,19 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       if (authorizationError) return authorizationError;
       const outcomeUnknown = externalBroadcastOutcomeUnknownResponse(c, e, executionTxId);
       if (outcomeUnknown) {
+        // This is also the fallback for a failed Vault.recordSignedTransaction
+        // write. Preserve the irreversible hash on the pre-staged intent before
+        // returning the typed 202 response.
+        await db
+          .update(transactions)
+          .set({
+            status: "outcome_unknown",
+            txHash:
+              e instanceof ExternalBroadcastOutcomeUnknownError ? e.transactionHash : undefined,
+            signedAt: new Date(),
+          })
+          .where(and(eq(transactions.id, executionTxId), eq(transactions.agentId, agentId)));
+
         // A lost response may still represent real spend. Account for it
         // conservatively before releasing the per-agent spend lock.
         recordVaultSpend(agentId, tenantId, signRequest.value, resolvedChainId).catch((err) =>
@@ -2543,6 +2649,10 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
         });
         return outcomeUnknown;
       }
+      await db
+        .update(transactions)
+        .set({ status: "failed" })
+        .where(and(eq(transactions.id, executionTxId), eq(transactions.agentId, agentId)));
       const requestId = c.get("requestId") || "unknown";
       console.error(`[${requestId}] Sign transaction failed for agent ${agentId}`);
 

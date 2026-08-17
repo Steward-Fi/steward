@@ -466,6 +466,54 @@ describe("external key custody seam", () => {
     expect(checkpointObserved).toBe(true);
   });
 
+  test("preserves typed outcome_unknown when its first durable write fails", async () => {
+    const txHash = `0x${"bc".repeat(32)}`;
+    const provider = new TestExternalKeyProvider("provider-signing", async () => {
+      throw new ExternalBroadcastOutcomeUnknownError(txHash);
+    });
+    vault = await freshVault(provider);
+    await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
+    await vault.importExternalKeyHandle(externalHandleRequest());
+    const target = await vault.resolveExecutionTarget({
+      tenantId: TENANT_ID,
+      agentId: "agent-external",
+      chainId: 8453,
+      venue: "hsm-primary",
+    });
+    const writableVault = vault as unknown as {
+      recordSignedTransaction: (...args: unknown[]) => Promise<void>;
+    };
+    writableVault.recordSignedTransaction = async () => {
+      throw new Error("injected transaction write failure");
+    };
+
+    let thrown: unknown;
+    try {
+      await vault.signTransaction(
+        {
+          tenantId: TENANT_ID,
+          agentId: "agent-external",
+          chainId: 8453,
+          to: "0x2222222222222222222222222222222222222222",
+          value: "1",
+          venue: "hsm-primary",
+          broadcast: true,
+        },
+        {
+          txId: "external-outcome-write-failure",
+          expectedBackend: target.backend,
+          expectedBackendIdentityDigest: target.backendIdentityDigest,
+        },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ExternalBroadcastOutcomeUnknownError);
+    expect((thrown as ExternalBroadcastOutcomeUnknownError).transactionHash).toBe(txHash);
+    expect(provider.signCalls).toHaveLength(1);
+  });
+
   // ── ROUND 3 / ITEM 3: backend-resolution TOCTOU (fail closed at sign) ────
   // resolveExecutionBackend is a separate, stale-able DB read. Between the
   // gateway's precheck (which may see "local-vault") and the raw sign, the

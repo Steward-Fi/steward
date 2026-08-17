@@ -1478,10 +1478,25 @@ export class Vault {
           });
         } catch (error) {
           if (error instanceof ExternalBroadcastOutcomeUnknownError) {
-            await this.recordSignedTransaction(request, chainId, true, error.transactionHash, {
-              ...options,
-              status: "outcome_unknown",
-            });
+            // The provider has already produced a deterministic local hash and
+            // may have handed the signed bytes to the RPC.  A database failure
+            // must never replace this irreversible outcome with a generic
+            // error: approval callers would otherwise reopen the queue and a
+            // retry could broadcast the same intent again.  The gateway
+            // pre-stages direct executions (and approval executions already
+            // have a transaction row), so it can durably recover the exact
+            // hash even when this first write fails.
+            try {
+              await this.recordSignedTransaction(request, chainId, true, error.transactionHash, {
+                ...options,
+                status: "outcome_unknown",
+              });
+            } catch {
+              // Deliberately preserve the typed error and its hash. Do not log
+              // the persistence exception: provider/RPC errors may contain
+              // credential-bearing URLs, and the gateway owns the bounded
+              // fallback persistence/audit path.
+            }
           }
           throw error;
         }

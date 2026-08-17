@@ -711,14 +711,35 @@ describe("vault EVM execution gateway", () => {
     }
   });
 
-  it("returns only the deterministic hash and stable outcome_unknown response after ambiguous broadcast", async () => {
+  it("falls back to the pre-staged direct intent after an ambiguous broadcast write failure", async () => {
     await seedExternalCustodyAgent();
     const txHash = `0x${"cd".repeat(32)}`;
-    const signSpy = spyOn(Vault.prototype, "signTransaction").mockImplementation(async () => {
-      throw new ExternalBroadcastOutcomeUnknownError(txHash, {
-        cause: new Error("https://rpc.example.test/SUPER_SECRET_API_KEY timed out"),
-      });
-    });
+    const provider: ExternalKeyCustodyProvider & { signCalls: number } = {
+      id: "direct-outcome-provider",
+      contractVersion: 1,
+      signCalls: 0,
+      async registerKeyHandle(): Promise<ExternalKeyHandleRegistration> {
+        throw new Error("registerKeyHandle is not used by this test");
+      },
+      async signTransaction(): Promise<ExternalKeySignTransactionResult> {
+        this.signCalls += 1;
+        throw new ExternalBroadcastOutcomeUnknownError(txHash, {
+          cause: new Error("https://rpc.example.test/SUPER_SECRET_API_KEY timed out"),
+        });
+      },
+    };
+    const routeVault = getConfiguredVault({
+      fallbackPassword: process.env.STEWARD_MASTER_PASSWORD,
+    }) as unknown as {
+      externalKeyCustodyProvider?: ExternalKeyCustodyProvider;
+      recordSignedTransaction: (...args: unknown[]) => Promise<void>;
+    };
+    const priorProvider = routeVault.externalKeyCustodyProvider;
+    const originalRecord = routeVault.recordSignedTransaction;
+    routeVault.externalKeyCustodyProvider = provider;
+    routeVault.recordSignedTransaction = async () => {
+      throw new Error("injected direct outcome write failure");
+    };
     try {
       const app = await makeApp();
       const res = await app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, {
@@ -749,7 +770,7 @@ describe("vault EVM execution gateway", () => {
       });
       expect(text).not.toContain("SUPER_SECRET_API_KEY");
       expect(text).not.toContain("rpc.example.test");
-      expect(signSpy).toHaveBeenCalledTimes(1);
+      expect(provider.signCalls).toBe(1);
       const audits = await getDb()
         .select({ action: auditEvents.action, resourceId: auditEvents.resourceId })
         .from(auditEvents)
@@ -758,8 +779,33 @@ describe("vault EVM execution gateway", () => {
         action: "vault.broadcast.outcome_unknown",
         resourceId: body.data.txId,
       });
+      const [transaction] = await getDb()
+        .select({ status: transactions.status, txHash: transactions.txHash })
+        .from(transactions)
+        .where(eq(transactions.id, body.data.txId));
+      expect(transaction).toEqual({ status: "outcome_unknown", txHash });
+
+      // A persistence failure inside Vault still surfaces the same typed error.
+      // Replaying the caller's idempotency key is rejected by the consumed
+      // authorization and cannot enter the signer a second time.
+      const retry = await app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "ext-custody-outcome-unknown-direct",
+        },
+        body: JSON.stringify({
+          to: "0x1111111111111111111111111111111111111111",
+          value: "1",
+          chainId: 8453,
+          broadcast: true,
+        }),
+      });
+      expect(retry.status).not.toBe(200);
+      expect(provider.signCalls).toBe(1);
     } finally {
-      signSpy.mockRestore();
+      routeVault.externalKeyCustodyProvider = priorProvider;
+      routeVault.recordSignedTransaction = originalRecord;
     }
   });
 
@@ -908,7 +954,7 @@ describe("vault EVM execution gateway", () => {
     }
   });
 
-  it("keeps an ambiguous external broadcast terminal and never reopens approval", async () => {
+  it("keeps an ambiguous external broadcast terminal when its vault write fails and never reopens approval", async () => {
     const txId = "tx-ext-custody-outcome-unknown";
     const txHash = `0x${"ef".repeat(32)}`;
     const walletAddress = "0x00000000000000000000000000000000000000ff";
@@ -957,9 +1003,30 @@ describe("vault EVM execution gateway", () => {
         requestedById: EXTERNAL_AGENT_ID,
       });
 
-    const signSpy = spyOn(Vault.prototype, "signTransaction").mockImplementation(async () => {
-      throw new ExternalBroadcastOutcomeUnknownError(txHash);
-    });
+    const provider: ExternalKeyCustodyProvider & { signCalls: number } = {
+      id: "approval-outcome-provider",
+      contractVersion: 1,
+      signCalls: 0,
+      async registerKeyHandle(): Promise<ExternalKeyHandleRegistration> {
+        throw new Error("registerKeyHandle is not used by this test");
+      },
+      async signTransaction(): Promise<ExternalKeySignTransactionResult> {
+        this.signCalls += 1;
+        throw new ExternalBroadcastOutcomeUnknownError(txHash);
+      },
+    };
+    const routeVault = getConfiguredVault({
+      fallbackPassword: process.env.STEWARD_MASTER_PASSWORD,
+    }) as unknown as {
+      externalKeyCustodyProvider?: ExternalKeyCustodyProvider;
+      recordSignedTransaction: (...args: unknown[]) => Promise<void>;
+    };
+    const priorProvider = routeVault.externalKeyCustodyProvider;
+    const originalRecord = routeVault.recordSignedTransaction;
+    routeVault.externalKeyCustodyProvider = provider;
+    routeVault.recordSignedTransaction = async () => {
+      throw new Error("injected approval outcome write failure");
+    };
     try {
       const app = await makeApp();
       const res = await app.request(`/vault/${EXTERNAL_AGENT_ID}/approve/${txId}`, {
@@ -991,9 +1058,10 @@ describe("vault EVM execution gateway", () => {
         body: "{}",
       });
       expect(retry.status).toBe(404);
-      expect(signSpy).toHaveBeenCalledTimes(1);
+      expect(provider.signCalls).toBe(1);
     } finally {
-      signSpy.mockRestore();
+      routeVault.externalKeyCustodyProvider = priorProvider;
+      routeVault.recordSignedTransaction = originalRecord;
     }
   });
 
