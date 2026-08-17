@@ -590,7 +590,7 @@ export class ProviderAuthorityStore {
       )
       .limit(1);
     if (!account) throw new ProviderAuthorityError("resource not found", "not_found", 404);
-    await this.requireWorkspaceAdmin(ctx, account.workspaceId, false);
+    await this.requireWorkspaceAdmin(ctx, account.workspaceId, true);
     if (account.revision !== ctx.expectedRevision)
       throw new ProviderAuthorityError(
         "provider account revision conflict",
@@ -610,6 +610,9 @@ export class ProviderAuthorityStore {
           throw new Error("profile mismatch");
         }
         genericDescriptor = validateGenericHttpDescriptor(input.requestProfile.operationDescriptor);
+        if (genericDescriptor.methods.length !== 1) {
+          throw new Error("one route can bind exactly one method");
+        }
         allowedMethods = genericDescriptor.methods;
       } catch {
         throw new ProviderAuthorityError(
@@ -627,6 +630,13 @@ export class ProviderAuthorityStore {
           403,
         );
       allowedMethods = [fixedMethod];
+    }
+    if (account.adapterKey === "generic-http" && !input.secretRouteId) {
+      throw new ProviderAuthorityError(
+        "generic-http operations require a governed credential route binding",
+        "forbidden",
+        403,
+      );
     }
     if (input.secretRouteId) {
       const credentialSecretId = account.credentialSecretId;

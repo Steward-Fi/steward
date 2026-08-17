@@ -118,6 +118,21 @@ function principal(): ProviderPrincipalV1 {
   };
 }
 
+function authorityApp(userId: string, tenantRole: string) {
+  const app = new Hono<{ Variables: AppVariables }>();
+  app.use("*", async (c, next) => {
+    c.set("tenantId", G.TENANT);
+    c.set("tenantRole", tenantRole);
+    c.set("userId", userId);
+    c.set("authType", "session-jwt");
+    c.set("sessionMfaVerifiedAt", Date.now());
+    c.set("requestId", "generic-authority-contract");
+    await next();
+  });
+  app.route("/v2", providerAuthorityRoutes);
+  return app;
+}
+
 function approvalRules(opKey: string) {
   return [
     {
@@ -678,6 +693,74 @@ describe("#201 generic-http governed provider-action E2E", () => {
     });
     expect(capturedForward?.body).toBe('{"priority":2,"title":"operator-authored ticket"}');
     expect(JSON.stringify(dispatched)).not.toContain(GENERIC_TOKEN_SENTINEL);
+  });
+
+  test("HTTP authoring permits the tenant owner but hides resources from an unauthorized member", async () => {
+    await getDb().delete(providerRoleBindings).where(eq(providerRoleBindings.id, G.ADMIN_BINDING));
+    const requestBody = {
+      operationKey: OP_AUTHORED_KEY,
+      riskClass: "write",
+      secretRouteId: G.ROUTE_AUTHORED,
+      requestProfile: {
+        profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+        operationDescriptor: AUTHORED_DESCRIPTOR,
+      },
+      expectedRevision: 1,
+      reason: "tenant owner authors governed operation",
+    };
+    const owner = await authorityApp(G.GRANTOR, "owner").request(
+      `/v2/provider-accounts/${G.ACCOUNT}/operations`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "owner-author-0001" },
+        body: JSON.stringify(requestBody),
+      },
+    );
+    expect(owner.status).toBe(201);
+
+    const unauthorized = await authorityApp(G.APPROVER, "member").request(
+      `/v2/provider-accounts/${G.ACCOUNT}/operations`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "member-author-01" },
+        body: JSON.stringify({ ...requestBody, expectedRevision: 2 }),
+      },
+    );
+    expect(unauthorized.status).toBe(404);
+  });
+
+  test("HTTP authoring rejects an unbound or multi-method generic operation", async () => {
+    const app = authorityApp(G.GRANTOR, "owner");
+    const base = {
+      operationKey: OP_AUTHORED_KEY,
+      riskClass: "write",
+      requestProfile: {
+        profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+        operationDescriptor: AUTHORED_DESCRIPTOR,
+      },
+      expectedRevision: 1,
+      reason: "negative authority contract",
+    };
+    const unbound = await app.request(`/v2/provider-accounts/${G.ACCOUNT}/operations`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "unbound-author-1" },
+      body: JSON.stringify(base),
+    });
+    expect(unbound.status).toBe(403);
+
+    const multiMethod = await app.request(`/v2/provider-accounts/${G.ACCOUNT}/operations`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "multi-method-001" },
+      body: JSON.stringify({
+        ...base,
+        secretRouteId: G.ROUTE_AUTHORED,
+        requestProfile: {
+          profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+          operationDescriptor: { ...AUTHORED_DESCRIPTOR, methods: ["POST", "PATCH"] },
+        },
+      }),
+    });
+    expect(multiMethod.status).toBe(400);
   });
 
   test("operator path rejects malformed descriptors and widening credential routes before commit", async () => {
