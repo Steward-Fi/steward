@@ -2163,40 +2163,14 @@ export const providerActionBindings = pgTable(
     policyDecision: jsonb("policy_decision").$type<Record<string, unknown>>(),
     policyDecisionHash: varchar("policy_decision_hash", { length: 71 }),
 
-    // #240: immutable Redis reservation identities captured in the same commit
-    // as the authority decision. Only the reconciliation state/timestamp below
-    // may advance after insert; the raw handles remain frozen by migration 0084.
-    policyReservationHandles: jsonb("policy_reservation_handles").$type<{
-      schemaVersion: "steward.provider-policy-reservations.v1";
-      generation: number;
-      phase: "decision" | "execution";
-      cumulativeSpend: Array<{
-        stream: {
-          agentId: string;
-          scope: "operation" | "agent" | "grant";
-          scopeKey: string;
-          currency: string;
-        };
-        reservationId: string;
-        amount: number;
-      }>;
-      windowedInvoke: {
-        agentId: string;
-        operationKey: string;
-        reservationId: string;
-      } | null;
-    }>(),
-    reservationReconciliationState: varchar("reservation_reconciliation_state", { length: 24 })
-      .notNull()
-      .default("not_required"),
-    reservationReconciledAt: timestamp("reservation_reconciled_at", { withTimezone: true }),
-    reservationReconciliationAttempts: integer("reservation_reconciliation_attempts")
-      .notNull()
-      .default(0),
-    reservationReconciliationNextRetryAt: timestamp("reservation_reconciliation_next_retry_at", {
-      withTimezone: true,
-    }),
-    reservationReconciliationLastError: text("reservation_reconciliation_last_error"),
+    // #239: authoritative execute-time policy evidence. Unlike the approval-time
+    // decision above, this snapshot is derived from current rules immediately
+    // before approval consumption and authorization mint.
+    executionPolicyDecisionId: uuid("execution_policy_decision_id"),
+    executionPolicyRevisionHash: varchar("execution_policy_revision_hash", { length: 71 }),
+    executionPolicyDecision: jsonb("execution_policy_decision").$type<Record<string, unknown>>(),
+    executionPolicyDecisionHash: varchar("execution_policy_decision_hash", { length: 71 }),
+    executionPolicyEvaluatedAt: timestamp("execution_policy_evaluated_at", { withTimezone: true }),
 
     status: varchar("status", { length: 32 }).notNull(),
     // ── PR3 approval lifecycle columns (0081) ──
@@ -2282,6 +2256,44 @@ export const providerActionBindings = pgTable(
 );
 
 export type ProviderActionBinding = typeof providerActionBindings.$inferSelect;
+
+/** Append-only reservation identities. Mutable reconciliation metadata is
+ * isolated from the immutable generation payload and claimed with SKIP LOCKED. */
+export const providerActionReservationGenerations = pgTable(
+  "provider_action_reservation_generations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    intentId: varchar("intent_id", { length: 64 }).notNull(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    generation: integer("generation").notNull(),
+    phase: varchar("phase", { length: 16 }).notNull(),
+    handles: jsonb("handles").$type<Record<string, unknown>>().notNull(),
+    state: varchar("state", { length: 24 }).notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    claimedBy: uuid("claimed_by"),
+    reconciledAt: timestamp("reconciled_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    intentFk: foreignKey({
+      columns: [table.tenantId, table.intentId],
+      foreignColumns: [intents.tenantId, intents.id],
+      name: "provider_action_reservation_generations_intent_fk",
+    }).onDelete("cascade"),
+    generationUnique: uniqueIndex("provider_action_reservation_generations_intent_gen_uniq").on(
+      table.intentId,
+      table.generation,
+    ),
+    dueIdx: index("provider_action_reservation_generations_due_idx").on(
+      table.state,
+      table.nextRetryAt,
+      table.createdAt,
+    ),
+  }),
+);
 
 // Transactional required-audit outbox (spec §6.4). A provider-action decision
 // inserts its REQUIRED audit intent here in the SAME transaction as the binding;

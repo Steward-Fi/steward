@@ -68,9 +68,6 @@ function bindingInsert(overrides: Partial<Record<string, string>> = {}): string 
     policyRevHash: `'${ACCESSHASH}'`,
     policyDecision: `'{}'::jsonb`,
     policyDecisionHash: `'${ACCESSHASH}'`,
-    reservationHandles: "NULL",
-    reservationState: "'not_required'",
-    reservationReconciledAt: "NULL",
     ...overrides,
   } as Record<string, string>;
   return `
@@ -80,18 +77,14 @@ function bindingInsert(overrides: Partial<Record<string, string>> = {}): string 
       action_digest, request_envelope, request_hash, idempotency_key_hash, safe_summary,
       access_decision_id, access_effect, access_reason_code, dependency_revisions,
       access_decision, access_decision_hash,
-      policy_decision_id, policy_effect, policy_revision_hash, policy_decision, policy_decision_hash,
-      policy_reservation_handles, reservation_reconciliation_state, reservation_reconciled_at,
-      status
+      policy_decision_id, policy_effect, policy_revision_hash, policy_decision, policy_decision_hash, status
     ) VALUES (
       '${v.intentId}','ta','${IDS.wsA}','agent-a','${IDS.acctA}',
       '${IDS.opA}',7,'github.provider-action.v1', decode('7b7d','hex'),
       '${DIGEST}','{}'::jsonb,'${REQHASH}','${IDEMHASH}','{}'::jsonb,
       '${IDS.accessDecision}','${v.accessEffect}','provider_access_allowed','{}'::jsonb,
       '{}'::jsonb,'${ACCESSHASH}',
-      ${v.policyId},'${v.policyEffect}',${v.policyRevHash},${v.policyDecision},${v.policyDecisionHash},
-      ${v.reservationHandles},${v.reservationState},${v.reservationReconciledAt},
-      '${v.status}'
+      ${v.policyId},'${v.policyEffect}',${v.policyRevHash},${v.policyDecision},${v.policyDecisionHash},'${v.status}'
     );
   `;
 }
@@ -225,40 +218,36 @@ describe("0080 provider_action_bindings migration", () => {
     await client.close();
   });
 
-  test("0084 freezes handles and permits only pending -> terminal reconciliation CAS", async () => {
+  test("0084 uses append-only generations and permits only pending -> terminal reconciliation CAS", async () => {
     const client = new PGlite("memory://");
     await applyAll(client);
     await seed(client);
     const handles = `'{"schemaVersion":"steward.provider-policy-reservations.v1","generation":1,"phase":"decision","cumulativeSpend":[{"stream":{"agentId":"agent-a","scope":"agent","scopeKey":"","currency":"USD"},"reservationId":"r1","amount":7}],"windowedInvoke":null}'::jsonb`;
-    await client.exec(
-      bindingInsert({ reservationHandles: handles, reservationState: "'pending'" }),
-    );
+    await client.exec(bindingInsert());
+    await client.exec(`INSERT INTO provider_action_reservation_generations
+      (intent_id,tenant_id,generation,phase,handles) VALUES ('intent-1','ta',1,'decision',${handles})`);
 
     await expect(
       client.exec(
-        `UPDATE provider_action_bindings
-         SET policy_reservation_handles = jsonb_set(policy_reservation_handles, '{cumulativeSpend,0,amount}', '8')
-         WHERE intent_id='intent-1'`,
+        `UPDATE provider_action_reservation_generations
+         SET handles = jsonb_set(handles, '{cumulativeSpend,0,amount}', '8') WHERE intent_id='intent-1'`,
       ),
     ).rejects.toBeDefined();
     await client.exec(
-      `UPDATE provider_action_bindings
-       SET reservation_reconciliation_state='settled', reservation_reconciled_at=now()
-       WHERE intent_id='intent-1' AND reservation_reconciliation_state='pending'`,
+      `UPDATE provider_action_reservation_generations SET state='settled', reconciled_at=now()
+       WHERE intent_id='intent-1' AND state='pending'`,
     );
     const row = await client.query<{
-      reservation_reconciliation_state: string;
-      reservation_reconciled_at: Date | null;
+      state: string;
+      reconciled_at: Date | null;
     }>(
-      `SELECT reservation_reconciliation_state,reservation_reconciled_at
-       FROM provider_action_bindings WHERE intent_id='intent-1'`,
+      `SELECT state,reconciled_at FROM provider_action_reservation_generations WHERE intent_id='intent-1'`,
     );
-    expect(row.rows[0].reservation_reconciliation_state).toBe("settled");
-    expect(row.rows[0].reservation_reconciled_at).not.toBeNull();
+    expect(row.rows[0].state).toBe("settled");
+    expect(row.rows[0].reconciled_at).not.toBeNull();
     await expect(
       client.exec(
-        `UPDATE provider_action_bindings SET reservation_reconciliation_state='released'
-         WHERE intent_id='intent-1'`,
+        `UPDATE provider_action_reservation_generations SET state='released' WHERE intent_id='intent-1'`,
       ),
     ).rejects.toBeDefined();
     await client.close();
@@ -269,8 +258,11 @@ describe("0080 provider_action_bindings migration", () => {
     await applyAll(client);
     await seed(client);
     const handles = `'{"schemaVersion":"steward.provider-policy-reservations.v1","generation":2,"phase":"execution","cumulativeSpend":[],"windowedInvoke":{"agentId":"agent-a","operationKey":"github.issue.list","reservationId":"r2"}}'::jsonb`;
+    await client.exec(bindingInsert());
     await expect(
-      client.exec(bindingInsert({ reservationHandles: handles, reservationState: "'released'" })),
+      client.exec(`INSERT INTO provider_action_reservation_generations
+      (intent_id,tenant_id,generation,phase,handles,state)
+      VALUES ('intent-1','ta',2,'execution',${handles},'released')`),
     ).rejects.toBeDefined();
     await client.close();
   });

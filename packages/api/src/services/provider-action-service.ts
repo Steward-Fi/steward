@@ -33,6 +33,7 @@ import {
   providerAccounts,
   providerActionAuditOutbox,
   providerActionBindings,
+  providerActionReservationGenerations,
   providerGrants,
   providerOperations,
   providerRoleBindings,
@@ -47,8 +48,12 @@ import {
   type ProviderPolicyRule,
   windowedInvokeBucketKey,
 } from "@stwd/policy-engine";
-import type { GithubActionBuild } from "@stwd/provider-github";
-import type { XActionBuild } from "@stwd/provider-x";
+import {
+  buildGithubAction,
+  type GithubActionBuild,
+  type GithubOperationKey,
+} from "@stwd/provider-github";
+import { buildXAction, type XActionBuild, type XOperationKey } from "@stwd/provider-x";
 import {
   computeProviderPolicyInputDigest,
   type GithubCanonicalActionV1,
@@ -134,12 +139,14 @@ export function __setReservationReconciliationFaultForTests(
 function persistedReservationHandles(
   cumulativeSpend: CumulativeSpendReservationHandle[],
   windowedInvoke: WindowedInvokeReservationHandle | undefined,
+  generation = 1,
+  phase: PersistedPolicyReservationHandlesV1["phase"] = "decision",
 ): PersistedPolicyReservationHandlesV1 | null {
   if (cumulativeSpend.length === 0 && windowedInvoke === undefined) return null;
   return {
     schemaVersion: "steward.provider-policy-reservations.v1",
-    generation: 1,
-    phase: "decision",
+    generation,
+    phase,
     cumulativeSpend,
     windowedInvoke: windowedInvoke ?? null,
   };
@@ -235,6 +242,70 @@ function reconciliationTargetForStatus(
   // allowed_stub / approved / execution_ready / executing / outcome_unknown:
   // never free maybe-consumed budget before the action has a known outcome.
   return null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("canonical provider action must be an object");
+  }
+  return value as Record<string, unknown>;
+}
+
+/** Reconstruct through the adapter so policy inputs are re-derived, not trusted. */
+function rebuildApprovedAction(
+  operationKey: string,
+  action: Record<string, unknown>,
+  safeSummary: Record<string, unknown>,
+): ProviderActionBuild {
+  const body = action.canonicalBody === null ? undefined : asRecord(action.canonicalBody);
+  if (operationKey === "x.tweet.create") {
+    const reply = body?.reply === undefined ? undefined : asRecord(body.reply);
+    return buildXAction(operationKey as XOperationKey, {
+      text: body?.text,
+      ...(reply?.in_reply_to_tweet_id !== undefined
+        ? { replyToTweetId: reply.in_reply_to_tweet_id }
+        : {}),
+      summoned: safeSummary.summoned === true,
+    });
+  }
+  if (operationKey === "x.tweet.delete") {
+    const match = /^\/2\/tweets\/([0-9]{1,25})$/.exec(String(action.normalizedPath));
+    return buildXAction(operationKey as XOperationKey, { tweetId: match?.[1] });
+  }
+  if (operationKey === "x.user.me.read") {
+    return buildXAction(operationKey as XOperationKey, {});
+  }
+  if (operationKey === "github.issue.list") {
+    const match = /^\/repos\/([^/]+)\/([^/]+)\/issues$/.exec(String(action.normalizedPath));
+    const query = Array.isArray(action.orderedQueryPairs) ? action.orderedQueryPairs : [];
+    const q = new Map<string, unknown>();
+    for (const pair of query) {
+      if (Array.isArray(pair) && pair.length === 2 && typeof pair[0] === "string") {
+        q.set(pair[0], pair[1]);
+      }
+    }
+    return buildGithubAction(operationKey as GithubOperationKey, {
+      owner: match?.[1],
+      repo: match?.[2],
+      ...(q.has("state") ? { state: q.get("state") } : {}),
+      ...(q.has("sort") ? { sort: q.get("sort") } : {}),
+      ...(q.has("direction") ? { direction: q.get("direction") } : {}),
+      ...(q.has("per_page") ? { perPage: Number(q.get("per_page")) } : {}),
+      ...(q.has("page") ? { page: Number(q.get("page")) } : {}),
+    });
+  }
+  if (operationKey === "github.pr.comment.create") {
+    const match = /^\/repos\/([^/]+)\/([^/]+)\/issues\/([0-9]+)\/comments$/.exec(
+      String(action.normalizedPath),
+    );
+    return buildGithubAction(operationKey as GithubOperationKey, {
+      owner: match?.[1],
+      repo: match?.[2],
+      pullNumber: Number(match?.[3]),
+      body: body?.body,
+    });
+  }
+  throw new Error(`unsupported provider operation '${operationKey}'`);
 }
 
 // ─── Public result envelope ───────────────────────────────────────────────────
@@ -757,16 +828,22 @@ class ProviderActionService {
           policyRevisionHash: policy ? policy.doc.policyRevisionHash : null,
           policyDecision: policy ? (policy.doc as unknown as Record<string, unknown>) : null,
           policyDecisionHash,
-          policyReservationHandles: persistedReservationHandles(
-            cumulativeSpendReservations,
-            windowedInvokeReservation,
-          ),
-          reservationReconciliationState:
-            cumulativeSpendReservations.length > 0 || windowedInvokeReservation !== undefined
-              ? "pending"
-              : "not_required",
           status: effects.status,
         });
+
+        const decisionHandles = persistedReservationHandles(
+          cumulativeSpendReservations,
+          windowedInvokeReservation,
+        );
+        if (decisionHandles) {
+          await tx.insert(providerActionReservationGenerations).values({
+            intentId,
+            tenantId,
+            generation: decisionHandles.generation,
+            phase: decisionHandles.phase,
+            handles: decisionHandles as unknown as Record<string, unknown>,
+          });
+        }
 
         // Required audit intent -> transactional outbox (drained post-commit).
         // PR5 C1: correlated lifecycle events set resource_type='provider_action'
@@ -1622,6 +1699,91 @@ class ProviderActionService {
   }
 
   /**
+   * Rebuild the immutable canonical action and authoritatively evaluate the
+   * operation's CURRENT policy immediately before approval consumption. Raw
+   * text exists only in this stack frame and is never returned or persisted.
+   */
+  async evaluateApprovedExecution(args: {
+    tenantId: string;
+    workspaceId: string;
+    actorAgentId: string;
+    operation: typeof providerOperations.$inferSelect;
+    intentId: string;
+    requestHash: string;
+    actionDigest: string;
+    canonicalActionBytes: Uint8Array;
+    safeSummary: Record<string, unknown>;
+    matchedGrantIds: string[];
+    priorGeneration: number;
+  }): Promise<
+    | {
+        ok: true;
+        decision: PersistedPolicyDecisionV1;
+        decisionHash: string;
+        handles: PersistedPolicyReservationHandlesV1 | null;
+      }
+    | { ok: false; code: string; httpStatus: number }
+  > {
+    const canonicalText = Buffer.from(args.canonicalActionBytes).toString("utf8");
+    const action = JSON.parse(canonicalText) as Record<string, unknown>;
+    const build = rebuildApprovedAction(args.operation.operationKey, action, args.safeSummary);
+    if (jcsStringify(build.action) !== canonicalText) {
+      return { ok: false, code: "APPROVAL_ACTION_INTEGRITY_FAILED", httpStatus: 409 };
+    }
+    const digest = sha256HexPrefixed(canonicalText);
+    if (digest !== args.actionDigest) {
+      return { ok: false, code: "APPROVAL_ACTION_INTEGRITY_FAILED", httpStatus: 409 };
+    }
+
+    const policy = await this.evaluatePolicy({
+      tenantId: args.tenantId,
+      workspaceId: args.workspaceId,
+      actorAgentId: args.actorAgentId,
+      operation: args.operation,
+      build,
+      intentId: args.intentId,
+      requestHash: args.requestHash,
+      actionDigest: args.actionDigest,
+      grantId: args.matchedGrantIds[0] ?? null,
+    });
+    if (policy.doc.effect === "hard_deny") {
+      await this.releasePolicyReservationHandles(
+        persistedReservationHandles(
+          policy.cumulativeSpendReservations,
+          policy.windowedInvokeReservation,
+          1,
+          "execution",
+        ),
+      );
+      return {
+        ok: false,
+        code: policy.doc.reasonCodes[0] ?? "POLICY_HARD_DENY",
+        httpStatus: 403,
+      };
+    }
+
+    const generation = args.priorGeneration + 1;
+    return {
+      ok: true,
+      decision: policy.doc,
+      decisionHash: sha256HexPrefixed(jcsStringify(policy.doc)),
+      handles: persistedReservationHandles(
+        policy.cumulativeSpendReservations,
+        policy.windowedInvokeReservation,
+        generation,
+        "execution",
+      ),
+    };
+  }
+
+  async releasePolicyReservationHandles(handles: unknown): Promise<void> {
+    if (handles === null) return;
+    const parsed = parsePersistedReservationHandles(handles);
+    if (!parsed) throw new Error("invalid persisted policy reservation handles");
+    await this.applyPersistedReservationHandles(parsed, "released");
+  }
+
+  /**
    * C2 crash-recovery sweeper (spec §7.3). The required-audit outbox row commits
    * IN-TX with the intent/binding, but its drain into the signed chain happens
    * post-commit. A crash between commit and drain leaves an intent with an
@@ -1714,32 +1876,77 @@ class ProviderActionService {
    * safely retried; unknown outcomes remain pending and are never released.
    */
   async reconcilePolicyReservations(tenantId?: string, intentId?: string): Promise<number> {
-    const rows = await this.db()
+    const candidates = await this.db()
       .select()
-      .from(providerActionBindings)
+      .from(providerActionReservationGenerations)
       .where(
         and(
           tenantId
-            ? eq(providerActionBindings.tenantId, tenantId)
+            ? eq(providerActionReservationGenerations.tenantId, tenantId)
             : (sql`true` as unknown as ReturnType<typeof eq>),
-          sql`${providerActionBindings.reservationReconciliationState} IN ('pending','needs_attention')`,
+          sql`${providerActionReservationGenerations.state} IN ('pending','needs_attention')`,
+          sql`(${providerActionReservationGenerations.nextRetryAt} IS NULL OR ${providerActionReservationGenerations.nextRetryAt} <= now())`,
+          sql`(${providerActionReservationGenerations.claimedAt} IS NULL OR ${providerActionReservationGenerations.claimedAt} < now() - interval '60 seconds')`,
           intentId
-            ? (sql`true` as unknown as ReturnType<typeof eq>)
-            : (sql`(${providerActionBindings.reservationReconciliationNextRetryAt} IS NULL OR ${providerActionBindings.reservationReconciliationNextRetryAt} <= now())` as unknown as ReturnType<
-                typeof eq
-              >),
-          intentId
-            ? eq(providerActionBindings.intentId, intentId)
+            ? eq(providerActionReservationGenerations.intentId, intentId)
             : (sql`true` as unknown as ReturnType<typeof eq>),
         ),
-      );
+      )
+      .orderBy(
+        providerActionReservationGenerations.nextRetryAt,
+        providerActionReservationGenerations.createdAt,
+      )
+      .limit(50);
     let reconciled = 0;
-    for (const row of rows) {
-      const handles = parsePersistedReservationHandles(row.policyReservationHandles);
-      // Corrupt/unrecognized persisted handles fail closed and remain pending.
-      if (!handles) continue;
-      const target = reconciliationTargetForStatus(row.status, handles.phase);
-      if (!target) continue;
+    for (const candidate of candidates) {
+      const claimId = randomUUID();
+      const [row] = await this.db()
+        .update(providerActionReservationGenerations)
+        .set({ claimedBy: claimId, claimedAt: new Date() })
+        .where(
+          and(
+            eq(providerActionReservationGenerations.id, candidate.id),
+            eq(providerActionReservationGenerations.state, candidate.state),
+            eq(providerActionReservationGenerations.attempts, candidate.attempts),
+            sql`(${providerActionReservationGenerations.claimedAt} IS NULL OR ${providerActionReservationGenerations.claimedAt} < now() - interval '60 seconds')`,
+          ),
+        )
+        .returning();
+      if (!row) continue;
+      const [binding] = await this.db()
+        .select({ status: providerActionBindings.status })
+        .from(providerActionBindings)
+        .where(eq(providerActionBindings.intentId, row.intentId))
+        .limit(1);
+      const handles = parsePersistedReservationHandles(row.handles);
+      if (!handles || handles.generation !== row.generation || handles.phase !== row.phase) {
+        const message = "malformed immutable reservation generation";
+        await this.recordReservationFailure(row, claimId, message, true);
+        await writeAuditEvent({
+          tenantId: row.tenantId,
+          actorType: "system",
+          action: "provider.reservation.needs_attention",
+          resourceType: "provider_action",
+          resourceId: row.intentId,
+          metadata: { generation: row.generation, reasonCode: "RESERVATION_GENERATION_MALFORMED" },
+        }).catch((error) =>
+          console.error("[provider-reservations] malformed-generation audit failed:", error),
+        );
+        continue;
+      }
+      const target = binding ? reconciliationTargetForStatus(binding.status, handles.phase) : null;
+      if (!target) {
+        await this.db()
+          .update(providerActionReservationGenerations)
+          .set({ claimedAt: null, claimedBy: null, nextRetryAt: new Date(Date.now() + 15_000) })
+          .where(
+            and(
+              eq(providerActionReservationGenerations.id, row.id),
+              eq(providerActionReservationGenerations.claimedBy, claimId),
+            ),
+          );
+        continue;
+      }
       try {
         if (reservationReconciliationFaultForTests === "before_apply")
           throw new Error("injected crash before reservation reconciliation");
@@ -1748,69 +1955,63 @@ class ProviderActionService {
           throw new Error("injected crash after reservation reconciliation");
       } catch (error) {
         const message = (error instanceof Error ? error.message : String(error)).slice(0, 1000);
-        const attempts = row.reservationReconciliationAttempts + 1;
-        const delaySeconds = Math.min(3600, 2 ** Math.min(attempts, 12));
-        await this.db()
-          .update(providerActionBindings)
-          .set({
-            reservationReconciliationState: attempts >= 20 ? "needs_attention" : "pending",
-            reservationReconciliationAttempts: attempts,
-            reservationReconciliationLastError: message,
-            reservationReconciliationNextRetryAt: new Date(Date.now() + delaySeconds * 1000),
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(providerActionBindings.intentId, row.intentId),
-              eq(providerActionBindings.status, row.status),
-              eq(
-                providerActionBindings.reservationReconciliationState,
-                row.reservationReconciliationState,
-              ),
-              eq(
-                providerActionBindings.reservationReconciliationAttempts,
-                row.reservationReconciliationAttempts,
-              ),
-              sql`${providerActionBindings.policyReservationHandles} = ${JSON.stringify(
-                row.policyReservationHandles,
-              )}::jsonb`,
-            ),
-          );
+        await this.recordReservationFailure(row, claimId, message, false);
         console.error(
-          `[provider-reservations] reconciliation failed intent=${row.intentId} generation=${handles.generation} attempts=${attempts}: ${message}`,
+          `[provider-reservations] reconciliation failed intent=${row.intentId} generation=${handles.generation}: ${message}`,
         );
         continue;
       }
       const updated = await this.db()
-        .update(providerActionBindings)
+        .update(providerActionReservationGenerations)
         .set({
-          reservationReconciliationState: target,
-          reservationReconciledAt: new Date(),
-          reservationReconciliationNextRetryAt: null,
-          reservationReconciliationLastError: null,
-          updatedAt: new Date(),
+          state: target,
+          reconciledAt: new Date(),
+          nextRetryAt: null,
+          lastError: null,
+          claimedAt: null,
+          claimedBy: null,
         })
         .where(
           and(
-            eq(providerActionBindings.intentId, row.intentId),
-            eq(providerActionBindings.status, row.status),
-            eq(
-              providerActionBindings.reservationReconciliationState,
-              row.reservationReconciliationState,
-            ),
-            eq(
-              providerActionBindings.reservationReconciliationAttempts,
-              row.reservationReconciliationAttempts,
-            ),
-            sql`${providerActionBindings.policyReservationHandles} = ${JSON.stringify(
-              row.policyReservationHandles,
-            )}::jsonb`,
+            eq(providerActionReservationGenerations.id, row.id),
+            eq(providerActionReservationGenerations.generation, row.generation),
+            eq(providerActionReservationGenerations.state, row.state),
+            eq(providerActionReservationGenerations.attempts, row.attempts),
+            eq(providerActionReservationGenerations.claimedBy, claimId),
           ),
         )
-        .returning({ intentId: providerActionBindings.intentId });
+        .returning({ intentId: providerActionReservationGenerations.intentId });
       if (updated.length > 0) reconciled += 1;
     }
     return reconciled;
+  }
+
+  private async recordReservationFailure(
+    row: typeof providerActionReservationGenerations.$inferSelect,
+    claimId: string,
+    message: string,
+    malformed: boolean,
+  ): Promise<void> {
+    const attempts = row.attempts + 1;
+    const delaySeconds = Math.min(3600, 2 ** Math.min(attempts, 12));
+    await this.db()
+      .update(providerActionReservationGenerations)
+      .set({
+        state: malformed || attempts >= 20 ? "needs_attention" : "pending",
+        attempts,
+        lastError: message.slice(0, 1000),
+        nextRetryAt: new Date(Date.now() + delaySeconds * 1000),
+        claimedAt: null,
+        claimedBy: null,
+      })
+      .where(
+        and(
+          eq(providerActionReservationGenerations.id, row.id),
+          eq(providerActionReservationGenerations.state, row.state),
+          eq(providerActionReservationGenerations.attempts, row.attempts),
+          eq(providerActionReservationGenerations.claimedBy, claimId),
+        ),
+      );
   }
 
   private async applyPersistedReservationHandles(
