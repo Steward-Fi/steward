@@ -35,6 +35,13 @@ export interface EvaluatorContext {
   request: SignRequest;
   recentTxCount24h: number;
   recentTxCount1h: number;
+  /**
+   * Rolling spend sums in the base unit of `request.chainId` ONLY (wei for
+   * EVM, lamports for Solana, piconero for Monero...). Callers MUST scope
+   * these counters to the request's chain: a cross-chain sum mixes
+   * incomparable units, and the USD path re-prices it at this request's chain
+   * price — silently under- or over-enforcing the cap (SEC-039).
+   */
   spentToday: bigint;
   spentThisWeek: bigint;
   /** Optional price oracle for USD-based policy evaluation */

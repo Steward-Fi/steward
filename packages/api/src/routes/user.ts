@@ -1316,7 +1316,7 @@ async function getTransactionStats(agentId: string) {
   };
 }
 
-async function getUserWalletTransactionStats(userId: string) {
+async function getUserWalletTransactionStats(userId: string, chainId?: number) {
   const db = getDb();
   const now = new Date();
   const oneHourAgo = new Date(now.getTime() - 3_600_000);
@@ -1331,6 +1331,12 @@ async function getUserWalletTransactionStats(userId: string) {
     ...Array.from({ length: 255 }, (_, index) => `${baseAgentId}-${index + 1}`),
   ];
 
+  // Same cross-chain unit discipline as getTransactionStats (SEC-039): the
+  // value column holds raw per-chain base units, so spend sums used for
+  // policy enforcement must be scoped to the request's chain.
+  const chainFilter =
+    chainId === undefined ? sql`` : sql` and ${transactions.chainId} = ${chainId}`;
+
   const [stats] = await db
     .select({
       recentTxCount1h: sql<number>`count(*) filter (where ${transactions.createdAt} >= ${oneHourAgoStr}::timestamptz)`,
@@ -1339,14 +1345,14 @@ async function getUserWalletTransactionStats(userId: string) {
         coalesce(
           sum(
             case
-              when ${transactions.createdAt} >= ${oneDayAgoStr}::timestamptz then (${transactions.value})::numeric
+              when ${transactions.createdAt} >= ${oneDayAgoStr}::timestamptz${chainFilter} then (${transactions.value})::numeric
               else 0
             end
           ),
           0
         )::text
       `,
-      spentThisWeek: sql<string>`coalesce(sum((${transactions.value})::numeric), 0)::text`,
+      spentThisWeek: sql<string>`coalesce(sum((${transactions.value})::numeric) filter (where true${chainFilter}), 0)::text`,
     })
     .from(transactions)
     .where(
@@ -5098,7 +5104,7 @@ user.post("/me/wallet/sign", async (c) => {
     const result: UserWalletSignResult = await withAgentSpendLock(
       `user-wallet-${userId}`,
       async () => {
-        const stats = await getUserWalletTransactionStats(userId);
+        const stats = await getUserWalletTransactionStats(userId, chainId);
         const engine = new PolicyEngine();
         const evaluation = await engine.evaluate(policySet, {
           request: signRequest,
