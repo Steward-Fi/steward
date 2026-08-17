@@ -125,6 +125,7 @@ export const transactionStatusEnum = pgEnum("transaction_status", [
   "broadcast",
   "confirmed",
   "failed",
+  "outcome_unknown",
 ]);
 
 export const approvalQueueStatusEnum = pgEnum("approval_queue_status", [
@@ -915,6 +916,7 @@ export const transactions = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     signedAt: timestamp("signed_at", { withTimezone: true }),
     confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
+    receiptPolledAt: timestamp("receipt_polled_at", { withTimezone: true }),
   },
   (table) => ({
     agentIdIdx: index("transactions_agent_id_idx").on(table.agentId),
