@@ -200,6 +200,24 @@ describe("capability-intent — argMatches constraint", () => {
     expect(r.passed).toBe(false);
     expect(r.reason).toContain("invalid regex");
   });
+
+  it("denies an over-long operator pattern (SEC-107 ReDoS bound)", () => {
+    const r = evaluateCapabilityIntent(
+      rule({ ...base, constraints: { argMatches: { branch: `(a+)+${".".repeat(300)}` } } }),
+      makeContext({ capability: cap({ args: { branch: "feat/x" } }) }),
+    );
+    expect(r.passed).toBe(false);
+    expect(r.reason).toContain("must not exceed 256 chars");
+  });
+
+  it("denies an over-long agent-controlled arg value (SEC-107 ReDoS bound)", () => {
+    const r = evaluateCapabilityIntent(
+      rule({ ...base, constraints: { argMatches: { branch: "feat/.+" } } }),
+      makeContext({ capability: cap({ args: { branch: `feat/${"x".repeat(9000)}` } }) }),
+    );
+    expect(r.passed).toBe(false);
+    expect(r.reason).toContain("match input cap");
+  });
 });
 
 describe("capability-intent — maxCallsPerHour constraint (fail closed)", () => {

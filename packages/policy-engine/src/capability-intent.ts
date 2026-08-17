@@ -65,6 +65,17 @@ import type { EvaluatorContext } from "./evaluators";
 /** the contributed rule-type discriminator. */
 export const CAPABILITY_INTENT_RULE_TYPE = "capability-intent" as const;
 
+/**
+ * ReDoS blast-radius bounds for operator-supplied patterns (SEC-107).
+ * `argMatches` / X `blockedPatterns` regexes come from tenant-admin policy
+ * config and run against agent-influenced invoke args / tweet text with no
+ * engine-side match timeout, so a catastrophically-backtracking pattern (even
+ * pasted innocently) could hang the API event loop. Both the pattern and the
+ * matched input are length-capped; anything over the cap fails closed (deny).
+ */
+export const MAX_POLICY_PATTERN_LENGTH = 256;
+export const MAX_POLICY_PATTERN_INPUT_LENGTH = 8_192;
+
 // ─── Permissioned-X: per-post price table (versioned constant) ────────────────
 //
 // SOURCE (captured 2026-07-16, docs.x.com pay-per-use, effective Feb 6 2026):
@@ -664,6 +675,12 @@ function parseXConstraints(rawInput: unknown): XConstraints | { error: string } 
           error:
             "capability-intent: `x.contentPolicy.blockedPatterns` must be a non-empty string[] of non-empty strings",
         };
+      // SEC-107: bound operator-supplied regexes at parse time (same cap as
+      // argMatches) so a pathological pattern fails closed as a config error.
+      if (cp.blockedPatterns.some((p) => (p as string).length > MAX_POLICY_PATTERN_LENGTH))
+        return {
+          error: `capability-intent: \`x.contentPolicy.blockedPatterns\` patterns must not exceed ${MAX_POLICY_PATTERN_LENGTH} chars`,
+        };
       content.blockedPatterns = cp.blockedPatterns as string[];
     }
     out.contentPolicy = content;
@@ -911,6 +928,18 @@ function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: strin
     if (c.argMatches !== undefined && !isStringRecord(c.argMatches)) {
       return { error: "capability-intent: `constraints.argMatches` must be Record<string,string>" };
     }
+    // SEC-107: bound operator-supplied regexes at store/parse time, not just at
+    // evaluation time, so a pathological pattern fails closed as a config error.
+    if (
+      c.argMatches !== undefined &&
+      Object.values(c.argMatches as Record<string, string>).some(
+        (p) => p.length > MAX_POLICY_PATTERN_LENGTH,
+      )
+    ) {
+      return {
+        error: `capability-intent: \`constraints.argMatches\` patterns must not exceed ${MAX_POLICY_PATTERN_LENGTH} chars`,
+      };
+    }
 
     let timeWindow: CapabilityTimeWindow | undefined;
     if (c.timeWindow !== undefined) {
@@ -1010,6 +1039,15 @@ function evaluateConstraints(
   // compiled) regex. Invalid regex in config => deny (never throw).
   if (constraints.argMatches) {
     for (const [key, pattern] of Object.entries(constraints.argMatches)) {
+      // SEC-107: cap the operator-supplied pattern length so a pathological
+      // regex cannot be smuggled in via config.
+      if (typeof pattern !== "string" || pattern.length > MAX_POLICY_PATTERN_LENGTH) {
+        return {
+          ...base,
+          passed: false,
+          reason: `capability-intent: regex for arg "${key}" missing or exceeds ${MAX_POLICY_PATTERN_LENGTH} chars`,
+        };
+      }
       let re: RegExp;
       try {
         // anchor full-string so a partial match can't slip a governed arg.
@@ -1029,6 +1067,15 @@ function evaluateConstraints(
         };
       }
       const value = args[key];
+      // SEC-107: cap the agent-controlled input the regex runs against; an
+      // oversized arg cannot be verified within the bound => deny.
+      if (typeof value === "string" && value.length > MAX_POLICY_PATTERN_INPUT_LENGTH) {
+        return {
+          ...base,
+          passed: false,
+          reason: `capability-intent: arg "${key}" exceeds the ${MAX_POLICY_PATTERN_INPUT_LENGTH}-char match input cap`,
+        };
+      }
       if (typeof value !== "string" || !re.test(value)) {
         return {
           ...base,
@@ -1708,6 +1755,10 @@ function evaluateProviderConstraints(
   }
   if (constraints.argMatches) {
     for (const [key, pattern] of Object.entries(constraints.argMatches)) {
+      // SEC-107: same ReDoS bounds as the legacy-plane evaluator.
+      if (typeof pattern !== "string" || pattern.length > MAX_POLICY_PATTERN_LENGTH) {
+        return PROVIDER_POLICY_REASON.CONFIGURATION_INVALID;
+      }
       let re: RegExp;
       try {
         re = new RegExp(`^(?:${pattern})$`);
@@ -1715,6 +1766,9 @@ function evaluateProviderConstraints(
         return PROVIDER_POLICY_REASON.CONFIGURATION_INVALID;
       }
       const value = args[key];
+      if (typeof value === "string" && value.length > MAX_POLICY_PATTERN_INPUT_LENGTH) {
+        return PROVIDER_POLICY_REASON.HARD_DENY;
+      }
       if (typeof value !== "string" || !re.test(value)) return PROVIDER_POLICY_REASON.HARD_DENY;
     }
   }
@@ -1946,7 +2000,17 @@ export function evaluateXConstraints(
       if (typeof text !== "string") {
         return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
       }
+      // SEC-107: cap the agent-controlled input the patterns run against; text
+      // too large to scan within the bound cannot be proven clean => deny.
+      if (text.length > MAX_POLICY_PATTERN_INPUT_LENGTH) {
+        return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
+      }
       for (const pattern of x.contentPolicy.blockedPatterns) {
+        // SEC-107: cap the operator-supplied pattern length so a pathological
+        // regex cannot be smuggled in via config.
+        if (typeof pattern !== "string" || pattern.length > MAX_POLICY_PATTERN_LENGTH) {
+          return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.CONFIGURATION_INVALID };
+        }
         let re: RegExp;
         try {
           re = new RegExp(pattern);

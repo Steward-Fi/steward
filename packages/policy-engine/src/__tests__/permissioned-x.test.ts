@@ -170,6 +170,28 @@ describe("permissioned-X: contentPolicy", () => {
     expect(d.effect).toBe("hard_deny");
     expect(d.reasonCodes).toContain(R.CONFIGURATION_INVALID);
   });
+
+  it("over-long blockedPatterns fail closed as a config error (SEC-107 ReDoS bound)", () => {
+    const rule: ProviderPolicyRule = {
+      id: "r-long-regex",
+      type: "capability-intent",
+      enabled: true,
+      config: {
+        capabilities: [OP_TWEET],
+        effect: "allow",
+        constraints: { x: { contentPolicy: { blockedPatterns: [`(a+)+${".".repeat(300)}`] } } },
+      },
+    };
+    const d = composeProviderActionPolicyDecision([rule], ctx({}, { policyText: "anything" }));
+    expect(d.effect).toBe("hard_deny");
+    expect(d.reasonCodes).toContain(R.CONFIGURATION_INVALID);
+  });
+
+  it("over-long policyText fails closed instead of being scanned (SEC-107 ReDoS bound)", () => {
+    const x: XConstraints = { contentPolicy: { blockedPatterns: ["spam"] } };
+    const c = ctx({}, { policyText: `gm ${"x".repeat(9000)}` });
+    expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
+  });
 });
 
 // ─── maxPostsPerWindow ──────────────────────────────────────────────────────
