@@ -142,6 +142,21 @@ function getOAuthCallbackParams(url: URL): { code?: string; state?: string; erro
   };
 }
 
+/**
+ * Bind an OAuth callback message to the exact popup opened for this attempt.
+ * Checking only `event.origin` lets any same-origin window race the real popup
+ * and inject a forged error/code. PKCE/state still protect the token exchange,
+ * but rejecting unrelated windows avoids callback confusion and denial of
+ * service before those checks run.
+ */
+function isTrustedOAuthPopupMessage(
+  event: Pick<MessageEvent, "origin" | "source">,
+  popup: Window,
+  expectedOrigin: string,
+): boolean {
+  return event.origin === expectedOrigin && event.source === popup;
+}
+
 // ─── In-memory fallback storage ───────────────────────────────────────────────
 
 class MemoryStorage implements SessionStorage {
@@ -2056,7 +2071,7 @@ export class StewardAuth {
       // Listen for postMessage from the popup (if the callback page sends one)
       const messageHandler = (event: MessageEvent): void => {
         if (resolved) return;
-        if (event.origin !== origin) return;
+        if (!isTrustedOAuthPopupMessage(event, popup, origin)) return;
         const data = event.data as
           | { type?: string; code?: string; state?: string; error?: string }
           | undefined;
@@ -2330,4 +2345,5 @@ export {
   generateCodeChallenge as _generateCodeChallenge,
   generateCodeVerifier as _generateCodeVerifier,
   getOAuthCallbackParams as _getOAuthCallbackParams,
+  isTrustedOAuthPopupMessage as _isTrustedOAuthPopupMessage,
 };

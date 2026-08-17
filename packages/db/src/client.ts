@@ -64,22 +64,37 @@ export function getDatabaseUrl(): string {
 export function assertDatabaseUrlTls(connectionString: string): void {
   if (process.env.NODE_ENV !== "production") return;
 
-  let host = "";
+  const allowInsecure = process.env.STEWARD_ALLOW_INSECURE_DB === "true";
+  let parsed: URL;
   try {
-    host = new URL(connectionString).hostname.toLowerCase();
+    parsed = new URL(connectionString);
   } catch {
-    return;
+    if (allowInsecure) {
+      console.warn(
+        "[db] WARNING: STEWARD_ALLOW_INSECURE_DB=true — DATABASE_URL is not a valid URL, so TLS cannot be verified.",
+      );
+      return;
+    }
+    throw new Error(
+      "DATABASE_URL must be a valid URL so TLS settings can be verified in production",
+    );
   }
+  if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
+    throw new Error("DATABASE_URL must use the postgres:// or postgresql:// scheme");
+  }
+
+  const host = parsed.hostname.toLowerCase();
   if (host === "localhost" || host === "127.0.0.1" || host === "::1") return;
 
-  const lower = connectionString.toLowerCase();
+  // Parse the query parameter instead of substring-matching the raw URL. A
+  // password/path such as `.../sslmode=require` must not satisfy the check,
+  // and duplicate sslmode parameters are ambiguous across client parsers.
+  const sslModes = parsed.searchParams.getAll("sslmode").map((value) => value.toLowerCase());
   const hasTls =
-    lower.includes("sslmode=require") ||
-    lower.includes("sslmode=verify-ca") ||
-    lower.includes("sslmode=verify-full");
+    sslModes.length === 1 && ["require", "verify-ca", "verify-full"].includes(sslModes[0]);
   if (hasTls) return;
 
-  if (process.env.STEWARD_ALLOW_INSECURE_DB === "true") {
+  if (allowInsecure) {
     console.warn(
       "[db] WARNING: STEWARD_ALLOW_INSECURE_DB=true — DATABASE_URL has no sslmode=require. " +
         "This is only safe on a private network. SOC2 CC6.7 requires encryption in transit.",
@@ -94,6 +109,7 @@ export function assertDatabaseUrlTls(connectionString: string): void {
 }
 
 export function createPostgresClient(connectionString = getDatabaseUrl()) {
+  assertDatabaseUrlTls(connectionString);
   return postgres(connectionString, {
     max: 10,
     prepare: false,
@@ -119,6 +135,7 @@ export function createDb(connectionString = getDatabaseUrl()) {
  * the underlying transport is HTTP, so there is no TCP connection to reuse.
  */
 export function createNeonHttpDb(connectionString = getDatabaseUrl()) {
+  assertDatabaseUrlTls(connectionString);
   // Lazy-require so Bun/Node entry points don't pull @neondatabase/serverless
   // into their bundle when the postgres-js driver is in use.
   const { neon } = require("@neondatabase/serverless") as { neon: (url: string) => any };

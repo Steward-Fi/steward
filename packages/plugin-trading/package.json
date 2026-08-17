@@ -15,6 +15,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@stwd/adapters": "workspace:*",
     "@stwd/db": "workspace:*",
     "@stwd/policy-engine": "workspace:*",
     "@stwd/redis": "workspace:*",

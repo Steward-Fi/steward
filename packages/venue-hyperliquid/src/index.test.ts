@@ -774,6 +774,14 @@ describe("Hyperliquid approveBuilderFee (user-signed action)", () => {
     expect([27, 28]).toContain(signed.signature.v);
   });
 
+  test("rejects malformed or excessive builder-fee approvals before signing", () => {
+    for (const maxFeeRate of ["100%", "0.100001%", "NaN", "0.1", "-0.1%", "1e-3%"] as const) {
+      expect(() =>
+        createApproveBuilderFeeTypedData({ builder: BUILDER, maxFeeRate, nonce: NONCE }),
+      ).toThrow(/maxFeeRate/);
+    }
+  });
+
   test("submitApproveBuilderFee throws on HTTP-200 status err", async () => {
     const signed = await signApproveBuilderFee(
       PRIVATE_KEY,

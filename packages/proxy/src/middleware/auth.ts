@@ -291,8 +291,9 @@ export async function authMiddleware(c: Context, next: Next) {
     c.set("tenantId", tenantId);
 
     await next();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Token verification failed";
-    return c.json({ ok: false, error: `Authentication failed: ${message}` }, 401);
+  } catch {
+    // Keep jose and revocation-store diagnostics behind the authentication
+    // boundary; exposing them creates a token/configuration oracle.
+    return c.json({ ok: false, error: "Authentication failed" }, 401);
   }
 }

@@ -71,6 +71,7 @@
     "ip-address": "^10.4.0",
     "socket.io-parser": "^4.2.7",
     "elliptic": "^6.6.1",
-    "hono": "^4.12.34"
+    "hono": "^4.12.34",
+    "@hono/node-server": "^1.19.15"
   }
 }

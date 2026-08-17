@@ -218,6 +218,31 @@ describe("operator recovery withdraw amount validation (issue #109)", () => {
     expect(signWithdrawCalls.length).toBe(0);
   });
 
+  it("applies the per-withdraw maximum to an omitted amount resolved from live balance", async () => {
+    const tenantId = `tenant-wd-live-max-${Date.now()}`;
+    const agentId = `agent-wd-live-max-${Date.now()}`;
+    await seedAgent({ tenantId, agentId, approvedAddresses: [approved] });
+    signWithdrawCalls.length = 0;
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ withdrawable: "2000.000001" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as typeof fetch;
+    try {
+      const app = await buildApp();
+      const res = await postWithdraw(app, tenantId, { agentId, destination: approved });
+
+      expect(res.status).toBe(400);
+      const bodyJson = (await res.json()) as { error?: string };
+      expect(bodyJson.error ?? "").toContain("maximum");
+      expect(signWithdrawCalls.length).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("accepts a valid 6-decimal USDC amount without floating-point rejection", async () => {
     const tenantId = `tenant-wd-six-dec-${Date.now()}`;
     const agentId = `agent-wd-six-dec-${Date.now()}`;

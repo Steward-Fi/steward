@@ -62,6 +62,7 @@
  * claim exactly-once settlement across a crash (see outcome_unknown semantics).
  */
 
+import { randomUUID } from "node:crypto";
 import { getRedis } from "./client.js";
 
 export type CumulativeSpendScope = "operation" | "agent" | "grant";
@@ -208,10 +209,11 @@ function isValidWindow(w: number): boolean {
   return typeof w === "number" && Number.isSafeInteger(w) && w > 0 && w <= MAX_WINDOW_SECONDS;
 }
 
-let seq = 0;
 function nextSeq(): string {
-  seq = (seq + 1) % 1_000_000;
-  return `${seq}.${Math.random().toString(36).slice(2, 8)}`;
+  // A process-local counter can repeat after a restart, and Math.random is not
+  // an appropriate uniqueness source for money-accounting reservations. A UUID
+  // prevents an existing ZSET member from being overwritten and under-counted.
+  return randomUUID();
 }
 
 /**

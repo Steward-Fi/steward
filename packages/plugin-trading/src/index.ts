@@ -23,10 +23,12 @@
 import type { AppVariables, StewardPlugin } from "@stwd/shared";
 import type { Hono } from "hono";
 import type { StewardAppContext } from "./context";
+import { createEvmSwapRoutes } from "./routes/evm-swap";
 import { createOperatorRecoveryRoutes } from "./routes/operator-recovery";
 import { createTradeRoutes } from "./routes/trade";
 
 export type { StewardAppContext } from "./context";
+export { createEvmSwapRoutes } from "./routes/evm-swap";
 export { createOperatorRecoveryRoutes } from "./routes/operator-recovery";
 export { createTradeRoutes } from "./routes/trade";
 
@@ -43,7 +45,9 @@ export type StewardApiPlugin = StewardPlugin<StewardApp, StewardAppContext>;
  * plugin. Exported so the plugin's own middleware (and tests) can branch on it.
  */
 export const isAgentOrderPath = (path: string): boolean =>
-  path.endsWith("/trade/hyperliquid/order") || path.endsWith("/trade/polymarket/order");
+  path.endsWith("/trade/hyperliquid/order") ||
+  path.endsWith("/trade/polymarket/order") ||
+  path.endsWith("/trade/evm/swap/prepare");
 
 export const isOperatorRecoveryPath = (path: string): boolean =>
   path.endsWith("/close-all") ||
@@ -106,6 +110,8 @@ export const tradingPlugin: StewardApiPlugin = {
       "/v1/trade/hyperliquid/order",
       "/trade/polymarket/order",
       "/v1/trade/polymarket/order",
+      "/trade/evm/swap/prepare",
+      "/v1/trade/evm/swap/prepare",
     ]) {
       app.use(path, (c, next) => requireAgentJwt(c, next));
     }
@@ -124,7 +130,10 @@ export const tradingPlugin: StewardApiPlugin = {
 
     // ── route mounts (verbatim order from app.ts) ─────────────────────────────
     const tradeRoutes = createTradeRoutes(ctx);
+    const evmSwapRoutes = createEvmSwapRoutes(ctx);
     const operatorRecoveryRoutes = createOperatorRecoveryRoutes(ctx);
+    app.route("/trade", evmSwapRoutes);
+    app.route("/v1/trade", evmSwapRoutes);
     app.route("/trade", tradeRoutes);
     app.route("/v1/trade", tradeRoutes);
     app.route("/trade", operatorRecoveryRoutes);

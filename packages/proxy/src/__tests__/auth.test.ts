@@ -143,7 +143,7 @@ describe("proxy auth middleware", () => {
 
     expect(res.status).toBe(401);
     const body = await res.json();
-    expect(body.error).toContain("revoked");
+    expect(body.error).toBe("Authentication failed");
   });
 
   test("rejects agent tokens revoked by the agent-wide revocation line", async () => {
@@ -164,7 +164,21 @@ describe("proxy auth middleware", () => {
 
     expect(res.status).toBe(401);
     const body = await res.json();
-    expect(body.error).toContain("revoked");
+    expect(body.error).toBe("Authentication failed");
+  });
+
+  test("does not expose JWT verifier diagnostics for malformed tokens", async () => {
+    const tokenMaterial = "not-a-compact-jwt-with-sensitive-material";
+    const res = await app().request("/", {
+      headers: { authorization: `Bearer ${tokenMaterial}` },
+    });
+
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body).toEqual({ ok: false, error: "Authentication failed" });
+    expect(JSON.stringify(body)).not.toContain(tokenMaterial);
+    expect(JSON.stringify(body)).not.toContain("JWS");
+    expect(JSON.stringify(body)).not.toContain("JWT");
   });
 
   test("requires proof-of-possession signatures when configured", async () => {

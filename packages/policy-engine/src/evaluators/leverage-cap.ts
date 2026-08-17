@@ -49,6 +49,13 @@ export function evaluateLeverageCap(rule: PolicyRule, ctx: LeverageCapContext): 
       reason: `leverage-cap: leverage ${ctx.leverage} is not a finite number`,
     };
   }
+  if (ctx.leverage < 1) {
+    return {
+      ...base,
+      passed: false,
+      reason: `leverage-cap: leverage ${ctx.leverage} must be >= 1`,
+    };
+  }
 
   if (ctx.leverage <= config.maxLeverage) {
     return {

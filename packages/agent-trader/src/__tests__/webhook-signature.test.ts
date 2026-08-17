@@ -3,6 +3,13 @@ import { createServer } from "node:net";
 import { signWebhookPayload } from "@stwd/sdk";
 import type { WebhookEvent } from "@stwd/shared";
 import { createWebhookServer } from "../webhook";
+import {
+  createConfiguredWebhookDeliveryStore,
+  createUpstashReplaySetClient,
+  MemoryWebhookDeliveryStore,
+  RedisWebhookDeliveryStore,
+  type WebhookDeliveryStore,
+} from "../webhook-delivery-store";
 
 const SECRET = "agent-trader-webhook-secret";
 
@@ -96,6 +103,120 @@ describe("agent trader webhook receiver signatures", () => {
       expect(response.status).toBe(200);
       expect(received).toHaveLength(1);
       expect(received[0]?.agentId).toBe("agent-1");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("dispatches a signed delivery id at most once", async () => {
+    const port = await getFreePort();
+    const server = createWebhookServer(port, SECRET);
+    const received: WebhookEvent[] = [];
+    server.on("tx_confirmed", (event) => received.push(event));
+
+    const body = JSON.stringify(makeEvent());
+    const headers = await v2Headers(body, "tx_confirmed", "delivery-replay-1");
+
+    await server.start();
+    try {
+      const first = await fetch(`http://127.0.0.1:${port}`, { method: "POST", headers, body });
+      const replay = await fetch(`http://127.0.0.1:${port}`, { method: "POST", headers, body });
+
+      expect(first.status).toBe(200);
+      expect(replay.status).toBe(200);
+      expect(received).toHaveLength(1);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("suppresses a duplicate atomically across two server instances sharing a store", async () => {
+    const firstPort = await getFreePort();
+    const secondPort = await getFreePort();
+    const sharedStore = new MemoryWebhookDeliveryStore();
+    const firstServer = createWebhookServer(firstPort, SECRET, { deliveryStore: sharedStore });
+    const secondServer = createWebhookServer(secondPort, SECRET, { deliveryStore: sharedStore });
+    const received: WebhookEvent[] = [];
+    firstServer.on("tx_confirmed", (event) => received.push(event));
+    secondServer.on("tx_confirmed", (event) => received.push(event));
+
+    const body = JSON.stringify(makeEvent());
+    const headers = await v2Headers(body, "tx_confirmed", "delivery-shared-store-1");
+
+    await Promise.all([firstServer.start(), secondServer.start()]);
+    try {
+      const responses = await Promise.all([
+        fetch(`http://127.0.0.1:${firstPort}`, { method: "POST", headers, body }),
+        fetch(`http://127.0.0.1:${secondPort}`, { method: "POST", headers, body }),
+      ]);
+
+      expect(responses.map((response) => response.status)).toEqual([200, 200]);
+      expect(received).toHaveLength(1);
+    } finally {
+      await Promise.all([firstServer.stop(), secondServer.stop()]);
+    }
+  });
+
+  it("fails closed without dispatch when the replay backend errors", async () => {
+    const port = await getFreePort();
+    const failingStore: WebhookDeliveryStore = {
+      durable: true,
+      async claim() {
+        throw new Error("redis unavailable");
+      },
+    };
+    const server = createWebhookServer(port, SECRET, { deliveryStore: failingStore });
+    const received: WebhookEvent[] = [];
+    server.on("tx_confirmed", (event) => received.push(event));
+
+    const body = JSON.stringify(makeEvent());
+    const headers = await v2Headers(body, "tx_confirmed", "delivery-store-error-1");
+
+    await server.start();
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}`, { method: "POST", headers, body });
+      expect(response.status).toBe(503);
+      expect(received).toHaveLength(0);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("uses Redis SET NX PX for an atomic, hashed delivery claim", async () => {
+    const calls: unknown[][] = [];
+    const redis = {
+      async set(...args: unknown[]) {
+        calls.push(args);
+        return "OK";
+      },
+    };
+    const store = new RedisWebhookDeliveryStore(redis as never);
+
+    expect(await store.claim("tenant-secret:delivery-1", 60_000)).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[0]).toMatch(/^steward:agent-trader:webhook-delivery:[a-f0-9]{64}$/);
+    expect(calls[0]?.[0]).not.toContain("tenant-secret");
+    expect(calls[0]?.slice(1)).toEqual(["1", "PX", 60_000, "NX"]);
+  });
+
+  it("rejects a signed header whose event type differs from the payload", async () => {
+    const port = await getFreePort();
+    const server = createWebhookServer(port, SECRET);
+    const received: WebhookEvent[] = [];
+    server.on("tx_confirmed", (event) => received.push(event));
+
+    const body = JSON.stringify(makeEvent());
+    const headers = await v2Headers(body, "tx_failed", "delivery-type-confusion-1");
+
+    await server.start();
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}`, {
+        method: "POST",
+        headers,
+        body,
+      });
+      expect(response.status).toBe(401);
+      expect(received).toHaveLength(0);
     } finally {
       await server.stop();
     }
@@ -240,6 +361,149 @@ describe("agent trader webhook receiver signatures", () => {
       if (prevEnv === undefined) delete process.env.NODE_ENV;
       else process.env.NODE_ENV = prevEnv;
     }
+  });
+
+  it("requires durable replay storage in production unless single-instance is acknowledged", () => {
+    const previousEnv = process.env.NODE_ENV;
+    const ackName = "STEWARD_AGENT_TRADER_ACKNOWLEDGE_SINGLE_INSTANCE_REPLAY";
+    const previousAck = process.env[ackName];
+    try {
+      process.env.NODE_ENV = "production";
+      delete process.env[ackName];
+      expect(() => createWebhookServer(4210, SECRET)).toThrow(
+        "Durable webhook replay storage is required in production",
+      );
+
+      process.env[ackName] = "true";
+      expect(createWebhookServer(4210, SECRET)).toBeDefined();
+
+      delete process.env[ackName];
+      expect(() =>
+        createWebhookServer(4210, SECRET, { deliveryStore: new MemoryWebhookDeliveryStore() }),
+      ).toThrow("Durable webhook replay storage is required in production");
+      expect(
+        createWebhookServer(4210, SECRET, {
+          deliveryStore: new RedisWebhookDeliveryStore({ set: async () => "OK" }),
+        }),
+      ).toBeDefined();
+    } finally {
+      if (previousEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousEnv;
+      if (previousAck === undefined) delete process.env[ackName];
+      else process.env[ackName] = previousAck;
+    }
+  });
+
+  it("selects configured Redis or Upstash replay storage and rejects partial credentials", () => {
+    let factoryCalls = 0;
+    const fakeRedis = { set: async () => "OK" };
+    const kinds: string[] = [];
+    const factory = (kind: "redis" | "upstash") => {
+      factoryCalls += 1;
+      kinds.push(kind);
+      return fakeRedis as never;
+    };
+
+    expect(
+      createConfiguredWebhookDeliveryStore({ REDIS_URL: "redis://redis:6379" }, factory),
+    ).toBeInstanceOf(RedisWebhookDeliveryStore);
+    const upstashEnv: NodeJS.ProcessEnv = {
+      UPSTASH_REDIS_REST_URL: "https://example.upstash.io",
+      UPSTASH_REDIS_REST_TOKEN: "test-token",
+    };
+    expect(createConfiguredWebhookDeliveryStore(upstashEnv, factory)).toBeInstanceOf(
+      RedisWebhookDeliveryStore,
+    );
+    expect(factoryCalls).toBe(2);
+    expect(kinds).toEqual(["redis", "upstash"]);
+    expect(() =>
+      createConfiguredWebhookDeliveryStore(
+        { UPSTASH_REDIS_REST_URL: "https://example.upstash.io" },
+        factory,
+      ),
+    ).toThrow("requires both REST URL and token");
+    expect(() =>
+      createConfiguredWebhookDeliveryStore(
+        {
+          UPSTASH_REDIS_REST_URL: "http://example.upstash.io",
+          UPSTASH_REDIS_REST_TOKEN: "test-token",
+        },
+        factory,
+      ),
+    ).toThrow("must use HTTPS");
+    expect(() => createConfiguredWebhookDeliveryStore({ NODE_ENV: "production" }, factory)).toThrow(
+      "Durable webhook replay storage is required in production",
+    );
+    expect(
+      createConfiguredWebhookDeliveryStore(
+        {
+          NODE_ENV: "production",
+          STEWARD_AGENT_TRADER_ACKNOWLEDGE_SINGLE_INSTANCE_REPLAY: "true",
+        },
+        factory,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("times out and aborts a stalled Upstash replay claim with a sanitized error", async () => {
+    let aborted = false;
+    const stalledFetch = ((_input: unknown, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          aborted = true;
+          reject(new Error("secret backend diagnostic containing test-token"));
+        });
+      })) as typeof fetch;
+    const client = createUpstashReplaySetClient("https://example.upstash.io", "test-token", {
+      fetchImpl: stalledFetch,
+      timeoutMs: 5,
+    });
+
+    const claim = client.set("key", "1", "PX", 60_000, "NX");
+    await expect(claim).rejects.toThrow("Upstash replay claim request failed");
+    await expect(claim).rejects.not.toThrow("test-token");
+    expect(aborted).toBe(true);
+  });
+
+  it("bounds and cancels an oversized Upstash response without leaking its body", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`sensitive-body-${"x".repeat(128)}`));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const oversizedFetch = (async () => new Response(body, { status: 200 })) as typeof fetch;
+    const client = createUpstashReplaySetClient("https://example.upstash.io", "test-token", {
+      fetchImpl: oversizedFetch,
+      maxResponseBytes: 16,
+    });
+
+    const claim = client.set("key", "1", "PX", 60_000, "NX");
+    await expect(claim).rejects.toThrow("Upstash replay claim response too large");
+    await expect(claim).rejects.not.toThrow("sensitive-body");
+    expect(cancelled).toBe(true);
+  });
+
+  it("times out and cancels an Upstash response body that stalls after headers", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const stalledBodyFetch = (async () => new Response(body, { status: 200 })) as typeof fetch;
+    const client = createUpstashReplaySetClient("https://example.upstash.io", "test-token", {
+      fetchImpl: stalledBodyFetch,
+      timeoutMs: 5,
+    });
+
+    await expect(client.set("key", "1", "PX", 60_000, "NX")).rejects.toThrow(
+      "Upstash replay claim request failed",
+    );
+    expect(cancelled).toBe(true);
   });
 
   it("rejects oversized webhook bodies before dispatch", async () => {

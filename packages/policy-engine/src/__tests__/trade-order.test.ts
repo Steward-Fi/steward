@@ -40,6 +40,15 @@ describe("trade-order evaluators", () => {
     });
   });
 
+  it("leverage-cap fails closed on malformed session caps and requested leverage", () => {
+    for (const leverageCap of [Number.NaN, Number.POSITIVE_INFINITY, 0, -1]) {
+      expect(leverageCapEvaluator({ ...session, leverageCap }, order).allow).toBe(false);
+    }
+    for (const leverage of [Number.NaN, Number.POSITIVE_INFINITY, 0, -1]) {
+      expect(leverageCapEvaluator(session, { ...order, leverage }).allow).toBe(false);
+    }
+  });
+
   it("asset-allowlist blocks assets outside the session allowlist and defaults to BTC/ETH", () => {
     expect(assetAllowlistEvaluator({}, { ...order, asset: "SOL" })).toEqual({
       allow: false,
@@ -63,6 +72,16 @@ describe("trade-order evaluators", () => {
     }
   });
 
+  it("daily-spend-cap fails closed on malformed stored cap or spend", () => {
+    expect(dailySpendCapEvaluator({ ...session, dailyCapUsd: Number.NaN }, order).allow).toBe(
+      false,
+    );
+    expect(
+      dailySpendCapEvaluator({ ...session, dailySpendUsd: Number.POSITIVE_INFINITY }, order).allow,
+    ).toBe(false);
+    expect(dailySpendCapEvaluator({ ...session, dailySpendUsd: -1 }, order).allow).toBe(false);
+  });
+
   it("per-order-cap blocks orders above the session per-order cap and defaults to $50", () => {
     expect(perOrderCapEvaluator({}, { ...order, estimatedOrderUsd: 51 })).toEqual({
       allow: false,
@@ -76,6 +95,12 @@ describe("trade-order evaluators", () => {
         allow: false,
         reason: "per-order-cap: estimated order USD is required when a per-order cap is configured",
       });
+    }
+  });
+
+  it("per-order-cap fails closed on a malformed stored cap", () => {
+    for (const perOrderCapUsd of [Number.NaN, Number.POSITIVE_INFINITY, 0, -1]) {
+      expect(perOrderCapEvaluator({ ...session, perOrderCapUsd }, order).allow).toBe(false);
     }
   });
 

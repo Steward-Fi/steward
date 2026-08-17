@@ -3,6 +3,7 @@ import {
   _generateCodeChallenge,
   _generateCodeVerifier,
   _getOAuthCallbackParams,
+  _isTrustedOAuthPopupMessage,
   StewardAuth,
 } from "../auth";
 import type { SessionStorage, StewardProviders } from "../auth-types";
@@ -1064,6 +1065,35 @@ describe("handleOAuthCallback", () => {
       expect(err).toBeInstanceOf(StewardApiError);
       expect((err as StewardApiError).message).toBe("Token exchange failed");
     }
+  });
+});
+
+describe("OAuth popup message binding", () => {
+  it("accepts messages only from the exact popup and expected origin", () => {
+    const popup = {} as Window;
+    const unrelatedWindow = {} as Window;
+
+    expect(
+      _isTrustedOAuthPopupMessage(
+        { origin: "https://app.example", source: popup },
+        popup,
+        "https://app.example",
+      ),
+    ).toBe(true);
+    expect(
+      _isTrustedOAuthPopupMessage(
+        { origin: "https://app.example", source: unrelatedWindow },
+        popup,
+        "https://app.example",
+      ),
+    ).toBe(false);
+    expect(
+      _isTrustedOAuthPopupMessage(
+        { origin: "https://evil.example", source: popup },
+        popup,
+        "https://app.example",
+      ),
+    ).toBe(false);
   });
 });
 

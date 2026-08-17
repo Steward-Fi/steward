@@ -88,7 +88,6 @@ export {
   decodeMoneroAddress,
   generateMoneroWallet,
   MONERO_ATOMIC_UNITS,
-  MONERO_DEFAULT_DAEMON_URLS,
   MoneroNotConfiguredError,
   MoneroRpcError,
   MoneroWalletRpcBackend,

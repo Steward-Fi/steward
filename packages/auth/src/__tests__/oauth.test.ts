@@ -502,6 +502,76 @@ describe("OAuthClient.exchangeCode", () => {
     );
     globalThis.fetch = originalFetch;
   });
+
+  it("does not propagate secret-bearing token endpoint error bodies", async () => {
+    const originalFetch = globalThis.fetch;
+    const reflectedSecret = "refresh_token=super-secret-refresh-token";
+    globalThis.fetch = asFetchMock(
+      async () =>
+        new Response(reflectedSecret, {
+          status: 401,
+          headers: { "Content-Type": "text/plain" },
+        }),
+    );
+    const client = new OAuthClient({ ...pkceConfig, requiresPkce: false });
+
+    let message = "";
+    try {
+      await client.exchangeCode("code", "https://app.com/cb");
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(message).toBe("Token exchange failed (401)");
+    expect(message).not.toContain(reflectedSecret);
+  });
+
+  it("does not propagate provider-controlled stream cancellation failures", async () => {
+    const originalFetch = globalThis.fetch;
+    const reflectedSecret = "stream-cancel-reflected-refresh-token";
+    globalThis.fetch = asFetchMock(async () => {
+      const stream = new ReadableStream({
+        cancel() {
+          throw new Error(reflectedSecret);
+        },
+      });
+      return new Response(stream, { status: 401 });
+    });
+    const client = new OAuthClient({ ...pkceConfig, requiresPkce: false });
+
+    let message = "";
+    try {
+      await client.exchangeCode("code", "https://app.com/cb");
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(message).toBe("Token exchange failed (401)");
+    expect(message).not.toContain(reflectedSecret);
+  });
+
+  it("rejects oversized successful token responses before parsing", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = asFetchMock(
+      async () =>
+        new Response("{}", {
+          status: 200,
+          headers: { "Content-Type": "application/json", "Content-Length": "1048577" },
+        }),
+    );
+    const client = new OAuthClient({ ...pkceConfig, requiresPkce: false });
+    try {
+      await expect(client.exchangeCode("code", "https://app.com/cb")).rejects.toThrow(
+        "Token exchange returned an oversized response",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 // ─── OAuthClient.getUserInfo — Twitter response normalization ─────────────────
@@ -681,6 +751,25 @@ describe("OAuthClient.getUserInfo — provider response normalization", () => {
     const client = makeClient();
     await expect(client.getUserInfo("bad-token")).rejects.toThrow("getUserInfo failed (401)");
     globalThis.fetch = originalFetch;
+  });
+
+  it("does not propagate secret-bearing userinfo error bodies", async () => {
+    const originalFetch = globalThis.fetch;
+    const reflectedSecret = "Bearer reflected-access-token";
+    globalThis.fetch = asFetchMock(async () => new Response(reflectedSecret, { status: 401 }));
+    const client = makeClient();
+
+    let message = "";
+    try {
+      await client.getUserInfo("bad-token");
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(message).toBe("getUserInfo failed (401)");
+    expect(message).not.toContain(reflectedSecret);
   });
 });
 

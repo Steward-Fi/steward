@@ -47,6 +47,25 @@ function fixedOracle(priceUsd: number | null): PriceOracle {
 }
 
 describe("USD policy evaluation", () => {
+  it("fails closed on malformed USD limits or oracle values", async () => {
+    for (const maxPerTxUsd of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+      const result = await evaluatePolicy(
+        rule("spending-limit", { maxPerTxUsd }),
+        makeContext({ priceOracle: fixedOracle(1) }),
+      );
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("non-negative finite number");
+    }
+
+    const badOracle = fixedOracle(1);
+    badOracle.weiToUsd = async () => Number.NaN;
+    const result = await evaluatePolicy(
+      rule("spending-limit", { maxPerTxUsd: 10 }),
+      makeContext({ priceOracle: badOracle }),
+    );
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("cannot be evaluated");
+  });
   it("uses USD spending limits when an oracle is available", async () => {
     const result = await evaluatePolicy(
       rule("spending-limit", {
@@ -131,6 +150,25 @@ describe("USD policy evaluation", () => {
 });
 
 describe("policy edge cases and composition", () => {
+  it("an enabled empty auto-approve policy requires manual approval", async () => {
+    const engine = new PolicyEngine();
+    const result = await engine.evaluate([rule("auto-approve-threshold", {})], makeContext());
+    expect(result.approved).toBe(false);
+    expect(result.requiresManualApproval).toBe(true);
+    expect(result.results[0]?.reason).toContain("not configured");
+  });
+
+  it("malformed rate-limit config fails closed", async () => {
+    for (const config of [
+      {},
+      { maxTxPerHour: Number.NaN, maxTxPerDay: 10 },
+      { maxTxPerHour: 10.5, maxTxPerDay: 10 },
+    ]) {
+      const result = await evaluatePolicy(rule("rate-limit", config), makeContext());
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("safe integers");
+    }
+  });
   it("zero rate limit blocks the first transaction", async () => {
     const result = await evaluatePolicy(
       rule("rate-limit", { maxTxPerHour: 0, maxTxPerDay: 10 }),
@@ -148,7 +186,7 @@ describe("policy edge cases and composition", () => {
     );
 
     expect(result.passed).toBe(false);
-    expect(result.reason).toContain("Hourly");
+    expect(result.reason).toContain("safe integers");
   });
 
   it("a negative auto-approve threshold is rejected as an invalid uint256", async () => {

@@ -8,7 +8,8 @@ coverage
 !.env.example
 README.md
 REDESIGN-BRIEF.md
-web
+web/**
+!web/package.json
 packages/dashboard
 packages/sdk/src/__tests__
 packages/sdk/dist

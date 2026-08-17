@@ -35,6 +35,7 @@ import { SecretVault } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import { providerAuthorityStore } from "../services/provider-authority-store";
 import {
+  __runDefaultXForwardForTests,
   __setXForwardForTests,
   completeXConnect,
   disconnectXProviderCredential,
@@ -891,4 +892,24 @@ test("XConnectError carries code + http status", () => {
   const e = new XConnectError("X_STATE_INVALID", 401);
   expect(e.code).toBe("X_STATE_INVALID");
   expect(e.httpStatus).toBe(401);
+});
+
+test("real X transport rejects oversized provider responses before parsing", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response("{}", {
+      status: 200,
+      headers: { "content-type": "application/json", "content-length": "1048577" },
+    })) as typeof fetch;
+  try {
+    await expect(
+      __runDefaultXForwardForTests({
+        url: "https://api.x.com/2/users/me",
+        method: "GET",
+        headers: { accept: "application/json" },
+      }),
+    ).rejects.toThrow("X provider response exceeded maximum size");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

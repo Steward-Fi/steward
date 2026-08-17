@@ -14,14 +14,33 @@ import path from "node:path";
  *   6. Cleanup (cascading deletes)
  *
  * Usage:
- *   STEWARD_URL=http://88.99.66.168:3200 bun run scripts/e2e-integration-test.ts
+ *   STEWARD_URL=https://steward.example bun run scripts/e2e-integration-test.ts
  *   STEWARD_URL=http://localhost:3200 bun run scripts/e2e-integration-test.ts
  */
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const STEWARD_URL = process.env.STEWARD_URL || "http://88.99.66.168:3200";
+const STEWARD_URL = process.env.STEWARD_URL || "http://localhost:3200";
 const PROXY_URL = process.env.PROXY_URL || STEWARD_URL.replace(":3200", ":8080");
+
+function assertSecureServiceUrl(name: string, value: string): void {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${name} must be an absolute http(s) URL`);
+  }
+  const loopback = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]).has(url.hostname);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+    throw new Error(`${name} must use https:// unless it targets loopback`);
+  }
+  if (url.username || url.password) {
+    throw new Error(`${name} must not embed credentials in the URL`);
+  }
+}
+
+assertSecureServiceUrl("STEWARD_URL", STEWARD_URL);
+assertSecureServiceUrl("PROXY_URL", PROXY_URL);
 const SKIP_PROXY_E2E = process.env.SKIP_PROXY_E2E === "1" || process.env.SKIP_PROXY_E2E === "true";
 const TEST_PREFIX = `e2e-${Date.now()}`;
 const TENANT_ID = `${TEST_PREFIX}-tenant`;

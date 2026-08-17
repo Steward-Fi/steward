@@ -59,6 +59,7 @@ The current `steward doctor` and Compose production roots are:
 | `STEWARD_AUDIT_HMAC_KEY` | Historical audit-event HMAC chains cannot be recomputed or verified. Database rows and signed checkpoints remain available, but the symmetric chain-integrity check is lost. A new key cannot authenticate old events. |
 | `STEWARD_AUDIT_SIGNING_KEY` | Existing checkpoint rows and exported bundles remain verifiable with their embedded public keys, but the restored instance cannot create continuity checkpoints with the old identity. Loss is not ciphertext loss, but key continuity is unrecoverable. Configure the same PKCS#8 PEM or 64-hex-character Ed25519 seed. |
 | `STEWARD_JWT_SECRET` | Existing user/agent/session JWTs cannot be verified. Restoring a different value forces reauthentication/token reissue; never substitute `STEWARD_MASTER_PASSWORD` in production. |
+| `STEWARD_EMAIL_CODE_SECRET` | Pending email login codes and magic-link challenges cannot be verified after restoring a different value. Restore the exact strong secret or deliberately invalidate all pending email login state before reopening. |
 | `POSTGRES_PASSWORD` and the credentials represented by `DATABASE_URL` | Required to access the database service. They may be reset by a database administrator without changing encrypted application data, but must be restored consistently to Compose/application configuration. Do not put the password in command history. |
 
 Also escrow every enabled deployment-specific credential that is needed after a

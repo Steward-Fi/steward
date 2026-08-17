@@ -461,10 +461,11 @@ through the shared auth `StoreBackend`: Redis when configured, otherwise
 Postgres `auth_kv_store` when migrations are available, otherwise an in-memory
 local-development fallback. This is not an HSM-backed import-session store.
 Production deployments should configure Redis or run migrations so init and
-submit can land on different API replicas. `/ready` reports
-`checks.importSessionStore.source` and fails production readiness when the source
-is `memory` unless `STEWARD_ALLOW_MEMORY_IMPORT_SESSION_STORE=true`. Memory
-fallback is not durable across restarts or processes.
+submit can land on different API replicas. Production startup fails before
+accepting traffic if any auth store falls back to memory, and `/ready` reports
+the complete mapping in `checks.authStores`. Only a guaranteed single-instance
+deployment may acknowledge restart-unsafe memory storage with
+`STEWARD_ALLOW_MEMORY_AUTH_STORES=true`.
 
 Plaintext `privateKey` fields, malformed envelopes, expired sessions, tenant or
 agent mismatches, and failed decryptions fail closed. Audit and webhook metadata

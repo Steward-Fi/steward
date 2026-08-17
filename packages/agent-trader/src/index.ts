@@ -15,6 +15,7 @@ import { logError, logInfo, logWarn } from "./logger.js";
 import type { AgentLoop } from "./loop.js";
 import { startAgentLoop } from "./loop.js";
 import { createWebhookServer, registerDefaultHandlers } from "./webhook.js";
+import { createConfiguredWebhookDeliveryStore } from "./webhook-delivery-store.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -53,6 +54,11 @@ async function main(): Promise<void> {
     logWarn("No enabled agents found — running in webhook-only mode");
   }
 
+  // Resolve the production replay-safety requirement before any autonomous
+  // trading loop starts. A missing/invalid durable store must abort startup,
+  // not leave trading active with an unsafe or absent webhook receiver.
+  const deliveryStore = createConfiguredWebhookDeliveryStore();
+
   // 2. Steward SDK client
   const steward = new StewardClient({
     baseUrl: config.steward.apiUrl,
@@ -86,6 +92,7 @@ async function main(): Promise<void> {
   const webhookServer = createWebhookServer(config.webhookPort, config.webhookSecret, {
     expectedTenantId: config.steward.tenantId,
     allowedAgentIds: config.agents.map((agent) => agent.agentId),
+    deliveryStore,
   });
   registerDefaultHandlers(webhookServer);
 
