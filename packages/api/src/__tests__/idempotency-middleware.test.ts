@@ -279,6 +279,57 @@ describe("idempotencyMiddleware", () => {
     expect(getCount()).toBe(1);
   });
 
+  it("suppresses replay of secret-bearing response bodies (SEC-070)", async () => {
+    const app = new Hono<{ Variables: AppVariables }>();
+    const store = new MemoryIdempotencyStore(100);
+    let count = 0;
+
+    app.use("*", async (c, next) => {
+      c.set("authType", "api-key");
+      await next();
+    });
+    app.use("*", idempotencyMiddleware({ store, ttlMs: 60_000 }));
+    app.post("/vault/agent-1/export", async (c) => {
+      count += 1;
+      return c.json({ ok: true, count, privateKey: `0xkeymaterial-${count}` });
+    });
+    app.post("/v1/kms/keys/key-1/decrypt", async (c) => {
+      count += 1;
+      return c.json({ plaintext_b64: `cGxhaW50ZXh0-${count}` });
+    });
+    app.post("/secrets", async (c) => {
+      count += 1;
+      return c.json({ ok: true, count, value: `supersecret-${count}` });
+    });
+
+    for (const [path, body] of [
+      ["/vault/agent-1/export", {}],
+      ["/v1/kms/keys/key-1/decrypt", { ciphertext_b64: "AA==" }],
+      ["/secrets", { name: "n", value: "v" }],
+    ] as const) {
+      const init = {
+        method: "POST",
+        headers: {
+          Authorization: AUTHORIZATION,
+          "Content-Type": "application/json",
+          "Idempotency-Key": `idem-key-secret-${path}`,
+        },
+        body: JSON.stringify(body),
+      };
+      const first = await app.request(path, init);
+      const second = await app.request(path, init);
+
+      expect(first.status).toBe(200);
+      // Body suppressed: the duplicate is rejected, never replayed from store.
+      expect(second.status).toBe(409);
+      expect(await second.json()).toEqual({
+        ok: false,
+        error: "Idempotency key has already been used",
+      });
+    }
+    expect(count).toBe(3);
+  });
+
   it("uses a verified request signature as replay-safe auth material", async () => {
     const app = new Hono<{ Variables: AppVariables }>();
     const store = new MemoryIdempotencyStore(100);
