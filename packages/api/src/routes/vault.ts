@@ -2608,15 +2608,22 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
         // This is also the fallback for a failed Vault.recordSignedTransaction
         // write. Preserve the irreversible hash on the pre-staged intent before
         // returning the typed 202 response.
-        await db
-          .update(transactions)
-          .set({
-            status: "outcome_unknown",
-            txHash:
-              e instanceof ExternalBroadcastOutcomeUnknownError ? e.transactionHash : undefined,
-            signedAt: new Date(),
-          })
-          .where(and(eq(transactions.id, executionTxId), eq(transactions.agentId, agentId)));
+        try {
+          await db
+            .update(transactions)
+            .set({
+              status: "outcome_unknown",
+              txHash:
+                e instanceof ExternalBroadcastOutcomeUnknownError ? e.transactionHash : undefined,
+              signedAt: new Date(),
+            })
+            .where(and(eq(transactions.id, executionTxId), eq(transactions.agentId, agentId)));
+        } catch {
+          // The awaited pre-broadcast checkpoint is already durable. Do not
+          // replace the non-retryable result with a generic 500 merely because
+          // this redundant bookkeeping write is temporarily unavailable.
+          console.error("[vault] Failed to refresh durable outcome_unknown transaction state");
+        }
 
         // A lost response may still represent real spend. Account for it
         // conservatively before releasing the per-agent spend lock.
@@ -4457,15 +4464,22 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           });
         }
       } else {
-        await db
-          .update(transactions)
-          .set({
-            status:
-              e instanceof ExternalBroadcastOutcomeUnknownError ? "outcome_unknown" : "broadcast",
-            txHash: completedTxHash ?? transactionRow.txHash ?? null,
-            signedAt: resolvedAt,
-          })
-          .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
+        try {
+          await db
+            .update(transactions)
+            .set({
+              status:
+                e instanceof ExternalBroadcastOutcomeUnknownError ? "outcome_unknown" : "broadcast",
+              txHash: completedTxHash ?? transactionRow.txHash ?? null,
+              signedAt: resolvedAt,
+            })
+            .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
+        } catch {
+          // Approval execution already crossed the durable checkpoint. Keep
+          // the approval terminal and preserve the typed response; reopening
+          // here would permit a duplicate external broadcast.
+          console.error("[vault] Failed to refresh approved irreversible transaction state");
+        }
       }
 
       if (bindingMismatch) return bindingMismatch;

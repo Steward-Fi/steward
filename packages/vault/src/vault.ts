@@ -1576,6 +1576,7 @@ export class Vault {
           ? (this.config.rpcUrl ?? resolveSolanaRpc(chainId))
           : (CHAIN_RPCS[chainId] ?? this.config.rpcUrl);
         let signed;
+        let preparedBroadcastHash: string | undefined;
         try {
           signed = await this.externalKeyCustodyProvider.signTransaction({
             tenantId: request.tenantId,
@@ -1600,16 +1601,34 @@ export class Vault {
             ...(shouldBroadcast
               ? {
                   onPreparedBroadcast: async (transactionHash: string) => {
+                    if (
+                      preparedBroadcastHash &&
+                      preparedBroadcastHash.toLowerCase() !== transactionHash.toLowerCase()
+                    ) {
+                      throw new Error(
+                        "External custody signer changed the prepared transaction hash",
+                      );
+                    }
                     await this.recordSignedTransaction(request, chainId, true, transactionHash, {
                       ...options,
                       status: "outcome_unknown",
                     });
+                    preparedBroadcastHash = transactionHash;
                   },
                 }
               : {}),
           });
         } catch (error) {
-          if (error instanceof ExternalBroadcastOutcomeUnknownError) {
+          const outcomeError =
+            error instanceof ExternalBroadcastOutcomeUnknownError
+              ? preparedBroadcastHash &&
+                preparedBroadcastHash.toLowerCase() !== error.transactionHash.toLowerCase()
+                ? new ExternalBroadcastOutcomeUnknownError(preparedBroadcastHash, { cause: error })
+                : error
+              : shouldBroadcast && preparedBroadcastHash
+                ? new ExternalBroadcastOutcomeUnknownError(preparedBroadcastHash, { cause: error })
+                : null;
+          if (outcomeError) {
             // The provider has already produced a deterministic local hash and
             // may have handed the signed bytes to the RPC.  A database failure
             // must never replace this irreversible outcome with a generic
@@ -1619,30 +1638,61 @@ export class Vault {
             // have a transaction row), so it can durably recover the exact
             // hash even when this first write fails.
             try {
-              await this.recordSignedTransaction(request, chainId, true, error.transactionHash, {
-                ...options,
-                status: "outcome_unknown",
-              });
+              await this.recordSignedTransaction(
+                request,
+                chainId,
+                true,
+                outcomeError.transactionHash,
+                {
+                  ...options,
+                  status: "outcome_unknown",
+                },
+              );
             } catch {
               // Deliberately preserve the typed error and its hash. Do not log
               // the persistence exception: provider/RPC errors may contain
               // credential-bearing URLs, and the gateway owns the bounded
               // fallback persistence/audit path.
             }
+            throw outcomeError;
           }
           throw error;
         }
-        assertNoExternalPrivateKeyMaterial(signed, "externalSignTransactionResult");
-        if (signed.broadcast !== shouldBroadcast) {
-          throw new Error("External key custody signer returned an unexpected broadcast mode");
+        try {
+          assertNoExternalPrivateKeyMaterial(signed, "externalSignTransactionResult");
+          if (signed.broadcast !== shouldBroadcast) {
+            throw new Error("External key custody signer returned an unexpected broadcast mode");
+          }
+          if (
+            shouldBroadcast &&
+            preparedBroadcastHash &&
+            signed.result.toLowerCase() !== preparedBroadcastHash.toLowerCase()
+          ) {
+            throw new ExternalBroadcastOutcomeUnknownError(preparedBroadcastHash, {
+              cause: new Error("External custody signer returned a mismatched transaction hash"),
+            });
+          }
+          await this.recordSignedTransaction(
+            request,
+            chainId,
+            shouldBroadcast,
+            signed.result,
+            options,
+          );
+        } catch (error) {
+          // Once the durable checkpoint has completed, every later failure is
+          // post-irreversibility: the provider may already have submitted the
+          // signed bytes. Preserve the exact prepared hash and never let the
+          // approval gateway classify this as retryable.
+          if (
+            shouldBroadcast &&
+            preparedBroadcastHash &&
+            !(error instanceof ExternalBroadcastOutcomeUnknownError)
+          ) {
+            throw new ExternalBroadcastOutcomeUnknownError(preparedBroadcastHash, { cause: error });
+          }
+          throw error;
         }
-        await this.recordSignedTransaction(
-          request,
-          chainId,
-          shouldBroadcast,
-          signed.result,
-          options,
-        );
         return signed.result;
       }
       if (venue) {
