@@ -1851,6 +1851,27 @@ class ProviderActionService {
     autoFreeze: boolean;
     snapshots: Array<Record<string, unknown>>;
   }> {
+    // Lock the parent namespace before reading child budget rows. Existing-row
+    // locks alone cannot serialize against insertion of a brand-new budget (a
+    // phantom), which could otherwise commit while this execution still admits
+    // against an empty/stale budget set. Mutations take the conflicting UPDATE
+    // lock on the same agent row; executions share this lock with each other.
+    const [budgetNamespace] = await input.db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.tenantId, input.tenantId), eq(agents.id, input.agentId)))
+      .limit(1)
+      .for("share");
+    if (!budgetNamespace) {
+      return {
+        reservations: [],
+        results: [],
+        exhausted: [],
+        unavailable: true,
+        autoFreeze: false,
+        snapshots: [],
+      };
+    }
     const rows = await input.db
       .select()
       .from(providerAgentBudgets)

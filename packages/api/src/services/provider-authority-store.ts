@@ -1524,6 +1524,15 @@ export class ProviderAuthorityStore {
     const id = randomUUID();
     return withTenantAuditedTransaction(ctx.tenantId, async (txRaw, append) => {
       const tx = txRaw as DbExecutor;
+      const [lockedAgent] = await tx
+        .select({ id: agents.id })
+        .from(agents)
+        .where(and(eq(agents.tenantId, ctx.tenantId), eq(agents.id, input.agentId)))
+        .limit(1)
+        .for("update");
+      if (!lockedAgent) {
+        throw new ProviderAuthorityError("resource not found", "not_found", 404);
+      }
       const [row] = await tx
         .insert(providerAgentBudgets)
         .values({
@@ -1582,6 +1591,15 @@ export class ProviderAuthorityStore {
     const normalized = normalizeBudgetInput(input);
     return withTenantAuditedTransaction(ctx.tenantId, async (txRaw, append) => {
       const tx = txRaw as DbExecutor;
+      const [lockedAgent] = await tx
+        .select({ id: agents.id })
+        .from(agents)
+        .where(and(eq(agents.tenantId, ctx.tenantId), eq(agents.id, current.agentId)))
+        .limit(1)
+        .for("update");
+      if (!lockedAgent) {
+        throw new ProviderAuthorityError("resource not found", "not_found", 404);
+      }
       const [updated] = await tx
         .update(providerAgentBudgets)
         .set(normalized)

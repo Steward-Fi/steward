@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   agents,
-  auditEvents as persistedAuditEvents,
   closeDb,
   getDb,
+  auditEvents as persistedAuditEvents,
   providerAccounts,
   providerAgentBudgets,
   providerGrants,
