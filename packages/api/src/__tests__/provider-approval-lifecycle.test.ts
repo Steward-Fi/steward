@@ -33,7 +33,7 @@ import {
   workspaces,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { providerApprovalService } from "../services/provider-approval";
 import {
   bindingRow,
@@ -210,7 +210,7 @@ describe("PR3 approval lifecycle", () => {
     expect(events2).toBe(events1);
   });
 
-  test("resume idempotent path re-ensures the v2 authorization for an execution_ready row that has none (codex P2 pre-rollout repair)", async () => {
+  test("resume idempotent path re-ensures v2 authorization only for an evidence-bound execution_ready row", async () => {
     const { intentId, requestHash, actionDigest } = await createApprovalRequired();
     await providerApprovalService.decide(decideInput(intentId, requestHash, actionDigest));
     const first = await providerApprovalService.resume({ intentId, tenantId: F.TENANT });
@@ -221,9 +221,8 @@ describe("PR3 approval lifecycle", () => {
       .from(executionAuthorizationNonces)
       .where(eq(executionAuthorizationNonces.intentId, intentId));
     expect(before.length).toBe(1);
-    // Simulate a pre-rollout execution_ready row: delete its authorization so the
-    // binding is execution_ready with NO v2 nonce (the governed dispatcher would
-    // be unable to dispatch it).
+    // Simulate loss of the authorization while retaining the immutable 0084
+    // execution-policy evidence.
     await getDb()
       .delete(executionAuthorizationNonces)
       .where(eq(executionAuthorizationNonces.intentId, intentId));
@@ -242,6 +241,54 @@ describe("PR3 approval lifecycle", () => {
       .from(executionAuthorizationNonces)
       .where(eq(executionAuthorizationNonces.intentId, intentId));
     expect(after.length).toBe(1);
+  });
+
+  test("#239 rollout: resume never mints for a legacy execution_ready row without policy evidence", async () => {
+    const { intentId, requestHash, actionDigest } = await createApprovalRequired();
+    await providerApprovalService.decide(decideInput(intentId, requestHash, actionDigest));
+    expect((await providerApprovalService.resume({ intentId, tenantId: F.TENANT })).ok).toBe(true);
+    const db = getDb();
+    await db
+      .delete(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.intentId, intentId));
+    await db.execute(
+      sql`ALTER TABLE provider_action_bindings DROP CONSTRAINT provider_action_bindings_execution_policy_ready_chk`,
+    );
+    await db.execute(
+      sql`DROP TRIGGER provider_action_bindings_immutable ON provider_action_bindings`,
+    );
+    await db
+      .update(providerActionBindings)
+      .set({
+        executionPolicyDecisionId: null,
+        executionPolicyRevisionHash: null,
+        executionPolicyDecision: null,
+        executionPolicyDecisionHash: null,
+        executionPolicyEvaluatedAt: null,
+      })
+      .where(eq(providerActionBindings.intentId, intentId));
+    await db.execute(sql`
+      CREATE TRIGGER provider_action_bindings_immutable
+      BEFORE UPDATE ON provider_action_bindings
+      FOR EACH ROW EXECUTE FUNCTION steward_provider_action_binding_guard()
+    `);
+    await db.execute(sql`
+      ALTER TABLE provider_action_bindings
+      ADD CONSTRAINT provider_action_bindings_execution_policy_ready_chk CHECK (
+        status NOT IN ('execution_ready','executing') OR execution_policy_decision_id IS NOT NULL
+      ) NOT VALID
+    `);
+
+    expect(await providerApprovalService.resume({ intentId, tenantId: F.TENANT })).toEqual({
+      ok: false,
+      code: "EXECUTION_POLICY_EVIDENCE_MISSING",
+      httpStatus: 409,
+    });
+    const nonce = await db
+      .select({ id: executionAuthorizationNonces.id })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.intentId, intentId));
+    expect(nonce).toHaveLength(0);
   });
 
   test("resume of a non-approved (pending) action => RESUME_NOT_APPROVED", async () => {

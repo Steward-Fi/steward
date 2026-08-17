@@ -1934,6 +1934,18 @@ class ProviderApprovalService {
           // exec_auth_nonces_intent_uniq (K22/F01): a repeat resume that already has
           // a nonce is a no-op insert. Fails closed if the secret is absent (X7).
           if (binding.status === "execution_ready") {
+            // 0084 terminalizes pre-rollout rows, but retain a second application
+            // boundary for partially applied/manual schemas: never mint an
+            // authorization for a row that did not pass execute-time policy.
+            if (
+              !binding.executionPolicyDecisionId ||
+              !binding.executionPolicyRevisionHash ||
+              !binding.executionPolicyDecision ||
+              !binding.executionPolicyDecisionHash ||
+              !binding.executionPolicyEvaluatedAt
+            ) {
+              return fail("EXECUTION_POLICY_EVIDENCE_MISSING", 409);
+            }
             await this.hook("beforeMint");
             await mintProviderExecutionAuthorizationWithinTx(
               tx as unknown as Parameters<typeof mintProviderExecutionAuthorizationWithinTx>[0],

@@ -2171,6 +2171,11 @@ export const providerActionBindings = pgTable(
     executionPolicyDecision: jsonb("execution_policy_decision").$type<Record<string, unknown>>(),
     executionPolicyDecisionHash: varchar("execution_policy_decision_hash", { length: 71 }),
     executionPolicyEvaluatedAt: timestamp("execution_policy_evaluated_at", { withTimezone: true }),
+    // 0084 also installs the raw-SQL NOT VALID rollout fence
+    // provider_action_bindings_execution_policy_ready_chk. It is intentionally
+    // not modeled here because Drizzle cannot express NOT VALID: PostgreSQL
+    // enforces it for every new execution_ready/executing row while tolerating
+    // historical in-flight executions whose outcome may already be unknown.
 
     status: varchar("status", { length: 32 }).notNull(),
     // ── PR3 approval lifecycle columns (0081) ──

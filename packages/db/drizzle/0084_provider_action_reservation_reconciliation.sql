@@ -82,6 +82,58 @@ ALTER TABLE "provider_action_bindings" ADD CONSTRAINT "provider_action_bindings_
 );
 --> statement-breakpoint
 
+-- Rollout fence for #239. 0084 introduces execute-time policy evidence, so an
+-- older API binary must not be allowed to create a fresh execution_ready row
+-- without it while a rolling deployment is in progress. NOT VALID deliberately
+-- avoids rejecting historical executing/terminal rows whose provider outcome
+-- may already be unknown, while PostgreSQL still enforces the check for every
+-- new insert/update immediately.
+ALTER TABLE "provider_action_bindings" ADD CONSTRAINT "provider_action_bindings_execution_policy_ready_chk" CHECK (
+  "status" NOT IN ('execution_ready','executing') OR "execution_policy_decision_id" IS NOT NULL
+) NOT VALID;
+--> statement-breakpoint
+
+-- Existing execution_ready rows were authorized before execute-time cap
+-- reservation existed. Never bless them retroactively: revoke an unclaimed v2
+-- nonce, terminalize the binding/intent, and enqueue durable recovery evidence.
+-- A data-modifying CTE keeps the rollout disposition atomic. Already executing
+-- rows are intentionally left alone because an external effect may have begun;
+-- the NOT VALID fence above prevents any new evidence-less execution arm.
+WITH legacy AS MATERIALIZED (
+  SELECT "tenant_id", "intent_id"
+  FROM "provider_action_bindings"
+  WHERE "status" = 'execution_ready' AND "execution_policy_decision_id" IS NULL
+), revoked AS (
+  UPDATE "execution_authorization_nonces" n
+  SET "status" = 'revoked'
+  FROM legacy l
+  WHERE n."tenant_id" = l."tenant_id" AND n."intent_id" = l."intent_id"
+    AND n."version" = 2 AND n."status" = 'active' AND n."dispatch_state" = 'none'
+), transitioned AS (
+  UPDATE "provider_action_bindings" b
+  SET "status" = 'failed', "binding_revision" = b."binding_revision" + 1, "updated_at" = now()
+  FROM legacy l
+  WHERE b."tenant_id" = l."tenant_id" AND b."intent_id" = l."intent_id"
+    AND b."status" = 'execution_ready' AND b."execution_policy_decision_id" IS NULL
+  RETURNING b."tenant_id", b."intent_id"
+), failed_intents AS (
+  UPDATE "intents" i
+  SET "status" = 'failed', "failed_by" = 'steward-system', "failed_at" = now(), "updated_at" = now()
+  FROM transitioned t
+  WHERE i."tenant_id" = t."tenant_id" AND i."id" = t."intent_id"
+)
+INSERT INTO "provider_action_audit_outbox"
+  ("tenant_id", "intent_id", "action", "resource_type", "resource_id", "metadata")
+SELECT t."tenant_id", t."intent_id", 'provider.execution.legacy_policy_evidence_rejected',
+       'provider_action', t."intent_id",
+       jsonb_build_object(
+         'schemaVersion', 'steward.provider-execution-rollout.v1',
+         'intentId', t."intent_id",
+         'reasonCode', 'EXECUTION_POLICY_EVIDENCE_MISSING'
+       )
+FROM transitioned t;
+--> statement-breakpoint
+
 -- Extend the existing frozen projection narrowly: execution-policy evidence may
 -- be populated exactly once, only on approved -> execution_ready. It remains
 -- frozen across every later dispatch/outcome transition.

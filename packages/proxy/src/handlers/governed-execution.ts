@@ -52,6 +52,7 @@ import {
   observeNonceClaimContention,
   type ProviderApprovalCommitmentV1,
   serializeCanonicalOutboundQuery,
+  sha256HexPrefixed,
   strictParseJson,
   verifyProviderExecutionCommitmentV2,
 } from "@stwd/shared";
@@ -71,6 +72,7 @@ export type GovernedDispatchCode =
   | "EXEC_AUTH_ACCOUNT_DISABLED"
   | "EXEC_AUTH_KEY_UNAVAILABLE"
   | "EXEC_AUTH_SIGNATURE_INVALID"
+  | "EXEC_AUTH_POLICY_EVIDENCE_MISSING"
   | "EXEC_DISPATCH_OUTCOME_UNKNOWN"
   | "EXEC_DISPATCH_UPSTREAM_ERROR"
   | "EXEC_AUDIT_UNAVAILABLE"
@@ -146,6 +148,11 @@ interface LoadedGovernedExecution {
   dispatchState: string;
   authStatus: string;
   bindingStatus: string;
+  executionPolicyDecisionId: string | null;
+  executionPolicyRevisionHash: string | null;
+  executionPolicyDecision: Record<string, unknown> | null;
+  executionPolicyDecisionHash: string | null;
+  executionPolicyEvaluatedAt: string | null;
   issuedAt: string;
   expiresAt: string;
 }
@@ -232,6 +239,11 @@ async function loadGovernedExecution(
     dispatchState: (nonce.dispatchState as string) ?? "none",
     authStatus: nonce.status,
     bindingStatus: binding.status,
+    executionPolicyDecisionId: binding.executionPolicyDecisionId,
+    executionPolicyRevisionHash: binding.executionPolicyRevisionHash,
+    executionPolicyDecision: binding.executionPolicyDecision,
+    executionPolicyDecisionHash: binding.executionPolicyDecisionHash,
+    executionPolicyEvaluatedAt: binding.executionPolicyEvaluatedAt?.toISOString() ?? null,
     issuedAt: (nonce.issuedAt as Date).toISOString(),
     expiresAt: (nonce.expiresAt as Date).toISOString(),
   };
@@ -290,6 +302,28 @@ export async function dispatchGovernedExecution(
     return deny("EXEC_TERMINAL_STATE", 409, intentId, {
       executionId: loaded.executionId,
       dispatchState: loaded.dispatchState,
+    });
+  }
+
+  // #239 rollout boundary: a pre-0084 execution_ready row may carry a validly
+  // signed legacy nonce but never have reserved the current cumulative cap.
+  // Require and verify the execute-time decision before the claim/decrypt edge.
+  const executionPolicy = loaded.executionPolicyDecision;
+  if (
+    !loaded.executionPolicyDecisionId ||
+    !loaded.executionPolicyRevisionHash ||
+    !executionPolicy ||
+    !loaded.executionPolicyDecisionHash ||
+    !loaded.executionPolicyEvaluatedAt ||
+    executionPolicy.decisionId !== loaded.executionPolicyDecisionId ||
+    executionPolicy.intentId !== loaded.intentId ||
+    executionPolicy.requestHash !== loaded.requestHash ||
+    executionPolicy.actionDigest !== loaded.actionDigest ||
+    executionPolicy.policyRevisionHash !== loaded.executionPolicyRevisionHash ||
+    sha256HexPrefixed(jcsStringify(executionPolicy)) !== loaded.executionPolicyDecisionHash
+  ) {
+    return deny("EXEC_AUTH_POLICY_EVIDENCE_MISSING", 409, intentId, {
+      executionId: loaded.executionId,
     });
   }
 
@@ -496,6 +530,10 @@ export async function dispatchGovernedExecution(
             eq(providerActionBindings.tenantId, tenantId),
             eq(providerActionBindings.intentId, loaded.intentId),
             eq(providerActionBindings.status, "execution_ready"),
+            eq(
+              providerActionBindings.executionPolicyDecisionHash,
+              loaded.executionPolicyDecisionHash as string,
+            ),
           ),
         )
         .returning({ intentId: providerActionBindings.intentId });
