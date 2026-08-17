@@ -228,7 +228,12 @@ COPY packages/webhooks/package.json          packages/webhooks/package.json
 COPY packages/examples/                      packages/examples/
 
 COPY --from=deps /app/bun.lock ./bun.lock
-RUN bun install --production --frozen-lockfile --ignore-scripts
+# Install only the two runtime entrypoints and their declared workspace
+# dependency closure. An unfiltered monorepo install also pulls the web wallet
+# stack into this server image, making the image large enough to exhaust hosted
+# runners during Docker export.
+RUN bun install --production --frozen-lockfile --ignore-scripts \
+    --filter @stwd/api --filter @stwd/proxy
 
 # Copy compiled output from build stage
 COPY --from=build /app/packages/adapters    packages/adapters
@@ -286,7 +291,8 @@ RUN mkdir -p node_modules/@stwd && \
 # symlinks (ENOENT reading drizzle-orm at boot). Re-installing rebuilds the
 # per-package node_modules symlinks against THIS stage's `.bun` store, so runtime
 # resolution is correct + deterministic regardless of resolution drift.
-RUN bun install --production --frozen-lockfile --ignore-scripts
+RUN bun install --production --frozen-lockfile --ignore-scripts \
+    --filter @stwd/api --filter @stwd/proxy
 
 # ── Non-root user ─────────────────────────────────────────────────────────────
 # bun image already has a 'bun' user (uid 1000); use it.
