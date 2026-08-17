@@ -121,6 +121,10 @@ export async function forwardToApi(
   );
   const response = await fetch(`${apiBase}${path}`, {
     method: "POST",
+    // A 307/308 would otherwise replay the refresh-token-bearing POST body to
+    // the redirect target. The configured Steward origin is the only trusted
+    // recipient, so redirects are always a hard failure at this boundary.
+    redirect: "error",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify(payload),
   });

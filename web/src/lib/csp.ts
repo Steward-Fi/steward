@@ -15,7 +15,7 @@ import { DEFAULT_STEWARD_API_URL } from "@/lib/steward-api-url";
  *   - the default public RPC endpoints of the EVM chains wired in lib/wagmi.ts
  *   - WalletConnect relay/verify/push origins (wildcards cover relay., echo.,
  *     pulse., keys., verify. on both .com and .org)
- *   - Coinbase Wallet's popup origin
+ *   - Coinbase Wallet's fixed popup, RPC, and legacy relay origins
  * Self-hosters overriding RPC endpoints via NEXT_PUBLIC_SOLANA_RPC_URL stay
  * allowlisted automatically; a custom EVM RPC must be added here when wired.
  */
@@ -42,7 +42,14 @@ const WALLETCONNECT_ORIGINS = [
   "wss://*.walletconnect.org",
 ] as const;
 
-const WALLET_SDK_ORIGINS = ["https://www.coinbase.com"] as const;
+// Locked @coinbase/wallet-sdk runtime endpoints. RainbowKit disables the
+// SDK's optional cca-lite telemetry, so that analytics origin is deliberately
+// not allowlisted.
+const WALLET_SDK_ORIGINS = [
+  "https://keys.coinbase.com",
+  "https://rpc.wallet.coinbase.com",
+  "https://www.walletlink.org",
+] as const;
 
 // Resolve the Steward API origin the client will actually call. This uses the
 // SAME resolved base URL as `lib/api.ts` / providers (env override or the

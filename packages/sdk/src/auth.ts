@@ -2362,7 +2362,6 @@ export class StewardAuth {
     if (!token) {
       throw new StewardApiError("Auth response did not include a session token", 0);
     }
-    this.storage.setItem(STORAGE_KEY, token);
     // Only persist the refresh token when it's a non-empty string.
     // An empty string means the API didn't issue one (e.g. SIWE flow).
     if (refreshToken) {
@@ -2373,6 +2372,10 @@ export class StewardAuth {
         this.storage.setItem(REFRESH_TOKEN_KEY, refreshToken);
       }
     }
+    // Persist the access token only after the refresh token is safely in its
+    // final custody location. In proxy mode a failed deposit must leave no
+    // partially authenticated local session behind.
+    this.storage.setItem(STORAGE_KEY, token);
     const session = sessionFromToken(token, user);
     this.notifyListeners(session);
     return { token, refreshToken, expiresIn, user };

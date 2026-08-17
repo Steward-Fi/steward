@@ -127,4 +127,42 @@ describe("forwardToApi (SEC-018)", () => {
       server.close();
     }
   });
+
+  test("does not replay a refresh-token POST across an upstream redirect", async () => {
+    const { createServer } = await import("node:http");
+    let redirectedRequests = 0;
+    const receiver = createServer((_req, res) => {
+      redirectedRequests += 1;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolve) => receiver.listen(0, "127.0.0.1", resolve));
+    const receiverAddress = receiver.address();
+    const receiverPort =
+      typeof receiverAddress === "object" && receiverAddress ? receiverAddress.port : 0;
+
+    const redirector = createServer((_req, res) => {
+      res.writeHead(307, { Location: `http://127.0.0.1:${receiverPort}/capture` });
+      res.end();
+    });
+    await new Promise<void>((resolve) => redirector.listen(0, "127.0.0.1", resolve));
+    const redirectorAddress = redirector.address();
+    const redirectorPort =
+      typeof redirectorAddress === "object" && redirectorAddress ? redirectorAddress.port : 0;
+
+    process.env.NEXT_PUBLIC_STEWARD_API_URL = `http://127.0.0.1:${redirectorPort}`;
+    try {
+      const { forwardToApi: forward } = await import("@/lib/auth-proxy");
+      await expect(
+        forward("/auth/refresh", { refreshToken: "rt-must-not-leak" }),
+      ).rejects.toThrow();
+      expect(redirectedRequests).toBe(0);
+    } finally {
+      delete process.env.NEXT_PUBLIC_STEWARD_API_URL;
+      await Promise.all([
+        new Promise<void>((resolve) => redirector.close(() => resolve())),
+        new Promise<void>((resolve) => receiver.close(() => resolve())),
+      ]);
+    }
+  });
 });

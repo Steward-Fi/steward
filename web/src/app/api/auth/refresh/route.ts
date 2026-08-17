@@ -57,23 +57,47 @@ export async function POST(request: Request): Promise<Response> {
   if (upstream.status === 401 || upstream.status === 403) {
     // The refresh token is dead — drop the cookie so the client signs out.
     return proxyJson(
-      upstream.json ?? { ok: false, error: "Refresh session rejected" },
+      {
+        ok: false,
+        error:
+          typeof upstream.json?.error === "string"
+            ? upstream.json.error
+            : "Refresh session rejected",
+      },
       upstream.status,
       { "Set-Cookie": buildExpiredRefreshCookie(secure) },
     );
   }
-  if (!upstream.json || upstream.json.ok !== true) {
-    return proxyJson(upstream.json ?? { ok: false, error: "Refresh failed" }, upstream.status);
+  if (upstream.status !== 200 || !upstream.json || upstream.json.ok !== true) {
+    return proxyJson(
+      {
+        ok: false,
+        error: typeof upstream.json?.error === "string" ? upstream.json.error : "Refresh failed",
+      },
+      upstream.status >= 400 && upstream.status <= 599 ? upstream.status : 502,
+    );
   }
 
-  const { refreshToken: rotated, ...rest } = upstream.json;
-  const rotatedToken = normalizeRefreshToken(rotated);
-  if (!rotatedToken) {
-    // The API contract guarantees rotation; without it we cannot keep the
-    // session alive securely, so fail closed.
-    return proxyJson({ ok: false, error: "Refresh response missing rotated token" }, 502, {
+  const rotatedToken = normalizeRefreshToken(upstream.json.refreshToken);
+  const accessToken =
+    typeof upstream.json.token === "string" && upstream.json.token.length > 0
+      ? upstream.json.token
+      : null;
+  const expiresIn = upstream.json.expiresIn;
+  if (
+    !rotatedToken ||
+    !accessToken ||
+    typeof expiresIn !== "number" ||
+    !Number.isFinite(expiresIn)
+  ) {
+    // Whitelist the exact upstream success contract. Besides failing closed on
+    // malformed responses, this prevents an upstream reflection from putting
+    // refresh-token material into any browser-visible response field.
+    return proxyJson({ ok: false, error: "Malformed refresh response" }, 502, {
       "Set-Cookie": buildExpiredRefreshCookie(secure),
     });
   }
-  return proxyJson(rest, 200, { "Set-Cookie": buildRefreshCookie(rotatedToken, secure) });
+  return proxyJson({ ok: true, token: accessToken, expiresIn }, 200, {
+    "Set-Cookie": buildRefreshCookie(rotatedToken, secure),
+  });
 }

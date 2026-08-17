@@ -175,6 +175,9 @@ describe("StewardAuth authProxyUrl (SEC-018: HttpOnly refresh-token custody)", (
     );
     // The refresh token must not fall back to JS-readable storage.
     expect(storage.getItem("steward_refresh_token")).toBeNull();
+    // A failed custody handoff must not leave a partially authenticated access
+    // token behind either.
+    expect(storage.getItem("steward_session_token")).toBeNull();
   });
 
   test("refreshSession calls the proxy without a JS-held token", async () => {
