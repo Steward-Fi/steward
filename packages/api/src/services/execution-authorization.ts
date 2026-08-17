@@ -265,10 +265,22 @@ function signExecutionAuthorization(authorization: ExecutionAuthorization): stri
 }
 
 function executionAuthorizationKey(): Uint8Array {
-  const secret = process.env.STEWARD_JWT_SECRET?.trim();
+  // SEC-074: derive from the dedicated execution-auth secret, NEVER from
+  // STEWARD_JWT_SECRET (the most widely-used secret in the deployment; its
+  // compromise must not yield forgeable execution authorizations). Mirrors the
+  // v2 mint posture (provider-execution.ts, X7): no JWT-secret fallback. v1
+  // authorizations are minted and consumed inside this process within a 60s
+  // TTL, so the active (first) key entry suffices; v1 keeps its own HKDF
+  // salt/info above for domain separation from the v2 derived keys.
+  const raw = process.env.STEWARD_EXECUTION_AUTH_SECRET?.trim();
+  const firstEntry = raw?.split(",")[0]?.trim() ?? "";
+  // `keyId:secret` — split on the FIRST colon only (the secret may contain
+  // colons); a bare secret with no prefix is the whole entry (v2 parsing rules).
+  const colon = firstEntry.indexOf(":");
+  const secret = (colon === -1 ? firstEntry : firstEntry.slice(colon + 1)).trim();
   if (!secret) {
     throw new ExecutionAuthorizationError(
-      "STEWARD_JWT_SECRET is required for execution authorization",
+      "STEWARD_EXECUTION_AUTH_SECRET is required for execution authorization",
       "secret_unavailable",
     );
   }
