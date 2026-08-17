@@ -34,6 +34,7 @@ import {
   type ShortLivedTokenMinter,
 } from "./issuance";
 import { listAgentManifest, resolveManifestEntry } from "./manifest";
+import { enforceCapabilityRateLimit } from "./rate-limit";
 import { CapabilityStore } from "./store";
 
 /** Mint a short-lived agent token carrying the given scopes; pre-generate the jti
@@ -119,6 +120,17 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
         return c.json<ApiResponse>({ ok: false, error: "agent authentication required" }, 401);
       }
       const manifestId = c.req.param("id") ?? "";
+
+      // Per-agent throttle on issuance/renewal (SEC-094): each attempt mints a
+      // token and writes an audit row, so it must be bounded like invoke.
+      const rate = await enforceCapabilityRateLimit(ctx, "issue", agentId);
+      if (!rate.allowed) {
+        c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
+        return c.json<ApiResponse>(
+          { ok: false, error: "capability issuance rate limit exceeded" },
+          429,
+        );
+      }
 
       let body: unknown = {};
       const raw = await c.req.text().catch(() => "");

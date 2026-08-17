@@ -23,6 +23,7 @@ import { StewardProxyClient } from "@stwd/proxy-client";
 import type { ApiResponse, AppVariables, PolicyRule, SignRequest } from "@stwd/shared";
 import { Hono } from "hono";
 import type { StewardAppContext } from "./context";
+import { enforceCapabilityRateLimit } from "./rate-limit";
 import type { Capability, InvocationDecision } from "./schema";
 import { CapabilityStore } from "./store";
 
@@ -568,6 +569,15 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
       );
     }
 
+    // Per-agent throttle BEFORE any DB/upstream work (SEC-094); the 429 path
+    // deliberately writes no invocation row (that write is the vector throttled).
+    const rate = await enforceCapabilityRateLimit(ctx, "invoke", agentId);
+    if (!rate.allowed) {
+      const res = jsonResponse({ ok: false, error: "capability invoke rate limit exceeded" }, 429);
+      res.headers.set("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
+      return stripGateMarker(res);
+    }
+
     type InvokeEnvelope = {
       args?: Record<string, unknown>;
       body?: unknown;
@@ -630,6 +640,14 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
     const agentId = c.get("agentScope");
     if (!tenantId || !agentId) {
       return openAIError("agent authentication required", 401);
+    }
+
+    // Same per-agent throttle as the envelope invoke route (SEC-094).
+    const rate = await enforceCapabilityRateLimit(ctx, "invoke", agentId);
+    if (!rate.allowed) {
+      const res = openAIError("capability invoke rate limit exceeded", 429);
+      res.headers.set("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
+      return res;
     }
 
     let body: unknown;
