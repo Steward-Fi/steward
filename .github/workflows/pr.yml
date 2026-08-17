@@ -151,7 +151,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -165,6 +165,7 @@ jobs:
         run: bunx turbo run build --filter=@stwd/react --filter=@stwd/sdk --filter=@stwd/shared
 
       - name: Install Chromium
+        working-directory: web
         run: bunx playwright install --with-deps chromium
 
       - name: Axe scan and keyboard-only approval flows
