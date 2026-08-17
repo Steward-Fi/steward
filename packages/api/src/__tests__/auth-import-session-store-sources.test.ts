@@ -89,7 +89,7 @@ describe("auth import-session store source tracking", () => {
       mfa: "redis",
       importSession: "redis",
     });
-    expect(redisSetMock).toHaveBeenCalledWith("__ping__import-session", "1", "PX", 1000);
+    expect(redisSetMock).toHaveBeenCalledWith("auth:import-session:__ping__", "1", "PX", 1000);
   });
 });
 
