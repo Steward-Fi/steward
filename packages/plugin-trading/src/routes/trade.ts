@@ -232,6 +232,24 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     return typeof body === "object" && body !== null && Object.hasOwn(body, key);
   }
 
+  /**
+   * Recent-MFA check for the human (session-jwt) trade-session gates. A session
+   * that completed MFA hours or days ago must NOT manage fund-moving trade
+   * sessions — presence of a historical verification is not recency. Mirrors
+   * the plugin-capabilities + core /secrets gate (5-minute default).
+   */
+  function hasRecentSessionMfa(
+    c: Context<{ Variables: AppVariables }>,
+    maxAgeMs = 5 * 60_000,
+  ): boolean {
+    const verifiedAt = c.get("sessionMfaVerifiedAt");
+    return (
+      typeof verifiedAt === "number" &&
+      Number.isFinite(verifiedAt) &&
+      Date.now() - verifiedAt <= maxAgeMs
+    );
+  }
+
   function policyViolation(message: string) {
     return { code: "policy-violation", message };
   }
@@ -525,7 +543,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (
       c.get("authType") === "session-jwt" &&
       createByHumanAdmin &&
-      !c.get("sessionMfaVerifiedAt")
+      !hasRecentSessionMfa(c)
     ) {
       return c.json<ApiResponse>(
         { ok: false, error: "Trade session management requires recent MFA verification" },
@@ -774,7 +792,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         403,
       );
     }
-    if (c.get("authType") === "session-jwt" && readByHumanAdmin && !c.get("sessionMfaVerifiedAt")) {
+    if (c.get("authType") === "session-jwt" && readByHumanAdmin && !hasRecentSessionMfa(c)) {
       return c.json<ApiResponse>(
         { ok: false, error: "Trade session management requires recent MFA verification" },
         403,
@@ -815,7 +833,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (
       c.get("authType") === "session-jwt" &&
       revokeByHumanAdmin &&
-      !c.get("sessionMfaVerifiedAt")
+      !hasRecentSessionMfa(c)
     ) {
       return c.json<ApiResponse>(
         { ok: false, error: "Trade session management requires recent MFA verification" },

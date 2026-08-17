@@ -58,6 +58,8 @@ type Posture =
   | "api-key"
   | "session-no-mfa"
   | "session-with-mfa"
+  // MFA verified 10 minutes ago — outside the 5-minute recency window (SEC-034).
+  | "session-stale-mfa"
   // agent's own bearer, scoped to AGENT_ID — the autonomous self-service path.
   | "agent-self"
   // agent bearer scoped to a DIFFERENT agent — must be refused.
@@ -87,6 +89,8 @@ async function makeApp(posture: Posture) {
     } else {
       c.set("authType", "session-jwt");
       if (posture === "session-with-mfa") c.set("sessionMfaVerifiedAt", Date.now());
+      if (posture === "session-stale-mfa")
+        c.set("sessionMfaVerifiedAt", Date.now() - 10 * 60_000);
     }
     await next();
   });
@@ -221,6 +225,36 @@ describe("trade session control-plane gates (real routes)", () => {
     expect(await errorOf(noMfaRes)).toBe(
       "Trade session management requires recent MFA verification",
     );
+  });
+
+  it("SEC-034: a STALE MFA verification (10 min ago) no longer manages trade sessions", async () => {
+    // Presence-only MFA previously passed these gates for a session that
+    // completed MFA hours/days ago. The gates now require recency (5-minute
+    // window), so a 10-minute-old verification is refused exactly like no MFA.
+    const createRes = await post(await makeApp("session-stale-mfa"), "/sessions", CREATE_BODY);
+    expect(createRes.status).toBe(403);
+    expect(await errorOf(createRes)).toBe(
+      "Trade session management requires recent MFA verification",
+    );
+
+    const getRes = await (await makeApp("session-stale-mfa")).request(
+      `/v1/trade/sessions/${SEEDED_SESSION_ID}`,
+    );
+    expect(getRes.status).toBe(403);
+
+    const revokeRes = await post(
+      await makeApp("session-stale-mfa"),
+      `/sessions/${SEEDED_SESSION_ID}/revoke`,
+      {},
+    );
+    expect(revokeRes.status).toBe(403);
+
+    // The denied revoke never mutated the session — it is still active.
+    const [row] = await getDb()
+      .select({ status: tradeSessions.status })
+      .from(tradeSessions)
+      .where(eq(tradeSessions.id, SEEDED_SESSION_ID));
+    expect(row.status).toBe("active");
   });
 
   it("revoke session: allows api-key while refusing owner-session-without-MFA, leaving the seeded session active", async () => {
