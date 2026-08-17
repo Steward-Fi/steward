@@ -2,6 +2,48 @@ import { importPKCS8, SignJWT } from "jose";
 import type { UpstreamTokenIssuer } from "./upstream-leases";
 
 const GITHUB_API = "https://api.github.com";
+const GITHUB_REQUEST_TIMEOUT_MS = 10_000;
+const GITHUB_RESPONSE_MAX_BYTES = 1024 * 1024;
+
+async function readBoundedJson(response: Response): Promise<unknown> {
+  const declared = response.headers.get("content-length");
+  if (declared !== null) {
+    const length = Number(declared);
+    if (!Number.isSafeInteger(length) || length < 0 || length > GITHUB_RESPONSE_MAX_BYTES) {
+      void response.body?.cancel().catch(() => {});
+      throw new Error("GitHub response exceeded maximum size");
+    }
+  }
+  if (!response.body) return null;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > GITHUB_RESPONSE_MAX_BYTES) {
+        void reader.cancel().catch(() => {});
+        throw new Error("GitHub response exceeded maximum size");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw new Error("GitHub response was malformed");
+  }
+}
 
 export class GitHubAppInstallationTokenIssuer implements UpstreamTokenIssuer {
   constructor(private readonly fetchImpl: typeof fetch = fetch) {}
@@ -30,11 +72,12 @@ export class GitHubAppInstallationTokenIssuer implements UpstreamTokenIssuer {
           repositories: input.resource.repositories,
           permissions: input.resource.permissions,
         }),
+        signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
       },
     );
     if (!response.ok)
       throw new Error(`GitHub installation-token issuance failed (${response.status})`);
-    const body = (await response.json()) as { token?: unknown; expires_at?: unknown };
+    const body = (await readBoundedJson(response)) as { token?: unknown; expires_at?: unknown };
     if (typeof body.token !== "string" || typeof body.expires_at !== "string") {
       throw new Error("GitHub installation-token response was malformed");
     }
@@ -52,6 +95,7 @@ export class GitHubAppInstallationTokenIssuer implements UpstreamTokenIssuer {
         "User-Agent": "steward-credential-lease",
         "X-GitHub-Api-Version": "2022-11-28",
       },
+      signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
     });
     if (!response.ok && response.status !== 404) {
       throw new Error(`GitHub installation-token revocation failed (${response.status})`);
