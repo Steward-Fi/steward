@@ -298,8 +298,11 @@ export async function buildBackend(
   if (redisClient) {
     try {
       const backend = new RedisBackend(redisClient, `auth:${namespace}:`);
-      // Quick connectivity smoke-test
-      await redisClient.set(`__ping__${namespace}`, "1", "PX", 1000);
+      // Smoke-test connectivity AND atomic-consume support: consume() needs
+      // GETDEL (Redis >= 6.2), so probe it here — otherwise a server without
+      // GETDEL would pass init yet throw on every consume() at runtime.
+      await backend.set(`__ping__`, "1", 1000);
+      await backend.consume(`__ping__`);
       return { backend, source: "redis" };
     } catch (err) {
       console.warn(
