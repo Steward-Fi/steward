@@ -178,6 +178,7 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
     // Real provisioning into the encrypted venue-scoped vault; no key material
     // leaves the vault, and the L1->L2 derivation signs for real.
     const wallet = await ctx.vault.createWallet({
+      tenantId,
       agentId,
       venue: "polymarket",
       chainType: "evm",
@@ -282,6 +283,7 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
 
     const { tenantId, agentId } = await seedTenantAgent();
     const wallet = await ctx.vault.createWallet({
+      tenantId,
       agentId,
       venue: "polymarket",
       chainType: "evm",
