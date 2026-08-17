@@ -1819,7 +1819,11 @@ export async function handleProxy(c: Context): Promise<Response> {
     );
   } catch (err) {
     const latencyMs = Date.now() - startTime;
-    console.error(`[proxy] Upstream request failed:`, err);
+    // Fetch errors can embed the full outbound URL. Query-injected credentials
+    // must never be copied from that error into application logs.
+    console.error("[proxy] Upstream request failed", {
+      errorName: err instanceof Error ? err.name : "UnknownError",
+    });
 
     // Audit the failure
     await recordAudit({

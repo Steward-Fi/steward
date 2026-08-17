@@ -43,5 +43,44 @@ export const PROXY_SCOPE = "api:proxy";
  * Local dev compose sets STEWARD_PROXY_DEV_MODE=true.
  */
 export function isProxyDevMode(): boolean {
-  return process.env.STEWARD_PROXY_DEV_MODE === "true";
+  return process.env.NODE_ENV !== "production" && process.env.STEWARD_PROXY_DEV_MODE === "true";
+}
+
+export function configuredProxyCorsOrigins(): string[] {
+  const values = (process.env.STEWARD_PROXY_CORS_ORIGINS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return values.map((value) => {
+    if (value === "*") throw new Error("STEWARD_PROXY_CORS_ORIGINS must not contain '*'");
+    let parsed: URL;
+    try {
+      parsed = new URL(value);
+    } catch {
+      throw new Error(`Invalid STEWARD_PROXY_CORS_ORIGINS origin: ${JSON.stringify(value)}`);
+    }
+    if (
+      (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+      parsed.username ||
+      parsed.password ||
+      parsed.pathname !== "/" ||
+      parsed.search ||
+      parsed.hash ||
+      parsed.origin !== value
+    ) {
+      throw new Error(
+        `STEWARD_PROXY_CORS_ORIGINS entries must be canonical HTTP(S) origins: ${JSON.stringify(value)}`,
+      );
+    }
+    const isLoopback =
+      parsed.hostname === "localhost" ||
+      parsed.hostname === "127.0.0.1" ||
+      parsed.hostname === "[::1]";
+    if (parsed.protocol !== "https:" && !isLoopback) {
+      throw new Error(
+        `STEWARD_PROXY_CORS_ORIGINS requires HTTPS except for loopback origins: ${JSON.stringify(value)}`,
+      );
+    }
+    return parsed.origin;
+  });
 }
