@@ -21,7 +21,12 @@ import type {
   ExternalKeySignTransactionRequest,
   ExternalKeySignTransactionResult,
 } from "@stwd/vault";
-import { BackendBindingMismatchError, externalCustodyIdentityDigest, Vault } from "@stwd/vault";
+import {
+  BackendBindingMismatchError,
+  ExternalBroadcastOutcomeUnknownError,
+  externalCustodyIdentityDigest,
+  Vault,
+} from "@stwd/vault";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
@@ -607,12 +612,15 @@ describe("vault EVM execution gateway", () => {
   const EXTERNAL_AGENT_ID = `gateway-ext-agent-${Date.now()}`;
 
   async function seedExternalCustodyAgent() {
-    await getDb().insert(agents).values({
-      id: EXTERNAL_AGENT_ID,
-      tenantId: TENANT_ID,
-      name: "External Custody Agent",
-      walletAddress: "0x00000000000000000000000000000000000000ff",
-    });
+    await getDb()
+      .insert(agents)
+      .values({
+        id: EXTERNAL_AGENT_ID,
+        tenantId: TENANT_ID,
+        name: "External Custody Agent",
+        walletAddress: "0x00000000000000000000000000000000000000ff",
+      })
+      .onConflictDoNothing();
     // Non-local-custody EVM wallet, NO encrypted_chain_keys row => the resolver
     // returns a non-local-vault backend. The custody discriminator "external" and
     // its metadata key "third-partyKey" matches the vault package,
@@ -627,12 +635,15 @@ describe("vault EVM execution gateway", () => {
         signingAvailability: "provider-signing",
       },
     };
-    await getDb().insert(agentWallets).values({
-      agentId: EXTERNAL_AGENT_ID,
-      chainFamily: "evm",
-      address: "0x00000000000000000000000000000000000000ff",
-      metadata: custodyMetadata,
-    });
+    await getDb()
+      .insert(agentWallets)
+      .values({
+        agentId: EXTERNAL_AGENT_ID,
+        chainFamily: "evm",
+        address: "0x00000000000000000000000000000000000000ff",
+        metadata: custodyMetadata,
+      })
+      .onConflictDoNothing();
     await getDb()
       .insert(policies)
       .values({
@@ -644,7 +655,8 @@ describe("vault EVM execution gateway", () => {
           mode: "whitelist",
           addresses: ["0x1111111111111111111111111111111111111111"],
         },
-      });
+      })
+      .onConflictDoNothing();
   }
 
   it("mints and consumes an identity-bound external-custody authorization on direct /sign", async () => {
@@ -692,6 +704,58 @@ describe("vault EVM execution gateway", () => {
         backend: "external-custody",
         identity: expectedIdentity,
         status: "consumed",
+      });
+    } finally {
+      signSpy.mockRestore();
+    }
+  });
+
+  it("returns only the deterministic hash and stable outcome_unknown response after ambiguous broadcast", async () => {
+    await seedExternalCustodyAgent();
+    const txHash = `0x${"cd".repeat(32)}`;
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockImplementation(async () => {
+      throw new ExternalBroadcastOutcomeUnknownError(txHash, {
+        cause: new Error("https://rpc.example.test/SUPER_SECRET_API_KEY timed out"),
+      });
+    });
+    try {
+      const app = await makeApp();
+      const res = await app.request(`/vault/${EXTERNAL_AGENT_ID}/sign`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "ext-custody-outcome-unknown-direct",
+        },
+        body: JSON.stringify({
+          to: "0x1111111111111111111111111111111111111111",
+          value: "1",
+          chainId: 8453,
+          broadcast: true,
+        }),
+      });
+      const text = await res.text();
+      const body = JSON.parse(text);
+      expect(res.status).toBe(202);
+      expect(body).toEqual({
+        ok: false,
+        error: "Broadcast outcome is unknown; reconcile the transaction hash before retrying",
+        data: {
+          code: "external_broadcast_outcome_unknown",
+          txId: expect.any(String),
+          txHash,
+          reconciliationRequired: true,
+        },
+      });
+      expect(text).not.toContain("SUPER_SECRET_API_KEY");
+      expect(text).not.toContain("rpc.example.test");
+      expect(signSpy).toHaveBeenCalledTimes(1);
+      const audits = await getDb()
+        .select({ action: auditEvents.action, resourceId: auditEvents.resourceId })
+        .from(auditEvents)
+        .where(eq(auditEvents.resourceId, body.data.txId));
+      expect(audits).toContainEqual({
+        action: "vault.broadcast.outcome_unknown",
+        resourceId: body.data.txId,
       });
     } finally {
       signSpy.mockRestore();
@@ -775,6 +839,95 @@ describe("vault EVM execution gateway", () => {
         .from(approvalQueue)
         .where(eq(approvalQueue.txId, txId));
       expect(approval?.status).toBe("approved");
+    } finally {
+      signSpy.mockRestore();
+    }
+  });
+
+  it("keeps an ambiguous external broadcast terminal and never reopens approval", async () => {
+    const txId = "tx-ext-custody-outcome-unknown";
+    const txHash = `0x${"ef".repeat(32)}`;
+    const walletAddress = "0x00000000000000000000000000000000000000ff";
+    const replay = {
+      ...REPLAY_BASE,
+      agentId: EXTERNAL_AGENT_ID,
+      walletAddress,
+      broadcast: true,
+    };
+    const identity = externalCustodyIdentityDigest({
+      providerId: "test-kms",
+      keyId: "key-ext-1",
+      address: walletAddress,
+    });
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: txId,
+        agentId: EXTERNAL_AGENT_ID,
+        status: "pending",
+        toAddress: replay.to,
+        value: replay.value,
+        data: replay.data,
+        chainId: replay.chainId,
+        actionPayload: {
+          type: "transaction",
+          broadcast: true,
+          nonce: replay.nonce,
+          gasLimit: replay.gasLimit,
+          walletAddress,
+        },
+        executionPayloadDigest: executionPayloadDigestForEvmSign(replay),
+        executionPolicyRevisionHash: "queued-policy-revision",
+        executionBackend: "external-custody",
+        executionBackendIdentityDigest: identity,
+        policyResults: [],
+      });
+    await getDb()
+      .insert(approvalQueue)
+      .values({
+        id: `aq-${txId}`,
+        txId,
+        agentId: EXTERNAL_AGENT_ID,
+        status: "pending",
+        requestedByType: "agent",
+        requestedById: EXTERNAL_AGENT_ID,
+      });
+
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockImplementation(async () => {
+      throw new ExternalBroadcastOutcomeUnknownError(txHash);
+    });
+    try {
+      const app = await makeApp();
+      const res = await app.request(`/vault/${EXTERNAL_AGENT_ID}/approve/${txId}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const body = await res.json();
+      expect(res.status).toBe(202);
+      expect(body.data).toMatchObject({
+        code: "external_broadcast_outcome_unknown",
+        txHash,
+        reconciliationRequired: true,
+      });
+      const [approval] = await getDb()
+        .select({ status: approvalQueue.status })
+        .from(approvalQueue)
+        .where(eq(approvalQueue.txId, txId));
+      expect(approval?.status).toBe("approved");
+      const [transaction] = await getDb()
+        .select({ status: transactions.status, txHash: transactions.txHash })
+        .from(transactions)
+        .where(eq(transactions.id, txId));
+      expect(transaction).toEqual({ status: "outcome_unknown", txHash });
+
+      const retry = await app.request(`/vault/${EXTERNAL_AGENT_ID}/approve/${txId}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(retry.status).toBe(404);
+      expect(signSpy).toHaveBeenCalledTimes(1);
     } finally {
       signSpy.mockRestore();
     }

@@ -1,52 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { extractRpcErrorMessage, isRpcError } from "../services/rpc-error";
 
 // ─── RPC Error Detection (extracted for testing) ─────────────────────────
-
-/**
- * These functions are duplicated from index.ts for unit testing.
- * In a production codebase, they would be exported from a shared module.
- */
-
-function isRpcError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  const msg = error.message.toLowerCase();
-  const rpcIndicators = [
-    "insufficient funds",
-    "insufficient balance",
-    "nonce too low",
-    "nonce too high",
-    "gas too low",
-    "gas limit",
-    "underpriced",
-    "replacement transaction",
-    "exceeds block gas limit",
-    "execution reverted",
-    "out of gas",
-    "invalid sender",
-    "invalid signature",
-    "account not found",
-    "blockhash not found",
-    "transaction simulation failed",
-    "instruction error",
-    "custom program error",
-    "rpc error",
-    "failed to send transaction",
-    "transaction failed",
-    "0x",
-  ];
-  return rpcIndicators.some((indicator) => msg.includes(indicator));
-}
-
-function extractRpcErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    const innerMatch = error.message.match(/message["\s:]+([^"]+)/i);
-    if (innerMatch) {
-      return innerMatch[1].trim();
-    }
-    return error.message;
-  }
-  return "RPC error";
-}
 
 // ─── Tests ────────────────────────────────────────────────────────────────
 
@@ -108,7 +63,7 @@ describe("RPC Error Detection", () => {
   describe("extractRpcErrorMessage", () => {
     it("extracts message from simple error", () => {
       const error = new Error("Insufficient funds for gas");
-      expect(extractRpcErrorMessage(error)).toBe("Insufficient funds for gas");
+      expect(extractRpcErrorMessage(error)).toBe("Insufficient funds for transaction");
     });
 
     it("extracts inner message when present", () => {
@@ -116,13 +71,23 @@ describe("RPC Error Detection", () => {
         'RPC error: {"code":-32000,"message":"insufficient funds for transfer"}',
       );
       const result = extractRpcErrorMessage(error);
-      expect(result).toContain("insufficient funds");
+      expect(result).toBe("Insufficient funds for transaction");
     });
 
     it("returns fallback for non-Error", () => {
-      expect(extractRpcErrorMessage("some string")).toBe("RPC error");
-      expect(extractRpcErrorMessage(null)).toBe("RPC error");
-      expect(extractRpcErrorMessage({ msg: "test" })).toBe("RPC error");
+      expect(extractRpcErrorMessage("some string")).toBe("RPC request failed");
+      expect(extractRpcErrorMessage(null)).toBe("RPC request failed");
+      expect(extractRpcErrorMessage({ msg: "test" })).toBe("RPC request failed");
+    });
+
+    it("never returns credential-bearing provider text", () => {
+      const canary = "https://rpc.example.test/v2/SUPER_SECRET_API_KEY";
+      const publicMessage = extractRpcErrorMessage(
+        new Error(`RPC error at ${canary}: transaction failed 0xdeadbeef`),
+      );
+      expect(publicMessage).toBe("RPC request failed");
+      expect(publicMessage).not.toContain("SUPER_SECRET_API_KEY");
+      expect(publicMessage).not.toContain("0xdeadbeef");
     });
   });
 });
@@ -130,9 +95,8 @@ describe("RPC Error Detection", () => {
 describe("RPC Error HTTP Status", () => {
   it("should return 502 for RPC errors (integration test concept)", () => {
     // This test documents the expected behavior:
-    // When an RPC error occurs (e.g., insufficient funds),
-    // the API should return 502 Bad Gateway with the actual error message,
-    // not 500 Internal Server Error with a generic message.
+    // When an RPC error occurs, the API returns a stable classification rather
+    // than credential-bearing provider text.
 
     // The actual integration test would require a running server
     // and a way to trigger an RPC error (e.g., sending without funds).
@@ -140,6 +104,6 @@ describe("RPC Error HTTP Status", () => {
     // For now, we verify the detection logic works correctly.
     const rpcError = new Error("insufficient funds for gas * price + value");
     expect(isRpcError(rpcError)).toBe(true);
-    expect(extractRpcErrorMessage(rpcError)).toContain("insufficient funds");
+    expect(extractRpcErrorMessage(rpcError)).toBe("Insufficient funds for transaction");
   });
 });

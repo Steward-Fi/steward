@@ -16,9 +16,10 @@ import {
   type AwsKmsSigningClientLike,
   decodeAwsKmsEcdsaSignature,
 } from "../aws-kms-external-custody";
-import type {
-  ExternalKeyHandleImportRequest,
-  ExternalKeySignTransactionRequest,
+import {
+  ExternalBroadcastOutcomeUnknownError,
+  type ExternalKeyHandleImportRequest,
+  type ExternalKeySignTransactionRequest,
 } from "../external-key-custody";
 import { runExternalKeyCustodyV1Conformance } from "../external-key-custody-conformance";
 
@@ -125,6 +126,10 @@ class MockRpc implements AwsKmsEvmRpc {
   async broadcast(serializedTransaction: Hex): Promise<Hex> {
     this.broadcasts.push(serializedTransaction);
     return keccak256(serializedTransaction);
+  }
+
+  async hasTransaction(): Promise<boolean> {
+    return false;
   }
 }
 
@@ -545,7 +550,52 @@ describe("AWS KMS asymmetric external custody", () => {
       providerFor(new MockKms(privateKey), dishonestRpc).signTransaction(
         signRequest(privateKey, { broadcast: true }),
       ),
-    ).rejects.toThrow("does not match signed bytes");
+    ).rejects.toBeInstanceOf(ExternalBroadcastOutcomeUnknownError);
+  });
+
+  test("reconciles an accepted broadcast after its response is lost without reposting", async () => {
+    const privateKey = secp256k1.utils.randomPrivateKey();
+    const rpc = new MockRpc();
+    const reconciled: Hex[] = [];
+    rpc.broadcast = async (serializedTransaction: Hex) => {
+      rpc.broadcasts.push(serializedTransaction);
+      throw new Error("socket reset after write");
+    };
+    rpc.hasTransaction = async (hash: Hex) => {
+      reconciled.push(hash);
+      return true;
+    };
+
+    const result = await providerFor(new MockKms(privateKey), rpc).signTransaction(
+      signRequest(privateKey, { broadcast: true }),
+    );
+    expect(rpc.broadcasts).toHaveLength(1);
+    expect(reconciled).toEqual([keccak256(rpc.broadcasts[0])]);
+    expect(result).toEqual({ result: reconciled[0], broadcast: true });
+  });
+
+  test("returns a deterministic outcome_unknown after an unreconciled broadcast without retry", async () => {
+    const privateKey = secp256k1.utils.randomPrivateKey();
+    const rpc = new MockRpc();
+    rpc.broadcast = async (serializedTransaction: Hex) => {
+      rpc.broadcasts.push(serializedTransaction);
+      throw new Error("https://rpc.example.test/SECRET_TOKEN timed out after write");
+    };
+
+    let error: unknown;
+    try {
+      await providerFor(new MockKms(privateKey), rpc).signTransaction(
+        signRequest(privateKey, { broadcast: true }),
+      );
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(ExternalBroadcastOutcomeUnknownError);
+    expect((error as ExternalBroadcastOutcomeUnknownError).transactionHash).toBe(
+      keccak256(rpc.broadcasts[0]),
+    );
+    expect((error as Error).message).not.toContain("SECRET_TOKEN");
+    expect(rpc.broadcasts).toHaveLength(1);
   });
 
   test("requires KMS to repeat the exact signing algorithm", async () => {

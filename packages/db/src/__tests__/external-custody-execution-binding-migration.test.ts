@@ -48,6 +48,12 @@ describe("0087 external custody execution binding migration", () => {
     await client.exec(transaction("tx-local", "'local-vault'", "NULL"));
     await client.exec(transaction("tx-external", "'external-custody'", `'${IDENTITY}'`));
     await client.exec(transaction("tx-legacy", "NULL", "NULL"));
+    await client.exec(
+      transaction("tx-unknown-outcome", "'external-custody'", `'${IDENTITY}'`).replace(
+        "'pending'",
+        "'outcome_unknown'",
+      ),
+    );
     await expectRejected(client, transaction("tx-null-smuggle", "NULL", `'${IDENTITY}'`));
     await expectRejected(client, transaction("tx-unknown", "'unknown'", "NULL"));
     await expectRejected(client, transaction("tx-external-null", "'external-custody'", "NULL"));

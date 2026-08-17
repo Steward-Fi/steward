@@ -24,6 +24,7 @@ import type {
 import {
   assertNoExternalPrivateKeyMaterial,
   EXTERNAL_KEY_CUSTODY_CONTRACT_VERSION,
+  ExternalBroadcastOutcomeUnknownError,
 } from "./external-key-custody";
 
 const AWS_PROVIDER_ID = "aws-kms";
@@ -75,6 +76,8 @@ export interface AwsKmsEvmRpc {
     address: Address,
   ): Promise<TransactionSerializableLegacy>;
   broadcast(serializedTransaction: Hex): Promise<Hex>;
+  /** Best-effort, read-only reconciliation after an ambiguous broadcast. */
+  hasTransaction?(transactionHash: Hex): Promise<boolean>;
 }
 
 export interface AwsKmsExternalKeyCustodyOptions {
@@ -354,6 +357,14 @@ function defaultRpcFactory(rpcUrl: string, timeoutMs: number): AwsKmsEvmRpc {
     broadcast(serializedTransaction) {
       return client.sendRawTransaction({ serializedTransaction });
     },
+    async hasTransaction(transactionHash) {
+      try {
+        await client.getTransaction({ hash: transactionHash });
+        return true;
+      } catch {
+        return false;
+      }
+    },
   };
 }
 
@@ -553,11 +564,30 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
       v: yParity === 0 ? 27n : 28n,
     });
     const expectedTransactionHash = keccak256(serialized);
-    const result = request.broadcast
-      ? await this.withDeadline(rpc.broadcast(serialized), "RPC broadcast")
-      : serialized;
-    if (request.broadcast && result.toLowerCase() !== expectedTransactionHash.toLowerCase()) {
-      throw new Error("AWS KMS RPC returned a transaction hash that does not match signed bytes");
+    let result: Hex = serialized;
+    if (request.broadcast) {
+      try {
+        result = await this.withDeadline(rpc.broadcast(serialized), "RPC broadcast");
+      } catch (cause) {
+        // sendRawTransaction can mutate the chain before its response is lost.
+        // Reconcile once by the deterministic local hash; never blindly retry.
+        const reconciled = rpc.hasTransaction
+          ? await this.withDeadline(
+              rpc.hasTransaction(expectedTransactionHash),
+              "RPC broadcast reconciliation",
+            ).catch(() => false)
+          : false;
+        if (reconciled) {
+          result = expectedTransactionHash;
+        } else {
+          throw new ExternalBroadcastOutcomeUnknownError(expectedTransactionHash, { cause });
+        }
+      }
+      if (result.toLowerCase() !== expectedTransactionHash.toLowerCase()) {
+        throw new Error(
+          "AWS KMS RPC returned a transaction hash that does not match signed bytes",
+        );
+      }
     }
     return { result, broadcast: request.broadcast };
   }

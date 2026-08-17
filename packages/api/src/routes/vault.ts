@@ -33,6 +33,7 @@ import {
   detectSolanaPolicyConflicts,
   ENTRY_POINT_V07,
   type ExportPrivateKeyResult,
+  ExternalBroadcastOutcomeUnknownError,
   GovernedVault,
   GovernedVaultError,
   getUserOperationHash,
@@ -1203,6 +1204,29 @@ function executionAuthorizationErrorResponse(
   return c.json<ApiResponse>({ ok: false, error: error.message }, status);
 }
 
+function externalBroadcastOutcomeUnknownResponse(
+  c: Context<{ Variables: AppVariables }>,
+  error: unknown,
+  txId?: string,
+): Response | null {
+  if (!(error instanceof ExternalBroadcastOutcomeUnknownError)) return null;
+  return c.json<
+    ApiResponse<{ code: string; txId?: string; txHash: string; reconciliationRequired: true }>
+  >(
+    {
+      ok: false,
+      error: "Broadcast outcome is unknown; reconcile the transaction hash before retrying",
+      data: {
+        code: error.code,
+        ...(txId ? { txId } : {}),
+        txHash: error.transactionHash,
+        reconciliationRequired: true,
+      },
+    },
+    202,
+  );
+}
+
 // Fail-closed handler for the TOCTOU backend-binding guard.
 //
 // `BackendBindingMismatchError` is thrown at the vault signing boundary
@@ -2256,8 +2280,9 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       );
     }
 
+    const executionTxId = crypto.randomUUID();
     try {
-      const txId = crypto.randomUUID();
+      const txId = executionTxId;
       const txStatus: "broadcast" | "signed" = shouldBroadcast ? "broadcast" : "signed";
       const executionAuthorization =
         isEvmSignRequest && executionPayloadDigest
@@ -2455,6 +2480,24 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       if (bindingMismatch) return bindingMismatch;
       const authorizationError = executionAuthorizationErrorResponse(c, e);
       if (authorizationError) return authorizationError;
+      const outcomeUnknown = externalBroadcastOutcomeUnknownResponse(c, e, executionTxId);
+      if (outcomeUnknown) {
+        await writeVaultAudit(c, {
+          tenantId,
+          actorType: "agent",
+          actorId: agentId,
+          action: "vault.broadcast.outcome_unknown",
+          resourceType: "transaction",
+          resourceId: executionTxId,
+          metadata: {
+            agentId,
+            txId: executionTxId,
+            txHash: e instanceof ExternalBroadcastOutcomeUnknownError ? e.transactionHash : null,
+            chainId: resolvedChainId,
+          },
+        });
+        return outcomeUnknown;
+      }
       const requestId = c.get("requestId") || "unknown";
       console.error(`[${requestId}] Sign transaction failed for agent ${agentId}`);
 
@@ -4213,6 +4256,10 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         data: !shouldBroadcast ? { txId, signedTx: txHash } : { txId, txHash },
       });
     } catch (e: unknown) {
+      if (e instanceof ExternalBroadcastOutcomeUnknownError) {
+        irreversibleResult = true;
+        completedTxHash = e.transactionHash;
+      }
       const frozen = frozenSigningResponse(c, e);
       if (frozen) return frozen;
       const authorizationError = executionAuthorizationErrorResponse(c, e);
@@ -4249,7 +4296,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         await db
           .update(transactions)
           .set({
-            status: "broadcast",
+            status:
+              e instanceof ExternalBroadcastOutcomeUnknownError ? "outcome_unknown" : "broadcast",
             txHash: completedTxHash ?? transactionRow.txHash ?? null,
             signedAt: resolvedAt,
           })
@@ -4258,6 +4306,20 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
 
       if (bindingMismatch) return bindingMismatch;
       if (authorizationError) return authorizationError;
+
+      const outcomeUnknown = externalBroadcastOutcomeUnknownResponse(c, e, txId);
+      if (outcomeUnknown) {
+        await writeVaultAudit(c, {
+          tenantId,
+          actorType: "user",
+          actorId,
+          action: "vault.broadcast.outcome_unknown",
+          resourceType: "transaction",
+          resourceId: txId,
+          metadata: { agentId, txId, txHash: completedTxHash, chainId: transactionRow.chainId },
+        });
+        return outcomeUnknown;
+      }
 
       const requestId = c.get("requestId") || "unknown";
       const safeFailureMessage = "Transaction approval execution failed";

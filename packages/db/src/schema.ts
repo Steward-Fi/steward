@@ -125,6 +125,7 @@ export const transactionStatusEnum = pgEnum("transaction_status", [
   "broadcast",
   "confirmed",
   "failed",
+  "outcome_unknown",
 ]);
 
 export const approvalQueueStatusEnum = pgEnum("approval_queue_status", [
