@@ -74,6 +74,13 @@ describe("audit archive filesystem boundaries", () => {
       writeFileSync(oversized, Buffer.alloc(17));
       expect(() => readBoundedRegularFile(oversized, 16)).toThrow("16 byte limit");
 
+      // A manifest file contains the signed manifest plus its envelope. The
+      // envelope may legitimately exceed the manifest-only 768 KiB ceiling,
+      // while remaining within the public API's 1 MiB transport bound.
+      const boundedEnvelope = join(directory, "bounded-envelope.json");
+      writeFileSync(boundedEnvelope, Buffer.alloc(800 * 1024, "a"));
+      expect(readBoundedRegularFile(boundedEnvelope, 1024 * 1024)).toHaveLength(800 * 1024);
+
       const symlink = join(directory, "symlink.jsonl");
       symlinkSync(regular, symlink);
       expect(() => readBoundedRegularFile(symlink, 16)).toThrow();

@@ -35,6 +35,7 @@ type ArchiveChunkReference = {
 
 const MAX_ARCHIVE_CHUNKS = 2_048;
 const MAX_ARCHIVE_MANIFEST_BYTES = 768 * 1024;
+const MAX_ARCHIVE_ENVELOPE_BYTES = 1024 * 1024;
 
 /** Read an untrusted archive file without following symlinks, blocking on
  * special files, or allocating beyond its validated size. */
@@ -377,7 +378,7 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
     const archive = JSON.parse(
       readBoundedRegularFile(
         join(inputDirectory, "manifest.json"),
-        MAX_ARCHIVE_MANIFEST_BYTES,
+        MAX_ARCHIVE_ENVELOPE_BYTES,
       ).toString("utf8"),
     ) as {
       archiveId: string;
@@ -440,9 +441,9 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
     mkdirSync(out, { recursive: true, mode: 0o700 });
     const manifestPath = join(out, "manifest.json");
     if (existsSync(manifestPath)) {
-      const existing = JSON.parse(readFileSync(manifestPath, "utf8")) as {
-        manifestSha256?: string;
-      };
+      const existing = JSON.parse(
+        readBoundedRegularFile(manifestPath, MAX_ARCHIVE_ENVELOPE_BYTES).toString("utf8"),
+      ) as { manifestSha256?: string };
       if (existing.manifestSha256 !== archive.manifestSha256) {
         throw new Error("Existing export manifest belongs to a different archive");
       }
@@ -455,7 +456,7 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
     for (const chunk of archive.manifest.chunks) {
       const path = join(out, chunk.file);
       if (existsSync(path)) {
-        const existing = readFileSync(path);
+        const existing = readBoundedRegularFile(path, 1024 * 1024, chunk.byteLength);
         if (createHash("sha256").update(existing).digest("hex") !== chunk.sha256) {
           throw new Error(`Existing chunk ${chunk.file} does not match the signed manifest`);
         }
