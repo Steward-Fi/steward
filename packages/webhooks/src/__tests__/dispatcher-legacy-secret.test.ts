@@ -115,12 +115,16 @@ describe("WebhookDispatcher legacy string-URL signing (SEC-101)", () => {
       const signatureB = String(requestB?.headers["x-steward-signature"]);
 
       // Tenant A's delivery verifies under A's derived key only.
-      expect(signatureA).toBe(signatureFor(requestA!, deriveLegacySecret(MASTER_SECRET, "tenant-a")));
+      expect(signatureA).toBe(
+        signatureFor(requestA!, deriveLegacySecret(MASTER_SECRET, "tenant-a")),
+      );
       expect(signatureA).not.toBe(
         signatureFor(requestA!, deriveLegacySecret(MASTER_SECRET, "tenant-b")),
       );
       // Tenant B's delivery verifies under B's derived key only.
-      expect(signatureB).toBe(signatureFor(requestB!, deriveLegacySecret(MASTER_SECRET, "tenant-b")));
+      expect(signatureB).toBe(
+        signatureFor(requestB!, deriveLegacySecret(MASTER_SECRET, "tenant-b")),
+      );
       expect(signatureB).not.toBe(
         signatureFor(requestB!, deriveLegacySecret(MASTER_SECRET, "tenant-a")),
       );
@@ -135,8 +139,8 @@ describe("WebhookDispatcher legacy string-URL signing (SEC-101)", () => {
   it("still requires STEWARD_WEBHOOK_SECRET for the string form", async () => {
     delete process.env.STEWARD_WEBHOOK_SECRET;
     const dispatcher = new WebhookDispatcher({ maxRetries: 0, timeoutMs: 1_000 });
-    await expect(dispatcher.dispatch(makeEvent("tenant-a"), "https://example.com/hook")).rejects.toThrow(
-      "Webhook secret is required",
-    );
+    await expect(
+      dispatcher.dispatch(makeEvent("tenant-a"), "https://example.com/hook"),
+    ).rejects.toThrow("Webhook secret is required");
   });
 });
