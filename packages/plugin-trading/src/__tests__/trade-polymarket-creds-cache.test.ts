@@ -25,7 +25,6 @@ import { agents, closeDb, getDb, tenants, tradeSessions } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import type { AppVariables } from "@stwd/shared";
 import { TradeSessionManager } from "@stwd/trade-sessions";
-import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { StewardAppContext } from "../context";
 
@@ -36,6 +35,12 @@ setDefaultTimeout(30000);
 const redisStore = new Map<string, string>();
 const fakeRedis = {
   get: async (key: string) => redisStore.get(key) ?? null,
+  // IoredisLike.set — the durable idempotency store (SEC-043) writes through
+  // this with a PX TTL; the creds cache itself uses setex below.
+  set: async (key: string, value: string, _mode?: "PX", _ttlMs?: number) => {
+    redisStore.set(key, value);
+    return "OK";
+  },
   setex: async (key: string, _ttlSeconds: number, value: string) => {
     redisStore.set(key, value);
     return "OK";
@@ -97,11 +102,7 @@ async function seedTenantAgent(): Promise<{ tenantId: string; agentId: string }>
   return { tenantId, agentId };
 }
 
-async function seedSession(
-  tenantId: string,
-  agentId: string,
-  walletId: string,
-): Promise<string> {
+async function seedSession(tenantId: string, agentId: string, walletId: string): Promise<string> {
   const sessionId = `ses_${crypto.randomUUID()}`;
   await getDb()
     .insert(tradeSessions)
