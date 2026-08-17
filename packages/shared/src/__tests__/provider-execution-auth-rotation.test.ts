@@ -60,7 +60,8 @@ describe("execution authorization v2 key rotation", () => {
     const oldCommitment = commitment("old");
     const oldSignature = signProviderExecutionCommitmentV2(oldCommitment);
 
-    process.env.STEWARD_EXECUTION_AUTH_SECRET = "new:new-secret-material-padded-to-32ch,old:old-secret-material-padded-to-32ch";
+    process.env.STEWARD_EXECUTION_AUTH_SECRET =
+      "new:new-secret-material-padded-to-32ch,old:old-secret-material-padded-to-32ch";
     expect(verifyProviderExecutionCommitmentV2(oldCommitment, oldSignature)).toBe(true);
     expect(() => signProviderExecutionCommitmentV2(oldCommitment)).toThrow(
       "commitment keyId does not match the active signing key",
@@ -92,8 +93,7 @@ describe("execution authorization v2 key rotation", () => {
     expect(() => signProviderExecutionCommitmentV2(commitment("k1"))).toThrow(/too weak/);
 
     // A too-weak entry anywhere in the rotation list fails closed at load.
-    process.env.STEWARD_EXECUTION_AUTH_SECRET =
-      "k1:secret-one-with-enough-entropy-here,k2:tiny";
+    process.env.STEWARD_EXECUTION_AUTH_SECRET = "k1:secret-one-with-enough-entropy-here,k2:tiny";
     expect(() => signProviderExecutionCommitmentV2(commitment("k1"))).toThrow(/too weak/);
   });
 });

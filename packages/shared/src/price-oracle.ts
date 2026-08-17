@@ -263,7 +263,6 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
       // exact. Rounds to nearest (half up) — an explicit rounding policy,
       // replacing the old double-math `Math.floor(tokenAmount * 10**decimals)`
       // which lost precision and always rounded down.
-      const MICROS = 1_000_000n;
       const usdMicros = BigInt(Math.round(usdValue * 1_000_000));
       const priceMicros = BigInt(Math.round(price * 1_000_000));
       if (priceMicros <= 0n) return null;

@@ -350,14 +350,14 @@ describe("strictParseJson", () => {
   // SEC-045: a `__proto__` member must never silently replace the result's
   // prototype (object value) or vanish (primitive value); reject it outright.
   it("rejects __proto__ member with object value", () =>
-    expectCanon(() => strictParseJson('{"__proto__":{"isAdmin":true}}'), "CANON_JSON_FORBIDDEN_KEY"));
+    expectCanon(
+      () => strictParseJson('{"__proto__":{"isAdmin":true}}'),
+      "CANON_JSON_FORBIDDEN_KEY",
+    ));
   it("rejects __proto__ member with primitive value", () =>
     expectCanon(() => strictParseJson('{"__proto__":1,"text":"hi"}'), "CANON_JSON_FORBIDDEN_KEY"));
   it("rejects __proto__ member nested at any depth", () =>
-    expectCanon(
-      () => strictParseJson('{"x":[{"__proto__":null}]}'),
-      "CANON_JSON_FORBIDDEN_KEY",
-    ));
+    expectCanon(() => strictParseJson('{"x":[{"__proto__":null}]}'), "CANON_JSON_FORBIDDEN_KEY"));
   it("rejects constructor/prototype members", () => {
     expectCanon(() => strictParseJson('{"constructor":{}}'), "CANON_JSON_FORBIDDEN_KEY");
     expectCanon(() => strictParseJson('{"prototype":{}}'), "CANON_JSON_FORBIDDEN_KEY");
