@@ -250,4 +250,19 @@ describe("FROST-secp256k1 2-of-3 threshold signing (E2E, real sidecars)", () => 
       expect(mode.toString(8)).toBe("600");
     }
   });
+
+  // SEC-026: a 1-of-1 group has no independent verifier — the aggregating
+  // share would verify its own aggregate. Reject the degenerate config
+  // instead of silently downgrading to self-verification.
+  test("SEC-026: a single-share group is rejected at construction", () => {
+    expect(
+      () =>
+        new FrostSignerBackend({
+          shareEndpoints: [cluster.endpoints[0]],
+          shareAuthTokens: [cluster.authTokens[0]],
+          threshold: 1,
+          groupPublicKeyHex: cluster.groupPublicKeyHex,
+        }),
+    ).toThrow(/at least two share endpoints/);
+  });
 });

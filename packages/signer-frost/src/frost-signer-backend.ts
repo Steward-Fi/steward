@@ -84,6 +84,16 @@ export class FrostSignerBackend implements SignerBackend {
         `need at least threshold=${opts.threshold} share endpoints, got ${opts.shareEndpoints.length}`,
       );
     }
+    // SEC-026: a single-share (1-of-1) group is rejected outright — with only
+    // one share there is no independent verifier, so the aggregating share
+    // would be trusted to verify its own aggregate, re-opening the
+    // message-substitution hole this backend otherwise closes.
+    if (opts.shareEndpoints.length < 2) {
+      throw new Error(
+        "frost signing requires at least two share endpoints: a single-share group " +
+          "cannot independently verify the aggregator",
+      );
+    }
     const perShareTokens =
       typeof opts.shareAuthTokens === "string"
         ? opts.shareEndpoints.map(() => opts.shareAuthTokens as string)
@@ -184,7 +194,12 @@ export class FrostSignerBackend implements SignerBackend {
       throw new Error("aggregated signature was produced under a different group key");
     }
     const independent =
-      this.shares.slice(this.threshold)[0] ?? this.shares.find((s) => s !== quorum[0]) ?? quorum[0];
+      this.shares.slice(this.threshold)[0] ?? this.shares.find((s) => s !== quorum[0]);
+    if (!independent) {
+      // Unreachable given the constructor's >=2-endpoint rule, but never let
+      // the aggregating share "independently" verify itself.
+      throw new Error("no share available for independent verification of the aggregate");
+    }
     const bound = await independent.verify(messageHex, agg.signatureHex);
     if (!bound) {
       throw new Error(

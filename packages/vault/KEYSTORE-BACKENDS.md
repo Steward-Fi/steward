@@ -106,6 +106,12 @@ import { FrostSignerBackend } from "@stwd/signer-frost";
 
 const signer: SignerBackend = new FrostSignerBackend({
   shareEndpoints: ["http://127.0.0.1:7401", "http://127.0.0.1:7402", "http://127.0.0.1:7403"],
+  // per-share bearer tokens the sidecars require (single string = one shared token)
+  shareAuthTokens: [
+    process.env.STEWARD_FROST_TOKEN_1!,
+    process.env.STEWARD_FROST_TOKEN_2!,
+    process.env.STEWARD_FROST_TOKEN_3!,
+  ],
   threshold: 2,
   groupPublicKeyHex: process.env.STEWARD_FROST_GROUP_PUBKEY!,
 });
