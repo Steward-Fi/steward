@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { assertDatabaseUrlTls } from "../client";
 
 const originalNodeEnv = process.env.NODE_ENV;
@@ -43,5 +43,31 @@ describe("database transport security", () => {
       assertDatabaseUrlTls("postgres://user:pass@db.example/steward?sslmode=verify-full"),
     ).not.toThrow();
     expect(() => assertDatabaseUrlTls("postgres://localhost/steward")).not.toThrow();
+  });
+
+  test("accepts sslmode=require in production but warns it does not verify the peer (SEC-087)", () => {
+    process.env.NODE_ENV = "production";
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(() =>
+        assertDatabaseUrlTls("postgres://user:pass@db.example/steward?sslmode=require"),
+      ).not.toThrow();
+      expect(warn).toHaveBeenCalled();
+      expect(String(warn.mock.calls[0]?.[0] ?? "")).toContain("verify-full");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("does not warn for verify-ca / verify-full (SEC-087)", () => {
+    process.env.NODE_ENV = "production";
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      assertDatabaseUrlTls("postgres://user:pass@db.example/steward?sslmode=verify-full");
+      assertDatabaseUrlTls("postgres://user:pass@db.example/steward?sslmode=verify-ca");
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
