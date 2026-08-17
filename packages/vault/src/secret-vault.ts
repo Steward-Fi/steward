@@ -38,6 +38,12 @@ import {
   secrets,
 } from "@stwd/db";
 import { type EncryptedKey, KeyStore } from "./keystore";
+import {
+  assertGovernedRouteUpdateIsSafe,
+  assertNoOppositeAuthorityOverlap,
+  lockSecretRouteNamespaces,
+  SecretRouteAuthorityConflict,
+} from "./secret-route-authority";
 import { validateSecretRouteConfig } from "./secret-route-validator";
 
 export interface SecretMetadata {
@@ -438,7 +444,7 @@ export class SecretVault {
       approvalConfig?: Record<string, unknown>;
     },
   ): Promise<SecretRoute> {
-    return this.createRouteWithinTx(getDb(), tenantId, secretId, config);
+    return getDb().transaction((tx) => this.createRouteWithinTx(tx, tenantId, secretId, config));
   }
 
   /** Create a route inside a caller-owned transaction. */
@@ -460,6 +466,7 @@ export class SecretVault {
       approvalConfig?: Record<string, unknown>;
     },
   ): Promise<SecretRoute> {
+    await lockSecretRouteNamespaces(db as never, tenantId, [config.agentId]);
     const normalizedConfig = {
       ...config,
       hostPattern: config.hostPattern.trim().toLowerCase(),
@@ -514,6 +521,11 @@ export class SecretVault {
       })
       .returning();
 
+    await assertNoOppositeAuthorityOverlap(db as never, {
+      ...row,
+      agentId: config.agentId,
+    });
+
     return row;
   }
 
@@ -552,7 +564,7 @@ export class SecretVault {
       approvalConfig: Record<string, unknown>;
     }>,
   ): Promise<SecretRoute | null> {
-    return this.updateRouteWithinTx(getDb(), tenantId, routeId, updates);
+    return getDb().transaction((tx) => this.updateRouteWithinTx(tx, tenantId, routeId, updates));
   }
 
   /** Update a route inside a caller-owned transaction. */
@@ -598,6 +610,29 @@ export class SecretVault {
         .limit(1);
       return unchanged ?? null;
     }
+    const [beforeLock] = await db
+      .select()
+      .from(secretRoutes)
+      .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)))
+      .limit(1);
+    if (!beforeLock) return null;
+    if (!beforeLock.agentId) {
+      throw new SecretRouteAuthorityConflict("route has no agent namespace");
+    }
+    const destinationAgentId = allowedUpdates.agentId ?? beforeLock.agentId;
+    await lockSecretRouteNamespaces(db as never, tenantId, [
+      beforeLock.agentId,
+      destinationAgentId,
+    ]);
+    const [lockedCurrent] = await db
+      .select()
+      .from(secretRoutes)
+      .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)))
+      .limit(1);
+    if (!lockedCurrent || lockedCurrent.agentId !== beforeLock.agentId) {
+      throw new SecretRouteAuthorityConflict("route changed during update");
+    }
+    assertGovernedRouteUpdateIsSafe(lockedCurrent, allowedUpdates);
     // Partial-patch validation: skip per-host strictness here (the patch may not
     // carry method/path). The merged pass below enforces strict-host rules.
     const validationError = validateSecretRouteConfig(allowedUpdates, {
@@ -656,6 +691,12 @@ export class SecretVault {
       .set(allowedUpdates)
       .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)))
       .returning();
+    if (row) {
+      await assertNoOppositeAuthorityOverlap(db as never, {
+        ...row,
+        agentId: destinationAgentId,
+      });
+    }
     return row ?? null;
   }
 

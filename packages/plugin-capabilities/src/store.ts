@@ -32,6 +32,8 @@
  */
 
 import {
+  type AppendRequiredAudit,
+  type AuditEventInput,
   agents,
   and,
   eq,
@@ -68,6 +70,12 @@ import {
 // (postgres-js/pglite/neon); the store accepts any drizzle db exposing the common
 // query builder + transaction. the core injects the concrete handle.
 export type Db = any;
+
+type AuditedTransaction = <T>(
+  tenantId: string,
+  fn: (tx: unknown, appendRequiredAudit: AppendRequiredAudit) => Promise<T>,
+) => Promise<T>;
+type AuditFactory<T> = (result: T) => AuditEventInput | null;
 
 /** fields that define a capability's target + injection (validated together). */
 export interface CapabilitySpec {
@@ -110,7 +118,27 @@ function routeValuesFor(
 }
 
 export class CapabilityStore {
-  constructor(private readonly db: Db) {}
+  constructor(
+    private readonly db: Db,
+    private readonly auditedTransaction?: AuditedTransaction,
+  ) {}
+
+  private transaction<T>(
+    tenantId: string,
+    audit: AuditFactory<T> | undefined,
+    mutate: (tx: Db) => Promise<T>,
+  ): Promise<T> {
+    if (!audit) return this.db.transaction(mutate);
+    if (!this.auditedTransaction) {
+      throw new Error("audited transaction runner is required for capability mutations");
+    }
+    return this.auditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
+      const result = await mutate(tx as Db);
+      const event = audit(result);
+      if (event) await appendRequiredAudit(event);
+      return result;
+    });
+  }
 
   // ── capability reads ────────────────────────────────────────────────────────
 
@@ -171,24 +199,27 @@ export class CapabilityStore {
     spec: CapabilitySpec;
     constraints: Record<string, unknown>;
     enabled: boolean;
+    audit?: AuditFactory<Capability>;
   }): Promise<Capability> {
-    const [row] = await this.db
-      .insert(capabilities)
-      .values({
-        tenantId: input.tenantId,
-        name: input.name,
-        secretId: input.spec.secretId,
-        host: input.spec.host,
-        pathPattern: input.spec.pathPattern,
-        method: input.spec.method,
-        injectAs: input.spec.injectAs,
-        injectKey: input.spec.injectKey,
-        injectFormat: input.spec.injectFormat,
-        constraints: input.constraints,
-        enabled: input.enabled,
-      })
-      .returning();
-    return row;
+    return this.transaction(input.tenantId, input.audit, async (tx) => {
+      const [row] = await tx
+        .insert(capabilities)
+        .values({
+          tenantId: input.tenantId,
+          name: input.name,
+          secretId: input.spec.secretId,
+          host: input.spec.host,
+          pathPattern: input.spec.pathPattern,
+          method: input.spec.method,
+          injectAs: input.spec.injectAs,
+          injectKey: input.spec.injectKey,
+          injectFormat: input.spec.injectFormat,
+          constraints: input.constraints,
+          enabled: input.enabled,
+        })
+        .returning();
+      return row;
+    });
   }
 
   // ── capability update (enable/disable + routing/inject/constraints) ─────────
@@ -215,8 +246,9 @@ export class CapabilityStore {
       enabled?: boolean;
     },
     now: Date = new Date(),
+    audit?: AuditFactory<Capability | null>,
   ): Promise<Capability | null> {
-    return this.db.transaction(async (tx: Db) => {
+    return this.transaction(tenantId, audit, async (tx: Db) => {
       const [current] = await tx
         .select()
         .from(capabilities)
@@ -316,8 +348,12 @@ export class CapabilityStore {
    * Delete a capability transactionally: remove every paired secret_route, then
    * every grant, then the capability. No route can survive the delete.
    */
-  async deleteCapability(tenantId: string, id: string): Promise<boolean> {
-    return this.db.transaction(async (tx: Db) => {
+  async deleteCapability(
+    tenantId: string,
+    id: string,
+    audit?: AuditFactory<boolean>,
+  ): Promise<boolean> {
+    return this.transaction(tenantId, audit, async (tx: Db) => {
       const [current] = await tx
         .select()
         .from(capabilities)
@@ -473,9 +509,10 @@ export class CapabilityStore {
     agentId: string;
     expiresAt: Date | null;
     now?: Date;
+    audit?: AuditFactory<{ grant: CapabilityGrant; route: SecretRoute | null } | null>;
   }): Promise<{ grant: CapabilityGrant; route: SecretRoute | null } | null> {
     const now = input.now ?? new Date();
-    return this.db.transaction(async (tx: Db) => {
+    return this.transaction(input.tenantId, input.audit, async (tx: Db) => {
       const [cap] = await tx
         .select()
         .from(capabilities)
@@ -546,8 +583,12 @@ export class CapabilityStore {
    * already-revoked grant (route already gone). Returns false if the grant does
    * not exist for the tenant.
    */
-  async revokeGrant(tenantId: string, grantId: string): Promise<boolean> {
-    return this.db.transaction(async (tx: Db) => {
+  async revokeGrant(
+    tenantId: string,
+    grantId: string,
+    audit?: AuditFactory<boolean>,
+  ): Promise<boolean> {
+    return this.transaction(tenantId, audit, async (tx: Db) => {
       const [grant] = await tx
         .select()
         .from(capabilityGrants)

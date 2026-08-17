@@ -10,6 +10,7 @@ import {
   secretRoutes,
   secrets,
   userTenants,
+  withTenantAuditedTransaction,
   workspaces,
 } from "@stwd/db";
 import {
@@ -32,6 +33,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   assertNoOppositeAuthorityOverlap,
   lockSecretRouteNamespaces,
+  type RouteAuthorityTx,
   SecretRouteAuthorityConflict,
 } from "./secret-route-authority";
 
@@ -729,7 +731,8 @@ export class ProviderAuthorityStore {
         reason: ctx.reason,
       },
     });
-    return this.db().transaction(async (tx) => {
+    return withTenantAuditedTransaction(ctx.tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as RouteAuthorityTx;
       if (input.secretRouteId) {
         const [routeBeforeLock] = await tx
           .select()
@@ -875,6 +878,22 @@ export class ProviderAuthorityStore {
           );
         }
       }
+      await appendRequiredAudit({
+        tenantId: ctx.tenantId,
+        actorType: "user",
+        actorId: ctx.actorUserId,
+        action: "provider.operation.register.completed",
+        resourceType: "provider_operation",
+        resourceId: row.id,
+        metadata: {
+          workspaceId: account.workspaceId,
+          providerAccountId: account.id,
+          operationKey,
+          expectedRevision: account.revision,
+          reason: ctx.reason,
+        },
+        requestId: ctx.requestId ?? null,
+      });
       return row;
     });
   }

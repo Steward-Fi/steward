@@ -1,5 +1,16 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
-import { agents, closeDb, getDb, secretRoutes, secrets, tenants } from "@stwd/db";
+import {
+  agents,
+  closeDb,
+  getDb,
+  providerAccounts,
+  providerOperations,
+  secretRoutes,
+  secrets,
+  tenants,
+  users,
+  workspaces,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, eq } from "drizzle-orm";
 import { SecretVault } from "../secret-vault";
@@ -39,6 +50,48 @@ async function ensureAgent(tenantId: string, agentId: string) {
       walletAddress: "0x0000000000000000000000000000000000000001",
     })
     .onConflictDoNothing();
+}
+
+async function promoteRoute(tenantId: string, routeId: string): Promise<void> {
+  const [user] = await getDb()
+    .insert(users)
+    .values({ email: `vault-route-${crypto.randomUUID()}@example.test` })
+    .returning();
+  const [workspace] = await getDb()
+    .insert(workspaces)
+    .values({
+      tenantId,
+      key: `vault-${crypto.randomUUID()}`,
+      name: "vault route",
+      environment: "production",
+      createdBy: user.id,
+    })
+    .returning();
+  const [account] = await getDb()
+    .insert(providerAccounts)
+    .values({
+      tenantId,
+      workspaceId: workspace.id,
+      adapterKey: "github",
+      externalRef: crypto.randomUUID(),
+      displayName: "vault route",
+    })
+    .returning();
+  const [operation] = await getDb()
+    .insert(providerOperations)
+    .values({
+      tenantId,
+      workspaceId: workspace.id,
+      providerAccountId: account.id,
+      operationKey: `vault.route.${crypto.randomUUID()}`,
+      riskClass: "write",
+      secretRouteId: routeId,
+    })
+    .returning();
+  await getDb()
+    .update(secretRoutes)
+    .set({ authorityMode: "governed_v2", providerOperationId: operation.id })
+    .where(eq(secretRoutes.id, routeId));
 }
 
 describe("SecretVault lifecycle semantics", () => {
@@ -205,5 +258,39 @@ describe("SecretVault lifecycle semantics", () => {
         injectKey: "authorization",
       }),
     ).rejects.toThrow(/Agent missing-agent not found/);
+  });
+
+  it("enforces governed authority at the public create/update boundary", async () => {
+    const tenantId = `tenant-vault-authority-${crypto.randomUUID()}`;
+    const agentId = "agent-vault-authority";
+    await ensureTenant(tenantId);
+    await ensureAgent(tenantId, agentId);
+    const secret = await vault.createSecret(tenantId, "authority", "secret");
+    const governed = await vault.createRoute(tenantId, secret.id, {
+      agentId,
+      hostPattern: "api.openai.com",
+      pathPattern: "/v1/chat/completions",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "authorization",
+    });
+    await promoteRoute(tenantId, governed.id);
+
+    await expect(
+      vault.createRoute(tenantId, secret.id, {
+        agentId,
+        hostPattern: "api.openai.com",
+        pathPattern: "/v1/chat/completions",
+        method: "POST",
+        injectAs: "header",
+        injectKey: "authorization",
+      }),
+    ).rejects.toThrow(/different authority model/);
+    await expect(
+      vault.updateRoute(tenantId, governed.id, { pathPattern: "/v1/responses" }),
+    ).rejects.toThrow(/provider operation authoring/);
+    expect((await vault.getRoute(tenantId, governed.id))?.pathPattern).toBe(
+      "/v1/chat/completions",
+    );
   });
 });

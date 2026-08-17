@@ -15,7 +15,7 @@
  * the underlying `@stwd/*` package types, never `@stwd/api`.
  */
 
-import type { getDb } from "@stwd/db";
+import type { AppendRequiredAudit, getDb } from "@stwd/db";
 import type { PolicyEngine } from "@stwd/policy-engine";
 import type { IoredisLike } from "@stwd/redis";
 import type { AgentIdentity, AppVariables, PolicyRule, PriceOracle } from "@stwd/shared";
@@ -73,6 +73,10 @@ export interface StewardAppContext {
 
   // ── audit + token status (from @stwd/api services) ────────────────────────
   writeAuditEvent(ev: AuditEventInput): Promise<void>;
+  withTenantAuditedTransaction<T>(
+    tenantId: string,
+    fn: (tx: unknown, appendRequiredAudit: AppendRequiredAudit) => Promise<T>,
+  ): Promise<T>;
   getAgentTokenStatus(agentId: string): Promise<AgentTokenStatus | null>;
 
   // ── redis (from @stwd/api middleware/redis) ───────────────────────────────

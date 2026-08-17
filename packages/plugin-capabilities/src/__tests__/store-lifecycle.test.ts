@@ -343,6 +343,62 @@ describe("governed route authority exclusivity", () => {
   });
 });
 
+describe("audited capability mutations", () => {
+  test("required audit failure rolls back grant creation and route rewrites", async () => {
+    const agentId = "agent-audit-rollback";
+    await ensureAgent(harness!.db, tenantId, agentId);
+    const cap = await createGithubCapability("github.audit.rollback");
+    const failingStore = new CapabilityStore(harness!.db, async (_tenantId, fn) =>
+      harness!.db.transaction((tx: unknown) =>
+        fn(tx, async () => {
+          throw new Error("required audit unavailable");
+        }),
+      ),
+    );
+
+    await expect(
+      failingStore.createGrant({
+        tenantId,
+        capabilityId: cap.id,
+        agentId,
+        expiresAt: null,
+        audit: () => ({
+          tenantId,
+          actorType: "user",
+          action: "capability.grant.create",
+        }),
+      }),
+    ).rejects.toThrow("required audit unavailable");
+    expect(await store.listGrantsForCapability(tenantId, cap.id)).toHaveLength(0);
+    expect(await totalRouteCount(harness!.db, tenantId)).toBe(0);
+
+    const granted = await store.createGrant({
+      tenantId,
+      capabilityId: cap.id,
+      agentId,
+      expiresAt: null,
+    });
+    const changedPath = "/repos/acme/widgets/issues/9/comments";
+    const changed = validateCapabilitySpec({ secretId, ...GH_SPEC, pathPattern: changedPath });
+    if (!changed.ok) throw new Error(changed.error);
+    await expect(
+      failingStore.updateCapability(
+        tenantId,
+        cap.id,
+        { spec: changed.spec },
+        undefined,
+        () => ({ tenantId, actorType: "user", action: "capability.update" }),
+      ),
+    ).rejects.toThrow("required audit unavailable");
+    expect((await store.getCapabilityById(tenantId, cap.id))?.pathPattern).toBe(
+      GH_SPEC.pathPattern,
+    );
+    expect((await getRoute(harness!.db, granted!.route!.id))?.pathPattern).toBe(
+      GH_SPEC.pathPattern,
+    );
+  });
+});
+
 describe("capability disable/enable -> paired routes track fail-closed", () => {
   test("disable disables every paired route; enable re-enables active grants", async () => {
     const cap = await createGithubCapability();
