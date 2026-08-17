@@ -176,6 +176,17 @@ describe("SEC-158 shipped nginx rate limiting and WebSocket map", () => {
     expect(nginx.match(/^\s*limit_req\s+zone=steward_proxy\b/gm)).toHaveLength(1);
   });
 
+  test("TLS listeners have an active bootstrap certificate before Certbot runs", () => {
+    expect(
+      nginx.match(/^\s*ssl_certificate\s+\/etc\/ssl\/certs\/steward-bootstrap\.crt;/gm),
+    ).toHaveLength(2);
+    expect(
+      nginx.match(/^\s*ssl_certificate_key\s+\/etc\/ssl\/private\/steward-bootstrap\.key;/gm),
+    ).toHaveLength(2);
+    expect(readme).toContain("openssl req -x509");
+    expect(readme).toContain("expose the host publicly until issuance succeeds");
+  });
+
   test("operator docs do not instruct duplicate http-context declarations", () => {
     expect(readme).not.toContain("limit_req_zone $binary_remote_addr");
     expect(readme).not.toContain("map $http_upgrade $connection_upgrade");

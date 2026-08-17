@@ -183,7 +183,17 @@ The `deploy/nginx.conf` proxies `api.example.com → :3200` and `proxy.example.c
 # On the node with nginx installed
 sudo apt-get install -y nginx certbot python3-certbot-nginx
 
-# Copy config
+# Create a one-day, owner-only bootstrap certificate. nginx refuses to load an
+# `ssl` listener without a certificate, while certbot's nginx plugin refuses to
+# operate until `nginx -t` passes. Certbot replaces these paths below; do not
+# expose the host publicly until issuance succeeds.
+sudo openssl req -x509 -nodes -newkey rsa:2048 -days 1 \
+  -subj "/CN=steward-bootstrap.invalid" \
+  -keyout /etc/ssl/private/steward-bootstrap.key \
+  -out /etc/ssl/certs/steward-bootstrap.crt
+sudo chmod 600 /etc/ssl/private/steward-bootstrap.key
+
+# Copy config (after replacing api.example.com / proxy.example.com).
 sudo cp deploy/nginx.conf /etc/nginx/sites-available/steward
 sudo ln -s /etc/nginx/sites-available/steward /etc/nginx/sites-enabled/steward
 
@@ -193,8 +203,9 @@ sudo ln -s /etc/nginx/sites-available/steward /etc/nginx/sites-enabled/steward
 
 sudo nginx -t && sudo systemctl reload nginx
 
-# Get TLS certificates
+# Get trusted TLS certificates and replace the bootstrap certificate directives.
 sudo certbot --nginx -d api.example.com -d proxy.example.com
+sudo nginx -t
 ```
 
 ---
