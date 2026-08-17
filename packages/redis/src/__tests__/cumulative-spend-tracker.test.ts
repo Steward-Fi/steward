@@ -26,6 +26,7 @@ import {
   releaseCumulativeSpend,
   releaseWindowedInvoke,
   reserveCumulativeSpend,
+  reserveCumulativeSpendBatch,
   reserveWindowedInvoke,
   settleCumulativeSpend,
 } from "../cumulative-spend-tracker.js";
@@ -40,7 +41,7 @@ async function cleanup() {
   const redis = getRedis();
   let cursor = "0";
   do {
-    const [next, keys] = await redis.scan(cursor, "MATCH", `cumspend:${AGENT}*`, "COUNT", 100);
+    const [next, keys] = await redis.scan(cursor, "MATCH", `cumspend:*${AGENT}*`, "COUNT", 100);
     cursor = next;
     if (keys.length > 0) await redis.del(...keys);
   } while (cursor !== "0");
@@ -95,6 +96,77 @@ describeRedis("reserveCumulativeSpend - REAL concurrency single-winner", () => {
     expect(results.filter((r) => r.ok).length).toBe(10);
     const snap = await getCumulativeSpendSum({ ...STREAM, windowSeconds: 3600 });
     expect(snap?.sum).toBe(1_000_000);
+  });
+});
+
+describeRedis("reserveCumulativeSpendBatch - cross-stream atomicity", () => {
+  const global = {
+    agentId: AGENT,
+    scope: "agent" as const,
+    scopeKey: "budget:global:count",
+    currency: "__agent_budget_count__",
+  };
+  const workspace = {
+    agentId: AGENT,
+    scope: "agent" as const,
+    scopeKey: "budget:workspace:w1:count",
+    currency: "__agent_budget_count__",
+  };
+
+  test("every agent-budget stream shares the agent Redis Cluster hash slot", () => {
+    const globalKey = cumulativeSpendStreamKeyForTest(global);
+    const workspaceKey = cumulativeSpendStreamKeyForTest(workspace);
+    expect(globalKey).toContain(`{${encodeURIComponent(AGENT)}}`);
+    expect(workspaceKey).toContain(`{${encodeURIComponent(AGENT)}}`);
+  });
+
+  test("a breach on one stream appends no member to any stream", async () => {
+    await reserveCumulativeSpend({
+      stream: workspace,
+      caps: [{ windowSeconds: 3600, max: 1 }],
+      amount: 1,
+    });
+    const denied = await reserveCumulativeSpendBatch([
+      {
+        stream: global,
+        caps: [{ windowSeconds: 3600, max: 10 }],
+        amount: 1,
+        reservationId: "batch-global-denied",
+      },
+      {
+        stream: workspace,
+        caps: [{ windowSeconds: 3600, max: 1 }],
+        amount: 1,
+        reservationId: "batch-workspace-denied",
+      },
+    ]);
+    expect(denied.ok).toBe(false);
+    expect(await getCumulativeSpendSum({ ...global, windowSeconds: 3600 })).toEqual({ sum: 0 });
+    expect(await getCumulativeSpendSum({ ...workspace, windowSeconds: 3600 })).toEqual({ sum: 1 });
+  });
+
+  test("parallel batches admit the same exact winners on every stream", async () => {
+    const outcomes = await Promise.all(
+      Array.from({ length: 10 }, (_, index) =>
+        reserveCumulativeSpendBatch([
+          {
+            stream: global,
+            caps: [{ windowSeconds: 3600, max: 3 }],
+            amount: 1,
+            reservationId: `batch-global-${index}`,
+          },
+          {
+            stream: workspace,
+            caps: [{ windowSeconds: 3600, max: 3 }],
+            amount: 1,
+            reservationId: `batch-workspace-${index}`,
+          },
+        ]),
+      ),
+    );
+    expect(outcomes.filter((outcome) => outcome.ok)).toHaveLength(3);
+    expect(await getCumulativeSpendSum({ ...global, windowSeconds: 3600 })).toEqual({ sum: 3 });
+    expect(await getCumulativeSpendSum({ ...workspace, windowSeconds: 3600 })).toEqual({ sum: 3 });
   });
 });
 

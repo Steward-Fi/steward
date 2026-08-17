@@ -2093,6 +2093,7 @@ class ProviderApprovalService {
 
           const { providerActionService } = await import("./provider-action-service.js");
           const executionPolicy = await providerActionService.evaluateApprovedExecution({
+            db: tx,
             tenantId: binding.tenantId,
             workspaceId: binding.workspaceId,
             actorAgentId: binding.actorAgentId,
@@ -2110,7 +2111,10 @@ class ProviderApprovalService {
               tenantId: binding.tenantId,
               actorType: "system",
               actorId: RESUME_ACTOR,
-              action: "provider.resume.policy_denied",
+              action:
+                executionPolicy.code === "PROVIDER_AGENT_BUDGET_EXHAUSTED"
+                  ? "provider.budget.exhausted"
+                  : "provider.resume.policy_denied",
               resourceType: "provider_action",
               resourceId: binding.intentId,
               metadata: {
@@ -2122,6 +2126,8 @@ class ProviderApprovalService {
                 executionPolicyDecisionId: executionPolicy.decision?.decisionId ?? null,
                 executionPolicyDecisionHash: executionPolicy.decisionHash ?? null,
                 executionPolicyRevisionHash: executionPolicy.decision?.policyRevisionHash ?? null,
+                budgetResults: executionPolicy.exhaustedBudgets ?? [],
+                autoFreeze: executionPolicy.autoFreeze ?? false,
               },
               ipAddress: input.ipAddress ?? null,
               userAgent: input.userAgent ?? null,

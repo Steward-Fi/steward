@@ -2266,6 +2266,56 @@ export const providerActionBindings = pgTable(
 
 export type ProviderActionBinding = typeof providerActionBindings.$inferSelect;
 
+/** First-class aggregate limits spanning every provider operation for an agent.
+ * Enforcement is an atomic Redis reservation; this row is the durable,
+ * revisioned operator configuration bound into each provider policy decision. */
+export const providerAgentBudgets = pgTable(
+  "provider_agent_budgets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    workspaceId: uuid("workspace_id"),
+    agentId: varchar("agent_id", { length: 64 }).notNull(),
+    dimension: varchar("dimension", { length: 16 }).notNull(),
+    windowSeconds: integer("window_seconds").notNull(),
+    max: bigint("max", { mode: "number" }).notNull(),
+    currency: varchar("currency", { length: 64 }),
+    autoFreeze: boolean("auto_freeze").notNull().default(false),
+    enabled: boolean("enabled").notNull().default(true),
+    revision: integer("revision").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    agentFk: foreignKey({
+      columns: [table.tenantId, table.agentId],
+      foreignColumns: [agents.tenantId, agents.id],
+      name: "provider_agent_budgets_agent_fk",
+    }).onDelete("cascade"),
+    workspaceFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId],
+      foreignColumns: [workspaces.tenantId, workspaces.id],
+      name: "provider_agent_budgets_workspace_fk",
+    }).onDelete("cascade"),
+    identityIdx: uniqueIndex("provider_agent_budgets_identity_idx").on(
+      table.tenantId,
+      sql`COALESCE(${table.workspaceId}::text, '')`,
+      table.agentId,
+      table.dimension,
+      sql`COALESCE(${table.currency}, '')`,
+      table.windowSeconds,
+    ),
+    lookupIdx: index("provider_agent_budgets_lookup_idx").on(
+      table.tenantId,
+      table.agentId,
+      table.enabled,
+      table.workspaceId,
+    ),
+  }),
+);
+
+export type ProviderAgentBudget = typeof providerAgentBudgets.$inferSelect;
+
 /** Append-only reservation identities. Mutable reconciliation metadata is
  * isolated from the immutable generation payload and claimed with SKIP LOCKED. */
 export const providerActionReservationGenerations = pgTable(

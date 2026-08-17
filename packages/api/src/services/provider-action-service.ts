@@ -34,10 +34,12 @@ import {
   providerActionAuditOutbox,
   providerActionBindings,
   providerActionReservationGenerations,
+  providerAgentBudgets,
   providerGrants,
   providerOperations,
   providerRoleBindings,
   secretRoutes,
+  vaultSigningFreezes,
   workspaces,
 } from "@stwd/db";
 import {
@@ -122,10 +124,11 @@ import {
   releaseCumulativeSpend,
   releaseWindowedInvoke,
   reserveCumulativeSpend,
+  reserveCumulativeSpendBatch,
   reserveWindowedInvoke,
   settleCumulativeSpend,
 } from "@stwd/redis";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNull, or, sql } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import { appendAuditEvent, withTenantAuditQueue, writeAuditEvent } from "./audit";
 import { getGenericHttpProductionSpec } from "./provider-action-profile-specs";
@@ -613,10 +616,27 @@ interface PersistedPolicyDecisionV1 {
     reasonCode: string;
     ruleRevisionHash: string;
   }>;
+  agentBudgetResults: AgentBudgetResult[];
   policyRevisionHash: string;
   evaluatorVersion: string;
   decidedAt: string;
 }
+
+interface AgentBudgetResult {
+  budgetId: string;
+  revision: number;
+  dimension: "count" | "notional";
+  workspaceId: string | null;
+  windowSeconds: number;
+  max: number;
+  currency: string | null;
+  amount: number;
+  outcome: "pass" | "exhausted" | "unavailable";
+  prior: number | null;
+}
+
+const AGENT_BUDGET_EXHAUSTED = "PROVIDER_AGENT_BUDGET_EXHAUSTED";
+const AGENT_BUDGET_UNAVAILABLE = "PROVIDER_AGENT_BUDGET_UNAVAILABLE";
 
 function byUuidBytes(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
@@ -643,6 +663,8 @@ const POLICY_DENY_HTTP: Record<string, number> = {
   POLICY_CONFIGURATION_INVALID: 403,
   POLICY_INPUT_UNAVAILABLE: 503,
   POLICY_EVALUATOR_ERROR: 503,
+  [AGENT_BUDGET_EXHAUSTED]: 403,
+  [AGENT_BUDGET_UNAVAILABLE]: 503,
 };
 
 // ─── Service ──────────────────────────────────────────────────────────────────
@@ -666,6 +688,8 @@ type PolicyResult = {
   decisionId: string;
   cumulativeSpendReservations: CumulativeSpendReservationHandle[];
   windowedInvokeReservation?: WindowedInvokeReservationHandle;
+  exhaustedBudgets: AgentBudgetResult[];
+  autoFreeze: boolean;
 };
 
 class ProviderActionService {
@@ -892,6 +916,7 @@ class ProviderActionService {
         policy =
           access.effect === "allow"
             ? await this.evaluatePolicy({
+                db: tx,
                 tenantId,
                 workspaceId: input.workspaceId,
                 actorAgentId,
@@ -1065,10 +1090,31 @@ class ProviderActionService {
             policyDecisionHash,
             policyEffect: effects.policy,
             policyReasonCodes: policy?.doc.reasonCodes ?? [],
+            agentBudgetResults: policy?.doc.agentBudgetResults ?? [],
             status: effects.status,
             requestId: input.requestId ?? null,
           },
         });
+        if (policy && policy.exhaustedBudgets.length > 0) {
+          await tx.insert(providerActionAuditOutbox).values({
+            tenantId,
+            intentId,
+            action: "provider.budget.exhausted",
+            resourceType: "provider_action",
+            resourceId: intentId,
+            metadata: {
+              schemaVersion: "steward.provider-agent-budget-exhausted.v1",
+              intentId,
+              actorAgentId,
+              workspaceId: input.workspaceId,
+              operationKey: input.operationKey,
+              requestHash,
+              actionDigest,
+              budgetResults: policy.exhaustedBudgets,
+              autoFreeze: policy.autoFreeze,
+            },
+          });
+        }
       });
     } catch (e) {
       // #206: the decision transaction failed to persist, so the action WILL NOT
@@ -1785,8 +1831,244 @@ class ProviderActionService {
     }).catch(() => undefined);
   }
 
+  /** Atomically debit every applicable first-class agent budget. Global and
+   * workspace budgets use distinct streams; all caps on one stream are checked
+   * in one Lua call, so concurrent executions have a single winner at the
+   * boundary. The returned handles join the normal crash-durable generation. */
+  private async reserveAgentBudgets(input: {
+    db: DbExecutor;
+    tenantId: string;
+    workspaceId: string;
+    agentId: string;
+    intentId: string;
+    generation: number;
+    spendDeclaration?: { field: string; currency: string };
+    policyArgs: Record<string, unknown>;
+  }): Promise<{
+    reservations: CumulativeSpendReservationHandle[];
+    results: AgentBudgetResult[];
+    exhausted: AgentBudgetResult[];
+    unavailable: boolean;
+    autoFreeze: boolean;
+    snapshots: Array<Record<string, unknown>>;
+  }> {
+    // Lock the durable parent row before reading the child configuration. Budget
+    // create/update takes the conflicting parent lock. Unlike locking the
+    // current budget result set, this also closes the empty-set INSERT race: an
+    // action that observed no budget cannot overlap a newly-created max=0 cap.
+    const [agent] = await input.db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.tenantId, input.tenantId), eq(agents.id, input.agentId)))
+      .limit(1)
+      .for("share");
+    if (!agent) {
+      return {
+        reservations: [],
+        results: [],
+        exhausted: [],
+        unavailable: true,
+        autoFreeze: false,
+        snapshots: [],
+      };
+    }
+    const rows = await input.db
+      .select()
+      .from(providerAgentBudgets)
+      .where(
+        and(
+          eq(providerAgentBudgets.tenantId, input.tenantId),
+          eq(providerAgentBudgets.agentId, input.agentId),
+          eq(providerAgentBudgets.enabled, true),
+          or(
+            isNull(providerAgentBudgets.workspaceId),
+            eq(providerAgentBudgets.workspaceId, input.workspaceId),
+          ),
+        ),
+      )
+      .orderBy(providerAgentBudgets.id)
+      // Concurrent executions may share the snapshot, while an operator budget
+      // mutation must wait until this execution decision commits. This prevents
+      // a newly tightened budget from racing an admission based on stale config.
+      .for("share");
+
+    const snapshots = rows.map((row) => ({
+      id: row.id,
+      revision: row.revision,
+      workspaceId: row.workspaceId,
+      dimension: row.dimension,
+      windowSeconds: row.windowSeconds,
+      max: row.max,
+      currency: row.currency,
+      autoFreeze: row.autoFreeze,
+    }));
+    const groups = new Map<
+      string,
+      {
+        stream: CumulativeSpendReservationHandle["stream"];
+        amount: number;
+        budgets: typeof rows;
+      }
+    >();
+    for (const row of rows) {
+      if (
+        (row.dimension !== "count" && row.dimension !== "notional") ||
+        !Number.isSafeInteger(row.windowSeconds) ||
+        row.windowSeconds <= 0 ||
+        !Number.isSafeInteger(row.max) ||
+        row.max < 0
+      ) {
+        return {
+          reservations: [],
+          results: [],
+          exhausted: [],
+          unavailable: true,
+          autoFreeze: false,
+          snapshots,
+        };
+      }
+      let amount: number;
+      let currency: string;
+      if (row.dimension === "count") {
+        amount = 1;
+        currency = "__agent_budget_count__";
+      } else {
+        const declaration = input.spendDeclaration;
+        // A currency-specific notional budget is applicable only to operations
+        // explicitly declaring that currency. Count budgets still cover every
+        // governed action, including operations with no notional declaration.
+        if (!declaration || row.currency !== declaration.currency) continue;
+        const raw = input.policyArgs[declaration.field];
+        if (!Number.isSafeInteger(raw) || (raw as number) < 0) {
+          return {
+            reservations: [],
+            results: [],
+            exhausted: [],
+            unavailable: true,
+            autoFreeze: false,
+            snapshots,
+          };
+        }
+        amount = raw as number;
+        currency = row.currency as string;
+      }
+      const scope = row.workspaceId ? `workspace:${row.workspaceId}` : "global";
+      const groupKey = `${scope}|${row.dimension}|${currency}`;
+      let group = groups.get(groupKey);
+      if (!group) {
+        group = {
+          stream: {
+            agentId: input.agentId,
+            scope: "agent",
+            scopeKey: `budget:${scope}:${row.dimension}`,
+            currency,
+          },
+          amount,
+          budgets: [],
+        };
+        groups.set(groupKey, group);
+      }
+      group.budgets.push(row);
+    }
+
+    const reservations: CumulativeSpendReservationHandle[] = [];
+    const results: AgentBudgetResult[] = [];
+    const exhausted: AgentBudgetResult[] = [];
+    let unavailable = false;
+    const grouped = [...groups.entries()];
+    if (grouped.length === 0) {
+      return { reservations, results, exhausted, unavailable, autoFreeze: false, snapshots };
+    }
+    let reserved: Awaited<ReturnType<typeof reserveCumulativeSpendBatch>>;
+    try {
+      reserved = await reserveCumulativeSpendBatch(
+        grouped.map(([groupKey, group]) => ({
+          stream: group.stream,
+          caps: group.budgets.map((budget) => ({
+            windowSeconds: budget.windowSeconds,
+            max: budget.max,
+          })),
+          amount: group.amount,
+          reservationId: sha256HexPrefixed(
+            jcsStringify({
+              domain: "steward.provider-agent-budget.v1",
+              intentId: input.intentId,
+              generation: input.generation,
+              groupKey,
+            }),
+          ),
+        })),
+      );
+    } catch {
+      unavailable = true;
+      for (const [, group] of grouped) {
+        for (const budget of group.budgets) {
+          results.push({
+            budgetId: budget.id,
+            revision: budget.revision,
+            dimension: budget.dimension as "count" | "notional",
+            workspaceId: budget.workspaceId,
+            windowSeconds: budget.windowSeconds,
+            max: budget.max,
+            currency: budget.currency,
+            amount: group.amount,
+            outcome: "unavailable",
+            prior: null,
+          });
+        }
+      }
+      return {
+        reservations,
+        results,
+        exhausted,
+        unavailable,
+        autoFreeze: false,
+        snapshots,
+      };
+    }
+    grouped.forEach(([, group], groupIndex) => {
+      const groupPriors = reserved.priorSums[groupIndex] ?? [];
+      group.budgets.forEach((budget, index) => {
+        const prior = groupPriors[index];
+        const breached =
+          !reserved.ok && (typeof prior !== "number" || prior + group.amount > budget.max);
+        const result: AgentBudgetResult = {
+          budgetId: budget.id,
+          revision: budget.revision,
+          dimension: budget.dimension as "count" | "notional",
+          workspaceId: budget.workspaceId,
+          windowSeconds: budget.windowSeconds,
+          max: budget.max,
+          currency: budget.currency,
+          amount: group.amount,
+          outcome: breached ? "exhausted" : "pass",
+          prior: typeof prior === "number" ? prior : null,
+        };
+        results.push(result);
+        if (breached) exhausted.push(result);
+      });
+      if (reserved.ok) {
+        reservations.push({
+          stream: group.stream,
+          reservationId: reserved.reservationIds?.[groupIndex] as string,
+          amount: group.amount,
+        });
+      }
+    });
+    const exhaustedIds = new Set(exhausted.map((result) => result.budgetId));
+    return {
+      reservations,
+      results,
+      exhausted,
+      unavailable,
+      autoFreeze: rows.some((row) => row.autoFreeze && exhaustedIds.has(row.id)),
+      snapshots,
+    };
+  }
+
   // ── Policy evaluation (spec §6.2 / §6.3) ──
   private async evaluatePolicy(args: {
+    db?: DbExecutor;
     tenantId: string;
     workspaceId: string;
     actorAgentId: string;
@@ -1810,6 +2092,8 @@ class ProviderActionService {
      *  covering ALL count windows). Settle (keep) on known-success, release on
      *  deny/failure, leave on outcome_unknown. */
     windowedInvokeReservation?: WindowedInvokeReservationHandle;
+    exhaustedBudgets: AgentBudgetResult[];
+    autoFreeze: boolean;
   }> {
     const decidedAt = (providerPolicyClockForTests?.() ?? new Date()).toISOString();
     const decisionId = randomUUID();
@@ -1837,175 +2121,234 @@ class ProviderActionService {
     // missing declaration / absent aggregate is left to the composer to fail
     // closed exactly as specified.
     const spendDeclaration = extractSpendDeclaration(operation.requestProfile);
-    const cumulative = await this.reserveCumulativeSpendForInvoke({
-      rules,
-      intentId: args.intentId,
-      operationKey: operation.operationKey,
+    const agentBudgets = await this.reserveAgentBudgets({
+      db: args.db ?? this.db(),
+      tenantId: args.tenantId,
+      workspaceId: args.workspaceId,
       agentId: args.actorAgentId,
-      grantId: args.grantId ?? null,
+      intentId: args.intentId,
+      generation: args.reservationGeneration ?? 1,
       spendDeclaration,
       policyArgs: build.policyArgs,
-      reservationGeneration: args.reservationGeneration ?? 1,
     });
-
-    // #206 configurable count cap (maxCalls + callWindow): ATOMICALLY reserve one
-    // invoke slot against the trailing-window count so concurrent invokes cannot
-    // collectively exceed maxCalls (single-winner, like the spend path; codex P2).
-    // The reserved priorCount is fed to the composer so its check agrees; a
-    // REJECTED reservation feeds a count AT the cap so the composer denies. Absent
-    // reservation (no governing maxCalls rule, or a Redis failure) leaves
-    // windowedInvokeCount undefined => a maxCalls rule fails closed
-    // (POLICY_INPUT_UNAVAILABLE). The slot is settled (kept) on a known-success
-    // allow and released on any deny/failure below.
-    // #206 configurable count caps: ATOMICALLY reserve ONE invoke slot against
-    // ALL count windows at once (a single invoke is counted ONCE across an hourly
-    // AND a daily cap; codex P2). Each window's count is fed to the composer keyed
-    // by its own bucket. A rejection on ANY window denies (no slot taken); a
-    // Redis failure feeds every cap AT its max so the composer fails closed.
-    const govMaxCalls = extractGoverningMaxCalls(rules, operation.operationKey);
-    let windowedInvokeCounts: Record<string, number> | undefined;
+    let cumulative:
+      | {
+          contextSums: Record<string, number> | undefined;
+          reservations: CumulativeSpendReservationHandle[];
+        }
+      | undefined;
     let windowedInvokeReservation: WindowedInvokeReservationHandle | undefined;
-    if (govMaxCalls.length > 0) {
-      const counts: Record<string, number> = {};
-      windowedInvokeCounts = counts;
-      const wr = await reserveWindowedInvoke({
-        agentId: args.actorAgentId,
-        operationKey: operation.operationKey,
-        caps: govMaxCalls.map((c) => ({ windowSeconds: c.windowSeconds, max: c.max })),
-        reservationId: sha256HexPrefixed(
-          jcsStringify({
-            domain: "steward.provider-reservation.v1",
-            intentId: args.intentId,
-            generation: args.reservationGeneration ?? 1,
-            kind: "windowedInvoke",
+    try {
+      if (agentBudgets.autoFreeze) {
+        await (args.db ?? this.db())
+          .insert(vaultSigningFreezes)
+          .values({
+            tenantId: args.tenantId,
+            scopeType: "agent",
             agentId: args.actorAgentId,
-            operationKey: operation.operationKey,
-          }),
-        ),
+            reason: "provider agent budget exhausted",
+            createdByType: "system",
+            createdById: "provider-budget-enforcer",
+          })
+          .onConflictDoNothing();
+      }
+      cumulative = await this.reserveCumulativeSpendForInvoke({
+        rules,
+        intentId: args.intentId,
+        operationKey: operation.operationKey,
+        agentId: args.actorAgentId,
+        grantId: args.grantId ?? null,
+        spendDeclaration,
+        policyArgs: build.policyArgs,
+        reservationGeneration: args.reservationGeneration ?? 1,
       });
-      govMaxCalls.forEach((cap, i) => {
-        const bucketKey = windowedInvokeBucketKey({
-          windowSeconds: cap.windowSeconds,
-          max: cap.max,
-        });
-        // On success feed the real prior count; on rejection/absence feed AT the
-        // cap so the composer denies (count >= maxCalls) for the breaching cap.
-        const prior = wr.priorCounts[i];
-        counts[bucketKey] = wr.ok && typeof prior === "number" ? prior : (prior ?? cap.max);
-      });
-      if (wr.ok && wr.reservationId !== undefined) {
-        windowedInvokeReservation = {
+
+      // #206 configurable count cap (maxCalls + callWindow): ATOMICALLY reserve one
+      // invoke slot against the trailing-window count so concurrent invokes cannot
+      // collectively exceed maxCalls (single-winner, like the spend path; codex P2).
+      // The reserved priorCount is fed to the composer so its check agrees; a
+      // REJECTED reservation feeds a count AT the cap so the composer denies. Absent
+      // reservation (no governing maxCalls rule, or a Redis failure) leaves
+      // windowedInvokeCount undefined => a maxCalls rule fails closed
+      // (POLICY_INPUT_UNAVAILABLE). The slot is settled (kept) on a known-success
+      // allow and released on any deny/failure below.
+      // #206 configurable count caps: ATOMICALLY reserve ONE invoke slot against
+      // ALL count windows at once (a single invoke is counted ONCE across an hourly
+      // AND a daily cap; codex P2). Each window's count is fed to the composer keyed
+      // by its own bucket. A rejection on ANY window denies (no slot taken); a
+      // Redis failure feeds every cap AT its max so the composer fails closed.
+      const govMaxCalls = extractGoverningMaxCalls(rules, operation.operationKey);
+      let windowedInvokeCounts: Record<string, number> | undefined;
+      if (govMaxCalls.length > 0) {
+        const counts: Record<string, number> = {};
+        windowedInvokeCounts = counts;
+        const wr = await reserveWindowedInvoke({
           agentId: args.actorAgentId,
           operationKey: operation.operationKey,
-          reservationId: wr.reservationId,
-        };
+          caps: govMaxCalls.map((c) => ({ windowSeconds: c.windowSeconds, max: c.max })),
+          reservationId: sha256HexPrefixed(
+            jcsStringify({
+              domain: "steward.provider-reservation.v1",
+              intentId: args.intentId,
+              generation: args.reservationGeneration ?? 1,
+              kind: "windowedInvoke",
+              agentId: args.actorAgentId,
+              operationKey: operation.operationKey,
+            }),
+          ),
+        });
+        govMaxCalls.forEach((cap, i) => {
+          const bucketKey = windowedInvokeBucketKey({
+            windowSeconds: cap.windowSeconds,
+            max: cap.max,
+          });
+          // On success feed the real prior count; on rejection/absence feed AT the
+          // cap so the composer denies (count >= maxCalls) for the breaching cap.
+          const prior = wr.priorCounts[i];
+          counts[bucketKey] = wr.ok && typeof prior === "number" ? prior : (prior ?? cap.max);
+        });
+        if (wr.ok && wr.reservationId !== undefined) {
+          windowedInvokeReservation = {
+            agentId: args.actorAgentId,
+            operationKey: operation.operationKey,
+            reservationId: wr.reservationId,
+          };
+        }
+        // A rejected multi-cap reserve takes NO slot, so there is nothing to
+        // release here; the composer will deny from the fed counts.
       }
-      // A rejected multi-cap reserve takes NO slot, so there is nothing to
-      // release here; the composer will deny from the fed counts.
-    }
 
-    const context: ProviderPolicyContext = {
-      operationKey: operation.operationKey,
-      args: build.policyArgs,
-      method: build.method,
-      // Host is carried context only (the composer never gates on it); derive it
-      // from the adapter's canonical origin so X actions report api.x.com and
-      // github actions report api.github.com, never a hardcoded provider.
-      host: hostFromOrigin(build.action.origin),
-      path: build.action.normalizedPath,
-      evaluatedAt: decidedAt,
-      // Trailing-hour count is not wired in PR2; rules that require it will
-      // fail closed (POLICY_INPUT_UNAVAILABLE) exactly as specified.
-      invokeCount1h: undefined,
-      // #206 configurable count caps: per-cap trailing-window counts (undefined
-      // when unwired => a maxCalls rule fails closed).
-      ...(windowedInvokeCounts !== undefined ? { windowedInvokeCounts } : {}),
-      ...(policyText !== undefined ? { policyText } : {}),
-      // #206 cumulative-spend aggregate + declaration. spendDeclaration absent =>
-      // a cumulativeSpend rule fails closed (NO_SPEND_FIELD). cumulativeSpend
-      // carries the reserved priorSum per scope; absent scope => fail closed
-      // (INPUT_UNAVAILABLE). See reserveCumulativeSpendForInvoke.
-      ...(spendDeclaration !== undefined ? { spendDeclaration } : {}),
-      ...(cumulative.contextSums !== undefined ? { cumulativeSpend: cumulative.contextSums } : {}),
-      // Permissioned-X authoritative inputs (post count / accumulated spend /
-      // now-minute) are NOT wired into the service in Phase 1 — exactly the same
-      // posture as invokeCount1h above. A permissioned-X rule that REQUIRES one
-      // of these inputs (maxPostsPerWindow / spendPolicy / quietHours) therefore
-      // fails closed (POLICY_INPUT_UNAVAILABLE) until the trailing-window
-      // accumulator lands. Content/reply/URL rules need no external input and are
-      // fully live now.
-      x: undefined,
-    };
+      const context: ProviderPolicyContext = {
+        operationKey: operation.operationKey,
+        args: build.policyArgs,
+        method: build.method,
+        // Host is carried context only (the composer never gates on it); derive it
+        // from the adapter's canonical origin so X actions report api.x.com and
+        // github actions report api.github.com, never a hardcoded provider.
+        host: hostFromOrigin(build.action.origin),
+        path: build.action.normalizedPath,
+        evaluatedAt: decidedAt,
+        // Trailing-hour count is not wired in PR2; rules that require it will
+        // fail closed (POLICY_INPUT_UNAVAILABLE) exactly as specified.
+        invokeCount1h: undefined,
+        // #206 configurable count caps: per-cap trailing-window counts (undefined
+        // when unwired => a maxCalls rule fails closed).
+        ...(windowedInvokeCounts !== undefined ? { windowedInvokeCounts } : {}),
+        ...(policyText !== undefined ? { policyText } : {}),
+        // #206 cumulative-spend aggregate + declaration. spendDeclaration absent =>
+        // a cumulativeSpend rule fails closed (NO_SPEND_FIELD). cumulativeSpend
+        // carries the reserved priorSum per scope; absent scope => fail closed
+        // (INPUT_UNAVAILABLE). See reserveCumulativeSpendForInvoke.
+        ...(spendDeclaration !== undefined ? { spendDeclaration } : {}),
+        ...(cumulative.contextSums !== undefined
+          ? { cumulativeSpend: cumulative.contextSums }
+          : {}),
+        // Permissioned-X authoritative inputs (post count / accumulated spend /
+        // now-minute) are NOT wired into the service in Phase 1 — exactly the same
+        // posture as invokeCount1h above. A permissioned-X rule that REQUIRES one
+        // of these inputs (maxPostsPerWindow / spendPolicy / quietHours) therefore
+        // fails closed (POLICY_INPUT_UNAVAILABLE) until the trailing-window
+        // accumulator lands. Content/reply/URL rules need no external input and are
+        // fully live now.
+        x: undefined,
+      };
 
-    const evaluation = composeProviderActionPolicyDecision(rules, context);
+      const ruleEvaluation = composeProviderActionPolicyDecision(rules, context);
+      const budgetReason = agentBudgets.unavailable
+        ? AGENT_BUDGET_UNAVAILABLE
+        : agentBudgets.exhausted.length > 0
+          ? AGENT_BUDGET_EXHAUSTED
+          : null;
+      const evaluation: ProviderPolicyEvaluationV1 = budgetReason
+        ? {
+            ...ruleEvaluation,
+            effect: "hard_deny",
+            reasonCodes: [budgetReason, ...ruleEvaluation.reasonCodes],
+          }
+        : ruleEvaluation;
 
-    // Per-rule revision hashes and the composite policy revision hash.
-    const enabledGoverning = rules.filter(
-      (r) => r.enabled && capabilitySelectorMatches(r.config, operation.operationKey),
-    );
-    const ruleSnapshots = enabledGoverning
-      .map((r) => ({
-        id: r.id,
-        type: r.type,
-        enabled: r.enabled,
-        config: r.config,
-        hash: ruleRevisionHash(r),
-      }))
-      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : a.hash < b.hash ? -1 : 1));
+      // Per-rule revision hashes and the composite policy revision hash.
+      const enabledGoverning = rules.filter(
+        (r) => r.enabled && capabilitySelectorMatches(r.config, operation.operationKey),
+      );
+      const ruleSnapshots = enabledGoverning
+        .map((r) => ({
+          id: r.id,
+          type: r.type,
+          enabled: r.enabled,
+          config: r.config,
+          hash: ruleRevisionHash(r),
+        }))
+        .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : a.hash < b.hash ? -1 : 1));
 
-    const policyRevisionHash = sha256HexPrefixed(
-      jcsStringify({
-        operationId: operation.id,
-        operationRevision: operation.revision,
-        actorAgentId: args.actorAgentId,
-        evaluatorVersion: EVALUATOR_VERSION,
-        rules: ruleSnapshots.map((r) => ({ id: r.id, hash: r.hash })),
-      }),
-    );
-
-    const hashById = new Map(ruleSnapshots.map((r) => [r.id, r.hash]));
-    const policyResults: PersistedPolicyDecisionV1["policyResults"] = evaluation.results
-      .map((res) => ({
-        policyId: res.policyId,
-        policyType: POLICY_TYPE,
-        applicable: true as const,
-        configuredEffect: res.configuredEffect,
-        outcome: res.outcome,
-        reasonCode: res.reasonCode,
-        ruleRevisionHash: hashById.get(res.policyId) ?? "",
-      }))
-      .sort((a, b) =>
-        a.policyId < b.policyId
-          ? -1
-          : a.policyId > b.policyId
-            ? 1
-            : a.ruleRevisionHash < b.ruleRevisionHash
-              ? -1
-              : 1,
+      const policyRevisionHash = sha256HexPrefixed(
+        jcsStringify({
+          operationId: operation.id,
+          operationRevision: operation.revision,
+          actorAgentId: args.actorAgentId,
+          evaluatorVersion: EVALUATOR_VERSION,
+          rules: ruleSnapshots.map((r) => ({ id: r.id, hash: r.hash })),
+          agentBudgets: agentBudgets.snapshots,
+        }),
       );
 
-    const doc: PersistedPolicyDecisionV1 = {
-      schemaVersion: "steward.provider-policy-decision.v1",
-      decisionId,
-      intentId: args.intentId,
-      requestHash: args.requestHash,
-      actionDigest: args.actionDigest,
-      operationId: operation.id,
-      operationKey: operation.operationKey,
-      effect: evaluation.effect,
-      reasonCodes: evaluation.reasonCodes,
-      policyResults,
-      policyRevisionHash,
-      evaluatorVersion: EVALUATOR_VERSION,
-      decidedAt,
-    };
-    return {
-      doc,
-      evaluation,
-      decisionId,
-      cumulativeSpendReservations: cumulative.reservations,
-      ...(windowedInvokeReservation !== undefined ? { windowedInvokeReservation } : {}),
-    };
+      const hashById = new Map(ruleSnapshots.map((r) => [r.id, r.hash]));
+      const policyResults: PersistedPolicyDecisionV1["policyResults"] = evaluation.results
+        .map((res) => ({
+          policyId: res.policyId,
+          policyType: POLICY_TYPE,
+          applicable: true as const,
+          configuredEffect: res.configuredEffect,
+          outcome: res.outcome,
+          reasonCode: res.reasonCode,
+          ruleRevisionHash: hashById.get(res.policyId) ?? "",
+        }))
+        .sort((a, b) =>
+          a.policyId < b.policyId
+            ? -1
+            : a.policyId > b.policyId
+              ? 1
+              : a.ruleRevisionHash < b.ruleRevisionHash
+                ? -1
+                : 1,
+        );
+
+      const doc: PersistedPolicyDecisionV1 = {
+        schemaVersion: "steward.provider-policy-decision.v1",
+        decisionId,
+        intentId: args.intentId,
+        requestHash: args.requestHash,
+        actionDigest: args.actionDigest,
+        operationId: operation.id,
+        operationKey: operation.operationKey,
+        effect: evaluation.effect,
+        reasonCodes: evaluation.reasonCodes,
+        policyResults,
+        agentBudgetResults: agentBudgets.results,
+        policyRevisionHash,
+        evaluatorVersion: EVALUATOR_VERSION,
+        decidedAt,
+      };
+      return {
+        doc,
+        evaluation,
+        decisionId,
+        cumulativeSpendReservations: [...cumulative.reservations, ...agentBudgets.reservations],
+        ...(windowedInvokeReservation !== undefined ? { windowedInvokeReservation } : {}),
+        exhaustedBudgets: agentBudgets.exhausted,
+        autoFreeze: agentBudgets.autoFreeze,
+      };
+    } catch (error) {
+      // Redis admission precedes the durable decision transaction. If any later
+      // reservation/evaluation step throws, the caller cannot persist handles it
+      // never received, so compensate every handle accumulated in this frame.
+      await this.finalizeCumulativeSpend(
+        [...(cumulative?.reservations ?? []), ...agentBudgets.reservations],
+        "failure",
+      );
+      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
+      throw error;
+    }
   }
 
   /**
@@ -2014,6 +2357,7 @@ class ProviderActionService {
    * text exists only in this stack frame and is never returned or persisted.
    */
   async evaluateApprovedExecution(args: {
+    db?: DbExecutor;
     tenantId: string;
     workspaceId: string;
     actorAgentId: string;
@@ -2038,6 +2382,8 @@ class ProviderActionService {
         httpStatus: number;
         decision?: PersistedPolicyDecisionV1;
         decisionHash?: string;
+        exhaustedBudgets?: AgentBudgetResult[];
+        autoFreeze?: boolean;
       }
   > {
     const generation = args.priorGeneration + 1;
@@ -2058,6 +2404,7 @@ class ProviderActionService {
     }
 
     const policy = await this.evaluatePolicy({
+      db: args.db,
       tenantId: args.tenantId,
       workspaceId: args.workspaceId,
       actorAgentId: args.actorAgentId,
@@ -2078,12 +2425,15 @@ class ProviderActionService {
           "execution",
         ),
       );
+      const code = primaryPolicyDenialReason(policy.doc);
       return {
         ok: false,
-        code: primaryPolicyDenialReason(policy.doc),
-        httpStatus: 403,
+        code,
+        httpStatus: code === AGENT_BUDGET_UNAVAILABLE ? 503 : 403,
         decision: policy.doc,
         decisionHash: sha256HexPrefixed(jcsStringify(policy.doc)),
+        exhaustedBudgets: policy.exhaustedBudgets,
+        autoFreeze: policy.autoFreeze,
       };
     }
 

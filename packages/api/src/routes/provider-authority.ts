@@ -355,6 +355,73 @@ providerAuthorityRoutes.post("/provider-grants/:id/revoke", async (c) => {
   }
 });
 
+providerAuthorityRoutes.get("/provider-agent-budgets", async (c) => {
+  const agentId = c.req.query("agentId") ?? "";
+  const workspaceId = c.req.query("workspaceId");
+  if (!agentId) return c.json<ApiResponse>({ ok: false, error: "agentId is required" }, 400);
+  try {
+    await requireReadAdmin(c, workspaceId);
+    return c.json({
+      ok: true,
+      data: await providerAuthorityStore.listAgentBudgets(c.get("tenantId"), agentId, workspaceId),
+    });
+  } catch (error) {
+    return fail(c, error);
+  }
+});
+
+providerAuthorityRoutes.post("/provider-agent-budgets", async (c) => {
+  const body = await safeJsonParse<{
+    agentId: string;
+    workspaceId?: string | null;
+    dimension: "count" | "notional";
+    windowSeconds: number;
+    max: number;
+    currency?: string | null;
+    autoFreeze?: boolean;
+    expectedRevision: number;
+    reason: string;
+  }>(c);
+  if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON body" }, 400);
+  try {
+    return c.json(
+      {
+        ok: true,
+        data: await providerAuthorityStore.createAgentBudget(mutationContext(c, body), body),
+      },
+      201,
+    );
+  } catch (error) {
+    return fail(c, error);
+  }
+});
+
+providerAuthorityRoutes.put("/provider-agent-budgets/:id", async (c) => {
+  const body = await safeJsonParse<{
+    dimension: "count" | "notional";
+    windowSeconds: number;
+    max: number;
+    currency?: string | null;
+    autoFreeze?: boolean;
+    enabled?: boolean;
+    expectedRevision: number;
+    reason: string;
+  }>(c);
+  if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON body" }, 400);
+  try {
+    return c.json({
+      ok: true,
+      data: await providerAuthorityStore.updateAgentBudget(
+        mutationContext(c, body),
+        c.req.param("id"),
+        body,
+      ),
+    });
+  } catch (error) {
+    return fail(c, error);
+  }
+});
+
 providerAuthorityRoutes.post("/provider-access/check", async (c) => {
   const body = await safeJsonParse<
     Omit<ProviderAccessRequestV1, "tenantId" | "actor" | "evaluatedAt"> & {

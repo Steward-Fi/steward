@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import {
+  type AppendRequiredAudit,
   agents,
   getDb,
   providerAccounts,
+  providerAgentBudgets,
   providerAuthorityTenantState,
   providerGrants,
   providerOperations,
@@ -68,6 +70,11 @@ const ROLES = new Set([
   "workspace_approver",
 ]);
 const RISK_CLASSES = new Set(["read", "write", "consequential"]);
+const BUDGET_DIMENSIONS = new Set(["count", "notional"]);
+const MAX_BUDGET_WINDOW_SECONDS = 30 * 24 * 60 * 60;
+
+type DbBase = ReturnType<typeof getDb>;
+type DbExecutor = DbBase | Parameters<Parameters<DbBase["transaction"]>[0]>[0];
 
 export class ProviderAuthorityError extends Error {
   constructor(
@@ -92,9 +99,28 @@ export type AuthorityAudit = (event: {
   metadata: Record<string, unknown>;
 }) => Promise<void>;
 
-type MutationContext = ProviderAuthorityMutationContext & { audit: AuthorityAudit };
+type MutationContext = ProviderAuthorityMutationContext & {
+  audit: AuthorityAudit;
+};
 type BindingInsert = typeof providerRoleBindings.$inferInsert;
 type GrantInsert = typeof providerGrants.$inferInsert;
+
+async function appendAuthorityMutationAudit(
+  ctx: MutationContext,
+  append: AppendRequiredAudit,
+  event: Parameters<AuthorityAudit>[0],
+): Promise<void> {
+  await append({
+    tenantId: ctx.tenantId,
+    actorType: "user",
+    actorId: ctx.actorUserId,
+    action: event.action,
+    resourceType: event.resourceType,
+    resourceId: event.resourceId,
+    metadata: event.metadata,
+    requestId: ctx.requestId ?? null,
+  });
+}
 
 function assertText(value: unknown, field: string, max = 512): string {
   const normalized = typeof value === "string" ? value.trim() : "";
@@ -106,6 +132,57 @@ function assertText(value: unknown, field: string, max = 512): string {
     );
   }
   return normalized;
+}
+
+function normalizeBudgetInput(input: {
+  dimension: unknown;
+  windowSeconds: unknown;
+  max: unknown;
+  currency?: unknown;
+  autoFreeze?: unknown;
+  enabled?: unknown;
+}) {
+  if (typeof input.dimension !== "string" || !BUDGET_DIMENSIONS.has(input.dimension)) {
+    throw new ProviderAuthorityError("invalid budget dimension", "bad_request", 400);
+  }
+  if (
+    !Number.isSafeInteger(input.windowSeconds) ||
+    (input.windowSeconds as number) < 1 ||
+    (input.windowSeconds as number) > MAX_BUDGET_WINDOW_SECONDS
+  ) {
+    throw new ProviderAuthorityError("invalid budget windowSeconds", "bad_request", 400);
+  }
+  if (!Number.isSafeInteger(input.max) || (input.max as number) < 0) {
+    throw new ProviderAuthorityError("invalid budget max", "bad_request", 400);
+  }
+  const currency =
+    input.currency === undefined || input.currency === null
+      ? null
+      : assertText(input.currency, "currency", 64);
+  if (
+    (input.dimension === "count" && currency !== null) ||
+    (input.dimension === "notional" && currency === null)
+  ) {
+    throw new ProviderAuthorityError(
+      "count budgets omit currency; notional budgets require currency",
+      "bad_request",
+      400,
+    );
+  }
+  if (input.autoFreeze !== undefined && typeof input.autoFreeze !== "boolean") {
+    throw new ProviderAuthorityError("invalid budget autoFreeze", "bad_request", 400);
+  }
+  if (input.enabled !== undefined && typeof input.enabled !== "boolean") {
+    throw new ProviderAuthorityError("invalid budget enabled", "bad_request", 400);
+  }
+  return {
+    dimension: input.dimension as "count" | "notional",
+    windowSeconds: input.windowSeconds as number,
+    max: input.max as number,
+    currency,
+    autoFreeze: input.autoFreeze ?? false,
+    enabled: input.enabled ?? true,
+  };
 }
 
 function assertMutationContext(ctx: MutationContext): void {
@@ -206,7 +283,9 @@ export class ProviderAuthorityStore {
       return true;
     await this.ensureTenantState(ctx.tenantId);
     const [state] = await this.db()
-      .select({ bootstrapCompleted: providerAuthorityTenantState.bootstrapCompleted })
+      .select({
+        bootstrapCompleted: providerAuthorityTenantState.bootstrapCompleted,
+      })
       .from(providerAuthorityTenantState)
       .where(eq(providerAuthorityTenantState.tenantId, ctx.tenantId))
       .limit(1);
@@ -300,7 +379,10 @@ export class ProviderAuthorityStore {
     if (await this.hasTenantAdmin(ctx)) return true;
     if (!(await this.membership(tenantId, userId))) return false;
     const [workspace] = await this.db()
-      .select({ environment: workspaces.environment, status: workspaces.status })
+      .select({
+        environment: workspaces.environment,
+        status: workspaces.status,
+      })
       .from(workspaces)
       .where(and(eq(workspaces.tenantId, tenantId), eq(workspaces.id, workspaceId)))
       .limit(1);
@@ -399,7 +481,11 @@ export class ProviderAuthorityStore {
     });
     const [updated] = await this.db()
       .update(workspaces)
-      .set({ status: "disabled", revision: row.revision + 1, updatedAt: new Date() })
+      .set({
+        status: "disabled",
+        revision: row.revision + 1,
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(workspaces.id, id),
@@ -552,7 +638,11 @@ export class ProviderAuthorityStore {
     });
     const [updated] = await this.db()
       .update(providerAccounts)
-      .set({ status: "disabled", revision: row.revision + 1, updatedAt: new Date() })
+      .set({
+        status: "disabled",
+        revision: row.revision + 1,
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(providerAccounts.id, id),
@@ -861,7 +951,9 @@ export class ProviderAuthorityStore {
             authorityMode: "governed_v2",
             providerOperationId: row.id,
             ...(genericDescriptor
-              ? { pathPattern: genericDescriptorGovernedRoutePattern(genericDescriptor) }
+              ? {
+                  pathPattern: genericDescriptorGovernedRoutePattern(genericDescriptor),
+                }
               : {}),
           })
           .where(
@@ -997,7 +1089,11 @@ export class ProviderAuthorityStore {
       return this.db().transaction(async (tx) => {
         const [cas] = await tx
           .update(providerAuthorityTenantState)
-          .set({ revision: revision + 1, bootstrapCompleted: true, updatedAt: new Date() })
+          .set({
+            revision: revision + 1,
+            bootstrapCompleted: true,
+            updatedAt: new Date(),
+          })
           .where(
             and(
               eq(providerAuthorityTenantState.tenantId, ctx.tenantId),
@@ -1064,7 +1160,10 @@ export class ProviderAuthorityStore {
     }
     if (requestedOperationKeys.length > 0) {
       const scopedOperations = await this.db()
-        .select({ key: providerOperations.operationKey, riskClass: providerOperations.riskClass })
+        .select({
+          key: providerOperations.operationKey,
+          riskClass: providerOperations.riskClass,
+        })
         .from(providerOperations)
         .where(
           and(
@@ -1201,7 +1300,11 @@ export class ProviderAuthorityStore {
     });
     const [updated] = await this.db()
       .update(providerRoleBindings)
-      .set({ status: "revoked", revision: binding.revision + 1, updatedAt: new Date() })
+      .set({
+        status: "revoked",
+        revision: binding.revision + 1,
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(providerRoleBindings.id, id),
@@ -1351,6 +1454,185 @@ export class ProviderAuthorityStore {
       .where(
         and(eq(providerGrants.tenantId, tenantId), eq(providerGrants.workspaceId, workspaceId)),
       );
+  }
+
+  async listAgentBudgets(tenantId: string, agentId: string, workspaceId?: string) {
+    const [agent] = await this.db()
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.tenantId, tenantId), eq(agents.id, agentId)))
+      .limit(1);
+    if (!agent) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+    const conditions = [
+      eq(providerAgentBudgets.tenantId, tenantId),
+      eq(providerAgentBudgets.agentId, agentId),
+    ];
+    if (workspaceId) conditions.push(eq(providerAgentBudgets.workspaceId, workspaceId));
+    return this.db()
+      .select()
+      .from(providerAgentBudgets)
+      .where(and(...conditions))
+      .orderBy(providerAgentBudgets.createdAt, providerAgentBudgets.id);
+  }
+
+  async createAgentBudget(
+    ctx: MutationContext,
+    input: {
+      agentId: string;
+      workspaceId?: string | null;
+      dimension: unknown;
+      windowSeconds: unknown;
+      max: unknown;
+      currency?: unknown;
+      autoFreeze?: unknown;
+    },
+  ) {
+    assertMutationContext(ctx);
+    if (ctx.expectedRevision !== 0) {
+      throw new ProviderAuthorityError(
+        "new budget expectedRevision must be 0",
+        "revision_conflict",
+        409,
+      );
+    }
+    const workspaceId = input.workspaceId ?? null;
+    if (workspaceId) await this.requireWorkspaceAdmin(ctx, workspaceId, true);
+    else if (!(await this.hasTenantAdmin(ctx))) {
+      throw new ProviderAuthorityError("tenant authority required", "forbidden", 403);
+    }
+    const [agent] = await this.db()
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.tenantId, ctx.tenantId), eq(agents.id, input.agentId)))
+      .limit(1);
+    if (!agent) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+    if (workspaceId) {
+      const [workspace] = await this.db()
+        .select({ id: workspaces.id })
+        .from(workspaces)
+        .where(
+          and(
+            eq(workspaces.tenantId, ctx.tenantId),
+            eq(workspaces.id, workspaceId),
+            eq(workspaces.status, "active"),
+          ),
+        )
+        .limit(1);
+      if (!workspace) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+    }
+    const normalized = normalizeBudgetInput(input);
+    const id = randomUUID();
+    return withTenantAuditedTransaction(ctx.tenantId, async (txRaw, append) => {
+      const tx = txRaw as DbExecutor;
+      const [lockedAgent] = await tx
+        .select({ id: agents.id })
+        .from(agents)
+        .where(and(eq(agents.tenantId, ctx.tenantId), eq(agents.id, input.agentId)))
+        .limit(1)
+        .for("update");
+      if (!lockedAgent) {
+        throw new ProviderAuthorityError("resource not found", "not_found", 404);
+      }
+      const [row] = await tx
+        .insert(providerAgentBudgets)
+        .values({
+          id,
+          tenantId: ctx.tenantId,
+          workspaceId,
+          agentId: input.agentId,
+          ...normalized,
+        })
+        .returning();
+      await appendAuthorityMutationAudit(ctx, append, {
+        action: "provider.agent_budget.create",
+        resourceType: "provider_agent_budget",
+        resourceId: id,
+        metadata: {
+          agentId: input.agentId,
+          workspaceId,
+          dimension: normalized.dimension,
+          windowSeconds: normalized.windowSeconds,
+          max: normalized.max,
+          currency: normalized.currency,
+          autoFreeze: normalized.autoFreeze,
+          reason: ctx.reason,
+        },
+      });
+      return row;
+    });
+  }
+
+  async updateAgentBudget(
+    ctx: MutationContext,
+    id: string,
+    input: {
+      dimension: unknown;
+      windowSeconds: unknown;
+      max: unknown;
+      currency?: unknown;
+      autoFreeze?: unknown;
+      enabled?: unknown;
+    },
+  ) {
+    assertMutationContext(ctx);
+    const [current] = await this.db()
+      .select()
+      .from(providerAgentBudgets)
+      .where(and(eq(providerAgentBudgets.tenantId, ctx.tenantId), eq(providerAgentBudgets.id, id)))
+      .limit(1);
+    if (!current) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+    if (current.workspaceId) await this.requireWorkspaceAdmin(ctx, current.workspaceId, true);
+    else if (!(await this.hasTenantAdmin(ctx))) {
+      throw new ProviderAuthorityError("tenant authority required", "forbidden", 403);
+    }
+    if (current.revision !== ctx.expectedRevision) {
+      throw new ProviderAuthorityError("budget revision conflict", "revision_conflict", 409);
+    }
+    const normalized = normalizeBudgetInput(input);
+    return withTenantAuditedTransaction(ctx.tenantId, async (txRaw, append) => {
+      const tx = txRaw as DbExecutor;
+      const [lockedAgent] = await tx
+        .select({ id: agents.id })
+        .from(agents)
+        .where(and(eq(agents.tenantId, ctx.tenantId), eq(agents.id, current.agentId)))
+        .limit(1)
+        .for("update");
+      if (!lockedAgent) {
+        throw new ProviderAuthorityError("resource not found", "not_found", 404);
+      }
+      const [updated] = await tx
+        .update(providerAgentBudgets)
+        .set(normalized)
+        .where(
+          and(
+            eq(providerAgentBudgets.tenantId, ctx.tenantId),
+            eq(providerAgentBudgets.id, id),
+            eq(providerAgentBudgets.revision, current.revision),
+          ),
+        )
+        .returning();
+      if (!updated) {
+        throw new ProviderAuthorityError("budget revision conflict", "revision_conflict", 409);
+      }
+      await appendAuthorityMutationAudit(ctx, append, {
+        action: "provider.agent_budget.update",
+        resourceType: "provider_agent_budget",
+        resourceId: id,
+        metadata: {
+          agentId: current.agentId,
+          workspaceId: current.workspaceId,
+          expectedRevision: current.revision,
+          dimension: normalized.dimension,
+          windowSeconds: normalized.windowSeconds,
+          max: normalized.max,
+          currency: normalized.currency,
+          autoFreeze: normalized.autoFreeze,
+          enabled: normalized.enabled,
+          reason: ctx.reason,
+        },
+      });
+      return updated;
+    });
   }
 
   async revokeGrant(ctx: MutationContext, id: string) {
