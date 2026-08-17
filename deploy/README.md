@@ -187,13 +187,9 @@ sudo apt-get install -y nginx certbot python3-certbot-nginx
 sudo cp deploy/nginx.conf /etc/nginx/sites-available/steward
 sudo ln -s /etc/nginx/sites-available/steward /etc/nginx/sites-enabled/steward
 
-# Add rate limit zone + WebSocket map to /etc/nginx/nginx.conf http{} block:
-# limit_req_zone $binary_remote_addr zone=steward_api:10m rate=60r/m;
-# limit_req_zone $binary_remote_addr zone=steward_proxy:10m rate=120r/m;
-# map $http_upgrade $connection_upgrade {
-#     default upgrade;
-#     ''      close;
-# }
+# The shipped site file already defines its rate-limit zones and WebSocket map.
+# Do not duplicate them in /etc/nginx/nginx.conf: sites-enabled/* is loaded from
+# nginx's http{} context on Debian/Ubuntu.
 
 sudo nginx -t && sudo systemctl reload nginx
 

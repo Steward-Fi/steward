@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decodeFunctionData } from "viem";
@@ -105,9 +105,13 @@ describe("builder key file permissions (SEC-202)", () => {
     async () => {
       const dir = await mkdtemp(join(tmpdir(), "sweep-key-"));
       const keyPath = join(dir, "hl-builder-eoa.json");
+      const symlinkPath = join(dir, "hl-builder-eoa-link.json");
       try {
         await writeFile(keyPath, JSON.stringify({ privateKey: TEST_KEY }), { mode: 0o600 });
         await expect(readBuilderPrivateKey(keyPath)).resolves.toBe(TEST_KEY);
+
+        await symlink(keyPath, symlinkPath);
+        await expect(readBuilderPrivateKey(symlinkPath)).rejects.toThrow();
 
         await chmod(keyPath, 0o640);
         await expect(readBuilderPrivateKey(keyPath)).rejects.toThrow(/group\/world-accessible/);
