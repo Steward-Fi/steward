@@ -7958,10 +7958,11 @@ auth.post("/passkey/register/verify", async (c) => {
       body.response as unknown as Parameters<PasskeyAuth["verifyRegistration"]>[1],
     );
   } catch (err) {
+    console.warn("[PasskeyAuth] Registration failed:", err);
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: err instanceof Error ? err.message : "Verification failed",
+        error: "Registration verification failed",
       },
       400,
     );
