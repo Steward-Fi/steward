@@ -140,6 +140,17 @@ export function auditArchiveVerificationMode(flags: Record<string, string | bool
   return { mode: "none" };
 }
 
+/**
+ * Absolute path to the offline evidence-bundle verifier SHIPPED WITH the CLI.
+ * Resolved against the CLI's own location (never the operator's CWD, which may
+ * be an attacker-writable directory containing a decoy
+ * `scripts/verify-evidence-bundle.mjs`) and executed via process.execPath so
+ * the runtime is the same one running the CLI.
+ */
+export function evidenceBundleVerifierScript(): string {
+  return join(import.meta.dir, "../../../scripts/verify-evidence-bundle.mjs");
+}
+
 const HELP = `steward CLI
 
 Usage:
@@ -512,11 +523,10 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
   if (to !== undefined) params.set("to", String(to));
   const bundle = await ctx.api.request("GET", `/audit/bundle?${params}`);
   const out = stringFlag(ctx.flags, "out");
-  if (out) writeFileSync(out, JSON.stringify(bundle, null, 2));
+  if (out) writeFileSync(out, JSON.stringify(bundle, null, 2), { mode: 0o600 });
   if (boolFlag(ctx.flags, "verify")) {
     if (!out) throw new Error("--verify requires --out so the offline verifier has a file");
-    const result = spawnSync("node", ["scripts/verify-evidence-bundle.mjs", out], {
-      cwd: process.cwd(),
+    const result = spawnSync(process.execPath, [evidenceBundleVerifierScript(), out], {
       stdio: "inherit",
     });
     if (result.status !== 0) throw new Error("Offline audit bundle verification failed");
@@ -599,11 +609,11 @@ async function providerActionCommand(action: string | undefined, ctx: CommandCon
     // trusted key fingerprint (E7): --out bundle.json [--verify --fp <hex>].
     const bundle = await ctx.api.request("GET", `/v2/provider-actions/${id()}/evidence`);
     const out = stringFlag(ctx.flags, "out");
-    if (out) writeFileSync(out, JSON.stringify(bundle, null, 2));
+    if (out) writeFileSync(out, JSON.stringify(bundle, null, 2), { mode: 0o600 });
     if (boolFlag(ctx.flags, "verify")) {
       if (!out) throw new Error("--verify requires --out so the offline verifier has a file");
       const fp = stringFlag(ctx.flags, "fp") ?? stringFlag(ctx.flags, "expected-key-fingerprint");
-      const args = ["scripts/verify-evidence-bundle.mjs", out];
+      const args = [evidenceBundleVerifierScript(), out];
       // E7 / M09: bind trust to an out-of-band fingerprint. Warn loudly if absent
       // (verifying against the embedded key proves self-consistency ONLY).
       if (fp) args.push("--expected-key-fingerprint", fp);
@@ -612,7 +622,7 @@ async function providerActionCommand(action: string | undefined, ctx: CommandCon
           "WARNING: no --fp supplied; verifying against the EMBEDDED key proves " +
             "self-consistency only, NOT trust to a known signing root (PR5 E7).",
         );
-      const result = spawnSync("node", args, { cwd: process.cwd(), stdio: "inherit" });
+      const result = spawnSync(process.execPath, args, { stdio: "inherit" });
       if (result.status !== 0) throw new Error("Offline evidence bundle verification failed");
     }
     return out ? { wrote: out, verified: boolFlag(ctx.flags, "verify"), bundle } : bundle;
