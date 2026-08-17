@@ -46,6 +46,13 @@ export interface AgentTokenStatus {
   observedAt: number;
 }
 
+export interface SealedCredentialLeaseToken {
+  ciphertext: string;
+  iv: string;
+  tag: string;
+  salt: string;
+}
+
 /** a hono middleware over the steward app's per-request variables. */
 export type StewardMiddleware = (
   c: Context<{ Variables: AppVariables }>,
@@ -88,6 +95,17 @@ export interface StewardAppContext {
     tenantId: string,
     secretId: string,
     use: (plaintext: string) => Promise<T>,
+  ): Promise<T>;
+  sealCredentialLeaseToken?(
+    tenantId: string,
+    leaseId: string,
+    token: string,
+  ): Promise<SealedCredentialLeaseToken>;
+  exerciseCredentialLeaseToken?<T>(
+    tenantId: string,
+    leaseId: string,
+    sealed: SealedCredentialLeaseToken,
+    use: (token: string) => Promise<T>,
   ): Promise<T>;
 
   // ── auth middleware the plugin installs on its own routes ─────────────────

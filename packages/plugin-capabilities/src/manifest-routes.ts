@@ -15,9 +15,9 @@
  *          scoped token; broker mode returns a delegation descriptor. Renewal is
  *          the same fully-checked path (revocation lands at the next renewal).
  *
- * Capability/grant revocation remains an OPERATOR act through the existing CRUD.
- * An agent may only revoke an upstream credential lease issued to its own
- * manifest identity; it cannot alter the underlying grant authority.
+ * GitHub token delivery is one-shot and must be acknowledged with token proof;
+ * unacknowledged deliveries are revoked by the bounded recovery sweep. Both the
+ * holder and an operator authority mutation can revoke the provider token.
  */
 
 import type { ApiResponse, AppVariables } from "@stwd/shared";
@@ -36,9 +36,12 @@ import { listAgentManifest, resolveManifestEntry } from "./manifest";
 import { enforceCapabilityRateLimit } from "./rate-limit";
 import { CapabilityStore } from "./store";
 import {
+  acknowledgeUpstreamCredentialLease,
+  DELIVERY_ACK_TIMEOUT_MS,
   GITHUB_APP_LEASE_ISSUER,
   type GitHubLeaseResource,
   issueUpstreamCredentialLease,
+  recoverInterruptedUpstreamCredentialLeases,
   revokeUpstreamCredentialLease,
 } from "./upstream-leases";
 
@@ -201,6 +204,29 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
             503,
           );
         }
+        if (!ctx.sealCredentialLeaseToken) {
+          return c.json<ApiResponse>(
+            { ok: false, error: "credential lease escrow is not configured" },
+            503,
+          );
+        }
+        if (!ctx.exerciseCredentialLeaseToken) {
+          return c.json<ApiResponse>(
+            { ok: false, error: "credential lease recovery is not configured" },
+            503,
+          );
+        }
+        try {
+          await recoverInterruptedUpstreamCredentialLeases({
+            db: ctx.db,
+            tenantId,
+            issuer: githubIssuer,
+            exerciseToken: ctx.exerciseCredentialLeaseToken,
+            audit: ctx.writeAuditEvent,
+          });
+        } catch {
+          return c.json<ApiResponse>({ ok: false, error: "credential lease recovery failed" }, 503);
+        }
         const leased = await issueUpstreamCredentialLease({
           db: ctx.db,
           tenantId,
@@ -211,6 +237,8 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
           resource: leaseBody.resource,
           resolved,
           exerciseSecret: ctx.exerciseCredentialSecret,
+          sealToken: ctx.sealCredentialLeaseToken,
+          audit: ctx.writeAuditEvent,
           issuer: githubIssuer,
         });
         if (!leased.ok) {
@@ -225,6 +253,8 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
             issuer: GITHUB_APP_LEASE_ISSUER,
             leaseId: leased.leaseId,
             token: leased.token,
+            acknowledgementRequired: true,
+            acknowledgementDeadlineSeconds: DELIVERY_ACK_TIMEOUT_MS / 1000,
             expiresAt: leased.expiresAt,
             resource: leased.resource,
             manifest: manifestId,
@@ -276,8 +306,47 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
       issuer: githubIssuer,
     });
     if (!result.ok) return c.json<ApiResponse>({ ok: false, error: result.error }, result.status);
+    try {
+      await ctx.writeAuditEvent({
+        tenantId,
+        actorType: "agent",
+        actorId: agentId,
+        action: "upstream_credential_lease.revoked",
+        resourceType: "upstream-credential-lease",
+        resourceId: c.req.param("leaseId"),
+        metadata: {},
+      });
+    } catch {
+      return c.json<ApiResponse>(
+        { ok: false, error: "credential was revoked but durable audit failed" },
+        503,
+      );
+    }
     c.header("Cache-Control", "no-store, max-age=0");
     return c.json<ApiResponse>({ ok: true, data: { revoked: true } });
+  });
+
+  routes.post("/manifest/leases/:leaseId/ack", async (c) => {
+    const tenantId = c.get("tenantId");
+    const agentId = c.get("agentScope");
+    if (!tenantId || !agentId) {
+      return c.json<ApiResponse>({ ok: false, error: "agent authentication required" }, 401);
+    }
+    const body = (await c.req.json().catch(() => null)) as { token?: unknown } | null;
+    if (!body || typeof body.token !== "string" || body.token.length === 0) {
+      return c.json<ApiResponse>({ ok: false, error: "token proof is required" }, 400);
+    }
+    const result = await acknowledgeUpstreamCredentialLease({
+      db: ctx.db,
+      tenantId,
+      agentId,
+      leaseId: c.req.param("leaseId"),
+      token: body.token,
+      audit: ctx.writeAuditEvent,
+    });
+    if (!result.ok) return c.json<ApiResponse>({ ok: false, error: result.error }, result.status);
+    c.header("Cache-Control", "no-store, max-age=0");
+    return c.json<ApiResponse>({ ok: true, data: { active: true } });
   });
 
   return routes;

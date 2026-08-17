@@ -4,6 +4,7 @@ import {
   asc,
   eq,
   gt,
+  isNotNull,
   isNull,
   lte,
   or,
@@ -18,6 +19,7 @@ export const GITHUB_INSTALLATION_TOKEN_TTL_SECONDS = 3600;
 const MIN_GITHUB_ISSUED_TTL_MS = 55 * 60 * 1000;
 const MAX_GITHUB_ISSUED_TTL_MS = (GITHUB_INSTALLATION_TOKEN_TTL_SECONDS + 30) * 1000;
 const REVOCATION_CLAIM_TIMEOUT_MS = 30_000;
+export const DELIVERY_ACK_TIMEOUT_MS = 30_000;
 
 export interface GitHubLeaseResource {
   repositories: string[];
@@ -49,6 +51,32 @@ export type ExerciseCredentialSecret = <T>(
   secretId: string,
   use: (plaintext: string) => Promise<T>,
 ) => Promise<T>;
+export interface SealedLeaseToken {
+  ciphertext: string;
+  iv: string;
+  tag: string;
+  salt: string;
+}
+export type SealLeaseToken = (
+  tenantId: string,
+  leaseId: string,
+  token: string,
+) => Promise<SealedLeaseToken>;
+export type ExerciseLeaseToken = <T>(
+  tenantId: string,
+  leaseId: string,
+  sealed: SealedLeaseToken,
+  use: (token: string) => Promise<T>,
+) => Promise<T>;
+export type LeaseAuditWriter = (event: {
+  tenantId: string;
+  actorType: "agent" | "system" | "user";
+  actorId?: string;
+  action: string;
+  resourceType: "upstream-credential-lease";
+  resourceId: string;
+  metadata: Record<string, unknown>;
+}) => Promise<void>;
 
 type Db = any;
 
@@ -286,6 +314,99 @@ export async function expireUpstreamCredentialLeases(input: {
   });
 }
 
+/** Recover issuance/delivery crashes. An `issuing` row has an unknowable
+ * provider outcome and is escalated truthfully. A delivery that was never ACKed
+ * retains an encrypted revocation handle and is revoked after the bounded ACK
+ * window. */
+export async function recoverInterruptedUpstreamCredentialLeases(input: {
+  db: Db;
+  tenantId: string;
+  issuer: UpstreamTokenIssuer;
+  exerciseToken: ExerciseLeaseToken;
+  audit: LeaseAuditWriter;
+  now?: Date;
+  limit?: number;
+}): Promise<{ unknown: number; revoked: number; attention: number }> {
+  const now = input.now ?? new Date();
+  const cutoff = new Date(now.getTime() - DELIVERY_ACK_TIMEOUT_MS);
+  const limit = Math.max(1, Math.min(input.limit ?? 100, 500));
+  const stale = await input.db
+    .select()
+    .from(upstreamCredentialLeases)
+    .where(
+      and(
+        eq(upstreamCredentialLeases.tenantId, input.tenantId),
+        or(
+          and(
+            eq(upstreamCredentialLeases.status, "issuing"),
+            lte(upstreamCredentialLeases.updatedAt, cutoff),
+          ),
+          and(
+            eq(upstreamCredentialLeases.status, "delivery_pending"),
+            lte(upstreamCredentialLeases.updatedAt, cutoff),
+          ),
+          and(
+            eq(upstreamCredentialLeases.status, "acknowledging"),
+            lte(upstreamCredentialLeases.updatedAt, cutoff),
+          ),
+          and(
+            eq(upstreamCredentialLeases.status, "needs_attention"),
+            isNotNull(upstreamCredentialLeases.tokenCiphertext),
+            lte(upstreamCredentialLeases.updatedAt, cutoff),
+          ),
+        ),
+      ),
+    )
+    .orderBy(asc(upstreamCredentialLeases.updatedAt), asc(upstreamCredentialLeases.id))
+    .limit(limit);
+  let unknown = 0;
+  let revoked = 0;
+  let attention = 0;
+  for (const lease of stale) {
+    if (lease.status === "issuing") {
+      const changed = await input.db
+        .update(upstreamCredentialLeases)
+        .set({
+          status: "needs_attention",
+          lastError: "issuer outcome unknown after interrupted issuance",
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(upstreamCredentialLeases.id, lease.id),
+            eq(upstreamCredentialLeases.status, "issuing"),
+            lte(upstreamCredentialLeases.updatedAt, cutoff),
+          ),
+        )
+        .returning({ id: upstreamCredentialLeases.id });
+      if (changed.length === 0) continue;
+      unknown += 1;
+      await input.audit({
+        tenantId: input.tenantId,
+        actorType: "system",
+        action: "upstream_credential_lease.issuer_outcome_unknown",
+        resourceType: "upstream-credential-lease",
+        resourceId: lease.id,
+        metadata: { grantId: lease.grantId, capabilityId: lease.capabilityId },
+      });
+      continue;
+    }
+    const result = await revokeUpstreamLeasesForAuthority({
+      db: input.db,
+      tenantId: input.tenantId,
+      grantId: lease.grantId,
+      capabilityId: lease.capabilityId,
+      issuer: input.issuer,
+      exerciseToken: input.exerciseToken,
+      audit: input.audit,
+      now,
+    });
+    if (result.ok) revoked += result.revoked;
+    else attention += 1;
+  }
+  return { unknown, revoked, attention };
+}
+
 export async function issueUpstreamCredentialLease(input: {
   db: Db;
   tenantId: string;
@@ -299,6 +420,8 @@ export async function issueUpstreamCredentialLease(input: {
     grant: { id: string; tenantId: string; agentId: string; capabilityId: string };
   };
   exerciseSecret: ExerciseCredentialSecret;
+  sealToken: SealLeaseToken;
+  audit: LeaseAuditWriter;
   issuer: UpstreamTokenIssuer;
   now?: Date;
 }): Promise<LeaseIssueResult> {
@@ -434,7 +557,13 @@ export async function issueUpstreamCredentialLease(input: {
         }),
     );
   } catch {
-    await recordFailure(input.db, claim.id, input.tenantId, "upstream issuer failed");
+    await recordFailure(
+      input.db,
+      claim.id,
+      input.tenantId,
+      "upstream issuer outcome is unknown",
+      "needs_attention",
+    );
     return {
       ok: false,
       status: 503,
@@ -473,6 +602,28 @@ export async function issueUpstreamCredentialLease(input: {
   }
 
   let authorityInvalidated = false;
+  let sealed: SealedLeaseToken;
+  try {
+    sealed = await input.sealToken(input.tenantId, claim.id, issued.token);
+  } catch {
+    const revoked = await input.issuer.revoke(issued.token).then(
+      () => true,
+      () => false,
+    );
+    await recordFailure(
+      input.db,
+      claim.id,
+      input.tenantId,
+      "credential escrow failed",
+      revoked ? "failed" : "needs_attention",
+    );
+    return {
+      ok: false,
+      status: 503,
+      code: "lease_finalization_failed",
+      error: "credential delivery was aborted",
+    };
+  }
   try {
     await input.db.transaction(async (tx: Db) => {
       const live = await readLiveLeaseAuthority(
@@ -494,9 +645,12 @@ export async function issueUpstreamCredentialLease(input: {
         .update(upstreamCredentialLeases)
         .set({
           tokenHash: sha256(issued.token),
-          status: "active",
+          tokenCiphertext: sealed.ciphertext,
+          tokenIv: sealed.iv,
+          tokenAuthTag: sealed.tag,
+          tokenSalt: sealed.salt,
+          status: "delivery_pending",
           expiresAt: issued.expiresAt,
-          deliveredAt: now,
           updatedAt: now,
         })
         .where(
@@ -510,7 +664,7 @@ export async function issueUpstreamCredentialLease(input: {
       await tx.insert(upstreamCredentialLeaseEvents).values({
         leaseId: claim.id,
         tenantId: input.tenantId,
-        action: "lease.issue",
+        action: "lease.delivery_pending",
         decision: "allow",
         metadata: {
           workspaceId: input.workspaceId,
@@ -539,6 +693,20 @@ export async function issueUpstreamCredentialLease(input: {
         error: "grant or capability changed during credential issuance",
       };
     }
+    await input.audit({
+      tenantId: input.tenantId,
+      actorType: "agent",
+      actorId: input.agentId,
+      action: "upstream_credential_lease.delivery_pending",
+      resourceType: "upstream-credential-lease",
+      resourceId: claim.id,
+      metadata: {
+        workspaceId: input.workspaceId,
+        grantId: input.resolved.grant.id,
+        capabilityId: input.resolved.capability.id,
+        resourceHash: resourceHash(resource),
+      },
+    });
   } catch {
     // The token only exists in this frame. If durable finalization fails, revoke
     // it before dropping the reference; a hard kill inside this tiny boundary is
@@ -573,6 +741,89 @@ export async function issueUpstreamCredentialLease(input: {
   };
 }
 
+export async function acknowledgeUpstreamCredentialLease(input: {
+  db: Db;
+  tenantId: string;
+  agentId: string;
+  leaseId: string;
+  token: string;
+  audit: LeaseAuditWriter;
+  now?: Date;
+}): Promise<{ ok: true } | { ok: false; status: 403 | 404 | 409 | 503; error: string }> {
+  const now = input.now ?? new Date();
+  const [lease] = await input.db
+    .select()
+    .from(upstreamCredentialLeases)
+    .where(
+      and(
+        eq(upstreamCredentialLeases.id, input.leaseId),
+        eq(upstreamCredentialLeases.tenantId, input.tenantId),
+        eq(upstreamCredentialLeases.agentId, input.agentId),
+      ),
+    );
+  if (!lease) return { ok: false, status: 404, error: "lease not found" };
+  if (lease.status !== "delivery_pending") {
+    return { ok: false, status: 409, error: "lease is not awaiting delivery acknowledgement" };
+  }
+  if (!equalHash(lease.tokenHash, input.token)) {
+    return { ok: false, status: 403, error: "lease token proof does not match" };
+  }
+  const [claimed] = await input.db
+    .update(upstreamCredentialLeases)
+    .set({ status: "acknowledging", updatedAt: now })
+    .where(
+      and(
+        eq(upstreamCredentialLeases.id, lease.id),
+        eq(upstreamCredentialLeases.status, "delivery_pending"),
+      ),
+    )
+    .returning({ id: upstreamCredentialLeases.id });
+  if (!claimed) return { ok: false, status: 409, error: "delivery acknowledgement raced" };
+  try {
+    await input.audit({
+      tenantId: input.tenantId,
+      actorType: "agent",
+      actorId: input.agentId,
+      action: "upstream_credential_lease.activated",
+      resourceType: "upstream-credential-lease",
+      resourceId: lease.id,
+      metadata: { workspaceId: lease.workspaceId, grantId: lease.grantId },
+    });
+    await input.db.transaction(async (tx: Db) => {
+      const activated = await tx
+        .update(upstreamCredentialLeases)
+        .set({ status: "active", deliveredAt: now, updatedAt: now })
+        .where(
+          and(
+            eq(upstreamCredentialLeases.id, lease.id),
+            eq(upstreamCredentialLeases.status, "acknowledging"),
+          ),
+        )
+        .returning({ id: upstreamCredentialLeases.id });
+      if (activated.length !== 1) throw new Error("delivery acknowledgement claim was lost");
+      await tx.insert(upstreamCredentialLeaseEvents).values({
+        leaseId: lease.id,
+        tenantId: input.tenantId,
+        action: "lease.issue",
+        decision: "allow",
+      });
+    });
+  } catch {
+    await input.db
+      .update(upstreamCredentialLeases)
+      .set({ status: "delivery_pending", updatedAt: new Date() })
+      .where(
+        and(
+          eq(upstreamCredentialLeases.id, lease.id),
+          eq(upstreamCredentialLeases.status, "acknowledging"),
+        ),
+      )
+      .catch(() => {});
+    return { ok: false, status: 503, error: "credential acknowledgement could not be recorded" };
+  }
+  return { ok: true };
+}
+
 function equalHash(left: string | null, token: string): boolean {
   if (!left || !/^[a-f0-9]{64}$/.test(left)) return false;
   return timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(sha256(token), "hex"));
@@ -599,7 +850,12 @@ export async function revokeUpstreamCredentialLease(input: {
       ),
     );
   if (!lease) return { ok: false, status: 404, error: "lease not found" };
-  if (lease.status !== "active" && lease.status !== "revoking") {
+  if (
+    lease.status !== "active" &&
+    lease.status !== "delivery_pending" &&
+    lease.status !== "acknowledging" &&
+    lease.status !== "revoking"
+  ) {
     return { ok: false, status: 409, error: "lease is not active" };
   }
   if (
@@ -633,10 +889,12 @@ export async function revokeUpstreamCredentialLease(input: {
     .update(upstreamCredentialLeases)
     .set({ status: "revoking", updatedAt: now })
     .where(
-      lease.status === "active"
+      lease.status === "active" ||
+        lease.status === "delivery_pending" ||
+        lease.status === "acknowledging"
         ? and(
             eq(upstreamCredentialLeases.id, lease.id),
-            eq(upstreamCredentialLeases.status, "active"),
+            eq(upstreamCredentialLeases.status, lease.status),
           )
         : and(
             eq(upstreamCredentialLeases.id, lease.id),
@@ -702,4 +960,112 @@ export async function revokeUpstreamCredentialLease(input: {
     };
   }
   return { ok: true };
+}
+
+function sealedTokenFromLease(lease: any): SealedLeaseToken | null {
+  if (!lease.tokenCiphertext || !lease.tokenIv || !lease.tokenAuthTag || !lease.tokenSalt) {
+    return null;
+  }
+  return {
+    ciphertext: lease.tokenCiphertext,
+    iv: lease.tokenIv,
+    tag: lease.tokenAuthTag,
+    salt: lease.tokenSalt,
+  };
+}
+
+/** Revoke every provider token bound to authority that is being revoked or
+ * changed. Provider failures are durable `needs_attention` outcomes and make the
+ * operator mutation fail closed so authority cannot appear fully revoked while
+ * a known-live credential remains usable. */
+export async function revokeUpstreamLeasesForAuthority(input: {
+  db: Db;
+  tenantId: string;
+  issuer: UpstreamTokenIssuer;
+  exerciseToken: ExerciseLeaseToken;
+  audit: LeaseAuditWriter;
+  grantId?: string;
+  capabilityId?: string;
+  now?: Date;
+}): Promise<{ ok: true; revoked: number } | { ok: false; error: string }> {
+  if (!input.grantId && !input.capabilityId)
+    return { ok: false, error: "authority binding required" };
+  const bindings = [eq(upstreamCredentialLeases.tenantId, input.tenantId)];
+  if (input.grantId) bindings.push(eq(upstreamCredentialLeases.grantId, input.grantId));
+  if (input.capabilityId)
+    bindings.push(eq(upstreamCredentialLeases.capabilityId, input.capabilityId));
+  const leases = await input.db
+    .select()
+    .from(upstreamCredentialLeases)
+    .where(
+      and(
+        ...bindings,
+        or(
+          eq(upstreamCredentialLeases.status, "active"),
+          eq(upstreamCredentialLeases.status, "delivery_pending"),
+          eq(upstreamCredentialLeases.status, "acknowledging"),
+          eq(upstreamCredentialLeases.status, "needs_attention"),
+        ),
+      ),
+    );
+  let revoked = 0;
+  for (const lease of leases) {
+    const sealed = sealedTokenFromLease(lease);
+    if (!sealed) {
+      await input.db
+        .update(upstreamCredentialLeases)
+        .set({ status: "needs_attention", lastError: "revocation handle unavailable" })
+        .where(eq(upstreamCredentialLeases.id, lease.id));
+      return { ok: false, error: "one or more upstream credentials require operator attention" };
+    }
+    const now = input.now ?? new Date();
+    const [claimed] = await input.db
+      .update(upstreamCredentialLeases)
+      .set({ status: "revoking", updatedAt: now })
+      .where(
+        and(
+          eq(upstreamCredentialLeases.id, lease.id),
+          eq(upstreamCredentialLeases.status, lease.status),
+        ),
+      )
+      .returning({ id: upstreamCredentialLeases.id });
+    if (!claimed) return { ok: false, error: "upstream credential revocation raced" };
+    try {
+      await input.exerciseToken(input.tenantId, lease.id, sealed, (token) =>
+        input.issuer.revoke(token),
+      );
+      await input.audit({
+        tenantId: input.tenantId,
+        actorType: "system",
+        action: "upstream_credential_lease.authority_revoked",
+        resourceType: "upstream-credential-lease",
+        resourceId: lease.id,
+        metadata: { grantId: lease.grantId, capabilityId: lease.capabilityId },
+      });
+      await input.db.transaction(async (tx: Db) => {
+        await tx
+          .update(upstreamCredentialLeases)
+          .set({ status: "revoked", revokedAt: now, lastError: null, updatedAt: now })
+          .where(eq(upstreamCredentialLeases.id, lease.id));
+        await tx.insert(upstreamCredentialLeaseEvents).values({
+          leaseId: lease.id,
+          tenantId: input.tenantId,
+          action: "lease.authority_revoke",
+          decision: "allow",
+        });
+      });
+      revoked += 1;
+    } catch {
+      await input.db
+        .update(upstreamCredentialLeases)
+        .set({
+          status: "needs_attention",
+          lastError: "authority revocation failed",
+          updatedAt: new Date(),
+        })
+        .where(eq(upstreamCredentialLeases.id, lease.id));
+      return { ok: false, error: "upstream credential revocation is incomplete" };
+    }
+  }
+  return { ok: true, revoked };
 }

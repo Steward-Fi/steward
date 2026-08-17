@@ -72,7 +72,7 @@ import {
 } from "@stwd/policy-engine";
 import type { PluginMigrationSource, StewardPlugin } from "@stwd/shared";
 import { WebhookEventRegistry } from "@stwd/shared";
-import { SecretVault } from "@stwd/vault";
+import { KeyStore, SecretVault } from "@stwd/vault";
 import type { Hono } from "hono";
 import {
   requireAgentJwt,
@@ -192,6 +192,17 @@ export interface StewardAppContext {
     secretId: string,
     use: (plaintext: string) => Promise<T>,
   ): Promise<T>;
+  sealCredentialLeaseToken(
+    tenantId: string,
+    leaseId: string,
+    token: string,
+  ): Promise<{ ciphertext: string; iv: string; tag: string; salt: string }>;
+  exerciseCredentialLeaseToken<T>(
+    tenantId: string,
+    leaseId: string,
+    sealed: { ciphertext: string; iv: string; tag: string; salt: string },
+    use: (token: string) => Promise<T>,
+  ): Promise<T>;
   requireAgentJwt: typeof requireAgentJwt;
   /**
    * Capability-surface authenticator: verifies the agent JWT and installs the
@@ -237,6 +248,7 @@ export type StewardApiPlugin = StewardPlugin<StewardApp, StewardAppContext, Eval
  */
 export function buildPluginContext(): StewardAppContext {
   const credentialVault = new SecretVault(MASTER_PASSWORD);
+  const leaseKeyStore = new KeyStore(MASTER_PASSWORD, undefined, "credential-lease");
   return {
     db,
     vault,
@@ -252,6 +264,16 @@ export function buildPluginContext(): StewardAppContext {
     getRedisClient,
     exerciseCredentialSecret: (tenantId, secretId, use) =>
       credentialVault.exerciseSecret(tenantId, secretId, use),
+    sealCredentialLeaseToken: async (tenantId, leaseId, token) =>
+      leaseKeyStore.encrypt(token, { tenantId, name: `upstream-lease:${leaseId}`, version: 1 }),
+    exerciseCredentialLeaseToken: async (tenantId, leaseId, sealed, use) => {
+      const token = leaseKeyStore.decrypt(sealed, {
+        tenantId,
+        name: `upstream-lease:${leaseId}`,
+        version: 1,
+      });
+      return use(token);
+    },
     requireAgentJwt,
     requireCapabilityAgentJwt,
     requireProviderAgentJwt,

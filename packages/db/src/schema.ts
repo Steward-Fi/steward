@@ -2366,6 +2366,10 @@ export const upstreamCredentialLeases = pgTable(
     resourceHash: varchar("resource_hash", { length: 64 }).notNull(),
     idempotencyKeyHash: varchar("idempotency_key_hash", { length: 64 }).notNull(),
     tokenHash: varchar("token_hash", { length: 64 }),
+    tokenCiphertext: text("token_ciphertext"),
+    tokenIv: text("token_iv"),
+    tokenAuthTag: text("token_auth_tag"),
+    tokenSalt: text("token_salt"),
     status: varchar("status", { length: 24 }).notNull().default("issuing"),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
@@ -2379,12 +2383,12 @@ export const upstreamCredentialLeases = pgTable(
       columns: [table.tenantId, table.agentId],
       foreignColumns: [agents.tenantId, agents.id],
       name: "upstream_credential_leases_agent_fk",
-    }).onDelete("cascade"),
+    }).onDelete("restrict"),
     workspaceFk: foreignKey({
       columns: [table.tenantId, table.workspaceId],
       foreignColumns: [workspaces.tenantId, workspaces.id],
       name: "upstream_credential_leases_workspace_fk",
-    }).onDelete("cascade"),
+    }).onDelete("restrict"),
     replayUnique: uniqueIndex("upstream_credential_leases_replay_uniq").on(
       table.tenantId,
       table.agentId,
@@ -2402,7 +2406,7 @@ export const upstreamCredentialLeases = pgTable(
     ),
     statusCheck: check(
       "upstream_credential_leases_status_check",
-      sql`${table.status} IN ('issuing','active','revoking','revoked','expired','failed','needs_attention')`,
+      sql`${table.status} IN ('issuing','delivery_pending','acknowledging','active','revoking','revoked','expired','failed','needs_attention')`,
     ),
   }),
 );
@@ -2414,9 +2418,7 @@ export const upstreamCredentialLeaseEvents = pgTable(
   "upstream_credential_lease_events",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    leaseId: uuid("lease_id")
-      .notNull()
-      .references(() => upstreamCredentialLeases.id, { onDelete: "cascade" }),
+    leaseId: uuid("lease_id").notNull(),
     tenantId: varchar("tenant_id", { length: 64 }).notNull(),
     action: varchar("action", { length: 64 }).notNull(),
     decision: varchar("decision", { length: 16 }).notNull(),

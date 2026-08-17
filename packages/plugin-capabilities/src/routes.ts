@@ -18,6 +18,7 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import { trustedClientIp } from "./client-ip";
 import type { AuditEventInput, StewardAppContext } from "./context";
+import { GitHubAppInstallationTokenIssuer } from "./github-app-issuer";
 import type { Capability, CapabilityGrant } from "./schema";
 import {
   AgentNotFoundError,
@@ -25,6 +26,7 @@ import {
   GrantExistsError,
   SecretRouteAuthorityConflict,
 } from "./store";
+import { revokeUpstreamLeasesForAuthority } from "./upstream-leases";
 import {
   createCapabilitySchema,
   createGrantSchema,
@@ -115,6 +117,26 @@ function requireCapabilityAdmin(
 export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables: AppVariables }> {
   const routes = new Hono<{ Variables: AppVariables }>();
   const store = new CapabilityStore(ctx.db, ctx.withTenantAuditedTransaction);
+  const githubIssuer = new GitHubAppInstallationTokenIssuer();
+
+  async function revokeBoundLeases(
+    tenantId: string,
+    binding: { grantId?: string; capabilityId?: string },
+  ): Promise<void> {
+    const result = await revokeUpstreamLeasesForAuthority({
+      db: ctx.db,
+      tenantId,
+      ...binding,
+      issuer: githubIssuer,
+      exerciseToken:
+        ctx.exerciseCredentialLeaseToken ??
+        (async () => {
+          throw new Error("credential lease revocation is not configured");
+        }),
+      audit: ctx.writeAuditEvent,
+    });
+    if (!result.ok) throw new Error(result.error);
+  }
 
   function auditEvent(
     c: Context<{ Variables: AppVariables }>,
@@ -290,6 +312,13 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
     }
 
     try {
+      if (
+        patch.enabled === false ||
+        patch.constraints !== undefined ||
+        patch.secretId !== undefined
+      ) {
+        await revokeBoundLeases(tenantId, { capabilityId: id });
+      }
       const updated = await store.updateCapability(
         tenantId,
         id,
@@ -331,6 +360,7 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
     const tenantId = c.get("tenantId");
     const id = c.req.param("id");
     try {
+      await revokeBoundLeases(tenantId, { capabilityId: id });
       const removed = await store.deleteCapability(tenantId, id, (result) =>
         result
           ? auditEvent(c, {
@@ -420,6 +450,7 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
     const tenantId = c.get("tenantId");
     const grantId = c.req.param("grantId");
     try {
+      await revokeBoundLeases(tenantId, { grantId });
       const revoked = await store.revokeGrant(tenantId, grantId, (result) =>
         result
           ? auditEvent(c, {
