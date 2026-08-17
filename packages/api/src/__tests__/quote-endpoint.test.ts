@@ -70,17 +70,23 @@ describe("GET /quote", () => {
     expect(response.status).toBe(400);
   });
 
-  // SEC-085: the public oracle is rate limited per client IP.
-  test("rate limits anonymous callers", async () => {
-    configureNoop(false, false);
-    const headers = { "x-forwarded-for": "10.9.9.9" };
+  // SEC-085: the public oracle is rate limited via the shared Redis-backed
+  // limiter (residual: moved off the wave-2 in-memory Map, which could not
+  // coordinate across replicas/isolates). With Redis never configured,
+  // production fails closed (429) rather than letting anonymous callers drive
+  // the guest agent unthrottled.
+  test("fails closed with 429 in production when Redis is unconfigured", async () => {
+    configureNoop(true, true);
+    process.env.NODE_ENV = "production";
+    delete process.env.REDIS_URL;
+    delete process.env.REDIS_DRIVER;
+    delete process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL;
 
-    let lastStatus = 0;
-    for (let i = 0; i < 31; i++) {
-      const response = await quoteRoutes.request("/", { headers });
-      lastStatus = response.status;
-    }
-    expect(lastStatus).toBe(429);
+    const response = await quoteRoutes.request("/", {
+      headers: { "x-forwarded-for": "10.9.9.9" },
+    });
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("60");
   });
 });
 
