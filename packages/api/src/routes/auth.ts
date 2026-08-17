@@ -1368,7 +1368,7 @@ async function lockOAuthCodeRedemption(code: string): Promise<boolean> {
 }
 
 async function releaseOAuthCodeRedemptionLock(code: string): Promise<void> {
-  getOAuthCodeStore().delete(`oauth-code-lock:${code}`);
+  await getOAuthCodeStore().delete(`oauth-code-lock:${code}`);
 }
 
 async function markOidcIdTokenUsedOnce(

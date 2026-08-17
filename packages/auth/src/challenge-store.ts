@@ -68,9 +68,19 @@ export class ChallengeStore {
     return this.backend.get(key);
   }
 
-  /** Delete a challenge explicitly. */
-  delete(key: string): void {
-    void this.backend.delete(key);
+  /**
+   * Delete a challenge explicitly.
+   *
+   * Awaits the backend delete so callers can rely on the entry being gone,
+   * but never rejects: a backend outage is logged as a warning instead of
+   * crashing the caller (entries still expire via their TTL).
+   */
+  async delete(key: string): Promise<void> {
+    try {
+      await this.backend.delete(key);
+    } catch (err) {
+      console.warn("[ChallengeStore] delete failed; entry will expire via TTL:", err);
+    }
   }
 
   /**
