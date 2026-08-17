@@ -16,12 +16,22 @@ import { arbitrum, base, bsc, gnosis, mainnet, optimism, polygon } from "wagmi/c
 /**
  * WalletConnect projectId.
  *
- * Resolved from `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` and falls back to a
- * shared default. Production deployments should configure their own projectId
- * via env to avoid rate-limit collisions on the shared key.
+ * Resolved from `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID`. The shared built-in
+ * fallback exists only so local dev and the e2e harness work out of the box —
+ * every default build otherwise shares one public quota/identity, which can be
+ * rate-limited or abused by third parties (SEC-157). The production deploy
+ * pipeline (cf:build/cf:preview/cf:deploy) refuses to build without the env
+ * var (scripts/assert-production-deploy-env.mjs), and production builds warn
+ * loudly at runtime if the fallback is somehow still in use.
  */
-const projectId =
-  process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || "2c7ddf841a48e522748c5e2782d73443";
+const SHARED_FALLBACK_PROJECT_ID = "2c7ddf841a48e522748c5e2782d73443";
+const projectId = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || SHARED_FALLBACK_PROJECT_ID;
+
+if (process.env.NODE_ENV === "production" && projectId === SHARED_FALLBACK_PROJECT_ID) {
+  console.warn(
+    "[steward] NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID is unset: this build shares the default WalletConnect projectId quota/identity. Configure a dedicated projectId for production.",
+  );
+}
 
 /**
  * Lazy factory for the wagmi/RainbowKit config.

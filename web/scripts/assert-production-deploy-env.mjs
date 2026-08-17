@@ -17,6 +17,14 @@ if (process.env.E2E_ALLOW_INSECURE_HTTP === "true") {
   );
 }
 
+// SEC-157: without a dedicated projectId every production build shares one
+// public WalletConnect quota/identity, which can be rate-limited or abused.
+if (!process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID) {
+  failures.push(
+    "NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID is unset — production builds must configure a dedicated WalletConnect projectId instead of the shared default.",
+  );
+}
+
 if (failures.length > 0) {
   console.error("Refusing to build/deploy for production:\n");
   for (const failure of failures) {
