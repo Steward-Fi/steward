@@ -368,7 +368,7 @@ async function seed(opts: {
         id: "71000000-0000-4000-8000-0000000000c1",
         tenantId: CS.TENANT,
         workspaceId: CS.WORKSPACE,
-        principalType: "user",
+        principalType: "human",
         principalId: CS.GRANTOR,
         roleKey: "workspace_approver",
         operationKeys: [OP_TWEET_KEY],
