@@ -2297,6 +2297,14 @@ export const providerAgentBudgets = pgTable(
       foreignColumns: [workspaces.tenantId, workspaces.id],
       name: "provider_agent_budgets_workspace_fk",
     }).onDelete("cascade"),
+    identityIdx: uniqueIndex("provider_agent_budgets_identity_idx").on(
+      table.tenantId,
+      sql`COALESCE(${table.workspaceId}::text, '')`,
+      table.agentId,
+      table.dimension,
+      sql`COALESCE(${table.currency}, '')`,
+      table.windowSeconds,
+    ),
     lookupIdx: index("provider_agent_budgets_lookup_idx").on(
       table.tenantId,
       table.agentId,

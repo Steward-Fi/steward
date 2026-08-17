@@ -118,6 +118,18 @@ export interface ReserveCumulativeSpendResult {
   reservationId?: string;
 }
 
+/** One independently-keyed stream participating in an all-or-nothing reserve. */
+export interface CumulativeSpendBatchEntry extends ReserveCumulativeSpendInput {}
+
+export interface ReserveCumulativeSpendBatchResult {
+  /** true only when every cap on every stream admits the reservation. */
+  ok: boolean;
+  /** Per-entry prior sums, in the same entry/cap order supplied by the caller. */
+  priorSums: number[][];
+  /** Stable reservation ids, present only when the whole batch is admitted. */
+  reservationIds?: string[];
+}
+
 /** Read-only trailing-window sum snapshot (advisory; enforcement is reserve). */
 export interface CumulativeSpendSnapshot {
   /** committed+reserved sum over the trailing window, integer minor units. */
@@ -129,6 +141,12 @@ function streamKey(s: CumulativeSpendStream): string {
   // delimiter-safe. Deliberately NO window/max in the key (codex P1): the stream
   // identity is the spend history, not the current cap threshold.
   const enc = (v: string) => encodeURIComponent(v);
+  // First-class agent budgets reserve several scope/dimension streams in one
+  // Lua call. Keep those keys in one Redis Cluster hash slot while preserving
+  // the established key shape (and history) for every pre-existing stream.
+  if (s.scope === "agent" && s.scopeKey.startsWith("budget:")) {
+    return `cumspend:{${enc(s.agentId)}}:${s.scope}:${enc(s.scopeKey)}:${enc(s.currency)}`;
+  }
   return `cumspend:${enc(s.agentId)}:${s.scope}:${enc(s.scopeKey)}:${enc(s.currency)}`;
 }
 
@@ -188,6 +206,73 @@ elseif out[1] == 0 and existingScore then
   -- A current-policy retry no longer admits this previously orphaned member.
   -- Remove it atomically with the denial so it cannot pin phantom budget.
   redis.call('ZREM', KEYS[1], member)
+end
+return out
+`;
+
+// ATOMIC all-or-nothing reserve over several independently-keyed streams.
+// Every stream is inspected before any member is added, so a rejection never
+// needs compensating writes and concurrent callers cannot observe a partial
+// multi-dimensional budget reservation.
+//
+// KEYS = one key per entry
+// ARGV[1]=now ARGV[2]=retentionCutoff ARGV[3]=ttlMs ARGV[4]=nEntries
+// then, for each entry: amount, member, nCaps, nCaps*(windowStart,max)
+const RESERVE_BATCH_LUA = `
+local now = tonumber(ARGV[1])
+local retentionCutoff = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+local nEntries = tonumber(ARGV[4])
+local cursor = 5
+local admitted = 1
+local out = {1}
+local members = {}
+
+for e = 1, nEntries do
+  local amount = tonumber(ARGV[cursor])
+  local member = ARGV[cursor + 1]
+  local nCaps = tonumber(ARGV[cursor + 2])
+  cursor = cursor + 3
+  members[e] = member
+  redis.call('ZREMRANGEBYSCORE', KEYS[e], 0, retentionCutoff)
+  for c = 1, nCaps do
+    local windowStart = tonumber(ARGV[cursor])
+    local maxv = tonumber(ARGV[cursor + 1])
+    cursor = cursor + 2
+    local live = redis.call('ZRANGEBYSCORE', KEYS[e], '(' .. windowStart, now)
+    local sum = 0
+    for i = 1, #live do
+      local m = live[i]
+      if m ~= member then
+        local firstBar = string.find(m, '|', 1, true)
+        if not firstBar then return {-1} end
+        local rest = string.sub(m, firstBar + 1)
+        local secondBar = string.find(rest, '|', 1, true)
+        local amtStr = secondBar and string.sub(rest, 1, secondBar - 1) or rest
+        local amt = tonumber(amtStr)
+        if amt == nil then return {-1} end
+        sum = sum + amt
+      end
+    end
+    out[#out + 1] = sum
+    if (sum + amount) > maxv then admitted = 0 end
+  end
+end
+
+out[1] = admitted
+cursor = 5
+for e = 1, nEntries do
+  local amount = tonumber(ARGV[cursor])
+  local member = ARGV[cursor + 1]
+  local nCaps = tonumber(ARGV[cursor + 2])
+  cursor = cursor + 3 + nCaps * 2
+  local existing = redis.call('ZSCORE', KEYS[e], member)
+  if admitted == 1 and not existing then
+    redis.call('ZADD', KEYS[e], now, member)
+    redis.call('PEXPIRE', KEYS[e], ttl)
+  elseif admitted == 0 and existing then
+    redis.call('ZREM', KEYS[e], member)
+  end
 end
 return out
 `;
@@ -309,6 +394,84 @@ export async function reserveCumulativeSpend(
   if (res[0] === 1) {
     return { ok: true, priorSums, reservationId };
   }
+  return { ok: false, priorSums };
+}
+
+/**
+ * Atomically reserve several distinct cumulative-spend streams. Redis executes
+ * the Lua script as one operation: either every entry is appended or none is.
+ * This is intended for one logical policy gate spanning several scopes or
+ * dimensions. Callers must supply keys in one Redis Cluster hash slot (agent
+ * budget keys do so automatically); duplicate stream keys are rejected because
+ * caps for one stream belong in one entry.
+ */
+export async function reserveCumulativeSpendBatch(
+  entries: CumulativeSpendBatchEntry[],
+): Promise<ReserveCumulativeSpendBatchResult> {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error("cumulative spend batch requires at least one entry");
+  }
+  const now = entries[0]?.now ?? Date.now();
+  const keys: string[] = [];
+  const args: string[] = [
+    String(now),
+    String(now - RETENTION_MS),
+    String(RETENTION_MS),
+    String(entries.length),
+  ];
+  const reservationIds: string[] = [];
+  const seenKeys = new Set<string>();
+  for (const entry of entries) {
+    if (entry.now !== undefined && entry.now !== now) {
+      throw new Error("cumulative spend batch entries must share one evaluation time");
+    }
+    if (!isNonNegInt(entry.amount)) {
+      throw new Error(`invalid cumulative spend amount: ${entry.amount}`);
+    }
+    if (!Array.isArray(entry.caps) || entry.caps.length === 0) {
+      throw new Error("cumulative spend reserve requires at least one cap");
+    }
+    for (const cap of entry.caps) {
+      if (!isNonNegInt(cap.max)) throw new Error(`invalid cumulative spend max: ${cap.max}`);
+      if (!isValidWindow(cap.windowSeconds)) {
+        throw new Error(`invalid cumulative spend window: ${cap.windowSeconds}`);
+      }
+    }
+    if (typeof entry.stream.agentId !== "string" || entry.stream.agentId.length === 0) {
+      throw new Error("cumulative spend reserve requires agentId");
+    }
+    if (typeof entry.stream.currency !== "string" || entry.stream.currency.length === 0) {
+      throw new Error("cumulative spend reserve requires currency");
+    }
+    const key = streamKey(entry.stream);
+    if (seenKeys.has(key)) throw new Error("cumulative spend batch contains a duplicate stream");
+    seenKeys.add(key);
+    keys.push(key);
+    const reservationId = entry.reservationId ?? `${now}:${nextSeq()}`;
+    if (reservationId.length === 0 || reservationId.length > 200 || reservationId.includes("|")) {
+      throw new Error("invalid cumulative spend reservationId");
+    }
+    reservationIds.push(reservationId);
+    args.push(
+      String(entry.amount),
+      `${reservationId}|${entry.amount}|reserved`,
+      String(entry.caps.length),
+    );
+    for (const cap of entry.caps) {
+      args.push(String(now - cap.windowSeconds * 1000), String(cap.max));
+    }
+  }
+
+  const redis = getRedis();
+  const raw = (await redis.eval(RESERVE_BATCH_LUA, keys.length, ...keys, ...args)) as number[];
+  if (raw[0] === -1) throw new Error("cumulative spend stream contained a corrupt member");
+  let offset = 1;
+  const priorSums = entries.map((entry) => {
+    const sums = raw.slice(offset, offset + entry.caps.length);
+    offset += entry.caps.length;
+    return sums;
+  });
+  if (raw[0] === 1) return { ok: true, priorSums, reservationIds };
   return { ok: false, priorSums };
 }
 
