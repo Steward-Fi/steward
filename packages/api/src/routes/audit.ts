@@ -15,17 +15,21 @@ import {
   readAuditBundleData,
   signAuditBundle,
   verifyAuditChain,
-  writeAuditEvent,
 } from "../services/audit";
 import {
+  beginAuditArchiveRestore,
+  completeAuditArchiveRestore,
   createAuditArchive,
   getAuditArchiveChunk,
   getAuditArchiveManifest,
   getAuditRetentionPolicy,
+  listAuditArchives,
   MAX_ARCHIVE_CHUNK_SIZE,
   MAX_AUDIT_RETENTION_DAYS,
   MIN_ARCHIVE_CHUNK_SIZE,
   MIN_AUDIT_RETENTION_DAYS,
+  putAuditArchiveRestoreChunk,
+  recordAuditArchiveDurabilityAcknowledgement,
   runTenantAuditRetention,
   setAuditRetentionPolicy,
 } from "../services/audit-archive";
@@ -954,16 +958,6 @@ auditRoutes.put("/retention-policy", async (c) => {
     archiveChunkSize,
     updatedBy: c.get("userId") ?? null,
   });
-  await writeAuditEvent({
-    tenantId,
-    actorType: "user",
-    actorId: c.get("userId") ?? null,
-    action: "audit.retention_policy.updated",
-    resourceType: "audit_retention_policy",
-    resourceId: tenantId,
-    metadata: { enabled: policy.enabled, retentionDays, archiveChunkSize },
-    requestId: c.get("requestId") ?? null,
-  });
   return c.json({ ok: true, data: policy });
 });
 
@@ -997,6 +991,142 @@ auditRoutes.post("/archives", async (c) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Audit archive failed";
     return c.json<ApiResponse>({ ok: false, error: message }, 409);
+  }
+});
+
+auditRoutes.get("/archives", async (c) => {
+  const limit = parsePositiveIntegerParam(c.req.query("limit"), "limit", 50, 200);
+  if (!limit.ok) return c.json<ApiResponse>({ ok: false, error: limit.error }, 400);
+  const beforeRaw = c.req.query("before");
+  const before = beforeRaw ? new Date(beforeRaw) : undefined;
+  if (before && !Number.isFinite(before.getTime())) {
+    return c.json<ApiResponse>({ ok: false, error: "before must be a valid timestamp" }, 400);
+  }
+  try {
+    const archives = await listAuditArchives(c.get("tenantId"), {
+      limit: limit.value,
+      before,
+    });
+    return c.json({ ok: true, data: archives });
+  } catch (error) {
+    console.error("[audit] archive list failed:", error);
+    return c.json<ApiResponse>({ ok: false, error: "Failed to list audit archives" }, 500);
+  }
+});
+
+auditRoutes.post("/archives/restore", async (c) => {
+  const body = await safeJsonParse<Record<string, unknown>>(c);
+  const allowed = new Set(["manifest", "manifestSha256", "signature"]);
+  if (
+    !body ||
+    Object.keys(body).some((key) => !allowed.has(key)) ||
+    !body.manifest ||
+    typeof body.manifest !== "object" ||
+    typeof body.manifestSha256 !== "string" ||
+    typeof body.signature !== "string"
+  ) {
+    return c.json<ApiResponse>({ ok: false, error: "Signed archive manifest is required" }, 400);
+  }
+  try {
+    const result = await beginAuditArchiveRestore({
+      tenantId: c.get("tenantId"),
+      manifest: body.manifest as never,
+      manifestSha256: body.manifestSha256,
+      signature: body.signature,
+      actorId: c.get("userId") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+    return c.json({ ok: true, data: result }, result.reused ? 200 : 201);
+  } catch (error) {
+    return c.json<ApiResponse>(
+      { ok: false, error: error instanceof Error ? error.message : "Restore failed" },
+      409,
+    );
+  }
+});
+
+auditRoutes.put("/archives/:archiveId/restore/chunks/:index", async (c) => {
+  const archiveId = c.req.param("archiveId");
+  const indexRaw = c.req.param("index");
+  if (!UUID_PATTERN.test(archiveId) || !/^\d{1,6}$/.test(indexRaw)) {
+    return c.json<ApiResponse>({ ok: false, error: "Restore session not found" }, 404);
+  }
+  if (!(c.req.header("content-type") ?? "").toLowerCase().startsWith("application/x-ndjson")) {
+    return c.json<ApiResponse>({ ok: false, error: "application/x-ndjson is required" }, 415);
+  }
+  try {
+    const result = await putAuditArchiveRestoreChunk({
+      tenantId: c.get("tenantId"),
+      archiveId,
+      index: Number(indexRaw),
+      jsonl: await c.req.text(),
+    });
+    return c.json({ ok: true, data: result });
+  } catch (error) {
+    return c.json<ApiResponse>(
+      { ok: false, error: error instanceof Error ? error.message : "Restore failed" },
+      409,
+    );
+  }
+});
+
+auditRoutes.post("/archives/:archiveId/restore/complete", async (c) => {
+  const archiveId = c.req.param("archiveId");
+  if (!UUID_PATTERN.test(archiveId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Restore session not found" }, 404);
+  }
+  try {
+    const result = await completeAuditArchiveRestore({
+      tenantId: c.get("tenantId"),
+      archiveId,
+      actorId: c.get("userId") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+    return c.json({ ok: true, data: result });
+  } catch (error) {
+    return c.json<ApiResponse>(
+      { ok: false, error: error instanceof Error ? error.message : "Restore failed" },
+      409,
+    );
+  }
+});
+
+auditRoutes.post("/archives/:archiveId/durability-ack", async (c) => {
+  const archiveId = c.req.param("archiveId");
+  if (!UUID_PATTERN.test(archiveId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Archive not found" }, 404);
+  }
+  const body = await safeJsonParse<Record<string, unknown>>(c);
+  const allowed = new Set(["payload", "keyId", "signature"]);
+  if (
+    !body ||
+    Object.keys(body).some((key) => !allowed.has(key)) ||
+    !body.payload ||
+    typeof body.payload !== "object" ||
+    typeof body.keyId !== "string" ||
+    typeof body.signature !== "string"
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Signed durability acknowledgement is required" },
+      400,
+    );
+  }
+  try {
+    const result = await recordAuditArchiveDurabilityAcknowledgement({
+      tenantId: c.get("tenantId"),
+      archiveId,
+      payload: body.payload as never,
+      keyId: body.keyId,
+      signature: body.signature,
+      actorId: c.get("userId") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+    return c.json({ ok: true, data: result });
+  } catch (error) {
+    return c.json<ApiResponse>(
+      { ok: false, error: error instanceof Error ? error.message : "Acknowledgement failed" },
+      409,
+    );
   }
 });
 
@@ -1034,21 +1164,14 @@ auditRoutes.post("/retention/run", async (c) => {
   }
   const tenantId = c.get("tenantId");
   try {
-    const result = await runTenantAuditRetention(tenantId);
+    const result = await runTenantAuditRetention(tenantId, {
+      actorId: c.get("userId") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
     const verification = await verifyAuditChain(tenantId, { requireHead: true });
     if (!verification.valid) {
       throw new Error(`Post-retention audit verification failed at seq ${verification.brokenAt}`);
     }
-    await writeAuditEvent({
-      tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? null,
-      action: "audit.retention.completed",
-      resourceType: "audit_archive",
-      resourceId: result.archiveId,
-      metadata: result,
-      requestId: c.get("requestId") ?? null,
-    });
     return c.json({ ok: true, data: result });
   } catch (error) {
     console.error(`[audit] retention run failed for tenant ${tenantId}:`, error);

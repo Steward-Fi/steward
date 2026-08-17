@@ -154,6 +154,35 @@ export class StewardApiClient {
     if (!res.ok) throw new ApiError(`GET ${path} failed with HTTP ${res.status}`, res.status, text);
     return text;
   }
+
+  async requestRaw<T = unknown>(
+    method: "PUT" | "POST",
+    path: string,
+    body: string,
+    contentType: string,
+  ): Promise<T> {
+    const headers: Record<string, string> = {
+      Accept: "application/json",
+      "Content-Type": contentType,
+    };
+    if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    else if (this.tenantKey) headers["X-Steward-Key"] = this.tenantKey;
+    if (this.tenantId) headers["X-Steward-Tenant"] = this.tenantId;
+    const res = await this.fetchImpl(`${this.baseUrl}${path}`, { method, headers, body });
+    const text = await res.text();
+    const parsed = text ? safeJson(text) : null;
+    if (!res.ok) {
+      const message =
+        parsed && typeof parsed === "object" && "error" in parsed
+          ? String((parsed as { error: unknown }).error)
+          : `${method} ${path} failed with HTTP ${res.status}`;
+      throw new ApiError(message, res.status, parsed ?? text);
+    }
+    if (parsed && typeof parsed === "object" && "ok" in parsed && "data" in parsed) {
+      return (parsed as { data: T }).data;
+    }
+    return parsed as T;
+  }
 }
 
 function safeJson(text: string): unknown {

@@ -35,15 +35,20 @@ function sha256(value) {
 const manifestPath = process.argv[2];
 if (!manifestPath) {
   console.error(
-    "usage: node scripts/verify-audit-archive.mjs <manifest.json> [archive-directory] [--expected-key-fingerprint <sha256>]",
+    "usage: node scripts/verify-audit-archive.mjs <manifest.json> [archive-directory] [--expected-key-fingerprint <sha256>] [--expected-key-id <id>]",
   );
   process.exit(2);
 }
 const archiveDir = process.argv[3] || dirname(manifestPath);
 const fingerprintFlag = process.argv.indexOf("--expected-key-fingerprint");
 const expectedFingerprint = fingerprintFlag >= 0 ? process.argv[fingerprintFlag + 1] : undefined;
+const keyIdFlag = process.argv.indexOf("--expected-key-id");
+const expectedKeyId = keyIdFlag >= 0 ? process.argv[keyIdFlag + 1] : undefined;
 if (fingerprintFlag >= 0 && !/^[0-9a-f]{64}$/i.test(expectedFingerprint ?? "")) {
   fail("expected key fingerprint must be exactly 64 hexadecimal characters");
+}
+if (keyIdFlag >= 0 && !/^[A-Za-z0-9_.:-]{1,64}$/.test(expectedKeyId ?? "")) {
+  fail("expected key id is invalid");
 }
 let envelope;
 try {
@@ -57,6 +62,9 @@ if (!manifest || manifest.schemaVersion !== "steward.audit-archive.v1") {
 }
 if (!Array.isArray(manifest.chunks) || manifest.chunks.length === 0) {
   fail("manifest chunks are missing");
+}
+if (expectedKeyId && manifest.signingKeyId !== expectedKeyId) {
+  fail("archive signing key id does not match the trusted identity");
 }
 const bytes = canonicalBytes(manifest);
 if (sha256(bytes) !== manifestSha256) fail("manifest SHA-256 does not match");

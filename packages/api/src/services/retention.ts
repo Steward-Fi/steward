@@ -38,6 +38,7 @@ export interface SweepResult {
    * we cannot roll back — we report).
    */
   auditFailed?: boolean;
+  failures?: Array<{ tenantId: string; error: string }>;
 }
 
 export interface RetentionSweepOptions {
@@ -167,11 +168,18 @@ async function sweepAuditEvents(ctx: RetentionSweepContext): Promise<SweepResult
   if (policies.length === 0) return null;
   await writeRetentionAuthorization("audit_events", ctx);
   let deleted = 0;
+  const failures: Array<{ tenantId: string; error: string }> = [];
   for (const policy of policies) {
-    const result = await runTenantAuditRetention(policy.tenant_id);
-    deleted += result.deleted;
+    try {
+      const result = await runTenantAuditRetention(policy.tenant_id);
+      deleted += result.deleted;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "unknown retention failure";
+      failures.push({ tenantId: policy.tenant_id, error: message });
+      console.error(`[retention] audit retention failed for tenant ${policy.tenant_id}:`, error);
+    }
   }
-  return { table: "audit_events", deleted };
+  return { table: "audit_events", deleted, ...(failures.length > 0 ? { failures } : {}) };
 }
 
 async function sweepAuthKvStore(ctx: RetentionSweepContext): Promise<SweepResult> {

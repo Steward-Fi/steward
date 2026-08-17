@@ -1,9 +1,9 @@
 /** Durable, tenant-scoped signed JSONL audit archives and chain-safe pruning. */
 
-import { createHash, createPublicKey, randomUUID, sign, verify } from "node:crypto";
+import { createHash, createPublicKey, type KeyObject, randomUUID, sign, verify } from "node:crypto";
 import { getDb } from "@stwd/db";
 import { sql } from "drizzle-orm";
-import { verifyAuditChain } from "./audit";
+import { type AuditReadExecutor, verifyAuditChain, withTenantAuditedTransaction } from "./audit";
 import { parseSigningKey, publicKeyPem } from "./audit-checkpoint";
 
 export const MIN_AUDIT_RETENTION_DAYS = 30;
@@ -17,6 +17,7 @@ export interface AuditRetentionPolicyValue {
   enabled: boolean;
   retentionDays: number;
   archiveChunkSize: number;
+  revision: number;
   updatedBy: string | null;
   createdAt: string;
   updatedAt: string;
@@ -40,6 +41,8 @@ export interface AuditArchiveManifestPayload {
   fromSeq: number;
   toSeq: number;
   eventCount: number;
+  signingKeyId: string;
+  retentionPolicyRevision: number | null;
   startPrevHash: string;
   endHmac: string;
   format: "application/x-ndjson";
@@ -54,6 +57,85 @@ export interface SignedAuditArchiveManifest {
   status: "sealed" | "pruned";
   sealedAt: string;
   prunedAt: string | null;
+  durabilityAcknowledgement: AuditArchiveDurabilityAcknowledgement | null;
+}
+
+export interface AuditArchiveDurabilityAcknowledgementPayload {
+  schemaVersion: "steward.audit-archive-durability.v1";
+  archiveId: string;
+  tenantId: string;
+  manifestSha256: string;
+  durabilityUri: string;
+  objectVersion: string;
+  acknowledgedAt: string;
+}
+
+export interface AuditArchiveDurabilityAcknowledgement {
+  payload: AuditArchiveDurabilityAcknowledgementPayload;
+  keyId: string;
+  signature: string;
+  acknowledgementSha256: string;
+}
+
+const KEY_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const DURABILITY_URI_PATTERN = /^(?:s3|gs|azure|https):\/\/[^\s]{1,1900}$/;
+
+function parseTrustedKeyRegistry(envName: string): Readonly<Record<string, string>> {
+  const raw = process.env[envName]?.trim();
+  if (!raw) return Object.freeze({});
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`${envName} must be a JSON object mapping key ids to PEM public keys`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${envName} must be a JSON object mapping key ids to PEM public keys`);
+  }
+  const registry: Record<string, string> = {};
+  for (const [keyId, pem] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!KEY_ID_PATTERN.test(keyId) || typeof pem !== "string") {
+      throw new Error(`${envName} contains an invalid key id or public key`);
+    }
+    const key = createPublicKey(pem);
+    if (key.asymmetricKeyType !== "ed25519") {
+      throw new Error(`${envName}.${keyId} must be an Ed25519 public key`);
+    }
+    registry[keyId] = key.export({ format: "pem", type: "spki" }).toString();
+  }
+  return Object.freeze(registry);
+}
+
+function currentArchiveSigningIdentity(): {
+  keyId: string;
+  privateKey: KeyObject;
+  publicKey: string;
+} {
+  const keyId = process.env.STEWARD_AUDIT_SIGNING_KEY_ID?.trim() ?? "";
+  if (!KEY_ID_PATTERN.test(keyId)) {
+    throw new Error("STEWARD_AUDIT_SIGNING_KEY_ID is required for audit archives");
+  }
+  const privateKey = parseSigningKey(process.env.STEWARD_AUDIT_SIGNING_KEY ?? "");
+  const publicKey = publicKeyPem(privateKey);
+  const trusted = parseTrustedKeyRegistry("STEWARD_AUDIT_ARCHIVE_TRUSTED_SIGNING_KEYS");
+  const configured = trusted[keyId];
+  if (!configured || configured !== publicKey) {
+    throw new Error("The audit archive signing key id is not bound to its trusted public key");
+  }
+  return { keyId, privateKey, publicKey };
+}
+
+function trustedArchiveSigningKey(keyId: string): KeyObject {
+  const pem = parseTrustedKeyRegistry("STEWARD_AUDIT_ARCHIVE_TRUSTED_SIGNING_KEYS")[keyId];
+  if (!pem) throw new Error("Audit archive manifest signing key id is not trusted");
+  return createPublicKey(pem);
+}
+
+function trustedDurabilityKey(keyId: string): KeyObject {
+  const pem = parseTrustedKeyRegistry("STEWARD_AUDIT_ARCHIVE_ACK_TRUSTED_KEYS")[keyId];
+  if (!pem) throw new Error("Audit archive durability acknowledgement key id is not trusted");
+  return createPublicKey(pem);
 }
 
 export interface AuditArchiveResult extends SignedAuditArchiveManifest {
@@ -192,14 +274,14 @@ function parseStoredManifest(row: Record<string, unknown>): SignedAuditArchiveMa
   if (sha256Hex(manifestBytes) !== String(row.manifest_sha256)) {
     throw new Error("Audit archive receipt manifest digest does not match");
   }
-  let publicKey;
-  try {
-    publicKey = createPublicKey(String(row.public_key));
-  } catch {
-    throw new Error("Audit archive receipt public key is invalid");
+  if (!KEY_ID_PATTERN.test(manifest.signingKeyId) || manifest.signingKeyId !== row.signing_key_id) {
+    throw new Error("Audit archive receipt signing key identity does not match its manifest");
   }
+  const publicKey = trustedArchiveSigningKey(manifest.signingKeyId);
+  const trustedPublicKeyPem = publicKey.export({ format: "pem", type: "spki" }).toString();
   if (
     publicKey.asymmetricKeyType !== "ed25519" ||
+    row.public_key !== trustedPublicKeyPem ||
     !verify(null, manifestBytes, publicKey, base64ToBytes(String(row.signature)))
   ) {
     throw new Error("Audit archive receipt signature does not verify");
@@ -209,10 +291,13 @@ function parseStoredManifest(row: Record<string, unknown>): SignedAuditArchiveMa
     manifest.tenantId !== String(row.tenant_id) ||
     manifest.fromSeq !== Number(row.from_seq) ||
     manifest.toSeq !== Number(row.to_seq) ||
-    manifest.eventCount !== Number(row.event_count)
+    manifest.eventCount !== Number(row.event_count) ||
+    manifest.retentionPolicyRevision !==
+      (row.retention_policy_revision == null ? null : Number(row.retention_policy_revision))
   ) {
     throw new Error("Audit archive receipt identity does not match its manifest");
   }
+  const durabilityAcknowledgement = parseStoredDurabilityAcknowledgement(row, manifest);
   return {
     manifest,
     manifestSha256: String(row.manifest_sha256),
@@ -221,7 +306,68 @@ function parseStoredManifest(row: Record<string, unknown>): SignedAuditArchiveMa
     status: row.status === "pruned" ? "pruned" : "sealed",
     sealedAt: asIso(row.sealed_at as Date | string),
     prunedAt: row.pruned_at ? asIso(row.pruned_at as Date | string) : null,
+    durabilityAcknowledgement,
   };
+}
+
+function validateDurabilityAcknowledgementPayload(
+  payload: AuditArchiveDurabilityAcknowledgementPayload,
+  manifest: AuditArchiveManifestPayload,
+  manifestSha256: string,
+): void {
+  if (
+    payload.schemaVersion !== "steward.audit-archive-durability.v1" ||
+    payload.archiveId !== manifest.archiveId ||
+    payload.tenantId !== manifest.tenantId ||
+    payload.manifestSha256 !== manifestSha256 ||
+    !/^[0-9a-f]{64}$/.test(payload.manifestSha256) ||
+    !DURABILITY_URI_PATTERN.test(payload.durabilityUri) ||
+    payload.objectVersion.length < 1 ||
+    payload.objectVersion.length > 512 ||
+    !Number.isFinite(Date.parse(payload.acknowledgedAt))
+  ) {
+    throw new Error("Audit archive durability acknowledgement payload is invalid");
+  }
+  const acknowledgedAt = Date.parse(payload.acknowledgedAt);
+  const sealedAt = Date.parse(manifest.createdAt);
+  if (acknowledgedAt < sealedAt || acknowledgedAt > Date.now() + 5 * 60_000) {
+    throw new Error("Audit archive durability acknowledgement timestamp is invalid");
+  }
+}
+
+function parseStoredDurabilityAcknowledgement(
+  row: Record<string, unknown>,
+  manifest: AuditArchiveManifestPayload,
+): AuditArchiveDurabilityAcknowledgement | null {
+  if (
+    row.durability_ack == null &&
+    row.durability_ack_key_id == null &&
+    row.durability_ack_signature == null &&
+    row.durability_ack_sha256 == null
+  ) {
+    return null;
+  }
+  if (
+    !row.durability_ack ||
+    !row.durability_ack_key_id ||
+    !row.durability_ack_signature ||
+    !row.durability_ack_sha256
+  ) {
+    throw new Error("Audit archive durability acknowledgement is incomplete");
+  }
+  const payload = row.durability_ack as unknown as AuditArchiveDurabilityAcknowledgementPayload;
+  const keyId = String(row.durability_ack_key_id);
+  const signature = String(row.durability_ack_signature);
+  const acknowledgementSha256 = String(row.durability_ack_sha256);
+  validateDurabilityAcknowledgementPayload(payload, manifest, String(row.manifest_sha256));
+  const bytes = canonicalBytes(payload);
+  if (sha256Hex(bytes) !== acknowledgementSha256) {
+    throw new Error("Audit archive durability acknowledgement digest does not match");
+  }
+  if (!verify(null, bytes, trustedDurabilityKey(keyId), base64ToBytes(signature))) {
+    throw new Error("Audit archive durability acknowledgement signature does not verify");
+  }
+  return { payload, keyId, signature, acknowledgementSha256 };
 }
 
 export async function getAuditRetentionPolicy(
@@ -229,7 +375,7 @@ export async function getAuditRetentionPolicy(
 ): Promise<AuditRetentionPolicyValue> {
   const rows = rowsFromExecute<Record<string, unknown>>(
     await getDb().execute(sql`
-      SELECT tenant_id, enabled, retention_days, archive_chunk_size, updated_by, created_at, updated_at
+      SELECT tenant_id, enabled, retention_days, archive_chunk_size, revision, updated_by, created_at, updated_at
       FROM audit_retention_policies WHERE tenant_id = ${tenantId} LIMIT 1
     `),
   );
@@ -240,6 +386,7 @@ export async function getAuditRetentionPolicy(
       enabled: false,
       retentionDays: 365,
       archiveChunkSize: 1000,
+      revision: 0,
       updatedBy: null,
       createdAt: "",
       updatedAt: "",
@@ -250,6 +397,7 @@ export async function getAuditRetentionPolicy(
     enabled: Boolean(row.enabled),
     retentionDays: Number(row.retention_days),
     archiveChunkSize: Number(row.archive_chunk_size),
+    revision: Number(row.revision),
     updatedBy: row.updated_by == null ? null : String(row.updated_by),
     createdAt: asIso(row.created_at as Date | string),
     updatedAt: asIso(row.updated_at as Date | string),
@@ -275,20 +423,120 @@ export async function setAuditRetentionPolicy(input: {
     MIN_ARCHIVE_CHUNK_SIZE,
     MAX_ARCHIVE_CHUNK_SIZE,
   );
-  await getDb().execute(sql`
-    INSERT INTO audit_retention_policies
-      (tenant_id, enabled, retention_days, archive_chunk_size, updated_by, created_at, updated_at)
-    VALUES
-      (${input.tenantId}, ${input.enabled}, ${input.retentionDays}, ${input.archiveChunkSize},
-       ${input.updatedBy}, now(), now())
-    ON CONFLICT (tenant_id) DO UPDATE
-      SET enabled = EXCLUDED.enabled,
-          retention_days = EXCLUDED.retention_days,
-          archive_chunk_size = EXCLUDED.archive_chunk_size,
-          updated_by = EXCLUDED.updated_by,
-          updated_at = now()
-  `);
+  await withTenantAuditedTransaction(input.tenantId, async (rawTx, appendRequiredAudit) => {
+    const tx = rawTx as { execute(query: ReturnType<typeof sql>): Promise<unknown> };
+    await tx.execute(sql`
+      INSERT INTO audit_retention_policies
+        (tenant_id, enabled, retention_days, archive_chunk_size, revision, updated_by, created_at, updated_at)
+      VALUES
+        (${input.tenantId}, ${input.enabled}, ${input.retentionDays}, ${input.archiveChunkSize}, 1,
+         ${input.updatedBy}, now(), now())
+      ON CONFLICT (tenant_id) DO UPDATE
+        SET enabled = EXCLUDED.enabled,
+            retention_days = EXCLUDED.retention_days,
+            archive_chunk_size = EXCLUDED.archive_chunk_size,
+            revision = audit_retention_policies.revision + 1,
+            updated_by = EXCLUDED.updated_by,
+            updated_at = now()
+    `);
+    const policyRows = rowsFromExecute<{ revision: number | string }>(
+      await tx.execute(sql`
+        SELECT revision FROM audit_retention_policies WHERE tenant_id = ${input.tenantId}
+      `),
+    );
+    await appendRequiredAudit({
+      tenantId: input.tenantId,
+      actorType: "user",
+      actorId: input.updatedBy,
+      action: "audit.retention_policy.updated",
+      resourceType: "audit_retention_policy",
+      resourceId: input.tenantId,
+      metadata: {
+        enabled: input.enabled,
+        retentionDays: input.retentionDays,
+        archiveChunkSize: input.archiveChunkSize,
+        revision: Number(policyRows[0]?.revision),
+      },
+    });
+  });
   return getAuditRetentionPolicy(input.tenantId);
+}
+
+async function verifyStoredArchiveChunks(
+  tx: { execute(query: ReturnType<typeof sql>): Promise<unknown> },
+  manifest: AuditArchiveManifestPayload,
+): Promise<void> {
+  const rows = rowsFromExecute<Record<string, unknown>>(
+    await tx.execute(sql`
+      SELECT chunk_index, from_seq, to_seq, event_count, sha256, byte_length, jsonl
+      FROM audit_archive_chunks
+      WHERE archive_id = ${manifest.archiveId}::uuid
+      ORDER BY chunk_index ASC
+      FOR UPDATE
+    `),
+  );
+  if (rows.length !== manifest.chunks.length || rows.length === 0) {
+    throw new Error("Audit archive durable chunk set is incomplete");
+  }
+  let expectedSeq = manifest.fromSeq;
+  let observedEvents = 0;
+  let previousHmac = manifest.startPrevHash;
+  for (let index = 0; index < manifest.chunks.length; index++) {
+    const expected = manifest.chunks[index];
+    const row = rows[index];
+    const jsonl = String(row.jsonl);
+    const byteLength = new TextEncoder().encode(jsonl).length;
+    if (
+      expected.index !== index ||
+      expected.file !== `chunk-${String(index).padStart(6, "0")}.jsonl` ||
+      Number(row.chunk_index) !== index ||
+      Number(row.from_seq) !== expected.fromSeq ||
+      Number(row.to_seq) !== expected.toSeq ||
+      Number(row.event_count) !== expected.eventCount ||
+      String(row.sha256) !== expected.sha256 ||
+      Number(row.byte_length) !== expected.byteLength ||
+      byteLength !== expected.byteLength ||
+      sha256Hex(jsonl) !== expected.sha256 ||
+      expected.fromSeq !== expectedSeq ||
+      expected.eventCount !== expected.toSeq - expected.fromSeq + 1
+    ) {
+      throw new Error(`Audit archive durable chunk ${index} does not match its signed manifest`);
+    }
+    const lines = jsonl.endsWith("\n") ? jsonl.slice(0, -1).split("\n") : [];
+    if (lines.length !== expected.eventCount) {
+      throw new Error(`Audit archive durable chunk ${index} event count does not match`);
+    }
+    for (const line of lines) {
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        throw new Error(`Audit archive durable chunk ${index} contains invalid JSONL`);
+      }
+      if (
+        event.v !== 1 ||
+        event.tenantId !== manifest.tenantId ||
+        event.seq !== expectedSeq ||
+        event.prevHash !== previousHmac ||
+        typeof event.hmac !== "string" ||
+        !/^[0-9a-f]{64}$/.test(event.hmac)
+      ) {
+        throw new Error(
+          `Audit archive durable chunk ${index} chain is invalid at seq ${expectedSeq}`,
+        );
+      }
+      previousHmac = event.hmac;
+      expectedSeq++;
+      observedEvents++;
+    }
+  }
+  if (
+    expectedSeq !== manifest.toSeq + 1 ||
+    observedEvents !== manifest.eventCount ||
+    previousHmac !== manifest.endHmac
+  ) {
+    throw new Error("Audit archive durable chunk set does not cover the signed range");
+  }
 }
 
 export async function createAuditArchive(input: {
@@ -296,6 +544,7 @@ export async function createAuditArchive(input: {
   fromSeq: number;
   toSeq: number;
   chunkSize: number;
+  retentionPolicyRevision?: number;
 }): Promise<AuditArchiveResult> {
   validateInteger("fromSeq", input.fromSeq, 1, Number.MAX_SAFE_INTEGER);
   validateInteger("toSeq", input.toSeq, input.fromSeq, Number.MAX_SAFE_INTEGER);
@@ -304,32 +553,46 @@ export async function createAuditArchive(input: {
   if (eventCount > MAX_ARCHIVE_EVENTS_PER_RUN) {
     throw new Error(`Archive range cannot exceed ${MAX_ARCHIVE_EVENTS_PER_RUN} events per run`);
   }
-  const sourceVerification = await verifyAuditChain(input.tenantId, {
-    fromSeq: input.fromSeq,
-    toSeq: input.toSeq,
-    requireHead: true,
-  });
-  if (!sourceVerification.valid || sourceVerification.count !== eventCount) {
-    const brokenAt = sourceVerification.valid
-      ? input.fromSeq + sourceVerification.count
-      : sourceVerification.brokenAt;
-    throw new Error(`Audit archive source failed HMAC verification at seq ${brokenAt}`);
+  if (
+    input.retentionPolicyRevision !== undefined &&
+    (!Number.isSafeInteger(input.retentionPolicyRevision) || input.retentionPolicyRevision < 1)
+  ) {
+    throw new Error("retentionPolicyRevision must be a positive safe integer");
   }
 
-  return getDb().transaction(async (tx) => {
-    await lockTenantAuditWriter(tx, input.tenantId);
+  return withTenantAuditedTransaction(input.tenantId, async (rawTx, appendRequiredAudit) => {
+    const tx = rawTx as { execute(query: ReturnType<typeof sql>): Promise<unknown> };
+    const sourceVerification = await verifyAuditChain(input.tenantId, {
+      fromSeq: input.fromSeq,
+      toSeq: input.toSeq,
+      requireHead: true,
+      executor: tx as unknown as AuditReadExecutor,
+    });
+    if (!sourceVerification.valid || sourceVerification.count !== eventCount) {
+      const brokenAt = sourceVerification.valid
+        ? input.fromSeq + sourceVerification.count
+        : sourceVerification.brokenAt;
+      throw new Error(`Audit archive source failed HMAC verification at seq ${brokenAt}`);
+    }
     const existing = rowsFromExecute<Record<string, unknown>>(
       await tx.execute(sql`
         SELECT * FROM audit_archives
         WHERE tenant_id = ${input.tenantId} AND from_seq = ${input.fromSeq} AND to_seq = ${input.toSeq}
+          AND source = 'native'
+          AND retention_policy_revision IS NOT DISTINCT FROM ${input.retentionPolicyRevision ?? null}
         LIMIT 1 FOR UPDATE
       `),
     )[0];
     if (existing && (existing.status === "sealed" || existing.status === "pruned")) {
+      const parsed = parseStoredManifest(existing);
+      if (parsed.manifest.retentionPolicyRevision !== (input.retentionPolicyRevision ?? null)) {
+        throw new Error("Existing archive was sealed under a different retention authority");
+      }
+      await verifyStoredArchiveChunks(tx, parsed.manifest);
       return {
         archiveId: String(existing.id),
         reused: true,
-        ...parseStoredManifest(existing),
+        ...parsed,
       };
     }
 
@@ -337,13 +600,19 @@ export async function createAuditArchive(input: {
     if (!existing) {
       await tx.execute(sql`
         INSERT INTO audit_archives
-          (id, tenant_id, from_seq, to_seq, event_count, status, created_at, updated_at)
+          (id, tenant_id, from_seq, to_seq, event_count, retention_policy_revision,
+           status, created_at, updated_at)
         VALUES
           (${archiveId}::uuid, ${input.tenantId}, ${input.fromSeq}, ${input.toSeq}, ${eventCount},
-           'building', now(), now())
+           ${input.retentionPolicyRevision ?? null}, 'building', now(), now())
       `);
     } else {
       await tx.execute(sql`DELETE FROM audit_archive_chunks WHERE archive_id = ${archiveId}::uuid`);
+      await tx.execute(sql`
+        UPDATE audit_archives
+        SET retention_policy_revision = ${input.retentionPolicyRevision ?? null}, updated_at = now()
+        WHERE id = ${archiveId}::uuid AND tenant_id = ${input.tenantId} AND status = 'building'
+      `);
     }
 
     const chunks: AuditArchiveChunkManifest[] = [];
@@ -405,6 +674,7 @@ export async function createAuditArchive(input: {
     }
 
     const createdAt = new Date().toISOString();
+    const signingIdentity = currentArchiveSigningIdentity();
     const manifest: AuditArchiveManifestPayload = {
       schemaVersion: "steward.audit-archive.v1",
       archiveId,
@@ -413,6 +683,8 @@ export async function createAuditArchive(input: {
       fromSeq: input.fromSeq,
       toSeq: input.toSeq,
       eventCount,
+      signingKeyId: signingIdentity.keyId,
+      retentionPolicyRevision: input.retentionPolicyRevision ?? null,
       startPrevHash: bytesToHex(firstRow.prev_hash),
       endHmac: bytesToHex(lastRow.hmac),
       format: "application/x-ndjson",
@@ -420,13 +692,12 @@ export async function createAuditArchive(input: {
     };
     const manifestBytes = canonicalBytes(manifest);
     const manifestSha256 = sha256Hex(manifestBytes);
-    const signingKey = parseSigningKey(process.env.STEWARD_AUDIT_SIGNING_KEY ?? "");
-    const signature = bytesToBase64(sign(null, manifestBytes, signingKey));
-    const publicKey = publicKeyPem(signingKey);
+    const signature = bytesToBase64(sign(null, manifestBytes, signingIdentity.privateKey));
     await tx.execute(sql`
       UPDATE audit_archives
       SET status = 'sealed', manifest = ${JSON.stringify(manifest)}::jsonb,
-          manifest_sha256 = ${manifestSha256}, signature = ${signature}, public_key = ${publicKey},
+          manifest_sha256 = ${manifestSha256}, signature = ${signature},
+          signing_key_id = ${signingIdentity.keyId}, public_key = ${signingIdentity.publicKey},
           sealed_at = now(), updated_at = now()
       WHERE id = ${archiveId}::uuid AND tenant_id = ${input.tenantId}
     `);
@@ -436,16 +707,118 @@ export async function createAuditArchive(input: {
       `),
     )[0];
     if (!sealed) throw new Error("Audit archive receipt failed to persist");
-    return { archiveId, reused: false, ...parseStoredManifest(sealed) };
+    const parsed = parseStoredManifest(sealed);
+    await verifyStoredArchiveChunks(tx, parsed.manifest);
+    await appendRequiredAudit({
+      tenantId: input.tenantId,
+      actorType: "system",
+      action: "audit.archive.sealed",
+      resourceType: "audit_archive",
+      resourceId: archiveId,
+      metadata: {
+        fromSeq: input.fromSeq,
+        toSeq: input.toSeq,
+        eventCount,
+        manifestSha256,
+        signingKeyId: signingIdentity.keyId,
+        retentionPolicyRevision: input.retentionPolicyRevision ?? null,
+      },
+    });
+    return { archiveId, reused: false, ...parsed };
+  });
+}
+
+export async function recordAuditArchiveDurabilityAcknowledgement(input: {
+  tenantId: string;
+  archiveId: string;
+  payload: AuditArchiveDurabilityAcknowledgementPayload;
+  keyId: string;
+  signature: string;
+  actorId?: string | null;
+  requestId?: string | null;
+}): Promise<{ acknowledgement: AuditArchiveDurabilityAcknowledgement; reused: boolean }> {
+  if (!KEY_ID_PATTERN.test(input.keyId)) {
+    throw new Error("Audit archive durability acknowledgement key id is invalid");
+  }
+  return withTenantAuditedTransaction(input.tenantId, async (rawTx, appendRequiredAudit) => {
+    const tx = rawTx as { execute(query: ReturnType<typeof sql>): Promise<unknown> };
+    const receipt = rowsFromExecute<Record<string, unknown>>(
+      await tx.execute(sql`
+        SELECT * FROM audit_archives
+        WHERE id = ${input.archiveId}::uuid AND tenant_id = ${input.tenantId}
+        LIMIT 1 FOR UPDATE
+      `),
+    )[0];
+    if (!receipt || (receipt.status !== "sealed" && receipt.status !== "pruned")) {
+      throw new Error("A sealed tenant archive is required before durability acknowledgement");
+    }
+    const parsed = parseStoredManifest(receipt);
+    await verifyStoredArchiveChunks(tx, parsed.manifest);
+    validateDurabilityAcknowledgementPayload(input.payload, parsed.manifest, parsed.manifestSha256);
+    const bytes = canonicalBytes(input.payload);
+    const acknowledgementSha256 = sha256Hex(bytes);
+    if (!verify(null, bytes, trustedDurabilityKey(input.keyId), base64ToBytes(input.signature))) {
+      throw new Error("Audit archive durability acknowledgement signature does not verify");
+    }
+    const acknowledgement: AuditArchiveDurabilityAcknowledgement = {
+      payload: input.payload,
+      keyId: input.keyId,
+      signature: input.signature,
+      acknowledgementSha256,
+    };
+    if (parsed.durabilityAcknowledgement) {
+      if (
+        sha256Hex(canonicalBytes(parsed.durabilityAcknowledgement)) ===
+        sha256Hex(canonicalBytes(acknowledgement))
+      ) {
+        return { acknowledgement: parsed.durabilityAcknowledgement, reused: true };
+      }
+      throw new Error("Audit archive durability acknowledgement is immutable");
+    }
+    const updated = rowsFromExecute<{ id: string }>(
+      await tx.execute(sql`
+        UPDATE audit_archives
+        SET durability_ack = ${JSON.stringify(input.payload)}::jsonb,
+            durability_ack_key_id = ${input.keyId},
+            durability_ack_signature = ${input.signature},
+            durability_ack_sha256 = ${acknowledgementSha256},
+            durability_ack_at = now(),
+            updated_at = now()
+        WHERE id = ${input.archiveId}::uuid AND tenant_id = ${input.tenantId}
+          AND durability_ack IS NULL
+        RETURNING id
+      `),
+    );
+    if (updated.length !== 1) {
+      throw new Error("Audit archive durability acknowledgement was concurrently recorded");
+    }
+    await appendRequiredAudit({
+      tenantId: input.tenantId,
+      actorType: input.actorId ? "user" : "system",
+      actorId: input.actorId ?? null,
+      action: "audit.archive.durability_acknowledged",
+      resourceType: "audit_archive",
+      resourceId: input.archiveId,
+      metadata: {
+        manifestSha256: parsed.manifestSha256,
+        acknowledgementSha256,
+        keyId: input.keyId,
+        durabilityUri: input.payload.durabilityUri,
+        objectVersion: input.payload.objectVersion,
+      },
+      requestId: input.requestId ?? null,
+    });
+    return { acknowledgement, reused: false };
   });
 }
 
 export async function pruneSealedAuditArchive(
   tenantId: string,
   archiveId: string,
+  context: { actorId?: string | null; requestId?: string | null } = {},
 ): Promise<{ archiveId: string; deleted: number; floorSeq: number; reused: boolean }> {
-  return getDb().transaction(async (tx) => {
-    await lockTenantAuditWriter(tx, tenantId);
+  return withTenantAuditedTransaction(tenantId, async (rawTx, appendRequiredAudit) => {
+    const tx = rawTx as { execute(query: ReturnType<typeof sql>): Promise<unknown> };
     const receipt = rowsFromExecute<Record<string, unknown>>(
       await tx.execute(sql`
         SELECT * FROM audit_archives WHERE id = ${archiveId}::uuid AND tenant_id = ${tenantId}
@@ -455,9 +828,30 @@ export async function pruneSealedAuditArchive(
     if (!receipt || (receipt.status !== "sealed" && receipt.status !== "pruned")) {
       throw new Error("A durably sealed tenant archive receipt is required before pruning");
     }
-    parseStoredManifest(receipt);
+    if (receipt.source !== "native") {
+      throw new Error("Restored archives cannot authorize deletion of the live audit chain");
+    }
+    const parsed = parseStoredManifest(receipt);
+    await verifyStoredArchiveChunks(tx, parsed.manifest);
+    if (!parsed.durabilityAcknowledgement) {
+      throw new Error("A trusted external durability acknowledgement is required before pruning");
+    }
     const toSeq = Number(receipt.to_seq);
     const fromSeq = Number(receipt.from_seq);
+    const policyRevision =
+      receipt.retention_policy_revision == null ? null : Number(receipt.retention_policy_revision);
+    if (policyRevision == null) {
+      throw new Error("Manual export archives cannot authorize retention pruning");
+    }
+    const policy = rowsFromExecute<{ enabled: boolean; revision: number | string }>(
+      await tx.execute(sql`
+        SELECT enabled, revision FROM audit_retention_policies
+        WHERE tenant_id = ${tenantId} LIMIT 1 FOR UPDATE
+      `),
+    )[0];
+    if (!policy?.enabled || Number(policy.revision) !== policyRevision) {
+      throw new Error("Audit retention policy changed after archive sealing; reseal required");
+    }
     const head = rowsFromExecute<{ floor_seq: number | string; floor_hmac: unknown }>(
       await tx.execute(sql`
         SELECT floor_seq, floor_hmac FROM audit_chain_heads
@@ -479,10 +873,37 @@ export async function pruneSealedAuditArchive(
       `),
     )[0];
     if (!anchor) throw new Error("Archive floor anchor event is missing; refusing to prune");
-    const manifest = receipt.manifest as unknown as AuditArchiveManifestPayload;
+    const manifest = parsed.manifest;
     if (bytesToHex(anchor.hmac) !== manifest.endHmac) {
       throw new Error("Archive receipt does not match the live floor anchor HMAC");
     }
+    const sourceVerification = await verifyAuditChain(tenantId, {
+      fromSeq,
+      toSeq,
+      requireHead: true,
+      executor: tx as unknown as AuditReadExecutor,
+    });
+    if (!sourceVerification.valid || sourceVerification.count !== manifest.eventCount) {
+      throw new Error("Prune source no longer matches the verified live audit chain");
+    }
+    await appendRequiredAudit({
+      tenantId,
+      actorType: context.actorId ? "user" : "system",
+      actorId: context.actorId ?? null,
+      action: "audit.retention.prune_authorized",
+      resourceType: "audit_archive",
+      resourceId: archiveId,
+      metadata: {
+        fromSeq,
+        toSeq,
+        manifestSha256: parsed.manifestSha256,
+        signingKeyId: manifest.signingKeyId,
+        durabilityAcknowledgementSha256: parsed.durabilityAcknowledgement.acknowledgementSha256,
+        durabilityKeyId: parsed.durabilityAcknowledgement.keyId,
+        retentionPolicyRevision: policyRevision,
+      },
+      requestId: context.requestId ?? null,
+    });
     const removed = rowsFromExecute<{ seq: number | string }>(
       await tx.execute(sql`
         DELETE FROM audit_events
@@ -503,11 +924,29 @@ export async function pruneSealedAuditArchive(
       SET status = 'pruned', pruned_at = now(), updated_at = now()
       WHERE id = ${archiveId}::uuid AND tenant_id = ${tenantId} AND status = 'sealed'
     `);
+    await appendRequiredAudit({
+      tenantId,
+      actorType: context.actorId ? "user" : "system",
+      actorId: context.actorId ?? null,
+      action: "audit.retention.prune_completed",
+      resourceType: "audit_archive",
+      resourceId: archiveId,
+      metadata: {
+        deleted: removed.length,
+        floorSeq: toSeq,
+        manifestSha256: parsed.manifestSha256,
+        durabilityAcknowledgementSha256: parsed.durabilityAcknowledgement.acknowledgementSha256,
+      },
+      requestId: context.requestId ?? null,
+    });
     return { archiveId, deleted: removed.length, floorSeq: toSeq, reused: false };
   });
 }
 
-export async function runTenantAuditRetention(tenantId: string): Promise<{
+export async function runTenantAuditRetention(
+  tenantId: string,
+  context: { actorId?: string | null; requestId?: string | null } = {},
+): Promise<{
   tenantId: string;
   archiveId: string | null;
   archived: number;
@@ -556,8 +995,19 @@ export async function runTenantAuditRetention(tenantId: string): Promise<{
     fromSeq: floorSeq + 1,
     toSeq,
     chunkSize: policy.archiveChunkSize,
+    retentionPolicyRevision: policy.revision,
   });
-  const pruned = await pruneSealedAuditArchive(tenantId, archive.archiveId);
+  if (!archive.durabilityAcknowledgement) {
+    return {
+      tenantId,
+      archiveId: archive.archiveId,
+      archived: toSeq - floorSeq,
+      deleted: 0,
+      floorSeq,
+      reused: archive.reused,
+    };
+  }
+  const pruned = await pruneSealedAuditArchive(tenantId, archive.archiveId, context);
   return {
     tenantId,
     archiveId: archive.archiveId,
@@ -566,6 +1016,258 @@ export async function runTenantAuditRetention(tenantId: string): Promise<{
     floorSeq: pruned.floorSeq,
     reused: archive.reused || pruned.reused,
   };
+}
+
+function verifySuppliedArchiveManifest(input: {
+  tenantId: string;
+  manifest: AuditArchiveManifestPayload;
+  manifestSha256: string;
+  signature: string;
+}): { bytes: Uint8Array; trustedPublicKey: string } {
+  const { manifest } = input;
+  if (
+    manifest.schemaVersion !== "steward.audit-archive.v1" ||
+    manifest.tenantId !== input.tenantId ||
+    !UUID_PATTERN.test(manifest.archiveId) ||
+    !Number.isSafeInteger(manifest.fromSeq) ||
+    !Number.isSafeInteger(manifest.toSeq) ||
+    !Number.isSafeInteger(manifest.eventCount) ||
+    manifest.fromSeq < 1 ||
+    manifest.toSeq < manifest.fromSeq ||
+    manifest.eventCount !== manifest.toSeq - manifest.fromSeq + 1 ||
+    !Array.isArray(manifest.chunks) ||
+    manifest.chunks.length < 1 ||
+    !/^[0-9a-f]{64}$/.test(manifest.startPrevHash) ||
+    !/^[0-9a-f]{64}$/.test(manifest.endHmac) ||
+    !KEY_ID_PATTERN.test(manifest.signingKeyId)
+  ) {
+    throw new Error("Restored audit archive manifest is invalid");
+  }
+  const bytes = canonicalBytes(manifest);
+  if (sha256Hex(bytes) !== input.manifestSha256) {
+    throw new Error("Restored audit archive manifest digest does not match");
+  }
+  const trustedKey = trustedArchiveSigningKey(manifest.signingKeyId);
+  if (!verify(null, bytes, trustedKey, base64ToBytes(input.signature))) {
+    throw new Error("Restored audit archive manifest signature does not verify");
+  }
+  return {
+    bytes,
+    trustedPublicKey: trustedKey.export({ format: "pem", type: "spki" }).toString(),
+  };
+}
+
+export async function beginAuditArchiveRestore(input: {
+  tenantId: string;
+  manifest: AuditArchiveManifestPayload;
+  manifestSha256: string;
+  signature: string;
+  actorId?: string | null;
+  requestId?: string | null;
+}): Promise<{ archiveId: string; reused: boolean; status: "building" | "sealed" }> {
+  const verified = verifySuppliedArchiveManifest(input);
+  return withTenantAuditedTransaction(input.tenantId, async (rawTx, appendRequiredAudit) => {
+    const tx = rawTx as { execute(query: ReturnType<typeof sql>): Promise<unknown> };
+    const existing = rowsFromExecute<Record<string, unknown>>(
+      await tx.execute(sql`
+        SELECT * FROM audit_archives WHERE id = ${input.manifest.archiveId}::uuid
+        LIMIT 1 FOR UPDATE
+      `),
+    )[0];
+    if (existing) {
+      if (existing.tenant_id !== input.tenantId || existing.source !== "imported") {
+        throw new Error("Audit archive id already belongs to another source or tenant");
+      }
+      if (
+        existing.manifest_sha256 !== input.manifestSha256 ||
+        existing.signature !== input.signature ||
+        existing.signing_key_id !== input.manifest.signingKeyId
+      ) {
+        throw new Error("Restored audit archive identity is immutable");
+      }
+      if (existing.status === "sealed") {
+        const parsed = parseStoredManifest(existing);
+        await verifyStoredArchiveChunks(tx, parsed.manifest);
+        return { archiveId: input.manifest.archiveId, reused: true, status: "sealed" };
+      }
+      return { archiveId: input.manifest.archiveId, reused: true, status: "building" };
+    }
+    await tx.execute(sql`
+      INSERT INTO audit_archives
+        (id, tenant_id, from_seq, to_seq, event_count, source, retention_policy_revision,
+         status, manifest, manifest_sha256, signature, signing_key_id, public_key,
+         created_at, updated_at)
+      VALUES
+        (${input.manifest.archiveId}::uuid, ${input.tenantId}, ${input.manifest.fromSeq},
+         ${input.manifest.toSeq}, ${input.manifest.eventCount}, 'imported',
+         ${input.manifest.retentionPolicyRevision}, 'building',
+         ${JSON.stringify(input.manifest)}::jsonb, ${input.manifestSha256}, ${input.signature},
+         ${input.manifest.signingKeyId}, ${verified.trustedPublicKey}, now(), now())
+    `);
+    await appendRequiredAudit({
+      tenantId: input.tenantId,
+      actorType: input.actorId ? "user" : "system",
+      actorId: input.actorId ?? null,
+      action: "audit.archive.restore_started",
+      resourceType: "audit_archive",
+      resourceId: input.manifest.archiveId,
+      metadata: {
+        manifestSha256: input.manifestSha256,
+        eventCount: input.manifest.eventCount,
+        signingKeyId: input.manifest.signingKeyId,
+      },
+      requestId: input.requestId ?? null,
+    });
+    return { archiveId: input.manifest.archiveId, reused: false, status: "building" };
+  });
+}
+
+export async function putAuditArchiveRestoreChunk(input: {
+  tenantId: string;
+  archiveId: string;
+  index: number;
+  jsonl: string;
+}): Promise<{ reused: boolean }> {
+  if (new TextEncoder().encode(input.jsonl).length > 25 * 1024 * 1024) {
+    throw new Error("Restored audit archive chunk exceeds 25 MiB");
+  }
+  return getDb().transaction(async (tx) => {
+    await lockTenantAuditWriter(tx, input.tenantId);
+    const row = rowsFromExecute<Record<string, unknown>>(
+      await tx.execute(sql`
+        SELECT * FROM audit_archives
+        WHERE id = ${input.archiveId}::uuid AND tenant_id = ${input.tenantId}
+        LIMIT 1 FOR UPDATE
+      `),
+    )[0];
+    if (!row || row.source !== "imported" || !row.manifest) {
+      throw new Error("Audit archive restore session not found");
+    }
+    verifySuppliedArchiveManifest({
+      tenantId: input.tenantId,
+      manifest: row.manifest as unknown as AuditArchiveManifestPayload,
+      manifestSha256: String(row.manifest_sha256),
+      signature: String(row.signature),
+    });
+    const manifest = row.manifest as unknown as AuditArchiveManifestPayload;
+    const expected = manifest.chunks[input.index];
+    if (!expected || expected.index !== input.index) {
+      throw new Error("Restored audit archive chunk index is not in the signed manifest");
+    }
+    const byteLength = new TextEncoder().encode(input.jsonl).length;
+    if (byteLength !== expected.byteLength || sha256Hex(input.jsonl) !== expected.sha256) {
+      throw new Error("Restored audit archive chunk does not match the signed manifest");
+    }
+    const existing = rowsFromExecute<{ sha256: string; byte_length: number | string }>(
+      await tx.execute(sql`
+        SELECT sha256, byte_length FROM audit_archive_chunks
+        WHERE archive_id = ${input.archiveId}::uuid AND chunk_index = ${input.index}
+      `),
+    )[0];
+    if (existing) {
+      if (existing.sha256 === expected.sha256 && Number(existing.byte_length) === byteLength) {
+        return { reused: true };
+      }
+      throw new Error("Restored audit archive chunk is immutable");
+    }
+    if (row.status !== "building") {
+      throw new Error("Completed audit archive restores are immutable");
+    }
+    await tx.execute(sql`
+      INSERT INTO audit_archive_chunks
+        (archive_id, chunk_index, from_seq, to_seq, event_count, sha256, byte_length, jsonl)
+      VALUES
+        (${input.archiveId}::uuid, ${input.index}, ${expected.fromSeq}, ${expected.toSeq},
+         ${expected.eventCount}, ${expected.sha256}, ${byteLength}, ${input.jsonl})
+    `);
+    return { reused: false };
+  });
+}
+
+export async function completeAuditArchiveRestore(input: {
+  tenantId: string;
+  archiveId: string;
+  actorId?: string | null;
+  requestId?: string | null;
+}): Promise<AuditArchiveResult> {
+  return withTenantAuditedTransaction(input.tenantId, async (rawTx, appendRequiredAudit) => {
+    const tx = rawTx as { execute(query: ReturnType<typeof sql>): Promise<unknown> };
+    const row = rowsFromExecute<Record<string, unknown>>(
+      await tx.execute(sql`
+        SELECT * FROM audit_archives
+        WHERE id = ${input.archiveId}::uuid AND tenant_id = ${input.tenantId}
+        LIMIT 1 FOR UPDATE
+      `),
+    )[0];
+    if (!row || row.source !== "imported" || !row.manifest) {
+      throw new Error("Audit archive restore session not found");
+    }
+    const manifest = row.manifest as unknown as AuditArchiveManifestPayload;
+    verifySuppliedArchiveManifest({
+      tenantId: input.tenantId,
+      manifest,
+      manifestSha256: String(row.manifest_sha256),
+      signature: String(row.signature),
+    });
+    await verifyStoredArchiveChunks(tx, manifest);
+    if (row.status === "sealed") {
+      return { archiveId: input.archiveId, reused: true, ...parseStoredManifest(row) };
+    }
+    const updated = rowsFromExecute<Record<string, unknown>>(
+      await tx.execute(sql`
+        UPDATE audit_archives
+        SET status = 'sealed', sealed_at = now(), updated_at = now()
+        WHERE id = ${input.archiveId}::uuid AND tenant_id = ${input.tenantId}
+          AND source = 'imported' AND status = 'building'
+        RETURNING *
+      `),
+    )[0];
+    if (!updated) throw new Error("Audit archive restore was concurrently completed");
+    await appendRequiredAudit({
+      tenantId: input.tenantId,
+      actorType: input.actorId ? "user" : "system",
+      actorId: input.actorId ?? null,
+      action: "audit.archive.restore_completed",
+      resourceType: "audit_archive",
+      resourceId: input.archiveId,
+      metadata: {
+        manifestSha256: String(row.manifest_sha256),
+        eventCount: manifest.eventCount,
+        signingKeyId: manifest.signingKeyId,
+      },
+      requestId: input.requestId ?? null,
+    });
+    return { archiveId: input.archiveId, reused: false, ...parseStoredManifest(updated) };
+  });
+}
+
+export async function listAuditArchives(
+  tenantId: string,
+  options: { limit?: number; before?: Date } = {},
+): Promise<AuditArchiveResult[]> {
+  const limit = options.limit ?? 50;
+  validateInteger("limit", limit, 1, 200);
+  const rows = rowsFromExecute<Record<string, unknown>>(
+    await getDb().execute(
+      options.before
+        ? sql`
+            SELECT * FROM audit_archives
+            WHERE tenant_id = ${tenantId} AND status IN ('sealed', 'pruned')
+              AND created_at < ${options.before.toISOString()}::timestamptz
+            ORDER BY created_at DESC, id DESC LIMIT ${limit}
+          `
+        : sql`
+            SELECT * FROM audit_archives
+            WHERE tenant_id = ${tenantId} AND status IN ('sealed', 'pruned')
+            ORDER BY created_at DESC, id DESC LIMIT ${limit}
+          `,
+    ),
+  );
+  return rows.map((row) => ({
+    archiveId: String(row.id),
+    reused: true,
+    ...parseStoredManifest(row),
+  }));
 }
 
 export async function getAuditArchiveManifest(
