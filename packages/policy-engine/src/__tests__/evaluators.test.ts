@@ -85,11 +85,15 @@ describe("Contract Allowlist Policy", () => {
     contracts: [{ address: contract, selectors: [selector] }],
   });
 
-  it("passes native value transfers with no calldata", async () => {
+  it("passes native value transfers with no calldata (SEC-183 documented seam)", async () => {
     const result = await evaluatePolicy(rule, makeContext());
 
     expect(result.passed).toBe(true);
-    expect(result.reason).toBe("No contract calldata");
+    // The reason names the seam so the audit trail shows the rule did not
+    // gate this transfer.
+    expect(result.reason).toBe(
+      "No contract calldata: native transfer is not gated by contract-allowlist",
+    );
   });
 
   it("passes when target contract and selector are explicitly allowed", async () => {
@@ -1073,7 +1077,7 @@ describe("Rate Limit Policy", () => {
 // ─── Time Window Tests ────────────────────────────────────────────────────
 
 describe("Time Window Policy", () => {
-  it("passes when no hour or day restrictions are set (always open)", async () => {
+  it("fails closed when no hour or day restrictions are set (SEC-180: empty rule is a misconfigured no-op)", async () => {
     const rule = makeTimeWindowRule({
       allowedHours: [],
       allowedDays: [],
@@ -1082,7 +1086,8 @@ describe("Time Window Policy", () => {
     const ctx = makeContext();
     const result = await evaluatePolicy(rule, ctx);
 
-    expect(result.passed).toBe(true);
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("no allowed days or hours");
   });
 
   it("passes when window covers all 24 hours and all 7 days", async () => {
@@ -1802,5 +1807,40 @@ describe("PolicyEngine.evaluate()", () => {
     expect(result.approved).toBe(true);
     expect(result.requiresManualApproval).toBe(false);
     expect(result.results).toHaveLength(2);
+  });
+});
+
+describe("Malformed evaluator config fails closed instead of throwing (SEC-105)", () => {
+  it("time-window with non-array allowedDays/allowedHours returns a structured deny", async () => {
+    for (const config of [
+      { allowedDays: undefined, allowedHours: [] },
+      { allowedDays: [], allowedHours: "9-17" },
+      {},
+    ]) {
+      const result = await evaluatePolicy(makeTimeWindowRule(config), makeContext());
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("must be arrays");
+    }
+  });
+
+  it("allowed-chains with a non-array chains config returns a structured deny", async () => {
+    const rule: PolicyRule = {
+      id: "chains-bad",
+      type: "allowed-chains",
+      enabled: true,
+      config: { chains: "eip155:8453" },
+    };
+    const result = await evaluatePolicy(rule, makeContext());
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("must be an array");
+  });
+
+  it("approved-addresses with a non-array addresses config returns a structured deny", async () => {
+    const result = await evaluatePolicy(
+      makeAddressRule({ addresses: "0x1234567890123456789012345678901234567890" }),
+      makeContext(),
+    );
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("must be an array");
   });
 });

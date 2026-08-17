@@ -263,3 +263,36 @@ describe("reputation-scaling evaluator", () => {
     expect(result.type).toBe("reputation-scaling");
   });
 });
+
+describe("reputation-scaling malformed input (SEC-105)", () => {
+  const linearConfig = {
+    baseMaxPerTx: "100000000000000000", // 0.1 ETH
+    maxMaxPerTx: "10000000000000000000", // 10 ETH
+    curve: "linear",
+  };
+
+  it("denies with a structured reason on non-numeric wei limits instead of throwing", () => {
+    const rule = makeRule("reputation-scaling", {
+      baseMaxPerTx: "not-a-number",
+      maxMaxPerTx: "10000000000000000000",
+      curve: "linear",
+    });
+    const result = evaluateReputationScaling(rule, {
+      reputationScore: 50,
+      txValue: 1n,
+    });
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("wei strings");
+  });
+
+  it("treats a non-finite score as 0 instead of throwing inside BigInt(NaN)", () => {
+    const limit = computeScaledLimit(linearConfig as any, Number.NaN);
+    expect(limit).toBe(BigInt("100000000000000000")); // base limit at score 0
+    const rule = makeRule("reputation-scaling", linearConfig);
+    const result = evaluateReputationScaling(rule, {
+      reputationScore: Number.NaN,
+      txValue: BigInt("100000000000000000"),
+    });
+    expect(result.passed).toBe(true); // exactly at the score-0 base limit
+  });
+});

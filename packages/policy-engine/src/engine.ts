@@ -158,7 +158,9 @@ export interface PolicyEngineOptions {
    * Sprint 4: optional sink for `policy.evaluated` audit events. Trade-
    * sessions wires this to the proxy audit log so every evaluation is
    * traceable to its inputs and verdict. Failures inside the hook are
-   * swallowed so they don't block the trade.
+   * swallowed so they don't block the trade — but counted on
+   * `auditHookFailures` and logged, so a persistently failing hook cannot
+   * silently disable the audit trail (SEC-104).
    */
   auditHook?: AuditHook;
 }
@@ -173,9 +175,20 @@ export interface PolicyEngineOptions {
  */
 export class PolicyEngine {
   private readonly auditHook?: AuditHook;
+  private auditHookFailureCount = 0;
 
   constructor(options: PolicyEngineOptions = {}) {
     if (options.auditHook) this.auditHook = options.auditHook;
+  }
+
+  /**
+   * Number of audit-hook failures swallowed since engine construction. A
+   * growing count means the policy audit trail is silently going dark — hook
+   * failures must never block a trade, but they must not be invisible either
+   * (SEC-104).
+   */
+  get auditHookFailures(): number {
+    return this.auditHookFailureCount;
   }
 
   /**
@@ -188,7 +201,12 @@ export class PolicyEngine {
     ctx: PolicyEvaluationContext & { correlationId?: string },
   ): Promise<EvaluationResult> {
     if (policies.length === 0) {
-      return { approved: false, results: [], requiresManualApproval: false };
+      // "No policies configured" is a deny and MUST be audited like any other
+      // — returning before emitAuditEvent leaves no trace of the rejection
+      // (SEC-104).
+      const evaluationResult = { approved: false, results: [], requiresManualApproval: false };
+      await this.emitAuditEvent(ctx, [], evaluationResult);
+      return evaluationResult;
     }
 
     const evaluatorCtx: EvaluatorContext = {
@@ -210,9 +228,22 @@ export class PolicyEngine {
       capabilityInvokeCount1h: ctx.capabilityInvokeCount1h,
     };
 
-    const results: EnginePolicyResult[] = await Promise.all(
-      policies.map((policy) => evaluatePolicy(policy, evaluatorCtx)),
-    );
+    // SEC-104: an evaluator throw rejects `Promise.all` past the audit call
+    // below, erasing the denial from the audit trail. Emit a NACK event before
+    // propagating so even a 500-surfacing failure stays traceable. (SEC-105
+    // makes config-malformation a structured deny; this catch is the residual
+    // guard for unexpected evaluator bugs.)
+    let results: EnginePolicyResult[];
+    try {
+      results = await Promise.all(policies.map((policy) => evaluatePolicy(policy, evaluatorCtx)));
+    } catch (err) {
+      await this.emitAuditEvent(ctx, [], {
+        approved: false,
+        results: [],
+        requiresManualApproval: false,
+      });
+      throw err;
+    }
 
     // Same falsy check as evaluatePolicy: a rule with `enabled: undefined`/
     // null/0 is disabled for pass purposes, so an all-such policy set hits
@@ -282,8 +313,16 @@ export class PolicyEngine {
     };
     try {
       await this.auditHook(event);
-    } catch {
-      // Audit failures must never block a trade. The engine swallows.
+    } catch (err) {
+      // Audit failures must never block a trade. The engine swallows, but not
+      // silently (SEC-104): count and log every failure so a persistently
+      // failing hook is visible to operators instead of quietly disabling the
+      // whole policy audit trail.
+      this.auditHookFailureCount += 1;
+      console.warn(
+        `[steward] policy audit hook failed (${this.auditHookFailureCount} since engine start); policy.evaluated events are being dropped`,
+        err,
+      );
     }
   }
 

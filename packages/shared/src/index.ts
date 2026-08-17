@@ -462,6 +462,14 @@ export interface AggregationConditionConfig {
   denomination?: AggregationDenomination;
 }
 
+/**
+ * SEC-183 (documented seam): `contract-allowlist` gates CONTRACT CALLS ONLY.
+ * A transaction with no calldata — a plain native-value transfer — passes
+ * this rule unconditionally regardless of the allowlist below. Operators who
+ * expect it to also constrain native sends MUST pair it with an
+ * `approved-addresses` rule (whose write validator currently restricts
+ * addresses to EVM format).
+ */
 export interface ContractAllowlistConfig {
   contracts: Array<{
     address: string;

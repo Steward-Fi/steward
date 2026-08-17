@@ -533,6 +533,17 @@ async function evaluateSpendingLimit(
 function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
   const config = rule.config as unknown as ApprovedAddressesConfig;
   const base = { policyId: rule.id, type: rule.type } as const;
+
+  // Fail closed with a structured deny on malformed config instead of throwing
+  // on `.map` (SEC-105).
+  if (!Array.isArray(config.addresses)) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Approved addresses must be an array",
+    };
+  }
+
   const targetAddress = getApprovedAddressTarget(ctx.request);
   if (!targetAddress) {
     return {
@@ -688,6 +699,29 @@ function evaluateRateLimit(rule: PolicyRule, ctx: EvaluatorContext): PolicyResul
 function evaluateTimeWindow(rule: PolicyRule, _ctx: EvaluatorContext): PolicyResult {
   const config = rule.config as unknown as TimeWindowConfig;
   const base = { policyId: rule.id, type: rule.type } as const;
+
+  // Fail closed with a structured deny on malformed config instead of throwing
+  // on `.length` (SEC-105) — consistent with the other defensive evaluators.
+  if (!Array.isArray(config.allowedDays) || !Array.isArray(config.allowedHours)) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Time-window allowedDays and allowedHours must be arrays",
+    };
+  }
+
+  // An enabled time-window rule with NO windows at all is a misconfigured
+  // no-op that would pass everything — fail closed instead (SEC-180),
+  // consistent with venue-allowlist's empty-config deny. An empty array on
+  // exactly ONE dimension still means "unconstrained on that dimension".
+  if (config.allowedDays.length === 0 && config.allowedHours.length === 0) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Time-window rule has no allowed days or hours configured",
+    };
+  }
+
   const now = new Date();
   const hour = now.getUTCHours();
   const day = now.getUTCDay();
@@ -721,6 +755,16 @@ function evaluateAllowedChains(rule: PolicyRule, ctx: EvaluatorContext): PolicyR
   const config = rule.config as unknown as AllowedChainsConfig;
   const base = { policyId: rule.id, type: rule.type } as const;
   const chainId = ctx.request.chainId;
+
+  // Fail closed with a structured deny on malformed config instead of throwing
+  // on `.includes` (SEC-105).
+  if (!Array.isArray(config.chains)) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Allowed chains must be an array of CAIP-2 identifiers",
+    };
+  }
 
   if (!Number.isSafeInteger(chainId) || chainId <= 0) {
     return {
@@ -842,8 +886,23 @@ function evaluateContractAllowlist(rule: PolicyRule, ctx: EvaluatorContext): Pol
   const base = { policyId: rule.id, type: rule.type } as const;
   const data = ctx.request.data;
 
+  // SEC-183 (documented seam): a request with NO calldata is a plain native
+  // transfer, and this rule does NOT gate it — it passes unconditionally,
+  // regardless of the allowlist. This is intentional (the rule's job is
+  // contract/selector gating) but a common misconfiguration seam: operators
+  // who expect contract-allowlist to also constrain native sends MUST pair it
+  // with an approved-addresses rule (note: the write validator restricts
+  // approved-addresses to EVM addresses, so on Solana/Monero paths that rule
+  // can never match and always denies — native-transfer gating there needs a
+  // chain-appropriate rule). Flipping this branch to deny would silently
+  // break existing tenants that rely on the documented behavior, so the
+  // decision to gate native transfers explicitly is deferred (see SEC-183).
   if (!data || data === "0x") {
-    return { ...base, passed: true, reason: "No contract calldata" };
+    return {
+      ...base,
+      passed: true,
+      reason: "No contract calldata: native transfer is not gated by contract-allowlist",
+    };
   }
 
   if (!/^0x(?:[a-fA-F0-9]{2})+$/.test(data) || data.length < 10) {

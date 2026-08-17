@@ -198,6 +198,77 @@ describe("PolicyEngine audit hook", () => {
     });
     expect(result.approved).toBe(true);
   });
+
+  it("emits verdict=NACK on the empty-policy-set deny (SEC-104)", async () => {
+    const events: { verdict: string }[] = [];
+    const engine = new PolicyEngine({
+      auditHook: (e) => {
+        events.push(e as { verdict: string });
+      },
+    });
+    const result = await engine.evaluate([], {
+      request: makeSignRequest(),
+      recentTxCount1h: 0,
+      recentTxCount24h: 0,
+      spentToday: 0n,
+      spentThisWeek: 0n,
+    });
+    expect(result.approved).toBe(false);
+    expect(events.length).toBe(1);
+    expect(events[0]!.verdict).toBe("NACK");
+  });
+
+  it("emits verdict=NACK before an evaluator throw propagates (SEC-104)", async () => {
+    const events: { verdict: string }[] = [];
+    const engine = new PolicyEngine({
+      auditHook: (e) => {
+        events.push(e as { verdict: string });
+      },
+    });
+    // A hostile config getter throws inside the evaluator, rejecting
+    // Promise.all — the denial must still reach the audit trail.
+    const hostile = {
+      id: "hostile-1",
+      type: "venue-allowlist",
+      enabled: true,
+    } as PolicyRule;
+    Object.defineProperty(hostile, "config", {
+      get() {
+        throw new Error("hostile config getter");
+      },
+    });
+    await expect(
+      engine.evaluate([hostile], {
+        request: makeSignRequest(),
+        recentTxCount1h: 0,
+        recentTxCount24h: 0,
+        spentToday: 0n,
+        spentThisWeek: 0n,
+        venue: "hyperliquid",
+      }),
+    ).rejects.toThrow("hostile config getter");
+    expect(events.length).toBe(1);
+    expect(events[0]!.verdict).toBe("NACK");
+  });
+
+  it("counts swallowed audit-hook failures instead of dropping them silently (SEC-104)", async () => {
+    const engine = new PolicyEngine({
+      auditHook: () => {
+        throw new Error("audit table is on fire");
+      },
+    });
+    expect(engine.auditHookFailures).toBe(0);
+    const result = await engine.evaluate([venueRule(["hyperliquid"])], {
+      request: makeSignRequest(),
+      recentTxCount1h: 0,
+      recentTxCount24h: 0,
+      spentToday: 0n,
+      spentThisWeek: 0n,
+      venue: "hyperliquid",
+    });
+    expect(result.approved).toBe(true);
+    expect(engine.auditHookFailures).toBe(1);
+  });
 });
 
 describe("PolicyEngine.evaluate (venue + leverage end-to-end)", () => {
