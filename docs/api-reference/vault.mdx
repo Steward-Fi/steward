@@ -82,6 +82,10 @@ const result = await steward.signTransaction("my-agent", {
 
 if ("txHash" in result) {
   console.log("Broadcast:", result.txHash);
+} else if ("code" in result && result.code === "external_broadcast_outcome_unknown") {
+  // The signed bytes may already be upstream. Reconcile this exact hash and
+  // do not submit the transaction again.
+  console.log("Broadcast outcome unknown:", result.txHash);
 } else if ("status" in result) {
   console.log("Queued for approval");
 }

@@ -51,6 +51,7 @@ import type { Vault } from "@stwd/vault";
 import { WebhookDispatcher } from "@stwd/webhooks";
 import { and, eq, gte, sql } from "drizzle-orm";
 import type { Context, Next } from "hono";
+import { sanitizePublicError } from "./public-error";
 import { getConfiguredVault } from "./vault-factory";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -267,53 +268,11 @@ export async function safeJsonParse<T>(c: Context): Promise<T | null> {
 }
 
 export function sanitizeErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    // Client-safe messages deliberately thrown for the caller (SEC-210): keep
-    // this list tight — everything else collapses to a generic 500 message.
-    const safe = ["already exists", "not found", "Unsupported chain", "not mnemonic-recoverable"];
-    if (safe.some((s) => error.message.includes(s))) return error.message;
-  }
-  return "Internal server error";
+  return sanitizePublicError(error);
 }
 
-export function isRpcError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  const msg = error.message.toLowerCase();
-  const rpcIndicators = [
-    "insufficient funds",
-    "insufficient balance",
-    "nonce too low",
-    "nonce too high",
-    "gas too low",
-    "gas limit",
-    "underpriced",
-    "replacement transaction",
-    "exceeds block gas limit",
-    "execution reverted",
-    "out of gas",
-    "invalid sender",
-    "invalid signature",
-    "account not found",
-    "blockhash not found",
-    "transaction simulation failed",
-    "instruction error",
-    "custom program error",
-    "rpc error",
-    "failed to send transaction",
-    "transaction failed",
-    "0x",
-  ];
-  return rpcIndicators.some((indicator) => msg.includes(indicator));
-}
-
-export function extractRpcErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    const innerMatch = error.message.match(/message["\s:]+([^"]+)/i);
-    if (innerMatch) return innerMatch[1].trim();
-    return error.message;
-  }
-  return "RPC error";
-}
+export { PublicApiError } from "./public-error";
+export { extractRpcErrorMessage, isRpcError } from "./rpc-error";
 
 // ─── Environment ──────────────────────────────────────────────────────────────
 
@@ -420,12 +379,12 @@ export const defaultTenantReady = db
   .values({
     id: DEFAULT_TENANT_ID,
     name: "Default Tenant",
-    // SEC-153: STEWARD_DEFAULT_TENANT_KEY must contain the sha256 HASH of the
-    // operator's key — it is stored verbatim as apiKeyHash and callers present
-    // the plaintext key via X-Steward-Key (validateApiKey hashes before
-    // comparing). A plaintext value here fails closed (tenant unreachable).
-    // This legacy tenant-wide key is unscoped full-tenant authority with no
-    // per-key revocation; prefer app-client secrets for new deployments.
+    // SEC-145: despite the variable name, STEWARD_DEFAULT_TENANT_KEY must be
+    // the sha256 hex hash of the plaintext key — it is stored verbatim as
+    // apiKeyHash and compared against sha256(X-Steward-Key). A plaintext
+    // value fails closed (default tenant unreachable); empty stays 403.
+    // SEC-153: this legacy tenant-wide key is unscoped full-tenant authority
+    // with no per-key revocation; prefer app-client secrets for new deployments.
     apiKeyHash: process.env.STEWARD_DEFAULT_TENANT_KEY || "",
   })
   .onConflictDoNothing();
@@ -684,7 +643,9 @@ export async function getTransactionStats(agentId: string, chainId?: number) {
       and(
         eq(transactions.agentId, agentId),
         gte(transactions.createdAt, oneWeekAgo),
-        sql`${transactions.status} in ('signed', 'broadcast', 'confirmed')`,
+        // An ambiguous broadcast may already have spent funds. Count it until
+        // receipt reconciliation proves the final chain outcome.
+        sql`${transactions.status} in ('signed', 'broadcast', 'confirmed', 'outcome_unknown')`,
       ),
     );
 

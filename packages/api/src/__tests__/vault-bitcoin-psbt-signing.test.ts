@@ -164,27 +164,32 @@ describe("vault Bitcoin PSBT signing", () => {
     await vault.createAgent(TENANT_ID, TAPROOT_AGENT_ID, "Bitcoin PSBT Taproot Agent");
     const wallet = await vault.createWallet({
       agentId: AGENT_ID,
+      tenantId: TENANT_ID,
       chainType: "bitcoin",
       bitcoin: { network: "testnet", addressType: "p2wpkh" },
     });
     const changeWallet = await vault.createWallet({
       agentId: AGENT_ID,
+      tenantId: TENANT_ID,
       chainType: "bitcoin",
       bitcoin: { network: "testnet", addressType: "p2wpkh", index: 1 },
     });
     await vault.createWallet({
       agentId: DENIED_AGENT_ID,
+      tenantId: TENANT_ID,
       scope: wallet.venue ?? undefined,
       chainType: "bitcoin",
       bitcoin: { network: "testnet", addressType: "p2wpkh" },
     });
     const spendLimitWallet = await vault.createWallet({
       agentId: SPEND_LIMIT_AGENT_ID,
+      tenantId: TENANT_ID,
       chainType: "bitcoin",
       bitcoin: { network: "testnet", addressType: "p2wpkh" },
     });
     const taprootWallet = await vault.createWallet({
       agentId: TAPROOT_AGENT_ID,
+      tenantId: TENANT_ID,
       chainType: "bitcoin",
       bitcoin: { network: "testnet", addressType: "p2tr" },
     });

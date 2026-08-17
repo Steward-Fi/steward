@@ -16,6 +16,31 @@ describe("policy rule validation", () => {
     ).toContain("auto-approve-threshold");
   });
 
+  it("rejects an enabled time-window rule with no windows at all (SEC-180)", () => {
+    expect(
+      getPolicyRulesValidationError([
+        {
+          id: "tw",
+          type: "time-window",
+          enabled: true,
+          config: { allowedHours: [], allowedDays: [] },
+        },
+      ]),
+    ).toBe("time-window requires at least one allowed hour window or allowed day");
+
+    // A single gated dimension is valid: the other stays unconstrained.
+    expect(
+      getPolicyRulesValidationError([
+        {
+          id: "tw",
+          type: "time-window",
+          enabled: true,
+          config: { allowedHours: [{ start: 9, end: 17 }], allowedDays: [] },
+        },
+      ]),
+    ).toBeNull();
+  });
+
   it("accepts valid persisted policy configs", () => {
     expect(
       getPolicyRulesValidationError([

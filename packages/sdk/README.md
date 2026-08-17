@@ -127,6 +127,12 @@ The return type is a discriminated union:
 type SignTransactionResult =
   | { txHash: string }           // signed and broadcast
   | { status: 'pending_approval'; results: PolicyResult[] }  // queued
+  | {
+      code: 'external_broadcast_outcome_unknown';
+      txId: string;
+      txHash: string;
+      reconciliationRequired: true;
+    }; // reconcile the hash; never resubmit blindly
 ```
 
 ```typescript

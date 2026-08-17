@@ -22,10 +22,36 @@ describe("transaction receipt poller", () => {
     expect(classifyBody).toContain('"transaction.execution_reverted"');
   });
 
-  it("polls only already-broadcast transactions with hashes", () => {
-    expect(pollerSource).toContain('eq(transactions.status, "broadcast")');
+  it("reconciles broadcast and outcome_unknown transactions only by deterministic hash", () => {
+    expect(pollerSource).toContain(
+      'inArray(transactions.status, ["broadcast", "outcome_unknown"])',
+    );
     expect(pollerSource).toContain("isNotNull(transactions.txHash)");
     expect(pollerSource).toContain("isHexHash(row.txHash)");
+    expect(pollerSource).toContain(
+      "receipt.transactionHash.toLowerCase() !== row.txHash.toLowerCase()",
+    );
+    expect(pollerSource).toContain('eq(transactions.status, "outcome_unknown")');
+    expect(pollerSource).toContain('action: "transaction.broadcast.reconciled"');
+    expect(pollerSource).toContain("withTenantAuditedTransaction(");
+    expect(pollerSource).not.toContain("sendRawTransaction");
+    expect(pollerSource).not.toContain("writeContract");
+  });
+
+  it("rotates durable polling batches instead of pinning the oldest missing receipt", () => {
+    expect(pollerSource).toContain("receiptPolledAt: now");
+    expect(pollerSource).toContain("receiptPolledAt} ASC NULLS FIRST");
+  });
+
+  it("never converts receipt absence into failure or a repost", () => {
+    const absenceGuard = pollerSource.slice(
+      pollerSource.indexOf("if (!receipt)"),
+      pollerSource.indexOf("// Without a trustworthy chain head"),
+    );
+    expect(absenceGuard).toContain('row.status === "outcome_unknown"');
+    expect(absenceGuard).toContain('return "skipped"');
+    expect(absenceGuard).not.toContain('status: "failed"');
+    expect(absenceGuard).not.toContain("broadcast(");
   });
 
   it("does not mark transactions failed for transient RPC lookup errors", () => {

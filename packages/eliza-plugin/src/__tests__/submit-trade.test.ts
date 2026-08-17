@@ -142,4 +142,34 @@ describe("SUBMIT_TRADE action", () => {
     expect(result?.success).toBe(false);
     expect(result?.text).toBe("venue error, will retry later");
   });
+
+  it("rejects a non-localhost plaintext STEWARD_API_URL before any request", async () => {
+    process.env.STEWARD_API_URL = "http://steward.example";
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      submitTradeAction.validate({} as any, mockMemory("buy 0.01 BTC") as any),
+    ).resolves.toBe(false);
+
+    const result = await submitTradeAction.handler({} as any, mockMemory("buy 0.01 BTC") as any);
+    expect(result?.success).toBe(false);
+    expect(result?.text).toBe(
+      "Trading is unavailable because Steward JWT/API env is not configured.",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("still allows loopback http STEWARD_API_URL for local dev", async () => {
+    process.env.STEWARD_API_URL = "http://127.0.0.1:7860";
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: true, data: { status: "active" } }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      submitTradeAction.validate({} as any, mockMemory("buy 0.01 BTC") as any),
+    ).resolves.toBe(true);
+  });
 });

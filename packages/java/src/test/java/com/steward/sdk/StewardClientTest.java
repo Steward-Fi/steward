@@ -15,6 +15,9 @@ public final class StewardClientTest {
         testSensitiveMutationsAreSignedAndIdempotent();
         testTenantApiKeyAndTenantHeader();
         testApiErrorsIncludeStatusAndPayload();
+        testTruncatedUnicodeEscapeYieldsApiException();
+        testPlaintextNonLoopbackBaseUrlRejected();
+        testAllowInsecureBaseUrlOptsOut();
         System.out.println("StewardClientTest passed");
     }
 
@@ -109,6 +112,46 @@ public final class StewardClientTest {
             assertEquals(403, error.getStatus());
             assertEquals("denied", error.getMessage());
         }
+    }
+
+    private static void testTruncatedUnicodeEscapeYieldsApiException() {
+        // SEC-197: a truncated unicode escape must surface as
+        // StewardApiException, not a raw StringIndexOutOfBoundsException.
+        CaptureTransport transport = new CaptureTransport(200, "{\"ok\":true,\"data\":\"ab\\u12");
+        StewardClient client = new StewardClient(StewardClient.config("https://api.example.test")
+            .apiKey("tenant-key")
+            .transport(transport)
+            .build());
+
+        try {
+            client.get("/platform/users/user-1");
+            throw new AssertionError("expected API exception");
+        } catch (StewardApiException error) {
+            assertEquals("Received invalid JSON from Steward API", error.getMessage());
+        }
+    }
+
+    private static void testPlaintextNonLoopbackBaseUrlRejected() {
+        // SEC-200: credentials must never travel to a plaintext non-loopback
+        // endpoint unless the operator explicitly opts out.
+        for (String baseUrl : List.of("http://api.example.test", "http://192.168.1.10:3200", "ftp://api.example.test", "https://user:secret@api.example.test")) {
+            try {
+                new StewardClient(StewardClient.config(baseUrl).apiKey("tenant-key").build());
+                throw new AssertionError("expected rejection for " + baseUrl);
+            } catch (IllegalArgumentException error) {
+                assertTrue(error.getMessage().contains("HTTPS") || error.getMessage().contains("credentials"), "unexpected message: " + error.getMessage());
+            }
+        }
+        for (String baseUrl : List.of("https://api.example.test", "http://localhost:3200", "http://127.0.0.1:3200", "http://[::1]:3200")) {
+            new StewardClient(StewardClient.config(baseUrl).apiKey("tenant-key").build());
+        }
+    }
+
+    private static void testAllowInsecureBaseUrlOptsOut() {
+        new StewardClient(StewardClient.config("http://api.example.test")
+            .apiKey("tenant-key")
+            .allowInsecureBaseUrl(true)
+            .build());
     }
 
     private static String body(StewardTransportRequest request) {

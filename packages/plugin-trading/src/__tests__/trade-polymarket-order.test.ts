@@ -434,6 +434,70 @@ describe("POST /v1/trade/polymarket/order", () => {
     expect(await dailySpendOf(sessionId)).toBe(0);
   });
 
+  it("SEC-111: STEWARD_PM_TEST_CREDS is hard-disabled in production", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({});
+    stubWallet(true); // wallet + funder present, but no provisioned L2 creds
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    const prevNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    process.env.STEWARD_PM_TEST_CREDS = "1";
+    try {
+      const res = await postOrder(app, sessionId, crypto.randomUUID());
+      // The test-creds seam is ignored in production, so creds resolution falls
+      // through to real L2 derivation, which fails closed in this harness.
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error?: string }).error).toContain(
+        "credentials are not provisioned",
+      );
+      expect(await dailySpendOf(sessionId)).toBe(0);
+    } finally {
+      if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevNodeEnv;
+      delete process.env.STEWARD_PM_TEST_CREDS;
+    }
+  });
+
+  it("SEC-111: a plain-http POLYMARKET_CLOB_API_URL is refused in production", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({});
+    stubWallet(true);
+    // Mock the adapter edge so the ONLY thing that can fail the order is creds
+    // resolution: pre-fix the http override + test creds would reach submit.
+    buildSpy = spyOn(PolymarketExecutionAdapter.prototype, "buildSignedOrder").mockResolvedValue(
+      {} as never,
+    );
+    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitSignedOrder").mockResolvedValue({
+      venue: "polymarket" as const,
+      orderId: "pm-http-guard",
+      status: "matched",
+      success: true,
+      makingAmount: "10",
+      takingAmount: "20",
+      actualAmount: 20,
+      actualPrice: 0.5,
+    } as Awaited<ReturnType<PolymarketExecutionAdapter["submitSignedOrder"]>>);
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    const prevNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    process.env.POLYMARKET_CLOB_API_URL = "http://clob.e2e.invalid";
+    process.env.STEWARD_PM_TEST_CREDS = "1";
+    try {
+      const res = await postOrder(app, sessionId, crypto.randomUUID());
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error?: string }).error).toContain(
+        "credentials are not provisioned",
+      );
+      expect(submitSpy).not.toHaveBeenCalled();
+      expect(await dailySpendOf(sessionId)).toBe(0);
+    } finally {
+      if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevNodeEnv;
+      delete process.env.POLYMARKET_CLOB_API_URL;
+      delete process.env.STEWARD_PM_TEST_CREDS;
+    }
+  });
+
   it("happy path: filled order -> 200, spend reserved, submitted + authorized audits (mocked adapter)", async () => {
     const { tenantId, agentId, sessionId } = await seedSession({});
     const app = makeApp(tenantId, agentId, tradeRoutes);
@@ -510,6 +574,7 @@ describe("POST /v1/trade/polymarket/order", () => {
     // getWallet/signing spy and no raw private key leaves the vault.
     const wallet = await sharedTestContext.vault.createWallet({
       agentId,
+      tenantId,
       venue: "polymarket",
       chainType: "evm",
     });

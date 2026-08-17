@@ -161,6 +161,65 @@ describe("SEC-081 enterprise backup service keeps the DSN out of container env a
   });
 });
 
+describe("SEC-158 shipped nginx rate limiting and WebSocket map", () => {
+  const nginx = read("nginx.conf");
+  const readme = read("README.md");
+
+  test("site file defines each http-context primitive exactly once", () => {
+    expect(nginx.match(/^limit_req_zone\s+.*zone=steward_api:/gm)).toHaveLength(1);
+    expect(nginx.match(/^limit_req_zone\s+.*zone=steward_proxy:/gm)).toHaveLength(1);
+    expect(nginx.match(/^map\s+\$http_upgrade\s+\$connection_upgrade\s*\{/gm)).toHaveLength(1);
+  });
+
+  test("both public server blocks enforce their declared zones", () => {
+    expect(nginx.match(/^\s*limit_req\s+zone=steward_api\b/gm)).toHaveLength(1);
+    expect(nginx.match(/^\s*limit_req\s+zone=steward_proxy\b/gm)).toHaveLength(1);
+  });
+
+  test("TLS listeners have an active bootstrap certificate before Certbot runs", () => {
+    expect(
+      nginx.match(/^\s*ssl_certificate\s+\/etc\/ssl\/certs\/steward-bootstrap\.crt;/gm),
+    ).toHaveLength(2);
+    expect(
+      nginx.match(/^\s*ssl_certificate_key\s+\/etc\/ssl\/private\/steward-bootstrap\.key;/gm),
+    ).toHaveLength(2);
+    expect(readme).toContain("openssl req -x509");
+    expect(readme).toContain("expose the host publicly until issuance succeeds");
+  });
+
+  test("operator docs do not instruct duplicate http-context declarations", () => {
+    expect(readme).not.toContain("limit_req_zone $binary_remote_addr");
+    expect(readme).not.toContain("map $http_upgrade $connection_upgrade");
+    expect(readme).toContain("shipped site file already defines");
+  });
+});
+
+describe("SEC-161 enterprise data-plane network isolation", () => {
+  const compose = readFileSync(
+    join(DEPLOY_DIR, "enterprise-reference", "docker-compose.yml"),
+    "utf8",
+  );
+
+  test("postgres and redis are data-plane only while callers are dual-homed", () => {
+    const serviceBlock = (name: string): string => {
+      const match = compose.match(
+        new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  \\S|^volumes:|^networks:)`, "m"),
+      );
+      expect(match).not.toBeNull();
+      return match?.[1] ?? "";
+    };
+    for (const name of ["postgres", "redis"]) {
+      expect(serviceBlock(name)).toMatch(/networks:\n\s+- steward-data\s*$/m);
+      expect(serviceBlock(name)).not.toContain("- steward-backend");
+    }
+    for (const name of ["steward-api", "steward-proxy", "steward-migrate", "backup"]) {
+      expect(serviceBlock(name)).toMatch(/steward-backend:[\s\S]*?gw_priority: 1/);
+      expect(serviceBlock(name)).toContain("steward-data: {}");
+    }
+    expect(compose).toMatch(/steward-data:\n\s+driver: bridge\n\s+internal: true/);
+  });
+});
+
 describe("SEC-079 deploy/docker-compose.yml passes vault/email secrets through", () => {
   const compose = read("docker-compose.yml");
 

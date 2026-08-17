@@ -65,6 +65,17 @@ import type { EvaluatorContext } from "./evaluators";
 /** the contributed rule-type discriminator. */
 export const CAPABILITY_INTENT_RULE_TYPE = "capability-intent" as const;
 
+/**
+ * ReDoS blast-radius bounds for operator-supplied patterns (SEC-107).
+ * `argMatches` / X `blockedPatterns` regexes come from tenant-admin policy
+ * config and run against agent-influenced invoke args / tweet text with no
+ * engine-side match timeout, so a catastrophically-backtracking pattern (even
+ * pasted innocently) could hang the API event loop. Both the pattern and the
+ * matched input are length-capped; anything over the cap fails closed (deny).
+ */
+export const MAX_POLICY_PATTERN_LENGTH = 256;
+export const MAX_POLICY_PATTERN_INPUT_LENGTH = 8_192;
+
 // ─── Permissioned-X: per-post price table (versioned constant) ────────────────
 //
 // SOURCE (captured 2026-07-16, docs.x.com pay-per-use, effective Feb 6 2026):
@@ -664,6 +675,12 @@ function parseXConstraints(rawInput: unknown): XConstraints | { error: string } 
           error:
             "capability-intent: `x.contentPolicy.blockedPatterns` must be a non-empty string[] of non-empty strings",
         };
+      // SEC-107: bound operator-supplied regexes at parse time (same cap as
+      // argMatches) so a pathological pattern fails closed as a config error.
+      if (cp.blockedPatterns.some((p) => (p as string).length > MAX_POLICY_PATTERN_LENGTH))
+        return {
+          error: `capability-intent: \`x.contentPolicy.blockedPatterns\` patterns must not exceed ${MAX_POLICY_PATTERN_LENGTH} chars`,
+        };
       content.blockedPatterns = cp.blockedPatterns as string[];
     }
     out.contentPolicy = content;
@@ -911,6 +928,18 @@ function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: strin
     if (c.argMatches !== undefined && !isStringRecord(c.argMatches)) {
       return { error: "capability-intent: `constraints.argMatches` must be Record<string,string>" };
     }
+    // SEC-107: bound operator-supplied regexes at store/parse time, not just at
+    // evaluation time, so a pathological pattern fails closed as a config error.
+    if (
+      c.argMatches !== undefined &&
+      Object.values(c.argMatches as Record<string, string>).some(
+        (p) => p.length > MAX_POLICY_PATTERN_LENGTH,
+      )
+    ) {
+      return {
+        error: `capability-intent: \`constraints.argMatches\` patterns must not exceed ${MAX_POLICY_PATTERN_LENGTH} chars`,
+      };
+    }
 
     let timeWindow: CapabilityTimeWindow | undefined;
     if (c.timeWindow !== undefined) {
@@ -1010,6 +1039,15 @@ function evaluateConstraints(
   // compiled) regex. Invalid regex in config => deny (never throw).
   if (constraints.argMatches) {
     for (const [key, pattern] of Object.entries(constraints.argMatches)) {
+      // SEC-107: cap the operator-supplied pattern length so a pathological
+      // regex cannot be smuggled in via config.
+      if (typeof pattern !== "string" || pattern.length > MAX_POLICY_PATTERN_LENGTH) {
+        return {
+          ...base,
+          passed: false,
+          reason: `capability-intent: regex for arg "${key}" missing or exceeds ${MAX_POLICY_PATTERN_LENGTH} chars`,
+        };
+      }
       let re: RegExp;
       try {
         // anchor full-string so a partial match can't slip a governed arg.
@@ -1029,6 +1067,15 @@ function evaluateConstraints(
         };
       }
       const value = args[key];
+      // SEC-107: cap the agent-controlled input the regex runs against; an
+      // oversized arg cannot be verified within the bound => deny.
+      if (typeof value === "string" && value.length > MAX_POLICY_PATTERN_INPUT_LENGTH) {
+        return {
+          ...base,
+          passed: false,
+          reason: `capability-intent: arg "${key}" exceeds the ${MAX_POLICY_PATTERN_INPUT_LENGTH}-char match input cap`,
+        };
+      }
       if (typeof value !== "string" || !re.test(value)) {
         return {
           ...base,
@@ -1117,6 +1164,19 @@ export function evaluateCapabilityIntent(
   // 2. Config must be well-formed (fail closed).
   const parsed = parseConfig(rule.config);
   if ("error" in parsed) {
+    // SEC-181: same malformed-input precedence as both composers — a malformed
+    // rule whose selector is well-formed and provably scoped to a DIFFERENT
+    // capability is not governing this invoke and stays inert. Only a
+    // malformed GOVERNING rule, or one whose selector is unrecoverable
+    // (ambiguous scope), denies.
+    const sel = recoverSelectorMatch(rule.config, ctx.capability.name);
+    if (sel.recoverable && !sel.matches) {
+      return {
+        ...base,
+        passed: true,
+        reason: `capability "${ctx.capability.name}" not governed by this rule`,
+      };
+    }
     return { ...base, passed: false, reason: parsed.error };
   }
 
@@ -1442,6 +1502,18 @@ export interface ProviderPolicyContext {
     readonly accumulatedSpendMicros?: number;
     /** authoritative current minute-of-day UTC, 0..1439 (used by quietHours). */
     readonly nowMinuteUtc?: number;
+    /** adapter-derived "the post is a reply" signal (replyPolicy). PREFERRED
+     *  over the same-named `args` entry, which is caller-influenced (SEC-182). */
+    readonly isReply?: boolean;
+    /** adapter-derived "the user summoned the agent" signal (replyPolicy
+     *  summoned-only). PREFERRED over `args` (SEC-182). */
+    readonly summoned?: boolean;
+    /** adapter-derived "the post body contains a URL" signal (allowUrls /
+     *  spend / escalation policies). PREFERRED over `args` (SEC-182). */
+    readonly hasUrl?: boolean;
+    /** adapter-counted code-point length of the post text (maxLength).
+     *  PREFERRED over `args` (SEC-182). */
+    readonly textCodePointLength?: number;
   };
   /**
    * The operation's DECLARED spend field (#206). The operation - not the caller
@@ -1584,6 +1656,14 @@ export function composeProviderActionPolicyDecision(
 
       const parsed = parseConfig(rule.config);
       if ("error" in parsed) {
+        // SEC-181: malformed-input precedence is scoped to GOVERNING rules,
+        // matching the legacy-plane composer (composeCapabilityIntentDecision)
+        // and master-plan §5.3. A well-formed selector provably scoped to a
+        // DIFFERENT operation stays inert even though the rest of the config
+        // is broken; only a malformed rule that governs THIS operation, or
+        // whose selector is unrecoverable (ambiguous scope), hard-denies.
+        const sel = recoverSelectorMatch(rule.config, context.operationKey);
+        if (sel.recoverable && !sel.matches) continue;
         sawHardDeny = true;
         reasonCodes.add(PROVIDER_POLICY_REASON.CONFIGURATION_INVALID);
         results.push({
@@ -1708,6 +1788,10 @@ function evaluateProviderConstraints(
   }
   if (constraints.argMatches) {
     for (const [key, pattern] of Object.entries(constraints.argMatches)) {
+      // SEC-107: same ReDoS bounds as the legacy-plane evaluator.
+      if (typeof pattern !== "string" || pattern.length > MAX_POLICY_PATTERN_LENGTH) {
+        return PROVIDER_POLICY_REASON.CONFIGURATION_INVALID;
+      }
       let re: RegExp;
       try {
         re = new RegExp(`^(?:${pattern})$`);
@@ -1715,6 +1799,9 @@ function evaluateProviderConstraints(
         return PROVIDER_POLICY_REASON.CONFIGURATION_INVALID;
       }
       const value = args[key];
+      if (typeof value === "string" && value.length > MAX_POLICY_PATTERN_INPUT_LENGTH) {
+        return PROVIDER_POLICY_REASON.HARD_DENY;
+      }
       if (typeof value !== "string" || !re.test(value)) return PROVIDER_POLICY_REASON.HARD_DENY;
     }
   }
@@ -1863,6 +1950,23 @@ function readBool(args: Record<string, unknown>, key: string): boolean | undefin
 }
 
 /**
+ * Read an X security signal, PREFERRING the typed, adapter-populated `ctx.x`
+ * channel over the caller-influenced `args` bag (SEC-182). The engine cannot
+ * distinguish adapter-derived values from pass-through caller args inside
+ * `args`; the typed channel is populated server-side from the adapter's
+ * validated build. The args read remains as the legacy fallback for adapters
+ * that do not wire the typed fields yet — the fail-closed contract (missing =>
+ * POLICY_INPUT_UNAVAILABLE) is unchanged either way.
+ */
+function xBoolSignal(
+  ctx: ProviderPolicyContext,
+  key: "isReply" | "summoned" | "hasUrl",
+): boolean | undefined {
+  const typed = ctx.x?.[key];
+  return typeof typed === "boolean" ? typed : readBool(ctx.args, key);
+}
+
+/**
  * Evaluate the permissioned-X constraint sub-block against the provider-policy
  * context. Returns:
  *   - { kind: "deny", reasonCode }  on the FIRST hard failure (deny wins),
@@ -1892,7 +1996,7 @@ export function evaluateXConstraints(
   // closed (an operation whose build doesn't carry isReply must NOT slip a reply
   // gate). `summoned` is only required when we actually reach the summoned check.
   if (x.replyPolicy) {
-    const isReply = readBool(args, "isReply");
+    const isReply = xBoolSignal(ctx, "isReply");
     if (isReply === undefined) {
       return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
     }
@@ -1901,7 +2005,7 @@ export function evaluateXConstraints(
         return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.X_REPLY_FORBIDDEN };
       }
       if (x.replyPolicy.mode === "summoned-only") {
-        const summoned = readBool(args, "summoned");
+        const summoned = xBoolSignal(ctx, "summoned");
         if (summoned === undefined) {
           return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
         }
@@ -1921,7 +2025,7 @@ export function evaluateXConstraints(
   if (x.contentPolicy) {
     // allowUrls DEPENDS on the `hasUrl` signal; absent/non-boolean => fail closed.
     if (x.contentPolicy.allowUrls === false) {
-      const hasUrl = readBool(args, "hasUrl");
+      const hasUrl = xBoolSignal(ctx, "hasUrl");
       if (hasUrl === undefined) {
         return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
       }
@@ -1930,7 +2034,9 @@ export function evaluateXConstraints(
       }
     }
     if (x.contentPolicy.maxLength !== undefined) {
-      const len = args.textCodePointLength;
+      // SEC-182: prefer the typed, adapter-populated length signal over the
+      // caller-influenced `args` bag (same fallback contract as xBoolSignal).
+      const len = ctx.x?.textCodePointLength ?? args.textCodePointLength;
       // A content-length policy REQUIRES the length signal. Absent => fail closed.
       if (typeof len !== "number" || !Number.isInteger(len)) {
         return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
@@ -1946,7 +2052,17 @@ export function evaluateXConstraints(
       if (typeof text !== "string") {
         return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
       }
+      // SEC-107: cap the agent-controlled input the patterns run against; text
+      // too large to scan within the bound cannot be proven clean => deny.
+      if (text.length > MAX_POLICY_PATTERN_INPUT_LENGTH) {
+        return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
+      }
       for (const pattern of x.contentPolicy.blockedPatterns) {
+        // SEC-107: cap the operator-supplied pattern length so a pathological
+        // regex cannot be smuggled in via config.
+        if (typeof pattern !== "string" || pattern.length > MAX_POLICY_PATTERN_LENGTH) {
+          return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.CONFIGURATION_INVALID };
+        }
         let re: RegExp;
         try {
           re = new RegExp(pattern);
@@ -1995,7 +2111,7 @@ export function evaluateXConstraints(
     x.escalation?.urlPostRequiresApproval === true;
   let hasUrl: boolean | undefined;
   if (needsHasUrl) {
-    hasUrl = readBool(args, "hasUrl");
+    hasUrl = xBoolSignal(ctx, "hasUrl");
     if (hasUrl === undefined) {
       return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
     }

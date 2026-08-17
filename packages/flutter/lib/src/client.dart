@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
+import 'base_url.dart';
 import 'models.dart';
 
 typedef StewardIdFactory = String Function();
@@ -19,6 +20,7 @@ class StewardClientConfig {
     this.tenantId,
     this.requestSigningSecret,
     this.requestSigningKeyId,
+    this.allowInsecureBaseUrl = false,
     this.httpClient,
     this.idFactory,
   });
@@ -32,6 +34,11 @@ class StewardClientConfig {
   final String? tenantId;
   final String? requestSigningSecret;
   final String? requestSigningKeyId;
+
+  /// Permit a plaintext non-loopback baseUrl (warns at construction). HTTPS is
+  /// required by default so credentials never travel cleartext off-loopback
+  /// (SEC-200).
+  final bool allowInsecureBaseUrl;
   final http.Client? httpClient;
   final StewardIdFactory? idFactory;
 }
@@ -39,7 +46,10 @@ class StewardClientConfig {
 class StewardClient {
   StewardClient(this.config)
       : _baseUri = Uri.parse(config.baseUrl.replaceFirst(RegExp(r'/+$'), '')),
-        _client = config.httpClient ?? http.Client();
+        _client = config.httpClient ?? http.Client() {
+    assertSecureBaseUrl(config.baseUrl,
+        allowInsecureBaseUrl: config.allowInsecureBaseUrl);
+  }
 
   // Keep in lockstep with the equivalent list in EVERY other SDK (sdk, go,
   // java, python, ruby, rust, swift, csharp): mutations under these prefixes

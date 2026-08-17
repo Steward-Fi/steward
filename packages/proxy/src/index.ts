@@ -16,7 +16,7 @@ import { validateJwtSecretEnv } from "@stwd/auth";
 import { metricsTokenIsValid, renderSecurityMetrics, securityMetricsEnabled } from "@stwd/shared";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { PROXY_PORT } from "./config";
+import { configuredProxyCorsOrigins, PROXY_PORT } from "./config";
 import { getAliasNames } from "./handlers/alias";
 import { handleProxy } from "./handlers/proxy";
 import { handlePendingProxyRequest, listPendingProxyRequests } from "./handlers/release";
@@ -40,18 +40,25 @@ createDb(dbUrl);
 
 const app = new Hono();
 
-// CORS — allow all origins for now (agents call from Docker network)
-app.use("*", cors());
+// SEC-174: agents are server-side callers, so CORS is OFF by default — a
+// wildcard origin lets any website drive unauthenticated probes (and use a
+// leaked token cross-origin from browser JS). Set STEWARD_PROXY_CORS_ORIGINS
+// (comma-separated) only if a browser client genuinely needs cross-origin
+// access.
+const corsOrigins = configuredProxyCorsOrigins();
+if (corsOrigins.length > 0) {
+  app.use("*", cors({ origin: corsOrigins }));
+}
 
 // ─── Health check (unauthenticated) ──────────────────────────────────────────
 
+// SEC-174: keep the unauthenticated response minimal — no service version or
+// alias list (recon details). The API readiness probe only reads serverTime.
 app.get("/health", (c) =>
   c.json({
     ok: true,
     service: "steward-proxy",
-    version: "0.3.0",
     serverTime: new Date().toISOString(),
-    aliases: getAliasNames(),
   }),
 );
 

@@ -79,6 +79,71 @@ function isPrivateIpv4(hostname: string): boolean {
   );
 }
 
+function expandIpv6Words(address: string): number[] | null {
+  let normalized = address.toLowerCase();
+  // Convert a dotted-quad tail (e.g. 64:ff9b::10.0.0.1) to two hex words.
+  if (normalized.includes(".")) {
+    const colonIndex = normalized.lastIndexOf(":");
+    if (colonIndex === -1) return null;
+    const quad = normalized
+      .slice(colonIndex + 1)
+      .split(".")
+      .map((part) => Number(part));
+    if (
+      quad.length !== 4 ||
+      quad.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
+    ) {
+      return null;
+    }
+    normalized = `${normalized.slice(0, colonIndex)}:${((quad[0] << 8) | quad[1]).toString(16)}:${((quad[2] << 8) | quad[3]).toString(16)}`;
+  }
+  const halves = normalized.split("::");
+  if (halves.length > 2) return null;
+
+  const parseWords = (part: string): number[] | null => {
+    if (!part) return [];
+    const words = part.split(":");
+    const parsed = words.map((word) => {
+      if (!/^[0-9a-f]{1,4}$/.test(word)) return Number.NaN;
+      return Number.parseInt(word, 16);
+    });
+    return parsed.some((word) => !Number.isInteger(word) || word < 0 || word > 0xffff)
+      ? null
+      : parsed;
+  };
+
+  const left = parseWords(halves[0]);
+  const right = parseWords(halves[1] ?? "");
+  if (!left || !right) return null;
+
+  const missing = 8 - left.length - right.length;
+  if ((halves.length === 1 && missing !== 0) || missing < 0) return null;
+
+  return [...left, ...Array.from({ length: missing }, () => 0), ...right];
+}
+
+/**
+ * Extract the IPv4 address embedded in an IPv6 transition mechanism
+ * (NAT64 64:ff9b::/96 per RFC 6052,
+ * 6to4 2002::/16 per RFC 3056) so it can be screened against isPrivateIpv4.
+ */
+function embeddedTransitionIpv4(address: string): string | null {
+  const words = expandIpv6Words(address);
+  if (!words) return null;
+  const fromWords = (high: number, low: number) =>
+    [high >> 8, high & 0xff, low >> 8, low & 0xff].join(".");
+  const isWellKnownNat64 =
+    words[0] === 0x64 &&
+    words[1] === 0xff9b &&
+    words[2] === 0 &&
+    words[3] === 0 &&
+    words[4] === 0 &&
+    words[5] === 0;
+  if (isWellKnownNat64) return fromWords(words[6], words[7]);
+  if (words[0] === 0x2002) return fromWords(words[1], words[2]);
+  return null;
+}
+
 function isPrivateIpv6(hostname: string): boolean {
   const normalized = hostname.toLowerCase();
   const ipv4Mapped = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
@@ -91,6 +156,15 @@ function isPrivateIpv6(hostname: string): boolean {
       return isPrivateIpv4(`${(high >> 8) & 255}.${high & 255}.${(low >> 8) & 255}.${low & 255}`);
     }
   }
+  const embedded = embeddedTransitionIpv4(normalized);
+  if (embedded) return isPrivateIpv4(embedded);
+  const words = expandIpv6Words(normalized);
+  // RFC 8215 reserves 64:ff9b:1::/48 for local use and explicitly says no
+  // assumption can be made about an embedded IPv4 address or its location.
+  // Treat the entire non-globally-reachable prefix as non-public.
+  if (words?.[0] === 0x64 && words[1] === 0xff9b && words[2] === 1) return true;
+  // Teredo (2001:0000::/32) obfuscates the embedded client IPv4 — block outright.
+  if (words?.[0] === 0x2001 && words[1] === 0) return true;
   return (
     normalized === "::" ||
     normalized === "::1" ||
@@ -276,6 +350,9 @@ export async function verifyOidcJwt(
     issuer: provider.issuer,
     audience: provider.audience,
     algorithms,
+    // Fail closed on non-compliant IdPs: an id_token without exp/iat never
+    // expires (jose only validates exp when present) and cannot be age-bound.
+    requiredClaims: ["exp", "iat"],
   });
 
   // OIDC Core §3.1.3.7: the `azp` (authorized party) claim, when present, MUST

@@ -127,12 +127,24 @@ function isAmbiguousPostError(raw: RawPostOrderResult): boolean {
 // filled 20-share order is never reported as 20_000_000.
 const BASE_UNIT_SCALE = 1e6;
 // Above this magnitude an "amount of shares/USD" is implausibly large for a
-// human unit and is almost certainly a 6-decimal base-unit value.
+// human unit and is almost certainly a 6-decimal base-unit value. Only used
+// when the order-size context cannot disambiguate (SEC-187).
 const BASE_UNIT_DETECT_THRESHOLD = 1e6;
+// Slack for venue rounding when bounding a fill by the signed order size.
+const FILL_ORDER_SIZE_TOLERANCE = 1.005;
 
-function normalizeFillUnit(value: number): number {
-  // The price ratio is unit-invariant; only absolute amounts need scaling. If a
-  // value is in base-unit magnitude, scale it down to human units.
+function normalizeFillUnit(value: number, orderSizeShares: number): number {
+  // SEC-187: derive the unit from the ORDER context instead of a bare
+  // magnitude guess. A fill can never exceed the signed order size, so:
+  //  - value fits the order size            -> human units (return as-is, even
+  //    for a genuine >=1M-share fill the magnitude heuristic shrank 1e6x);
+  //  - value exceeds it but fits scaled-down -> 6-dec base units (scale down,
+  //    even for sub-1e6 base-unit values the heuristic passed through as-is);
+  //  - exceeds it under BOTH interpretations -> inconsistent venue data; fall
+  //    back to the magnitude heuristic (trusted venue, accounting-only).
+  const allowance = orderSizeShares * FILL_ORDER_SIZE_TOLERANCE;
+  if (value <= allowance) return value;
+  if (value / BASE_UNIT_SCALE <= allowance) return value / BASE_UNIT_SCALE;
   return value >= BASE_UNIT_DETECT_THRESHOLD ? value / BASE_UNIT_SCALE : value;
 }
 
@@ -142,7 +154,9 @@ function normalizeFillUnit(value: number): number {
  *
  * actualPrice = making/taking is unit-invariant (the 1e6 scale cancels), so it
  * is computed on the RAW amounts. actualAmount is normalized to human units
- * (shares) so callers never record base-unit-inflated sizes.
+ * (shares) so callers never record base-unit-inflated sizes. The unit is
+ * derived from the order context (fallback.amount — the signed order size in
+ * shares at the call site): a fill can never exceed it (SEC-187).
  *
  * Cases:
  *  - amounts MISSING/unparsable -> use fallback (accepted-no-amounts case).
@@ -170,14 +184,14 @@ export function deriveActualFill(
   if (side === "buy") {
     // BUY: taking = shares acquired, making = USD spent. price = making/taking.
     return {
-      actualAmount: normalizeFillUnit(takingAmount),
+      actualAmount: normalizeFillUnit(takingAmount, fallback.amount),
       actualPrice: makingAmount / takingAmount,
     };
   }
   // SELL: making = shares sold, taking = USD received. price = taking/making.
   // (Zero amounts already handled above as the resting/unfilled case.)
   return {
-    actualAmount: normalizeFillUnit(makingAmount),
+    actualAmount: normalizeFillUnit(makingAmount, fallback.amount),
     actualPrice: takingAmount / makingAmount,
   };
 }

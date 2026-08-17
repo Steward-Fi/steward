@@ -96,7 +96,9 @@ describe("deriveActualFill", () => {
     const r = deriveActualFill(
       "buy",
       { makingAmount: "10", takingAmount: "20" },
-      { amount: 10, price: 0.5 },
+      // Order size context: a 20-share buy (10 USDC at 0.5). The fill can never
+      // exceed the signed size, so 20 reads as human units.
+      { amount: 20, price: 0.5 },
     );
     expect(r.actualAmount).toBe(20);
     expect(r.actualPrice).toBeCloseTo(0.5, 10);
@@ -163,6 +165,29 @@ describe("deriveActualFill", () => {
       { amount: 7, price: 0.42 },
     );
     expect(r).toEqual({ actualAmount: 7, actualPrice: 0.42 });
+  });
+
+  test("SEC-187: a genuine >=1M-share fill in human units is NOT shrunk by the magnitude heuristic", () => {
+    // 2,000,000-share order filled in full, reported in human units.
+    const r = deriveActualFill(
+      "buy",
+      { makingAmount: "1000000", takingAmount: "2000000" },
+      { amount: 2_000_000, price: 0.5 },
+    );
+    expect(r.actualAmount).toBe(2_000_000); // NOT 2
+    expect(r.actualPrice).toBeCloseTo(0.5, 10);
+  });
+
+  test("SEC-187: a sub-1e6 base-unit fill is scaled down via order-size context", () => {
+    // 0.5-share fill on a 1-share order, reported as 6-decimal base units —
+    // below the old magnitude threshold yet still base units.
+    const r = deriveActualFill(
+      "buy",
+      { makingAmount: "250000", takingAmount: "500000" },
+      { amount: 1, price: 0.5 },
+    );
+    expect(r.actualAmount).toBe(0.5); // NOT 500000
+    expect(r.actualPrice).toBeCloseTo(0.5, 10);
   });
 });
 

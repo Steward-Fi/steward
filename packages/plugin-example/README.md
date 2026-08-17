@@ -4,7 +4,7 @@ the smallest honest Steward plugin. the runnable reference for writing one.
 
 it exercises all of the plugin contract's contribution points in the minimal way, importing ONLY from `@stwd/plugin-sdk`:
 
-1. route - `register(app, ctx)` mounts `GET /example/ping` -> `{ ok: true }`.
+1. route - `register(app, ctx)` mounts `GET /example/ping` -> `{ ok: true }`. **Deliberately unauthenticated** (SEC-173): the payload is a constant and the route exists only to prove the seam. Do NOT copy the ungated pattern — real routes that touch state must be mounted behind ctx auth middleware (`ctx.operatorAuth` / `ctx.tenantAuth` / `ctx.requireAgentJwt`).
 2. policy rule - a custom `example-business-hours` rule the engine evaluates.
 3. webhook event - declares `example.pinged`.
 4. migration - points at this package's own `drizzle/` folder (one `CREATE TABLE example_log`), applied into a per-plugin namespaced bookkeeping table, isolated from the core journal.

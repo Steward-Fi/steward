@@ -196,8 +196,12 @@ describe("idempotencyMiddleware", () => {
     const store = new MemoryIdempotencyStore(100);
     let count = 0;
     let releaseRoute: (() => void) | undefined;
+    let markRouteEntered: (() => void) | undefined;
     const routeGate = new Promise<void>((resolve) => {
       releaseRoute = resolve;
+    });
+    const routeEntered = new Promise<void>((resolve) => {
+      markRouteEntered = resolve;
     });
 
     app.use("*", async (c, next) => {
@@ -207,6 +211,7 @@ describe("idempotencyMiddleware", () => {
     app.use("*", idempotencyMiddleware({ store, ttlMs: 60_000 }));
     app.post("/mutate", async (c) => {
       count += 1;
+      markRouteEntered?.();
       await routeGate;
       return c.json({ ok: true, count });
     });
@@ -221,7 +226,7 @@ describe("idempotencyMiddleware", () => {
       body: JSON.stringify({ value: "first" }),
     };
     const firstPromise = app.request("/mutate", init);
-    await Promise.resolve();
+    await routeEntered;
     const second = await app.request("/mutate", init);
     releaseRoute?.();
     const first = await firstPromise;

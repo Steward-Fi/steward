@@ -43,6 +43,23 @@
  *
  * that way `@stwd/api` itself stays trading-free for anyone importing it, while a
  * deploy that wants trading opts in by registering the plugin.
+ *
+ * PLUGIN TRUST MODEL (SEC-170)
+ * ----------------------------
+ * plugins run IN-PROCESS with FULL trust — there is no sandbox. the injected
+ * ctx hands a plugin the live `vault` (it can sign arbitrary transactions for
+ * any agent/tenant, bypassing the policy engine) and the raw drizzle `db`
+ * handle (it can rewrite `agent_policies`, insert `secret_routes`, read
+ * ciphertext). the host's fail-closed guarantees cover CONTRIBUTION COLLISIONS
+ * (duplicate plugin names, missing deps, cycles, migration conflicts), NOT
+ * privilege: a malicious or compromised plugin package is full RCE with
+ * signing authority. therefore:
+ *   - only register first-party plugins or third-party plugins you would
+ *     trust with root on the host AND the master signing keys;
+ *   - pin + audit plugin dependencies exactly as you would the core itself;
+ *   - never register a plugin supplied at runtime by an untrusted party.
+ * a policy-gated signing facade in place of the raw vault handle is a
+ * considered future hardening, not currently implemented (SEC-170).
  */
 
 import { type AdapterCategory, AdapterRegistry, adapterRegistry } from "@stwd/adapters";

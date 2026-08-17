@@ -56,6 +56,7 @@ import { allocateEvmNonce, confirmEvmNonce, markEvmNonceDropped } from "./evm-no
 import {
   assertExternalKeyCustodyProviderV1,
   assertNoExternalPrivateKeyMaterial,
+  ExternalBroadcastOutcomeUnknownError,
   type ExternalKeyCustodyProvider,
   type ExternalKeyHandleImportRequest,
   type ExternalKeyHandleRegistration,
@@ -168,6 +169,14 @@ export interface SignBitcoinPsbtRequest {
   walletScope: string;
   psbtBase64: string;
   finalize?: boolean;
+  /**
+   * SEC-163: explicit caller attestation that edge policy (inspectBitcoinPsbt
+   * + spend/fee evaluation) approved this PSBT. The vault layer performs no
+   * fee/output policy of its own — it signs any PSBT with ≥1 input spendable
+   * by the wallet key — so signing REQUIRES this flag. Never forward
+   * client-controlled input into it.
+   */
+  allowBlindSign?: boolean;
 }
 
 export interface InspectBitcoinPsbtResult {
@@ -258,6 +267,130 @@ const SOLANA_RPCS: Record<number, string> = {
   101: "https://api.mainnet-beta.solana.com",
   102: "https://api.devnet.solana.com",
 };
+
+/**
+ * SEC-082: default read-only method inventory for rpcPassthrough. Anything not
+ * listed here is rejected — signing, state-modifying, and operator-namespace
+ * methods (eth_sendTransaction, eth_sign*, personal_*, Solana sendTransaction/
+ * signMessage/signTransaction/requestAirdrop, eth_accounts, admin_/debug_/
+ * trace_/txpool_/miner_*) can never be proxied, regardless of the upstream.
+ * STEWARD_VAULT_RPC_ALLOWLIST may only tighten this inventory (fail closed).
+ */
+const DEFAULT_RPC_PASSTHROUGH_ALLOWLIST = [
+  // EVM read-only
+  "eth_chainId",
+  "eth_blockNumber",
+  "eth_getBalance",
+  "eth_getCode",
+  "eth_getStorageAt",
+  "eth_getTransactionCount",
+  "eth_getTransactionByHash",
+  "eth_getTransactionReceipt",
+  "eth_getBlockByNumber",
+  "eth_getBlockByHash",
+  "eth_getBlockTransactionCountByNumber",
+  "eth_getBlockTransactionCountByHash",
+  "eth_getBlockReceipts",
+  "eth_getLogs",
+  "eth_getProof",
+  "eth_call",
+  "eth_estimateGas",
+  "eth_gasPrice",
+  "eth_maxPriorityFeePerGas",
+  "eth_feeHistory",
+  "eth_syncing",
+  "net_version",
+  "net_listening",
+  "net_peerCount",
+  "web3_clientVersion",
+  // Solana read-only
+  "getBalance",
+  "getAccountInfo",
+  "getMultipleAccounts",
+  "getBlock",
+  "getBlocks",
+  "getBlocksWithLimit",
+  "getBlockHeight",
+  "getBlockTime",
+  "getLatestBlockhash",
+  "isBlockhashValid",
+  "getFeeForMessage",
+  "getTransaction",
+  "getSignaturesForAddress",
+  "getSignatureStatuses",
+  "getTokenAccountsByOwner",
+  "getTokenAccountBalance",
+  "getTokenSupply",
+  "getProgramAccounts",
+  "getSupply",
+  "getSlot",
+  "getVersion",
+  "getHealth",
+  "getEpochInfo",
+  "getEpochSchedule",
+  "getGenesisHash",
+  "getRecentPrioritizationFees",
+  "getMinimumBalanceForRentExemption",
+  "getStakeMinimumDelegation",
+  "minimumLedgerSlot",
+  "simulateTransaction",
+];
+const DEFAULT_RPC_PASSTHROUGH_METHODS = new Set(DEFAULT_RPC_PASSTHROUGH_ALLOWLIST);
+const RPC_PASSTHROUGH_TIMEOUT_MS = 10_000;
+const RPC_PASSTHROUGH_MAX_RESPONSE_BYTES = 1024 * 1024;
+
+async function readBoundedRpcResponse(response: Response): Promise<RpcResponse> {
+  if (!response.ok) {
+    void response.body?.cancel().catch(() => {});
+    throw new Error(`RPC request failed with status ${response.status}`);
+  }
+  const declared = response.headers.get("content-length");
+  if (declared !== null) {
+    const length = Number(declared);
+    if (
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      length > RPC_PASSTHROUGH_MAX_RESPONSE_BYTES
+    ) {
+      void response.body?.cancel().catch(() => {});
+      throw new Error("RPC response exceeded maximum size");
+    }
+  }
+  if (!response.body) throw new Error("RPC response was empty");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > RPC_PASSTHROUGH_MAX_RESPONSE_BYTES) {
+        void reader.cancel().catch(() => {});
+        throw new Error("RPC response exceeded maximum size");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw new Error("RPC response was malformed");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("RPC response was malformed");
+  }
+  return parsed as RpcResponse;
+}
 
 export function resolveSignVenueSelector(request: Pick<SignRequest, "venue">): string | null {
   return request.venue ?? null;
@@ -683,6 +816,19 @@ export class Vault {
     }
   }
 
+  private async assertLocalSigningScopeIsNotExternal(
+    agentId: string,
+    chainFamily: ChainFamily,
+    venue: string | null = null,
+  ): Promise<void> {
+    const externalWallet = await this.getExternalKeyWallet({ agentId, chainFamily, venue });
+    if (externalWallet) {
+      throw new Error(
+        "This wallet uses external custody; this signing operation is not supported for external keys",
+      );
+    }
+  }
+
   private async recordSignedTransaction(
     request: SignRequest,
     chainId: number,
@@ -712,6 +858,8 @@ export class Vault {
         data: request.data,
         chainId,
         txHash: shouldBroadcast ? hash : undefined,
+        executionBackend: options.expectedBackend,
+        executionBackendIdentityDigest: options.expectedBackendIdentityDigest,
         policyResults: options.policyResults ?? [],
         signedAt,
         createdAt: signedAt,
@@ -726,6 +874,8 @@ export class Vault {
           data: request.data,
           chainId,
           txHash: shouldBroadcast ? hash : undefined,
+          executionBackend: options.expectedBackend,
+          executionBackendIdentityDigest: options.expectedBackendIdentityDigest,
           policyResults: options.policyResults ?? [],
           signedAt,
         },
@@ -1425,38 +1575,124 @@ export class Vault {
         const rpcUrl = isSolana
           ? (this.config.rpcUrl ?? resolveSolanaRpc(chainId))
           : (CHAIN_RPCS[chainId] ?? this.config.rpcUrl);
-        const signed = await this.externalKeyCustodyProvider.signTransaction({
-          tenantId: request.tenantId,
-          agentId: request.agentId,
-          chainFamily: chainFamilyToUse,
-          address: externalWallet.address,
-          handle: {
-            providerId: externalWallet.metadata.externalKey.providerId,
-            keyId: externalWallet.metadata.externalKey.keyId,
-            version: externalWallet.metadata.externalKey.version,
-            region: externalWallet.metadata.externalKey.region,
-          },
-          venue,
-          chainId,
-          to: request.to,
-          value: request.value,
-          data: request.data,
-          gasLimit: request.gasLimit,
-          nonce: request.nonce,
-          broadcast: shouldBroadcast,
-          rpcUrl,
-        });
-        assertNoExternalPrivateKeyMaterial(signed, "externalSignTransactionResult");
-        if (signed.broadcast !== shouldBroadcast) {
-          throw new Error("External key custody signer returned an unexpected broadcast mode");
+        let signed;
+        let preparedBroadcastHash: string | undefined;
+        try {
+          signed = await this.externalKeyCustodyProvider.signTransaction({
+            tenantId: request.tenantId,
+            agentId: request.agentId,
+            chainFamily: chainFamilyToUse,
+            address: externalWallet.address,
+            handle: {
+              providerId: externalWallet.metadata.externalKey.providerId,
+              keyId: externalWallet.metadata.externalKey.keyId,
+              version: externalWallet.metadata.externalKey.version,
+              region: externalWallet.metadata.externalKey.region,
+            },
+            venue,
+            chainId,
+            to: request.to,
+            value: request.value,
+            data: request.data,
+            gasLimit: request.gasLimit,
+            nonce: request.nonce,
+            broadcast: shouldBroadcast,
+            rpcUrl,
+            ...(shouldBroadcast
+              ? {
+                  onPreparedBroadcast: async (transactionHash: string) => {
+                    if (
+                      preparedBroadcastHash &&
+                      preparedBroadcastHash.toLowerCase() !== transactionHash.toLowerCase()
+                    ) {
+                      throw new Error(
+                        "External custody signer changed the prepared transaction hash",
+                      );
+                    }
+                    await this.recordSignedTransaction(request, chainId, true, transactionHash, {
+                      ...options,
+                      status: "outcome_unknown",
+                    });
+                    preparedBroadcastHash = transactionHash;
+                  },
+                }
+              : {}),
+          });
+        } catch (error) {
+          const outcomeError =
+            error instanceof ExternalBroadcastOutcomeUnknownError
+              ? preparedBroadcastHash &&
+                preparedBroadcastHash.toLowerCase() !== error.transactionHash.toLowerCase()
+                ? new ExternalBroadcastOutcomeUnknownError(preparedBroadcastHash, { cause: error })
+                : error
+              : shouldBroadcast && preparedBroadcastHash
+                ? new ExternalBroadcastOutcomeUnknownError(preparedBroadcastHash, { cause: error })
+                : null;
+          if (outcomeError) {
+            // The provider has already produced a deterministic local hash and
+            // may have handed the signed bytes to the RPC.  A database failure
+            // must never replace this irreversible outcome with a generic
+            // error: approval callers would otherwise reopen the queue and a
+            // retry could broadcast the same intent again.  The gateway
+            // pre-stages direct executions (and approval executions already
+            // have a transaction row), so it can durably recover the exact
+            // hash even when this first write fails.
+            try {
+              await this.recordSignedTransaction(
+                request,
+                chainId,
+                true,
+                outcomeError.transactionHash,
+                {
+                  ...options,
+                  status: "outcome_unknown",
+                },
+              );
+            } catch {
+              // Deliberately preserve the typed error and its hash. Do not log
+              // the persistence exception: provider/RPC errors may contain
+              // credential-bearing URLs, and the gateway owns the bounded
+              // fallback persistence/audit path.
+            }
+            throw outcomeError;
+          }
+          throw error;
         }
-        await this.recordSignedTransaction(
-          request,
-          chainId,
-          shouldBroadcast,
-          signed.result,
-          options,
-        );
+        try {
+          assertNoExternalPrivateKeyMaterial(signed, "externalSignTransactionResult");
+          if (signed.broadcast !== shouldBroadcast) {
+            throw new Error("External key custody signer returned an unexpected broadcast mode");
+          }
+          if (
+            shouldBroadcast &&
+            preparedBroadcastHash &&
+            signed.result.toLowerCase() !== preparedBroadcastHash.toLowerCase()
+          ) {
+            throw new ExternalBroadcastOutcomeUnknownError(preparedBroadcastHash, {
+              cause: new Error("External custody signer returned a mismatched transaction hash"),
+            });
+          }
+          await this.recordSignedTransaction(
+            request,
+            chainId,
+            shouldBroadcast,
+            signed.result,
+            options,
+          );
+        } catch (error) {
+          // Once the durable checkpoint has completed, every later failure is
+          // post-irreversibility: the provider may already have submitted the
+          // signed bytes. Preserve the exact prepared hash and never let the
+          // approval gateway classify this as retryable.
+          if (
+            shouldBroadcast &&
+            preparedBroadcastHash &&
+            !(error instanceof ExternalBroadcastOutcomeUnknownError)
+          ) {
+            throw new ExternalBroadcastOutcomeUnknownError(preparedBroadcastHash, { cause: error });
+          }
+          throw error;
+        }
         return signed.result;
       }
       if (venue) {
@@ -1969,11 +2205,21 @@ export class Vault {
 
     const db = getDb();
     const [agentRow] = await db
-      .select({ id: agents.id })
+      .select({ id: agents.id, walletAddress: agents.walletAddress })
       .from(agents)
       .where(and(eq(agents.id, request.agentId), eq(agents.tenantId, request.tenantId)));
     if (!agentRow) {
       throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
+    }
+
+    if (!request.venue && detectChainType(agentRow.walletAddress) === request.chainFamily) {
+      const [legacyKey] = await db
+        .select({ agentId: encryptedKeys.agentId })
+        .from(encryptedKeys)
+        .where(eq(encryptedKeys.agentId, request.agentId));
+      if (legacyKey) {
+        throw new Error("Cannot register external key handle over a legacy server-managed key");
+      }
     }
 
     const registration = normalizeExternalKeyHandleRegistration(
@@ -2062,6 +2308,7 @@ export class Vault {
     const isSolana = detectChainType(agentRow.walletAddress) === "solana";
     const chainFamilyToUse = isSolana ? "solana" : "evm";
     await assertVaultSigningActive({ tenantId, agentId, chainFamily: chainFamilyToUse });
+    await this.assertLocalSigningScopeIsNotExternal(agentId, chainFamilyToUse);
 
     // Resolve signing key: prefer encryptedChainKeys (multi-wallet), fall back to legacy encryptedKeys
     let secretKey: string;
@@ -2140,6 +2387,7 @@ export class Vault {
       throw new Error("Raw secp256k1 signing requires an EVM agent");
     }
     await assertVaultSigningActive({ tenantId, agentId, chainFamily: "evm" });
+    await this.assertLocalSigningScopeIsNotExternal(agentId, "evm");
 
     let secretKey: string;
     const [chainKey] = await db
@@ -2243,6 +2491,7 @@ export class Vault {
     // authorization boundary (the encrypted-key tables are keyed by agentId).
     const chainFamily = curve === "secp256k1" ? "evm" : "solana";
     await assertVaultSigningActive({ tenantId, agentId, chainFamily });
+    await this.assertLocalSigningScopeIsNotExternal(agentId, chainFamily);
 
     let secretKey: string;
     const [chainKey] = await db
@@ -2348,6 +2597,7 @@ export class Vault {
       throw new Error("signAuthorization requires an EVM agent");
     }
     await assertVaultSigningActive({ tenantId, agentId, chainFamily: "evm" });
+    await this.assertLocalSigningScopeIsNotExternal(agentId, "evm");
 
     let secretKey: string;
     const [chainKey] = await db
@@ -2426,6 +2676,7 @@ export class Vault {
       chainFamily: "evm",
       venue: request.venue ?? null,
     });
+    await this.assertLocalSigningScopeIsNotExternal(request.agentId, "evm", request.venue ?? null);
 
     // Resolve signing key: prefer encryptedChainKeys (multi-wallet), scoped by
     // venue when requested, then fall back to legacy encryptedKeys only for
@@ -2529,6 +2780,7 @@ export class Vault {
     if (detectChainType(agentRow.walletAddress) === "solana") {
       throw new Error("ERC-4337 user operation signing is not supported for Solana wallets");
     }
+    await this.assertLocalSigningScopeIsNotExternal(request.agentId, "evm");
 
     await assertVaultSigningActive({
       tenantId: request.tenantId,
@@ -2613,6 +2865,7 @@ export class Vault {
     if (!agentRow) {
       throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
     }
+    await this.assertLocalSigningScopeIsNotExternal(request.agentId, "solana");
 
     await assertVaultSigningActive({
       tenantId: request.tenantId,
@@ -2620,6 +2873,23 @@ export class Vault {
       chainFamily: "solana",
       venue: null,
     });
+
+    // SEC-163: fail closed on blind signing. Without the expectedTo/
+    // expectedValue envelope the vault applies no recipient/amount assertion,
+    // so the caller must explicitly attest that its own edge policy evaluation
+    // approved the transaction. Checked after the signing freeze (a freeze
+    // must still report as a freeze) and before any key material is touched.
+    if (request.expectedTo === undefined && request.expectedValue === undefined) {
+      if (request.allowBlindSign !== true) {
+        throw new Error(
+          "Solana transaction signing without a policy envelope requires allowBlindSign: true " +
+            "(caller attestation that edge policy approved the transaction)",
+        );
+      }
+      console.warn(
+        `[Vault] BLIND Solana sign (no policy envelope, caller-attested): tenant=${request.tenantId} agent=${request.agentId} chainId=${request.chainId ?? 101} broadcast=${request.broadcast !== false}`,
+      );
+    }
 
     // Resolve Solana key: prefer encryptedChainKeys (multi-wallet), fall back to
     // legacy encryptedKeys when the agent has a Solana walletAddress.
@@ -3086,6 +3356,18 @@ export class Vault {
       venue: walletScope,
     });
 
+    // SEC-163: the vault layer applies no fee/output policy to PSBTs — it
+    // signs any PSBT with ≥1 input spendable by the wallet key. Signing is
+    // therefore only permitted when the caller explicitly attests that edge
+    // policy (inspectBitcoinPsbt + spend/fee evaluation) already approved
+    // this exact payload. Checked after the freeze gate, before key access.
+    if (request.allowBlindSign !== true) {
+      throw new Error(
+        "Bitcoin PSBT signing requires allowBlindSign: true " +
+          "(caller attestation that edge policy approved the PSBT)",
+      );
+    }
+
     const [wallet] = await db
       .select({
         address: agentWallets.address,
@@ -3253,6 +3535,16 @@ export class Vault {
   /**
    * Proxy a read-only RPC call to the appropriate chain provider.
    * Supports both EVM and Solana RPC methods.
+   *
+   * SEC-082: enforced as an ALLOWLIST, not a blocklist. A blocklist can never
+   * enumerate every signing/admin method on every upstream (`eth_signTypedData_v3`,
+   * Solana `signMessage`/`signTransaction`, or `admin_`/`debug_`/`trace_`
+   * namespaces when an operator points `config.rpcUrl` at a node with unlocked
+   * accounts), so only known read-only methods pass. Operators tighten or
+   * tighten the inventory via STEWARD_VAULT_RPC_ALLOWLIST (comma-separated) —
+   * the same knob the API edge uses. Note the vault's own guards proxy
+   * `eth_getCode` through here, so an override that omits it fails closed
+   * (native-transfer code checks are denied, never bypassed).
    */
   async rpcPassthrough(request: RpcRequest): Promise<RpcResponse> {
     const chainId = request.chainId;
@@ -3269,19 +3561,20 @@ export class Vault {
       throw new Error(`No RPC URL configured for chainId ${chainId}`);
     }
 
-    // Block signing/state-modifying methods - this is read-only passthrough
-    const blockedMethods = [
-      "eth_sendTransaction",
-      "eth_sendRawTransaction",
-      "eth_sign",
-      "personal_sign",
-      "eth_signTypedData",
-      "eth_signTypedData_v4",
-      "sendTransaction",
-    ];
-    if (blockedMethods.includes(request.method)) {
+    const configured = process.env.STEWARD_VAULT_RPC_ALLOWLIST;
+    const configuredMethods = configured
+      ?.split(",")
+      .map((method) => method.trim())
+      .filter(Boolean);
+    if (configuredMethods?.some((method) => !DEFAULT_RPC_PASSTHROUGH_METHODS.has(method))) {
+      throw new Error("STEWARD_VAULT_RPC_ALLOWLIST contains an unsupported method");
+    }
+    const allowlist = configuredMethods
+      ? new Set(configuredMethods)
+      : DEFAULT_RPC_PASSTHROUGH_METHODS;
+    if (!allowlist.has(request.method)) {
       throw new Error(
-        `Method ${request.method} is not allowed via RPC passthrough - use the signing endpoints`,
+        `Method ${request.method} is not allowed via RPC passthrough - read-only methods only`,
       );
     }
 
@@ -3294,13 +3587,10 @@ export class Vault {
         method: request.method,
         params: request.params ?? [],
       }),
+      redirect: "error",
+      signal: AbortSignal.timeout(RPC_PASSTHROUGH_TIMEOUT_MS),
     });
-
-    if (!response.ok) {
-      throw new Error(`RPC request failed: ${response.status} ${response.statusText}`);
-    }
-
-    return (await response.json()) as RpcResponse;
+    return readBoundedRpcResponse(response);
   }
 
   // ──────────────────────────────────────────────────────────────────────
@@ -3522,6 +3812,17 @@ export class Vault {
    */
   async createWallet(args: {
     agentId: string;
+    /**
+     * SEC-162: required caller-asserted tenant, verified against the agent's
+     * real tenant before any wallet row is written. The AAD on the encrypted
+     * key material was always bound to `agentRow.tenantId` (so cross-tenant
+     * key theft was never possible); this check closes the residual DoS —
+     * a caller reaching this method with another tenant's agentId can no
+     * longer squat venue wallet slots for that agent. Routes that know the
+     * tenant must pass it. Keeping this optional would preserve the original
+     * in-process cross-tenant venue-slot-squatting path.
+     */
+    tenantId: string;
     venue?: string;
     scope?: string;
     chainType: WalletChainFamily;
@@ -3549,6 +3850,12 @@ export class Vault {
       .where(eq(agents.id, agentId));
     if (!agentRow) {
       throw new Error(`Agent ${agentId} not found`);
+    }
+    // Defense-in-depth tenant binding (SEC-162). Same "not found" phrasing as
+    // the other tenant-scoped lookups so a mismatch does not confirm the
+    // agent's existence under another tenant.
+    if (agentRow.tenantId !== args.tenantId) {
+      throw new Error(`Agent ${agentId} not found for tenant ${args.tenantId}`);
     }
 
     let address: string;

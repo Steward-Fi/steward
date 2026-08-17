@@ -135,6 +135,23 @@ describe("permissioned-X: contentPolicy", () => {
     expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
 
+  it("typed ctx.x signals win over contradictory caller args (SEC-182)", () => {
+    const noUrls: XConstraints = { contentPolicy: { allowUrls: false } };
+    // args (caller-influenced) claims a URL; the adapter-derived typed channel
+    // says there is none — the typed channel is authoritative.
+    expect(decide(noUrls, ctx({ hasUrl: true }, { x: { hasUrl: false } })).effect).toBe("allow");
+    // and the reverse: typed hasUrl=true denies even when args claims none.
+    const d = decide(noUrls, ctx({ hasUrl: false }, { x: { hasUrl: true } }));
+    expect(d.reasonCodes).toContain(R.X_URL_FORBIDDEN);
+
+    // same preference for the length signal
+    const maxLen: XConstraints = { contentPolicy: { maxLength: 10 } };
+    expect(decide(maxLen, ctx({}, { x: { textCodePointLength: 5 } })).effect).toBe("allow");
+    expect(decide(maxLen, ctx({}, { x: { textCodePointLength: 11 } })).reasonCodes).toContain(
+      R.X_CONTENT_TOO_LONG,
+    );
+  });
+
   it("blockedPatterns denies a matching text via the in-memory policyText channel", () => {
     // Patterns are standard JS RegExp source (no inline (?i) flag). Author
     // case-insensitivity into the pattern itself.
@@ -169,6 +186,28 @@ describe("permissioned-X: contentPolicy", () => {
     const d = composeProviderActionPolicyDecision([rule], ctx({}, { policyText: "anything" }));
     expect(d.effect).toBe("hard_deny");
     expect(d.reasonCodes).toContain(R.CONFIGURATION_INVALID);
+  });
+
+  it("over-long blockedPatterns fail closed as a config error (SEC-107 ReDoS bound)", () => {
+    const rule: ProviderPolicyRule = {
+      id: "r-long-regex",
+      type: "capability-intent",
+      enabled: true,
+      config: {
+        capabilities: [OP_TWEET],
+        effect: "allow",
+        constraints: { x: { contentPolicy: { blockedPatterns: [`(a+)+${".".repeat(300)}`] } } },
+      },
+    };
+    const d = composeProviderActionPolicyDecision([rule], ctx({}, { policyText: "anything" }));
+    expect(d.effect).toBe("hard_deny");
+    expect(d.reasonCodes).toContain(R.CONFIGURATION_INVALID);
+  });
+
+  it("over-long policyText fails closed instead of being scanned (SEC-107 ReDoS bound)", () => {
+    const x: XConstraints = { contentPolicy: { blockedPatterns: ["spam"] } };
+    const c = ctx({}, { policyText: `gm ${"x".repeat(9000)}` });
+    expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
 });
 

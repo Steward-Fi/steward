@@ -462,6 +462,14 @@ export interface AggregationConditionConfig {
   denomination?: AggregationDenomination;
 }
 
+/**
+ * SEC-183 (documented seam): `contract-allowlist` gates CONTRACT CALLS ONLY.
+ * A transaction with no calldata — a plain native-value transfer — passes
+ * this rule unconditionally regardless of the allowlist below. Operators who
+ * expect it to also constrain native sends MUST pair it with an
+ * `approved-addresses` rule (whose write validator currently restricts
+ * addresses to EVM format).
+ */
 export interface ContractAllowlistConfig {
   contracts: Array<{
     address: string;
@@ -575,7 +583,8 @@ export type TxStatus =
   | "signed"
   | "broadcast"
   | "confirmed"
-  | "failed";
+  | "failed"
+  | "outcome_unknown";
 
 export interface SignRequest {
   agentId: string;
@@ -646,6 +655,15 @@ export interface SignSolanaTransactionRequest {
   broadcast?: boolean; // default true
   expectedTo?: string; // policy-evaluated recipient for serialized transfer validation
   expectedValue?: string; // policy-evaluated lamports for serialized transfer validation
+  /**
+   * SEC-163: explicit caller attestation required when signing WITHOUT the
+   * expectedTo/expectedValue policy envelope (token/multi-instruction shapes
+   * the vault's byte-level envelope check cannot model). Callers must only set
+   * this after their own edge policy evaluation approved the transaction; the
+   * vault rejects blind requests that omit it and logs every flagged blind
+   * sign. Never forward client-controlled input into this flag.
+   */
+  allowBlindSign?: boolean;
 }
 
 /**

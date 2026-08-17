@@ -41,4 +41,51 @@ describe("passkey MFA hardening", () => {
     expect(counterUpdate).toBeGreaterThan(consumeChallenge);
     expect(mfaMethod).toBeGreaterThan(counterUpdate);
   });
+
+  it("rejects passkey counter regression before persisting the counter (SEC-141)", () => {
+    // Both the login route and the MFA complete/verify handler must reject a
+    // non-increasing counter from an authenticator that previously reported
+    // one — and must do so before updating the stored counter.
+    const guard = "verification.authenticationInfo.newCounter <= cred.counter";
+
+    const mfaStart = authSource.indexOf("const completePasskeyMfaHandler");
+    expect(mfaStart).toBeGreaterThanOrEqual(0);
+    const mfaGuard = authSource.indexOf(guard, mfaStart);
+    const mfaCounterUpdate = authSource.indexOf(".set({ counter:", mfaStart);
+    const mfaCompareAndSwap = authSource.indexOf(
+      "eq(authenticators.counter, cred.counter)",
+      mfaCounterUpdate,
+    );
+    expect(mfaGuard).toBeGreaterThan(mfaStart);
+    expect(mfaGuard).toBeLessThan(mfaCounterUpdate);
+    expect(mfaCompareAndSwap).toBeGreaterThan(mfaCounterUpdate);
+
+    const loginStart = authSource.indexOf('auth.post("/passkey/login/verify"');
+    expect(loginStart).toBeGreaterThanOrEqual(0);
+    const loginGuard = authSource.indexOf(guard, loginStart);
+    const loginCounterUpdate = authSource.indexOf(".set({ counter:", loginStart);
+    const loginCompareAndSwap = authSource.indexOf(
+      "eq(authenticators.counter, cred.counter)",
+      loginCounterUpdate,
+    );
+    expect(loginGuard).toBeGreaterThan(loginStart);
+    expect(loginGuard).toBeLessThan(loginCounterUpdate);
+    expect(loginCompareAndSwap).toBeGreaterThan(loginCounterUpdate);
+  });
+
+  it("atomically claims passkey counters to reject concurrent clones", () => {
+    const compareAndSwap = "eq(authenticators.counter, cred.counter)";
+
+    const mfaStart = authSource.indexOf("const completePasskeyMfaHandler");
+    const mfaCas = authSource.indexOf(compareAndSwap, mfaStart);
+    const mfaFailure = authSource.indexOf("updatedMfaCounters.length !== 1", mfaCas);
+    expect(mfaCas).toBeGreaterThan(mfaStart);
+    expect(mfaFailure).toBeGreaterThan(mfaCas);
+
+    const loginStart = authSource.indexOf('auth.post("/passkey/login/verify"');
+    const loginCas = authSource.indexOf(compareAndSwap, loginStart);
+    const loginFailure = authSource.indexOf("updatedCounters.length !== 1", loginCas);
+    expect(loginCas).toBeGreaterThan(loginStart);
+    expect(loginFailure).toBeGreaterThan(loginCas);
+  });
 });

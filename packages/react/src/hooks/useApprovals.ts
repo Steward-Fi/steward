@@ -1,9 +1,44 @@
+import type { ApprovalQueueEntry as SdkApprovalQueueEntry } from "@stwd/sdk";
 import { useCallback, useEffect, useState } from "react";
 import { useStewardContext } from "../provider.js";
 import type { ApprovalQueueEntry } from "../types.js";
 
 /**
+ * Map the SDK tenant-level approval entry onto the dashboard shape. The
+ * tenant approvals API does not expose per-entry policy results, so that
+ * list stays empty. Exported for unit tests; not part of the package API.
+ */
+export function toQueueEntry(entry: SdkApprovalQueueEntry): ApprovalQueueEntry {
+  const requestedAt =
+    entry.requestedAt instanceof Date ? entry.requestedAt : new Date(entry.requestedAt);
+  const resolvedAt =
+    entry.resolvedAt === undefined
+      ? undefined
+      : entry.resolvedAt instanceof Date
+        ? entry.resolvedAt
+        : new Date(entry.resolvedAt);
+  return {
+    id: entry.id,
+    agentId: entry.agentId,
+    txId: entry.txId,
+    status: entry.status,
+    to: entry.toAddress ?? "",
+    value: entry.value ?? "0",
+    chainId: entry.chainId ?? 0,
+    policyResults: [],
+    createdAt: Number.isNaN(requestedAt.getTime()) ? "" : requestedAt.toISOString(),
+    resolvedAt:
+      resolvedAt && !Number.isNaN(resolvedAt.getTime()) ? resolvedAt.toISOString() : undefined,
+    resolvedBy: entry.resolvedBy,
+  };
+}
+
+/**
  * Approval queue with approve/reject actions.
+ *
+ * All calls route through the credentialed StewardClient — never raw fetch.
+ * Vault approvals use the vault execution route so policy is revalidated and
+ * the approved transaction is actually signed/broadcast (SEC-195).
  */
 export function useApprovals(refreshInterval?: number) {
   const { client, agentId, pollInterval } = useStewardContext();
@@ -14,27 +49,18 @@ export function useApprovals(refreshInterval?: number) {
   const [isResolving, setIsResolving] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
-  const baseUrl = client.getBaseUrl();
-
   const fetchApprovals = useCallback(async () => {
     try {
-      const res = await fetch(
-        `${baseUrl}/agents/${encodeURIComponent(agentId)}/approvals?status=pending`,
-        { headers: { Accept: "application/json" } },
-      );
-      if (res.ok) {
-        const json = await res.json();
-        if (json.ok && json.data) {
-          setPending(Array.isArray(json.data) ? json.data : []);
-        }
-      }
+      // Tenant-scoped list; narrow to this provider's agent client-side.
+      const entries = await client.listApprovals({ status: "pending" });
+      setPending(entries.filter((e) => e.agentId === agentId).map(toQueueEntry));
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
     } finally {
       setIsLoading(false);
     }
-  }, [baseUrl, agentId]);
+  }, [client, agentId]);
 
   useEffect(() => {
     fetchApprovals();
@@ -46,38 +72,26 @@ export function useApprovals(refreshInterval?: number) {
     async (txId: string) => {
       setIsResolving(true);
       try {
-        const res = await fetch(
-          `${baseUrl}/agents/${encodeURIComponent(agentId)}/approvals/${encodeURIComponent(txId)}/approve`,
-          { method: "POST", headers: { "Content-Type": "application/json" } },
-        );
-        if (!res.ok) throw new Error(`Approve failed: ${res.status}`);
+        await client.approveVaultTransaction(agentId, txId);
         setPending((prev) => prev.filter((a) => a.txId !== txId));
       } finally {
         setIsResolving(false);
       }
     },
-    [baseUrl, agentId],
+    [client, agentId],
   );
 
   const reject = useCallback(
     async (txId: string, reason?: string) => {
       setIsResolving(true);
       try {
-        const res = await fetch(
-          `${baseUrl}/agents/${encodeURIComponent(agentId)}/approvals/${encodeURIComponent(txId)}/reject`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ reason }),
-          },
-        );
-        if (!res.ok) throw new Error(`Reject failed: ${res.status}`);
+        await client.denyTransaction(txId, reason ?? "");
         setPending((prev) => prev.filter((a) => a.txId !== txId));
       } finally {
         setIsResolving(false);
       }
     },
-    [baseUrl, agentId],
+    [client],
   );
 
   return {

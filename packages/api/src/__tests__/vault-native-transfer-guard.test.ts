@@ -217,13 +217,18 @@ describe("native transfer gas-accounting guard (real /sign path)", () => {
         );
       expect(authorized.length).toBe(1);
 
-      // Fail-closed: nothing persisted as signed for this agent (the row is created
-      // inside signTransaction, which threw), and the success audit was NOT written.
+      // Fail-closed: the pre-I/O recovery anchor is retained but marked failed;
+      // nothing is persisted as signed/broadcast and no success audit is written.
+      // Keeping this terminal row also prevents an idempotent retry from reaching
+      // the signer after an ambiguous process failure.
       const rows = await getDb()
-        .select({ id: transactions.id })
+        .select({ id: transactions.id, status: transactions.status, txHash: transactions.txHash })
         .from(transactions)
         .where(eq(transactions.agentId, AGENT_ID));
-      expect(rows.length).toBe(0);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ status: "failed", txHash: null });
+      expect(rows[0]?.status).not.toBe("broadcast");
+      expect(rows[0]?.status).not.toBe("outcome_unknown");
       const succeeded = await getDb()
         .select({ action: auditEvents.action })
         .from(auditEvents)

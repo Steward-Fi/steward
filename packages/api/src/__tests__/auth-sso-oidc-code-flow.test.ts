@@ -72,4 +72,37 @@ describe("enterprise OIDC authorization-code SSO hardening", () => {
     expect(source).toContain("OIDC token endpoint did not return an id_token");
     expect(source).toContain("Direct JWT login is disabled for authorization-code OIDC providers");
   });
+
+  it("screens IPv4-embedding IPv6 transition ranges in the token-endpoint SSRF guard", () => {
+    const source = read("packages/api/src/routes/auth.ts");
+    expect(source).toContain("embeddedTransitionOidcIpv4");
+    expect(source).toContain("words[0] === 0x64 &&");
+    expect(source).toContain("words[0] === 0x2002");
+    expect(source).toContain("words?.[0] === 0x2001 && words[1] === 0");
+    const guardStart = source.indexOf("function isPrivateOidcIpv6");
+    const guardEnd = source.indexOf("\nfunction ", guardStart + 1);
+    const guard = source.slice(guardStart, guardEnd === -1 ? undefined : guardEnd);
+    expect(guard).toContain("embeddedTransitionOidcIpv4(normalized)");
+    expect(guard).toContain("isPrivateOidcIpv4(embedded)");
+  });
+
+  it("never echoes the IdP-supplied error string into the token-exchange 502", () => {
+    const source = read("packages/api/src/routes/auth.ts");
+    const exchangeStart = source.indexOf("async function exchangeOidcAuthorizationCode");
+    expect(exchangeStart).toBeGreaterThanOrEqual(0);
+    const exchangeEnd = source.indexOf("\nasync function ", exchangeStart + 1);
+    const exchange = source.slice(exchangeStart, exchangeEnd === -1 ? undefined : exchangeEnd);
+
+    // The IdP-controlled payload.error must be logged server-side, not thrown
+    // (the route surfaces err.message in its 502 response).
+    const rejectStart = exchange.indexOf("if (!response.ok)");
+    expect(rejectStart).toBeGreaterThanOrEqual(0);
+    const rejectBlock = exchange.slice(rejectStart, exchange.indexOf("}", rejectStart) + 1);
+    expect(exchange).toContain("console.warn(");
+    expect(exchange).not.toContain("throw new Error(error)");
+    expect(exchange).toContain(
+      'throw new Error("OIDC token endpoint rejected authorization code")',
+    );
+    expect(rejectBlock).not.toContain("throw new Error(error)");
+  });
 });

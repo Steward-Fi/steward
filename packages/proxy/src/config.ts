@@ -17,8 +17,70 @@ export const DEFAULT_ALIASES: Record<string, string> = {
   x: "api.x.com",
 };
 
+/** Parse a bounded integer setting at module load so malformed resource limits fail closed. */
+export function boundedPositiveIntegerEnv(name: string, fallback: number, maximum: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
+    throw new Error(`${name} must be an integer between 1 and ${maximum}`);
+  }
+  return value;
+}
+
 /** Default port for the proxy server */
-export const PROXY_PORT = parseInt(process.env.STEWARD_PROXY_PORT || "8080", 10);
+export const PROXY_PORT = boundedPositiveIntegerEnv("STEWARD_PROXY_PORT", 8080, 65_535);
 
 /** Required JWT scope for proxy access */
 export const PROXY_SCOPE = "api:proxy";
+
+/**
+ * SEC-175: the proxy fails closed by default — request signing, Redis-backed
+ * rate limiting, and the shared replay store are REQUIRED regardless of
+ * NODE_ENV. The soft development posture (unsigned requests, permissive
+ * in-process fallbacks) now needs this explicit opt-in, so a deployment that
+ * merely forgets to set NODE_ENV=production no longer silently gets it.
+ * Local dev compose sets STEWARD_PROXY_DEV_MODE=true.
+ */
+export function isProxyDevMode(): boolean {
+  return process.env.NODE_ENV !== "production" && process.env.STEWARD_PROXY_DEV_MODE === "true";
+}
+
+export function configuredProxyCorsOrigins(): string[] {
+  const values = (process.env.STEWARD_PROXY_CORS_ORIGINS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return values.map((value) => {
+    if (value === "*") throw new Error("STEWARD_PROXY_CORS_ORIGINS must not contain '*'");
+    let parsed: URL;
+    try {
+      parsed = new URL(value);
+    } catch {
+      throw new Error(`Invalid STEWARD_PROXY_CORS_ORIGINS origin: ${JSON.stringify(value)}`);
+    }
+    if (
+      (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+      parsed.username ||
+      parsed.password ||
+      parsed.pathname !== "/" ||
+      parsed.search ||
+      parsed.hash ||
+      parsed.origin !== value
+    ) {
+      throw new Error(
+        `STEWARD_PROXY_CORS_ORIGINS entries must be canonical HTTP(S) origins: ${JSON.stringify(value)}`,
+      );
+    }
+    const isLoopback =
+      parsed.hostname === "localhost" ||
+      parsed.hostname === "127.0.0.1" ||
+      parsed.hostname === "[::1]";
+    if (parsed.protocol !== "https:" && !isLoopback) {
+      throw new Error(
+        `STEWARD_PROXY_CORS_ORIGINS requires HTTPS except for loopback origins: ${JSON.stringify(value)}`,
+      );
+    }
+    return parsed.origin;
+  });
+}

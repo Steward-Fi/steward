@@ -65,6 +65,20 @@ const SENSITIVE_CREDENTIAL_KEY_DECORATORS = ["header", "value", "pem"];
 const PRIVATE_KEY_ARMOR =
   /-----BEGIN (?:ENCRYPTED |RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----|-----BEGIN PGP PRIVATE KEY BLOCK-----/;
 
+/**
+ * Lowercase and strip every non-[a-z0-9] character so carrier names compare
+ * punctuation/case-insensitively ("X-API-Key" → "xapikey").
+ *
+ * KNOWN LIMITATION (SEC-194): non-ASCII lookalike key names evade this
+ * heuristic — e.g. Cyrillic `secrеt` normalizes to `secrt` (the Cyrillic
+ * letters are stripped, not folded), which matches no sensitive key. This is
+ * accepted residual risk: the heuristic is a defense-in-depth canary for
+ * diagnostics/redaction, not the credential boundary — credential-carrying
+ * headers are separately forbidden outright, and actual credential injection
+ * flows only through the vault's allowlisted routes. Do not widen this into a
+ * security-critical gate without adding confusable folding (e.g. NFKC +
+ * skeleton mapping) first.
+ */
 function normalizeSensitiveKey(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]/g, "");
 }

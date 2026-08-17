@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import type { LookupAddress } from "node:dns";
 import type { RequestOptions } from "node:http";
 import { isIP, type LookupFunction } from "node:net";
@@ -14,7 +14,8 @@ const SIGNATURE_SCHEME = "v2";
 // bodies contain '.', and a plain `.`-join would let an attacker re-split a
 // captured signature (e.g. eventType "a.b"+body "c" vs "a"+body "b.c") to forge
 // a colliding-but-valid message. body is last/unbounded so needs no prefix.
-function canonicalSignedPayload(
+// Exported so receivers (verifyWebhookSignature) sign the identical material.
+export function canonicalSignedPayload(
   timestamp: string,
   deliveryId: string,
   eventType: string,
@@ -30,6 +31,9 @@ const MAX_RESPONSE_BYTES = 64 * 1024;
 const ALLOW_PRIVATE_WEBHOOK_NETWORKS =
   (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
     ?.STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS === "true";
+
+// Once-per-process latch for the SEC-102 escape-hatch warning below.
+let warnedPrivateWebhookNetworks = false;
 
 function toHex(buffer: ArrayBuffer): string {
   return Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -155,6 +159,19 @@ function embeddedIpv4FromIpv6(address: string): string | null {
     words[0] === 0x64 && words[1] === 0xff9b && words[2] === 1 && words[3] === 0;
   if (isNat64LocalUse) return fromWords(words[6], words[7]);
 
+  // RFC 8215 IPv4-translated ::ffff:0:0/96 — distinct from the IPv4-mapped form
+  // (handled by mappedIpv4FromIpv6, which has words[5] === 0xffff). The IPv4 is
+  // embedded in the low 32 bits and is reachable through NAT64/SIIT paths, so it
+  // must face the same non-public checks (SEC-178).
+  const isIpv4Translated =
+    words[0] === 0 &&
+    words[1] === 0 &&
+    words[2] === 0 &&
+    words[3] === 0 &&
+    words[4] === 0xffff &&
+    words[5] === 0;
+  if (isIpv4Translated) return fromWords(words[6], words[7]);
+
   if (words[0] === 0x2002) return fromWords(words[1], words[2]);
   return null;
 }
@@ -167,6 +184,11 @@ function isNonPublicIpv6(address: string): boolean {
   if (ipv4Embedded) return isNonPublicIpv4(ipv4Embedded);
   const words = expandIpv6Words(normalized);
   if (words?.[0] === 0x2001 && (words[1] === 0 || words[1] === 0xdb8)) return true;
+  // 2001:2::/48 benchmarking (RFC 5180) — documentation/special-use, never a
+  // public webhook target (SEC-178).
+  if (words?.[0] === 0x2001 && words[1] === 0x0002 && words[2] === 0) return true;
+  // 100::/64 discard-only (RFC 6666) (SEC-178).
+  if (words?.[0] === 0x0100 && words[1] === 0 && words[2] === 0 && words[3] === 0) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfe80) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfec0) return true;
   return (
@@ -191,7 +213,7 @@ export class WebhookValidationError extends Error {
 }
 
 function assertPublicWebhookHostname(hostname: string): void {
-  if (!hostname) throw new Error("Webhook URL must include a host");
+  if (!hostname) throw new WebhookValidationError("Webhook URL must include a host");
   if (
     hostname === "localhost" ||
     hostname.endsWith(".localhost") ||
@@ -216,7 +238,7 @@ function assertPublicAddress(address: string, family?: number): void {
     (family === 6 && isNonPublicIpv6(address)) ||
     (family !== 4 && family !== 6 && (isNonPublicIpv4(address) || isNonPublicIpv6(address)))
   ) {
-    throw new Error("Webhook host must resolve to a public address");
+    throw new WebhookValidationError("Webhook host must resolve to a public address");
   }
 }
 
@@ -279,12 +301,18 @@ async function postWebhook(
     lookup?: LookupFunction;
   },
 ): Promise<{ status: number; ok: boolean }> {
-  const parsed = new URL(url);
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    // An unparseable URL can never succeed on retry (SEC-179).
+    throw new WebhookValidationError("Webhook URL is not a valid URL");
+  }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new Error("Webhook URL must use https");
+    throw new WebhookValidationError("Webhook URL must use https");
   }
   if (parsed.protocol === "http:" && !init.allowInsecureHttp) {
-    throw new Error("Webhook URL must use https");
+    throw new WebhookValidationError("Webhook URL must use https");
   }
 
   const transport =
@@ -354,20 +382,35 @@ async function postWebhook(
   });
 }
 
-function normalizeWebhook(webhook: WebhookConfig | string): WebhookConfig {
+/**
+ * SEC-101: the bare-URL (legacy) form carries no per-tenant secret, so the
+ * process-wide STEWARD_WEBHOOK_SECRET used to sign every tenant's legacy
+ * endpoint directly — one key compromise forged events for ALL of them. Derive
+ * a per-tenant signing key from the master secret instead: a captured derived
+ * key is scoped to a single tenant's legacy endpoint. (Receivers on this path
+ * were never provisioned a key, so verification there was never possible; the
+ * derivation bounds blast radius without changing the wire scheme.)
+ */
+function deriveLegacyWebhookSecret(masterSecret: string, tenantId: string): string {
+  return createHmac("sha256", masterSecret)
+    .update(`steward-legacy-webhook-secret:${tenantId}`)
+    .digest("hex");
+}
+
+function normalizeWebhook(webhook: WebhookConfig | string, tenantId: string): WebhookConfig {
   if (typeof webhook !== "string") {
     return webhook;
   }
 
-  const secret = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process
-    ?.env?.STEWARD_WEBHOOK_SECRET;
-  if (!secret) {
+  const masterSecret = (globalThis as { process?: { env?: Record<string, string | undefined> } })
+    .process?.env?.STEWARD_WEBHOOK_SECRET;
+  if (!masterSecret) {
     throw new Error(
       "Webhook secret is required. Pass a WebhookConfig or set STEWARD_WEBHOOK_SECRET.",
     );
   }
 
-  return { url: webhook, secret };
+  return { url: webhook, secret: deriveLegacyWebhookSecret(masterSecret, tenantId) };
 }
 
 export class WebhookDispatcher {
@@ -385,13 +428,23 @@ export class WebhookDispatcher {
     this.allowPrivateNetwork = options.allowPrivateNetwork ?? ALLOW_PRIVATE_WEBHOOK_NETWORKS;
     this.allowInsecureHttp = options.allowInsecureHttp ?? false;
     this.lookup = options.lookup;
+    // SEC-102: the SSRF escape hatch disables the private-network guard for
+    // every delivery this dispatcher makes (STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS
+    // does it process-wide at module load). Announce it loudly once per process
+    // instead of running unguarded in silence.
+    if (this.allowPrivateNetwork && !warnedPrivateWebhookNetworks) {
+      warnedPrivateWebhookNetworks = true;
+      console.warn(
+        "[steward] WARNING: webhook SSRF guard is DISABLED (allowPrivateNetwork / STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS=true). Loopback, link-local, and private-range webhook targets will be fetched. Use only for local development or trusted test harnesses.",
+      );
+    }
   }
 
   async dispatch(
     event: WebhookEvent,
     webhook: WebhookConfig | string,
   ): Promise<WebhookDeliveryResult> {
-    const config = normalizeWebhook(webhook);
+    const config = normalizeWebhook(webhook, event.tenantId);
 
     // An empty events array means "subscribe to all" everywhere else
     // (acceptsConfiguredWebhookEvent, persistent-queue) — a truthy [] must
@@ -470,7 +523,11 @@ export class WebhookDispatcher {
         }
       } catch (error) {
         lastError = error instanceof Error ? error.message : "Unknown webhook delivery error";
-        if (attempts > this.maxRetries) {
+        // SEC-179: a deterministic validation rejection (bad scheme, non-public
+        // host/address, unparseable URL) can never succeed on retry — stop
+        // immediately instead of burning maxRetries+1 attempts with backoff and
+        // repeated DNS lookups.
+        if (error instanceof WebhookValidationError || attempts > this.maxRetries) {
           break;
         }
       }

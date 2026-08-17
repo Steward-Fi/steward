@@ -1,22 +1,22 @@
 import { describe, expect, it } from "bun:test";
-import { sanitizeErrorMessage } from "../services/context";
+import { PublicApiError, sanitizeErrorMessage } from "../services/context";
 
 // SEC-210: route catch-alls must never return raw internal error text (DB
 // constraint names, RPC endpoint details, internal paths). Only deliberately
 // client-safe messages pass through; everything else collapses to a generic
 // "Internal server error".
 describe("sanitizeErrorMessage (SEC-210)", () => {
-  it("passes through deliberately client-safe messages", () => {
-    expect(sanitizeErrorMessage(new Error("Agent already exists"))).toBe("Agent already exists");
-    expect(sanitizeErrorMessage(new Error("Wallet not found"))).toBe("Wallet not found");
-    expect(sanitizeErrorMessage(new Error("Unsupported chain: 999"))).toBe(
-      "Unsupported chain: 999",
+  it("passes through only deliberately typed client-safe messages", () => {
+    expect(sanitizeErrorMessage(new PublicApiError("resource_already_exists"))).toBe(
+      "Resource already exists",
     );
-    expect(
-      sanitizeErrorMessage(
-        new Error("Existing wallet is not mnemonic-recoverable; refusing unsafe restore"),
-      ),
-    ).toBe("Existing wallet is not mnemonic-recoverable; refusing unsafe restore");
+    expect(sanitizeErrorMessage(new PublicApiError("resource_not_found"))).toBe(
+      "Resource not found",
+    );
+    expect(sanitizeErrorMessage(new PublicApiError("unsupported_chain"))).toBe("Unsupported chain");
+    expect(sanitizeErrorMessage(new Error("secret table not found: credentials"))).toBe(
+      "Internal server error",
+    );
   });
 
   it("collapses DB constraint/infrastructure detail to a generic message", () => {

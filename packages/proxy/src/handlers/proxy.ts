@@ -33,6 +33,7 @@ import {
 import { getRedis, type SpendReservation, settleReservedSpend } from "@stwd/redis";
 import { SecretVault } from "@stwd/vault";
 import type { Context } from "hono";
+import { boundedPositiveIntegerEnv, isProxyDevMode } from "../config";
 import { recordAudit, recordRequiredAudit } from "../middleware/audit";
 import {
   checkProxyRateLimit,
@@ -163,7 +164,9 @@ function injectCredential(
       throw new Error("Body credential injection is not supported");
 
     default:
-      console.warn(`[proxy] Unknown inject_as: ${route.injectAs}`);
+      // SEC-176: fail closed. Forwarding with no credential in a state the
+      // operator never configured is worse than rejecting the request.
+      throw new Error(`Unknown credential injection mode: ${String(route.injectAs)}`);
   }
 
   return { headers, url, body };
@@ -172,9 +175,14 @@ function injectCredential(
 function stripHopByHopHeaders(headers: Headers): Set<string> {
   const blocked = new Set([
     "authorization",
+    // SEC-097: alternate client-IP headers trusted by some providers/CDNs for
+    // IP attribution or geo-gating. An authenticated agent must not be able to
+    // relay spoofed values to the credential-injected upstream.
+    "cf-connecting-ip",
     "connection",
     "content-length",
     "cookie",
+    "fastly-client-ip",
     "forwarded",
     "host",
     "idempotency-key",
@@ -184,7 +192,10 @@ function stripHopByHopHeaders(headers: Headers): Set<string> {
     "te",
     "trailer",
     "transfer-encoding",
+    "true-client-ip",
     "upgrade",
+    "x-client-ip",
+    "x-cluster-client-ip",
     "x-forwarded-for",
     "x-forwarded-host",
     "x-forwarded-port",
@@ -193,11 +204,16 @@ function stripHopByHopHeaders(headers: Headers): Set<string> {
     "x-http-method",
     "x-http-method-override",
     "x-method-override",
+    "x-original-forwarded-for",
     "x-original-url",
     "x-real-ip",
     "x-rewrite-url",
     "x-steward-key",
     "x-steward-platform-key",
+    // SEC-099: the proxy's request-signing window metadata is internal; do not
+    // disclose it to upstream providers.
+    "x-steward-request-expires-at",
+    "x-steward-request-timestamp",
     "x-steward-signature",
   ]);
   const connection = headers.get("connection");
@@ -271,25 +287,52 @@ async function releaseProxySpendReservation(
 
 let checkProxySpendLimitForHandler = checkProxySpendLimit;
 let resolveProxyHostForHandler = dnsLookup;
-const MAX_LLM_SPEND_TRACKING_BODY_BYTES = Number(
-  process.env.STEWARD_PROXY_MAX_SPEND_BODY_BYTES ?? 1024 * 1024,
+const MAX_LLM_SPEND_TRACKING_BODY_BYTES = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_MAX_SPEND_BODY_BYTES",
+  1024 * 1024,
+  100 * 1024 * 1024,
 );
-const PROXY_IDEMPOTENCY_TTL_MS = Number(
-  process.env.STEWARD_PROXY_IDEMPOTENCY_TTL_MS ?? 24 * 60 * 60 * 1000,
+const PROXY_IDEMPOTENCY_TTL_MS = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_IDEMPOTENCY_TTL_MS",
+  24 * 60 * 60 * 1000,
+  30 * 24 * 60 * 60 * 1000,
 );
-const MAX_PROXY_IDEMPOTENCY_BODY_BYTES = Number(
-  process.env.STEWARD_PROXY_IDEMPOTENCY_BODY_BYTES ?? 2 * 1024 * 1024,
+const MAX_PROXY_IDEMPOTENCY_BODY_BYTES = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_IDEMPOTENCY_BODY_BYTES",
+  2 * 1024 * 1024,
+  100 * 1024 * 1024,
 );
-const PROXY_UPSTREAM_TIMEOUT_MS = Number(process.env.STEWARD_PROXY_UPSTREAM_TIMEOUT_MS ?? 30_000);
-const MAX_PROXY_RESPONSE_BYTES = Number(
-  process.env.STEWARD_PROXY_RESPONSE_BYTES ?? 25 * 1024 * 1024,
+const PROXY_UPSTREAM_TIMEOUT_MS = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_UPSTREAM_TIMEOUT_MS",
+  30_000,
+  5 * 60_000,
 );
-const MAX_PROXY_STREAM_DURATION_MS = Number(
-  process.env.STEWARD_PROXY_STREAM_DURATION_MS ?? 5 * 60_000,
+/**
+ * SEC-100: proxy resource limits fail closed — they cannot be disabled. A `0`
+ * (or garbage) env value previously meant "unlimited", silently removing the
+ * response-size, stream-duration, and concurrency caps on operator
+ * misconfiguration. Reject non-positive / non-integer values at startup
+ * (module load) instead.
+ */
+const MAX_PROXY_RESPONSE_BYTES = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_RESPONSE_BYTES",
+  25 * 1024 * 1024,
+  100 * 1024 * 1024,
 );
-let MAX_PROXY_IN_FLIGHT_PER_AGENT = Number(process.env.STEWARD_PROXY_MAX_IN_FLIGHT_PER_AGENT ?? 50);
-let MAX_PROXY_IN_FLIGHT_PER_TENANT = Number(
-  process.env.STEWARD_PROXY_MAX_IN_FLIGHT_PER_TENANT ?? 250,
+const MAX_PROXY_STREAM_DURATION_MS = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_STREAM_DURATION_MS",
+  5 * 60_000,
+  30 * 60_000,
+);
+let MAX_PROXY_IN_FLIGHT_PER_AGENT = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_MAX_IN_FLIGHT_PER_AGENT",
+  50,
+  10_000,
+);
+let MAX_PROXY_IN_FLIGHT_PER_TENANT = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_MAX_IN_FLIGHT_PER_TENANT",
+  250,
+  100_000,
 );
 const IDEMPOTENCY_KEY_RE = /^[\x21-\x7e]{8,255}$/;
 const SAFE_PROXY_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
@@ -388,11 +431,14 @@ function releaseWhenBodyCloses(
 }
 
 function requireSharedProxyReplayStore(): boolean {
-  return (
-    process.env.REDIS_REQUIRED === "true" ||
-    (process.env.NODE_ENV === "production" &&
-      process.env.STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL !== "true")
-  );
+  if (process.env.REDIS_REQUIRED === "true") return true;
+  if (process.env.STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL === "true") return false;
+  // SEC-175: default-deny — the per-process replay store is a dev-only
+  // fallback and now needs the explicit dev-mode opt-in; an unset NODE_ENV
+  // no longer selects it silently, and a production NODE_ENV overrides a
+  // stray dev-mode flag.
+  if (process.env.NODE_ENV === "production") return true;
+  return !isProxyDevMode();
 }
 
 /** Test hook for overriding spend-limit enforcement without module mocks. */
@@ -1773,7 +1819,11 @@ export async function handleProxy(c: Context): Promise<Response> {
     );
   } catch (err) {
     const latencyMs = Date.now() - startTime;
-    console.error(`[proxy] Upstream request failed:`, err);
+    // Fetch errors can embed the full outbound URL. Query-injected credentials
+    // must never be copied from that error into application logs.
+    console.error("[proxy] Upstream request failed", {
+      errorName: err instanceof Error ? err.name : "UnknownError",
+    });
 
     // Audit the failure
     await recordAudit({
@@ -2026,6 +2076,10 @@ export async function handleProxy(c: Context): Promise<Response> {
   const skipResponseHeaders = new Set([
     "connection",
     "keep-alive",
+    // SEC-098: never relay upstream session cookies to the agent — a
+    // credential-derived session token would let it replay directly against
+    // the provider, bypassing proxy policy and audit.
+    "set-cookie",
     "transfer-encoding",
     "te",
     "trailer",

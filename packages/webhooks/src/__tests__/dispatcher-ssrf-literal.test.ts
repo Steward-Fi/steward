@@ -94,6 +94,50 @@ describe("WebhookDispatcher SSRF guard for IP-literal URLs", () => {
     }
   });
 
+  it("rejects IPv4-translated and special-use IPv6 literals (SEC-178)", async () => {
+    const dispatcher = new WebhookDispatcher({
+      maxRetries: 0,
+      retryDelayMs: 1,
+      timeoutMs: 500,
+      allowPrivateNetwork: false,
+      allowInsecureHttp: true,
+    });
+
+    for (const url of [
+      "http://[::ffff:0:7f00:1]/hook", // RFC 8215 translated, embeds 127.0.0.1
+      "http://[::ffff:0:a00:1]/hook", // translated, embeds 10.0.0.1
+      "http://[::ffff:0:ac10:1]/hook", // translated, embeds 172.16.0.1
+      "http://[::ffff:7f00:1]/hook", // IPv4-mapped hex form of 127.0.0.1
+      "http://[100::5]/hook", // 100::/64 discard-only (RFC 6666)
+      "http://[2001:2::1]/hook", // 2001:2::/48 benchmarking (RFC 5180)
+    ]) {
+      const result = await dispatcher.dispatch(makeEvent(), { url, secret: SECRET });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("must resolve to a public address");
+    }
+  });
+
+  it("does not over-block adjacent public IPv6 prefixes", async () => {
+    const dispatcher = new WebhookDispatcher({
+      maxRetries: 0,
+      retryDelayMs: 1,
+      timeoutMs: 500,
+      allowPrivateNetwork: false,
+      allowInsecureHttp: true,
+    });
+
+    for (const url of [
+      "http://[100:1::]/hook", // outside 100::/64
+      "http://[2001:2:1::]/hook", // outside 2001:2::/48
+      "http://[::ffff:1:7f00:1]/hook", // words[5] !== 0: not the translated prefix
+    ]) {
+      const result = await dispatcher.dispatch(makeEvent(), { url, secret: SECRET });
+      expect(result.success).toBe(false);
+      // Rejected by the network failure path (no route), NOT by the SSRF guard.
+      expect(result.error ?? "").not.toContain("must resolve to a public address");
+    }
+  });
+
   it("still delivers to loopback when the private-network escape hatch is explicit", async () => {
     const server = await withLoopbackServer();
     const dispatcher = new WebhookDispatcher({

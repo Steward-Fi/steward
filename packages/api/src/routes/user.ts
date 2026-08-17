@@ -109,6 +109,8 @@ import { redactWalletMetadataSecrets } from "../services/wallet-metadata";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 import {
   assertAllowedOAuthRedirectUri,
+  claimSmsVerifyAttempt,
+  clearSmsVerifyFailures,
   createSessionToken,
   decryptImportSessionJson,
   encryptImportSessionJson,
@@ -3131,14 +3133,22 @@ for (const channel of ["sms", "whatsapp"] as const) {
     }
 
     const userId = c.get("userId");
-    const verified = await getPhoneAuth().verifyOtp(
-      body.phone,
-      body.code,
-      phoneLinkPurpose(channel, userId),
-    );
+    const linkPurpose = phoneLinkPurpose(channel, userId);
+    if (!(await claimSmsVerifyAttempt(body.phone, linkPurpose))) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Too many invalid codes. Request a new code and try again later.",
+        },
+        429,
+      );
+    }
+
+    const verified = await getPhoneAuth().verifyOtp(body.phone, body.code, linkPurpose);
     if (!verified.valid) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
     }
+    await clearSmsVerifyFailures(body.phone, linkPurpose);
 
     const provider = channel === "whatsapp" ? "whatsapp" : "phone";
     const providerAccountId = phoneProviderAccountId(body.phone);

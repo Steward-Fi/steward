@@ -6,6 +6,7 @@ import { verifyAuditChain, writeAuditEvent } from "../services/audit";
 
 const TENANT_ID = `audit-strict-${Date.now()}`;
 const EMPTY_TENANT_ID = `audit-strict-empty-${Date.now()}`;
+const UNDEF_META_TENANT_ID = `audit-strict-undef-meta-${Date.now()}`;
 
 describe("strict audit chain verification", () => {
   beforeAll(async () => {
@@ -21,12 +22,14 @@ describe("strict audit chain verification", () => {
       .values([
         { id: TENANT_ID, name: "Audit Strict Tenant", apiKeyHash: "hash-strict" },
         { id: EMPTY_TENANT_ID, name: "Audit Strict Empty Tenant", apiKeyHash: "hash-empty" },
+        { id: UNDEF_META_TENANT_ID, name: "Audit Undef Meta Tenant", apiKeyHash: "hash-undef" },
       ]);
   }, 120_000);
 
   afterAll(async () => {
     await getDb().delete(tenants).where(eq(tenants.id, TENANT_ID));
     await getDb().delete(tenants).where(eq(tenants.id, EMPTY_TENANT_ID));
+    await getDb().delete(tenants).where(eq(tenants.id, UNDEF_META_TENANT_ID));
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_AUDIT_HMAC_KEY;
@@ -69,5 +72,31 @@ describe("strict audit chain verification", () => {
       valid: false,
       brokenAt: 1,
     });
+  });
+
+  it("stays verifiable when metadata contains undefined-valued keys (SEC-089)", async () => {
+    await writeAuditEvent({
+      tenantId: UNDEF_META_TENANT_ID,
+      actorType: "user",
+      actorId: "auditor",
+      action: "test.audit.undefined-metadata",
+      metadata: { present: "yes", absent: undefined } as Record<string, unknown>,
+    });
+
+    // Re-canonicalizing the persisted row must reproduce the written HMAC —
+    // before the fix, JSON.stringify dropped the undefined-valued key while
+    // the HMAC preimage kept it as null, breaking verification from this seq.
+    expect(await verifyAuditChain(UNDEF_META_TENANT_ID, { requireHead: true })).toMatchObject({
+      valid: true,
+      count: 1,
+    });
+
+    const raw = (await getDb().execute(
+      sql`SELECT metadata FROM audit_events WHERE tenant_id = ${UNDEF_META_TENANT_ID} AND seq = 1`,
+    )) as unknown;
+    const rows = (Array.isArray(raw) ? raw : (raw as { rows: unknown[] }).rows) as Array<{
+      metadata: Record<string, unknown>;
+    }>;
+    expect(rows[0]?.metadata).toEqual({ absent: null, present: "yes" });
   });
 });

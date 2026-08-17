@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-import { readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import {
@@ -138,7 +139,32 @@ export function buildUsdcTransferData(to: Address, amount: bigint): Hex {
 }
 
 export async function readBuilderPrivateKey(path: string): Promise<Hex> {
-  const raw = await readFile(expandHome(path), "utf8");
+  const resolved = expandHome(path);
+  // SEC-202: inspect and read one already-open descriptor so a local attacker
+  // cannot swap the path between a permissions check and the read. O_NOFOLLOW
+  // rejects symlinks and O_NONBLOCK lets us reject FIFOs/devices without ever
+  // waiting for a writer. POSIX mode bits are meaningless on Windows, where
+  // those flags and the permissions check are skipped.
+  const posix = process.platform !== "win32";
+  const flags = posix
+    ? constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+    : constants.O_RDONLY;
+  const handle = await open(resolved, flags);
+  let raw: string;
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) {
+      throw new Error(`builder EOA key path at ${path} must be a regular file`);
+    }
+    if (posix && metadata.mode & 0o077) {
+      throw new Error(
+        `builder EOA key file at ${path} is group/world-accessible (mode ${(metadata.mode & 0o777).toString(8).padStart(3, "0")}); lock it down with: chmod 600 ${path}`,
+      );
+    }
+    raw = await handle.readFile({ encoding: "utf8" });
+  } finally {
+    await handle.close();
+  }
   const parsed = JSON.parse(raw) as unknown;
   const candidate =
     typeof parsed === "string"

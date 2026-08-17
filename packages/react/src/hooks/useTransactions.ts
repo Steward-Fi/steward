@@ -1,6 +1,7 @@
 import type { TxRecord, TxStatus } from "@stwd/sdk";
 import { useCallback, useEffect, useState } from "react";
 import { useStewardContext } from "../provider.js";
+import { getAllTransactions } from "../utils/transactions.js";
 
 interface UseTransactionsOpts {
   pageSize?: number;
@@ -9,9 +10,25 @@ interface UseTransactionsOpts {
 }
 
 /**
+ * Client-side status/chain filtering for history records. Exported for unit
+ * tests; not part of the package API.
+ */
+export function filterTransactions(
+  records: TxRecord[],
+  opts: { status?: TxStatus[]; chainId?: number },
+): TxRecord[] {
+  return records.filter(
+    (tx) =>
+      (!opts.status?.length || opts.status.includes(tx.status)) &&
+      (!opts.chainId || tx.request?.chainId === opts.chainId),
+  );
+}
+
+/**
  * Paginated transaction history.
- * Falls back to client.getHistory() and does client-side pagination
- * until the paginated API endpoint is available.
+ * The hook exhausts the credentialed transaction-list endpoint and then
+ * filters/paginates client-side. Raw fetch is never used, so credentials
+ * always attach and histories over 100 rows are not truncated (SEC-195).
  */
 export function useTransactions(opts: UseTransactionsOpts = {}) {
   const { client, agentId, pollInterval } = useStewardContext();
@@ -24,54 +41,15 @@ export function useTransactions(opts: UseTransactionsOpts = {}) {
 
   const fetchTransactions = useCallback(async () => {
     try {
-      // Try paginated endpoint first
-      const params = new URLSearchParams();
-      params.set("page", String(page));
-      params.set("pageSize", String(pageSize));
-      if (status?.length) params.set("status", status.join(","));
-      if (chainId) params.set("chainId", String(chainId));
-
-      const res = await fetch(
-        `${client.getBaseUrl()}/agents/${encodeURIComponent(agentId)}/transactions?${params}`,
-        {
-          headers: { Accept: "application/json" },
-        },
-      );
-
-      if (res.ok) {
-        const json = await res.json();
-        if (json.ok && json.data?.transactions) {
-          setAllTransactions(json.data.transactions);
-          setError(null);
-          setIsLoading(false);
-          return;
-        }
-      }
-
-      // Fallback: use getHistory and convert
-      const history = await client.getHistory(agentId);
-      const txRecords: TxRecord[] = history.map((entry, i) => ({
-        id: `tx-${i}`,
-        agentId,
-        status: "confirmed" as TxStatus,
-        request: {
-          agentId,
-          tenantId: "",
-          to: "",
-          value: entry.value,
-          chainId: chainId || 8453,
-        },
-        policyResults: [],
-        createdAt: new Date(entry.timestamp * 1000),
-      }));
-      setAllTransactions(txRecords);
+      const records = await getAllTransactions(client, agentId);
+      setAllTransactions(filterTransactions(records, { status, chainId }));
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
     } finally {
       setIsLoading(false);
     }
-  }, [client, agentId, page, pageSize, status, chainId]);
+  }, [client, agentId, status, chainId]);
 
   useEffect(() => {
     fetchTransactions();
@@ -79,7 +57,7 @@ export function useTransactions(opts: UseTransactionsOpts = {}) {
     return () => clearInterval(interval);
   }, [fetchTransactions, pollInterval]);
 
-  // Client-side pagination for fallback
+  // Client-side pagination
   const totalPages = Math.max(1, Math.ceil(allTransactions.length / pageSize));
   const paginatedTx = allTransactions.slice((page - 1) * pageSize, page * pageSize);
 
