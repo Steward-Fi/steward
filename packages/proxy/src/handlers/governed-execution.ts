@@ -215,6 +215,7 @@ async function loadGovernedExecution(
   // descriptor from the exact operation revision bound to this execution.
   const operationRows = await db
     .select({
+      operationKey: providerOperations.operationKey,
       requestProfile: providerOperations.requestProfile,
       revision: providerOperations.revision,
     })
@@ -252,6 +253,7 @@ async function loadGovernedExecution(
     new Uint8Array(binding.canonicalActionBytes as Uint8Array),
     profile,
     allowedOrigins,
+    operation,
   );
 
   return {
@@ -298,11 +300,13 @@ export function parseGovernedCanonicalActionForDispatch(
   bytes: Uint8Array,
   expectedProfile: string,
   allowedOrigins: readonly string[],
+  operation: { operationKey: string; requestProfile: Record<string, unknown> },
 ): GithubCanonicalActionV1 {
   return parseCanonicalProviderActionBytes(
     bytes,
     expectedProfile,
     allowedOrigins,
+    operation,
   ) as GithubCanonicalActionV1;
 }
 
