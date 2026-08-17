@@ -65,13 +65,26 @@ function normalizeSensitiveKey(key: string): string {
 /** Return true when a field name conventionally carries credential material. */
 export function isSensitiveCredentialKey(key: string): boolean {
   const normalized = normalizeSensitiveKey(key);
-  const candidates = [
-    normalized,
-    ...SENSITIVE_CREDENTIAL_KEY_DECORATORS.flatMap((decorator) =>
-      normalized.endsWith(decorator) ? [normalized.slice(0, -decorator.length)] : [],
-    ),
-  ];
-  return candidates.some(
+  // Carrier decorators are commonly stacked or pluralized, for example
+  // `authorizationHeaderValue`, `credential_headers`, and `apiKeys`. Peel them
+  // to a fixed point instead of removing only one layer, which would leave
+  // nested carrier names undetected.
+  const pending = [normalized];
+  const candidates = new Set<string>();
+  while (pending.length > 0) {
+    const candidate = pending.pop()!;
+    if (!candidate || candidates.has(candidate)) continue;
+    candidates.add(candidate);
+    if (candidate.endsWith("s") && candidate.length > 1) {
+      pending.push(candidate.slice(0, -1));
+    }
+    for (const decorator of SENSITIVE_CREDENTIAL_KEY_DECORATORS) {
+      if (candidate.endsWith(decorator) && candidate.length > decorator.length) {
+        pending.push(candidate.slice(0, -decorator.length));
+      }
+    }
+  }
+  return [...candidates].some(
     (candidate) =>
       SENSITIVE_CREDENTIAL_KEYS.has(candidate) ||
       SENSITIVE_CREDENTIAL_KEY_SUFFIXES.some((suffix) => candidate.endsWith(suffix)),

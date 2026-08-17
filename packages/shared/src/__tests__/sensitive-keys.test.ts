@@ -35,6 +35,11 @@ describe("sensitive credential keys", () => {
       "bearer",
       "accessTokenValue",
       "credential_value",
+      "authorizationHeaderValue",
+      "credential_headers",
+      "apiKeys",
+      "private_key_headers",
+      "sessionCookieHeaderValues",
     ]) {
       expect(isSensitiveCredentialKey(key), key).toBe(true);
     }
@@ -48,6 +53,9 @@ describe("sensitive credential keys", () => {
       "passwordless",
       "secretSanta",
       "key",
+      "headers",
+      "publicValues",
+      "status",
     ]) {
       expect(isSensitiveCredentialKey(key), key).toBe(false);
     }
@@ -62,14 +70,14 @@ describe("sensitive credential keys", () => {
 
   test("fails closed without invoking accessors", () => {
     let invoked = false;
-    const input = Object.defineProperty({}, "password", {
+    const nested = Object.defineProperty({}, "public", {
       enumerable: true,
       get() {
         invoked = true;
         return "hidden";
       },
     });
-    expect(containsSensitiveCredentialKey(input)).toBe(true);
+    expect(containsSensitiveCredentialKey({ nested })).toBe(true);
     expect(invoked).toBe(false);
   });
 

@@ -94,6 +94,11 @@ describe("STEWARD_PROVIDER_ACTION", () => {
       "oauth-client-secret-value",
       "cookieHeader",
       "session_cookie_header",
+      "authorizationHeaderValue",
+      "credential_headers",
+      "apiKeys",
+      "private_key_headers",
+      "sessionCookieHeaderValues",
     ];
     for (const key of credentialKeys) {
       const result = await providerAction.handler(
