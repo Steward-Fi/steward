@@ -76,6 +76,15 @@ describe("signing-curve capability registry", () => {
     expect(rawSigningChainSupport(undefined)).toBeUndefined();
   });
 
+  it("rawSigningChainSupport does not treat Object.prototype members as chains (SEC-116)", () => {
+    // `"constructor" in RAW_SIGNING_CHAIN_SUPPORT` is true via the prototype
+    // chain; the lookup must restrict to own keys or it returns the Object
+    // constructor as a fake support record.
+    expect(rawSigningChainSupport("constructor")).toBeUndefined();
+    expect(rawSigningChainSupport("toString")).toBeUndefined();
+    expect(rawSigningChainSupport("hasOwnProperty")).toBeUndefined();
+  });
+
   it("isSigningCurve recognises known curves and rejects junk", () => {
     expect(isSigningCurve("secp256k1")).toBe(true);
     expect(isSigningCurve("ed25519")).toBe(true);

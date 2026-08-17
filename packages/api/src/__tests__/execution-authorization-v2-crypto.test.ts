@@ -102,7 +102,7 @@ describe("provider execution authorization v2 crypto", () => {
 
   it("keyId rotation: first key signs, all listed keys verify", () => {
     process.env.STEWARD_EXECUTION_AUTH_SECRET =
-      "k2:new-secret-entropy-abcdef,k1:old-secret-entropy-abcdef";
+      "k2:new-secret-entropy-abcdef-padded32,k1:old-secret-entropy-abcdef-padded32";
     // Active key is k2 (first).
     expect(activeExecutionAuthV2Key().keyId).toBe("k2");
     const c2 = commitment({ keyId: "k2" });
@@ -111,11 +111,11 @@ describe("provider execution authorization v2 crypto", () => {
     // A commitment minted under the retired k1 still verifies (TTL window).
     // Rebuild the key set with k1 active to produce a k1 signature, then verify
     // it under the rotation list where k1 is second.
-    process.env.STEWARD_EXECUTION_AUTH_SECRET = "k1:old-secret-entropy-abcdef";
+    process.env.STEWARD_EXECUTION_AUTH_SECRET = "k1:old-secret-entropy-abcdef-padded32";
     const c1 = commitment({ keyId: "k1" });
     const sig1 = signProviderExecutionCommitmentV2(c1);
     process.env.STEWARD_EXECUTION_AUTH_SECRET =
-      "k2:new-secret-entropy-abcdef,k1:old-secret-entropy-abcdef";
+      "k2:new-secret-entropy-abcdef-padded32,k1:old-secret-entropy-abcdef-padded32";
     expect(verifyProviderExecutionCommitmentV2(c1, sig1)).toBe(true);
   });
 

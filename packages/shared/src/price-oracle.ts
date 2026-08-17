@@ -6,7 +6,11 @@
  * - Graceful degradation: returns null on failure so callers can fall back to wei comparison
  */
 
-import { getNativeDecimals, getTokenDecimals, getWrappedNativeAddress } from "./tokens.js";
+import {
+  getNativeDecimalsStrict,
+  getTokenDecimalsStrict,
+  getWrappedNativeAddress,
+} from "./tokens.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -102,6 +106,18 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
   }
 
   /**
+   * Reject malformed token addresses before they reach the request URL
+   * (SEC-118). EVM chains expect a 20-byte hex address; Solana a base58 mint.
+   * Anything else (path/query metacharacters, wrong family) fails closed.
+   */
+  function isPlausibleTokenAddress(chainId: number, tokenAddress: string): boolean {
+    if (chainId === 101 || chainId === 102) {
+      return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(tokenAddress);
+    }
+    return /^0x[0-9a-fA-F]{40}$/.test(tokenAddress);
+  }
+
+  /**
    * Fetch price from DexScreener for a token address.
    * Picks the pair with highest liquidity for best accuracy.
    */
@@ -112,7 +128,13 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
         console.warn(`[price-oracle] No DexScreener chain mapping for chainId ${chainId}`);
         return null;
       }
-      const url = `https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`;
+      if (!isPlausibleTokenAddress(chainId, tokenAddress)) {
+        console.warn(
+          `[price-oracle] Rejecting malformed token address for chainId ${chainId}: ${tokenAddress.slice(0, 64)}`,
+        );
+        return null;
+      }
+      const url = `https://api.dexscreener.com/latest/dex/tokens/${encodeURIComponent(tokenAddress)}`;
       const res = await fetch(url, {
         headers: { Accept: "application/json" },
         signal: AbortSignal.timeout(5000),
@@ -187,9 +209,17 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
 
       if (price === null) return null;
 
+      // Strict decimals (SEC-190): unknown chains/tokens return null and the
+      // conversion fails closed instead of guessing 18 decimals.
       const decimals = isNative
-        ? getNativeDecimals(chainId)
-        : getTokenDecimals(chainId, tokenAddress);
+        ? getNativeDecimalsStrict(chainId)
+        : getTokenDecimalsStrict(chainId, tokenAddress);
+      if (decimals === null) {
+        console.warn(
+          `[price-oracle] Unknown decimals for chainId ${chainId} token ${tokenAddress ?? "native"}; failing closed`,
+        );
+        return null;
+      }
 
       // Convert wei to token units: weiValue / 10^decimals
       // Use BigInt arithmetic to avoid floating point issues with large numbers
@@ -215,14 +245,30 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
 
       if (price === null || price === 0) return null;
 
+      // Strict decimals (SEC-190): unknown chains/tokens fail closed.
       const decimals = isNative
-        ? getNativeDecimals(chainId)
-        : getTokenDecimals(chainId, tokenAddress);
+        ? getNativeDecimalsStrict(chainId)
+        : getTokenDecimalsStrict(chainId, tokenAddress);
+      if (decimals === null) {
+        console.warn(
+          `[price-oracle] Unknown decimals for chainId ${chainId} token ${tokenAddress ?? "native"}; failing closed`,
+        );
+        return null;
+      }
 
-      // tokenAmount = usdValue / price
-      // wei = tokenAmount * 10^decimals
-      const tokenAmount = usdValue / price;
-      const wei = BigInt(Math.floor(tokenAmount * 10 ** decimals));
+      if (!Number.isFinite(usdValue) || usdValue < 0) return null;
+
+      // Rational arithmetic (SEC-189): scale the USD input and price to
+      // micro-unit integers and divide in BigInt, so values beyond 2^53 stay
+      // exact. Rounds to nearest (half up) — an explicit rounding policy,
+      // replacing the old double-math `Math.floor(tokenAmount * 10**decimals)`
+      // which lost precision and always rounded down.
+      const MICROS = 1_000_000n;
+      const usdMicros = BigInt(Math.round(usdValue * 1_000_000));
+      const priceMicros = BigInt(Math.round(price * 1_000_000));
+      if (priceMicros <= 0n) return null;
+      const numerator = usdMicros * 10n ** BigInt(decimals);
+      const wei = (numerator * 2n + priceMicros) / (priceMicros * 2n);
       return wei.toString();
     },
   };

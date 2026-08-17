@@ -290,7 +290,9 @@ export function chainFromNumeric(id: number): ChainIdentifier | undefined {
 
 /** Look up a chain by its CAIP-2 string (e.g. `"eip155:8453"`). Returns undefined if not found. */
 export function chainFromCaip2(caip2: string): ChainIdentifier | undefined {
-  return CHAINS[caip2];
+  // Own-key lookup: a bare index would return Object.prototype members (e.g.
+  // "constructor") as if they were known chains (SEC-116).
+  return Object.hasOwn(CHAINS, caip2) ? CHAINS[caip2] : undefined;
 }
 
 /**
@@ -306,7 +308,7 @@ export function toCaip2(numericId: number): string | undefined {
  * Returns undefined for unrecognised CAIP-2 strings.
  */
 export function fromCaip2(caip2: string): number | undefined {
-  return CHAINS[caip2]?.numericId;
+  return chainFromCaip2(caip2)?.numericId;
 }
 
 // ─── Policies ───

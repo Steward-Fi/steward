@@ -63,7 +63,11 @@ export const CHAIN_PROVIDERS_BY_NUMERIC: Record<number, ChainProvider> = Object.
 );
 
 export function getChainProviderByCaip2(caip2: string): ChainProvider | undefined {
-  return CHAIN_PROVIDERS_BY_CAIP2[caip2];
+  // Own-key lookup: a bare index would return Object.prototype members (e.g.
+  // "constructor") as if they were known providers (SEC-116).
+  return Object.hasOwn(CHAIN_PROVIDERS_BY_CAIP2, caip2)
+    ? CHAIN_PROVIDERS_BY_CAIP2[caip2]
+    : undefined;
 }
 
 export function getChainProviderByNumeric(numericId: number): ChainProvider | undefined {

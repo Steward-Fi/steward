@@ -1,3 +1,4 @@
+import { CHAIN_PROVIDERS_BY_NUMERIC } from "./chains/index.js";
 import type { SignRequest } from "./index.js";
 
 /**
@@ -15,8 +16,6 @@ import type { SignRequest } from "./index.js";
  * consumed; those are deliberately outside the bound intent. See
  * SECURITY_SURFACE_OPERATIONS notes and PR #182 for the exact semantics.
  */
-
-const SOLANA_CHAIN_IDS = new Set([101, 102]);
 
 /**
  * Fields that carry a caller-supplied integer we bind into the intent digest.
@@ -65,8 +64,14 @@ export interface NormalizedEvmExecutionPayload {
   };
 }
 
+/**
+ * True only for chains registered as EVM-family. Unknown numeric ids and
+ * non-EVM families (Solana/Bitcoin/Monero) return false — fail closed, so a
+ * future caller routing on this never mis-handles a non-EVM id as EVM
+ * (SEC-193).
+ */
 export function isEvmChainId(chainId: number): boolean {
-  return !SOLANA_CHAIN_IDS.has(chainId);
+  return CHAIN_PROVIDERS_BY_NUMERIC[chainId]?.family === "evm";
 }
 
 /**
@@ -110,7 +115,10 @@ function canonicalize(value: unknown): unknown {
   if (value instanceof Date) return value.toISOString();
   if (Array.isArray(value)) return value.map((entry) => canonicalize(entry));
   const input = value as Record<string, unknown>;
-  const output: Record<string, unknown> = {};
+  // Null-prototype output: plain `{}` assignment silently DROPS an own
+  // `__proto__` key (present after JSON.parse/JSONB reads), which would let two
+  // snapshots differing only in that member digest identically (SEC-115).
+  const output: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   for (const key of Object.keys(input).sort()) {
     const item = input[key];
     if (item !== undefined) output[key] = canonicalize(item);

@@ -56,11 +56,11 @@ afterEach(() => {
 
 describe("execution authorization v2 key rotation", () => {
   it("keeps the retired key verify-only during overlap", () => {
-    process.env.STEWARD_EXECUTION_AUTH_SECRET = "old:old-secret-material";
+    process.env.STEWARD_EXECUTION_AUTH_SECRET = "old:old-secret-material-padded-to-32ch";
     const oldCommitment = commitment("old");
     const oldSignature = signProviderExecutionCommitmentV2(oldCommitment);
 
-    process.env.STEWARD_EXECUTION_AUTH_SECRET = "new:new-secret-material,old:old-secret-material";
+    process.env.STEWARD_EXECUTION_AUTH_SECRET = "new:new-secret-material-padded-to-32ch,old:old-secret-material-padded-to-32ch";
     expect(verifyProviderExecutionCommitmentV2(oldCommitment, oldSignature)).toBe(true);
     expect(() => signProviderExecutionCommitmentV2(oldCommitment)).toThrow(
       "commitment keyId does not match the active signing key",
@@ -76,11 +76,24 @@ describe("execution authorization v2 key rotation", () => {
   });
 
   it("rejects the retired key after overlap removal", () => {
-    process.env.STEWARD_EXECUTION_AUTH_SECRET = "old:old-secret-material";
+    process.env.STEWARD_EXECUTION_AUTH_SECRET = "old:old-secret-material-padded-to-32ch";
     const oldCommitment = commitment("old");
     const oldSignature = signProviderExecutionCommitmentV2(oldCommitment);
 
-    process.env.STEWARD_EXECUTION_AUTH_SECRET = "new:new-secret-material";
+    process.env.STEWARD_EXECUTION_AUTH_SECRET = "new:new-secret-material-padded-to-32ch";
     expect(verifyProviderExecutionCommitmentV2(oldCommitment, oldSignature)).toBe(false);
+  });
+
+  it("rejects secrets below the 32-char entropy floor (SEC-117)", () => {
+    process.env.STEWARD_EXECUTION_AUTH_SECRET = "a";
+    expect(() => signProviderExecutionCommitmentV2(commitment("v2-default"))).toThrow(/too weak/);
+
+    process.env.STEWARD_EXECUTION_AUTH_SECRET = "k1:short";
+    expect(() => signProviderExecutionCommitmentV2(commitment("k1"))).toThrow(/too weak/);
+
+    // A too-weak entry anywhere in the rotation list fails closed at load.
+    process.env.STEWARD_EXECUTION_AUTH_SECRET =
+      "k1:secret-one-with-enough-entropy-here,k2:tiny";
+    expect(() => signProviderExecutionCommitmentV2(commitment("k1"))).toThrow(/too weak/);
   });
 });

@@ -218,7 +218,9 @@ export function signingCurveSupport(value: unknown): SigningCurveSupport | undef
 }
 
 export function rawSigningChainSupport(value: unknown): RawSigningChainSupport | undefined {
-  return typeof value === "string" && value in RAW_SIGNING_CHAIN_SUPPORT
+  // `in` would also match Object.prototype members ("constructor" etc.) and
+  // return them as support records; restrict to own keys (SEC-116).
+  return typeof value === "string" && Object.hasOwn(RAW_SIGNING_CHAIN_SUPPORT, value)
     ? RAW_SIGNING_CHAIN_SUPPORT[value as RawSigningChain]
     : undefined;
 }
