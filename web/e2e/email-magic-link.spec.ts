@@ -104,7 +104,9 @@ test.describe("Email magic-link — mock inbox round-trip", () => {
     expect(storageState.refreshToken).toBeNull();
     expect(storageState.localToken).toBeNull();
     expect(storageState.localRefreshToken).toBeNull();
-    const cookies = await page.context().cookies(WEB);
+    // NOTE: no URL filter — the cookie is Path-scoped to /api/auth, and
+    // cookies(url) path-matches, so filtering by the app root would hide it.
+    const cookies = await page.context().cookies();
     const refreshCookie = cookies.find((cookie) => cookie.name === "steward_rt");
     expect(refreshCookie).toBeDefined();
     expect(refreshCookie?.httpOnly).toBe(true);
