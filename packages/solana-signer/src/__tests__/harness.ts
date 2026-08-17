@@ -19,7 +19,13 @@ export interface RecordedRequest {
   body: unknown;
 }
 
-export type StubMode = "sign" | "reject" | "pending" | "forbidden";
+export type StubMode =
+  | "sign"
+  | "reject"
+  | "pending"
+  | "forbidden"
+  | "invalid-signature"
+  | "changed-cosigner";
 
 export interface StubSteward {
   url: string;
@@ -136,7 +142,15 @@ export function startStubSteward(kp: Keypair): StubSteward {
         } else {
           const tx = Transaction.from(bytes);
           tx.partialSign(kp);
-          signed = new Uint8Array(tx.serialize({ requireAllSignatures: false }));
+          if (mode === "invalid-signature" && tx.signatures[0]?.signature) {
+            tx.signatures[0].signature[0] ^= 1;
+          }
+          if (mode === "changed-cosigner" && tx.signatures[1]?.signature) {
+            tx.signatures[1].signature[0] ^= 1;
+          }
+          signed = new Uint8Array(
+            tx.serialize({ requireAllSignatures: false, verifySignatures: false }),
+          );
         }
         return json({
           ok: true,

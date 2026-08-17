@@ -16,6 +16,7 @@
 //
 // Sign-only by design: this module never broadcasts and never touches keys.
 
+import { createPublicKey, verify } from "node:crypto";
 import { PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
 import { type PolicyResult, StewardApiError, StewardClient } from "@stwd/sdk";
 
@@ -152,6 +153,133 @@ function isVersioned(tx: Transaction | VersionedTransaction): tx is VersionedTra
   return "version" in tx;
 }
 
+function hasSignature(signature: Uint8Array | null): signature is Uint8Array {
+  return signature !== null && signature.some((byte) => byte !== 0);
+}
+
+function assertSameBytes(actual: Uint8Array, expected: Uint8Array, message: string): void {
+  if (!Buffer.from(actual).equals(Buffer.from(expected))) {
+    throw new StewardSignerError("api", message);
+  }
+}
+
+function verifySolanaSignature(
+  publicKey: PublicKey,
+  message: Uint8Array,
+  signature: Uint8Array,
+): boolean {
+  // RFC 8410 SubjectPublicKeyInfo prefix for a raw 32-byte Ed25519 public key.
+  const spki = Buffer.concat([
+    Buffer.from("302a300506032b6570032100", "hex"),
+    Buffer.from(publicKey.toBytes()),
+  ]);
+  return verify(
+    null,
+    Buffer.from(message),
+    createPublicKey({ key: spki, format: "der", type: "spki" }),
+    signature,
+  );
+}
+
+function validateSignedResponse(
+  submitted: Transaction | VersionedTransaction,
+  returned: Transaction | VersionedTransaction,
+  publicKey: PublicKey,
+): void {
+  if (isVersioned(submitted) !== isVersioned(returned)) {
+    throw new StewardSignerError("api", "Steward returned a different Solana transaction format");
+  }
+
+  if (isVersioned(submitted) && isVersioned(returned)) {
+    const submittedMessage = submitted.message.serialize();
+    assertSameBytes(
+      returned.message.serialize(),
+      submittedMessage,
+      "Steward returned signatures for a different Solana message",
+    );
+    const required = submitted.message.header.numRequiredSignatures;
+    const signerIndex = submitted.message.staticAccountKeys
+      .slice(0, required)
+      .findIndex((key) => key.equals(publicKey));
+    if (signerIndex < 0) {
+      throw new StewardSignerError(
+        "api",
+        "the Steward Solana address is not a required transaction signer",
+      );
+    }
+    for (let index = 0; index < submitted.signatures.length; index += 1) {
+      const prior = submitted.signatures[index];
+      if (index !== signerIndex && hasSignature(prior)) {
+        assertSameBytes(
+          returned.signatures[index] ?? new Uint8Array(),
+          prior,
+          "Steward changed an existing co-signer signature",
+        );
+      }
+    }
+    const stewardSignature = returned.signatures[signerIndex];
+    if (
+      !stewardSignature ||
+      !verifySolanaSignature(publicKey, submittedMessage, stewardSignature)
+    ) {
+      throw new StewardSignerError("api", "Steward returned an invalid Solana signature");
+    }
+    return;
+  }
+
+  const submittedLegacy = submitted as Transaction;
+  const returnedLegacy = returned as Transaction;
+  const submittedMessage = submittedLegacy.serializeMessage();
+  assertSameBytes(
+    returnedLegacy.serializeMessage(),
+    submittedMessage,
+    "Steward returned signatures for a different Solana message",
+  );
+  const signerIndex = submittedLegacy.signatures.findIndex((entry) =>
+    entry.publicKey.equals(publicKey),
+  );
+  if (signerIndex < 0) {
+    throw new StewardSignerError(
+      "api",
+      "the Steward Solana address is not a required transaction signer",
+    );
+  }
+  for (let index = 0; index < submittedLegacy.signatures.length; index += 1) {
+    const prior = submittedLegacy.signatures[index]?.signature;
+    if (index !== signerIndex && hasSignature(prior)) {
+      const returnedSignature = returnedLegacy.signatures[index]?.signature;
+      if (!returnedSignature) {
+        throw new StewardSignerError("api", "Steward removed an existing co-signer signature");
+      }
+      assertSameBytes(returnedSignature, prior, "Steward changed an existing co-signer signature");
+    }
+  }
+  const stewardSignature = returnedLegacy.signatures[signerIndex]?.signature;
+  if (!stewardSignature || !verifySolanaSignature(publicKey, submittedMessage, stewardSignature)) {
+    throw new StewardSignerError("api", "Steward returned an invalid Solana signature");
+  }
+}
+
+function deserializeTransaction(bytes: Uint8Array): Transaction | VersionedTransaction {
+  // A serialized transaction starts with compact-u16 signature count and slots;
+  // the following message byte has its high bit set for versioned messages.
+  let signatureCount = 0;
+  let bytesRead = 0;
+  for (let shift = 0; ; shift += 7) {
+    const byte = bytes[bytesRead];
+    if (byte === undefined || shift > 21)
+      throw new StewardSignerError("api", "invalid Solana transaction");
+    bytesRead += 1;
+    signatureCount |= (byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) break;
+  }
+  const messageByte = bytes[bytesRead + signatureCount * 64];
+  if (messageByte === undefined) throw new StewardSignerError("api", "invalid Solana transaction");
+  return (messageByte & 0x80) !== 0
+    ? VersionedTransaction.deserialize(bytes)
+    : Transaction.from(bytes);
+}
+
 /** Build a signer for one Steward agent. Async because it resolves the agent's
  *  Solana address from the vault unless `address` is supplied. */
 export async function createStewardSolanaSigner(
@@ -190,6 +318,12 @@ export async function createStewardSolanaSigner(
     txBase64: string,
     hints?: SolanaPolicyHints,
   ): Promise<string> {
+    let submitted: Transaction | VersionedTransaction;
+    try {
+      submitted = deserializeTransaction(Uint8Array.from(Buffer.from(txBase64, "base64")));
+    } catch (err) {
+      throw toSignerError(err);
+    }
     let result: Awaited<ReturnType<StewardClient["signSolanaTransaction"]>>;
     try {
       // The SDK input type does not model the advisory to/value hints the
@@ -209,6 +343,13 @@ export async function createStewardSolanaSigner(
         "api",
         "Steward broadcast the transaction although broadcast:false was requested",
       );
+    }
+    let returned: Transaction | VersionedTransaction;
+    try {
+      returned = deserializeTransaction(Uint8Array.from(Buffer.from(result.signature, "base64")));
+      validateSignedResponse(submitted, returned, publicKey);
+    } catch (err) {
+      throw toSignerError(err);
     }
     // With broadcast:false the route returns the FULL signed transaction,
     // base64-serialized, in the `signature` field.

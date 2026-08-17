@@ -70,6 +70,7 @@ COPY packages/redis/package.json             packages/redis/package.json
 COPY packages/seed/package.json              packages/seed/package.json
 COPY packages/shared/package.json            packages/shared/package.json
 COPY packages/signer-frost/package.json      packages/signer-frost/package.json
+COPY packages/solana-signer/package.json     packages/solana-signer/package.json
 COPY packages/sdk/package.json               packages/sdk/package.json
 COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
 COPY packages/vault/package.json             packages/vault/package.json
@@ -114,6 +115,7 @@ COPY packages/redis/package.json             packages/redis/package.json
 COPY packages/seed/package.json              packages/seed/package.json
 COPY packages/shared/package.json            packages/shared/package.json
 COPY packages/signer-frost/package.json      packages/signer-frost/package.json
+COPY packages/solana-signer/package.json     packages/solana-signer/package.json
 COPY packages/sdk/package.json               packages/sdk/package.json
 COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
 COPY packages/vault/package.json             packages/vault/package.json
@@ -219,6 +221,7 @@ COPY packages/redis/package.json             packages/redis/package.json
 COPY packages/seed/package.json              packages/seed/package.json
 COPY packages/shared/package.json            packages/shared/package.json
 COPY packages/signer-frost/package.json      packages/signer-frost/package.json
+COPY packages/solana-signer/package.json     packages/solana-signer/package.json
 COPY packages/sdk/package.json               packages/sdk/package.json
 COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
 COPY packages/vault/package.json             packages/vault/package.json

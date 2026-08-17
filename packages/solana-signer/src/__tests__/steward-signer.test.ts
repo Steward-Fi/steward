@@ -132,6 +132,37 @@ describe("signTransaction", () => {
     for (const slot of tx.signatures) expect(slot.signature).not.toBeNull();
   });
 
+  it("rejects an invalid signature returned by the Steward API", async () => {
+    const signer = await newSigner();
+    stub.setMode("invalid-signature");
+    await expect(signer.signTransaction(legacyTransfer(signer.publicKey))).rejects.toThrow(
+      /invalid Solana signature/,
+    );
+  });
+
+  it("rejects a response that changes an existing co-signer signature", async () => {
+    const signer = await newSigner();
+    const coSigner = Keypair.fromSeed(new Uint8Array(32).fill(6));
+    const tx = new Transaction().add(
+      SystemProgram.transfer({ fromPubkey: signer.publicKey, toPubkey: SINK, lamports: 1_000 }),
+      SystemProgram.transfer({ fromPubkey: coSigner.publicKey, toPubkey: SINK, lamports: 1 }),
+    );
+    tx.recentBlockhash = STUB_BLOCKHASH;
+    tx.feePayer = signer.publicKey;
+    tx.partialSign(coSigner);
+    stub.setMode("changed-cosigner");
+
+    await expect(signer.signTransaction(tx)).rejects.toThrow(/changed an existing co-signer/);
+  });
+
+  it("rejects a configured Steward address that is not a required signer", async () => {
+    const outsider = Keypair.fromSeed(new Uint8Array(32).fill(12)).publicKey;
+    const signer = await newSigner({ address: outsider.toBase58() });
+    const tx = legacyTransfer(vaultKeypair.publicKey);
+
+    await expect(signer.signTransaction(tx)).rejects.toThrow(/not a required transaction signer/);
+  });
+
   it("signs a v0 versioned transaction", async () => {
     const signer = await newSigner();
     const vtx = versionedTransfer(signer.publicKey);

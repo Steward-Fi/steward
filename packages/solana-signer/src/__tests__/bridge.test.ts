@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Keypair, Transaction } from "@solana/web3.js";
-import { BRIDGE_TOKEN_ENV, BRIDGE_TOKEN_HEADER, startSignerBridge } from "../bridge";
+import {
+  BRIDGE_MAX_BODY_BYTES,
+  BRIDGE_TOKEN_ENV,
+  BRIDGE_TOKEN_HEADER,
+  startSignerBridge,
+} from "../bridge";
 import { createStewardSolanaSigner, type StewardSolanaSigner } from "../steward-signer";
 import { legacyTransfer, type StubSteward, startStubSteward } from "./harness";
 
@@ -110,6 +115,17 @@ describe("signer bridge", () => {
     expect(res.status).toBe(400);
     expect(stub.requests.length).toBe(before);
   });
+
+  it("rejects oversized request bodies before any vault call", async () => {
+    const before = stub.requests.length;
+    const res = await authed("/sign-transaction", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transaction: "A".repeat(BRIDGE_MAX_BODY_BYTES) }),
+    });
+    expect(res.status).toBe(413);
+    expect(stub.requests.length).toBe(before);
+  });
 });
 
 describe("bridge shared-secret auth", () => {
@@ -164,5 +180,15 @@ describe("bridge shared-secret auth", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ address: vaultKeypair.publicKey.toBase58() });
     await bridge.close();
+  });
+
+  it("rejects an empty shared secret", async () => {
+    await expect(startSignerBridge(signer, { token: "" })).rejects.toThrow(/must not be empty/);
+  });
+
+  it("rejects non-loopback bind hosts", async () => {
+    await expect(startSignerBridge(signer, { host: "0.0.0.0" })).rejects.toThrow(
+      /must be loopback/,
+    );
   });
 });

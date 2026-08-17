@@ -35,6 +35,9 @@ export const BRIDGE_TOKEN_HEADER = "x-steward-bridge-token";
 /** Env var supplying the shared secret on BOTH sides of the bridge. */
 export const BRIDGE_TOKEN_ENV = "STEWARD_SIGNER_BRIDGE_TOKEN";
 
+/** Enough for Solana's transaction limit plus JSON/hints, while bounding RAM. */
+export const BRIDGE_MAX_BODY_BYTES = 16 * 1024;
+
 export interface SignerBridgeOptions {
   /** Bind host. Loopback by default; never expose this beyond the machine. */
   host?: string;
@@ -86,8 +89,23 @@ function respond(res: ServerResponse, status: number, body: object): void {
 }
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const declaredLength = Number(req.headers["content-length"]);
+  if (
+    req.headers["content-length"] !== undefined &&
+    (!Number.isSafeInteger(declaredLength) ||
+      declaredLength < 0 ||
+      declaredLength > BRIDGE_MAX_BODY_BYTES)
+  ) {
+    throw new PayloadTooLargeError();
+  }
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let received = 0;
+  for await (const chunk of req) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+    received += bytes.length;
+    if (received > BRIDGE_MAX_BODY_BYTES) throw new PayloadTooLargeError();
+    chunks.push(bytes);
+  }
   const text = Buffer.concat(chunks).toString("utf8");
   const parsed: unknown = JSON.parse(text);
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
@@ -96,15 +114,30 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
   return parsed as Record<string, unknown>;
 }
 
+class PayloadTooLargeError extends Error {}
+
+function assertLoopbackHost(host: string): void {
+  if (host !== "127.0.0.1" && host !== "::1" && host !== "localhost") {
+    throw new StewardSignerError(
+      "api",
+      `signer bridge host must be loopback (127.0.0.1, ::1, or localhost), got ${host}`,
+    );
+  }
+}
+
 export async function startSignerBridge(
   signer: StewardSolanaSigner,
   options: SignerBridgeOptions = {},
 ): Promise<SignerBridge> {
   const host = options.host ?? "127.0.0.1";
+  assertLoopbackHost(host);
   const token =
     options.token === undefined
       ? process.env[BRIDGE_TOKEN_ENV] || randomBytes(32).toString("hex")
       : options.token;
+  if (token !== null && token.length === 0) {
+    throw new StewardSignerError("api", "signer bridge token must not be empty");
+  }
 
   const server = createServer((req, res) => {
     void handle(req, res);
@@ -131,6 +164,10 @@ export async function startSignerBridge(
         try {
           body = await readJson(req);
         } catch (err) {
+          if (err instanceof PayloadTooLargeError) {
+            respond(res, 413, { error: `request body exceeds ${BRIDGE_MAX_BODY_BYTES} bytes` });
+            return;
+          }
           respond(res, 400, { error: err instanceof Error ? err.message : "invalid JSON body" });
           return;
         }
@@ -172,7 +209,7 @@ export async function startSignerBridge(
     throw new StewardSignerError("api", "signer bridge failed to bind a TCP port");
   }
   return {
-    url: `http://${host}:${bound.port}`,
+    url: `http://${host.includes(":") ? `[${host}]` : host}:${bound.port}`,
     token,
     server,
     close: () =>

@@ -65,6 +65,11 @@ consumer that cannot send headers yet, pass `token: null` to run the bridge
 open; that is an explicit choice to let any local process request signatures,
 so keep the vault's policy tight when using it.
 
+The bridge rejects non-loopback bind hosts, empty tokens, and request bodies
+larger than 16 KiB. Returned transactions are accepted only when the original
+message and existing co-signer signatures are unchanged and the declared
+Steward public key has supplied a valid Ed25519 signature.
+
 ## Blind-signing hints
 
 Transactions whose instructions Steward cannot decode (custom programs) are
