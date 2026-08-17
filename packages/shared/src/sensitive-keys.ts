@@ -60,7 +60,10 @@ const SENSITIVE_CREDENTIAL_KEY_SUFFIXES = [
   "jwt",
 ];
 
-const SENSITIVE_CREDENTIAL_KEY_DECORATORS = ["header", "value"];
+const SENSITIVE_CREDENTIAL_KEY_DECORATORS = ["header", "value", "pem"];
+
+const PRIVATE_KEY_ARMOR =
+  /-----BEGIN (?:ENCRYPTED |RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----|-----BEGIN PGP PRIVATE KEY BLOCK-----/;
 
 function normalizeSensitiveKey(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -96,7 +99,8 @@ export function isSensitiveCredentialKey(key: string): boolean {
 }
 
 /**
- * Recursively inspect JSON-like input for credential-bearing field names.
+ * Recursively inspect JSON-like input for credential-bearing field names and
+ * unmistakable private-key armor embedded under an otherwise innocuous key.
  * Accessors, cycles, and excessive nesting fail closed without invoking code.
  */
 export function containsSensitiveCredentialKey(
@@ -105,6 +109,7 @@ export function containsSensitiveCredentialKey(
   ancestors = new Set<object>(),
 ): boolean {
   if (depth > 20) return true;
+  if (typeof value === "string") return PRIVATE_KEY_ARMOR.test(value);
   if (!value || typeof value !== "object") return false;
   if (ancestors.has(value)) return true;
 
