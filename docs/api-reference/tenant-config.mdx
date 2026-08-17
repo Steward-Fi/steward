@@ -326,12 +326,14 @@ Tenant OIDC providers support direct JWT exchange and enterprise authorization-c
   "audience": ["steward-api"],
   "jwksUri": "https://idp.example.com/.well-known/jwks.json",
   "clientId": "steward-dashboard",
-  "clientSecretEnv": "ACME_SSO_CLIENT_SECRET",
+  "clientSecretEnv": "STEWARD_TENANT_OIDC_SECRET_ACME_SSO",
   "authorizationUrl": "https://idp.example.com/oauth2/v1/authorize",
   "tokenUrl": "https://idp.example.com/oauth2/v1/token",
   "scopes": ["openid", "email", "profile"]
 }
 ```
+
+`clientSecretEnv` must name an environment variable in the dedicated `STEWARD_TENANT_OIDC_SECRET_*` namespace; arbitrary platform env vars are rejected so tenant config cannot exfiltrate deployment secrets through the token exchange.
 
 The SP-initiated SSO route requires app-side PKCE:
 

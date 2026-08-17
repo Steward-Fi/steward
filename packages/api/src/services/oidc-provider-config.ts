@@ -1,6 +1,18 @@
 import type { TenantOidcProviderConfig } from "@stwd/shared";
 import { validateWebhookUrl } from "./webhook-url";
 
+/**
+ * Tenant-configured OIDC client secrets may only be sourced from env vars in
+ * this dedicated namespace. Without the prefix, a tenant admin could point
+ * `clientSecretEnv` at any platform secret (e.g. STEWARD_JWT_SECRET) and have
+ * it POSTed to a tenant-controlled tokenUrl during code exchange (SEC-005).
+ */
+export const OIDC_CLIENT_SECRET_ENV_PREFIX = "STEWARD_TENANT_OIDC_SECRET_";
+
+export function isAllowedOidcClientSecretEnv(name: string): boolean {
+  return /^[A-Z_][A-Z0-9_]{0,127}$/.test(name) && name.startsWith(OIDC_CLIENT_SECRET_ENV_PREFIX);
+}
+
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -67,8 +79,8 @@ export function normalizeOidcProviders(value: unknown): TenantOidcProviderConfig
     if (clientId && clientId.length > 256) {
       return `clientId for provider ${id} may be at most 256 characters`;
     }
-    if (clientSecretEnv && !/^[A-Z_][A-Z0-9_]{0,127}$/.test(clientSecretEnv)) {
-      return `clientSecretEnv for provider ${id} must be an environment variable name`;
+    if (clientSecretEnv && !isAllowedOidcClientSecretEnv(clientSecretEnv)) {
+      return `clientSecretEnv for provider ${id} must be an environment variable name starting with ${OIDC_CLIENT_SECRET_ENV_PREFIX}`;
     }
     if (
       authorizationUrl &&

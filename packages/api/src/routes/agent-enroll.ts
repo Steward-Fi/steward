@@ -11,18 +11,22 @@
  *
  * Reuses the shipped crypto + stores:
  *   - challenge/response + P-256 verify: @stwd/auth agent-enroll core.
+ *   - challenge persistence: the API's initialized ChallengeStore (Redis or
+ *     Postgres in production — see initAuthStores), so challenges survive
+ *     restarts and verify can land on a different instance than challenge.
  *   - registered key: `agent_signers` (keyType="p256", status="active").
  *   - token mint: signAgentToken (short TTL — minute-scale, so revocation via a
  *     signer status flip lands at the next enroll cycle).
  *
  * The tenant is derived SERVER-SIDE from the resolved signer row, never taken
  * from the request. Fail-closed everywhere: any resolution/verify failure denies
- * with a generic message (no enumeration signal beyond "denied").
+ * with a generic message (no enumeration signal beyond "denied"). Both endpoints
+ * are unauthenticated, so they sit behind the same Redis-backed auth rate
+ * limiter as the other public auth surfaces (SEC-051).
  */
 
 import {
   type AgentSignerResolver,
-  challengeStore,
   issueEnrollChallenge,
   type ResolvedAgentSigner,
   signAgentToken,
@@ -31,7 +35,14 @@ import {
 import { agentSigners, eq } from "@stwd/db";
 import { Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
-import { type ApiResponse, type AppVariables, db, safeJsonParse } from "../services/context";
+import {
+  type ApiResponse,
+  type AppVariables,
+  db,
+  isValidAgentId,
+  safeJsonParse,
+} from "../services/context";
+import { checkAuthRateLimit, getAuthChallengeStore } from "./auth";
 
 /** Short-lived enrollment token TTL. Minute-scale: the agent immediately renews
  * (or exchanges for scoped capabilities), and a revoked signer stops enrolling
@@ -70,13 +81,27 @@ async function resolveP256Signers(agentId: string): Promise<{
 
 // ── POST /challenge ──────────────────────────────────────────────────────────
 agentEnrollRoutes.post("/challenge", async (c) => {
+  const rl = await checkAuthRateLimit(c, "agent-enroll-challenge", 60_000, 30);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many enrollment attempts. Try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
   const body = await safeJsonParse<{ agentId?: unknown }>(c);
   const agentId = typeof body?.agentId === "string" ? body.agentId.trim() : "";
   if (!agentId) {
     return c.json<ApiResponse>({ ok: false, error: "agentId required" }, 400);
   }
+  // Cap length + charset (schema shape): the agentId is embedded in the store
+  // key, so an uncapped value pins attacker-controlled memory per request.
+  if (!isValidAgentId(agentId)) {
+    return c.json<ApiResponse>({ ok: false, error: "invalid agentId" }, 400);
+  }
 
-  const issued = await issueEnrollChallenge(challengeStore, agentId);
+  const issued = await issueEnrollChallenge(getAuthChallengeStore(), agentId);
   if (!issued.ok) {
     return c.json<ApiResponse>({ ok: false, error: "enrollment unavailable" }, 503);
   }
@@ -95,6 +120,15 @@ agentEnrollRoutes.post("/challenge", async (c) => {
 
 // ── POST /verify ─────────────────────────────────────────────────────────────
 agentEnrollRoutes.post("/verify", async (c) => {
+  const rl = await checkAuthRateLimit(c, "agent-enroll-verify", 60_000, 20);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many enrollment attempts. Try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
   const body = await safeJsonParse<{
     agentId?: unknown;
     nonce?: unknown;
@@ -106,6 +140,9 @@ agentEnrollRoutes.post("/verify", async (c) => {
   if (!agentId || !nonce || !signature) {
     return c.json<ApiResponse>({ ok: false, error: "agentId, nonce and signature required" }, 400);
   }
+  if (!isValidAgentId(agentId)) {
+    return c.json<ApiResponse>({ ok: false, error: "invalid agentId" }, 400);
+  }
 
   // Resolve signers ONCE; the enrollment core is handed a thin resolver closure so
   // it stays db-agnostic. We keep the tenant from the same query.
@@ -116,7 +153,7 @@ agentEnrollRoutes.post("/verify", async (c) => {
     return signers;
   };
 
-  const result = await verifyEnrollResponse(challengeStore, resolver, {
+  const result = await verifyEnrollResponse(getAuthChallengeStore(), resolver, {
     agentId,
     nonce,
     signature,

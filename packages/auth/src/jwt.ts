@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, scryptSync } from "node:crypto";
 import {
   calculateJwkThumbprint,
   exportJWK,
@@ -67,6 +67,35 @@ export interface IdentityJwtConfig {
 let warnedDeprecatedSessionSecret = false;
 let warnedEmbeddedMasterFallback = false;
 let warnedDevSecret = false;
+let warnedShortSecret = false;
+
+/**
+ * Embedded-mode JWT secret derivation cache. Deriving via scrypt costs ~50ms,
+ * and getJwtSecret() runs on every token sign/verify, so the derived key is
+ * memoized per distinct source password.
+ */
+let embeddedJwtDerivation: { source: string; derived: string } | null = null;
+
+/**
+ * Derive the embedded-mode JWT signing secret from STEWARD_MASTER_PASSWORD.
+ *
+ * The raw master password is NEVER used as the JWT secret (SEC-013): every
+ * issued HS256 JWT would otherwise be an unlimited fast offline brute-force
+ * oracle against the same password that encrypts vault keys. Instead the JWT
+ * secret is scrypt-derived with a domain-separation label (same idiom as the
+ * vault's KeyStore domains), so the JWT key is cryptographically independent
+ * from the vault root key and offline guesses cost a scrypt each.
+ */
+function deriveEmbeddedJwtSecret(masterPassword: string): string {
+  if (embeddedJwtDerivation && embeddedJwtDerivation.source === masterPassword) {
+    return embeddedJwtDerivation.derived;
+  }
+  const derived = (scryptSync(masterPassword, "steward-kdf:jwt-signing:v1", 32) as Buffer).toString(
+    "hex",
+  );
+  embeddedJwtDerivation = { source: masterPassword, derived };
+  return derived;
+}
 
 function isEmbeddedMode(): boolean {
   return (
@@ -112,7 +141,7 @@ function warnOnce(kind: "session" | "master" | "dev", warn: ((message: string) =
     if (warnedEmbeddedMasterFallback) return;
     warnedEmbeddedMasterFallback = true;
     warn(
-      "⚠️ [EMBEDDED/DEV ONLY] Falling back to STEWARD_MASTER_PASSWORD for JWTs. Set STEWARD_JWT_SECRET for server deployments.",
+      "⚠️ [EMBEDDED/DEV ONLY] Deriving the JWT secret from STEWARD_MASTER_PASSWORD via domain-separated scrypt. Set STEWARD_JWT_SECRET for server deployments.",
     );
     return;
   }
@@ -124,11 +153,40 @@ function warnOnce(kind: "session" | "master" | "dev", warn: ((message: string) =
 }
 
 /**
+ * Length policy for any CONFIGURED JWT secret (SEC-053): production hard-fails
+ * below 32 characters; other environments still accept shorter values (tests
+ * and local dev rely on them) but warn loudly once, so a staging/preview
+ * deploy with a weak secret is visible in logs instead of silently issuing
+ * brute-forceable tokens. The explicit dev-secret fallback is not routed here.
+ */
+export function checkJwtSecretStrength(
+  secret: string,
+  sourceName: string,
+  options: { nodeEnv?: string; warn?: ((message: string) => void) | null } = {},
+): void {
+  if (secret.length >= 32) return;
+  const nodeEnv = options.nodeEnv ?? process.env.NODE_ENV;
+  if (nodeEnv === "production") {
+    throw new Error(
+      `⛔ ${sourceName} must be at least 32 characters in production (canonical env var: STEWARD_JWT_SECRET).`,
+    );
+  }
+  const warn = options.warn === undefined ? console.warn : options.warn;
+  if (!warn || warnedShortSecret) return;
+  warnedShortSecret = true;
+  warn(
+    `⚠️ ${sourceName} is shorter than 32 characters; HS256 tokens are cheap to brute-force offline. ` +
+      "Use a long random secret anywhere outside local tests.",
+  );
+}
+
+/**
  * Resolve Steward's canonical JWT secret.
  *
  * Canonical env var: STEWARD_JWT_SECRET.
  * Deprecated compatibility fallback: STEWARD_SESSION_SECRET.
- * STEWARD_MASTER_PASSWORD is only accepted in embedded/local dev mode.
+ * In embedded/local dev mode only, STEWARD_MASTER_PASSWORD is accepted as
+ * derivation input — never used verbatim (see deriveEmbeddedJwtSecret).
  */
 export function getJwtSecret(options: JwtSecretOptions = {}): string {
   const nodeEnv = options.nodeEnv ?? process.env.NODE_ENV;
@@ -152,7 +210,7 @@ export function getJwtSecret(options: JwtSecretOptions = {}): string {
     warnOnce("session", warn);
   } else if (isEmbeddedMode() && process.env.STEWARD_MASTER_PASSWORD) {
     sourceName = "STEWARD_MASTER_PASSWORD";
-    secret = process.env.STEWARD_MASTER_PASSWORD;
+    secret = deriveEmbeddedJwtSecret(process.env.STEWARD_MASTER_PASSWORD);
     warnOnce("master", warn);
   } else {
     sourceName = "dev-secret";
@@ -164,11 +222,9 @@ export function getJwtSecret(options: JwtSecretOptions = {}): string {
         "⛔ STEWARD_JWT_SECRET is required in production (minimum 32 characters). STEWARD_SESSION_SECRET is temporarily accepted for migration but deprecated.",
       );
     }
-    if (secret.length < 32) {
-      throw new Error(
-        `⛔ ${sourceName} must be at least 32 characters in production (canonical env var: STEWARD_JWT_SECRET).`,
-      );
-    }
+    checkJwtSecretStrength(secret, sourceName, { nodeEnv, warn });
+  } else if (secret) {
+    checkJwtSecretStrength(secret, sourceName, { nodeEnv, warn });
   }
 
   if (!secret) {

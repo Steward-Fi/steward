@@ -132,4 +132,43 @@ describe("session revocation", () => {
       }
     }
   });
+
+  it("rejects refresh JWTs as session tokens (SEC-055)", async () => {
+    const sessions = new SessionManager({ secret, expiresIn: "1h" });
+    const refresh = await sessions.createSession("user-refresh-confusion", {
+      tokenType: "refresh",
+    });
+    expect(await sessions.verifySession(refresh)).toBeNull();
+  });
+
+  it("warns loudly when revocation degrades to per-process memory (SEC-056)", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousRedisUrl = process.env.REDIS_URL;
+    delete process.env.NODE_ENV;
+    delete process.env.REDIS_URL;
+
+    const originalWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (message?: unknown, ...rest: unknown[]) => {
+      warnings.push([message, ...rest].join(" "));
+    };
+    try {
+      // Fresh module instance so the warn-once flag starts clean.
+      const { revocationStore: freshStore } = await import(`../revocation?sec056=${Date.now()}`);
+      await freshStore.isRevoked("sec056-probe");
+      expect(warnings.some((m) => m.includes("per-process memory"))).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+      if (previousNodeEnv === undefined) {
+        delete process.env.NODE_ENV;
+      } else {
+        process.env.NODE_ENV = previousNodeEnv;
+      }
+      if (previousRedisUrl === undefined) {
+        delete process.env.REDIS_URL;
+      } else {
+        process.env.REDIS_URL = previousRedisUrl;
+      }
+    }
+  });
 });

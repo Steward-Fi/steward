@@ -129,11 +129,22 @@ class InMemoryRevocationStore implements RevocationStore {
 class RedisRevocationStore implements RevocationStore {
   private redis: Redis | null = null;
   private readonly fallback = new InMemoryRevocationStore();
+  private warnedMemoryFallback = false;
 
   private getRedis(): Redis | null {
     if (!process.env.REDIS_URL) {
       if (process.env.NODE_ENV === "production") {
         throw new Error("Shared token revocation store unavailable");
+      }
+      // SEC-056: revocation state silently degrading to per-process memory
+      // breaks logout/user-wide revocation across instances — say so loudly.
+      if (!this.warnedMemoryFallback) {
+        this.warnedMemoryFallback = true;
+        console.warn(
+          "[steward:auth] REDIS_URL unset — token revocation uses per-process memory; " +
+            "logout and user/agent-wide revocation do NOT propagate across instances " +
+            "(production would fail closed).",
+        );
       }
       return null;
     }

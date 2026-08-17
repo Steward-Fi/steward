@@ -18,7 +18,16 @@
  * guessers that rotate subjects.
  *
  * Storage is pluggable so production deployments can back this with Redis;
- * the default in-memory store is fine for tests and single-node dev.
+ * the default in-memory store is fine for tests and single-node dev. NOTE:
+ * the default store is per-process — each instance of a multi-instance
+ * deployment gets its own independent guess budget. Use a shared store in
+ * multi-instance deployments.
+ *
+ * Concurrency: `check()` + `recordFailure()` are separate round-trips, so N
+ * parallel attempts can all pass `check()` before any failure is recorded,
+ * multiplying the guess budget by the parallelism factor. Prefer
+ * `checkAndRecord()` on contention-prone endpoints; it is genuinely atomic
+ * with the default (synchronous) in-memory store.
  */
 
 export interface LockoutState {
@@ -142,5 +151,68 @@ export class Lockout {
   /** Clear counter on successful authentication. */
   async recordSuccess(key: string): Promise<void> {
     await this.store.delete(key);
+  }
+
+  /**
+   * Atomically check the budget and, when allowed, record a failure in one
+   * call (SEC-057). Prefer this over check()+recordFailure() pairs: separate
+   * calls let N parallel attempts all pass check() before any failure lands.
+   *
+   * With a synchronous store (the default InMemoryLockoutStore) the
+   * read-modify-write below never yields to the event loop, so it is truly
+   * atomic. With an async remote store the operations can still interleave —
+   * use a backend with server-side atomicity (e.g. a Lua-scripted Redis
+   * store) for strict guarantees across instances.
+   */
+  async checkAndRecord(key: string): Promise<CheckResult> {
+    const stateOrPromise = this.store.get(key);
+    if (stateOrPromise instanceof Promise) {
+      return this.checkAndRecordAsync(key, await stateOrPromise);
+    }
+    // Sync fast path: no awaits, so no interleaving between read and write.
+    return this.checkAndRecordSync(key, stateOrPromise);
+  }
+
+  private checkAndRecordSync(key: string, state: LockoutState | undefined): CheckResult {
+    const now = this.now();
+    const base = state && now - state.lastAttempt <= this.cfg.idleResetMs ? state : undefined;
+    if (base && base.lockedUntil > now) {
+      return { allowed: false, retryAfterMs: base.lockedUntil - now };
+    }
+    const next = this.nextFailureState(base, now);
+    this.store.set(key, next);
+    return this.failureResult(next, now);
+  }
+
+  private async checkAndRecordAsync(
+    key: string,
+    state: LockoutState | undefined,
+  ): Promise<CheckResult> {
+    const now = this.now();
+    const base = state && now - state.lastAttempt <= this.cfg.idleResetMs ? state : undefined;
+    if (base && base.lockedUntil > now) {
+      return { allowed: false, retryAfterMs: base.lockedUntil - now };
+    }
+    const next = this.nextFailureState(base, now);
+    await this.store.set(key, next);
+    return this.failureResult(next, now);
+  }
+
+  private nextFailureState(state: LockoutState | undefined, now: number): LockoutState {
+    const failures = (state?.failures ?? 0) + 1;
+    let lockedUntil = state?.lockedUntil ?? 0;
+    if (failures >= this.cfg.maxAttempts) {
+      const over = failures - this.cfg.maxAttempts;
+      const window = Math.min(this.cfg.lockoutMs * 2 ** over, this.cfg.maxLockoutMs);
+      lockedUntil = now + window;
+    }
+    return { failures, lockedUntil, lastAttempt: now };
+  }
+
+  private failureResult(state: LockoutState, now: number): CheckResult {
+    if (state.lockedUntil > now) {
+      return { allowed: false, retryAfterMs: state.lockedUntil - now };
+    }
+    return { allowed: true, remaining: Math.max(0, this.cfg.maxAttempts - state.failures) };
   }
 }

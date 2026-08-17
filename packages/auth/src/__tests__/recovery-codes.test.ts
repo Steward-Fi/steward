@@ -36,8 +36,24 @@ describe("generateRecoveryCodes + verifyRecoveryCode", () => {
     const norms = codes.map(normalize);
     expect(new Set(norms).size).toBe(10);
     for (const n of norms) {
-      expect(n).toMatch(/^[A-HJ-NP-Z2-9]{10}$/);
+      expect(n).toMatch(/^[A-HJ-NP-Z2-9]{14}$/);
     }
+  });
+
+  test("legacy 10-char codes still verify (SEC-064 grace), new codes are 14 chars", async () => {
+    const store = new InMemoryRecoveryCodeStore();
+    // Simulate a pre-upgrade stored code: 10 chars, salted single SHA-256.
+    const legacyRaw = "ABCDEFGHJK";
+    const legacySalt = "SALTSALTSALTSALT";
+    const { createHash } = await import("node:crypto");
+    const legacyHash = createHash("sha256").update(`${legacySalt}:${legacyRaw}`).digest("hex");
+    await store.replaceForUser(USER, [{ hash: legacyHash, salt: legacySalt }]);
+
+    const legacy = await verifyRecoveryCode(store, USER, "ABCDE-FGHJK");
+    expect(legacy.valid).toBe(true);
+
+    const codes = await generateRecoveryCodes(store, USER, 1);
+    expect(normalize(codes[0])).toHaveLength(14);
   });
 
   test("returns valid=true for any issued code, then refuses replay", async () => {

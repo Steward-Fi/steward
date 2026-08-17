@@ -146,6 +146,7 @@ import {
   verifyCaptchaToken,
 } from "../services/auth-abuse";
 import { verifyEip1271 } from "../services/eip1271";
+import { isAllowedOidcClientSecretEnv } from "../services/oidc-provider-config";
 import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
 import { lockUserSession } from "../services/session-lock";
 import { testAccountOtpMatches } from "../services/test-account-credentials";
@@ -447,7 +448,7 @@ function authRateLimitOutageAllow(endpoint: string, err?: unknown): boolean {
  * @param max      - Max requests in the window (×5 for coarse fallback subjects)
  * @param subjectOverride - Per-target subject (e.g. destination email); hashed at key build
  */
-async function checkAuthRateLimit(
+export async function checkAuthRateLimit(
   c: Context,
   endpoint: string,
   windowMs: number,
@@ -1042,6 +1043,7 @@ export async function verifySessionToken(token: string): Promise<{
       userId?: string;
       email?: string;
       typ?: string;
+      tokenType?: string;
       jti?: string;
       exp?: number;
       iat?: number;
@@ -1051,6 +1053,8 @@ export async function verifySessionToken(token: string): Promise<{
       mfaMethod?: string;
     };
     if (payload.typ === "identity") return null;
+    // Never accept a refresh JWT as an access token (SEC-055).
+    if (payload.tokenType === "refresh") return null;
     await assertTokenNotRevoked(payload);
     if (payload.userId) {
       const [user] = await getDb()
@@ -1282,6 +1286,13 @@ function getChallengeStore(): ChallengeStore {
   _challengeStore ??= new ChallengeStore();
   return _challengeStore;
 }
+
+/**
+ * Exported for the public agent-enroll routes: enrollment challenges must
+ * share this initialized (Redis/Postgres in production) store instead of the
+ * auth package's process-local memory singleton (SEC-052).
+ */
+export { getChallengeStore as getAuthChallengeStore };
 
 function getOAuthCodeStore(): ChallengeStore {
   _oauthCodeStore ??= new ChallengeStore({ ttlMs: OAUTH_CODE_TTL_MS });
@@ -10298,6 +10309,11 @@ async function exchangeOidcAuthorizationCode(opts: {
     code_verifier: codeVerifier,
   });
   if (provider.clientSecretEnv) {
+    // Defense in depth: legacy rows may predate the config-time allowlist, so
+    // re-enforce the dedicated env namespace before reading any secret.
+    if (!isAllowedOidcClientSecretEnv(provider.clientSecretEnv)) {
+      throw new Error("OIDC client secret env is outside the allowed tenant namespace");
+    }
     const secret = process.env[provider.clientSecretEnv];
     if (!secret) throw new Error(`OIDC client secret env ${provider.clientSecretEnv} is not set`);
     body.set("client_secret", secret);

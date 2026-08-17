@@ -88,7 +88,7 @@ describe("Farcaster SIWF verifier", () => {
     });
 
     expect(verified).toMatchObject({
-      fid: "4242",
+      claimedFid: "4242",
       custodyAddress: account.address,
       username: "alice",
       displayName: "Alice",
