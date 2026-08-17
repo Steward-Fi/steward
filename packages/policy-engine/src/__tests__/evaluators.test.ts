@@ -85,11 +85,15 @@ describe("Contract Allowlist Policy", () => {
     contracts: [{ address: contract, selectors: [selector] }],
   });
 
-  it("passes native value transfers with no calldata", async () => {
+  it("passes native value transfers with no calldata (SEC-183 documented seam)", async () => {
     const result = await evaluatePolicy(rule, makeContext());
 
     expect(result.passed).toBe(true);
-    expect(result.reason).toBe("No contract calldata");
+    // The reason names the seam so the audit trail shows the rule did not
+    // gate this transfer.
+    expect(result.reason).toBe(
+      "No contract calldata: native transfer is not gated by contract-allowlist",
+    );
   });
 
   it("passes when target contract and selector are explicitly allowed", async () => {

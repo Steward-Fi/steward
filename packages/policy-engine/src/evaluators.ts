@@ -886,8 +886,23 @@ function evaluateContractAllowlist(rule: PolicyRule, ctx: EvaluatorContext): Pol
   const base = { policyId: rule.id, type: rule.type } as const;
   const data = ctx.request.data;
 
+  // SEC-183 (documented seam): a request with NO calldata is a plain native
+  // transfer, and this rule does NOT gate it — it passes unconditionally,
+  // regardless of the allowlist. This is intentional (the rule's job is
+  // contract/selector gating) but a common misconfiguration seam: operators
+  // who expect contract-allowlist to also constrain native sends MUST pair it
+  // with an approved-addresses rule (note: the write validator restricts
+  // approved-addresses to EVM addresses, so on Solana/Monero paths that rule
+  // can never match and always denies — native-transfer gating there needs a
+  // chain-appropriate rule). Flipping this branch to deny would silently
+  // break existing tenants that rely on the documented behavior, so the
+  // decision to gate native transfers explicitly is deferred (see SEC-183).
   if (!data || data === "0x") {
-    return { ...base, passed: true, reason: "No contract calldata" };
+    return {
+      ...base,
+      passed: true,
+      reason: "No contract calldata: native transfer is not gated by contract-allowlist",
+    };
   }
 
   if (!/^0x(?:[a-fA-F0-9]{2})+$/.test(data) || data.length < 10) {
