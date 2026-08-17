@@ -34,11 +34,29 @@ rendered_config=$(mktemp)
 sidecar_config=$(mktemp)
 unset_log=$(mktemp)
 empty_log=$(mktemp)
+pull_log=$(mktemp)
 cleanup() {
   MONERO_WALLET_RPC_PASSWORD=cleanup compose --profile monero down --volumes --remove-orphans >/dev/null 2>&1 || true
-  rm -f "$rendered_config" "$sidecar_config" "$unset_log" "$empty_log"
+  rm -f "$rendered_config" "$sidecar_config" "$unset_log" "$empty_log" "$pull_log"
 }
 trap cleanup EXIT HUP INT TERM
+
+pull_monero_image() {
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    if compose --profile monero pull monero-wallet-rpc >"$pull_log" 2>&1; then
+      return 0
+    fi
+    if [ "$attempt" -lt 3 ]; then
+      echo "compose-monero: image pull attempt $attempt failed; retrying" >&2
+      sleep $((attempt * 2))
+    fi
+    attempt=$((attempt + 1))
+  done
+  echo "compose-monero: failed to pull pinned sidecar image after 3 attempts" >&2
+  cat "$pull_log" >&2
+  return 1
+}
 
 echo "compose-monero: base config accepts unset MONERO_WALLET_RPC_PASSWORD"
 (
@@ -48,6 +66,7 @@ echo "compose-monero: base config accepts unset MONERO_WALLET_RPC_PASSWORD"
 )
 
 echo "compose-monero: profiled sidecar fails closed with unset MONERO_WALLET_RPC_PASSWORD"
+pull_monero_image
 if (
   unset MONERO_WALLET_RPC_PASSWORD
   export COMPOSE_PROFILES=monero
