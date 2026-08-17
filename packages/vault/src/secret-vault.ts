@@ -30,6 +30,7 @@ import {
   desc,
   eq,
   getDb,
+  gt,
   inArray,
   isNull,
   type Secret,
@@ -64,6 +65,28 @@ export interface CreateSecretOptions {
 }
 
 /**
+ * SEC-164: result of {@link SecretVault.migrateLegacyRootSecrets} — the forced
+ * re-encryption of pre-domain-separation secret rows into the domain-separated
+ * `secret-vault` root. Counts only; never contains plaintext.
+ */
+export interface LegacyRootSecretMigration {
+  /** Total secret rows examined (active AND soft-deleted versions). */
+  scanned: number;
+  /**
+   * Rows re-encrypted from the legacy (undomained) root into the domain root.
+   * In dry-run mode, the count of rows that WOULD be re-encrypted.
+   */
+  migrated: number;
+  /** Rows that already authenticated under the domain-separated root (skipped). */
+  alreadyDomainSeparated: number;
+  /**
+   * Row ids that authenticated under NEITHER root (corrupt row or wrong master
+   * password). Left untouched; never silently dropped.
+   */
+  failed: string[];
+}
+
+/**
  * A drizzle executor (the top-level db OR an open transaction) accepted by the
  * *WithinTx helpers so a caller can rotate a secret inside its OWN transaction
  * without a nested `db.transaction` (which deadlocks single-connection PGLite).
@@ -71,12 +94,18 @@ export interface CreateSecretOptions {
 export type SecretTxExecutor = DbBase | Parameters<Parameters<DbBase["transaction"]>[0]>[0];
 type DbBase = ReturnType<typeof getDb>;
 
+// SEC-164 migration walk: uuid cursor pagination (mirrors the rotation script).
+const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
+const LEGACY_MIGRATION_BATCH = 100;
+
 export class SecretVault {
   private keyStore: KeyStore;
   // Legacy root (no domain label) — secrets encrypted before domain separation
   // shared the signing-vault's root. Kept only for decrypt fallback so existing
   // ciphertext stays readable; new secrets are always written under the
-  // domain-separated `secret-vault` root above.
+  // domain-separated `secret-vault` root above. SEC-164: run
+  // {@link migrateLegacyRootSecrets} to re-encrypt legacy rows into the domain
+  // root, then disable the fallback (see allowLegacySecretRootFallback).
   private legacyKeyStore: KeyStore;
 
   constructor(masterPassword: string) {
@@ -241,9 +270,12 @@ export class SecretVault {
     const context = { tenantId, name: row.name, version: row.version };
     try {
       return this.keyStore.decrypt(encrypted, context);
-    } catch {
+    } catch (error) {
       // Backward compat: secrets written before domain separation are under the
       // legacy (shared) root. New secrets always use the domain-separated root above.
+      // SEC-164: the fallback stays enabled until an operator migrates legacy
+      // rows (migrateLegacyRootSecrets) and opts out via env; then it fails closed.
+      if (!allowLegacySecretRootFallback()) throw error;
       return this.legacyKeyStore.decrypt(encrypted, context);
     }
   }
@@ -421,6 +453,105 @@ export class SecretVault {
         seen.add(row.name);
         result.push(this.toMetadata(row));
       }
+    }
+    return result;
+  }
+
+  /**
+   * SEC-164: forced re-encryption of pre-domain-separation secret rows.
+   *
+   * Secrets written before KDF domain separation are encrypted under the
+   * legacy (undomained) root and only decrypt via the fallback in
+   * {@link decryptSecretRow} — meaning the shared signing-vault root can also
+   * decrypt them, which weakens the domain separation until they are rotated.
+   * This migration walks EVERY secret row (including soft-deleted versions,
+   * whose ciphertext remains at rest and readable by historical-version
+   * consumers such as KMS decrypt-old-version) and re-encrypts any row that
+   * only authenticates under the legacy root INTO the domain-separated root,
+   * in place: id/tenantId/name/version are untouched, so the production AAD
+   * context { tenantId, name, version } is preserved and no route or metadata
+   * changes.
+   *
+   * Idempotent: rows already under the domain root are skipped, so an
+   * interrupted run can be rerun safely. Rows authenticating under neither
+   * root are reported in `failed` and left as-is.
+   *
+   * Operator flow (scripts/migrate-legacy-secret-root.ts wraps this): dry-run,
+   * then write mode, then a verifying dry-run that must report every row
+   * alreadyDomainSeparated with failed empty — after which
+   * STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK=false makes the compat fallback
+   * fail closed. See docs/runbooks/key-rotation.md.
+   */
+  async migrateLegacyRootSecrets(options?: {
+    dryRun?: boolean;
+    /** Caller-owned executor so the walk can run inside one outer transaction. */
+    db?: SecretTxExecutor;
+  }): Promise<LegacyRootSecretMigration> {
+    const db = options?.db ?? getDb();
+    const result: LegacyRootSecretMigration = {
+      scanned: 0,
+      migrated: 0,
+      alreadyDomainSeparated: 0,
+      failed: [],
+    };
+    let cursor = ZERO_UUID;
+    while (true) {
+      // NOTE: no deletedAt filter — soft-deleted versions hold ciphertext too
+      // and must not be left dependent on the legacy root.
+      const rows = await db
+        .select({
+          id: secrets.id,
+          tenantId: secrets.tenantId,
+          name: secrets.name,
+          version: secrets.version,
+          ciphertext: secrets.ciphertext,
+          iv: secrets.iv,
+          authTag: secrets.authTag,
+          salt: secrets.salt,
+        })
+        .from(secrets)
+        .where(gt(secrets.id, cursor))
+        .orderBy(secrets.id)
+        .limit(LEGACY_MIGRATION_BATCH);
+      if (rows.length === 0) break;
+
+      for (const row of rows) {
+        result.scanned += 1;
+        const context = { tenantId: row.tenantId, name: row.name, version: row.version };
+        const encrypted: EncryptedKey = {
+          ciphertext: row.ciphertext,
+          iv: row.iv,
+          tag: row.authTag,
+          salt: row.salt,
+        };
+        try {
+          this.keyStore.decrypt(encrypted, context);
+          result.alreadyDomainSeparated += 1;
+          continue;
+        } catch {
+          // Not under the domain root — try the legacy (undomained) root.
+        }
+        try {
+          const plaintext = this.legacyKeyStore.decrypt(encrypted, context);
+          if (!options?.dryRun) {
+            const reEncrypted = this.keyStore.encrypt(plaintext, context);
+            await db
+              .update(secrets)
+              .set({
+                ciphertext: reEncrypted.ciphertext,
+                iv: reEncrypted.iv,
+                authTag: reEncrypted.tag,
+                salt: reEncrypted.salt,
+              })
+              .where(eq(secrets.id, row.id));
+          }
+          result.migrated += 1;
+        } catch {
+          result.failed.push(row.id);
+        }
+      }
+      cursor = rows[rows.length - 1].id;
+      if (rows.length < LEGACY_MIGRATION_BATCH) break;
     }
     return result;
   }
@@ -728,4 +859,17 @@ export class SecretVault {
       updatedAt: row.updatedAt,
     };
   }
+}
+
+/**
+ * SEC-164: the legacy-root decrypt fallback exists only so pre-domain-
+ * separation secrets stay readable until they are re-encrypted under the
+ * domain-separated root. It defaults to ENABLED for backward compatibility;
+ * after `migrateLegacyRootSecrets` runs clean (and a verifying dry-run shows
+ * every row under the domain root), operators set
+ * STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK=false so the fallback fails closed
+ * and full domain separation is enforced.
+ */
+function allowLegacySecretRootFallback(): boolean {
+  return process.env.STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK !== "false";
 }

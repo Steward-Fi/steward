@@ -92,6 +92,31 @@ Before application cutover, a transaction failure needs no data rollback. Fix th
 
 Blast radius of an incorrect root is all local encrypted custody and credentials. The script does not rotate KMS/HSM-managed material.
 
+### Secret-vault legacy root migration (domain separation)
+
+Secrets written before KDF domain separation are encrypted under the legacy undomained root — the same root that protects wallet signing keys — and `SecretVault` reads them through a compatibility fallback in `decryptSecretRow`. Until those rows are re-encrypted, the signing-vault root also decrypts every pre-separation secret, which weakens the separation. `scripts/migrate-legacy-secret-root.ts` re-encrypts those rows in place under the domain-separated `secret-vault` root, preserving each row's id, tenant, name, and version (its AES-GCM AAD), so no consumer, route, or metadata changes.
+
+The master-password procedure above already performs this re-encryption as a side effect. Use this script only when you are NOT rotating the password or KDF salt. It walks every `secrets` row including soft-deleted versions, skips rows already under the domain root (idempotent), authenticates the complete inventory before any write, runs write mode in one transaction under an advisory lock, and aborts without rewriting any row that authenticates under neither root. The password and salt do not change; `STEWARD_KDF_SALT` must match the runtime value.
+
+```sh
+export DATABASE_URL='postgresql://...'
+export STEWARD_MASTER_PASSWORD="$MASTER_FROM_SECRET_MANAGER"
+export STEWARD_KDF_SALT="$KDF_SALT_FROM_SECRET_MANAGER"
+
+# Mandatory no-write classification pass.
+bun run scripts/migrate-legacy-secret-root.ts --dry-run
+
+# Only continue if failed=0.
+bun run scripts/migrate-legacy-secret-root.ts --confirm
+
+# Verifying rerun: must report migrated=0 failed=0.
+bun run scripts/migrate-legacy-secret-root.ts --dry-run
+```
+
+Then set `STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK=false` on every consumer, restart, and perform a non-value-bearing smoke test of one secret injection. With the flag off, any row still requiring the legacy root fails closed with a decrypt error instead of silently using the shared root; rerun the migration if that surfaces a straggler. The fallback defaults to enabled, so deployments that have not run the migration keep working.
+
+Rollback: the migration rewrites ciphertext only — plaintext, AAD, and row identity are unchanged — so there is no data restore beyond the standard backup protocol. Before the flag cutover, verification failure means rerunning the script; after it, unset the flag while you investigate. The contract test is `packages/vault/src/__tests__/secret-legacy-root-migration.test.ts`.
+
 ## Execution authorization v2
 
 The actual format is a comma-separated list of `keyId:secret` entries. A bare value gets key ID `v2-default`. The first usable entry is the only signing key. All listed entries can verify. Duplicate key IDs are ignored after the first.
