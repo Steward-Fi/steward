@@ -8,7 +8,7 @@
  */
 
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
@@ -274,6 +274,36 @@ describe("PGLite Adapter", () => {
       await client.close();
     }
   });
+
+  // ─── Data directory permissions (SEC-090) ──────────────────────────────
+
+  test.skipIf(process.platform === "win32")(
+    "data directory is created owner-only (SEC-090)",
+    async () => {
+      const parent = await mkdtemp(join(tmpdir(), "steward-pglite-perms-"));
+      const dir = join(parent, "data");
+
+      const { client } = await createPGLiteDb(dir);
+      await client.close();
+
+      expect((await stat(dir)).mode & 0o777).toBe(0o700);
+      await rm(parent, { recursive: true, force: true }).catch(() => {});
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "pre-existing permissive data directory is tightened to owner-only (SEC-090)",
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), "steward-pglite-perms-existing-"));
+      await chmod(dir, 0o755);
+
+      const { client } = await createPGLiteDb(dir);
+      await client.close();
+
+      expect((await stat(dir)).mode & 0o777).toBe(0o700);
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+    },
+  );
 
   test("migrations don't re-run on persistent DB", async () => {
     const dir = await mkdtemp(join(tmpdir(), "steward-pglite-mig-"));
