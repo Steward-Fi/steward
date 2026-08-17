@@ -278,6 +278,26 @@ function requireTenantAdminOrApiKey(c: Parameters<typeof requireTenantLevel>[0])
   return requireTenantAdminSession(c);
 }
 
+/**
+ * SEC-209: agent-token minting, vault-policy-set replacement, and agent
+ * deletion are root-equivalent mutations. A bare tenant API key (one shared
+ * secret, no step-up possible) is no longer sufficient for them by default —
+ * they require a human owner/admin session with recent MFA, consistent with
+ * the sibling webhooks/secrets/audit surfaces. Operators that depend on
+ * machine automation can explicitly restore the legacy api-key path via
+ * STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS=true (documented as fully-root).
+ */
+function allowApiKeyAdminMutations(c: Parameters<typeof requireTenantLevel>[0]): boolean {
+  return (
+    c.get("authType") === "api-key" &&
+    process.env.STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS === "true"
+  );
+}
+
+function requireSensitiveMutationPrincipal(c: Parameters<typeof requireTenantLevel>[0]): boolean {
+  return requireTenantAdminSession(c) || allowApiKeyAdminMutations(c);
+}
+
 function generateAgentId(): string {
   return `agt_${crypto.randomUUID()}`;
 }
@@ -1359,7 +1379,9 @@ agentRoutes.post("/:agentId/token", async (c) => {
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
 
-  if (!requireTenantAdminOrApiKey(c)) {
+  // SEC-209: minting agent tokens is root-equivalent — human admin session
+  // (API key only via explicit STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS opt-in).
+  if (!requireSensitiveMutationPrincipal(c)) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -1845,7 +1867,9 @@ agentRoutes.get("/:agentId", async (c) => {
 // ─── Delete agent ─────────────────────────────────────────────────────────────
 
 agentRoutes.delete("/:agentId", async (c) => {
-  if (!requireTenantAdminOrApiKey(c)) {
+  // SEC-209: deleting an agent destroys its key material — human admin
+  // session (API key only via explicit opt-in).
+  if (!requireSensitiveMutationPrincipal(c)) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -3523,7 +3547,9 @@ agentRoutes.get("/:agentId/policies", async (c) => {
 // ─── Update agent policies ────────────────────────────────────────────────────
 
 agentRoutes.put("/:agentId/policies", async (c) => {
-  if (!requireTenantAdminOrApiKey(c)) {
+  // SEC-209: replacing an agent's vault policy set removes its spend caps —
+  // human admin session (API key only via explicit opt-in).
+  if (!requireSensitiveMutationPrincipal(c)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Policy updates require owner or admin session" },
       403,
