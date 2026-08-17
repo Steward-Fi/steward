@@ -29,6 +29,83 @@ POST /v2/provider-actions          (create; PR2 canonicalization + binding)
 
 No new authority is introduced by the golden path. It exercises PR1–PR5 only.
 
+## Config-driven generic HTTP operations
+
+`generic-http.provider-action.v1` lets an owner or workspace admin enroll a
+public HTTPS operation without adding a provider package. The control-plane
+caller must have recent MFA. Enrollment is deliberately two-step:
+
+1. Create a narrow, enabled legacy credential route for one tenant agent,
+   secret, DNS host, exact path, and method. The normal secret-route public-host
+   allowlist and validation still apply.
+2. Register the operation with
+   `POST /v2/provider-accounts/{accountId}/operations`. Registration validates
+   the descriptor, proves that the exact route is inside its path language, and
+   atomically promotes the route to `governed_v2` bound to the new operation.
+
+The provider account uses `adapterKey: "generic-http"`. A minimal operation
+registration body is:
+
+```json
+{
+  "operationKey": "acme.ticket.create",
+  "riskClass": "write",
+  "secretRouteId": "<exact-legacy-route-id>",
+  "requestProfile": {
+    "profile": "generic-http.provider-action.v1",
+    "operationDescriptor": {
+      "profile": "generic-http.provider-action.v1",
+      "origin": "https://api.example.com",
+      "methods": ["POST"],
+      "pathTemplate": [
+        { "literal": "v1" },
+        { "literal": "tickets" }
+      ],
+      "body": {
+        "contentType": "application/json",
+        "fields": [
+          {
+            "name": "title",
+            "type": "string",
+            "required": true,
+            "pattern": "^.{1,200}$",
+            "maxBytes": 4096
+          }
+        ]
+      },
+      "projection": {
+        "policyArgs": [],
+        "safeSummary": ["title"]
+      }
+    }
+  },
+  "expectedRevision": 1,
+  "reason": "enroll Acme ticket creation"
+}
+```
+
+Path, query, and body values are scalar and fail closed on unknown fields.
+String patterns use Steward's linear-time subset: anchored literal alternatives,
+or anchored sequences of literals, `.`, and positive character classes with
+finite `{n}` or `{min,max}` repetition. Lookaround, backreferences, optional or
+unbounded quantifiers, nested groups, negated classes, and multiple
+variable-width repetitions are rejected at authoring time.
+
+Descriptor headers are fixed public metadata only. Credential, forwarding,
+hop-by-hop, host, content-length, and Steward-internal headers cannot be placed
+in the canonical action. The selected route's encrypted secret id and version
+are bound separately into the approval and execution authorization; the proxy
+injects the plaintext only after the single-use governed claim succeeds.
+
+Agents invoke the registered operation through `POST /v2/provider-actions`,
+supplying `method` and `arguments`. Approval resume reconstructs arguments from
+the committed canonical bytes, reruns the current descriptor through the
+production builder, and requires byte-identical JCS before current-policy
+evaluation or authorization mint. Descriptor drift therefore returns
+`APPROVAL_ACTION_INTEGRITY_FAILED` and records
+`provider.resume.policy_denied`; it never dispatches the old approval against a
+new target.
+
 ## 1. The fake CI proof (every PR, credential-free)
 
 ```bash

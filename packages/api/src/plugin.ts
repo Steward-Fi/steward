@@ -46,7 +46,7 @@
  */
 
 import { type AdapterCategory, AdapterRegistry, adapterRegistry } from "@stwd/adapters";
-import { pluginMigrationsTable, runPluginMigrations } from "@stwd/db";
+import { pluginMigrationsTable, runPluginMigrations, withTenantAuditedTransaction } from "@stwd/db";
 import {
   type EvaluatorContext,
   type PolicyRuleRegistry,
@@ -161,6 +161,7 @@ export interface StewardAppContext {
   safeJsonParse: typeof safeJsonParse;
   isValidAnyAddress: typeof isValidAnyAddress;
   writeAuditEvent: typeof writeAuditEvent;
+  withTenantAuditedTransaction: typeof withTenantAuditedTransaction;
   getAgentTokenStatus: typeof getAgentTokenStatus;
   getRedisClient: typeof getRedisClient;
   requireAgentJwt: typeof requireAgentJwt;
@@ -209,6 +210,7 @@ export function buildPluginContext(): StewardAppContext {
     safeJsonParse,
     isValidAnyAddress,
     writeAuditEvent,
+    withTenantAuditedTransaction,
     getAgentTokenStatus,
     getRedisClient,
     requireAgentJwt,

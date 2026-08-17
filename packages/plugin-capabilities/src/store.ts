@@ -32,6 +32,8 @@
  */
 
 import {
+  type AppendRequiredAudit,
+  type AuditEventInput,
   agents,
   and,
   eq,
@@ -43,6 +45,12 @@ import {
   secrets,
   sql,
 } from "@stwd/db";
+import {
+  assertGovernedRouteUpdateIsSafe,
+  assertNoOppositeAuthorityOverlap,
+  lockSecretRouteNamespaces,
+  SecretRouteAuthorityConflict,
+} from "@stwd/vault";
 import {
   type Capability,
   type CapabilityGrant,
@@ -62,6 +70,12 @@ import {
 // (postgres-js/pglite/neon); the store accepts any drizzle db exposing the common
 // query builder + transaction. the core injects the concrete handle.
 export type Db = any;
+
+type AuditedTransaction = <T>(
+  tenantId: string,
+  fn: (tx: unknown, appendRequiredAudit: AppendRequiredAudit) => Promise<T>,
+) => Promise<T>;
+type AuditFactory<T> = (result: T) => AuditEventInput | null;
 
 /** fields that define a capability's target + injection (validated together). */
 export interface CapabilitySpec {
@@ -104,7 +118,27 @@ function routeValuesFor(
 }
 
 export class CapabilityStore {
-  constructor(private readonly db: Db) {}
+  constructor(
+    private readonly db: Db,
+    private readonly auditedTransaction?: AuditedTransaction,
+  ) {}
+
+  private transaction<T>(
+    tenantId: string,
+    audit: AuditFactory<T> | undefined,
+    mutate: (tx: Db) => Promise<T>,
+  ): Promise<T> {
+    if (!audit) return this.db.transaction(mutate);
+    if (!this.auditedTransaction) {
+      throw new Error("audited transaction runner is required for capability mutations");
+    }
+    return this.auditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
+      const result = await mutate(tx as Db);
+      const event = audit(result);
+      if (event) await appendRequiredAudit(event);
+      return result;
+    });
+  }
 
   // ── capability reads ────────────────────────────────────────────────────────
 
@@ -165,24 +199,27 @@ export class CapabilityStore {
     spec: CapabilitySpec;
     constraints: Record<string, unknown>;
     enabled: boolean;
+    audit?: AuditFactory<Capability>;
   }): Promise<Capability> {
-    const [row] = await this.db
-      .insert(capabilities)
-      .values({
-        tenantId: input.tenantId,
-        name: input.name,
-        secretId: input.spec.secretId,
-        host: input.spec.host,
-        pathPattern: input.spec.pathPattern,
-        method: input.spec.method,
-        injectAs: input.spec.injectAs,
-        injectKey: input.spec.injectKey,
-        injectFormat: input.spec.injectFormat,
-        constraints: input.constraints,
-        enabled: input.enabled,
-      })
-      .returning();
-    return row;
+    return this.transaction(input.tenantId, input.audit, async (tx) => {
+      const [row] = await tx
+        .insert(capabilities)
+        .values({
+          tenantId: input.tenantId,
+          name: input.name,
+          secretId: input.spec.secretId,
+          host: input.spec.host,
+          pathPattern: input.spec.pathPattern,
+          method: input.spec.method,
+          injectAs: input.spec.injectAs,
+          injectKey: input.spec.injectKey,
+          injectFormat: input.spec.injectFormat,
+          constraints: input.constraints,
+          enabled: input.enabled,
+        })
+        .returning();
+      return row;
+    });
   }
 
   // ── capability update (enable/disable + routing/inject/constraints) ─────────
@@ -209,13 +246,29 @@ export class CapabilityStore {
       enabled?: boolean;
     },
     now: Date = new Date(),
+    audit?: AuditFactory<Capability | null>,
   ): Promise<Capability | null> {
-    return this.db.transaction(async (tx: Db) => {
+    return this.transaction(tenantId, audit, async (tx: Db) => {
       const [current] = await tx
         .select()
         .from(capabilities)
-        .where(and(eq(capabilities.id, id), eq(capabilities.tenantId, tenantId)));
+        .where(and(eq(capabilities.id, id), eq(capabilities.tenantId, tenantId)))
+        .for("update");
       if (!current) return null;
+
+      // Capability row first, then sorted agent namespaces everywhere. Holding
+      // the capability row prevents a concurrent grant from appearing after the
+      // namespace inventory is read, while the sorted namespace lock prevents
+      // route edits/promotions from racing this rewrite.
+      const grants: CapabilityGrant[] = await tx
+        .select()
+        .from(capabilityGrants)
+        .where(and(eq(capabilityGrants.tenantId, tenantId), eq(capabilityGrants.capabilityId, id)));
+      await lockSecretRouteNamespaces(
+        tx,
+        tenantId,
+        grants.map((grant) => grant.agentId),
+      );
 
       const set: Record<string, unknown> = { updatedAt: now };
       if (patch.spec) {
@@ -240,18 +293,30 @@ export class CapabilityStore {
       const merged: CapabilityRouteFields = patch.spec ? { ...patch.spec } : current;
       const willBeEnabled = patch.enabled ?? current.enabled;
 
-      const grants: CapabilityGrant[] = await tx
-        .select()
-        .from(capabilityGrants)
-        .where(and(eq(capabilityGrants.tenantId, tenantId), eq(capabilityGrants.capabilityId, id)));
-
       for (const grant of grants) {
         if (!grant.secretRouteId) continue;
         // a route stays enabled only if the capability is enabled AND the grant
         // is active + unexpired. otherwise it is disabled (fail-closed).
         const grantUsable = grant.status === "active" && !isExpired(grant.expiresAt, now);
         const routeEnabled = willBeEnabled && grantUsable;
-        await tx
+        const [existingRoute] = await tx
+          .select()
+          .from(secretRoutes)
+          .where(and(eq(secretRoutes.id, grant.secretRouteId), eq(secretRoutes.tenantId, tenantId)))
+          .limit(1);
+        if (!existingRoute) continue;
+        assertGovernedRouteUpdateIsSafe(existingRoute, {
+          secretId: merged.secretId,
+          agentId: grant.agentId,
+          hostPattern: merged.host,
+          pathPattern: merged.pathPattern,
+          method: merged.method,
+          injectAs: merged.injectAs,
+          injectKey: merged.injectKey,
+          injectFormat: merged.injectFormat,
+          enabled: routeEnabled,
+        });
+        const [changedRoute] = await tx
           .update(secretRoutes)
           .set({
             secretId: merged.secretId,
@@ -263,9 +328,14 @@ export class CapabilityStore {
             injectFormat: merged.injectFormat,
             enabled: routeEnabled,
           })
-          .where(
-            and(eq(secretRoutes.id, grant.secretRouteId), eq(secretRoutes.tenantId, tenantId)),
-          );
+          .where(and(eq(secretRoutes.id, grant.secretRouteId), eq(secretRoutes.tenantId, tenantId)))
+          .returning();
+        if (changedRoute) {
+          await assertNoOppositeAuthorityOverlap(tx, {
+            ...changedRoute,
+            agentId: grant.agentId,
+          });
+        }
       }
 
       return updated;
@@ -278,12 +348,17 @@ export class CapabilityStore {
    * Delete a capability transactionally: remove every paired secret_route, then
    * every grant, then the capability. No route can survive the delete.
    */
-  async deleteCapability(tenantId: string, id: string): Promise<boolean> {
-    return this.db.transaction(async (tx: Db) => {
+  async deleteCapability(
+    tenantId: string,
+    id: string,
+    audit?: AuditFactory<boolean>,
+  ): Promise<boolean> {
+    return this.transaction(tenantId, audit, async (tx: Db) => {
       const [current] = await tx
         .select()
         .from(capabilities)
-        .where(and(eq(capabilities.id, id), eq(capabilities.tenantId, tenantId)));
+        .where(and(eq(capabilities.id, id), eq(capabilities.tenantId, tenantId)))
+        .for("update");
       if (!current) return false;
 
       const grants: CapabilityGrant[] = await tx
@@ -434,15 +509,17 @@ export class CapabilityStore {
     agentId: string;
     expiresAt: Date | null;
     now?: Date;
+    audit?: AuditFactory<{ grant: CapabilityGrant; route: SecretRoute | null } | null>;
   }): Promise<{ grant: CapabilityGrant; route: SecretRoute | null } | null> {
     const now = input.now ?? new Date();
-    return this.db.transaction(async (tx: Db) => {
+    return this.transaction(input.tenantId, input.audit, async (tx: Db) => {
       const [cap] = await tx
         .select()
         .from(capabilities)
         .where(
           and(eq(capabilities.id, input.capabilityId), eq(capabilities.tenantId, input.tenantId)),
-        );
+        )
+        .for("update");
       if (!cap) return null;
 
       // agent must exist under this tenant (mirrors SecretVault.createRoute's
@@ -452,6 +529,7 @@ export class CapabilityStore {
         .from(agents)
         .where(and(eq(agents.id, input.agentId), eq(agents.tenantId, input.tenantId)));
       if (!agent) throw new AgentNotFoundError(input.agentId, input.tenantId);
+      await lockSecretRouteNamespaces(tx, input.tenantId, [input.agentId]);
 
       // reject a duplicate grant PROACTIVELY (before materializing a route), so
       // the unique(tenant, agent, capability) constraint is surfaced as a typed
@@ -476,6 +554,10 @@ export class CapabilityStore {
         .insert(secretRoutes)
         .values(routeValuesFor(input.tenantId, input.agentId, cap, routeEnabled))
         .returning();
+      await assertNoOppositeAuthorityOverlap(tx, {
+        ...route,
+        agentId: input.agentId,
+      });
 
       const [grant] = await tx
         .insert(capabilityGrants)
@@ -501,8 +583,12 @@ export class CapabilityStore {
    * already-revoked grant (route already gone). Returns false if the grant does
    * not exist for the tenant.
    */
-  async revokeGrant(tenantId: string, grantId: string): Promise<boolean> {
-    return this.db.transaction(async (tx: Db) => {
+  async revokeGrant(
+    tenantId: string,
+    grantId: string,
+    audit?: AuditFactory<boolean>,
+  ): Promise<boolean> {
+    return this.transaction(tenantId, audit, async (tx: Db) => {
       const [grant] = await tx
         .select()
         .from(capabilityGrants)
@@ -535,6 +621,8 @@ export class AgentNotFoundError extends Error {
     this.name = "AgentNotFoundError";
   }
 }
+
+export { SecretRouteAuthorityConflict };
 
 /**
  * Thrown when an agent is already granted a capability (the

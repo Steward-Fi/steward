@@ -16,9 +16,14 @@
 import type { ApiResponse, AppVariables } from "@stwd/shared";
 import type { Context } from "hono";
 import { Hono } from "hono";
-import type { StewardAppContext } from "./context";
+import type { AuditEventInput, StewardAppContext } from "./context";
 import type { Capability, CapabilityGrant } from "./schema";
-import { AgentNotFoundError, CapabilityStore, GrantExistsError } from "./store";
+import {
+  AgentNotFoundError,
+  CapabilityStore,
+  GrantExistsError,
+  SecretRouteAuthorityConflict,
+} from "./store";
 import {
   createCapabilitySchema,
   createGrantSchema,
@@ -108,9 +113,9 @@ function requireCapabilityAdmin(
  */
 export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables: AppVariables }> {
   const routes = new Hono<{ Variables: AppVariables }>();
-  const store = new CapabilityStore(ctx.db);
+  const store = new CapabilityStore(ctx.db, ctx.withTenantAuditedTransaction);
 
-  async function audit(
+  function auditEvent(
     c: Context<{ Variables: AppVariables }>,
     event: {
       tenantId: string;
@@ -119,8 +124,8 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
       resourceId: string;
       metadata?: Record<string, unknown>;
     },
-  ): Promise<void> {
-    await ctx.writeAuditEvent({
+  ): AuditEventInput {
+    return {
       tenantId: event.tenantId,
       actorType: c.get("authType") === "api-key" ? "api-key" : "user",
       actorId: c.get("userId") ?? c.get("authType") ?? event.tenantId,
@@ -131,7 +136,7 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
       ipAddress: c.req.header("x-forwarded-for") ?? null,
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
-    });
+    };
   }
 
   // ── POST /capabilities - create (validates, no grants -> no routes yet) ─────
@@ -185,20 +190,21 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
         spec: validated.spec,
         constraints: input.constraints ?? {},
         enabled: input.enabled ?? true,
-      });
-      await audit(c, {
-        tenantId,
-        action: "capability.create",
-        resourceType: "capability",
-        resourceId: cap.id,
-        metadata: {
-          name: cap.name,
-          secretId: cap.secretId,
-          host: cap.host,
-          pathPattern: cap.pathPattern,
-          method: cap.method,
-          enabled: cap.enabled,
-        },
+        audit: (created) =>
+          auditEvent(c, {
+            tenantId,
+            action: "capability.create",
+            resourceType: "capability",
+            resourceId: created.id,
+            metadata: {
+              name: created.name,
+              secretId: created.secretId,
+              host: created.host,
+              pathPattern: created.pathPattern,
+              method: created.method,
+              enabled: created.enabled,
+            },
+          }),
       });
       return c.json<ApiResponse>({ ok: true, data: toCapabilityView(cap) }, 201);
     } catch (e) {
@@ -281,25 +287,36 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
     }
 
     try {
-      const updated = await store.updateCapability(tenantId, id, {
-        ...(spec?.ok ? { spec: spec.spec } : {}),
-        ...(patch.constraints !== undefined ? { constraints: patch.constraints } : {}),
-        ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
-      });
-      if (!updated) return c.json<ApiResponse>({ ok: false, error: "capability not found" }, 404);
-      await audit(c, {
+      const updated = await store.updateCapability(
         tenantId,
-        action: "capability.update",
-        resourceType: "capability",
-        resourceId: updated.id,
-        metadata: {
-          enabled: updated.enabled,
-          routingChanged: touchesRouting,
-          constraintsChanged: patch.constraints !== undefined,
+        id,
+        {
+          ...(spec?.ok ? { spec: spec.spec } : {}),
+          ...(patch.constraints !== undefined ? { constraints: patch.constraints } : {}),
+          ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
         },
-      });
+        undefined,
+        (result) =>
+          result
+            ? auditEvent(c, {
+                tenantId,
+                action: "capability.update",
+                resourceType: "capability",
+                resourceId: result.id,
+                metadata: {
+                  enabled: result.enabled,
+                  routingChanged: touchesRouting,
+                  constraintsChanged: patch.constraints !== undefined,
+                },
+              })
+            : null,
+      );
+      if (!updated) return c.json<ApiResponse>({ ok: false, error: "capability not found" }, 404);
       return c.json<ApiResponse>({ ok: true, data: toCapabilityView(updated) });
     } catch (e) {
+      if (e instanceof SecretRouteAuthorityConflict) {
+        return c.json<ApiResponse>({ ok: false, error: e.message }, 409);
+      }
       return errorResponse(c, e);
     }
   });
@@ -311,14 +328,17 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
     const tenantId = c.get("tenantId");
     const id = c.req.param("id");
     try {
-      const removed = await store.deleteCapability(tenantId, id);
+      const removed = await store.deleteCapability(tenantId, id, (result) =>
+        result
+          ? auditEvent(c, {
+              tenantId,
+              action: "capability.delete",
+              resourceType: "capability",
+              resourceId: id,
+            })
+          : null,
+      );
       if (!removed) return c.json<ApiResponse>({ ok: false, error: "capability not found" }, 404);
-      await audit(c, {
-        tenantId,
-        action: "capability.delete",
-        resourceType: "capability",
-        resourceId: id,
-      });
       return c.json<ApiResponse>({ ok: true, data: { id } });
     } catch (e) {
       return errorResponse(c, e);
@@ -355,20 +375,23 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
         capabilityId,
         agentId,
         expiresAt: expires,
+        audit: (created) =>
+          created
+            ? auditEvent(c, {
+                tenantId,
+                action: "capability.grant.create",
+                resourceType: "capability_grant",
+                resourceId: created.grant.id,
+                metadata: {
+                  capabilityId,
+                  agentId,
+                  secretRouteId: created.grant.secretRouteId,
+                  expiresAt: created.grant.expiresAt,
+                },
+              })
+            : null,
       });
       if (!result) return c.json<ApiResponse>({ ok: false, error: "capability not found" }, 404);
-      await audit(c, {
-        tenantId,
-        action: "capability.grant.create",
-        resourceType: "capability_grant",
-        resourceId: result.grant.id,
-        metadata: {
-          capabilityId,
-          agentId,
-          secretRouteId: result.grant.secretRouteId,
-          expiresAt: result.grant.expiresAt,
-        },
-      });
       return c.json<ApiResponse>({ ok: true, data: toGrantView(result.grant) }, 201);
     } catch (e) {
       if (e instanceof AgentNotFoundError) {
@@ -379,6 +402,9 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
           { ok: false, error: "agent already granted this capability" },
           409,
         );
+      }
+      if (e instanceof SecretRouteAuthorityConflict) {
+        return c.json<ApiResponse>({ ok: false, error: e.message }, 409);
       }
       return errorResponse(c, e);
     }
@@ -391,14 +417,17 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
     const tenantId = c.get("tenantId");
     const grantId = c.req.param("grantId");
     try {
-      const revoked = await store.revokeGrant(tenantId, grantId);
+      const revoked = await store.revokeGrant(tenantId, grantId, (result) =>
+        result
+          ? auditEvent(c, {
+              tenantId,
+              action: "capability.grant.revoke",
+              resourceType: "capability_grant",
+              resourceId: grantId,
+            })
+          : null,
+      );
       if (!revoked) return c.json<ApiResponse>({ ok: false, error: "grant not found" }, 404);
-      await audit(c, {
-        tenantId,
-        action: "capability.grant.revoke",
-        resourceType: "capability_grant",
-        resourceId: grantId,
-      });
       return c.json<ApiResponse>({ ok: true, data: { id: grantId } });
     } catch (e) {
       return errorResponse(c, e);

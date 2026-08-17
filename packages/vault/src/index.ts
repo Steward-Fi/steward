@@ -104,6 +104,14 @@ export {
   globToRegex,
   matchesGlob,
 } from "./route-matcher";
+export {
+  assertGovernedRouteUpdateIsSafe,
+  assertNoOppositeAuthorityOverlap,
+  lockSecretRouteNamespaces,
+  type RouteAuthorityTx,
+  SecretRouteAuthorityConflict,
+  secretRouteAuthorityPatternsOverlap,
+} from "./secret-route-authority";
 export type { SecretRouteConfigInput } from "./secret-route-validator";
 export {
   configuredSecretRouteHosts,

@@ -10,9 +10,13 @@ import {
   secretRoutes,
   secrets,
   userTenants,
+  withTenantAuditedTransaction,
   workspaces,
 } from "@stwd/db";
 import {
+  GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+  genericDescriptorAllowsExactPath,
+  genericDescriptorGovernedRoutePattern,
   PROVIDER_ACCESS_REASON,
   type ProviderAccessDecisionV1,
   type ProviderAccessRequestV1,
@@ -20,8 +24,18 @@ import {
   type ProviderEnvironment,
   type ProviderPrincipalType,
   type ProviderRiskClass,
+  secretRouteHostPatternsOverlap,
+  secretRouteMethodPatternsOverlap,
+  secretRoutePathPatternsOverlap,
+  validateGenericHttpDescriptor,
 } from "@stwd/shared";
 import { and, eq, inArray, sql } from "drizzle-orm";
+import {
+  assertNoOppositeAuthorityOverlap,
+  lockSecretRouteNamespaces,
+  type RouteAuthorityTx,
+  SecretRouteAuthorityConflict,
+} from "./secret-route-authority";
 
 const RECENT_MFA_MS = 5 * 60_000;
 const OPERATION_KEY = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_]*)+$/;
@@ -43,6 +57,7 @@ const PROVIDER_HOST_ALLOWLIST: Readonly<Record<string, string>> = {
   github: "api.github.com",
   x: "api.x.com",
 };
+const REGISTERED_ADAPTER_KEYS = new Set(["github", "x", "generic-http"]);
 const ENVIRONMENTS = new Set(["development", "staging", "production"]);
 const PRINCIPAL_TYPES = new Set(["human", "agent"]);
 const ROLES = new Set([
@@ -145,6 +160,10 @@ function subset(candidate: string[], allowed: string[]): boolean {
 }
 
 export class ProviderAuthorityStore {
+  constructor(
+    private readonly runAuditedTransaction: typeof withTenantAuditedTransaction = withTenantAuditedTransaction,
+  ) {}
+
   private db() {
     return getDb();
   }
@@ -450,6 +469,10 @@ export class ProviderAuthorityStore {
       if (!secret || (secret.expiresAt && secret.expiresAt <= new Date()))
         throw new ProviderAuthorityError("resource not found", "not_found", 404);
     }
+    const adapterKey = assertText(input.adapterKey, "adapterKey", 128);
+    if (!REGISTERED_ADAPTER_KEYS.has(adapterKey)) {
+      throw new ProviderAuthorityError("adapter is not registered", "bad_request", 400);
+    }
     const id = randomUUID();
     await ctx.audit({
       action: "provider.account.create",
@@ -481,7 +504,7 @@ export class ProviderAuthorityStore {
           id,
           tenantId: ctx.tenantId,
           workspaceId: workspace.id,
-          adapterKey: assertText(input.adapterKey, "adapterKey", 128),
+          adapterKey,
           externalRef: assertText(input.externalRef, "externalRef", 512),
           displayName: assertText(input.displayName, "displayName", 255),
           credentialSecretId: input.credentialSecretId,
@@ -573,7 +596,7 @@ export class ProviderAuthorityStore {
       )
       .limit(1);
     if (!account) throw new ProviderAuthorityError("resource not found", "not_found", 404);
-    await this.requireWorkspaceAdmin(ctx, account.workspaceId, false);
+    await this.requireWorkspaceAdmin(ctx, account.workspaceId, true);
     if (account.revision !== ctx.expectedRevision)
       throw new ProviderAuthorityError(
         "provider account revision conflict",
@@ -585,14 +608,51 @@ export class ProviderAuthorityStore {
       throw new ProviderAuthorityError("invalid riskClass", "bad_request", 400);
     if (!OPERATION_KEY.test(operationKey))
       throw new ProviderAuthorityError("invalid operationKey", "bad_request", 400);
-    const allowedMethod = PROVIDER_OPERATION_ALLOWLIST[account.adapterKey]?.[operationKey];
-    if (!allowedMethod)
+    let allowedMethods: readonly string[];
+    let genericDescriptor: ReturnType<typeof validateGenericHttpDescriptor> | undefined;
+    if (account.adapterKey === "generic-http") {
+      try {
+        if (input.requestProfile?.profile !== GENERIC_HTTP_PROVIDER_ACTION_PROFILE) {
+          throw new Error("profile mismatch");
+        }
+        genericDescriptor = validateGenericHttpDescriptor(input.requestProfile.operationDescriptor);
+        if (genericDescriptor.methods.length !== 1) {
+          throw new Error("one route can bind exactly one method");
+        }
+        allowedMethods = genericDescriptor.methods;
+      } catch {
+        throw new ProviderAuthorityError(
+          "invalid generic-http operation descriptor",
+          "bad_request",
+          400,
+        );
+      }
+    } else {
+      const fixedMethod = PROVIDER_OPERATION_ALLOWLIST[account.adapterKey]?.[operationKey];
+      if (!fixedMethod)
+        throw new ProviderAuthorityError(
+          "operation is not in the adapter allowlist",
+          "forbidden",
+          403,
+        );
+      allowedMethods = [fixedMethod];
+    }
+    if (account.adapterKey === "generic-http" && !input.secretRouteId) {
       throw new ProviderAuthorityError(
-        "operation is not in the adapter allowlist",
+        "generic-http operations require a governed credential route binding",
         "forbidden",
         403,
       );
+    }
     if (input.secretRouteId) {
+      const credentialSecretId = account.credentialSecretId;
+      if (!credentialSecretId) {
+        throw new ProviderAuthorityError(
+          "provider account has no credential binding",
+          "forbidden",
+          403,
+        );
+      }
       const [route] = await this.db()
         .select()
         .from(secretRoutes)
@@ -604,16 +664,59 @@ export class ProviderAuthorityStore {
           ),
         )
         .limit(1);
-      const expectedHost = PROVIDER_HOST_ALLOWLIST[account.adapterKey];
+      const expectedHost = genericDescriptor
+        ? new URL(genericDescriptor.origin).hostname
+        : PROVIDER_HOST_ALLOWLIST[account.adapterKey];
+      const method = route?.method?.toUpperCase();
+      const pathAllowed = genericDescriptor
+        ? Boolean(
+            route?.pathPattern &&
+              genericDescriptorAllowsExactPath(genericDescriptor, route.pathPattern),
+          )
+        : Boolean(route?.pathPattern && !route.pathPattern.includes("*"));
       if (
         !route ||
+        route.secretId !== credentialSecretId ||
+        !route.agentId ||
+        route.authorityMode !== "legacy" ||
+        route.providerOperationId !== null ||
         route.hostPattern !== expectedHost ||
-        route.method !== allowedMethod ||
-        !route.pathPattern ||
-        route.pathPattern.includes("*")
+        !method ||
+        !allowedMethods.includes(method) ||
+        !pathAllowed
       ) {
         throw new ProviderAuthorityError(
           "route target would widen the adapter operation",
+          "forbidden",
+          403,
+        );
+      }
+      const promotedPath = genericDescriptor
+        ? genericDescriptorGovernedRoutePattern(genericDescriptor)
+        : route.pathPattern;
+      // This early overlap check is only a fast rejection. The transaction below
+      // repeats it after locking the agent's route namespace.
+      const siblings = await this.db()
+        .select()
+        .from(secretRoutes)
+        .where(
+          and(
+            eq(secretRoutes.tenantId, ctx.tenantId),
+            eq(secretRoutes.agentId, route.agentId),
+            eq(secretRoutes.enabled, true),
+          ),
+        );
+      if (
+        siblings.some(
+          (candidate) =>
+            candidate.id !== route.id &&
+            secretRouteMethodPatternsOverlap(candidate.method, route.method) &&
+            secretRouteHostPatternsOverlap(candidate.hostPattern, route.hostPattern) &&
+            secretRoutePathPatternsOverlap(candidate.pathPattern ?? "/*", promotedPath ?? "/*"),
+        )
+      ) {
+        throw new ProviderAuthorityError(
+          "credential route overlaps another enabled route for this agent",
           "forbidden",
           403,
         );
@@ -632,7 +735,84 @@ export class ProviderAuthorityStore {
         reason: ctx.reason,
       },
     });
-    return this.db().transaction(async (tx) => {
+    return this.runAuditedTransaction(ctx.tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as RouteAuthorityTx;
+      if (input.secretRouteId) {
+        const [routeBeforeLock] = await tx
+          .select()
+          .from(secretRoutes)
+          .where(
+            and(
+              eq(secretRoutes.tenantId, ctx.tenantId),
+              eq(secretRoutes.id, input.secretRouteId),
+              eq(secretRoutes.enabled, true),
+            ),
+          )
+          .limit(1);
+        if (!routeBeforeLock?.agentId) {
+          throw new ProviderAuthorityError(
+            "credential route changed during operation registration",
+            "revision_conflict",
+            409,
+          );
+        }
+        await lockSecretRouteNamespaces(tx, ctx.tenantId, [routeBeforeLock.agentId]);
+        const [route] = await tx
+          .select()
+          .from(secretRoutes)
+          .where(
+            and(
+              eq(secretRoutes.tenantId, ctx.tenantId),
+              eq(secretRoutes.id, input.secretRouteId),
+              eq(secretRoutes.enabled, true),
+            ),
+          )
+          .limit(1);
+        const credentialSecretId = account.credentialSecretId;
+        const expectedHost = genericDescriptor
+          ? new URL(genericDescriptor.origin).hostname
+          : PROVIDER_HOST_ALLOWLIST[account.adapterKey];
+        const method = route?.method?.toUpperCase();
+        const pathAllowed = genericDescriptor
+          ? Boolean(
+              route?.pathPattern &&
+                genericDescriptorAllowsExactPath(genericDescriptor, route.pathPattern),
+            )
+          : Boolean(route?.pathPattern && !route.pathPattern.includes("*"));
+        if (
+          !credentialSecretId ||
+          !route ||
+          route.agentId !== routeBeforeLock.agentId ||
+          route.secretId !== credentialSecretId ||
+          route.authorityMode !== "legacy" ||
+          route.providerOperationId !== null ||
+          route.hostPattern !== expectedHost ||
+          !method ||
+          !allowedMethods.includes(method) ||
+          !pathAllowed
+        ) {
+          throw new ProviderAuthorityError(
+            "credential route changed during operation registration",
+            "revision_conflict",
+            409,
+          );
+        }
+        try {
+          await assertNoOppositeAuthorityOverlap(tx, {
+            ...route,
+            agentId: routeBeforeLock.agentId,
+            authorityMode: "governed_v2",
+            pathPattern: genericDescriptor
+              ? genericDescriptorGovernedRoutePattern(genericDescriptor)
+              : route.pathPattern,
+          });
+        } catch (error) {
+          if (error instanceof SecretRouteAuthorityConflict) {
+            throw new ProviderAuthorityError(error.message, "forbidden", 403);
+          }
+          throw error;
+        }
+      }
       const [cas] = await tx
         .update(providerAccounts)
         .set({ revision: account.revision + 1, updatedAt: new Date() })
@@ -666,6 +846,58 @@ export class ProviderAuthorityStore {
           responseProfile: input.responseProfile ?? {},
         })
         .returning();
+      if (input.secretRouteId) {
+        const credentialSecretId = account.credentialSecretId;
+        if (!credentialSecretId) {
+          throw new ProviderAuthorityError(
+            "provider account has no credential binding",
+            "forbidden",
+            403,
+          );
+        }
+        const [boundRoute] = await tx
+          .update(secretRoutes)
+          .set({
+            authorityMode: "governed_v2",
+            providerOperationId: row.id,
+            ...(genericDescriptor
+              ? { pathPattern: genericDescriptorGovernedRoutePattern(genericDescriptor) }
+              : {}),
+          })
+          .where(
+            and(
+              eq(secretRoutes.id, input.secretRouteId),
+              eq(secretRoutes.tenantId, ctx.tenantId),
+              eq(secretRoutes.secretId, credentialSecretId),
+              eq(secretRoutes.authorityMode, "legacy"),
+              sql`${secretRoutes.providerOperationId} IS NULL`,
+            ),
+          )
+          .returning();
+        if (!boundRoute) {
+          throw new ProviderAuthorityError(
+            "credential route changed during operation registration",
+            "revision_conflict",
+            409,
+          );
+        }
+      }
+      await appendRequiredAudit({
+        tenantId: ctx.tenantId,
+        actorType: "user",
+        actorId: ctx.actorUserId,
+        action: "provider.operation.register.completed",
+        resourceType: "provider_operation",
+        resourceId: row.id,
+        metadata: {
+          workspaceId: account.workspaceId,
+          providerAccountId: account.id,
+          operationKey,
+          expectedRevision: account.revision,
+          reason: ctx.reason,
+        },
+        requestId: ctx.requestId ?? null,
+      });
       return row;
     });
   }

@@ -185,6 +185,7 @@ describe("SecretVault no-read-back: get is impossible", () => {
       .sort();
     expect(methods).toEqual([
       "createRoute",
+      "createRouteWithinTx",
       "createSecret",
       "decryptSecret",
       "decryptSecretRow",
@@ -201,6 +202,7 @@ describe("SecretVault no-read-back: get is impossible", () => {
       "rotateSecretWithinTx",
       "toMetadata",
       "updateRoute",
+      "updateRouteWithinTx",
     ]);
 
     // The plaintext-capable subset is exactly these two direct-return methods

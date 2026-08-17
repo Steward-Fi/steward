@@ -37,6 +37,7 @@ import {
   providerGrants,
   providerOperations,
   providerRoleBindings,
+  secretRoutes,
   workspaces,
 } from "@stwd/db";
 import {
@@ -55,11 +56,24 @@ import {
 } from "@stwd/provider-github";
 import { buildXAction, type XActionBuild, type XOperationKey } from "@stwd/provider-x";
 import {
+  assertRegisteredProfile,
+  buildGenericHttpAction,
+  CanonError,
   computeProviderPolicyInputDigest,
+  GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+  type GenericHttpActionBuild,
+  type GenericHttpCanonicalActionV1,
+  type GenericHttpOperationDescriptorV1,
+  type GenericSegmentType,
   type GithubCanonicalActionV1,
+  genericDescriptorGovernedRoutePattern,
+  isConfigDrivenProfile,
+  isGenericDescriptorError,
   jcsStringify,
   type ProviderRequestEnvelopeV1,
   sha256HexPrefixed,
+  UnregisteredProfileError,
+  validateGenericHttpDescriptor,
   type XCanonicalActionV1,
 } from "@stwd/shared";
 
@@ -71,9 +85,38 @@ import {
  * Adding a new adapter is a matter of extending this union, never forking the
  * pipeline.
  */
-export type ProviderActionBuild = GithubActionBuild | XActionBuild;
-/** The structurally-shared canonical action shape both adapters emit. */
-type AnyCanonicalActionV1 = GithubCanonicalActionV1 | XCanonicalActionV1;
+/**
+ * A build produced by an adapter-fixed profile (github/x) or the config-driven
+ * generic-http profile. All three are structurally compatible on the fields the
+ * pipeline reads (action.profile/method/origin/path/query/headers/body,
+ * policyArgs, safeSummary), so the pipeline consumes them uniformly.
+ */
+export type ConcreteProviderActionBuild = GithubActionBuild | XActionBuild | GenericHttpActionBuild;
+
+/**
+ * #201: a DEFERRED build for a config-driven (generic-http) operation. The route
+ * cannot canonicalize it because the operator-authored descriptor lives on the
+ * resolved provider_operations row. The service finalizes it (loads + validates
+ * the descriptor, then `buildGenericHttpAction`) immediately after scope
+ * resolution, BEFORE any digest is computed.
+ */
+export interface DeferredGenericBuild {
+  kind: "deferred-generic";
+  operationKey: string;
+  method: string | undefined;
+  args: unknown;
+}
+
+export type ProviderActionBuild = ConcreteProviderActionBuild | DeferredGenericBuild;
+/** The structurally-shared canonical action shape every adapter emits. */
+type AnyCanonicalActionV1 =
+  | GithubCanonicalActionV1
+  | XCanonicalActionV1
+  | GenericHttpCanonicalActionV1;
+
+function isDeferredGenericBuild(b: ProviderActionBuild): b is DeferredGenericBuild {
+  return (b as DeferredGenericBuild).kind === "deferred-generic";
+}
 
 import {
   type CumulativeSpendScope,
@@ -268,12 +311,91 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function genericScalarFromCanonicalText(value: string, type: GenericSegmentType): unknown {
+  if (type !== "int") return value;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error("canonical generic-http integer is not safe");
+  }
+  return parsed;
+}
+
+/**
+ * Recover the descriptor arguments from already-committed canonical bytes, then
+ * run the production generic builder again. The caller compares the rebuilt JCS
+ * bytes with the committed bytes, so non-canonical encodings, undeclared query
+ * pairs/headers/body fields, descriptor drift, and path-shape drift all fail.
+ */
+function rebuildGenericApprovedAction(
+  operationKey: string,
+  action: Record<string, unknown>,
+  descriptor: GenericHttpOperationDescriptorV1,
+): GenericHttpActionBuild {
+  if (typeof action.normalizedPath !== "string") {
+    throw new Error("canonical generic-http path is missing");
+  }
+  const pathParts = action.normalizedPath.split("/").slice(1);
+  if (pathParts.length !== descriptor.pathTemplate.length) {
+    throw new Error("canonical generic-http path shape changed");
+  }
+
+  const recovered: Record<string, unknown> = {};
+  for (let i = 0; i < descriptor.pathTemplate.length; i++) {
+    const spec = descriptor.pathTemplate[i];
+    if (!spec.param) continue;
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(pathParts[i]);
+    } catch {
+      throw new Error("canonical generic-http path encoding is invalid");
+    }
+    recovered[spec.param.name] = genericScalarFromCanonicalText(decoded, spec.param.type);
+  }
+
+  if (!Array.isArray(action.orderedQueryPairs)) {
+    throw new Error("canonical generic-http query is missing");
+  }
+  const querySpecs = new Map((descriptor.query ?? []).map((spec) => [spec.name, spec]));
+  for (const pair of action.orderedQueryPairs) {
+    if (
+      !Array.isArray(pair) ||
+      pair.length !== 2 ||
+      typeof pair[0] !== "string" ||
+      typeof pair[1] !== "string"
+    ) {
+      throw new Error("canonical generic-http query pair is invalid");
+    }
+    const spec = querySpecs.get(pair[0]);
+    if (!spec || pair[0] in recovered) {
+      throw new Error("canonical generic-http query is not descriptor-unique");
+    }
+    recovered[pair[0]] = genericScalarFromCanonicalText(pair[1], spec.type);
+  }
+
+  if (action.canonicalBody !== null) {
+    const body = asRecord(action.canonicalBody);
+    for (const [name, value] of Object.entries(body)) {
+      if (name in recovered) {
+        throw new Error("canonical generic-http argument is duplicated");
+      }
+      recovered[name] = value;
+    }
+  }
+
+  return buildGenericHttpAction(operationKey, descriptor, action.method, recovered);
+}
+
 /** Reconstruct through the adapter so policy inputs are re-derived, not trusted. */
 function rebuildApprovedAction(
   operationKey: string,
   action: Record<string, unknown>,
   safeSummary: Record<string, unknown>,
-): ProviderActionBuild {
+  requestProfile: Record<string, unknown>,
+): ConcreteProviderActionBuild {
+  if (action.profile === GENERIC_HTTP_PROVIDER_ACTION_PROFILE) {
+    const descriptor = validateGenericHttpDescriptor(requestProfile.operationDescriptor);
+    return rebuildGenericApprovedAction(operationKey, action, descriptor);
+  }
   const body = action.canonicalBody === null ? undefined : asRecord(action.canonicalBody);
   if (operationKey === "x.tweet.create") {
     const reply = body?.reply === undefined ? undefined : asRecord(body.reply);
@@ -556,7 +678,8 @@ class ProviderActionService {
    * transactional contract.
    */
   async createProviderAction(input: CreateProviderActionInput): Promise<ProviderActionOutcome> {
-    const { principal, build } = input;
+    const { principal } = input;
+    const inputBuild = input.build;
     const tenantId = principal.tenantId;
     const actorAgentId = principal.agentId;
 
@@ -571,6 +694,18 @@ class ProviderActionService {
       input.operationKey,
     );
     if (!resolved) {
+      // For a deferred generic build the descriptor lives on the (missing)
+      // operation row, so there is no canonical action to digest yet; use a
+      // stable per-request placeholder digest for the denial audit. A concrete
+      // build digests its already-canonicalized action.
+      const scopeDenyDigest = isDeferredGenericBuild(inputBuild)
+        ? sha256HexPrefixed(
+            jcsStringify({
+              profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+              scope: "unresolved",
+            }),
+          )
+        : sha256HexPrefixed(jcsStringify(this.canonicalActionObject(inputBuild.action)));
       await this.writeRequiredDenialAudit(tenantId, {
         action: "provider.action.denied",
         resourceType: "provider-action",
@@ -578,7 +713,7 @@ class ProviderActionService {
         metadata: {
           reasonCode: "SCOPE_RESOURCE_NOT_FOUND",
           actorAgentId,
-          actionDigest: sha256HexPrefixed(jcsStringify(this.canonicalActionObject(build.action))),
+          actionDigest: scopeDenyDigest,
           requestId: input.requestId ?? null,
         },
       });
@@ -587,6 +722,43 @@ class ProviderActionService {
 
     const { workspace, account, operation } = resolved;
     const environment = workspace.environment as PersistedAccessDecisionV1["environment"];
+
+    // ── #201: finalize a deferred generic-http build now that the operation
+    // (and its operator-authored descriptor) is resolved. Fail closed on an
+    // unregistered profile or an invalid descriptor with a stable CANON_* code
+    // (mapped to a 400 deny by the route). The descriptor is loaded from the
+    // resolved operation's requestProfile; the tx snapshot re-reads the same
+    // row, and the operation is immutable-except-status, so this pre-tx read is
+    // consistent with the tx build.
+    let build: ConcreteProviderActionBuild;
+    try {
+      build = isDeferredGenericBuild(inputBuild)
+        ? this.finalizeGenericBuild(inputBuild, operation.requestProfile)
+        : inputBuild;
+    } catch (e) {
+      if (e instanceof UnregisteredProfileError) throw new CanonError(e.code);
+      if (isGenericDescriptorError(e)) throw new CanonError("CANON_PROFILE_UNSUPPORTED", e.code);
+      throw e;
+    }
+
+    // #201 fail-closed consumption site: the canonical profile stamped on the
+    // action MUST be registered before we digest/store/dispatch it. An
+    // unregistered profile (e.g. a corrupted or forged build) is rejected here
+    // with a stable code rather than persisted.
+    try {
+      assertRegisteredProfile(build.action.profile);
+    } catch (e) {
+      if (e instanceof UnregisteredProfileError) throw new CanonError(e.code);
+      throw e;
+    }
+    if (build.action.profile === GENERIC_HTTP_PROVIDER_ACTION_PROFILE) {
+      await this.assertGenericCredentialRouteBinding(
+        actorAgentId,
+        account,
+        operation,
+        build as GenericHttpActionBuild,
+      );
+    }
 
     // Compute the canonical action digest + request envelope/hash up-front (they
     // are pure and needed for the binding + idempotency conflict check).
@@ -1085,6 +1257,81 @@ class ProviderActionService {
     };
   }
 
+  /**
+   * #201: finalize a deferred generic-http build against the resolved
+   * operation's operator-authored descriptor. The descriptor is read from
+   * `requestProfile.operationDescriptor`, STRICTLY validated
+   * (`validateGenericHttpDescriptor`, fail-closed), and the caller-supplied
+   * method + arguments are canonicalized against it. The resulting profile MUST
+   * be a registered profile (it always is for a valid descriptor, but we assert
+   * fail-closed). Throws {@link CanonError} / a descriptor error on any
+   * ambiguity; NEVER a 500.
+   */
+  private finalizeGenericBuild(
+    deferred: DeferredGenericBuild,
+    requestProfile: Record<string, unknown>,
+  ): GenericHttpActionBuild {
+    const declaredProfile = (requestProfile as { profile?: unknown }).profile;
+    // The operation must declare the generic-http profile AND be config-driven.
+    if (!isConfigDrivenProfile(declaredProfile))
+      throw new CanonError("CANON_PROFILE_UNSUPPORTED", "operation is not config-driven");
+    const rawDescriptor = (requestProfile as { operationDescriptor?: unknown }).operationDescriptor;
+    if (rawDescriptor === undefined)
+      throw new CanonError("CANON_PROFILE_UNSUPPORTED", "missing generic-http descriptor");
+    const descriptor = validateGenericHttpDescriptor(rawDescriptor);
+    const built = buildGenericHttpAction(
+      deferred.operationKey,
+      descriptor,
+      deferred.method,
+      deferred.args,
+    );
+    // Fail-closed: the built profile must be registered (enforced at every
+    // consumption site; asserted here at build time too).
+    assertRegisteredProfile(built.action.profile);
+    return built;
+  }
+
+  private async assertGenericCredentialRouteBinding(
+    actorAgentId: string,
+    account: typeof providerAccounts.$inferSelect,
+    operation: typeof providerOperations.$inferSelect,
+    build: GenericHttpActionBuild,
+  ): Promise<void> {
+    if (!operation.secretRouteId || !account.credentialSecretId) {
+      throw new CanonError("CANON_ORIGIN_NOT_ALLOWED", "generic operation has no credential route");
+    }
+    const [route] = await this.db()
+      .select()
+      .from(secretRoutes)
+      .where(
+        and(
+          eq(secretRoutes.id, operation.secretRouteId),
+          eq(secretRoutes.tenantId, operation.tenantId),
+        ),
+      )
+      .limit(1);
+    const targetHost = new URL(build.action.origin).hostname;
+    if (
+      !route ||
+      !route.enabled ||
+      route.authorityMode !== "governed_v2" ||
+      route.providerOperationId !== operation.id ||
+      route.secretId !== account.credentialSecretId ||
+      route.agentId !== actorAgentId ||
+      route.hostPattern !== targetHost ||
+      route.pathPattern !==
+        genericDescriptorGovernedRoutePattern(
+          validateGenericHttpDescriptor(operation.requestProfile.operationDescriptor),
+        ) ||
+      route.method?.toUpperCase() !== build.action.method
+    ) {
+      throw new CanonError(
+        "CANON_ORIGIN_NOT_ALLOWED",
+        "generic action is outside its exact governed credential route binding",
+      );
+    }
+  }
+
   // ── Scope resolution (pre-intent) ──
   private async resolveScope(
     tenantId: string,
@@ -1544,7 +1791,7 @@ class ProviderActionService {
     workspaceId: string;
     actorAgentId: string;
     operation: typeof providerOperations.$inferSelect;
-    build: ProviderActionBuild;
+    build: ConcreteProviderActionBuild;
     intentId: string;
     requestHash: string;
     actionDigest: string;
@@ -1796,7 +2043,12 @@ class ProviderActionService {
     const generation = args.priorGeneration + 1;
     const canonicalText = Buffer.from(args.canonicalActionBytes).toString("utf8");
     const action = JSON.parse(canonicalText) as Record<string, unknown>;
-    const build = rebuildApprovedAction(args.operation.operationKey, action, args.safeSummary);
+    const build = rebuildApprovedAction(
+      args.operation.operationKey,
+      action,
+      args.safeSummary,
+      asRecord(args.operation.requestProfile),
+    );
     if (jcsStringify(build.action) !== canonicalText) {
       return { ok: false, code: "APPROVAL_ACTION_INTEGRITY_FAILED", httpStatus: 409 };
     }
