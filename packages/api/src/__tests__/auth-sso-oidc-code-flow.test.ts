@@ -100,7 +100,9 @@ describe("enterprise OIDC authorization-code SSO hardening", () => {
     const rejectBlock = exchange.slice(rejectStart, exchange.indexOf("}", rejectStart) + 1);
     expect(exchange).toContain("console.warn(");
     expect(exchange).not.toContain("throw new Error(error)");
-    expect(exchange).toContain('throw new Error("OIDC token endpoint rejected authorization code")');
+    expect(exchange).toContain(
+      'throw new Error("OIDC token endpoint rejected authorization code")',
+    );
     expect(rejectBlock).not.toContain("throw new Error(error)");
   });
 });

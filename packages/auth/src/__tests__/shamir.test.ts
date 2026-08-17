@@ -72,9 +72,7 @@ describe("Shamir secret sharing", () => {
   test("fewer than k shares throws instead of interpolating garbage (SEC-142)", () => {
     const secret = hexToBytes(SECRET_HEX);
     const shares = splitSecret(secret, 3, 5);
-    expect(() => combineShares(pick(shares, [0, 1]), 3)).toThrow(
-      "fewer shares than the threshold",
-    );
+    expect(() => combineShares(pick(shares, [0, 1]), 3)).toThrow("fewer shares than the threshold");
   });
 
   test("works for 32-byte secrets (the EVM private key size)", () => {
