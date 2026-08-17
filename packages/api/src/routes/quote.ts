@@ -43,11 +43,9 @@ quoteRoutes.get("/", async (c) => {
     QUOTE_RATE_LIMIT_MAX,
   );
   if (!rl.allowed) {
-    return c.json(
-      { error: "rate limit exceeded" },
-      429,
-      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
-    );
+    return c.json({ error: "rate limit exceeded" }, 429, {
+      "Retry-After": String(rl.retryAfterSecs ?? 60),
+    });
   }
 
   const nonce = c.req.query("nonce") ?? crypto.randomUUID();

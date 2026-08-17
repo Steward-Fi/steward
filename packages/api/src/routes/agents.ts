@@ -1776,8 +1776,7 @@ agentRoutes.put("/:agentId/policy", async (c) => {
       return c.json<ApiResponse>(
         {
           ok: false,
-          error:
-            "Initial trade policy creation requires an owner/admin session with recent MFA",
+          error: "Initial trade policy creation requires an owner/admin session with recent MFA",
         },
         403,
       );

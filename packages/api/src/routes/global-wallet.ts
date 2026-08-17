@@ -779,7 +779,14 @@ globalWalletRoutes.post("/consent/approve", async (c) => {
       tenantId: parsed.tenantId,
       action: "global_wallet.consent.approved",
       resourceId: consent.id,
-      metadata: { clientId: parsed.clientId, origin, originSource, redirectUri, scopes, walletIndex },
+      metadata: {
+        clientId: parsed.clientId,
+        origin,
+        originSource,
+        redirectUri,
+        scopes,
+        walletIndex,
+      },
     });
   } catch (error) {
     await getDb().transaction(async (tx) => {
