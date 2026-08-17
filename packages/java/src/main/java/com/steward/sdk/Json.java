@@ -202,6 +202,9 @@ final class Json {
                     case 'r' -> out.append('\r');
                     case 't' -> out.append('\t');
                     case 'u' -> {
+                        if (pos + 4 > json.length()) {
+                            throw new IllegalArgumentException("Truncated \\u escape in JSON string");
+                        }
                         String hex = json.substring(pos, pos + 4);
                         out.append((char) Integer.parseInt(hex, 16));
                         pos += 4;

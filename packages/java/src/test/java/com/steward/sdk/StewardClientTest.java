@@ -15,6 +15,7 @@ public final class StewardClientTest {
         testSensitiveMutationsAreSignedAndIdempotent();
         testTenantApiKeyAndTenantHeader();
         testApiErrorsIncludeStatusAndPayload();
+        testTruncatedUnicodeEscapeYieldsApiException();
         System.out.println("StewardClientTest passed");
     }
 
@@ -108,6 +109,23 @@ public final class StewardClientTest {
         } catch (StewardApiException error) {
             assertEquals(403, error.getStatus());
             assertEquals("denied", error.getMessage());
+        }
+    }
+
+    private static void testTruncatedUnicodeEscapeYieldsApiException() {
+        // SEC-197: a truncated unicode escape must surface as
+        // StewardApiException, not a raw StringIndexOutOfBoundsException.
+        CaptureTransport transport = new CaptureTransport(200, "{\"ok\":true,\"data\":\"ab\\u12");
+        StewardClient client = new StewardClient(StewardClient.config("https://api.example.test")
+            .apiKey("tenant-key")
+            .transport(transport)
+            .build());
+
+        try {
+            client.get("/platform/users/user-1");
+            throw new AssertionError("expected API exception");
+        } catch (StewardApiException error) {
+            assertEquals("Received invalid JSON from Steward API", error.getMessage());
         }
     }
 
