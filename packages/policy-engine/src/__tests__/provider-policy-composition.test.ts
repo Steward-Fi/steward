@@ -112,6 +112,31 @@ describe("composeProviderActionPolicyDecision precedence", () => {
     expect(d.reasonCodes).toContain(PROVIDER_POLICY_REASON.CONFIGURATION_INVALID);
   });
 
+  it("malformed rule provably scoped to a DIFFERENT operation stays inert (SEC-181)", () => {
+    // Same malformed-config semantics as the legacy-plane composer: a broken
+    // rule must not brick operations it does not govern.
+    const scopedElsewhere: ProviderPolicyRule = {
+      id: "bad-elsewhere",
+      type: "capability-intent",
+      enabled: true,
+      config: { capabilities: ["x.tweet.create"], effect: "allow", bogusKey: 1 },
+    };
+    const d = composeProviderActionPolicyDecision([scopedElsewhere, rule("a", "allow")], ctx);
+    expect(d.effect).toBe("allow");
+  });
+
+  it("malformed rule with an unrecoverable selector still hard-denies (SEC-181)", () => {
+    const ambiguous: ProviderPolicyRule = {
+      id: "bad-ambiguous",
+      type: "capability-intent",
+      enabled: true,
+      config: { capabilities: "not-an-array", effect: "allow" },
+    };
+    const d = composeProviderActionPolicyDecision([ambiguous, rule("a", "allow")], ctx);
+    expect(d.effect).toBe("hard_deny");
+    expect(d.reasonCodes).toContain(PROVIDER_POLICY_REASON.CONFIGURATION_INVALID);
+  });
+
   it("unknown rule type => hard_deny", () => {
     const foreign: ProviderPolicyRule = {
       id: "x",

@@ -1164,6 +1164,19 @@ export function evaluateCapabilityIntent(
   // 2. Config must be well-formed (fail closed).
   const parsed = parseConfig(rule.config);
   if ("error" in parsed) {
+    // SEC-181: same malformed-input precedence as both composers — a malformed
+    // rule whose selector is well-formed and provably scoped to a DIFFERENT
+    // capability is not governing this invoke and stays inert. Only a
+    // malformed GOVERNING rule, or one whose selector is unrecoverable
+    // (ambiguous scope), denies.
+    const sel = recoverSelectorMatch(rule.config, ctx.capability.name);
+    if (sel.recoverable && !sel.matches) {
+      return {
+        ...base,
+        passed: true,
+        reason: `capability "${ctx.capability.name}" not governed by this rule`,
+      };
+    }
     return { ...base, passed: false, reason: parsed.error };
   }
 
@@ -1631,6 +1644,14 @@ export function composeProviderActionPolicyDecision(
 
       const parsed = parseConfig(rule.config);
       if ("error" in parsed) {
+        // SEC-181: malformed-input precedence is scoped to GOVERNING rules,
+        // matching the legacy-plane composer (composeCapabilityIntentDecision)
+        // and master-plan §5.3. A well-formed selector provably scoped to a
+        // DIFFERENT operation stays inert even though the rest of the config
+        // is broken; only a malformed rule that governs THIS operation, or
+        // whose selector is unrecoverable (ambiguous scope), hard-denies.
+        const sel = recoverSelectorMatch(rule.config, context.operationKey);
+        if (sel.recoverable && !sel.matches) continue;
         sawHardDeny = true;
         reasonCodes.add(PROVIDER_POLICY_REASON.CONFIGURATION_INVALID);
         results.push({

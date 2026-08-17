@@ -331,6 +331,25 @@ describe("capability-intent — config validation (fail closed)", () => {
     expect(r.reason).toContain("effect");
   });
 
+  it("malformed rule provably scoped elsewhere stays inert; ambiguous scope still denies (SEC-181)", () => {
+    // Same malformed-input precedence as both composers: a broken rule whose
+    // selector is well-formed and names a DIFFERENT capability is not
+    // governing this invoke.
+    const inert = evaluateCapabilityIntent(
+      rule({ capabilities: ["x.tweet.create"], effect: "maybe" }),
+      makeContext({ capability: cap() }),
+    );
+    expect(inert.passed).toBe(true);
+    expect(inert.reason).toContain("not governed");
+
+    // An unrecoverable selector makes the rule's scope ambiguous => deny.
+    const ambiguous = evaluateCapabilityIntent(
+      rule({ capabilities: "not-an-array", effect: "allow" }),
+      makeContext({ capability: cap() }),
+    );
+    expect(ambiguous.passed).toBe(false);
+  });
+
   it("denies a non-integer maxCallsPerHour", () => {
     const r = evaluateCapabilityIntent(
       rule({ capabilities: ["github.*"], effect: "allow", constraints: { maxCallsPerHour: 1.5 } }),
