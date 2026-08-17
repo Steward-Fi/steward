@@ -7,6 +7,7 @@
 - `/accounts` and `/global-wallet` mutations are now HMAC-signed when `requestSigningSecret` is configured, aligning the request-signing prefix list with all eight other SDKs (SEC-049). Servers that enforce signatures on these routes previously saw unsigned mutations from this SDK.
 
 ### Added
+- Add `approveVaultTransaction()` and its typed result so SDK consumers can execute an approved vault transaction through the policy-revalidating vault route.
 - `StewardAuthConfig.authProxyUrl`: optional same-origin auth proxy prefix (e.g. `/api/auth`) that keeps the long-lived refresh token in an HttpOnly, SameSite=Strict cookie instead of JS-readable storage (SEC-018). When set, sign-in deposits the refresh token with the proxy (failing closed if the deposit cannot be completed), and refresh / revoke / tenant-switch calls go through the proxy — only the short-lived access token is kept in `storage`. Unset keeps the previous behavior unchanged.
 - Preserve the honest `outcome_unknown` transfer and transaction status when an external broadcast may have succeeded but no receipt is available yet.
 - Add shared magic-link + six-digit companion-code login helpers: `verifyEmailSignInCode()` and status-only `pollEmailSignInStatus()`. `signInWithEmail()` now returns opaque polling credentials.
