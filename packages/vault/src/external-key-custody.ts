@@ -46,11 +46,34 @@ export interface ExternalKeySignTransactionRequest {
   nonce?: number;
   broadcast: boolean;
   rpcUrl?: string;
+  /**
+   * Durable pre-broadcast checkpoint. Providers that can derive the final
+   * transaction hash MUST await this before the first mutating RPC call.
+   */
+  onPreparedBroadcast?: (transactionHash: string) => Promise<void>;
 }
 
 export interface ExternalKeySignTransactionResult {
   result: string;
   broadcast: boolean;
+}
+
+/**
+ * The signed bytes have been submitted to the provider RPC, but Steward could
+ * not prove whether the RPC accepted them. The locally-derived transaction
+ * hash is safe to expose and is the only identifier callers may reconcile;
+ * provider errors and signed bytes deliberately remain private.
+ */
+export class ExternalBroadcastOutcomeUnknownError extends Error {
+  readonly code = "external_broadcast_outcome_unknown" as const;
+
+  constructor(
+    readonly transactionHash: string,
+    options?: { cause?: unknown },
+  ) {
+    super("External custody broadcast outcome is unknown", options);
+    this.name = "ExternalBroadcastOutcomeUnknownError";
+  }
 }
 
 export interface ExternalKeyHandleRegistration {

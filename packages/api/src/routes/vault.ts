@@ -15,7 +15,12 @@ import {
   type KeyObject,
   randomBytes,
 } from "node:crypto";
-import { tenantConfigs as tenantConfigsTable, users, userTenants } from "@stwd/db";
+import {
+  executionAuthorizationNonces,
+  tenantConfigs as tenantConfigsTable,
+  users,
+  userTenants,
+} from "@stwd/db";
 import { recordAggregationEvent } from "@stwd/redis";
 import {
   ExecutionPayloadNormalizationError,
@@ -33,6 +38,7 @@ import {
   detectSolanaPolicyConflicts,
   ENTRY_POINT_V07,
   type ExportPrivateKeyResult,
+  ExternalBroadcastOutcomeUnknownError,
   GovernedVault,
   GovernedVaultError,
   getUserOperationHash,
@@ -142,6 +148,20 @@ async function writeVaultAudit(
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
   });
+}
+
+async function writeOutcomeUnknownAudit(
+  c: Context<{ Variables: AppVariables }>,
+  event: Omit<AuditEventInput, "ipAddress" | "userAgent" | "requestId">,
+): Promise<void> {
+  try {
+    await writeVaultAudit(c, event);
+  } catch (error) {
+    // The deterministic hash and outcome_unknown row are already durable. An
+    // audit sink failure must never replace the non-retryable 202 response with
+    // a generic 500 that could induce a fresh broadcast.
+    console.error("[vault] Failed to append outcome_unknown audit:", error);
+  }
 }
 // ─── Unsafe-signing opt-in flags (read LIVE, not captured at module-init) ──────
 //
@@ -615,7 +635,14 @@ function parseSendCallsActionInput(body: SendCallsActionInput):
 
 function transferActionResponse(input: {
   actionId: string;
-  status: "pending_approval" | "rejected" | "signed" | "broadcast" | "confirmed" | "failed";
+  status:
+    | "pending_approval"
+    | "rejected"
+    | "signed"
+    | "broadcast"
+    | "confirmed"
+    | "failed"
+    | "outcome_unknown";
   chainId: number;
   to: string;
   value: string;
@@ -775,11 +802,20 @@ async function recordSponsoredActionIfNeeded(input: {
 
 function transferResponseStatus(
   status: string,
-): "pending_approval" | "rejected" | "signed" | "broadcast" | "failed" {
+):
+  | "pending_approval"
+  | "rejected"
+  | "signed"
+  | "broadcast"
+  | "confirmed"
+  | "failed"
+  | "outcome_unknown" {
   if (status === "pending") return "pending_approval";
   if (status === "rejected") return "rejected";
   if (status === "broadcast") return "broadcast";
+  if (status === "confirmed") return "confirmed";
   if (status === "failed") return "failed";
+  if (status === "outcome_unknown") return "outcome_unknown";
   return "signed";
 }
 
@@ -1201,6 +1237,29 @@ function executionAuthorizationErrorResponse(
   if (!(error instanceof GovernedVaultError)) return null;
   const status = error.code === "authorization_rejected" ? 403 : 500;
   return c.json<ApiResponse>({ ok: false, error: error.message }, status);
+}
+
+function externalBroadcastOutcomeUnknownResponse(
+  c: Context<{ Variables: AppVariables }>,
+  error: unknown,
+  txId?: string,
+): Response | null {
+  if (!(error instanceof ExternalBroadcastOutcomeUnknownError)) return null;
+  return c.json<
+    ApiResponse<{ code: string; txId?: string; txHash: string; reconciliationRequired: true }>
+  >(
+    {
+      ok: false,
+      error: "Broadcast outcome is unknown; reconcile the transaction hash before retrying",
+      data: {
+        code: error.code,
+        ...(txId ? { txId } : {}),
+        txHash: error.transactionHash,
+        reconciliationRequired: true,
+      },
+    },
+    202,
+  );
 }
 
 // Fail-closed handler for the TOCTOU backend-binding guard.
@@ -2256,8 +2315,71 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       );
     }
 
+    const idempotencyKey = c.req.header("Idempotency-Key");
+    if (isEvmSignRequest && idempotencyKey && executionPayloadDigest) {
+      const [priorAuthorization] = await db
+        .select({
+          requestId: executionAuthorizationNonces.requestId,
+          payloadDigest: executionAuthorizationNonces.payloadDigest,
+        })
+        .from(executionAuthorizationNonces)
+        .where(
+          and(
+            eq(executionAuthorizationNonces.tenantId, tenantId),
+            eq(executionAuthorizationNonces.agentId, agentId),
+            eq(executionAuthorizationNonces.idempotencyKey, idempotencyKey),
+          ),
+        )
+        .orderBy(desc(executionAuthorizationNonces.issuedAt))
+        .limit(1);
+      if (priorAuthorization) {
+        if (priorAuthorization.payloadDigest !== executionPayloadDigest) {
+          return c.json<ApiResponse>(
+            { ok: false, error: "Idempotency-Key was already used for a different transaction" },
+            409,
+          );
+        }
+        const [priorTransaction] = await db
+          .select({ status: transactions.status, txHash: transactions.txHash })
+          .from(transactions)
+          .where(
+            and(
+              eq(transactions.id, priorAuthorization.requestId),
+              eq(transactions.agentId, agentId),
+            ),
+          );
+        if (priorTransaction?.status === "outcome_unknown" && priorTransaction.txHash) {
+          const response = externalBroadcastOutcomeUnknownResponse(
+            c,
+            new ExternalBroadcastOutcomeUnknownError(priorTransaction.txHash),
+            priorAuthorization.requestId,
+          );
+          if (!response) throw new Error("invariant: outcome_unknown response was not constructed");
+          return response;
+        }
+        if (
+          priorTransaction?.txHash &&
+          (priorTransaction.status === "broadcast" || priorTransaction.status === "confirmed")
+        ) {
+          return c.json<ApiResponse<{ txId: string; txHash: string }>>({
+            ok: true,
+            data: { txId: priorAuthorization.requestId, txHash: priorTransaction.txHash },
+          });
+        }
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: "Transaction execution is already recorded; inspect its status before retrying",
+            data: { txId: priorAuthorization.requestId, status: priorTransaction?.status },
+          },
+          409,
+        );
+      }
+    }
+
+    const executionTxId = crypto.randomUUID();
     try {
-      const txId = crypto.randomUUID();
+      const txId = executionTxId;
       const txStatus: "broadcast" | "signed" = shouldBroadcast ? "broadcast" : "signed";
       const executionAuthorization =
         isEvmSignRequest && executionPayloadDigest
@@ -2270,7 +2392,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
               backend: executionTarget.backend,
               backendIdentityDigest: executionTarget.backendIdentityDigest,
               policyRevisionHash: executionPolicyRevisionHash ?? undefined,
-              idempotencyKey: c.req.header("Idempotency-Key") ?? undefined,
+              idempotencyKey: idempotencyKey ?? undefined,
             })
           : null;
       if (executionAuthorization && executionPayloadDigest) {
@@ -2291,6 +2413,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
           },
         });
       }
+
       await writeVaultAudit(c, {
         tenantId,
         actorType: "agent",
@@ -2325,6 +2448,31 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
                     capability: expected.capability,
                     backend: expected.backend,
                   },
+                });
+                // Stage the governed intent after authorization consumption but
+                // before the raw signer can perform external I/O. This exact
+                // row is the durable recovery anchor if the provider returns a
+                // hash and Vault.recordSignedTransaction subsequently fails.
+                await db.insert(transactions).values({
+                  id: txId,
+                  agentId,
+                  status: "approved",
+                  toAddress: signRequest.to,
+                  value: signRequest.value,
+                  data: signRequest.data,
+                  chainId: resolvedChainId,
+                  executionPayloadDigest,
+                  executionPolicyRevisionHash,
+                  executionBackend: executionTarget.backend,
+                  executionBackendIdentityDigest: executionTarget.backendIdentityDigest,
+                  policyResults: evaluation.results,
+                  actionPayload: transactionActionPayload({
+                    broadcast: shouldBroadcast,
+                    nonce: signRequest.nonce,
+                    gasLimit: signRequest.gasLimit,
+                    venue: signRequest.venue,
+                    walletAddress: signRequest.walletAddress,
+                  }),
                 });
               } catch (error) {
                 await writeVaultAudit(c, {
@@ -2455,6 +2603,56 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       if (bindingMismatch) return bindingMismatch;
       const authorizationError = executionAuthorizationErrorResponse(c, e);
       if (authorizationError) return authorizationError;
+      const outcomeUnknown = externalBroadcastOutcomeUnknownResponse(c, e, executionTxId);
+      if (outcomeUnknown) {
+        // This is also the fallback for a failed Vault.recordSignedTransaction
+        // write. Preserve the irreversible hash on the pre-staged intent before
+        // returning the typed 202 response.
+        await db
+          .update(transactions)
+          .set({
+            status: "outcome_unknown",
+            txHash:
+              e instanceof ExternalBroadcastOutcomeUnknownError ? e.transactionHash : undefined,
+            signedAt: new Date(),
+          })
+          .where(and(eq(transactions.id, executionTxId), eq(transactions.agentId, agentId)));
+
+        // A lost response may still represent real spend. Account for it
+        // conservatively before releasing the per-agent spend lock.
+        recordVaultSpend(agentId, tenantId, signRequest.value, resolvedChainId).catch((err) =>
+          console.error("[vault] Failed to record ambiguous spend:", err),
+        );
+        try {
+          await recordAggregationEvent({
+            agentId,
+            valueRaw: signRequest.value,
+            to: signRequest.to,
+            chainId: resolvedChainId,
+          });
+        } catch (err) {
+          console.error("[vault] Failed to record ambiguous aggregation event:", err);
+        }
+        await writeOutcomeUnknownAudit(c, {
+          tenantId,
+          actorType: "agent",
+          actorId: agentId,
+          action: "vault.broadcast.outcome_unknown",
+          resourceType: "transaction",
+          resourceId: executionTxId,
+          metadata: {
+            agentId,
+            txId: executionTxId,
+            txHash: e instanceof ExternalBroadcastOutcomeUnknownError ? e.transactionHash : null,
+            chainId: resolvedChainId,
+          },
+        });
+        return outcomeUnknown;
+      }
+      await db
+        .update(transactions)
+        .set({ status: "failed" })
+        .where(and(eq(transactions.id, executionTxId), eq(transactions.agentId, agentId)));
       const requestId = c.get("requestId") || "unknown";
       console.error(`[${requestId}] Sign transaction failed for agent ${agentId}`);
 
@@ -3459,7 +3657,9 @@ vaultRoutes.get("/:agentId/actions/:actionId", async (c) => {
             ? "confirmed"
             : row.status === "failed"
               ? "failed"
-              : "signed";
+              : row.status === "outcome_unknown"
+                ? "outcome_unknown"
+                : "signed";
   return c.json<ApiResponse>({
     ok: true,
     data: {
@@ -4220,6 +4420,10 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         data: !shouldBroadcast ? { txId, signedTx: txHash } : { txId, txHash },
       });
     } catch (e: unknown) {
+      if (e instanceof ExternalBroadcastOutcomeUnknownError) {
+        irreversibleResult = true;
+        completedTxHash = e.transactionHash;
+      }
       const frozen = frozenSigningResponse(c, e);
       if (frozen) return frozen;
       const authorizationError = executionAuthorizationErrorResponse(c, e);
@@ -4256,7 +4460,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         await db
           .update(transactions)
           .set({
-            status: "broadcast",
+            status:
+              e instanceof ExternalBroadcastOutcomeUnknownError ? "outcome_unknown" : "broadcast",
             txHash: completedTxHash ?? transactionRow.txHash ?? null,
             signedAt: resolvedAt,
           })
@@ -4265,6 +4470,33 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
 
       if (bindingMismatch) return bindingMismatch;
       if (authorizationError) return authorizationError;
+
+      const outcomeUnknown = externalBroadcastOutcomeUnknownResponse(c, e, txId);
+      if (outcomeUnknown) {
+        recordVaultSpend(agentId, tenantId, transactionRow.value, transactionRow.chainId).catch(
+          (err) => console.error("[vault] Failed to record ambiguous approved spend:", err),
+        );
+        try {
+          await recordAggregationEvent({
+            agentId,
+            valueRaw: transactionRow.value,
+            to: transactionRow.toAddress,
+            chainId: transactionRow.chainId,
+          });
+        } catch (err) {
+          console.error("[vault] Failed to record ambiguous approved aggregation event:", err);
+        }
+        await writeOutcomeUnknownAudit(c, {
+          tenantId,
+          actorType: "user",
+          actorId,
+          action: "vault.broadcast.outcome_unknown",
+          resourceType: "transaction",
+          resourceId: txId,
+          metadata: { agentId, txId, txHash: completedTxHash, chainId: transactionRow.chainId },
+        });
+        return outcomeUnknown;
+      }
 
       const requestId = c.get("requestId") || "unknown";
       const safeFailureMessage = "Transaction approval execution failed";
@@ -4539,6 +4771,7 @@ vaultRoutes.get("/:agentId/transactions", async (c) => {
     "broadcast",
     "confirmed",
     "failed",
+    "outcome_unknown",
   ]);
   if (status && !allowedStatuses.has(status)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid transaction status filter" }, 400);

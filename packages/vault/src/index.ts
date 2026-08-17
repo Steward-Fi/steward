@@ -47,6 +47,7 @@ export {
   assertExternalKeyCustodyProviderV1,
   assertNoExternalPrivateKeyMaterial,
   EXTERNAL_KEY_CUSTODY_CONTRACT_VERSION,
+  ExternalBroadcastOutcomeUnknownError,
   externalKeyCustodyUnavailableError,
   externalKeyPrivateExportUnavailableError,
   externalKeySigningUnavailableError,

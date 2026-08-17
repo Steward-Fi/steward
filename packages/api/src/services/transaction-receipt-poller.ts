@@ -1,7 +1,7 @@
 import { toCaip2 } from "@stwd/shared";
-import { and, asc, eq, isNotNull, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { createPublicClient, http, type TransactionReceipt } from "viem";
-import { writeAuditEvent } from "./audit";
+import { withTenantAuditedTransaction, writeAuditEvent } from "./audit";
 import { agents, db, transactions } from "./context";
 import { dispatchWebhook } from "./webhook-dispatch";
 
@@ -24,6 +24,7 @@ const EVM_CHAIN_RPCS: Record<number, string> = {
 
 type PollableTransaction = typeof transactions.$inferSelect & { tenantId: string };
 type TransactionLifecycleEventType =
+  | "transaction.broadcasted"
   | "transaction.confirmed"
   | "transaction.execution_reverted"
   | "transaction.provider_error"
@@ -34,7 +35,20 @@ export interface TransactionReceiptPollerOptions {
   minConfirmations?: number;
   stillPendingAfterMs?: number;
   stillPendingIntervalMs?: number;
+  /** Dependency injection for deterministic tests; production uses a read-only viem client. */
+  clientFactory?: (rpcUrl: string) => TransactionReceiptClient;
 }
+
+export interface TransactionReceiptClient {
+  getTransactionReceipt(input: { hash: `0x${string}` }): Promise<TransactionReceipt>;
+  getBlockNumber(): Promise<bigint>;
+}
+
+type ResolvedTransactionReceiptPollerOptions = Required<
+  Omit<TransactionReceiptPollerOptions, "clientFactory">
+> & {
+  clientFactory: (rpcUrl: string) => TransactionReceiptClient;
+};
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -248,30 +262,63 @@ async function finalizeReceipt(
     gasUsed: receipt.gasUsed?.toString(),
   });
 
-  await writeSystemLifecycleAudit(row, eventType, {
-    txHash: row.txHash,
-    status: nextStatus,
-    chainId: row.chainId,
-    blockNumber,
-    confirmations,
-  });
+  const updated = await withTenantAuditedTransaction(
+    row.tenantId,
+    async (rawTx, appendRequiredAudit) => {
+      const tx = rawTx as typeof db;
+      const [transitioned] = await tx
+        .update(transactions)
+        .set({
+          status: nextStatus,
+          confirmedAt: eventType === "transaction.confirmed" ? now : row.confirmedAt,
+          actionPayload,
+        })
+        .where(
+          and(
+            eq(transactions.id, row.id),
+            eq(transactions.agentId, row.agentId),
+            eq(transactions.status, row.status),
+            sql`${transactions.txHash} = ${row.txHash}`,
+          ),
+        )
+        .returning();
+      if (!transitioned) return null;
 
-  const [updated] = await db
-    .update(transactions)
-    .set({
-      status: nextStatus,
-      confirmedAt: eventType === "transaction.confirmed" ? now : row.confirmedAt,
-      actionPayload,
-    })
-    .where(
-      and(
-        eq(transactions.id, row.id),
-        eq(transactions.agentId, row.agentId),
-        eq(transactions.status, "broadcast"),
-        sql`${transactions.txHash} = ${row.txHash}`,
-      ),
-    )
-    .returning();
+      if (row.status === "outcome_unknown") {
+        await appendRequiredAudit({
+          tenantId: row.tenantId,
+          actorType: "system",
+          actorId: "transaction-receipt-poller",
+          action: "transaction.broadcast.reconciled",
+          resourceType: "transaction",
+          resourceId: row.id,
+          metadata: {
+            txHash: row.txHash,
+            previousStatus: "outcome_unknown",
+            chainId: row.chainId,
+            evidence: "transaction_receipt",
+          },
+        });
+      }
+      await appendRequiredAudit({
+        tenantId: row.tenantId,
+        actorType: "system",
+        actorId: "transaction-receipt-poller",
+        action: eventType,
+        resourceType: "transaction",
+        resourceId: row.id,
+        metadata: {
+          txHash: row.txHash,
+          status: nextStatus,
+          chainId: row.chainId,
+          blockNumber,
+          confirmations,
+          previousStatus: row.status,
+        },
+      });
+      return transitioned;
+    },
+  );
   if (!updated) return;
 
   dispatchTransactionLifecycleWebhook({ ...row, actionPayload }, eventType, {
@@ -298,16 +345,88 @@ async function finalizeReceipt(
   }
 }
 
+/**
+ * A receipt proves that the exact, locally-derived transaction hash was
+ * accepted by the chain. Promote an ambiguous outcome without ever resending
+ * signed bytes. The guarded update and audit append commit atomically.
+ */
+async function reconcileOutcomeUnknownAsBroadcast(
+  row: PollableTransaction,
+  receipt: TransactionReceipt,
+): Promise<PollableTransaction | null> {
+  const now = new Date();
+  const actionPayload = mergePollingMetadata(row.actionPayload ?? null, {
+    lastCheckedAt: now.toISOString(),
+    receiptStatus: receipt.status,
+    blockNumber: receipt.blockNumber.toString(),
+    reconciledAt: now.toISOString(),
+  });
+  const updated = await withTenantAuditedTransaction(
+    row.tenantId,
+    async (rawTx, appendRequiredAudit) => {
+      const tx = rawTx as typeof db;
+      const [transitioned] = await tx
+        .update(transactions)
+        .set({ status: "broadcast", actionPayload })
+        .where(
+          and(
+            eq(transactions.id, row.id),
+            eq(transactions.agentId, row.agentId),
+            eq(transactions.status, "outcome_unknown"),
+            sql`${transactions.txHash} = ${row.txHash}`,
+          ),
+        )
+        .returning();
+      if (!transitioned) return null;
+      await appendRequiredAudit({
+        tenantId: row.tenantId,
+        actorType: "system",
+        actorId: "transaction-receipt-poller",
+        action: "transaction.broadcast.reconciled",
+        resourceType: "transaction",
+        resourceId: row.id,
+        metadata: {
+          txHash: row.txHash,
+          previousStatus: "outcome_unknown",
+          status: "broadcast",
+          chainId: row.chainId,
+          evidence: "transaction_receipt",
+        },
+      });
+      return { ...transitioned, tenantId: row.tenantId } as PollableTransaction;
+    },
+  );
+  if (!updated) return null;
+  dispatchTransactionLifecycleWebhook(updated, "transaction.broadcasted", {
+    status: "broadcast",
+    transactionRequest: transactionRequestPayload(updated),
+  });
+  return updated;
+}
+
 async function pollOneTransaction(
   row: PollableTransaction,
-  options: Required<TransactionReceiptPollerOptions>,
+  options: ResolvedTransactionReceiptPollerOptions,
 ): Promise<"confirmed" | "reverted" | "pending" | "skipped"> {
+  const now = new Date();
+  // Advance a durable fairness cursor before validation or I/O. A malformed
+  // hash, unsupported chain, or permanently absent receipt must not monopolize
+  // the oldest fixed-size batch across scheduler ticks.
+  await db
+    .update(transactions)
+    .set({ receiptPolledAt: now })
+    .where(
+      and(
+        eq(transactions.id, row.id),
+        eq(transactions.agentId, row.agentId),
+        eq(transactions.status, row.status),
+      ),
+    );
   if (!isHexHash(row.txHash)) return "skipped";
   const rpcUrl = resolveEvmReceiptRpcUrl(row.chainId);
   if (!rpcUrl) return "skipped";
 
-  const client = createPublicClient({ transport: http(rpcUrl) });
-  const now = new Date();
+  const client = options.clientFactory(rpcUrl);
   let receipt: TransactionReceipt | null = null;
   try {
     receipt = await client.getTransactionReceipt({ hash: row.txHash });
@@ -319,12 +438,22 @@ async function pollOneTransaction(
   }
 
   if (!receipt) {
+    // Absence of a receipt cannot prove that an ambiguous submission failed.
+    // Keep outcome_unknown terminal and, critically, never call a broadcast API.
+    if (row.status === "outcome_unknown") return "skipped";
     if (
       shouldEmitStillPending(row, now, options.stillPendingAfterMs, options.stillPendingIntervalMs)
     ) {
       await markStillPending(row, now);
       return "pending";
     }
+    return "skipped";
+  }
+
+  // Bind the provider-controlled response back to the exact deterministic
+  // hash requested. A malicious RPC must not reconcile using another receipt.
+  if (receipt.transactionHash.toLowerCase() !== row.txHash.toLowerCase()) {
+    console.warn(`[tx-poller] Receipt hash mismatch for ${row.id}; refusing reconciliation`);
     return "skipped";
   }
 
@@ -345,7 +474,13 @@ async function pollOneTransaction(
     confirmations,
     options.minConfirmations,
   );
-  if (!eventType) return "skipped";
+  if (!eventType) {
+    if (row.status === "outcome_unknown") {
+      const reconciled = await reconcileOutcomeUnknownAsBroadcast(row, receipt);
+      return reconciled ? "pending" : "skipped";
+    }
+    return "skipped";
+  }
 
   await finalizeReceipt(row, receipt, eventType, confirmations);
   return eventType === "transaction.confirmed" ? "confirmed" : "reverted";
@@ -360,11 +495,14 @@ export async function pollBroadcastTransactionReceipts(
   pending: number;
   skipped: number;
 }> {
-  const resolvedOptions: Required<TransactionReceiptPollerOptions> = {
+  const resolvedOptions: ResolvedTransactionReceiptPollerOptions = {
     batchSize: options.batchSize ?? DEFAULT_RECEIPT_POLL_BATCH_SIZE,
     minConfirmations: options.minConfirmations ?? DEFAULT_MIN_CONFIRMATIONS,
     stillPendingAfterMs: options.stillPendingAfterMs ?? DEFAULT_STILL_PENDING_AFTER_MS,
     stillPendingIntervalMs: options.stillPendingIntervalMs ?? DEFAULT_STILL_PENDING_INTERVAL_MS,
+    clientFactory:
+      options.clientFactory ??
+      ((rpcUrl) => createPublicClient({ transport: http(rpcUrl) }) as TransactionReceiptClient),
   };
   const rows = await db
     .select({
@@ -387,11 +525,17 @@ export async function pollBroadcastTransactionReceipts(
       createdAt: transactions.createdAt,
       signedAt: transactions.signedAt,
       confirmedAt: transactions.confirmedAt,
+      receiptPolledAt: transactions.receiptPolledAt,
     })
     .from(transactions)
     .innerJoin(agents, eq(transactions.agentId, agents.id))
-    .where(and(eq(transactions.status, "broadcast"), isNotNull(transactions.txHash)))
-    .orderBy(asc(transactions.createdAt))
+    .where(
+      and(
+        inArray(transactions.status, ["broadcast", "outcome_unknown"]),
+        isNotNull(transactions.txHash),
+      ),
+    )
+    .orderBy(sql`${transactions.receiptPolledAt} ASC NULLS FIRST`, asc(transactions.createdAt))
     .limit(resolvedOptions.batchSize);
 
   const summary = { checked: rows.length, confirmed: 0, reverted: 0, pending: 0, skipped: 0 };
