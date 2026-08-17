@@ -10398,14 +10398,20 @@ async function exchangeOidcAuthorizationCode(opts: {
     throw new Error("OIDC token endpoint returned invalid JSON");
   }
   if (!response.ok) {
-    const error =
+    // SEC-139: the IdP-supplied `error` string is untrusted text. Log it
+    // server-side for operators, but never echo it into the client-facing
+    // 502 response.
+    const idpError =
       payload &&
       typeof payload === "object" &&
       "error" in payload &&
       typeof payload.error === "string"
         ? payload.error
-        : "OIDC token endpoint rejected authorization code";
-    throw new Error(error);
+        : undefined;
+    if (idpError) {
+      console.warn("[OIDC] Token endpoint rejected authorization code:", idpError);
+    }
+    throw new Error("OIDC token endpoint rejected authorization code");
   }
   if (
     !payload ||
