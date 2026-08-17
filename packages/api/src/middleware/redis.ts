@@ -116,7 +116,13 @@ export async function checkAgentRateLimit(
   windowMs: number,
   maxRequests: number,
 ): Promise<RateLimitResult> {
-  if (!redisAvailable) return PERMISSIVE_RATE_LIMIT;
+  // Redis not available: only skip enforcement when Redis was never configured
+  // (documented dev path). If Redis IS configured (production), an unavailable
+  // backend must fail CLOSED — mirroring checkAgentSpendLimit (SEC-016).
+  if (!redisAvailable) {
+    if (!isRedisConfigured()) return PERMISSIVE_RATE_LIMIT;
+    return { allowed: false, remaining: 0, resetMs: 60_000 };
+  }
 
   try {
     const key = `ratelimit:vault:${agentId}:${windowMs}`;
@@ -141,7 +147,12 @@ export async function checkProxyRateLimit(
   windowMs: number,
   maxRequests: number,
 ): Promise<RateLimitResult> {
-  if (!redisAvailable) return PERMISSIVE_RATE_LIMIT;
+  // Same fail-closed posture as checkAgentRateLimit (SEC-016): permissive only
+  // when Redis was never configured; a configured-but-down backend denies.
+  if (!redisAvailable) {
+    if (!isRedisConfigured()) return PERMISSIVE_RATE_LIMIT;
+    return { allowed: false, remaining: 0, resetMs: 60_000 };
+  }
 
   try {
     const key = `ratelimit:proxy:${agentId}:${host}:${windowMs}`;
