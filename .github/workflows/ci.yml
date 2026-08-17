@@ -284,8 +284,9 @@ jobs:
           STEWARD_EMAIL_CODE_SECRET: "ci-email-code-secret-must-be-at-least-32-chars-long"
           STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "ci-audit-hmac-key-must-be-at-least-32-bytes-long"
-          # Isolated API fixtures import an in-process proxy without calling
-          # initProxyRedis or signing requests.
+          # Isolated files reuse deterministic agent/host fixtures, so retain
+          # Redis enforcement with a high bounded ceiling for the test flood.
+          STEWARD_PROXY_RATE_LIMIT_MAX: "1000000"
           STEWARD_PROXY_DEV_MODE: "true"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost,127.0.0.1:3200"
 
@@ -412,6 +413,7 @@ jobs:
           # which are enforced only when NODE_ENV=production (covered by unit tests).
           NODE_ENV: "test"
           STEWARD_PROXY_DEV_MODE: "true"
+          STEWARD_PROXY_RATE_LIMIT_MAX: "1000000"
           STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS: "true"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost,127.0.0.1:3200"
           PORT: "3200"

@@ -1,11 +1,9 @@
 /**
  * SEC-100: proxy resource-limit env vars fail closed at startup.
  *
- * `STEWARD_PROXY_RESPONSE_BYTES`, `STEWARD_PROXY_STREAM_DURATION_MS`, and
- * `STEWARD_PROXY_MAX_IN_FLIGHT_PER_AGENT/TENANT` previously treated `0` (or a
- * non-numeric value) as "unlimited", silently removing the response-size,
- * stream-duration, and concurrency caps on operator misconfiguration. The
- * limits are validated at module load, so each case runs in a subprocess.
+ * Response, stream, concurrency, and Redis rate limits reject `0` (or a
+ * non-numeric value) instead of silently disabling enforcement. The limits
+ * are validated at module load, so each case runs in a subprocess.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -33,12 +31,14 @@ describe("proxy resource-limit env validation (SEC-100)", () => {
       "STEWARD_PROXY_STREAM_DURATION_MS",
       "STEWARD_PROXY_MAX_IN_FLIGHT_PER_AGENT",
       "STEWARD_PROXY_MAX_IN_FLIGHT_PER_TENANT",
+      "STEWARD_PROXY_RATE_LIMIT_MAX",
+      "STEWARD_PROXY_RATE_LIMIT_WINDOW_MS",
     ]) {
       const result = loadProxyModule({ [name]: "0" });
       expect(result.exitCode).not.toBe(0);
       expect(result.stderr.toString()).toContain(name);
     }
-  });
+  }, 15_000);
 
   test("rejects non-numeric values at startup", () => {
     const result = loadProxyModule({ STEWARD_PROXY_RESPONSE_BYTES: "unlimited" });
@@ -52,6 +52,8 @@ describe("proxy resource-limit env validation (SEC-100)", () => {
       STEWARD_PROXY_STREAM_DURATION_MS: "60000",
       STEWARD_PROXY_MAX_IN_FLIGHT_PER_AGENT: "7",
       STEWARD_PROXY_MAX_IN_FLIGHT_PER_TENANT: "70",
+      STEWARD_PROXY_RATE_LIMIT_MAX: "600",
+      STEWARD_PROXY_RATE_LIMIT_WINDOW_MS: "30000",
     });
     expect(result.exitCode).toBe(0);
   });

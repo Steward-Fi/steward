@@ -66,8 +66,21 @@ export async function shutdownProxyRedis(): Promise<void> {
 
 // ─── Default rate limits for proxy (per-agent per-host) ──────────────────────
 
-const DEFAULT_PROXY_RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
-const DEFAULT_PROXY_RATE_LIMIT_MAX = 60; // 60 requests/minute per agent per host
+function positiveIntegerEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
+const DEFAULT_PROXY_RATE_LIMIT_WINDOW_MS = positiveIntegerEnv(
+  "STEWARD_PROXY_RATE_LIMIT_WINDOW_MS",
+  60_000,
+);
+const DEFAULT_PROXY_RATE_LIMIT_MAX = positiveIntegerEnv("STEWARD_PROXY_RATE_LIMIT_MAX", 60);
 
 const PERMISSIVE: RateLimitResult = {
   allowed: true,
