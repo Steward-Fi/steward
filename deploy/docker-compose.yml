@@ -40,6 +40,11 @@ services:
       CHAIN_ID: "${CHAIN_ID:-8453}"
       STEWARD_PLATFORM_KEY: "${STEWARD_PLATFORM_KEY:-}"
       SOLANA_RPC_URL: "${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}"
+      # SEC-079: the production image (ENV NODE_ENV=production) makes KeyStore
+      # throw without STEWARD_KDF_SALT, and email-code flows need the secret —
+      # the provisioner writes both into deploy/.env, so pass them through.
+      STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?Set STEWARD_KDF_SALT in .env - generate with: openssl rand -hex 32}"
+      STEWARD_EMAIL_CODE_SECRET: "${STEWARD_EMAIL_CODE_SECRET:-}"
       STEWARD_PLUGINS: "${STEWARD_PLUGINS:-}"
       WXMR_SOLANA_RPC_URL: "${WXMR_SOLANA_RPC_URL:-}"
     volumes:

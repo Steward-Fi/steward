@@ -101,6 +101,29 @@ describe("#101 deploy/DEPLOYMENT.md docs reconciled with fail-closed code", () =
   });
 });
 
+describe("SEC-079 deploy/docker-compose.yml passes vault/email secrets through", () => {
+  const compose = read("docker-compose.yml");
+
+  test("steward service passes STEWARD_KDF_SALT and STEWARD_EMAIL_CODE_SECRET", () => {
+    // The provisioner writes STEWARD_KDF_SALT into deploy/.env and the
+    // production image's KeyStore throws without it — but the compose env
+    // list used to omit both vars, so the shipped stack was degraded out of
+    // the box.
+    const lines = compose.split("\n");
+    const start = lines.findIndex((l) => /^\s{2}steward:\s*$/.test(l));
+    expect(start).toBeGreaterThanOrEqual(0);
+    const body: string[] = [];
+    for (let i = start + 1; i < lines.length; i += 1) {
+      const l = lines[i];
+      if (/^\s{2}\S/.test(l) || /^\S/.test(l)) break;
+      body.push(l);
+    }
+    const steward = body.join("\n");
+    expect(/STEWARD_KDF_SALT\s*:/.test(steward)).toBe(true);
+    expect(/STEWARD_EMAIL_CODE_SECRET\s*:/.test(steward)).toBe(true);
+  });
+});
+
 describe("SEC-022 DEPLOYMENT.md installs shipped hardened units, no root units or cleartext admin ops", () => {
   const doc = read("DEPLOYMENT.md");
 
