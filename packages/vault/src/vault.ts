@@ -56,6 +56,7 @@ import { allocateEvmNonce, confirmEvmNonce, markEvmNonceDropped } from "./evm-no
 import {
   assertExternalKeyCustodyProviderV1,
   assertNoExternalPrivateKeyMaterial,
+  ExternalBroadcastOutcomeUnknownError,
   type ExternalKeyCustodyProvider,
   type ExternalKeyHandleImportRequest,
   type ExternalKeyHandleRegistration,
@@ -683,6 +684,19 @@ export class Vault {
     }
   }
 
+  private async assertLocalSigningScopeIsNotExternal(
+    agentId: string,
+    chainFamily: ChainFamily,
+    venue: string | null = null,
+  ): Promise<void> {
+    const externalWallet = await this.getExternalKeyWallet({ agentId, chainFamily, venue });
+    if (externalWallet) {
+      throw new Error(
+        "This wallet uses external custody; this signing operation is not supported for external keys",
+      );
+    }
+  }
+
   private async recordSignedTransaction(
     request: SignRequest,
     chainId: number,
@@ -712,6 +726,8 @@ export class Vault {
         data: request.data,
         chainId,
         txHash: shouldBroadcast ? hash : undefined,
+        executionBackend: options.expectedBackend,
+        executionBackendIdentityDigest: options.expectedBackendIdentityDigest,
         policyResults: options.policyResults ?? [],
         signedAt,
         createdAt: signedAt,
@@ -726,6 +742,8 @@ export class Vault {
           data: request.data,
           chainId,
           txHash: shouldBroadcast ? hash : undefined,
+          executionBackend: options.expectedBackend,
+          executionBackendIdentityDigest: options.expectedBackendIdentityDigest,
           policyResults: options.policyResults ?? [],
           signedAt,
         },
@@ -1425,27 +1443,63 @@ export class Vault {
         const rpcUrl = isSolana
           ? (this.config.rpcUrl ?? resolveSolanaRpc(chainId))
           : (CHAIN_RPCS[chainId] ?? this.config.rpcUrl);
-        const signed = await this.externalKeyCustodyProvider.signTransaction({
-          tenantId: request.tenantId,
-          agentId: request.agentId,
-          chainFamily: chainFamilyToUse,
-          address: externalWallet.address,
-          handle: {
-            providerId: externalWallet.metadata.externalKey.providerId,
-            keyId: externalWallet.metadata.externalKey.keyId,
-            version: externalWallet.metadata.externalKey.version,
-            region: externalWallet.metadata.externalKey.region,
-          },
-          venue,
-          chainId,
-          to: request.to,
-          value: request.value,
-          data: request.data,
-          gasLimit: request.gasLimit,
-          nonce: request.nonce,
-          broadcast: shouldBroadcast,
-          rpcUrl,
-        });
+        let signed;
+        try {
+          signed = await this.externalKeyCustodyProvider.signTransaction({
+            tenantId: request.tenantId,
+            agentId: request.agentId,
+            chainFamily: chainFamilyToUse,
+            address: externalWallet.address,
+            handle: {
+              providerId: externalWallet.metadata.externalKey.providerId,
+              keyId: externalWallet.metadata.externalKey.keyId,
+              version: externalWallet.metadata.externalKey.version,
+              region: externalWallet.metadata.externalKey.region,
+            },
+            venue,
+            chainId,
+            to: request.to,
+            value: request.value,
+            data: request.data,
+            gasLimit: request.gasLimit,
+            nonce: request.nonce,
+            broadcast: shouldBroadcast,
+            rpcUrl,
+            ...(shouldBroadcast
+              ? {
+                  onPreparedBroadcast: async (transactionHash: string) => {
+                    await this.recordSignedTransaction(request, chainId, true, transactionHash, {
+                      ...options,
+                      status: "outcome_unknown",
+                    });
+                  },
+                }
+              : {}),
+          });
+        } catch (error) {
+          if (error instanceof ExternalBroadcastOutcomeUnknownError) {
+            // The provider has already produced a deterministic local hash and
+            // may have handed the signed bytes to the RPC.  A database failure
+            // must never replace this irreversible outcome with a generic
+            // error: approval callers would otherwise reopen the queue and a
+            // retry could broadcast the same intent again.  The gateway
+            // pre-stages direct executions (and approval executions already
+            // have a transaction row), so it can durably recover the exact
+            // hash even when this first write fails.
+            try {
+              await this.recordSignedTransaction(request, chainId, true, error.transactionHash, {
+                ...options,
+                status: "outcome_unknown",
+              });
+            } catch {
+              // Deliberately preserve the typed error and its hash. Do not log
+              // the persistence exception: provider/RPC errors may contain
+              // credential-bearing URLs, and the gateway owns the bounded
+              // fallback persistence/audit path.
+            }
+          }
+          throw error;
+        }
         assertNoExternalPrivateKeyMaterial(signed, "externalSignTransactionResult");
         if (signed.broadcast !== shouldBroadcast) {
           throw new Error("External key custody signer returned an unexpected broadcast mode");
@@ -1969,11 +2023,21 @@ export class Vault {
 
     const db = getDb();
     const [agentRow] = await db
-      .select({ id: agents.id })
+      .select({ id: agents.id, walletAddress: agents.walletAddress })
       .from(agents)
       .where(and(eq(agents.id, request.agentId), eq(agents.tenantId, request.tenantId)));
     if (!agentRow) {
       throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
+    }
+
+    if (!request.venue && detectChainType(agentRow.walletAddress) === request.chainFamily) {
+      const [legacyKey] = await db
+        .select({ agentId: encryptedKeys.agentId })
+        .from(encryptedKeys)
+        .where(eq(encryptedKeys.agentId, request.agentId));
+      if (legacyKey) {
+        throw new Error("Cannot register external key handle over a legacy server-managed key");
+      }
     }
 
     const registration = normalizeExternalKeyHandleRegistration(
@@ -2062,6 +2126,7 @@ export class Vault {
     const isSolana = detectChainType(agentRow.walletAddress) === "solana";
     const chainFamilyToUse = isSolana ? "solana" : "evm";
     await assertVaultSigningActive({ tenantId, agentId, chainFamily: chainFamilyToUse });
+    await this.assertLocalSigningScopeIsNotExternal(agentId, chainFamilyToUse);
 
     // Resolve signing key: prefer encryptedChainKeys (multi-wallet), fall back to legacy encryptedKeys
     let secretKey: string;
@@ -2140,6 +2205,7 @@ export class Vault {
       throw new Error("Raw secp256k1 signing requires an EVM agent");
     }
     await assertVaultSigningActive({ tenantId, agentId, chainFamily: "evm" });
+    await this.assertLocalSigningScopeIsNotExternal(agentId, "evm");
 
     let secretKey: string;
     const [chainKey] = await db
@@ -2243,6 +2309,7 @@ export class Vault {
     // authorization boundary (the encrypted-key tables are keyed by agentId).
     const chainFamily = curve === "secp256k1" ? "evm" : "solana";
     await assertVaultSigningActive({ tenantId, agentId, chainFamily });
+    await this.assertLocalSigningScopeIsNotExternal(agentId, chainFamily);
 
     let secretKey: string;
     const [chainKey] = await db
@@ -2348,6 +2415,7 @@ export class Vault {
       throw new Error("signAuthorization requires an EVM agent");
     }
     await assertVaultSigningActive({ tenantId, agentId, chainFamily: "evm" });
+    await this.assertLocalSigningScopeIsNotExternal(agentId, "evm");
 
     let secretKey: string;
     const [chainKey] = await db
@@ -2426,6 +2494,7 @@ export class Vault {
       chainFamily: "evm",
       venue: request.venue ?? null,
     });
+    await this.assertLocalSigningScopeIsNotExternal(request.agentId, "evm", request.venue ?? null);
 
     // Resolve signing key: prefer encryptedChainKeys (multi-wallet), scoped by
     // venue when requested, then fall back to legacy encryptedKeys only for
@@ -2529,6 +2598,7 @@ export class Vault {
     if (detectChainType(agentRow.walletAddress) === "solana") {
       throw new Error("ERC-4337 user operation signing is not supported for Solana wallets");
     }
+    await this.assertLocalSigningScopeIsNotExternal(request.agentId, "evm");
 
     await assertVaultSigningActive({
       tenantId: request.tenantId,
@@ -2613,6 +2683,7 @@ export class Vault {
     if (!agentRow) {
       throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
     }
+    await this.assertLocalSigningScopeIsNotExternal(request.agentId, "solana");
 
     await assertVaultSigningActive({
       tenantId: request.tenantId,

@@ -62,10 +62,27 @@ describe("generated OpenAPI contract", () => {
     expect(spec.paths).toHaveProperty("/platform/users/wallet/external-id/connect-or-create");
     expect(spec.paths).toHaveProperty("/platform/apps/gas_spend");
     expect(spec.paths).toHaveProperty("/vault/{agentId}/transactions");
+    expect(spec.paths).toHaveProperty("/vault/{agentId}/sign");
+    const signOperation = spec.paths["/vault/{agentId}/sign"].post;
+    expect(signOperation.responses).toHaveProperty("202");
+    const signAcceptedVariants = signOperation.responses["202"].content["application/json"].schema
+      .oneOf as Array<Record<string, unknown>>;
+    expect(signAcceptedVariants).toHaveLength(2);
+    expect(signAcceptedVariants[1].properties.data.properties.code.const).toBe(
+      "external_broadcast_outcome_unknown",
+    );
+    expect(signAcceptedVariants[1].properties.data.properties.reconciliationRequired.const).toBe(
+      true,
+    );
     expect(spec.paths).toHaveProperty("/vault/{agentId}/actions/transfer/quote");
     expect(spec.paths).toHaveProperty("/vault/{agentId}/actions/transfer");
     expect(spec.paths).toHaveProperty("/vault/{agentId}/actions/send-calls");
     expect(spec.paths).toHaveProperty("/vault/{agentId}/actions/{actionId}");
+    const transferStatus =
+      spec.paths["/vault/{agentId}/actions/{actionId}"].get.responses["200"].content[
+        "application/json"
+      ].schema.properties.data.properties.status.enum;
+    expect(transferStatus).toContain("outcome_unknown");
     expect(spec.paths).toHaveProperty("/vault/{agentId}/import/init");
     expect(spec.paths).toHaveProperty("/vault/{agentId}/import/submit");
     expect(spec.paths).toHaveProperty("/user/me/wallet/import/init");
@@ -835,6 +852,7 @@ describe("generated OpenAPI contract", () => {
       "broadcast",
       "confirmed",
       "failed",
+      "outcome_unknown",
     ]);
     expect(transfer.responses).toHaveProperty("202");
     expect(transfer.responses).toHaveProperty("429");
