@@ -230,8 +230,8 @@ beforeAll(async () => {
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url =
       typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    if (url.startsWith("http://a3-api")) {
-      const path = url.slice("http://a3-api".length) || "/";
+    if (url.startsWith("http://localhost")) {
+      const path = url.slice("http://localhost".length) || "/";
       return apiApp.request(path, init as RequestInit);
     }
     if (url.startsWith(PROXY_URL) && proxyApp) {
@@ -263,7 +263,7 @@ describe("A3 agent-client E2E (real API, seeded p256 signer)", () => {
     // The agent holds ONLY its private key (imported non-extractable).
     const kp = await AgentKeypair.fromPkcs8Base64(await exportPkcs8Base64(keypair.privateKey));
     const client = new AgentClient({
-      baseUrl: "http://a3-api",
+      baseUrl: "http://localhost",
       agentId,
       keypair: kp,
       renewJitterMs: 0,

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Security (BREAKING)
+- `StewardClient`, `StewardAuth`, and `AgentClient` constructors now REJECT a plaintext non-loopback `baseUrl` (fail closed, SEC-048). These clients transmit platform keys, app secrets, bearer tokens, and HMAC-signed credentials, which must never travel cleartext off-loopback — the CLI has always enforced this. `http://localhost`/`127.0.0.1`/`[::1]` stay allowed for local development; operators on trusted private networks can opt out with the new `allowInsecureBaseUrl: true` config (warns loudly at construction). Previously-working insecure configs must pass the flag or switch to HTTPS.
+- `/accounts` and `/global-wallet` mutations are now HMAC-signed when `requestSigningSecret` is configured, aligning the request-signing prefix list with all eight other SDKs (SEC-049). Servers that enforce signatures on these routes previously saw unsigned mutations from this SDK.
+
 ### Added
 - Add shared magic-link + six-digit companion-code login helpers: `verifyEmailSignInCode()` and status-only `pollEmailSignInStatus()`. `signInWithEmail()` now returns opaque polling credentials.
 - `BridgeHandoff` type and `BridgeBuildResult = AdapterUnsignedIntent | BridgeHandoff` union. `buildBridgeIntent()` now returns either an unsigned transaction intent or a non-signable external handoff (for providers like wxmr.io that require an interactive wallet and expose no safe transaction-building API). Bridge quote/session types gain optional `direction`, `executionMode`, `handoffUrl`, `feeScope`, `notices`, and `recipientSensitive` metadata. Additive and backward compatible.
