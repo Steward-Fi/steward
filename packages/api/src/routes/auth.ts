@@ -1043,6 +1043,7 @@ export async function verifySessionToken(token: string): Promise<{
       userId?: string;
       email?: string;
       typ?: string;
+      tokenType?: string;
       jti?: string;
       exp?: number;
       iat?: number;
@@ -1052,6 +1053,8 @@ export async function verifySessionToken(token: string): Promise<{
       mfaMethod?: string;
     };
     if (payload.typ === "identity") return null;
+    // Never accept a refresh JWT as an access token (SEC-055).
+    if (payload.tokenType === "refresh") return null;
     await assertTokenNotRevoked(payload);
     if (payload.userId) {
       const [user] = await getDb()
