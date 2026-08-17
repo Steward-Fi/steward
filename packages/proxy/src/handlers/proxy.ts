@@ -31,6 +31,7 @@ import {
   workspaces,
 } from "@stwd/db";
 import { getRedis, type SpendReservation, settleReservedSpend } from "@stwd/redis";
+import { strictParseJson } from "@stwd/shared";
 import { SecretVault } from "@stwd/vault";
 import type { Context } from "hono";
 import { boundedPositiveIntegerEnv, isProxyDevMode } from "../config";
@@ -2166,7 +2167,10 @@ export async function handleProxy(c: Context): Promise<Response> {
 /** Null means Slack explicitly attested success; any string is a safe failure code. */
 export function classifySlackWebApiPayload(bodyText: string): string | null {
   try {
-    const parsed = JSON.parse(bodyText) as { ok?: unknown; error?: unknown };
+    const parsed = strictParseJson(bodyText) as { ok?: unknown; error?: unknown };
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return "invalid_response";
+    }
     if (parsed.ok === true) return null;
     return typeof parsed.error === "string" && /^[a-z0-9_]{1,128}$/i.test(parsed.error)
       ? parsed.error

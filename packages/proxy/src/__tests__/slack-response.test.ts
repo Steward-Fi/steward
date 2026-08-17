@@ -12,5 +12,7 @@ describe("Slack Web API response semantics", () => {
     expect(classifySlackWebApiPayload('{"ok":false,"error":"token leaked: xoxb-secret"}')).toBe(
       "invalid_response",
     );
+    expect(classifySlackWebApiPayload('{"ok":false,"ok":true}')).toBe("invalid_response");
+    expect(classifySlackWebApiPayload('[{"ok":true}]')).toBe("invalid_response");
   });
 });
