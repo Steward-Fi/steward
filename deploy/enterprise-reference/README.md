@@ -2,6 +2,10 @@
 
 This profile is the hardened compose path for PR6. It includes PostgreSQL, Redis, a one-shot migration job, the API, the credential proxy, Caddy TLS termination, health/readiness checks, and a `backup` service that writes `pg_dump` files into `deploy/enterprise-reference/backups`.
 
+Docker Compose 2.33.1 or newer is required. The profile uses `gw_priority` to
+make the egress-capable network the deterministic default gateway for its
+dual-homed API, proxy, migration, and backup containers.
+
 ```bash
 bun install
 bun run packages/cli/src/index.ts init --env deploy/enterprise-reference/.env --force

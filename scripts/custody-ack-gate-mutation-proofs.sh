@@ -10,18 +10,29 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FACTORY="$ROOT/packages/api/src/services/vault-factory.ts"
-BACKUP="$(mktemp)"
-# SEC-201: mktemp instead of a predictable /tmp path (symlink-safe on shared hosts)
-LOG="$(mktemp -t custody-ack-mut.XXXXXX)"
+BACKUP=""
+LOG=""
+BACKUP_READY=false
 TEST="vault-factory.test.ts"
 
 cleanup() {
-  cp "$BACKUP" "$FACTORY"
-  rm -f "$BACKUP" "$LOG"
+  # Never restore from a merely-created (still empty) mktemp file. If the
+  # initial source copy fails, overwriting FACTORY from that file would turn a
+  # setup error into source destruction.
+  if $BACKUP_READY; then
+    cp "$BACKUP" "$FACTORY"
+  fi
+  [[ -n "$BACKUP" ]] && rm -f -- "$BACKUP"
+  [[ -n "$LOG" ]] && rm -f -- "$LOG"
 }
 trap cleanup EXIT
 
+# SEC-201: mktemp instead of a predictable /tmp path (symlink-safe on shared hosts).
+# Install the cleanup trap before allocation so partial setup cannot leak files.
+BACKUP="$(mktemp)"
+LOG="$(mktemp -t custody-ack-mut.XXXXXX)"
 cp "$FACTORY" "$BACKUP"
+BACKUP_READY=true
 
 run_tests() {
   ( cd "$ROOT/packages/api" && bun scripts/run-tests-isolated.ts "$TEST" ) >"$LOG" 2>&1

@@ -15,3 +15,5 @@ packages/db/ @0xSolace
 .github/ @0xSolace @lalalune
 Dockerfile @0xSolace @lalalune
 docker-compose*.yml @0xSolace @lalalune
+deploy/ @0xSolace @lalalune
+scripts/ @0xSolace @lalalune

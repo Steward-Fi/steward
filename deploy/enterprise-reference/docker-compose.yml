@@ -31,8 +31,11 @@ services:
     networks:
       # Dual-homed: reaches the bundled postgres via steward-data, and an
       # operator-supplied external DATABASE_URL via steward-backend egress.
-      - steward-backend
-      - steward-data
+      steward-backend:
+        # Compose does not define a default gateway for equal priorities. Pin
+        # the egress-capable network explicitly (Compose >= 2.33.1).
+        gw_priority: 1
+      steward-data: {}
     restart: "no"
 
   steward-api:
@@ -89,8 +92,9 @@ services:
       start_period: 30s
       retries: 8
     networks:
-      - steward-backend
-      - steward-data
+      steward-backend:
+        gw_priority: 1
+      steward-data: {}
 
   steward-proxy:
     profiles: ["enterprise-reference"]
@@ -126,8 +130,9 @@ services:
       start_period: 15s
       retries: 5
     networks:
-      - steward-backend
-      - steward-data
+      steward-backend:
+        gw_priority: 1
+      steward-data: {}
 
   caddy:
     profiles: ["enterprise-reference"]
@@ -208,8 +213,9 @@ services:
     networks:
       # Dual-homed like steward-migrate: bundled postgres via steward-data,
       # external DATABASE_URL (if overridden) via steward-backend egress.
-      - steward-backend
-      - steward-data
+      steward-backend:
+        gw_priority: 1
+      steward-data: {}
     restart: "no"
 
 volumes:
