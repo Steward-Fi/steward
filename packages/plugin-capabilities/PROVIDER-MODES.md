@@ -81,8 +81,9 @@ only the scrubbed upstream response.
   alive until GitHub expiry; this is the explicit precommit-orphan boundary.
 - Revocation uses a durable claim. If the process dies after GitHub accepts the
   revocation but before Steward commits the result, the holder can retry after
-  the 30-second claim timeout. GitHub's idempotent missing-token response is
-  treated as confirmation, so the lease cannot remain permanently `revoking`.
+  the 30-second claim timeout. A success response or GitHub's invalid-token
+  response confirms that the credential is no longer usable, so the lease cannot
+  remain permanently `revoking`; undocumented not-found responses fail closed.
 
 These tests use a deterministic fake upstream boundary. They do not constitute
 live GitHub, Railway, or deployment proof.

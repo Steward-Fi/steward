@@ -62,4 +62,17 @@ describe("GitHub App upstream issuer transport", () => {
     expect(requestBody).not.toHaveProperty("ttlSeconds");
     expect(issued).toEqual({ token: "ghs_test", expiresAt: new Date(expiresAt) });
   });
+
+  test("accepts only success or invalid-token proof when revoking", async () => {
+    for (const status of [204, 401]) {
+      const issuer = new GitHubAppInstallationTokenIssuer(
+        (async () => new Response(null, { status })) as typeof fetch,
+      );
+      await expect(issuer.revoke("installation-token")).resolves.toBeUndefined();
+    }
+    const issuer = new GitHubAppInstallationTokenIssuer(
+      (async () => new Response(null, { status: 404 })) as typeof fetch,
+    );
+    await expect(issuer.revoke("installation-token")).rejects.toThrow("revocation failed (404)");
+  });
 });

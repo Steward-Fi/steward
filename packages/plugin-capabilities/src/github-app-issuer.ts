@@ -99,7 +99,11 @@ export class GitHubAppInstallationTokenIssuer implements UpstreamTokenIssuer {
       redirect: "error",
       signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
     });
-    if (!response.ok && response.status !== 404) {
+    // A retry after a prior successful revoke authenticates with a token GitHub
+    // no longer accepts and returns 401. That is confirmation the credential is
+    // unusable. A 404 is not documented for this endpoint and must not be
+    // mistaken for revocation proof.
+    if (!response.ok && response.status !== 401) {
       throw new Error(`GitHub installation-token revocation failed (${response.status})`);
     }
   }
