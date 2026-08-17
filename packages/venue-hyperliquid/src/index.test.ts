@@ -175,6 +175,14 @@ describe("Hyperliquid L1 signing", () => {
       process.env.HL_BUILDER_ADDRESS = "not-an-address";
       process.env.HL_BUILDER_FEE_TENTHS_BP = "10";
       expect(() => validateBuilderFeeEnv()).toThrow(/Invalid HL builder fee configuration/);
+
+      process.env.HL_BUILDER_ADDRESS = "0xABCDEF0123456789abcdef0123456789ABCDEF01";
+      delete process.env.HL_BUILDER_FEE_TENTHS_BP;
+      expect(() => validateBuilderFeeEnv()).toThrow(/must be set together/);
+
+      delete process.env.HL_BUILDER_ADDRESS;
+      process.env.HL_BUILDER_FEE_TENTHS_BP = "10";
+      expect(() => validateBuilderFeeEnv()).toThrow(/must be set together/);
     } finally {
       if (oldAddress === undefined) delete process.env.HL_BUILDER_ADDRESS;
       else process.env.HL_BUILDER_ADDRESS = oldAddress;

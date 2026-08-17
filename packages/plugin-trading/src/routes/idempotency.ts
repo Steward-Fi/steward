@@ -159,7 +159,13 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
         }
       },
       release: async () => {
-        await redis.eval(DELETE_IF_OWNER, 1, redisKey, claimToken);
+        try {
+          await redis.eval(DELETE_IF_OWNER, 1, redisKey, claimToken);
+        } catch (err) {
+          // A failed release leaves the claim pending, which is inconvenient
+          // but safe: a later request must not execute while ownership is unknown.
+          console.error("[idempotency] failed to release pre-execution claim:", err);
+        }
       },
     };
   }

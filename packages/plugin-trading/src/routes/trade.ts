@@ -354,9 +354,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       conflict: check.conflict,
       inProgress: check.inProgress,
       response: check.record,
-      claim: check.claim
-        ? async () => routeIdempotency(await check.claim!())
-        : undefined,
+      claim: check.claim ? async () => routeIdempotency(await check.claim!()) : undefined,
       store: check.store,
       release: check.release,
     };
@@ -941,7 +939,10 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     }
     if (idempotency.inProgress) {
       c.header("Retry-After", "1");
-      return c.json<ApiResponse>({ ok: false, error: "Request with this idempotency key is in progress" }, 409);
+      return c.json<ApiResponse>(
+        { ok: false, error: "Request with this idempotency key is in progress" },
+        409,
+      );
     }
 
     const session = await getSessionManager().getActive(tenantId, body.sessionId);
@@ -1085,7 +1086,10 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (idempotency.response) return tradeReplayResponse(c, idempotency.response);
     if (idempotency.inProgress) {
       c.header("Retry-After", "1");
-      return c.json<ApiResponse>({ ok: false, error: "Request with this idempotency key is in progress" }, 409);
+      return c.json<ApiResponse>(
+        { ok: false, error: "Request with this idempotency key is in progress" },
+        409,
+      );
     }
     const fenced = await manager.withActiveSubmissionFence(
       { tenantId, id: session.id },
@@ -1181,7 +1185,32 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             builderPerp,
           });
         }
-        const signed = await adapter.signOrder(order);
+        let signed: Awaited<ReturnType<HyperliquidAdapter["signOrder"]>>;
+        try {
+          signed = await adapter.signOrder(order);
+        } catch (err) {
+          // Signing is local and no order reached the venue. Release both the
+          // spend reservation and idempotency claim so a corrected retry can
+          // execute instead of leaving a 24h pending tombstone.
+          await getSessionManager().releaseSpend({
+            tenantId,
+            id: session.id,
+            amountUsd: sizeUsd,
+          });
+          await idempotency.release?.();
+          await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
+            sessionId: session.id,
+            venue: "hyperliquid",
+            asset: parsedAsset.data,
+            sizeUsd,
+            reason: "pre-submit-sign-failed",
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return {
+            status: 400,
+            body: { ok: false, error: "Order could not be signed; not submitted" },
+          } satisfies TradeIdempotencyResponse;
+        }
         const activeAfterSign = await getSessionManager().getActive(tenantId, session.id);
         if (!activeAfterSign) {
           await getSessionManager().releaseSpend({
@@ -1717,7 +1746,10 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     }
     if (idempotency.inProgress) {
       c.header("Retry-After", "1");
-      return c.json<ApiResponse>({ ok: false, error: "Request with this idempotency key is in progress" }, 409);
+      return c.json<ApiResponse>(
+        { ok: false, error: "Request with this idempotency key is in progress" },
+        409,
+      );
     }
 
     // Validate price + amount as positive finite numbers up front (the policy gate
@@ -1906,7 +1938,10 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (idempotency.response) return tradeReplayResponse(c, idempotency.response);
     if (idempotency.inProgress) {
       c.header("Retry-After", "1");
-      return c.json<ApiResponse>({ ok: false, error: "Request with this idempotency key is in progress" }, 409);
+      return c.json<ApiResponse>(
+        { ok: false, error: "Request with this idempotency key is in progress" },
+        409,
+      );
     }
     // Fence reserve→submit against concurrent revocation (mirrors HL's
     // withActiveSubmissionFence). After SEC-044 the fence's advisory lock covers

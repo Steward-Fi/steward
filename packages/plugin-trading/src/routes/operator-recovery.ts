@@ -252,12 +252,9 @@ export function createOperatorRecoveryRoutes(
       };
     }
     return {
-      claim: check.claim
-        ? async () => operatorIdempotency(await check.claim!())
-        : undefined,
+      claim: check.claim ? async () => operatorIdempotency(await check.claim!()) : undefined,
       store: check.store
-        ? (response: unknown) =>
-            check.store!({ status: 200, body: { ok: true, data: response } })
+        ? (response: unknown) => check.store!({ status: 200, body: { ok: true, data: response } })
         : undefined,
       storeFailure: check.store
         ? (errorBody: unknown) => check.store!({ status: 502, body: errorBody })
@@ -621,15 +618,8 @@ export function createOperatorRecoveryRoutes(
       venue,
       amount: amountBaseUnits.toString(),
     });
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.entry) {
-      return c.json(idempotency.entry.body, idempotency.entry.status);
-    }
+    const replayResponse = operatorIdempotencyResponse(c, idempotency);
+    if (replayResponse) return replayResponse;
 
     // Build the ERC-20 transfer(bridge, amount) calldata and have the vault sign +
     // broadcast it FROM the agent's venue wallet on Arbitrum. The raw key never
@@ -723,15 +713,8 @@ export function createOperatorRecoveryRoutes(
       requestedLeverage: body.leverage,
       isCross,
     });
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.entry) {
-      return c.json(idempotency.entry.body, idempotency.entry.status);
-    }
+    const replayResponse = operatorIdempotencyResponse(c, idempotency);
+    if (replayResponse) return replayResponse;
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -855,25 +838,14 @@ export function createOperatorRecoveryRoutes(
       );
     }
 
-    let idempotency = await getOperatorIdempotency(
-      `${tenantId}:add-margin`,
-      body.idempotencyKey,
-      {
-        agentId,
-        venue,
-        coin,
-        amount: amountBaseUnits.toString(),
-      },
-    );
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.entry) {
-      return c.json(idempotency.entry.body, idempotency.entry.status);
-    }
+    let idempotency = await getOperatorIdempotency(`${tenantId}:add-margin`, body.idempotencyKey, {
+      agentId,
+      venue,
+      coin,
+      amount: amountBaseUnits.toString(),
+    });
+    const replayResponse = operatorIdempotencyResponse(c, idempotency);
+    if (replayResponse) return replayResponse;
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -1002,15 +974,8 @@ export function createOperatorRecoveryRoutes(
       destination,
       amount,
     });
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.entry) {
-      return c.json(idempotency.entry.body, idempotency.entry.status);
-    }
+    const replayResponse = operatorIdempotencyResponse(c, idempotency);
+    if (replayResponse) return replayResponse;
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -1126,15 +1091,8 @@ export function createOperatorRecoveryRoutes(
         maxFeeRate,
       },
     );
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.entry) {
-      return c.json(idempotency.entry.body, idempotency.entry.status);
-    }
+    const replayResponse = operatorIdempotencyResponse(c, idempotency);
+    if (replayResponse) return replayResponse;
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -1252,15 +1210,8 @@ export function createOperatorRecoveryRoutes(
       amount: amountBaseUnits.toString(),
       token: body.token ?? null,
     });
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.entry) {
-      return c.json(idempotency.entry.body, idempotency.entry.status);
-    }
+    const replayResponse = operatorIdempotencyResponse(c, idempotency);
+    if (replayResponse) return replayResponse;
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -1375,15 +1326,8 @@ export function createOperatorRecoveryRoutes(
       agentId,
       venue,
     });
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.entry) {
-      return c.json(idempotency.entry.body, idempotency.entry.status);
-    }
+    const replayResponse = operatorIdempotencyResponse(c, idempotency);
+    if (replayResponse) return replayResponse;
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -1503,15 +1447,8 @@ export function createOperatorRecoveryRoutes(
       destination,
       amount: explicitIdempotencyAmount,
     });
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.entry) {
-      return c.json(idempotency.entry.body, idempotency.entry.status);
-    }
+    const replayResponse = operatorIdempotencyResponse(c, idempotency);
+    if (replayResponse) return replayResponse;
 
     // Resolve amount after the idempotency cache lookup, so a retry for a
     // previous full-balance withdraw returns the cached success before reading a

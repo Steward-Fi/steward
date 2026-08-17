@@ -28,7 +28,13 @@ function fakeRedis() {
       data.set(key, value);
       return "OK";
     },
-    eval: async (script: string, _numKeys: number, key: string, token: string, ...args: unknown[]) => {
+    eval: async (
+      script: string,
+      _numKeys: number,
+      key: string,
+      token: string,
+      ...args: unknown[]
+    ) => {
       const raw = data.get(key);
       if (!raw) return 0;
       const current = JSON.parse(raw) as { state?: string; claimToken?: string };

@@ -114,25 +114,24 @@ describe("deriveActualFill", () => {
     expect(r.actualPrice).toBeCloseTo(0.6, 10);
   });
 
-  test("BUY base-unit (6dp) response is normalized to shares", () => {
-    // 20 shares acquired for 10 USDC, reported as 6-decimal base units.
+  test("BUY decimal response amounts retain the official CLOB human units", () => {
     const r = deriveActualFill(
       "buy",
-      { makingAmount: "10000000", takingAmount: "20000000" },
-      { amount: 20, price: 0.5 },
+      { makingAmount: "4.999999", takingAmount: "10.416665" },
+      { amount: 10.42, price: 0.48 },
     );
-    expect(r.actualAmount).toBe(20); // NOT 20000000
-    expect(r.actualPrice).toBeCloseTo(0.5, 10); // ratio unit-invariant
+    expect(r.actualAmount).toBe(10.416665);
+    expect(r.actualPrice).toBeCloseTo(4.999999 / 10.416665, 10);
   });
 
-  test("SELL base-unit (6dp) response is normalized to shares", () => {
+  test("SELL decimal response amounts retain the official CLOB human units", () => {
     const r = deriveActualFill(
       "sell",
-      { makingAmount: "20000000", takingAmount: "12000000" },
-      { amount: 20, price: 0.6 },
+      { makingAmount: "1.69", takingAmount: "0.9802" },
+      { amount: 1.69, price: 0.58 },
     );
-    expect(r.actualAmount).toBe(20);
-    expect(r.actualPrice).toBeCloseTo(0.6, 10);
+    expect(r.actualAmount).toBe(1.69);
+    expect(r.actualPrice).toBeCloseTo(0.9802 / 1.69, 10);
   });
 
   test("falls back when amounts missing", () => {
@@ -167,26 +166,13 @@ describe("deriveActualFill", () => {
     expect(r).toEqual({ actualAmount: 7, actualPrice: 0.42 });
   });
 
-  test("SEC-187: a genuine >=1M-share fill in human units is NOT shrunk by the magnitude heuristic", () => {
-    // 2,000,000-share order filled in full, reported in human units.
+  test("SEC-187: a genuine >=1M-share response is never magnitude-scaled", () => {
     const r = deriveActualFill(
       "buy",
       { makingAmount: "1000000", takingAmount: "2000000" },
       { amount: 2_000_000, price: 0.5 },
     );
     expect(r.actualAmount).toBe(2_000_000); // NOT 2
-    expect(r.actualPrice).toBeCloseTo(0.5, 10);
-  });
-
-  test("SEC-187: a sub-1e6 base-unit fill is scaled down via order-size context", () => {
-    // 0.5-share fill on a 1-share order, reported as 6-decimal base units —
-    // below the old magnitude threshold yet still base units.
-    const r = deriveActualFill(
-      "buy",
-      { makingAmount: "250000", takingAmount: "500000" },
-      { amount: 1, price: 0.5 },
-    );
-    expect(r.actualAmount).toBe(0.5); // NOT 500000
     expect(r.actualPrice).toBeCloseTo(0.5, 10);
   });
 });
