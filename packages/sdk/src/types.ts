@@ -1678,20 +1678,80 @@ export type ProviderCaseTerminalState =
   | "outcome_unknown"
   | "unknown";
 
+export type ProviderCaseEventRole =
+  | "genesis"
+  | "access_decided"
+  | "policy_decided"
+  | "approval_requested"
+  | "approval_decided"
+  | "approval_terminal"
+  | "resume_ready"
+  | "exec_authorized"
+  | "exec_claimed"
+  | "exec_denied_at_boundary"
+  | "exec_dispatched"
+  | "exec_terminal"
+  | "exec_reconciled"
+  | "unclassified";
+
+export type ProviderCaseDispatchState =
+  | "none"
+  | "claimed"
+  | "dispatched"
+  | "succeeded"
+  | "failed"
+  | "outcome_unknown";
+
 export interface ProviderCaseManifest {
   schemaVersion: "steward.provider-case-manifest.v1";
   caseId: string;
   tenantId: string;
   workspaceId: string;
+  requestActor: { type: "agent"; id: string; revision: number };
+  approvalActor: { type: "user"; id: string } | null;
+  resumeActor: "steward-system" | null;
+  providerAccount: { id: string; revision: number };
+  operation: {
+    id: string;
+    key: string;
+    revision: number;
+    canonicalProfile: string;
+    riskClass: string;
+  };
+  actionDigest: string;
+  requestHash: string;
+  idempotencyKeyHash: string;
+  accessDecision: { id: string; hash: string; effect: "allow" | "deny" };
+  policyDecision: { id: string | null; hash: string | null; effect: string };
+  approvalCommitmentHash: string | null;
+  execution: {
+    authorizationId: string | null;
+    dispatchState: ProviderCaseDispatchState;
+    providerIdempotencyKeyHash: string | null;
+    upstreamStatusCode: number | null;
+    reconciled: boolean;
+  } | null;
+  dependencyRevisions: {
+    actor: number;
+    workspace: number;
+    providerAccount: number;
+    operation: number;
+    matchedGrants: Array<{ id: string; revision: number }>;
+    matchedBindings: Array<{ id: string; revision: number }>;
+    route: { id: string; revision: number } | null;
+    secret: { id: string; version: number } | null;
+    policyRevisionHash: string | null;
+  };
+  events: Array<{ seq: number; action: string; role: ProviderCaseEventRole; hmac: string }>;
+  eventSeqRange: { from: number; to: number } | null;
   terminalState: ProviderCaseTerminalState;
   completeness: "complete" | "incomplete" | "unknown";
-  missingRequiredRoles: string[];
+  missingRequiredRoles: ProviderCaseEventRole[];
   incompletenessReasons: string[];
   safeSummary: Record<string, unknown> | null;
   genesisAt: string | null;
   terminalAt: string | null;
   assembledAt: string;
-  [key: string]: unknown;
 }
 
 export interface ProviderCaseEvidence {
@@ -1699,7 +1759,15 @@ export interface ProviderCaseEvidence {
   tenantId: string;
   caseId: string;
   manifest: ProviderCaseManifest;
-  bundle: Record<string, unknown>;
+  bundle: {
+    version: 1;
+    tenantId: string;
+    range: { from: number; to: number; includesHead: boolean };
+    canonicalizationSpec: string;
+    events: unknown[];
+    checkpoint: { payload: unknown; signature: string; publicKey: string };
+    generatedAt: string;
+  };
   completeness: "complete" | "incomplete" | "unknown";
   generatedAt: string;
 }

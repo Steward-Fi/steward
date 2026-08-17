@@ -56,4 +56,26 @@ describe("StewardService provider-action polling", () => {
     });
     expect(JSON.stringify(results)).not.toContain("token-canary");
   });
+
+  it("keeps polling results associated with the ids captured at poll start", async () => {
+    const trackedIds = new Set([ACTION_A]);
+    const service = new StewardService({} as any);
+    Object.assign(service as any, {
+      client: {
+        providerActions: {
+          get: async () => {
+            trackedIds.clear();
+            throw new Error("stopped while poll was in flight");
+          },
+        },
+      },
+      _connected: true,
+      trackedProviderActionIds: trackedIds,
+      providerActionLastKnown: new Map(),
+    });
+
+    await expect(service.listTrackedProviderActions()).resolves.toMatchObject([
+      { polling: "error", id: ACTION_A },
+    ]);
+  });
 });

@@ -953,6 +953,18 @@ describe("generated OpenAPI contract", () => {
     expect(paths["/v2/provider-actions/{id}/approval"].get.description).toContain("recent MFA");
     expect(paths["/v2/provider-actions/{id}/case"].get.description).toContain("human session");
     expect(paths["/v2/provider-actions"].post.description).toContain("never accepted");
+    const invokeDenial =
+      paths["/v2/provider-actions"].post.responses["403"].content["application/json"].schema;
+    expect(invokeDenial.properties.data.properties.status.enum).toEqual([
+      "denied_access",
+      "denied_policy",
+    ]);
+    const caseManifest =
+      paths["/v2/provider-actions/{id}/case"].get.responses["200"].content["application/json"]
+        .schema;
+    expect(caseManifest.required).toContain("requestActor");
+    expect(caseManifest.required).toContain("dependencyRevisions");
+    expect(caseManifest.required).toContain("events");
   });
 
   it("serves the generated contract at /openapi.json", async () => {

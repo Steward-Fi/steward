@@ -141,6 +141,26 @@ describe("STEWARD_PROVIDER_ACTION", () => {
     expect(denied.text).toContain("denied and persisted");
     expect(denied.text).not.toContain("not submitted");
   });
+
+  it("fails closed when runtime arguments cannot be canonically serialized", async () => {
+    const invokeProviderAction = vi.fn();
+    const result = await providerAction.handler(
+      runtime({ isConnected: () => true, invokeProviderAction }),
+      { id: "message-cyclic" } as any,
+      undefined,
+      {
+        parameters: {
+          workspaceId: "workspace-a",
+          providerAccountId: "account-a",
+          operationKey: "github.issue.list",
+          arguments: { unsupportedRuntimeValue: 1n },
+        },
+      },
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("stable message id");
+    expect(invokeProviderAction).not.toHaveBeenCalled();
+  });
 });
 
 describe("stewardProviderActions provider", () => {

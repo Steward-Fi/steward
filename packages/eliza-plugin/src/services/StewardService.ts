@@ -274,11 +274,12 @@ export class StewardService extends Service {
    */
   async listTrackedProviderActions(): Promise<TrackedProviderAction[]> {
     this.assertConnected();
+    const trackedIds = [...this.trackedProviderActionIds];
     const results = await Promise.allSettled(
-      [...this.trackedProviderActionIds].map((id) => this.getClient().providerActions.get(id)),
+      trackedIds.map((id) => this.getClient().providerActions.get(id)),
     );
     return results.map((result, index) => {
-      const id = [...this.trackedProviderActionIds][index]!;
+      const id = trackedIds[index]!;
       if (result.status === "fulfilled") {
         this.providerActionLastKnown.set(id, result.value);
         return { polling: "ok" as const, action: result.value };

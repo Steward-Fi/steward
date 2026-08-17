@@ -5414,7 +5414,8 @@
                   "type": "object",
                   "required": [
                     "ok",
-                    "error"
+                    "error",
+                    "data"
                   ],
                   "properties": {
                     "ok": {
@@ -5423,6 +5424,34 @@
                     },
                     "error": {
                       "type": "string"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "id",
+                        "status",
+                        "requestHash",
+                        "actionDigest"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "denied_access",
+                            "denied_policy"
+                          ]
+                        },
+                        "requestHash": {
+                          "type": "string"
+                        },
+                        "actionDigest": {
+                          "type": "string"
+                        }
+                      }
                     }
                   }
                 }
@@ -10032,16 +10061,34 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
+                  "additionalProperties": false,
                   "required": [
                     "schemaVersion",
                     "caseId",
                     "tenantId",
                     "workspaceId",
+                    "requestActor",
+                    "approvalActor",
+                    "resumeActor",
+                    "providerAccount",
+                    "operation",
+                    "actionDigest",
+                    "requestHash",
+                    "idempotencyKeyHash",
+                    "accessDecision",
+                    "policyDecision",
+                    "approvalCommitmentHash",
+                    "execution",
+                    "dependencyRevisions",
+                    "events",
+                    "eventSeqRange",
                     "terminalState",
                     "completeness",
                     "missingRequiredRoles",
                     "incompletenessReasons",
+                    "safeSummary",
+                    "genesisAt",
+                    "terminalAt",
                     "assembledAt"
                   ],
                   "properties": {
@@ -10057,6 +10104,215 @@
                     },
                     "workspaceId": {
                       "type": "string"
+                    },
+                    "requestActor": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "type",
+                        "id",
+                        "revision"
+                      ],
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "agent"
+                        },
+                        "id": {
+                          "type": "string"
+                        },
+                        "revision": {
+                          "type": "integer"
+                        }
+                      }
+                    },
+                    "approvalActor": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "type",
+                            "id"
+                          ],
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "user"
+                            },
+                            "id": {
+                              "type": "string"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "resumeActor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "enum": [
+                        "steward-system",
+                        null
+                      ]
+                    },
+                    "providerAccount": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "id",
+                        "revision"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "revision": {
+                          "type": "integer"
+                        }
+                      }
+                    },
+                    "operation": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "id",
+                        "key",
+                        "revision",
+                        "canonicalProfile",
+                        "riskClass"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "key": {
+                          "type": "string"
+                        },
+                        "revision": {
+                          "type": "integer"
+                        },
+                        "canonicalProfile": {
+                          "type": "string"
+                        },
+                        "riskClass": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "actionDigest": {
+                      "type": "string"
+                    },
+                    "requestHash": {
+                      "type": "string"
+                    },
+                    "idempotencyKeyHash": {
+                      "type": "string"
+                    },
+                    "accessDecision": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "id",
+                        "hash",
+                        "effect"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "hash": {
+                          "type": "string"
+                        },
+                        "effect": {
+                          "type": "string",
+                          "enum": [
+                            "allow",
+                            "deny"
+                          ]
+                        }
+                      }
+                    },
+                    "policyDecision": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "id",
+                        "hash",
+                        "effect"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "hash": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "effect": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "approvalCommitmentHash": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "execution": {
+                      "type": [
+                        "object",
+                        "null"
+                      ],
+                      "additionalProperties": true
+                    },
+                    "dependencyRevisions": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "seq",
+                          "action",
+                          "role",
+                          "hmac"
+                        ],
+                        "properties": {
+                          "seq": {
+                            "type": "integer"
+                          },
+                          "action": {
+                            "type": "string"
+                          },
+                          "role": {
+                            "type": "string"
+                          },
+                          "hmac": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "eventSeqRange": {
+                      "type": [
+                        "object",
+                        "null"
+                      ],
+                      "additionalProperties": true
                     },
                     "terminalState": {
                       "type": "string"
@@ -10087,6 +10343,20 @@
                         "null"
                       ],
                       "additionalProperties": true
+                    },
+                    "genesisAt": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "date-time"
+                    },
+                    "terminalAt": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "date-time"
                     },
                     "assembledAt": {
                       "type": "string",
@@ -10266,16 +10536,34 @@
                     },
                     "manifest": {
                       "type": "object",
-                      "additionalProperties": true,
+                      "additionalProperties": false,
                       "required": [
                         "schemaVersion",
                         "caseId",
                         "tenantId",
                         "workspaceId",
+                        "requestActor",
+                        "approvalActor",
+                        "resumeActor",
+                        "providerAccount",
+                        "operation",
+                        "actionDigest",
+                        "requestHash",
+                        "idempotencyKeyHash",
+                        "accessDecision",
+                        "policyDecision",
+                        "approvalCommitmentHash",
+                        "execution",
+                        "dependencyRevisions",
+                        "events",
+                        "eventSeqRange",
                         "terminalState",
                         "completeness",
                         "missingRequiredRoles",
                         "incompletenessReasons",
+                        "safeSummary",
+                        "genesisAt",
+                        "terminalAt",
                         "assembledAt"
                       ],
                       "properties": {
@@ -10291,6 +10579,215 @@
                         },
                         "workspaceId": {
                           "type": "string"
+                        },
+                        "requestActor": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "type",
+                            "id",
+                            "revision"
+                          ],
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "agent"
+                            },
+                            "id": {
+                              "type": "string"
+                            },
+                            "revision": {
+                              "type": "integer"
+                            }
+                          }
+                        },
+                        "approvalActor": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": [
+                                "type",
+                                "id"
+                              ],
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "const": "user"
+                                },
+                                "id": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          ]
+                        },
+                        "resumeActor": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "enum": [
+                            "steward-system",
+                            null
+                          ]
+                        },
+                        "providerAccount": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "id",
+                            "revision"
+                          ],
+                          "properties": {
+                            "id": {
+                              "type": "string"
+                            },
+                            "revision": {
+                              "type": "integer"
+                            }
+                          }
+                        },
+                        "operation": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "id",
+                            "key",
+                            "revision",
+                            "canonicalProfile",
+                            "riskClass"
+                          ],
+                          "properties": {
+                            "id": {
+                              "type": "string"
+                            },
+                            "key": {
+                              "type": "string"
+                            },
+                            "revision": {
+                              "type": "integer"
+                            },
+                            "canonicalProfile": {
+                              "type": "string"
+                            },
+                            "riskClass": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "actionDigest": {
+                          "type": "string"
+                        },
+                        "requestHash": {
+                          "type": "string"
+                        },
+                        "idempotencyKeyHash": {
+                          "type": "string"
+                        },
+                        "accessDecision": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "id",
+                            "hash",
+                            "effect"
+                          ],
+                          "properties": {
+                            "id": {
+                              "type": "string"
+                            },
+                            "hash": {
+                              "type": "string"
+                            },
+                            "effect": {
+                              "type": "string",
+                              "enum": [
+                                "allow",
+                                "deny"
+                              ]
+                            }
+                          }
+                        },
+                        "policyDecision": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "id",
+                            "hash",
+                            "effect"
+                          ],
+                          "properties": {
+                            "id": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "hash": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "effect": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "approvalCommitmentHash": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "execution": {
+                          "type": [
+                            "object",
+                            "null"
+                          ],
+                          "additionalProperties": true
+                        },
+                        "dependencyRevisions": {
+                          "type": "object",
+                          "additionalProperties": true
+                        },
+                        "events": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "seq",
+                              "action",
+                              "role",
+                              "hmac"
+                            ],
+                            "properties": {
+                              "seq": {
+                                "type": "integer"
+                              },
+                              "action": {
+                                "type": "string"
+                              },
+                              "role": {
+                                "type": "string"
+                              },
+                              "hmac": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        },
+                        "eventSeqRange": {
+                          "type": [
+                            "object",
+                            "null"
+                          ],
+                          "additionalProperties": true
                         },
                         "terminalState": {
                           "type": "string"
@@ -10321,6 +10818,20 @@
                             "null"
                           ],
                           "additionalProperties": true
+                        },
+                        "genesisAt": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "format": "date-time"
+                        },
+                        "terminalAt": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "format": "date-time"
                         },
                         "assembledAt": {
                           "type": "string",

@@ -22,16 +22,22 @@ function containsCredentialKey(value: unknown, depth = 0): boolean {
   );
 }
 
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalize);
-  if (value && typeof value === "object") {
+function canonicalize(value: unknown, ancestors = new Set<object>()): unknown {
+  if (!value || typeof value !== "object") return value;
+  if (ancestors.has(value)) throw new TypeError("cyclic provider action arguments");
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return value.map((item) => canonicalize(item, ancestors));
+    }
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([key, nested]) => [key, canonicalize(nested)]),
+        .map(([key, nested]) => [key, canonicalize(nested, ancestors)]),
     );
+  } finally {
+    ancestors.delete(value);
   }
-  return value;
 }
 
 function stableRetryKey(message: Memory, params: Record<string, unknown>): string | null {
@@ -47,9 +53,13 @@ function stableRetryKey(message: Memory, params: Record<string, unknown>): strin
     operationKey: params.operationKey,
     arguments: params.arguments,
   };
-  return `eliza-${createHash("sha256")
-    .update(JSON.stringify(canonicalize(publicAction)))
-    .digest("hex")}`;
+  try {
+    const canonical = JSON.stringify(canonicalize(publicAction));
+    if (typeof canonical !== "string") return null;
+    return `eliza-${createHash("sha256").update(canonical).digest("hex")}`;
+  } catch {
+    return null;
+  }
 }
 
 export const providerAction: Action = {

@@ -260,6 +260,8 @@ export type {
   ProviderActionStatus,
   ProviderActionTransitionResult,
   ProviderApprovalReasonCode,
+  ProviderCaseDispatchState,
+  ProviderCaseEventRole,
   ProviderCaseEvidence,
   ProviderCaseManifest,
   ProviderCaseTerminalState,
