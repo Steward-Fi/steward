@@ -31,7 +31,15 @@ javac -d packages/android/build/classes $(find packages/java/src/main/java packa
 java -cp packages/android/build/classes com.steward.android.StewardAndroidClientTest
 ```
 
+Maven build (requires `packages/java` installed into the local repository
+first, since this module depends on `com.steward:steward-sdk`):
+
+```sh
+cd packages/java && mvn install && cd ../android && mvn verify
+```
+
 Remaining work: add Kotlin-first APIs, Android `SharedPreferences`/Keystore
 storage adapters, native passkey Credential Manager wrappers, FCM service
-integration, Gradle/Maven publishing metadata, and emulator/device e2e tests.
+integration, Android AAR packaging (the module is pure JVM today), and
+emulator/device e2e tests.
 
