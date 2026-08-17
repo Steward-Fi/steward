@@ -159,6 +159,19 @@ function embeddedIpv4FromIpv6(address: string): string | null {
     words[0] === 0x64 && words[1] === 0xff9b && words[2] === 1 && words[3] === 0;
   if (isNat64LocalUse) return fromWords(words[6], words[7]);
 
+  // RFC 8215 IPv4-translated ::ffff:0:0/96 — distinct from the IPv4-mapped form
+  // (handled by mappedIpv4FromIpv6, which has words[5] === 0xffff). The IPv4 is
+  // embedded in the low 32 bits and is reachable through NAT64/SIIT paths, so it
+  // must face the same non-public checks (SEC-178).
+  const isIpv4Translated =
+    words[0] === 0 &&
+    words[1] === 0 &&
+    words[2] === 0 &&
+    words[3] === 0 &&
+    words[4] === 0xffff &&
+    words[5] === 0;
+  if (isIpv4Translated) return fromWords(words[6], words[7]);
+
   if (words[0] === 0x2002) return fromWords(words[1], words[2]);
   return null;
 }
@@ -171,6 +184,11 @@ function isNonPublicIpv6(address: string): boolean {
   if (ipv4Embedded) return isNonPublicIpv4(ipv4Embedded);
   const words = expandIpv6Words(normalized);
   if (words?.[0] === 0x2001 && (words[1] === 0 || words[1] === 0xdb8)) return true;
+  // 2001:2::/48 benchmarking (RFC 5180) — documentation/special-use, never a
+  // public webhook target (SEC-178).
+  if (words?.[0] === 0x2001 && words[1] === 0x0002 && words[2] === 0) return true;
+  // 100::/64 discard-only (RFC 6666) (SEC-178).
+  if (words?.[0] === 0x0100 && words[1] === 0 && words[2] === 0 && words[3] === 0) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfe80) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfec0) return true;
   return (
