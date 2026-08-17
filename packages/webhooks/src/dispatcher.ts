@@ -393,7 +393,10 @@ export class WebhookDispatcher {
   ): Promise<WebhookDeliveryResult> {
     const config = normalizeWebhook(webhook);
 
-    if (config.events && !config.events.includes(event.type)) {
+    // An empty events array means "subscribe to all" everywhere else
+    // (acceptsConfiguredWebhookEvent, persistent-queue) — a truthy [] must
+    // not silently drop every event while reporting success.
+    if (config.events?.length && !config.events.includes(event.type)) {
       return {
         success: true,
         attempts: 0,
