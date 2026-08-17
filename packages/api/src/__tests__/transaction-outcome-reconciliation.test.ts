@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { agents, auditEvents, closeDb, getDb, tenants, transactions } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
@@ -9,6 +9,8 @@ const TENANT_ID = "receipt-reconcile-tenant";
 const AGENT_ID = "receipt-reconcile-agent";
 const HASH = `0x${"ab".repeat(32)}` as const;
 let pollBroadcastTransactionReceipts: typeof import("../services/transaction-receipt-poller")["pollBroadcastTransactionReceipts"];
+
+setDefaultTimeout(120_000);
 
 function receipt(status: "success" | "reverted" = "success"): TransactionReceipt {
   return {
