@@ -1073,7 +1073,7 @@ function dispatchIntentWebhook(
     action_type: row.intentType,
     status: row.status,
     resource_id: row.resourceId,
-    authorization_details: row.authorizationDetails,
+    authorization_details: redactIntentResponseValue(row.authorizationDetails),
     execution_result: redactIntentResponseValue(row.executionResult),
     rejection_reason: row.rejectionReason,
     cancellation_reason: row.cancellationReason,

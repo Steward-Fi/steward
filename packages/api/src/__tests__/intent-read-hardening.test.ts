@@ -96,4 +96,14 @@ describe("intent read hardening", () => {
     expect(transferBody).toContain("const txId = row.id");
     expect(transferBody).not.toContain("row.resourceId || row.id");
   });
+
+  it("redacts authorization details before dispatching intent webhooks", () => {
+    const start = routeSource.indexOf("function dispatchIntentWebhook");
+    const end = routeSource.indexOf("function dispatchWalletActionSuccessWebhook", start);
+    const body = routeSource.slice(start, end);
+    expect(body).toContain(
+      "authorization_details: redactIntentResponseValue(row.authorizationDetails)",
+    );
+    expect(body).not.toContain("authorization_details: row.authorizationDetails");
+  });
 });
