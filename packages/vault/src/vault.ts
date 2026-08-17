@@ -2503,6 +2503,13 @@ export class Vault {
       throw new Error("ERC-4337 user operation signing is not supported for Solana wallets");
     }
 
+    await assertVaultSigningActive({
+      tenantId: request.tenantId,
+      agentId: request.agentId,
+      chainFamily: "evm",
+      venue: null,
+    });
+
     const [chainKey] = await db
       .select()
       .from(encryptedChainKeys)
@@ -2579,6 +2586,13 @@ export class Vault {
     if (!agentRow) {
       throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
     }
+
+    await assertVaultSigningActive({
+      tenantId: request.tenantId,
+      agentId: request.agentId,
+      chainFamily: "solana",
+      venue: null,
+    });
 
     // Resolve Solana key: prefer encryptedChainKeys (multi-wallet), fall back to
     // legacy encryptedKeys when the agent has a Solana walletAddress.
