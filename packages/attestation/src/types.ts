@@ -28,6 +28,11 @@ export interface AttestationQuote {
 }
 
 export interface AttestationVerificationOptions {
+  /**
+   * Freshness challenge bound into the quote's report_data. REQUIRED for a
+   * `verified: true` result: without a nonce no freshness check was performed
+   * and verification fails closed (replay protection).
+   */
   nonce?: string;
   now?: Date;
 }

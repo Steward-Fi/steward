@@ -20,6 +20,8 @@ const BIN = join(SIDECAR_DIR, "target", "release", "frost-signer");
 
 export interface FrostCluster {
   endpoints: string[];
+  /** Per-share bearer tokens the sidecars require (SEC-025). */
+  authTokens: string[];
   groupPublicKeyHex: string;
   threshold: number;
   participants: number;
@@ -86,15 +88,22 @@ export async function startFrostCluster(threshold = 2, participants = 3): Promis
 
   const port0 = basePort();
   const endpoints: string[] = [];
+  const authTokens: string[] = [];
   const procs: ReturnType<typeof spawn>[] = [];
 
   for (let i = 0; i < participants; i++) {
     const port = port0 + i;
-    const p = spawn(BIN, ["share", "--share-file", shareFiles[i], "--port", String(port)], {
-      stdio: "ignore",
-    });
+    const authToken = `test-share-token-${port0}-${i}`;
+    const p = spawn(
+      BIN,
+      ["share", "--share-file", shareFiles[i], "--port", String(port), "--auth-token", authToken],
+      {
+        stdio: "ignore",
+      },
+    );
     procs.push(p);
     endpoints.push(`http://127.0.0.1:${port}`);
+    authTokens.push(authToken);
   }
 
   await Promise.all(endpoints.map((e) => waitHealthy(e)));
@@ -114,7 +123,7 @@ export async function startFrostCluster(threshold = 2, participants = 3): Promis
     }
   };
 
-  return { endpoints, groupPublicKeyHex, threshold, participants, shareDir, teardown };
+  return { endpoints, authTokens, groupPublicKeyHex, threshold, participants, shareDir, teardown };
 }
 
 /** Read the group.json a keygen wrote (used by a sanity assertion in tests). */

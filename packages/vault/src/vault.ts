@@ -1827,6 +1827,26 @@ export class Vault {
       .from(agents)
       .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
 
+    // SEC-024: refuse to silently convert an external-custody wallet back to
+    // server custody — the reverse guard of importExternalKeyHandle. A local
+    // chain key here would shadow the HSM on every future sign while the DB
+    // still claims external custody.
+    const [externalWallet] = await db
+      .select({ metadata: agentWallets.metadata })
+      .from(agentWallets)
+      .where(
+        and(
+          eq(agentWallets.agentId, agentId),
+          eq(agentWallets.chainFamily, chainType),
+          isNull(agentWallets.venue),
+        ),
+      );
+    if (externalWallet && isExternalKeyWalletMetadata(externalWallet.metadata)) {
+      throw new Error(
+        `Cannot import a server-managed key over the external-custody ${chainType} wallet of agent ${agentId}`,
+      );
+    }
+
     // Wrap all writes atomically - roll back on any failure
     await db.transaction(async (tx) => {
       if (existingAgent) {
@@ -1836,15 +1856,20 @@ export class Vault {
           .set({ walletAddress, updatedAt: now })
           .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
 
-        await tx.delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
+        // SEC-023: the legacy encrypted_keys table holds the EVM key only.
+        // Only replace the legacy row for EVM imports — deleting it for a
+        // Solana import would brick a legacy agent's existing EVM key.
+        if (chainType === "evm") {
+          await tx.delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
 
-        await tx.insert(encryptedKeys).values({
-          agentId,
-          ciphertext: encryptedKey.ciphertext,
-          iv: encryptedKey.iv,
-          tag: encryptedKey.tag,
-          salt: encryptedKey.salt,
-        });
+          await tx.insert(encryptedKeys).values({
+            agentId,
+            ciphertext: encryptedKey.ciphertext,
+            iv: encryptedKey.iv,
+            tag: encryptedKey.tag,
+            salt: encryptedKey.salt,
+          });
+        }
       } else {
         // Create new agent record
         await tx.insert(agents).values({
@@ -1856,13 +1881,15 @@ export class Vault {
           updatedAt: now,
         });
 
-        await tx.insert(encryptedKeys).values({
-          agentId,
-          ciphertext: encryptedKey.ciphertext,
-          iv: encryptedKey.iv,
-          tag: encryptedKey.tag,
-          salt: encryptedKey.salt,
-        });
+        if (chainType === "evm") {
+          await tx.insert(encryptedKeys).values({
+            agentId,
+            ciphertext: encryptedKey.ciphertext,
+            iv: encryptedKey.iv,
+            tag: encryptedKey.tag,
+            salt: encryptedKey.salt,
+          });
+        }
       }
 
       // ── Also write to multi-wallet tables so new signing paths find the key ─
@@ -2503,6 +2530,13 @@ export class Vault {
       throw new Error("ERC-4337 user operation signing is not supported for Solana wallets");
     }
 
+    await assertVaultSigningActive({
+      tenantId: request.tenantId,
+      agentId: request.agentId,
+      chainFamily: "evm",
+      venue: null,
+    });
+
     const [chainKey] = await db
       .select()
       .from(encryptedChainKeys)
@@ -2579,6 +2613,13 @@ export class Vault {
     if (!agentRow) {
       throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
     }
+
+    await assertVaultSigningActive({
+      tenantId: request.tenantId,
+      agentId: request.agentId,
+      chainFamily: "solana",
+      venue: null,
+    });
 
     // Resolve Solana key: prefer encryptedChainKeys (multi-wallet), fall back to
     // legacy encryptedKeys when the agent has a Solana walletAddress.

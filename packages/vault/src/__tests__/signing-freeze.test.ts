@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { Keypair } from "@solana/web3.js";
 import { and, eq, getDb, isNull, sql, tenants, vaultSigningFreezes } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { isVaultSigningFrozenError } from "../signing-freeze";
@@ -143,6 +144,93 @@ describe("vault signing freeze", () => {
     };
 
     await expect(vault.signMessage(TENANT_ID, AGENT_ID, "blocked")).rejects.toThrow();
+    expect(decryptCalls).toBe(0);
+  });
+
+  // SEC-003 regression: signUserOperation signed the ERC-4337 userOp hash with
+  // no signing-freeze check, so a frozen agent kept authorizing userOp callData.
+  test("agent freeze blocks signUserOperation before key decryption", async () => {
+    await getDb().insert(vaultSigningFreezes).values({
+      tenantId: TENANT_ID,
+      scopeType: "agent",
+      agentId: AGENT_ID,
+      reason: "compromised agent",
+      createdByType: "user",
+      createdById: "admin",
+    });
+
+    let decryptCalls = 0;
+    const keyStore = (vault as unknown as { keyStore: { decrypt: (...args: unknown[]) => string } })
+      .keyStore;
+    keyStore.decrypt = () => {
+      decryptCalls += 1;
+      throw new Error("decrypt should not run while frozen");
+    };
+
+    let thrown: unknown;
+    try {
+      await vault.signUserOperation({
+        agentId: AGENT_ID,
+        tenantId: TENANT_ID,
+        userOperation: {
+          sender: "0x1111111111111111111111111111111111111111",
+          nonce: 0n,
+          initCode: "0x",
+          callData: "0xdeadbeef",
+          verificationGasLimit: 100000n,
+          callGasLimit: 200000n,
+          preVerificationGas: 21000n,
+          maxPriorityFeePerGas: 1_000_000_000n,
+          maxFeePerGas: 2_000_000_000n,
+          paymasterAndData: "0x",
+        },
+        chainId: 1,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(isVaultSigningFrozenError(thrown)).toBe(true);
+    expect(decryptCalls).toBe(0);
+  });
+
+  // SEC-002 regression: signSolanaTransaction decrypted the key and signed with
+  // no signing-freeze check, so a frozen agent kept signing SOL/SPL transfers.
+  test("agent freeze blocks signSolanaTransaction before key decryption", async () => {
+    const solanaAgent = "freeze-sol-agent";
+    const secretKeyHex = Buffer.from(Keypair.generate().secretKey).toString("hex");
+    await vault.importKey(TENANT_ID, solanaAgent, secretKeyHex, "solana");
+
+    await getDb().insert(vaultSigningFreezes).values({
+      tenantId: TENANT_ID,
+      scopeType: "agent",
+      agentId: solanaAgent,
+      reason: "compromised agent",
+      createdByType: "user",
+      createdById: "admin",
+    });
+
+    let decryptCalls = 0;
+    const keyStore = (vault as unknown as { keyStore: { decrypt: (...args: unknown[]) => string } })
+      .keyStore;
+    keyStore.decrypt = () => {
+      decryptCalls += 1;
+      throw new Error("decrypt should not run while frozen");
+    };
+
+    let thrown: unknown;
+    try {
+      await vault.signSolanaTransaction({
+        agentId: solanaAgent,
+        tenantId: TENANT_ID,
+        transaction: Buffer.from("not-a-real-tx").toString("base64"),
+        broadcast: false,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(isVaultSigningFrozenError(thrown)).toBe(true);
     expect(decryptCalls).toBe(0);
   });
 });

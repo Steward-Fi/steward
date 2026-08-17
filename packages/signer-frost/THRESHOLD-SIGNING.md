@@ -71,6 +71,13 @@ ECDSA (CGGMP21-class) for the first prototype. The short version:
 | POST | `/aggregate` | combine signature shares → group signature (verifies) | public op |
 | POST | `/verify` | verify a provided signature against the group key | public op |
 
+Every endpoint except `GET /health` requires `Authorization: Bearer <token>`
+(`--auth-token` or `FROST_SHARE_AUTH_TOKEN`; the service refuses to start
+without one). Use a distinct token per share. The coordinator never trusts the
+aggregating share: after `/aggregate` it re-verifies the signature over the
+original message via a different share, so a single-share (1-of-1) group —
+where no independent verifier exists — is rejected at construction.
+
 The share (`KeyPackage`) never leaves the sidecar process. There is no export
 endpoint by construction.
 
@@ -187,9 +194,11 @@ cargo build --release --manifest-path sidecar/Cargo.toml
 sidecar/target/release/frost-signer keygen --threshold 2 --participants 3 --out ./shares
 
 # 3. start three share services (each = one enclave stand-in)
-frost-signer share --share-file ./shares/share-0000...0001.json --port 7401 &
-frost-signer share --share-file ./shares/share-0000...0002.json --port 7402 &
-frost-signer share --share-file ./shares/share-0000...0003.json --port 7403 &
+#    each requires its own bearer token (flag or FROST_SHARE_AUTH_TOKEN);
+#    the service refuses to start unauthenticated
+frost-signer share --share-file ./shares/share-0000...0001.json --port 7401 --auth-token "$FROST_TOKEN_1" &
+frost-signer share --share-file ./shares/share-0000...0002.json --port 7402 --auth-token "$FROST_TOKEN_2" &
+frost-signer share --share-file ./shares/share-0000...0003.json --port 7403 --auth-token "$FROST_TOKEN_3" &
 
 # 4. use FrostSignerBackend from TS (see @stwd/vault KEYSTORE-BACKENDS.md)
 
