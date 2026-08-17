@@ -72,4 +72,17 @@ describe("enterprise OIDC authorization-code SSO hardening", () => {
     expect(source).toContain("OIDC token endpoint did not return an id_token");
     expect(source).toContain("Direct JWT login is disabled for authorization-code OIDC providers");
   });
+
+  it("screens IPv4-embedding IPv6 transition ranges in the token-endpoint SSRF guard", () => {
+    const source = read("packages/api/src/routes/auth.ts");
+    expect(source).toContain("embeddedTransitionOidcIpv4");
+    expect(source).toContain("words[0] === 0x64 &&");
+    expect(source).toContain("words[0] === 0x2002");
+    expect(source).toContain("words?.[0] === 0x2001 && words[1] === 0");
+    const guardStart = source.indexOf("function isPrivateOidcIpv6");
+    const guardEnd = source.indexOf("\nfunction ", guardStart + 1);
+    const guard = source.slice(guardStart, guardEnd === -1 ? undefined : guardEnd);
+    expect(guard).toContain("embeddedTransitionOidcIpv4(normalized)");
+    expect(guard).toContain("isPrivateOidcIpv4(embedded)");
+  });
 });
