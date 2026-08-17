@@ -954,7 +954,7 @@ describe("vault EVM execution gateway", () => {
     }
   });
 
-  it("keeps an ambiguous external broadcast terminal when its vault write fails and never reopens approval", async () => {
+  it("keeps a successful external broadcast terminal when final bookkeeping fails and never reopens approval", async () => {
     await seedExternalCustodyAgent();
     const txId = "tx-ext-custody-outcome-unknown";
     const txHash = `0x${"ef".repeat(32)}`;
@@ -1011,9 +1011,10 @@ describe("vault EVM execution gateway", () => {
       async registerKeyHandle(): Promise<ExternalKeyHandleRegistration> {
         throw new Error("registerKeyHandle is not used by this test");
       },
-      async signTransaction(): Promise<ExternalKeySignTransactionResult> {
+      async signTransaction(request): Promise<ExternalKeySignTransactionResult> {
         this.signCalls += 1;
-        throw new ExternalBroadcastOutcomeUnknownError(txHash);
+        await request.onPreparedBroadcast?.(txHash);
+        return { result: txHash, broadcast: true };
       },
     };
     const routeVault = getConfiguredVault({
@@ -1024,9 +1025,12 @@ describe("vault EVM execution gateway", () => {
     };
     const priorProvider = routeVault.externalKeyCustodyProvider;
     const originalRecord = routeVault.recordSignedTransaction;
+    let writes = 0;
     routeVault.externalKeyCustodyProvider = provider;
-    routeVault.recordSignedTransaction = async () => {
-      throw new Error("injected approval outcome write failure");
+    routeVault.recordSignedTransaction = async (...args) => {
+      writes += 1;
+      if (writes === 2) throw new Error("injected final approval write failure");
+      await originalRecord.apply(routeVault, args);
     };
     try {
       const app = await makeApp();
@@ -1060,6 +1064,7 @@ describe("vault EVM execution gateway", () => {
       });
       expect(retry.status).toBe(404);
       expect(provider.signCalls).toBe(1);
+      expect(writes).toBe(2);
     } finally {
       routeVault.externalKeyCustodyProvider = priorProvider;
       routeVault.recordSignedTransaction = originalRecord;
