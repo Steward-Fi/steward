@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import type {
   Action,
   ActionResult,
@@ -20,6 +20,36 @@ function containsCredentialKey(value: unknown, depth = 0): boolean {
   return Object.entries(value).some(
     ([key, nested]) => CREDENTIAL_KEY.test(key) || containsCredentialKey(nested, depth + 1),
   );
+}
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, nested]) => [key, canonicalize(nested)]),
+    );
+  }
+  return value;
+}
+
+function stableRetryKey(message: Memory, params: Record<string, unknown>): string | null {
+  if (typeof params.idempotencyKey === "string") {
+    return /^[\x21-\x7e]{8,255}$/.test(params.idempotencyKey) ? params.idempotencyKey : null;
+  }
+  const messageId = (message as { id?: unknown }).id;
+  if (typeof messageId !== "string" || messageId.length === 0) return null;
+  const publicAction = {
+    messageId,
+    workspaceId: params.workspaceId,
+    providerAccountId: params.providerAccountId,
+    operationKey: params.operationKey,
+    arguments: params.arguments,
+  };
+  return `eliza-${createHash("sha256")
+    .update(JSON.stringify(canonicalize(publicAction)))
+    .digest("hex")}`;
 }
 
 export const providerAction: Action = {
@@ -65,7 +95,7 @@ export const providerAction: Action = {
   },
   async handler(
     runtime: IAgentRuntime,
-    _message: Memory,
+    message: Memory,
     _state?: State,
     options?: HandlerOptions,
   ): Promise<ActionResult> {
@@ -92,15 +122,21 @@ export const providerAction: Action = {
       };
     }
 
+    const idempotencyKey = stableRetryKey(message, params);
+    if (!idempotencyKey) {
+      return {
+        success: false,
+        error: "a valid idempotencyKey or stable message id is required",
+        text: "Provider action was not submitted because no stable retry identity was available.",
+      };
+    }
+
     const input: ProviderActionInvokeInput = {
       workspaceId: params.workspaceId,
       providerAccountId: params.providerAccountId,
       operationKey: params.operationKey,
       arguments: params.arguments as Record<string, unknown>,
-      idempotencyKey:
-        typeof params.idempotencyKey === "string" && params.idempotencyKey.length >= 8
-          ? params.idempotencyKey
-          : `eliza-${randomUUID()}`,
+      idempotencyKey,
     };
 
     try {
@@ -109,11 +145,14 @@ export const providerAction: Action = {
       ).invokeProviderAction(input);
       const pending = result.status === "pending_approval";
       const failed = result.status === "stub_failed";
+      const denied = result.status === "denied_access" || result.status === "denied_policy";
       return {
-        success: !failed,
-        text: pending
-          ? `Provider action ${result.id} is blocked pending human approval. It has not executed.`
-          : `Provider action ${result.id} completed with status ${result.status}.`,
+        success: !failed && !denied,
+        text: denied
+          ? `Provider action ${result.id} was denied and persisted with status ${result.status}. It did not execute.`
+          : pending
+            ? `Provider action ${result.id} is blocked pending human approval. It has not executed.`
+            : `Provider action ${result.id} completed with status ${result.status}.`,
         data: {
           ...result,
           caseId: result.id,

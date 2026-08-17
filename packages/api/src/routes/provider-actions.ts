@@ -154,6 +154,7 @@ function outcomeToResponse(c: RouteContext, outcome: ProviderActionOutcome) {
           error: outcome.code,
           data: {
             id: outcome.intentId,
+            status: outcome.kind === "access_denied" ? "denied_access" : "denied_policy",
             requestHash: outcome.requestHash,
             actionDigest: outcome.actionDigest,
           },

@@ -65,9 +65,22 @@ describe("provider-action lifecycle", () => {
   });
 
   test("polls agent status through the scoped route", async () => {
-    const intent = { id: ACTION_ID, intentType: "provider-action", status: "pending" };
-    const calls = mock({ ok: true, data: intent });
-    expect(await client().providerActions.get(ACTION_ID)).toEqual(intent);
+    const status = {
+      id: ACTION_ID,
+      status: "pending_approval",
+      version: 2,
+      workspaceId: "workspace-a",
+      providerAccountId: "account-a",
+      operationId: "github.issue.list",
+      operationRevision: 1,
+      actionDigest: `sha256:${"b".repeat(64)}`,
+      requestHash: `sha256:${"a".repeat(64)}`,
+      expiresAt: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:01:00.000Z",
+    };
+    const calls = mock({ ok: true, data: status });
+    expect(await client().providerActions.get(ACTION_ID)).toEqual(status);
     expect(calls[0]?.url).toBe(`https://steward.example/v2/provider-actions/${ACTION_ID}`);
   });
 
@@ -90,8 +103,9 @@ describe("provider-action lifecycle", () => {
     expect(calls[0]?.url).toEndWith(`/v2/provider-actions/${ACTION_ID}/approval`);
 
     calls = mock({ id: ACTION_ID, status: "executing", version: 3 });
-    await c.providerActions.execute(ACTION_ID, { idempotencyKey: "execute-retry-1" });
+    await c.providerActions.execute(ACTION_ID);
     expect(calls[0]?.url).toEndWith(`/v2/provider-actions/${ACTION_ID}/execute`);
+    expect(calls[0]?.body).toBeUndefined();
 
     calls = mock({ schemaVersion: "steward.provider-case-manifest.v1", caseId: ACTION_ID });
     await c.providerActions.getCase(ACTION_ID);
@@ -115,5 +129,46 @@ describe("provider-action lifecycle", () => {
       message: "APPROVAL_MFA_REQUIRED",
       status: 403,
     } satisfies Partial<StewardApiError>);
+  });
+
+  test("returns a typed persisted denial and preserves non-persisted failures", async () => {
+    mock(
+      {
+        ok: false,
+        error: "PROVIDER_ACCESS_DENIED",
+        data: {
+          id: ACTION_ID,
+          status: "denied_access",
+          requestHash: `sha256:${"a".repeat(64)}`,
+          actionDigest: `sha256:${"b".repeat(64)}`,
+        },
+      },
+      403,
+    );
+    await expect(
+      client().providerActions.invoke({
+        workspaceId: "workspace-a",
+        providerAccountId: "account-a",
+        operationKey: "github.issue.list",
+        arguments: {},
+        idempotencyKey: "stable-retry-1",
+      }),
+    ).resolves.toMatchObject({
+      id: ACTION_ID,
+      status: "denied_access",
+      reasonCode: "PROVIDER_ACCESS_DENIED",
+      persisted: true,
+    });
+
+    mock({ ok: false, error: "BACKEND_UNAVAILABLE" }, 503);
+    await expect(
+      client().providerActions.invoke({
+        workspaceId: "workspace-a",
+        providerAccountId: "account-a",
+        operationKey: "github.issue.list",
+        arguments: {},
+        idempotencyKey: "stable-retry-1",
+      }),
+    ).rejects.toMatchObject({ status: 503, message: "BACKEND_UNAVAILABLE" });
   });
 });

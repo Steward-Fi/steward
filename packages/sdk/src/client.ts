@@ -85,6 +85,7 @@ import type {
   ProviderActionApprovalDetail,
   ProviderActionInvokeInput,
   ProviderActionInvokeResult,
+  ProviderActionStatus,
   ProviderActionTransitionResult,
   ProviderCaseEvidence,
   ProviderCaseManifest,
@@ -1458,14 +1459,41 @@ export class StewardClient {
    * by the API against the persisted action owner/approval state.
    */
   readonly providerActions = {
-    invoke: async (input: ProviderActionInvokeInput): Promise<ProviderActionInvokeResult> =>
-      this.requestRawJson<ProviderActionInvokeResult>("/v2/provider-actions", {
-        method: "POST",
-        body: JSON.stringify(input),
-      }),
+    invoke: async (input: ProviderActionInvokeInput): Promise<ProviderActionInvokeResult> => {
+      try {
+        return await this.requestRawJson<ProviderActionInvokeResult>("/v2/provider-actions", {
+          method: "POST",
+          body: JSON.stringify(input),
+        });
+      } catch (error) {
+        if (error instanceof StewardApiError && error.status === 403) {
+          const envelope = error.data as {
+            error?: string;
+            data?: { id?: string; status?: string; requestHash?: string; actionDigest?: string };
+          };
+          const denial = envelope?.data;
+          if (
+            denial?.id &&
+            (denial.status === "denied_access" || denial.status === "denied_policy") &&
+            denial.requestHash &&
+            denial.actionDigest
+          ) {
+            return {
+              id: denial.id,
+              status: denial.status,
+              reasonCode: envelope.error ?? error.message,
+              requestHash: denial.requestHash,
+              actionDigest: denial.actionDigest,
+              persisted: true,
+            };
+          }
+        }
+        throw error;
+      }
+    },
 
-    get: async (actionId: string): Promise<Intent> => {
-      const response = await this.request<Intent, StewardErrorResponse>(
+    get: async (actionId: string): Promise<ProviderActionStatus> => {
+      const response = await this.request<ProviderActionStatus, StewardErrorResponse>(
         `/v2/provider-actions/${encodeURIComponent(actionId)}`,
       );
       if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
@@ -1489,13 +1517,10 @@ export class StewardClient {
         { method: "POST", body: JSON.stringify(input) },
       ),
 
-    execute: async (
-      actionId: string,
-      input: { idempotencyKey?: string } = {},
-    ): Promise<ProviderActionTransitionResult> =>
+    execute: async (actionId: string): Promise<ProviderActionTransitionResult> =>
       this.requestRawJson<ProviderActionTransitionResult>(
         `/v2/provider-actions/${encodeURIComponent(actionId)}/execute`,
-        { method: "POST", body: JSON.stringify(input) },
+        { method: "POST" },
       ),
 
     getCase: async (actionId: string): Promise<ProviderCaseManifest> =>

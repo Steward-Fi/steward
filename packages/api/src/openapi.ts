@@ -533,13 +533,8 @@ function providerAuthorityPaths(): Record<string, OpenApiPathItem> {
         tags: ["Provider Authority"],
         summary: "Request safe resume of an approved provider action",
         description:
-          "The server authorizes the caller against persisted ownership and exact approval state; callers cannot replace the actor or action.",
+          "The server authorizes the caller against persisted ownership and exact approval state. Resume is state-idempotent through the binding and execution nonce; this endpoint accepts no request body.",
         security,
-        requestBody: jsonRequestBody({
-          type: "object",
-          additionalProperties: false,
-          properties: { idempotencyKey: stringSchema },
-        }),
         responses: { "200": jsonResponse(providerTransitionSchema), ...errorResponses() },
       },
     },

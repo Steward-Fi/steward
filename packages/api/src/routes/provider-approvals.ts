@@ -227,24 +227,11 @@ async function handlePostExecute(c: RouteContext) {
     return err(c, callerAuthorization.code, callerAuthorization.httpStatus);
   }
 
-  // Reject any body that supplies actor/action fields (I4 / RESUME_ACTOR_SUBSTITUTION).
-  const contentType = (c.req.header("content-type") ?? "").trim().toLowerCase();
-  if (contentType && ALLOWED_MEDIA.has(contentType)) {
-    try {
-      const buf = await c.req.raw.clone().arrayBuffer();
-      if (buf.byteLength > 0) {
-        const parsed = strictParseJson(decodeUtf8Strict(new Uint8Array(buf)));
-        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-          for (const key of Object.keys(parsed as Record<string, unknown>)) {
-            if (key !== "idempotencyKey") {
-              return err(c, "RESUME_ACTOR_SUBSTITUTION_FORBIDDEN", 400);
-            }
-          }
-        }
-      }
-    } catch {
-      return err(c, "RESUME_ACTOR_SUBSTITUTION_FORBIDDEN", 400);
-    }
+  // Resume is state-idempotent: the persisted binding/nonce permits one claim.
+  // There is deliberately no request-key contract. Reject every body instead of
+  // accepting and silently ignoring a caller-supplied idempotency key.
+  if ((await c.req.raw.clone().arrayBuffer()).byteLength > 0) {
+    return err(c, "RESUME_BODY_NOT_ALLOWED", 400);
   }
 
   const result = await providerApprovalService.resume({

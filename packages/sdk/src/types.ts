@@ -1581,7 +1581,7 @@ export interface ProviderActionInvokeInput {
   idempotencyKey: string;
 }
 
-export interface ProviderActionInvokeResult {
+export interface ProviderActionInvokeSuccessResult {
   id: string;
   status: "pending_approval" | "stub_succeeded" | "stub_failed";
   requestHash: string;
@@ -1591,6 +1591,36 @@ export interface ProviderActionInvokeResult {
     status: "stub_succeeded" | "stub_failed";
     echo: { operationId: string; actionDigest: string };
   };
+}
+
+/** A policy/access denial is a durable lifecycle record, not a failed submission. */
+export interface ProviderActionInvokeDeniedResult {
+  id: string;
+  status: "denied_access" | "denied_policy";
+  reasonCode: string;
+  requestHash: string;
+  actionDigest: string;
+  persisted: true;
+}
+
+export type ProviderActionInvokeResult =
+  | ProviderActionInvokeSuccessResult
+  | ProviderActionInvokeDeniedResult;
+
+/** Scalar-only agent view of the persisted provider-action binding. */
+export interface ProviderActionStatus {
+  id: string;
+  status: string;
+  version: number;
+  workspaceId: string;
+  providerAccountId: string;
+  operationId: string;
+  operationRevision: number;
+  actionDigest: string;
+  requestHash: string;
+  expiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ProviderActionApprovalDetail {

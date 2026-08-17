@@ -146,7 +146,11 @@ provider account, operation, exact request digest, and case id.
 ```
 
 When policy requires approval, the action reports `blocked: true` and explicitly
-says it has not executed. It never accepts provider credentials as parameters.
+says it has not executed. A policy/access denial is also surfaced as a persisted
+action id rather than mislabeled as an unsubmitted request. If `idempotencyKey`
+is omitted, the plugin derives a stable retry key from the Eliza message id and
+canonical public parameters; without either stable identity it fails closed.
+It never accepts provider credentials as parameters.
 
 ## Providers
 

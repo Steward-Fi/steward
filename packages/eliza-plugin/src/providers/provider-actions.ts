@@ -12,17 +12,36 @@ export const providerActionsProvider: Provider = {
       return {
         text: actions.length
           ? `Steward provider actions:\n${actions
-              .map((action) => `- ${action.id}: ${action.status} (case ${action.id})`)
+              .map((entry) => {
+                if (entry.polling === "ok") {
+                  return `- ${entry.action.id}: ${entry.action.status} (binding v${entry.action.version})`;
+                }
+                const retained = entry.lastKnown
+                  ? `; last known ${entry.lastKnown.status} (binding v${entry.lastKnown.version})`
+                  : "";
+                return `- ${entry.id}: status unavailable (polling error${retained})`;
+              })
               .join("\n")}`
           : "No provider actions have been invoked by this agent in this runtime.",
         data: {
           providerActions: actions as any,
-          // The case id is the action id. Detailed case/evidence reads remain
-          // human/MFA-gated and are intentionally not fetched by this provider.
-          caseStates: actions.map((action) => ({
-            caseId: action.id,
-            status: action.status,
-          })) as any,
+          bindingStates: actions.map((entry) =>
+            entry.polling === "ok"
+              ? {
+                  id: entry.action.id,
+                  status: entry.action.status,
+                  version: entry.action.version,
+                  operationId: entry.action.operationId,
+                  polling: "ok",
+                }
+              : {
+                  id: entry.id,
+                  status: entry.lastKnown?.status ?? "unavailable",
+                  version: entry.lastKnown?.version,
+                  operationId: entry.lastKnown?.operationId,
+                  polling: "error",
+                },
+          ) as any,
         },
       };
     } catch {

@@ -26,7 +26,9 @@ const action = await steward.providerActions.invoke({
   idempotencyKey: crypto.randomUUID(),
 });
 
-if (action.status === "pending_approval") {
+if (action.status === "denied_access" || action.status === "denied_policy") {
+  console.log(`Denied and persisted as ${action.id}: ${action.reasonCode}`);
+} else if (action.status === "pending_approval") {
   console.log("Blocked pending human approval; no provider request was dispatched.");
 }
 
@@ -52,9 +54,7 @@ await humanSteward.providerActions.decideApproval(action.id, {
 
 // The submitting agent may request safe resume only after the server verifies
 // the persisted approval and exact action binding.
-await steward.providerActions.execute(action.id, {
-  idempotencyKey: crypto.randomUUID(),
-});
+await steward.providerActions.execute(action.id);
 
 const manifest = await humanSteward.providerActions.getCase(action.id);
 const evidence = await humanSteward.providerActions.getEvidence(action.id);
@@ -62,3 +62,5 @@ const evidence = await humanSteward.providerActions.getEvidence(action.id);
 
 Never pass provider tokens, cookies, API keys, or authorization headers in
 `arguments`. Steward resolves the credential from the bound provider account.
+An execute request accepts no body: its retry safety comes from the persisted
+binding state and one-time execution nonce, not from a caller key.

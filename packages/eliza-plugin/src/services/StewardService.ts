@@ -7,11 +7,11 @@ import {
   type ApprovalStats,
   type GetBalanceResult,
   type GetHistoryResult,
-  type Intent,
   type PendingProxyRequest,
   type PolicyRule,
   type ProviderActionInvokeInput,
   type ProviderActionInvokeResult,
+  type ProviderActionStatus,
   type SignMessageResult,
   type SignTransactionInput,
   type SignTransactionResult,
@@ -37,6 +37,15 @@ export interface HyperliquidOrderResult {
   avgPrice: number;
   txHash: string | null;
 }
+
+export type TrackedProviderAction =
+  | { polling: "ok"; action: ProviderActionStatus }
+  | {
+      polling: "error";
+      id: string;
+      lastKnown?: ProviderActionStatus;
+      error: { message: string; httpStatus?: number; retryable: true };
+    };
 
 /**
  * Reject plaintext `http://` API URLs for non-localhost hosts. Talking to a
@@ -78,6 +87,7 @@ export class StewardService extends Service {
   private agentIdentity: AgentIdentity | null = null;
   private _connected = false;
   private readonly trackedProviderActionIds = new Set<string>();
+  private readonly providerActionLastKnown = new Map<string, ProviderActionStatus>();
 
   static async start(runtime: IAgentRuntime): Promise<StewardService> {
     const service = new StewardService(runtime);
@@ -90,6 +100,7 @@ export class StewardService extends Service {
     this._connected = false;
     this.agentIdentity = null;
     this.trackedProviderActionIds.clear();
+    this.providerActionLastKnown.clear();
   }
 
   // ── Initialization ──────────────────────────────────────────────
@@ -246,10 +257,11 @@ export class StewardService extends Service {
     return result;
   }
 
-  async getProviderAction(actionId: string): Promise<Intent> {
+  async getProviderAction(actionId: string): Promise<ProviderActionStatus> {
     this.assertConnected();
     const status = await this.getClient().providerActions.get(actionId);
     this.trackedProviderActionIds.add(actionId);
+    this.providerActionLastKnown.set(actionId, status);
     return status;
   }
 
@@ -257,12 +269,29 @@ export class StewardService extends Service {
    * Poll only action status available to this agent JWT. Human approval detail,
    * case manifests, and evidence remain on their existing human/MFA routes.
    */
-  async listTrackedProviderActions(): Promise<Intent[]> {
+  async listTrackedProviderActions(): Promise<TrackedProviderAction[]> {
     this.assertConnected();
     const results = await Promise.allSettled(
       [...this.trackedProviderActionIds].map((id) => this.getClient().providerActions.get(id)),
     );
-    return results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+    return results.map((result, index) => {
+      const id = [...this.trackedProviderActionIds][index]!;
+      if (result.status === "fulfilled") {
+        this.providerActionLastKnown.set(id, result.value);
+        return { polling: "ok" as const, action: result.value };
+      }
+      const cause = result.reason;
+      return {
+        polling: "error" as const,
+        id,
+        lastKnown: this.providerActionLastKnown.get(id),
+        error: {
+          message: cause instanceof Error ? cause.message : String(cause),
+          httpStatus: cause instanceof StewardApiError ? cause.status : undefined,
+          retryable: true as const,
+        },
+      };
+    });
   }
 
   async listPendingProxyRequests(): Promise<PendingProxyRequest[]> {

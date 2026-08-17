@@ -9838,28 +9838,12 @@
           "Provider Authority"
         ],
         "summary": "Request safe resume of an approved provider action",
-        "description": "The server authorizes the caller against persisted ownership and exact approval state; callers cannot replace the actor or action.",
+        "description": "The server authorizes the caller against persisted ownership and exact approval state. Resume is state-idempotent through the binding and execution nonce; this endpoint accepts no request body.",
         "security": [
           {
             "bearerAuth": []
           }
         ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "idempotencyKey": {
-                    "type": "string"
-                  }
-                }
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "JSON response",
