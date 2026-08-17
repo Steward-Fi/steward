@@ -3779,8 +3779,14 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           venue: approvalSignRequest.venue,
           walletAddress: approvalSignRequest.walletAddress,
         });
+        // 0087 adds the custody commitment after payload/policy binding already
+        // existed. A pre-0087 row with NULL backend can safely mean ONLY the
+        // legacy local vault: external custody did not have a governed approval
+        // path. Preserve those local approvals while still rejecting a NULL row
+        // that now resolves to any external provider.
+        const storedExecutionBackend = transactionRow.executionBackend ?? "local-vault";
         if (
-          transactionRow.executionBackend !== approvalExecutionTarget.backend ||
+          storedExecutionBackend !== approvalExecutionTarget.backend ||
           transactionRow.executionBackendIdentityDigest !==
             (approvalExecutionTarget.backendIdentityDigest ?? null)
         ) {
@@ -3789,7 +3795,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
             "The custody provider, key, or address changed after this approval was requested. Resubmit the transaction.",
             approvalExecutionPayloadDigest,
             {
-              storedBackend: transactionRow.executionBackend,
+              storedBackend: storedExecutionBackend,
               storedBackendIdentityDigest: transactionRow.executionBackendIdentityDigest,
               resolvedBackend: approvalExecutionTarget.backend,
               resolvedBackendIdentityDigest: approvalExecutionTarget.backendIdentityDigest,
