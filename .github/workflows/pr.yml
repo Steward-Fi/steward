@@ -474,7 +474,11 @@ jobs:
           PORT: "3200"
           STEWARD_PROXY_PORT: "8080"
         run: |
-          docker compose up -d --build postgres redis steward-api steward-proxy
+          # API and proxy intentionally share the same image. Build it once;
+          # asking Compose to build both services exports the identical image
+          # twice and can exhaust a hosted runner during the duplicate export.
+          docker compose build steward-api
+          docker compose up -d --no-build postgres redis steward-api steward-proxy
           for url in http://127.0.0.1:3200/health http://127.0.0.1:8080/health; do
             for _ in $(seq 1 90); do
               if curl -sf "$url" >/dev/null; then
