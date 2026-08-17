@@ -250,6 +250,10 @@ class StewardAuth {
     throw StewardApiException('Expected object response from Steward API', 0, payload);
   }
 
+  /// Decodes the JWT payload client-side WITHOUT signature verification —
+  /// verification happens server-side on every authenticated request. The
+  /// resulting claims (userId/tenantId/email/expiresAt) are display and
+  /// expiry hints only; never use them for client-side authorization.
   static StewardSession _sessionFromToken(String token, {String? refreshToken}) {
     final parts = token.split('.');
     Map<String, Object?> claims = <String, Object?>{};

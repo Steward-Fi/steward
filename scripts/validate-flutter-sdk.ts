@@ -10,6 +10,7 @@ const requiredFiles = [
   "packages/flutter/lib/src/models.dart",
   "packages/flutter/lib/src/storage.dart",
   "packages/flutter/test/steward_contract_test.dart",
+  "packages/flutter/example/secure_session_storage.dart",
 ];
 
 const requiredNeedles: Array<[string, string]> = [
@@ -28,6 +29,8 @@ const requiredNeedles: Array<[string, string]> = [
   ["packages/flutter/lib/src/storage.dart", "abstract interface class StewardSessionStorage"],
   ["packages/flutter/test/steward_contract_test.dart", "NamespacedStewardSessionStorage"],
   ["packages/flutter/test/steward_contract_test.dart", "PushSubscriptionInput"],
+  ["packages/flutter/example/secure_session_storage.dart", "implements StewardSessionStorage"],
+  ["packages/flutter/example/secure_session_storage.dart", "encryptedSharedPreferences: true"],
 ];
 
 const failures: string[] = [];
