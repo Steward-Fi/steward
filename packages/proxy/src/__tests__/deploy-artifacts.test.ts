@@ -101,6 +101,31 @@ describe("#101 deploy/DEPLOYMENT.md docs reconciled with fail-closed code", () =
   });
 });
 
+describe("SEC-022 DEPLOYMENT.md installs shipped hardened units, no root units or cleartext admin ops", () => {
+  const doc = read("DEPLOYMENT.md");
+
+  test("no inline systemd unit runs services as root", () => {
+    // Pre-fix the doc shipped inline units with `User=root` + `Restart=always`
+    // and none of the hardening in deploy/*.service.
+    expect(doc).not.toContain("User=root");
+    expect(doc).not.toContain("Restart=always");
+  });
+
+  test("doc installs the shipped hardened units", () => {
+    expect(doc).toContain("deploy/steward.service");
+    expect(doc).toContain("deploy/steward-proxy.service");
+  });
+
+  test("platform key is not interpolated into a remote ssh curl argv", () => {
+    // Pre-fix Step 6: PLATFORM_KEY="<...>"; ssh ... "curl ... ${PLATFORM_KEY}"
+    expect(doc).not.toContain("X-Steward-Platform-Key: ${PLATFORM_KEY}");
+  });
+
+  test("doc warns against driving admin keys over plain HTTP to node IPs", () => {
+    expect(doc).toContain("cleartext");
+  });
+});
+
 describe("SEC-021 deploy/docker-compose.yml redis persists enforcement counters", () => {
   const compose = read("docker-compose.yml");
 

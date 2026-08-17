@@ -6,7 +6,7 @@
 
 Steward runs as two **systemd services** on each Milady node, built from source using Bun. It connects to a shared Neon PostgreSQL database and an optional Redis instance for rate limiting and spend tracking.
 
-- `steward-api.service` — REST API on port 3200
+- `steward.service` — REST API on port 3200
 - `steward-proxy.service` — API proxy gateway on port 8080
 
 **Current production nodes:** milady-core-1 through milady-core-6 (all Hetzner dedicated servers).
@@ -19,7 +19,7 @@ Steward runs as two **systemd services** on each Milady node, built from source 
 ┌──────────────────────────────────────────────────────┐
 │  Milady Core Node                                     │
 │                                                       │
-│  systemd: steward-api.service                         │
+│  systemd: steward.service                             │
 │    └─ bun run packages/api/src/index.ts               │
 │    └─ Listens: 0.0.0.0:3200                          │
 │    └─ Env: /opt/steward/.env                          │
@@ -112,76 +112,48 @@ chmod 600 /opt/steward/.env"
 
 ### Step 4: Create systemd services
 
+Install the **shipped, hardened units** (`deploy/steward.service`,
+`deploy/steward-proxy.service`) — they run as a dedicated unprivileged
+`steward` user with `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`,
+and backoff restart limits. Do NOT hand-roll units that run the services as
+root with unconditional restart loops (SEC-022).
+
 ```bash
-# API service
-ssh root@${NODE_IP} "cat > /etc/systemd/system/steward-api.service << 'EOF'
-[Unit]
-Description=Steward API
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/steward
-ExecStart=/root/.bun/bin/bun run packages/api/src/index.ts
-Restart=always
-RestartSec=10
-EnvironmentFile=/opt/steward/.env
-
-[Install]
-WantedBy=multi-user.target
-EOF"
-
-# Proxy service
-ssh root@${NODE_IP} "cat > /etc/systemd/system/steward-proxy.service << 'EOF'
-[Unit]
-Description=Steward API Proxy
-After=network.target steward-api.service
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/steward
-ExecStart=/root/.bun/bin/bun run packages/proxy/src/index.ts
-Restart=always
-RestartSec=10
-EnvironmentFile=/opt/steward/.env
-
-[Install]
-WantedBy=multi-user.target
-EOF"
-
+# 1. Create the dedicated user and install Bun for it (units use
+#    /home/steward/.bun/bin/bun)
 ssh root@${NODE_IP} "
+  useradd --system --create-home --shell /usr/sbin/nologin steward 2>/dev/null || true
+  sudo -u steward bash -c 'curl -fsSL https://bun.sh/install | bash'
+"
+
+# 2. Move the env file to the path the units expect and lock it down
+ssh root@${NODE_IP} "
+  mkdir -p /etc/steward
+  cp /opt/steward/.env /etc/steward/env
+  chmod 600 /etc/steward/env
+  chown -R steward:steward /opt/steward
+"
+
+# 3. Install + start the shipped units
+ssh root@${NODE_IP} "
+  cp /opt/steward/deploy/steward.service /etc/systemd/system/steward.service
+  cp /opt/steward/deploy/steward-proxy.service /etc/systemd/system/steward-proxy.service
   systemctl daemon-reload
-  systemctl enable steward-api steward-proxy
-  systemctl start steward-api steward-proxy
+  systemctl enable steward steward-proxy
+  systemctl start steward steward-proxy
 "
 ```
 
 <details>
 <summary>Legacy single-service setup (still works)</summary>
 
-If you don't need the proxy, the original `steward.service` targeting the API only still works:
+If you don't need the proxy, install only `deploy/steward.service` (same
+hardening, API only) and skip `steward-proxy.service`:
 
 ```bash
-ssh root@${NODE_IP} "cat > /etc/systemd/system/steward.service << 'EOF'
-[Unit]
-Description=Steward Wallet Service
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/steward
-ExecStart=/root/.bun/bin/bun run packages/api/src/index.ts
-Restart=always
-RestartSec=10
-EnvironmentFile=/opt/steward/.env
-
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl daemon-reload && systemctl enable steward && systemctl start steward"
+ssh root@${NODE_IP} "
+  cp /opt/steward/deploy/steward.service /etc/systemd/system/steward.service
+  systemctl daemon-reload && systemctl enable steward && systemctl start steward"
 ```
 </details>
 
@@ -203,12 +175,25 @@ ssh root@${NODE_IP} "curl -sf http://172.18.0.1:8080/health"
 
 ### Step 6: Create milady-cloud tenant (if first time)
 
+The platform key must never appear on a command line (local ps/history,
+remote process list). Read it on the node from the mode-0600 env file and
+call the API over localhost via the SSH channel (SEC-022):
+
 ```bash
-PLATFORM_KEY="<your-platform-key>"
-ssh root@${NODE_IP} "curl -sf -X POST http://localhost:3200/platform/tenants \
+ssh root@${NODE_IP} "PK=\$(grep '^STEWARD_PLATFORM_KEYS=' /etc/steward/env | cut -d= -f2- | cut -d, -f1); \
+  curl -sf -X POST http://localhost:3200/platform/tenants \
   -H 'Content-Type: application/json' \
-  -H 'X-Steward-Platform-Key: ${PLATFORM_KEY}' \
+  -H \"X-Steward-Platform-Key: \${PK}\" \
   -d '{\"id\": \"milady-cloud\", \"name\": \"Milady Cloud\"}'"
+```
+
+For any other platform-key operation, use an SSH tunnel from your workstation
+(never plain HTTP to a node IP over the internet):
+
+```bash
+ssh -L 3200:localhost:3200 root@${NODE_IP}
+# then, locally:
+curl -sf http://localhost:3200/platform/tenants -H "X-Steward-Platform-Key: $PLATFORM_KEY"
 ```
 
 ---
@@ -322,6 +307,11 @@ After deploying or updating, verify:
 
 ### Full E2E smoke test
 
+Run this ON the node or through an SSH tunnel (`ssh -L 3200:localhost:3200
+root@<node-ip>`). Never point it at `http://<node-ip>:3200` over the
+internet — the platform key and tenant keys would cross the network in
+cleartext (SEC-022).
+
 ```bash
 PK="<platform-key>"
 BASE="http://localhost:3200"
@@ -374,7 +364,7 @@ curl -sf -X DELETE $BASE/agents/test-1 \
 
 ### Steward won't start
 ```bash
-journalctl -u steward-api --no-pager -n 50
+journalctl -u steward --no-pager -n 50
 journalctl -u steward-proxy --no-pager -n 50
 # Legacy single-service:
 journalctl -u steward --no-pager -n 50
@@ -576,7 +566,7 @@ REDIS_URL=redis://:yourpassword@localhost:6379
 ```bash
 # After restarting Steward, check logs for:
 # [redis] Connected to redis://localhost:6379
-journalctl -u steward-api --since "1 minute ago" | grep redis
+journalctl -u steward --since "1 minute ago" | grep redis
 ```
 
 Redis is used for:
