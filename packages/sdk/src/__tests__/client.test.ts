@@ -1365,6 +1365,25 @@ describe("HTTP request building", () => {
     expect(lastCapture?.url).toBe("https://api.steward.example/vault/agent-1/actions/action-1");
   });
 
+  it("preserves outcome_unknown transfer action status", async () => {
+    installMockFetch({
+      ok: true,
+      data: {
+        id: "action-unknown",
+        type: "transfer",
+        status: "outcome_unknown",
+        chainId: 8453,
+        to: "0x1234567890123456789012345678901234567890",
+        value: "1000",
+        token: "native",
+        txHash: `0x${"ab".repeat(32)}`,
+      },
+    });
+
+    const result = await makeClient().getTransferAction("agent-1", "action-unknown");
+    expect(result.status).toBe("outcome_unknown");
+  });
+
   it("user linked account helpers use /user/me/accounts", async () => {
     installMockFetch({
       ok: true,

@@ -616,7 +616,14 @@ function parseSendCallsActionInput(body: SendCallsActionInput):
 
 function transferActionResponse(input: {
   actionId: string;
-  status: "pending_approval" | "rejected" | "signed" | "broadcast" | "confirmed" | "failed";
+  status:
+    | "pending_approval"
+    | "rejected"
+    | "signed"
+    | "broadcast"
+    | "confirmed"
+    | "failed"
+    | "outcome_unknown";
   chainId: number;
   to: string;
   value: string;
@@ -776,11 +783,20 @@ async function recordSponsoredActionIfNeeded(input: {
 
 function transferResponseStatus(
   status: string,
-): "pending_approval" | "rejected" | "signed" | "broadcast" | "failed" {
+):
+  | "pending_approval"
+  | "rejected"
+  | "signed"
+  | "broadcast"
+  | "confirmed"
+  | "failed"
+  | "outcome_unknown" {
   if (status === "pending") return "pending_approval";
   if (status === "rejected") return "rejected";
   if (status === "broadcast") return "broadcast";
+  if (status === "confirmed") return "confirmed";
   if (status === "failed") return "failed";
+  if (status === "outcome_unknown") return "outcome_unknown";
   return "signed";
 }
 
@@ -3498,7 +3514,9 @@ vaultRoutes.get("/:agentId/actions/:actionId", async (c) => {
             ? "confirmed"
             : row.status === "failed"
               ? "failed"
-              : "signed";
+              : row.status === "outcome_unknown"
+                ? "outcome_unknown"
+                : "signed";
   return c.json<ApiResponse>({
     ok: true,
     data: {
@@ -4594,6 +4612,7 @@ vaultRoutes.get("/:agentId/transactions", async (c) => {
     "broadcast",
     "confirmed",
     "failed",
+    "outcome_unknown",
   ]);
   if (status && !allowedStatuses.has(status)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid transaction status filter" }, 400);

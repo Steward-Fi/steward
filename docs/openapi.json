@@ -97365,7 +97365,8 @@
                             "signed",
                             "broadcast",
                             "confirmed",
-                            "failed"
+                            "failed",
+                            "outcome_unknown"
                           ]
                         },
                         "chainId": {
@@ -97478,7 +97479,8 @@
                             "signed",
                             "broadcast",
                             "confirmed",
-                            "failed"
+                            "failed",
+                            "outcome_unknown"
                           ]
                         },
                         "chainId": {
@@ -98456,7 +98458,8 @@
                             "signed",
                             "broadcast",
                             "confirmed",
-                            "failed"
+                            "failed",
+                            "outcome_unknown"
                           ]
                         },
                         "chainId": {

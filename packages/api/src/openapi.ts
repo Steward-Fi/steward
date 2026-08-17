@@ -1522,7 +1522,15 @@ const transferActionSchema: JsonSchema = {
     type: { type: "string", const: "transfer" },
     status: {
       type: "string",
-      enum: ["pending_approval", "rejected", "signed", "broadcast", "confirmed", "failed"],
+      enum: [
+        "pending_approval",
+        "rejected",
+        "signed",
+        "broadcast",
+        "confirmed",
+        "failed",
+        "outcome_unknown",
+      ],
     },
     chainId: { type: "integer", minimum: 1 },
     to: stringSchema,

@@ -51,6 +51,7 @@ import type { Vault } from "@stwd/vault";
 import { WebhookDispatcher } from "@stwd/webhooks";
 import { and, eq, gte, sql } from "drizzle-orm";
 import type { Context, Next } from "hono";
+import { sanitizePublicError } from "./public-error";
 import { getConfiguredVault } from "./vault-factory";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -267,13 +268,10 @@ export async function safeJsonParse<T>(c: Context): Promise<T | null> {
 }
 
 export function sanitizeErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    const safe = ["already exists", "not found", "Unsupported chain"];
-    if (safe.some((s) => error.message.includes(s))) return error.message;
-  }
-  return "Internal server error";
+  return sanitizePublicError(error);
 }
 
+export { PublicApiError } from "./public-error";
 export { extractRpcErrorMessage, isRpcError } from "./rpc-error";
 
 // ─── Environment ──────────────────────────────────────────────────────────────

@@ -1082,7 +1082,8 @@ export type TransferActionStatus =
   | "signed"
   | "broadcast"
   | "confirmed"
-  | "failed";
+  | "failed"
+  | "outcome_unknown";
 export interface TransferAction {
   id: string;
   type: "transfer";

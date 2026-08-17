@@ -550,7 +550,7 @@ describe("AWS KMS asymmetric external custody", () => {
       providerFor(new MockKms(privateKey), dishonestRpc).signTransaction(
         signRequest(privateKey, { broadcast: true }),
       ),
-    ).rejects.toBeInstanceOf(ExternalBroadcastOutcomeUnknownError);
+    ).rejects.toThrow("does not match signed bytes");
   });
 
   test("reconciles an accepted broadcast after its response is lost without reposting", async () => {

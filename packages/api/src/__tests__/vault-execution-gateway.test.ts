@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
 import {
   agents,
   agentWallets,
@@ -38,6 +38,7 @@ const AGENT_ID = `gateway-agent-${Date.now()}`;
 const USER_ID = "00000000-0000-4000-8000-000000000123";
 const ORIGINAL_REDIS_URL = process.env.REDIS_URL;
 const ORIGINAL_REDIS_REQUIRED = process.env.REDIS_REQUIRED;
+setDefaultTimeout(30_000);
 
 async function makeApp() {
   const { vaultRoutes } = await import("../routes/vault");
@@ -760,6 +761,69 @@ describe("vault EVM execution gateway", () => {
     } finally {
       signSpy.mockRestore();
     }
+  });
+
+  it("does not expose credential-bearing provider text through the generic HTTP error path", async () => {
+    const canary = "SUPER_SECRET_PROVIDER_TOKEN";
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockImplementation(async () => {
+      throw new Error(
+        `KMS key arn:aws:kms:us-east-1:123456789012:key/example not found at https://kms.example.test/${canary}`,
+      );
+    });
+    try {
+      const app = await makeApp();
+      const res = await app.request(`/vault/${AGENT_ID}/sign`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "provider-error-redaction-canary",
+        },
+        body: JSON.stringify({
+          to: "0x1111111111111111111111111111111111111111",
+          value: "1",
+          chainId: 8453,
+          broadcast: true,
+        }),
+      });
+      const text = await res.text();
+      expect(res.status).toBe(500);
+      expect(JSON.parse(text)).toEqual({ ok: false, error: "Internal server error" });
+      expect(text).not.toContain(canary);
+      expect(text).not.toContain("arn:aws:kms");
+      expect(text).not.toContain("kms.example.test");
+      expect(signSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      signSpy.mockRestore();
+    }
+  });
+
+  it("reports outcome_unknown truthfully through the transfer action API", async () => {
+    const txId = "tx-transfer-outcome-unknown";
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: txId,
+        agentId: AGENT_ID,
+        status: "outcome_unknown",
+        toAddress: "0x1111111111111111111111111111111111111111",
+        value: "1",
+        chainId: 8453,
+        txHash: `0x${"ab".repeat(32)}`,
+        actionType: "transfer",
+        actionPayload: {
+          type: "transfer",
+          token: "native",
+          recipient: "0x1111111111111111111111111111111111111111",
+          amount: "1",
+          broadcast: true,
+        },
+      });
+
+    const app = await makeApp();
+    const res = await app.request(`/vault/${AGENT_ID}/actions/${txId}`);
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.data).toMatchObject({ id: txId, status: "outcome_unknown" });
   });
 
   it("replays an approval only through the queued external provider/key/address identity", async () => {

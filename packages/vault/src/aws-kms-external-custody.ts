@@ -584,9 +584,7 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
         }
       }
       if (result.toLowerCase() !== expectedTransactionHash.toLowerCase()) {
-        throw new Error(
-          "AWS KMS RPC returned a transaction hash that does not match signed bytes",
-        );
+        throw new Error("AWS KMS RPC returned a transaction hash that does not match signed bytes");
       }
     }
     return { result, broadcast: request.broadcast };
