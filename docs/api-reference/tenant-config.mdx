@@ -335,6 +335,8 @@ Tenant OIDC providers support direct JWT exchange and enterprise authorization-c
 
 `clientSecretEnv` must name an environment variable in the dedicated `STEWARD_TENANT_OIDC_SECRET_*` namespace; arbitrary platform env vars are rejected so tenant config cannot exfiltrate deployment secrets through the token exchange.
 
+`allowJitProvisioning` defaults to `false` when omitted (matching the SAML plane): holders of a valid IdP token for an unknown account are denied until a tenant admin explicitly opts into just-in-time account creation with `"allowJitProvisioning": true`. Configs written before this default changed keep their previously persisted value.
+
 The SP-initiated SSO route requires app-side PKCE:
 
 ```bash
