@@ -15,8 +15,10 @@ import {
   __resetAuditHmacKeyCacheForTests,
   type AppendRequiredAudit,
   appendAuditEventWithinTx,
+  auditEvents,
 } from "@stwd/db";
 import type { AppVariables } from "@stwd/shared";
+import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { StewardAppContext } from "../context";
 import { createAgentCapabilityRoutes, createCapabilityRoutes } from "../routes";
@@ -68,12 +70,19 @@ function buildCtx(db: TestDb): StewardAppContext {
       /* no-op audit sink for tests */
     },
     withTenantAuditedTransaction<T>(
-      _tenantId: string,
+      transactionTenantId: string,
       fn: (tx: unknown, appendRequiredAudit: AppendRequiredAudit) => Promise<T>,
     ) {
       return (
         db as { transaction<R>(callback: (tx: unknown) => Promise<R>): Promise<R> }
-      ).transaction((tx) => fn(tx, (event) => appendAuditEventWithinTx(tx as never, event)));
+      ).transaction((tx) =>
+        fn(tx, (event) => {
+          if (event.tenantId !== transactionTenantId) {
+            throw new Error("audit event tenant does not match transaction tenant");
+          }
+          return appendAuditEventWithinTx(tx as never, event);
+        }),
+      );
     },
     async getAgentTokenStatus() {
       return null;
@@ -227,12 +236,29 @@ describe("capability CRUD happy path (authorized)", () => {
     const del = await app.request(`/capabilities/${capId}`, { method: "DELETE" });
     expect(del.status).toBe(200);
     expect(await app.request(`/capabilities/${capId}`).then((r) => r.status)).toBe(404);
+
+    const persistedAudit = await harness!.db
+      .select({ action: auditEvents.action })
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, tenantId))
+      .orderBy(auditEvents.seq);
+    expect(persistedAudit.map(({ action }: { action: string }) => action)).toEqual([
+      "capability.create",
+      "capability.grant.create",
+      "capability.grant.revoke",
+      "capability.delete",
+    ]);
   });
 
-  test("duplicate name -> 409", async () => {
+  test("duplicate name -> 409 and rolls back its audit event", async () => {
     const app = authedApp(harness!.db);
     expect((await createCap(app)).status).toBe(201);
     expect((await createCap(app)).status).toBe(409);
+    const persistedAudit = await harness!.db
+      .select({ action: auditEvents.action })
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, tenantId));
+    expect(persistedAudit).toEqual([{ action: "capability.create" }]);
   });
 
   test("invalid github spec -> 400 (strict host)", async () => {
