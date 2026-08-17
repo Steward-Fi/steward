@@ -288,7 +288,7 @@ function decodeJobCreatedId(
     // Only the commerce contract's JobCreated is authoritative: a lookalike
     // event from another contract the tx touched would yield a wrong jobId
     // that later setBudget/fund calls would then fund.
-    if (log.address.toLowerCase() !== expectedEmitter) continue;
+    if (typeof log.address !== "string" || log.address.toLowerCase() !== expectedEmitter) continue;
     try {
       const decoded = decodeEventLog({
         abi: AGENTIC_COMMERCE_ABI,

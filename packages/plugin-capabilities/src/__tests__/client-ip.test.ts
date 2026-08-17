@@ -77,6 +77,16 @@ describe("trustedClientIp (capability audit)", () => {
     );
   });
 
+  test("with hops>=2 a short XFF chain never falls back to the adjacent Envoy proxy", async () => {
+    process.env.STEWARD_TRUSTED_PROXY_HOPS = "2";
+    expect(
+      await requestIp({
+        "x-forwarded-for": "203.0.113.9",
+        "x-envoy-external-address": "10.0.0.9",
+      }),
+    ).toBeNull();
+  });
+
   test("honors x-envoy-external-address with port stripping once trust is opted in", async () => {
     process.env.STEWARD_TRUSTED_PROXY_HOPS = "1";
     expect(await requestIp({ "x-envoy-external-address": "203.0.113.9:51234" })).toBe(

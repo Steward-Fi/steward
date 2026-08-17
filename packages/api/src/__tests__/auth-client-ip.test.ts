@@ -225,13 +225,14 @@ describe("trustedClientIp", () => {
         "x-forwarded-for": "203.0.113.5, 198.51.100.7, 10.0.0.9",
       }),
     ).toBe("198.51.100.7");
-    // ...but Envoy still rescues when the positional read cannot parse.
+    // A missing positional entry is a topology failure. Envoy names the
+    // adjacent proxy here and must not be accepted as the external client.
     expect(
       await probeIp({
         "x-envoy-external-address": "10.0.0.9",
         "x-forwarded-for": "203.0.113.5",
       }),
-    ).toBe("10.0.0.9");
+    ).toBeNull();
   });
 
   it("parses ip:port and [ipv6]:port in the trusted XFF position; bare IPv6 is never mangled", async () => {

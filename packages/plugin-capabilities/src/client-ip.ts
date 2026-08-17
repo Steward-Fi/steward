@@ -89,6 +89,7 @@ export function trustedClientIp(c: Context): string | undefined {
 
   // x-envoy-external-address identifies the client only when the trusted edge
   // is the outermost hop, so with hops >= 2 the positional read stays
-  // authoritative and Envoy's value is only a rescue when that read fails.
-  return hops >= 2 ? (fromForwardedFor() ?? fromEnvoy()) : (fromEnvoy() ?? fromForwardedFor());
+  // authoritative. A missing/invalid positional entry is a trust-topology
+  // failure and must not fall back to the adjacent proxy's address.
+  return hops >= 2 ? fromForwardedFor() : (fromEnvoy() ?? fromForwardedFor());
 }

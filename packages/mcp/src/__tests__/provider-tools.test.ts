@@ -279,6 +279,19 @@ describe("credential redaction", () => {
     expect(clean).toContain("[redacted]");
   });
 
+  test("redacts current credential formats and armored private keys in free text", () => {
+    const openAiKey = "sk-proj-example_canary_1234567890";
+    const awsAccessKey = "AKIAIOSFODNN7EXAMPLE";
+    const privateKey = "-----BEGIN PRIVATE KEY-----\nprivate-key-canary\n-----END PRIVATE KEY-----";
+    const clean = sanitizeProviderPayload(
+      `provider failed: ${openAiKey} ${awsAccessKey}\n${privateKey}`,
+    ) as string;
+
+    for (const canary of [openAiKey, awsAccessKey, "private-key-canary"]) {
+      expect(clean).not.toContain(canary);
+    }
+  });
+
   test("fails closed on accessors and cycles without invoking provider code", () => {
     let invoked = false;
     const payload: Record<string, unknown> = { public: "safe" };

@@ -272,7 +272,7 @@ function logNoTrustedClientIpDiag(c: Context, hops: number): void {
  *   deployment a client could set it — and it
  *   identifies the CLIENT only when that edge is the outermost trusted hop,
  *   so with hops >= 2 the positional x-forwarded-for read stays authoritative
- *   and Envoy's value is only a rescue when that read fails.
+ *   and Envoy's value is never used as a fallback.
  * - x-forwarded-for: each trusted proxy APPENDS the peer it observed, so with
  *   N trusted hops the trustworthy entry is the N-th from the RIGHT. The
  *   left-most entry is client-supplied and is never read.
@@ -309,7 +309,10 @@ export function trustedClientIp(c: Context): string | undefined {
     return normalizeIpCandidate(entries[entries.length - hops]);
   };
 
-  const ip = hops >= 2 ? (fromForwardedFor() ?? fromEnvoy()) : (fromEnvoy() ?? fromForwardedFor());
+  // In a multi-hop topology Envoy observes the adjacent proxy, not the
+  // external client. Falling back to that header when XFF is missing or too
+  // short would turn a topology/configuration failure into false attribution.
+  const ip = hops >= 2 ? fromForwardedFor() : (fromEnvoy() ?? fromForwardedFor());
   if (ip) return ip;
   logNoTrustedClientIpDiag(c, hops);
   return undefined;

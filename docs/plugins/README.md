@@ -41,6 +41,12 @@ migrations run at boot before the server accepts traffic. that's it - the core i
 
 ## door 2 - write a plugin (author)
 
+> **Security boundary:** plugins execute in-process with full host trust. The
+> injected context includes the raw database and vault, so a plugin can read or
+> rewrite tenant state and sign outside the policy engine. There is no sandbox.
+> Register only code you would trust with root access and master signing keys;
+> pin and audit its dependency tree, and never load an untrusted runtime plugin.
+
 a plugin is one object. you import everything from a single package:
 
 ```ts
