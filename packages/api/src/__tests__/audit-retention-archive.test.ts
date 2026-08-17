@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash, createPublicKey, generateKeyPairSync, sign as signBytes } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDb, getDb, tenants } from "@stwd/db";
@@ -29,6 +29,24 @@ const ARCHIVE_SIGNING_KEY_ID = "archive-test-key-v1";
 const ACK_KEY_ID = "external-archive-store-test-v1";
 const ACK_KEYS = generateKeyPairSync("ed25519");
 let policyRevision = 0;
+
+describe("archive restore request boundary", () => {
+  it("authenticates and MFA-gates before granting the narrow 25 MiB body exception", () => {
+    const appSource = readFileSync(join(import.meta.dir, "..", "app.ts"), "utf8");
+    const tenantAuthIndex = appSource.indexOf(
+      "app.use(archiveRestoreChunkPath, (c, next) => tenantAuth(c, next))",
+    );
+    const mfaGateIndex = appSource.indexOf(
+      "app.use(archiveRestoreChunkPath, auditOwnerAdminMfaGate)",
+    );
+    const bodyLimitIndex = appSource.indexOf('app.use("*", (c, next) =>');
+    expect(tenantAuthIndex).toBeGreaterThanOrEqual(0);
+    expect(mfaGateIndex).toBeGreaterThan(tenantAuthIndex);
+    expect(bodyLimitIndex).toBeGreaterThan(mfaGateIndex);
+    expect(appSource).toContain("maxSize: MAX_ARCHIVE_CHUNK_BYTES");
+    expect(appSource).toContain("maxSize: 1024 * 1024");
+  });
+});
 
 function canonical(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -184,6 +202,14 @@ describe("durable audit retention archives", () => {
         { cwd: join(import.meta.dir, "../../../.."), encoding: "utf8" },
       );
       expect(verifier.status).toBe(0);
+      const integrityOnly = spawnSync(
+        "node",
+        ["scripts/verify-audit-archive.mjs", join(directory, "manifest.json"), directory],
+        { cwd: join(import.meta.dir, "../../../.."), encoding: "utf8" },
+      );
+      expect(integrityOnly.status).toBe(0);
+      expect(integrityOnly.stderr).toContain("verifies archive integrity only");
+      expect(integrityOnly.stdout).toContain("PASS (integrity only");
       writeFileSync(join(directory, sealed.manifest.chunks[0].file), "tampered\n");
       const tampered = spawnSync(
         "node",

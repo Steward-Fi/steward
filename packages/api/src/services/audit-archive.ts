@@ -11,6 +11,7 @@ export const MAX_AUDIT_RETENTION_DAYS = 3650;
 export const MIN_ARCHIVE_CHUNK_SIZE = 1;
 export const MAX_ARCHIVE_CHUNK_SIZE = 10_000;
 export const MAX_ARCHIVE_EVENTS_PER_RUN = 50_000;
+export const MAX_ARCHIVE_CHUNK_BYTES = 25 * 1024 * 1024;
 
 export interface AuditRetentionPolicyValue {
   tenantId: string;
@@ -650,13 +651,19 @@ export async function createAuditArchive(input: {
       lastRow = rows[rows.length - 1];
       observedCount += rows.length;
       const jsonl = `${rows.map(archiveLine).join("\n")}\n`;
+      const chunkByteLength = new TextEncoder().encode(jsonl).length;
+      if (chunkByteLength > MAX_ARCHIVE_CHUNK_BYTES) {
+        throw new Error(
+          `Audit archive chunk exceeds ${MAX_ARCHIVE_CHUNK_BYTES} bytes; reduce archiveChunkSize`,
+        );
+      }
       const chunk = {
         index,
         fromSeq: cursor,
         toSeq: chunkTo,
         eventCount: rows.length,
         sha256: sha256Hex(jsonl),
-        byteLength: new TextEncoder().encode(jsonl).length,
+        byteLength: chunkByteLength,
         file: `chunk-${String(index).padStart(6, "0")}.jsonl`,
       };
       await tx.execute(sql`
@@ -1069,7 +1076,7 @@ function verifySuppliedArchiveManifest(input: {
       chunk.eventCount < MIN_ARCHIVE_CHUNK_SIZE ||
       chunk.eventCount > MAX_ARCHIVE_CHUNK_SIZE ||
       chunk.byteLength < 1 ||
-      chunk.byteLength > 25 * 1024 * 1024 ||
+      chunk.byteLength > MAX_ARCHIVE_CHUNK_BYTES ||
       !/^[0-9a-f]{64}$/.test(chunk.sha256)
     ) {
       throw new Error(`Restored audit archive manifest chunk ${index} is invalid`);
@@ -1165,7 +1172,7 @@ export async function putAuditArchiveRestoreChunk(input: {
   index: number;
   jsonl: string;
 }): Promise<{ reused: boolean }> {
-  if (new TextEncoder().encode(input.jsonl).length > 25 * 1024 * 1024) {
+  if (new TextEncoder().encode(input.jsonl).length > MAX_ARCHIVE_CHUNK_BYTES) {
     throw new Error("Restored audit archive chunk exceeds 25 MiB");
   }
   return getDb().transaction(async (tx) => {

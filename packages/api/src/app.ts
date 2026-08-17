@@ -40,6 +40,7 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { logger } from "hono/logger";
 import { correlationId } from "./middleware/correlation";
+import { auditOwnerAdminMfaGate } from "./middleware/audit-gate";
 import { idempotencyMiddleware } from "./middleware/idempotency";
 import { securityHeaders } from "./middleware/security-headers";
 import { tenantCors } from "./middleware/tenant-cors";
@@ -50,6 +51,7 @@ import { agentEnrollRoutes } from "./routes/agent-enroll";
 import { agentRoutes, createAgentBatch } from "./routes/agents";
 import { approvalRoutes } from "./routes/approvals";
 import { auditRoutes } from "./routes/audit";
+import { MAX_ARCHIVE_CHUNK_BYTES } from "./services/audit-archive";
 import { authRoutes } from "./routes/auth";
 import { conditionSetRoutes } from "./routes/condition-sets";
 import { dashboardRoutes } from "./routes/dashboard";
@@ -119,13 +121,31 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
   app.use("*", logger());
   app.use("*", correlationId);
 
-  app.use(
-    "*",
-    bodyLimit({
-      maxSize: 1024 * 1024,
-      onError: (c) =>
-        c.json<ApiResponse>({ ok: false, error: "Request body too large (max 1MB)" }, 413),
-    }),
+  // Archive restores are the sole large-body surface. Authenticate and apply
+  // recent-MFA authorization before allowing the larger stream so anonymous,
+  // agent-token, and stale-session callers retain the ordinary 1 MiB ceiling.
+  const archiveRestoreChunkPath = "/audit/archives/:archiveId/restore/chunks/:index";
+  app.use(archiveRestoreChunkPath, (c, next) => tenantAuth(c, next));
+  app.use(archiveRestoreChunkPath, auditOwnerAdminMfaGate);
+
+  const ordinaryBodyLimit = bodyLimit({
+    maxSize: 1024 * 1024,
+    onError: (c) =>
+      c.json<ApiResponse>({ ok: false, error: "Request body too large (max 1MB)" }, 413),
+  });
+  const archiveChunkBodyLimit = bodyLimit({
+    maxSize: MAX_ARCHIVE_CHUNK_BYTES,
+    onError: (c) =>
+      c.json<ApiResponse>({ ok: false, error: "Archive chunk too large (max 25MiB)" }, 413),
+  });
+
+  app.use("*", (c, next) =>
+    c.req.method === "PUT" &&
+    /^\/audit\/archives\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/restore\/chunks\/\d{1,6}$/i.test(
+      c.req.path,
+    )
+      ? archiveChunkBodyLimit(c, next)
+      : ordinaryBodyLimit(c, next),
   );
 
   // ─── Auth middleware per route group ────────────────────────────────────────

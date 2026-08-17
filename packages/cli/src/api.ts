@@ -26,15 +26,24 @@ export class ApiError extends Error {
 }
 
 const API_REQUEST_TIMEOUT_MS = 10_000;
+const API_ARCHIVE_REQUEST_TIMEOUT_MS = 60_000;
 const API_RESPONSE_MAX_BYTES = 1024 * 1024;
+const API_ARCHIVE_CHUNK_MAX_BYTES = 25 * 1024 * 1024;
 
-async function readBoundedResponse(res: Response): Promise<string> {
+function responseLimitLabel(maxBytes: number): string {
+  return maxBytes === API_RESPONSE_MAX_BYTES ? "1 MiB" : `${maxBytes} byte`;
+}
+
+async function readBoundedResponse(
+  res: Response,
+  maxBytes = API_RESPONSE_MAX_BYTES,
+): Promise<string> {
   const declared = res.headers.get("content-length");
   if (declared !== null) {
     const length = Number(declared);
-    if (!Number.isSafeInteger(length) || length < 0 || length > API_RESPONSE_MAX_BYTES) {
+    if (!Number.isSafeInteger(length) || length < 0 || length > maxBytes) {
       void res.body?.cancel().catch(() => {});
-      throw new Error("Steward API response exceeded the 1 MiB limit");
+      throw new Error(`Steward API response exceeded the ${responseLimitLabel(maxBytes)} limit`);
     }
   }
   if (!res.body) return "";
@@ -46,9 +55,9 @@ async function readBoundedResponse(res: Response): Promise<string> {
       const { done, value } = await reader.read();
       if (done) break;
       total += value.byteLength;
-      if (total > API_RESPONSE_MAX_BYTES) {
+      if (total > maxBytes) {
         void reader.cancel().catch(() => {});
-        throw new Error("Steward API response exceeded the 1 MiB limit");
+        throw new Error(`Steward API response exceeded the ${responseLimitLabel(maxBytes)} limit`);
       }
       chunks.push(value);
     }
@@ -149,8 +158,16 @@ export class StewardApiClient {
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
     else if (this.tenantKey) headers["X-Steward-Key"] = this.tenantKey;
     if (this.tenantId) headers["X-Steward-Tenant"] = this.tenantId;
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, { method: "GET", headers });
-    const text = await res.text();
+    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(API_ARCHIVE_REQUEST_TIMEOUT_MS),
+      redirect: "error",
+    });
+    const text = await readBoundedResponse(
+      res,
+      res.ok ? API_ARCHIVE_CHUNK_MAX_BYTES : API_RESPONSE_MAX_BYTES,
+    );
     if (!res.ok) throw new ApiError(`GET ${path} failed with HTTP ${res.status}`, res.status, text);
     return text;
   }
@@ -161,6 +178,9 @@ export class StewardApiClient {
     body: string,
     contentType: string,
   ): Promise<T> {
+    if (new TextEncoder().encode(body).length > API_ARCHIVE_CHUNK_MAX_BYTES) {
+      throw new Error(`Steward API request exceeded the ${API_ARCHIVE_CHUNK_MAX_BYTES} byte limit`);
+    }
     const headers: Record<string, string> = {
       Accept: "application/json",
       "Content-Type": contentType,
@@ -168,8 +188,14 @@ export class StewardApiClient {
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
     else if (this.tenantKey) headers["X-Steward-Key"] = this.tenantKey;
     if (this.tenantId) headers["X-Steward-Tenant"] = this.tenantId;
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, { method, headers, body });
-    const text = await res.text();
+    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      method,
+      headers,
+      body,
+      signal: AbortSignal.timeout(API_ARCHIVE_REQUEST_TIMEOUT_MS),
+      redirect: "error",
+    });
+    const text = await readBoundedResponse(res);
     const parsed = text ? safeJson(text) : null;
     if (!res.ok) {
       const message =

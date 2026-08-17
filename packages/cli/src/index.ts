@@ -16,6 +16,39 @@ type CommandContext = {
   format: OutputFormat;
 };
 
+type ArchiveChunkReference = {
+  index: number;
+  file: string;
+  sha256?: string;
+  byteLength?: number;
+};
+
+export function assertSafeArchiveChunks(
+  chunks: unknown,
+  requireIntegrityFields = false,
+): asserts chunks is ArchiveChunkReference[] {
+  if (!Array.isArray(chunks) || chunks.length === 0 || chunks.length > 50_000) {
+    throw new Error("Archive manifest has an invalid chunk list");
+  }
+  for (let index = 0; index < chunks.length; index++) {
+    const chunk = chunks[index] as Partial<ArchiveChunkReference> | null;
+    const expectedFile = `chunk-${String(index).padStart(6, "0")}.jsonl`;
+    if (
+      !chunk ||
+      chunk.index !== index ||
+      chunk.file !== expectedFile ||
+      (requireIntegrityFields && (chunk.sha256 === undefined || chunk.byteLength === undefined)) ||
+      (chunk.sha256 !== undefined && !/^[0-9a-f]{64}$/.test(chunk.sha256)) ||
+      (chunk.byteLength !== undefined &&
+        (!Number.isSafeInteger(chunk.byteLength) ||
+          chunk.byteLength < 1 ||
+          chunk.byteLength > 25 * 1024 * 1024))
+    ) {
+      throw new Error(`Archive manifest chunk ${index} is invalid or unsafe`);
+    }
+  }
+}
+
 const HELP = `steward CLI
 
 Usage:
@@ -259,6 +292,7 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
     if (archive.archiveId !== archive.manifest.archiveId) {
       throw new Error("Archive id does not match the signed manifest");
     }
+    assertSafeArchiveChunks(archive.manifest.chunks, true);
     const started = await ctx.api.request("POST", "/audit/archives/restore", {
       manifest: archive.manifest,
       manifestSha256: archive.manifestSha256,
@@ -289,7 +323,7 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
     const chunkSize = intFlag(ctx.flags, "chunk-size");
     const archive = await ctx.api.request<{
       archiveId: string;
-      manifest: { chunks: Array<{ index: number; file: string; sha256: string }> };
+      manifest: { chunks: ArchiveChunkReference[] };
       manifestSha256: string;
       signature: string;
       publicKey: string;
@@ -297,6 +331,7 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
       sealedAt: string;
       prunedAt: string | null;
     }>("POST", "/audit/archives", { fromSeq, toSeq, chunkSize });
+    assertSafeArchiveChunks(archive.manifest.chunks, true);
     mkdirSync(out, { recursive: true, mode: 0o700 });
     const manifestPath = join(out, "manifest.json");
     if (existsSync(manifestPath)) {
@@ -324,6 +359,15 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
       const jsonl = await ctx.api.requestText(
         `/audit/archives/${encodeURIComponent(archive.archiveId)}/chunks/${chunk.index}`,
       );
+      const bytes = new TextEncoder().encode(jsonl);
+      if (
+        chunk.byteLength === undefined ||
+        bytes.length !== chunk.byteLength ||
+        chunk.sha256 === undefined ||
+        createHash("sha256").update(bytes).digest("hex") !== chunk.sha256
+      ) {
+        throw new Error(`Downloaded chunk ${chunk.file} does not match the signed manifest`);
+      }
       writeFileSync(path, jsonl, { mode: 0o600, flag: "wx" });
     }
     if (boolFlag(ctx.flags, "verify")) {

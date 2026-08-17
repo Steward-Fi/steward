@@ -50,6 +50,11 @@ if (fingerprintFlag >= 0 && !/^[0-9a-f]{64}$/i.test(expectedFingerprint ?? "")) 
 if (keyIdFlag >= 0 && !/^[A-Za-z0-9_.:-]{1,64}$/.test(expectedKeyId ?? "")) {
   fail("expected key id is invalid");
 }
+if (!expectedFingerprint) {
+  console.error(
+    "WARNING: no trusted key fingerprint supplied; this verifies archive integrity only, not signer identity.",
+  );
+}
 let envelope;
 try {
   envelope = JSON.parse(readFileSync(manifestPath, "utf8"));
@@ -133,7 +138,7 @@ if (observed !== manifest.eventCount || expectedSeq - 1 !== manifest.toSeq) {
 }
 if (previousHmac !== manifest.endHmac) fail("archive end HMAC does not match manifest");
 
-console.log("PASS");
+console.log(expectedFingerprint ? "PASS" : "PASS (integrity only; signer identity is untrusted)");
 console.log(`  archive: ${manifest.archiveId}`);
 console.log(`  tenant:  ${manifest.tenantId}`);
 console.log(`  events:  ${manifest.eventCount} (seq ${manifest.fromSeq}..${manifest.toSeq})`);
