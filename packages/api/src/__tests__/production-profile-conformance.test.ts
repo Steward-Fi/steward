@@ -241,7 +241,17 @@ describe("#220 executable provider profile conformance", () => {
     const built = buildFromProductionSpec(spec, {
       ...FIXTURES[GITHUB_PROVIDER_ACTION_PROFILE].args,
     });
-    for (const segment of ["%252e%252e", "%252f", "%255c"]) {
+    for (const segment of [
+      ".",
+      "..",
+      "a\\b",
+      "%252e%252e",
+      "%252f",
+      "%255c",
+      "%2525252e%2525252e",
+      "%2525252f",
+      "%2525255c",
+    ]) {
       expect(
         inspectProviderProfileConformance(spec.profile, {
           ...built.action,
@@ -249,6 +259,22 @@ describe("#220 executable provider profile conformance", () => {
         }),
       ).toContain("path-traversal");
     }
+  });
+
+  it("mutation proof catches invalid encoding hidden by an outer encoding", () => {
+    const spec = PRODUCTION_PROVIDER_PROFILE_SPECS.find(
+      (candidate) => candidate.profile === GITHUB_PROVIDER_ACTION_PROFILE,
+    );
+    if (!spec) throw new Error("github production profile missing");
+    const built = buildFromProductionSpec(spec, {
+      ...FIXTURES[GITHUB_PROVIDER_ACTION_PROFILE].args,
+    });
+    expect(
+      inspectProviderProfileConformance(spec.profile, {
+        ...built.action,
+        normalizedPath: "/repos/%25ZZ/hello/issues",
+      }),
+    ).toContain("path-encoding-invalid");
   });
 
   it("mutation proof catches duplicate query/header names and unsupported content type", () => {
