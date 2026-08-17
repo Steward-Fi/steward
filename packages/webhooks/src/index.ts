@@ -1,4 +1,4 @@
-export { WebhookDispatcher } from "./dispatcher";
+export { WebhookDispatcher, WebhookValidationError } from "./dispatcher";
 export type {
   PersistentQueueOptions,
   PersistentQueueStats as PersistentStats,

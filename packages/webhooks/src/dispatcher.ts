@@ -213,7 +213,7 @@ export class WebhookValidationError extends Error {
 }
 
 function assertPublicWebhookHostname(hostname: string): void {
-  if (!hostname) throw new Error("Webhook URL must include a host");
+  if (!hostname) throw new WebhookValidationError("Webhook URL must include a host");
   if (
     hostname === "localhost" ||
     hostname.endsWith(".localhost") ||
@@ -238,7 +238,7 @@ function assertPublicAddress(address: string, family?: number): void {
     (family === 6 && isNonPublicIpv6(address)) ||
     (family !== 4 && family !== 6 && (isNonPublicIpv4(address) || isNonPublicIpv6(address)))
   ) {
-    throw new Error("Webhook host must resolve to a public address");
+    throw new WebhookValidationError("Webhook host must resolve to a public address");
   }
 }
 
@@ -301,12 +301,18 @@ async function postWebhook(
     lookup?: LookupFunction;
   },
 ): Promise<{ status: number; ok: boolean }> {
-  const parsed = new URL(url);
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    // An unparseable URL can never succeed on retry (SEC-179).
+    throw new WebhookValidationError("Webhook URL is not a valid URL");
+  }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new Error("Webhook URL must use https");
+    throw new WebhookValidationError("Webhook URL must use https");
   }
   if (parsed.protocol === "http:" && !init.allowInsecureHttp) {
-    throw new Error("Webhook URL must use https");
+    throw new WebhookValidationError("Webhook URL must use https");
   }
 
   const transport =
@@ -517,7 +523,11 @@ export class WebhookDispatcher {
         }
       } catch (error) {
         lastError = error instanceof Error ? error.message : "Unknown webhook delivery error";
-        if (attempts > this.maxRetries) {
+        // SEC-179: a deterministic validation rejection (bad scheme, non-public
+        // host/address, unparseable URL) can never succeed on retry — stop
+        // immediately instead of burning maxRetries+1 attempts with backoff and
+        // repeated DNS lookups.
+        if (error instanceof WebhookValidationError || attempts > this.maxRetries) {
           break;
         }
       }
