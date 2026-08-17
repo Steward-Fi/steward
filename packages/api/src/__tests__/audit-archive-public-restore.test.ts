@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { createHash, randomUUID, sign } from "node:crypto";
 import { signAccessToken } from "@stwd/auth";
 import { closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
@@ -22,6 +23,7 @@ const OWNER = "21600000-0000-4000-8000-000000000001";
 const SIGNING_KEY = "33".repeat(32);
 const SIGNING_KEY_ID = "archive-public-restore-v1";
 let app: Hono<{ Variables: AppVariables }>;
+const ISOLATED_CHILD = "STEWARD_AUDIT_PUBLIC_RESTORE_ISOLATED_CHILD";
 
 function canonical(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -86,7 +88,9 @@ async function headers(contentType = "application/json") {
   };
 }
 
-describe("audit archive restore through the public app", () => {
+const publicRestoreTests = process.env[ISOLATED_CHILD] === "true" ? describe : describe.skip;
+
+publicRestoreTests("audit archive restore through the public app", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY = "audit-public-restore-hmac-0123456789abcdef";
@@ -188,3 +192,19 @@ describe("audit archive restore through the public app", () => {
     });
   });
 });
+
+if (process.env[ISOLATED_CHILD] !== "true") {
+  test("runs the public restore app against isolated process globals", () => {
+    const result = spawnSync(process.execPath, ["test", "--timeout", "120000", import.meta.path], {
+      encoding: "utf8",
+      env: { ...process.env, [ISOLATED_CHILD]: "true" },
+      timeout: 120_000,
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      throw new Error(
+        `isolated public restore test failed with status ${result.status}\n${result.stdout}\n${result.stderr}`,
+      );
+    }
+  });
+}
