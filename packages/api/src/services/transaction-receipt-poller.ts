@@ -8,6 +8,13 @@ import { dispatchWebhook } from "./webhook-dispatch";
 const DEFAULT_RECEIPT_POLL_INTERVAL_MS = 60_000;
 const DEFAULT_RECEIPT_POLL_BATCH_SIZE = 50;
 const DEFAULT_MIN_CONFIRMATIONS = 1;
+// SEC-152: 1-block finality is reorg-unsafe for high-value mainnet flows. When
+// the operator has not set STEWARD_TRANSACTION_RECEIPT_CONFIRMATIONS, these
+// per-chain defaults apply (Ethereum L1 mainnet waits 12); everything else
+// falls back to DEFAULT_MIN_CONFIRMATIONS. An explicit env value always wins.
+const DEFAULT_MIN_CONFIRMATIONS_BY_CHAIN: Record<number, number> = {
+  1: 12, // Ethereum L1 mainnet
+};
 const DEFAULT_STILL_PENDING_AFTER_MS = 10 * 60_000;
 const DEFAULT_STILL_PENDING_INTERVAL_MS = 10 * 60_000;
 
@@ -68,6 +75,12 @@ export function classifyReceiptLifecycle(
 ): "transaction.confirmed" | "transaction.execution_reverted" | null {
   if (confirmations < minConfirmations) return null;
   return status === "success" ? "transaction.confirmed" : "transaction.execution_reverted";
+}
+
+/** Confirmation threshold for a chain: explicit override wins, else the
+ * per-chain default (SEC-152), else the global fallback. */
+export function minConfirmationsForChain(chainId: number, override?: number): number {
+  return override ?? DEFAULT_MIN_CONFIRMATIONS_BY_CHAIN[chainId] ?? DEFAULT_MIN_CONFIRMATIONS;
 }
 
 function actionReferenceId(payload: unknown): string | null {
@@ -300,7 +313,8 @@ async function finalizeReceipt(
 
 async function pollOneTransaction(
   row: PollableTransaction,
-  options: Required<TransactionReceiptPollerOptions>,
+  options: Omit<Required<TransactionReceiptPollerOptions>, "minConfirmations"> &
+    Pick<TransactionReceiptPollerOptions, "minConfirmations">,
 ): Promise<"confirmed" | "reverted" | "pending" | "skipped"> {
   if (!isHexHash(row.txHash)) return "skipped";
   const rpcUrl = resolveEvmReceiptRpcUrl(row.chainId);
@@ -343,7 +357,7 @@ async function pollOneTransaction(
   const eventType = classifyReceiptLifecycle(
     receipt.status,
     confirmations,
-    options.minConfirmations,
+    minConfirmationsForChain(row.chainId, options.minConfirmations),
   );
   if (!eventType) return "skipped";
 
@@ -360,9 +374,11 @@ export async function pollBroadcastTransactionReceipts(
   pending: number;
   skipped: number;
 }> {
-  const resolvedOptions: Required<TransactionReceiptPollerOptions> = {
+  const resolvedOptions = {
     batchSize: options.batchSize ?? DEFAULT_RECEIPT_POLL_BATCH_SIZE,
-    minConfirmations: options.minConfirmations ?? DEFAULT_MIN_CONFIRMATIONS,
+    // Left undefined when unset so pollOneTransaction applies the per-chain
+    // default (SEC-152); an explicit value applies to every chain.
+    minConfirmations: options.minConfirmations,
     stillPendingAfterMs: options.stillPendingAfterMs ?? DEFAULT_STILL_PENDING_AFTER_MS,
     stillPendingIntervalMs: options.stillPendingIntervalMs ?? DEFAULT_STILL_PENDING_INTERVAL_MS,
   };
@@ -416,10 +432,16 @@ export function startTransactionReceiptPollingScheduler(): () => void {
     process.env.STEWARD_TRANSACTION_RECEIPT_POLL_BATCH_SIZE,
     DEFAULT_RECEIPT_POLL_BATCH_SIZE,
   );
-  const minConfirmations = parsePositiveInt(
-    process.env.STEWARD_TRANSACTION_RECEIPT_CONFIRMATIONS,
-    DEFAULT_MIN_CONFIRMATIONS,
-  );
+  // SEC-152: when unset (or invalid), leave undefined so each chain's default
+  // applies (e.g. 12 for Ethereum L1 mainnet) instead of forcing 1 everywhere.
+  const confirmationsEnv = process.env.STEWARD_TRANSACTION_RECEIPT_CONFIRMATIONS?.trim();
+  const parsedConfirmations = confirmationsEnv ? Number(confirmationsEnv) : undefined;
+  const minConfirmations =
+    parsedConfirmations !== undefined &&
+    Number.isInteger(parsedConfirmations) &&
+    parsedConfirmations > 0
+      ? parsedConfirmations
+      : undefined;
   const stillPendingAfterMs = parsePositiveInt(
     process.env.STEWARD_TRANSACTION_STILL_PENDING_AFTER_MS,
     DEFAULT_STILL_PENDING_AFTER_MS,
