@@ -3017,6 +3017,7 @@ function auditPaths(prefix = ""): Record<string, unknown> {
               "checkpointAtHead",
               "checkpointSeq",
               "chainHeadSeq",
+              "governedRoutes",
             ],
             properties: {
               valid: { type: "boolean" },
@@ -3026,6 +3027,16 @@ function auditPaths(prefix = ""): Record<string, unknown> {
               checkpointAtHead: { type: "boolean" },
               checkpointSeq: { type: ["integer", "null"] },
               chainHeadSeq: { type: ["integer", "null"] },
+              governedRoutes: {
+                type: "object",
+                required: ["governedRoutes", "nullOperationRoutes", "dualModeRoutes", "ok"],
+                properties: {
+                  governedRoutes: { type: "integer" },
+                  nullOperationRoutes: { type: "integer" },
+                  dualModeRoutes: { type: "integer" },
+                  ok: { type: "boolean" },
+                },
+              },
             },
           }),
           ...errorResponses(),

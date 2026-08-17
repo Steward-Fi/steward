@@ -151,7 +151,6 @@ export async function runDoctor(
     for (const name of [
       "ops:migration-tip",
       "ops:redis-reachability",
-      "ops:governed-route-inventory",
       "ops:proxy-clock-skew",
       "ops:api-database-clock-skew",
     ]) {
@@ -168,7 +167,15 @@ export async function runDoctor(
       checkpointAtHead?: unknown;
       checkpointSeq?: unknown;
       chainHeadSeq?: unknown;
+      governedRoutes?: ReadyCheck;
     }>("GET", "/audit/integrity");
+    checks.push({
+      name: "ops:governed-route-inventory",
+      ok:
+        integrity.governedRoutes?.ok === true ||
+        (!options.strict && integrity.governedRoutes?.ok !== false),
+      detail: operationalDetail(integrity.governedRoutes, "diagnostic unavailable"),
+    });
     checks.push({
       name: "ops:audit-checkpoint-integrity",
       ok: integrity.valid === true || !options.strict,
@@ -182,6 +189,11 @@ export async function runDoctor(
       }),
     });
   } catch (error) {
+    checks.push({
+      name: "ops:governed-route-inventory",
+      ok: !options.strict,
+      detail: (error as Error).message,
+    });
     checks.push({
       name: "ops:audit-checkpoint-integrity",
       ok: !options.strict,
@@ -202,7 +214,6 @@ function appendReadyChecks(
   for (const [name, source] of [
     ["ops:migration-tip", readyChecks.migrations],
     ["ops:redis-reachability", readyChecks.redis],
-    ["ops:governed-route-inventory", readyChecks.governedRoutes],
     ["ops:proxy-clock-skew", readyChecks.proxyClock],
   ] as const) {
     checks.push({

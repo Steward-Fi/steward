@@ -12,6 +12,8 @@ export type GovernedRouteInventory = {
   ok: boolean;
 };
 
+type RouteReadExecutor = Pick<ReturnType<typeof getDb>, "execute">;
+
 type InventoryRoute = {
   tenant_id: string;
   agent_id: string | null;
@@ -42,12 +44,15 @@ function authorityRoutesOverlap(a: InventoryRoute, b: InventoryRoute): boolean {
 }
 
 /** Runtime doctor using the same wildcard semantics as proxy matching. */
-export async function inspectGovernedRoutes(): Promise<GovernedRouteInventory> {
+export async function inspectGovernedRoutes(
+  tenantId: string,
+  executor: RouteReadExecutor = getDb(),
+): Promise<GovernedRouteInventory> {
   const routes = rowsFromExecute<InventoryRoute>(
-    await getDb().execute(sql`
+    await executor.execute(sql`
       SELECT tenant_id, agent_id, authority_mode, provider_operation_id,
              host_pattern, path_pattern, method
-      FROM secret_routes WHERE enabled = TRUE
+      FROM secret_routes WHERE enabled = TRUE AND tenant_id = ${tenantId}
     `),
   );
   const governed = routes.filter((route) => route.authority_mode === "governed_v2");

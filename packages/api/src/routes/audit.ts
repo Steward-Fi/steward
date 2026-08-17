@@ -30,6 +30,7 @@ import {
   db,
   transactions,
 } from "../services/context";
+import { inspectGovernedRoutes } from "../services/governed-route-inventory";
 
 export const auditRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -840,6 +841,7 @@ auditRoutes.get("/integrity", async (c) => {
       .where(eq(auditCheckpoints.tenantId, tenantId))
       .orderBy(desc(auditCheckpoints.seq), desc(auditCheckpoints.id))
       .limit(1);
+    const governedRoutes = await inspectGovernedRoutes(tenantId, tx);
 
     let checkpointValid = false;
     let checkpointAtHead = false;
@@ -868,6 +870,7 @@ auditRoutes.get("/integrity", async (c) => {
       bounded: true,
       eventsInspected: chain.valid ? chain.count : maxEvents,
       maxEvents,
+      governedRoutes,
       ...(limitExceeded
         ? {
             error:

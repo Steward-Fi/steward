@@ -61,6 +61,19 @@ export type { AuditActorType as ActorType } from "@stwd/db";
  * their existing typing when an executor is supplied.
  */
 export type AuditReadExecutor = Pick<ReturnType<typeof getDb>, "execute">;
+
+/** Build the high-water aggregate read, bounded when doctor supplies maxRows. */
+export function auditRowAggregateQuery(tenantId: string, genesisSeq: number, maxRows?: number) {
+  return maxRows === undefined
+    ? sql`SELECT MAX(seq) AS max_seq, COUNT(*) AS cnt FROM audit_events WHERE tenant_id = ${tenantId} AND seq >= ${genesisSeq}`
+    : sql`SELECT MAX(seq) AS max_seq, COUNT(*) AS cnt
+          FROM (
+            SELECT seq FROM audit_events
+            WHERE tenant_id = ${tenantId} AND seq >= ${genesisSeq}
+            ORDER BY seq ASC
+            LIMIT ${maxRows + 1}
+          ) AS bounded_audit_events`;
+}
 // The tamper-evident audit-chain WRITE core (append/transaction primitives, the
 // HMAC key handling, and metadata redaction) now lives in `@stwd/db` so the
 // proxy package can extend the chain atomically without importing `@stwd/api`
@@ -277,13 +290,14 @@ export async function verifyAuditChain(
     const expectedSeqHwm = Number(head.expected_seq);
     const expectedCount = Number(head.expected_count);
     const aggRows = rowsFromExecute<{ max_seq: number | string | null; cnt: number | string }>(
-      await db.execute(
-        sql`SELECT MAX(seq) AS max_seq, COUNT(*) AS cnt FROM audit_events WHERE tenant_id = ${tenantId} AND seq >= ${genesisSeq}`,
-      ),
+      await db.execute(auditRowAggregateQuery(tenantId, genesisSeq, maxRows)),
     );
     const actualMaxSeq = aggRows[0]?.max_seq != null ? Number(aggRows[0].max_seq) : 0;
     const actualCount = aggRows[0]?.cnt != null ? Number(aggRows[0].cnt) : 0;
     const expectedLiveCount = expectedCount - (genesisSeq - 1);
+    if (maxRows !== undefined && actualCount > maxRows) {
+      return { valid: false, brokenAt: genesisSeq + maxRows, limitExceeded: true };
+    }
     // Missing newest rows (tail truncation) or whole-chain deletion: the stored
     // head outranks / outcounts what survives on disk. Point brokenAt at the
     // first missing seq.

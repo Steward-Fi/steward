@@ -67868,7 +67868,8 @@
                     "checkpointValid",
                     "checkpointAtHead",
                     "checkpointSeq",
-                    "chainHeadSeq"
+                    "chainHeadSeq",
+                    "governedRoutes"
                   ],
                   "properties": {
                     "valid": {
@@ -67897,6 +67898,29 @@
                         "integer",
                         "null"
                       ]
+                    },
+                    "governedRoutes": {
+                      "type": "object",
+                      "required": [
+                        "governedRoutes",
+                        "nullOperationRoutes",
+                        "dualModeRoutes",
+                        "ok"
+                      ],
+                      "properties": {
+                        "governedRoutes": {
+                          "type": "integer"
+                        },
+                        "nullOperationRoutes": {
+                          "type": "integer"
+                        },
+                        "dualModeRoutes": {
+                          "type": "integer"
+                        },
+                        "ok": {
+                          "type": "boolean"
+                        }
+                      }
                     }
                   }
                 }

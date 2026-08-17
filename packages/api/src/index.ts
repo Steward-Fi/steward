@@ -26,7 +26,6 @@ import {
   RATE_LIMIT_MAX_REQUESTS,
   RATE_LIMIT_WINDOW_MS,
 } from "./services/context";
-import { inspectGovernedRoutes } from "./services/governed-route-inventory";
 import { startRetentionScheduler } from "./services/retention";
 import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
 import { configuredVaultStartupLogLine, getConfiguredVault } from "./services/vault-factory";
@@ -172,16 +171,6 @@ app.get("/ready", async (c) => {
         : { ok: false, required: false, error: "Redis is not configured (optional mode)" };
   } catch (err: unknown) {
     checks.redis = { ok: false, error: err instanceof Error ? err.message : "unknown" };
-  }
-
-  try {
-    const inventory = await inspectGovernedRoutes();
-    checks.governedRoutes = { ok: inventory.ok, detail: inventory };
-  } catch (err: unknown) {
-    checks.governedRoutes = {
-      ok: false,
-      error: err instanceof Error ? err.message : "unknown",
-    };
   }
 
   const proxyUrl = process.env.STEWARD_PROXY_URL?.replace(/\/+$/, "");

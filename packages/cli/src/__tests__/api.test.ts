@@ -86,7 +86,7 @@ describe("StewardApiClient", () => {
     ]) {
       const client = new StewardApiClient({
         baseUrl: "https://api.example.test",
-        fetchImpl: (async () => response) as typeof fetch,
+        fetchImpl: (async () => response) as unknown as typeof fetch,
       });
       await expect(client.request("GET", "/health")).rejects.toThrow("exceeded the 1 MiB limit");
     }

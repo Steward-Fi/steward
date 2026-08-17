@@ -19,10 +19,6 @@ function stubApi(): StewardApiClient {
           checks: {
             migrations: { ok: true, detail: { expected: "journal-tip" } },
             redis: { ok: true },
-            governedRoutes: {
-              ok: true,
-              detail: { governedRoutes: 1, nullOperationRoutes: 0, dualModeRoutes: 0 },
-            },
             proxyClock: { ok: true, detail: { clockSkewMs: 2 } },
             database: {
               ok: true,
@@ -40,6 +36,10 @@ function stubApi(): StewardApiClient {
           checkpointAtHead: true,
           checkpointSeq: 4,
           chainHeadSeq: 4,
+          governedRoutes: {
+            ok: true,
+            detail: { governedRoutes: 1, nullOperationRoutes: 0, dualModeRoutes: 0 },
+          },
         };
       }
       return { ok: true };
@@ -208,7 +208,6 @@ describe("operator-integrity diagnostics", () => {
             checks: {
               migrations: { ok: false, detail: { expected: "0085", actual: "0084" } },
               redis: { ok: false, required: false },
-              governedRoutes: { ok: true },
               proxyClock: { ok: false, required: false },
               database: {
                 ok: true,
@@ -217,7 +216,7 @@ describe("operator-integrity diagnostics", () => {
             },
           });
         }
-        return { valid: true };
+        return { valid: true, governedRoutes: { ok: true } };
       },
     } as unknown as StewardApiClient;
     const result = await runDoctor({ strict: true, api });
@@ -273,7 +272,6 @@ describe("operator-integrity diagnostics", () => {
             checks: {
               migrations: { ok: false, detail: { expected: "0084", actual: "0083" } },
               redis: { ok: false, error: "unreachable" },
-              governedRoutes: { ok: false, detail: { nullOperationRoutes: 1 } },
               proxyClock: { ok: false, detail: { clockSkewMs: 60_000 } },
               database: {
                 ok: false,
@@ -289,6 +287,7 @@ describe("operator-integrity diagnostics", () => {
             checkpointPresent: true,
             checkpointValid: true,
             checkpointAtHead: false,
+            governedRoutes: { ok: false, detail: { nullOperationRoutes: 1 } },
           };
         }
         return { ok: true };
