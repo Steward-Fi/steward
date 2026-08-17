@@ -2425,10 +2425,11 @@ class ProviderActionService {
           "execution",
         ),
       );
+      const code = primaryPolicyDenialReason(policy.doc);
       return {
         ok: false,
-        code: policy.doc.reasonCodes[0] ?? "POLICY_HARD_DENY",
-        httpStatus: policy.doc.reasonCodes[0] === AGENT_BUDGET_UNAVAILABLE ? 503 : 403,
+        code,
+        httpStatus: code === AGENT_BUDGET_UNAVAILABLE ? 503 : 403,
         decision: policy.doc,
         decisionHash: sha256HexPrefixed(jcsStringify(policy.doc)),
         exhaustedBudgets: policy.exhaustedBudgets,
