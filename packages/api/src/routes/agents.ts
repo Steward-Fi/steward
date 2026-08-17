@@ -1664,8 +1664,10 @@ agentRoutes.get("/:agentId/policy", async (c) => {
 
 agentRoutes.put("/:agentId/policy", async (c) => {
   // SEC-208: two write paths into the trade-policy table —
-  //   1. agent token (self-update): TIGHTEN-ONLY, enforced below after
-  //      validation via policyLooseningViolation.
+  //   1. agent token (self-update): TIGHTEN-ONLY against the existing row,
+  //      enforced below after validation via policyLooseningViolation, and
+  //      forbidden from creating the initial row (creation activates the
+  //      trade-route ceilings, so it is reserved for path 2).
   //   2. human owner/admin session with recent MFA: unrestricted (subject to
   //      the platform ceilings), restoring the human-ceiling administration
   //      path this route previously lacked.
@@ -1765,6 +1767,21 @@ agentRoutes.put("/:agentId/policy", async (c) => {
   // SEC-208: agent self-updates are tighten-only — reject any loosening here
   // (fail closed, AFTER input validation so malformed bodies still 400).
   if (isAgentSelfUpdate) {
+    // SEC-208 residual: tighten-only constrains updates against the CURRENT
+    // row, but a policy-less agent could still CREATE its initial policy at
+    // full platform defaults — activating trade ceilings (the trade route
+    // fails closed when the row is absent) with no human approval. Initial
+    // creation is therefore reserved for the human owner/admin+MFA path.
+    if (!existing) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            "Initial trade policy creation requires an owner/admin session with recent MFA",
+        },
+        403,
+      );
+    }
     const loosening = policyLooseningViolation(before, {
       dailyCap: dailyCapValue,
       perOrderCap: perOrderCapValue,
