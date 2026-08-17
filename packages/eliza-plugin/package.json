@@ -16,7 +16,8 @@
     }
   },
   "dependencies": {
-    "@stwd/sdk": "^0.10.0"
+    "@stwd/sdk": "^0.10.0",
+    "@stwd/shared": "workspace:*"
   },
   "peerDependencies": {
     "@elizaos/core": ">=2.0.0-alpha.50"

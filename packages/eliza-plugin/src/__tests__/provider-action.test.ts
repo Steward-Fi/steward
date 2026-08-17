@@ -82,6 +82,39 @@ describe("STEWARD_PROVIDER_ACTION", () => {
     expect(invokeProviderAction).not.toHaveBeenCalled();
   });
 
+  it("rejects the full nested credential-key vocabulary without false negatives", async () => {
+    const invokeProviderAction = vi.fn();
+    const credentialKeys = [
+      "password",
+      "databasePassword",
+      "passphrase",
+      "wallet_passphrase",
+      "auth",
+      "clientSecretValue",
+      "oauth-client-secret-value",
+      "cookieHeader",
+      "session_cookie_header",
+    ];
+    for (const key of credentialKeys) {
+      const result = await providerAction.handler(
+        runtime({ isConnected: () => true, invokeProviderAction }),
+        { id: `message-${key}` } as any,
+        undefined,
+        {
+          parameters: {
+            workspaceId: "workspace-a",
+            providerAccountId: "account-a",
+            operationKey: "github.issue.list",
+            arguments: { public: [{ nested: { [key]: "must-not-forward" } }] },
+          },
+        },
+      );
+      expect(result.success, key).toBe(false);
+      expect(result.error, key).toContain("credentials");
+    }
+    expect(invokeProviderAction).not.toHaveBeenCalled();
+  });
+
   it("derives stable retry identity from message and canonical public parameters", async () => {
     const invokeProviderAction = vi.fn().mockResolvedValue({
       id: ACTION_ID,

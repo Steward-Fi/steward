@@ -18,6 +18,7 @@ export * from "./provider-execution-auth.js";
 export { describeThrown, UNPRINTABLE_THROWN_VALUE } from "./safe-error.js";
 export * from "./secret-route-matching.js";
 export * from "./security-surface.js";
+export * from "./sensitive-keys.js";
 // ─── Token Registry & Price Oracle ───
 export * from "./tokens.js";
 // ─── Per-request app context shape (shared so plugins can type routes) ───

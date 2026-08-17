@@ -8,19 +8,8 @@ import type {
   State,
 } from "@elizaos/core";
 import type { ProviderActionInvokeInput } from "@stwd/sdk";
+import { containsSensitiveCredentialKey } from "@stwd/shared";
 import type { StewardService } from "../services/StewardService.js";
-
-const CREDENTIAL_KEY =
-  /(?:authorization|cookie|token|secret|credential|api[-_]?key|private[-_]?key)$/i;
-
-function containsCredentialKey(value: unknown, depth = 0): boolean {
-  if (depth > 20) return true;
-  if (Array.isArray(value)) return value.some((item) => containsCredentialKey(item, depth + 1));
-  if (!value || typeof value !== "object") return false;
-  return Object.entries(value).some(
-    ([key, nested]) => CREDENTIAL_KEY.test(key) || containsCredentialKey(nested, depth + 1),
-  );
-}
 
 function canonicalize(value: unknown, ancestors = new Set<object>()): unknown {
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
@@ -141,13 +130,6 @@ export const providerAction: Action = {
         text: "A governed provider action needs a workspace, provider account, operation, and public arguments.",
       };
     }
-    if (containsCredentialKey(params.arguments)) {
-      return {
-        success: false,
-        error: "provider credentials must not be supplied in action arguments",
-        text: "Provider credentials stay in Steward and cannot be passed by the agent.",
-      };
-    }
     try {
       canonicalize(params.arguments);
     } catch {
@@ -155,6 +137,13 @@ export const providerAction: Action = {
         success: false,
         error: "provider action arguments must be finite, plain JSON values",
         text: "Provider action was not submitted because its public arguments were not plain JSON values.",
+      };
+    }
+    if (containsSensitiveCredentialKey(params.arguments)) {
+      return {
+        success: false,
+        error: "provider credentials must not be supplied in action arguments",
+        text: "Provider credentials stay in Steward and cannot be passed by the agent.",
       };
     }
 
