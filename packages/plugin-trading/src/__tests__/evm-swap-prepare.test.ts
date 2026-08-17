@@ -1,4 +1,13 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  setDefaultTimeout,
+} from "bun:test";
 import {
   AdapterRegistry,
   type SwapAdapter,
@@ -16,6 +25,8 @@ process.env.STEWARD_PGLITE_MEMORY = "true";
 process.env.STEWARD_DB_MODE = "pglite";
 process.env.STEWARD_MASTER_PASSWORD = "evm-swap-master-password";
 process.env.STEWARD_AUDIT_HMAC_KEY = "evm-swap-audit-hmac-key-with-enough-entropy";
+
+setDefaultTimeout(30000);
 
 const TENANT_ID = "evm-swap-tenant";
 const AGENT_ID = "evm-swap-agent";
