@@ -29,21 +29,20 @@ import {
   providerGrants,
   providerOperations,
   secretRoutes,
+  secrets,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { parseGovernedCanonicalActionForDispatch } from "@stwd/proxy/src/handlers/governed-execution";
 import {
   GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
   GITHUB_PROVIDER_ACTION_PROFILE,
-  jcsStringify,
   REGISTERED_PROFILES,
   X_PROVIDER_ACTION_PROFILE,
 } from "@stwd/shared";
-import { and, eq } from "drizzle-orm";
+import { KeyStore } from "@stwd/vault";
+import { and, eq, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { exportJWK, generateKeyPair, type KeyLike, SignJWT } from "jose";
 import type { AppVariables } from "../services/context";
-import { getProviderCase, getProviderCaseEvidence } from "../services/provider-case";
 
 const KID = "production-profile-boundary-kid";
 setDefaultTimeout(120_000);
@@ -56,6 +55,8 @@ let wipeCase: CaseFixture["wipeCase"];
 let app: Hono<{ Variables: AppVariables }>;
 let jwksServer: Server;
 let agentPrivateKey: KeyLike;
+let dispatchGovernedExecution: typeof import("@stwd/proxy/src/handlers/governed-execution")["dispatchGovernedExecution"];
+let forwardCount = 0;
 
 const PROFILES = [
   {
@@ -120,12 +121,12 @@ function approvalRules(operationKey: string) {
   ];
 }
 
-async function sessionToken(): Promise<string> {
+async function sessionToken(userId = F.APPROVER): Promise<string> {
   return signAccessToken(
     {
       address: "0xprofile",
       tenantId: F.TENANT,
-      userId: F.APPROVER,
+      userId,
       mfaVerifiedAt: Date.now(),
     } as never,
     "10m",
@@ -178,9 +179,17 @@ beforeAll(async () => {
   const { resetCheckpointSignerCache } = await import("../services/audit-checkpoint");
   resetCheckpointSignerCache();
   app = (await import("../app")).app as Hono<{ Variables: AppVariables }>;
+  const proxy = await import("@stwd/proxy/src/handlers/proxy");
+  ({ dispatchGovernedExecution } = await import("@stwd/proxy/src/handlers/governed-execution"));
+  proxy.__setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
+  proxy.__setForwardProxyRequestForTests(async () => {
+    forwardCount += 1;
+    return new Response('{"ok":true}', { status: 201 });
+  });
 });
 
 beforeEach(async () => {
+  forwardCount = 0;
   await seedFixture();
 });
 
@@ -210,137 +219,196 @@ afterAll(async () => {
   }
 });
 
+type BoundaryFixture = (typeof PROFILES)[number];
+
+async function runAuthenticatedBoundary(
+  fixture: BoundaryFixture,
+  options: { maliciousOperationDescriptor?: boolean } = {},
+): Promise<void> {
+  const requestProfile = {
+    ...fixture.requestProfile,
+    policyRules: approvalRules(fixture.operationKey),
+  };
+  const db = getDb();
+  const vault = new KeyStore(
+    process.env.STEWARD_MASTER_PASSWORD as string,
+    undefined,
+    "secret-vault",
+  );
+  const encrypted = vault.encrypt("profile-boundary-credential", {
+    tenantId: F.TENANT,
+    name: "github",
+    version: 1,
+  });
+  await db
+    .update(secrets)
+    .set({
+      ciphertext: encrypted.ciphertext,
+      iv: encrypted.iv,
+      authTag: encrypted.tag,
+      salt: encrypted.salt,
+    })
+    .where(and(eq(secrets.tenantId, F.TENANT), eq(secrets.id, F.SECRET)));
+  await db
+    .update(providerAccounts)
+    .set({ adapterKey: fixture.adapterKey })
+    .where(and(eq(providerAccounts.tenantId, F.TENANT), eq(providerAccounts.id, F.ACCOUNT)));
+  await db
+    .update(providerOperations)
+    .set({ operationKey: fixture.operationKey, requestProfile })
+    .where(and(eq(providerOperations.tenantId, F.TENANT), eq(providerOperations.id, F.OP)));
+  await db
+    .update(providerGrants)
+    .set({ operationKeys: [fixture.operationKey] })
+    .where(and(eq(providerGrants.tenantId, F.TENANT), eq(providerGrants.id, F.GRANT)));
+  await db
+    .update(secretRoutes)
+    .set({
+      hostPattern: fixture.host,
+      pathPattern: fixture.path,
+      method: fixture.method,
+      agentId: F.AGENT,
+      authorityMode: "governed_v2",
+      providerOperationId: F.OP,
+    })
+    .where(and(eq(secretRoutes.tenantId, F.TENANT), eq(secretRoutes.id, F.ROUTE)));
+
+  const actionResponse = await app.request("/v2/provider-actions", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${await agentToken()}`,
+      "content-type": "application/json",
+      "x-steward-tenant": F.TENANT,
+    },
+    body: JSON.stringify({
+      workspaceId: F.WORKSPACE,
+      providerAccountId: F.ACCOUNT,
+      operationKey: fixture.operationKey,
+      ...(fixture.profile === GENERIC_HTTP_PROVIDER_ACTION_PROFILE
+        ? { method: fixture.method }
+        : {}),
+      arguments: fixture.args,
+      idempotencyKey: `profile-boundary-${fixture.adapterKey}-${options.maliciousOperationDescriptor ? "malicious" : "valid"}`,
+    }),
+  });
+  expect(actionResponse.status).toBe(202);
+  const action = (await actionResponse.json()) as {
+    id: string;
+    requestHash: string;
+    actionDigest: string;
+  };
+
+  const [persisted] = await db
+    .select({
+      canonicalProfile: providerActionBindings.canonicalProfile,
+      canonicalActionBytes: providerActionBindings.canonicalActionBytes,
+    })
+    .from(providerActionBindings)
+    .where(
+      and(
+        eq(providerActionBindings.tenantId, F.TENANT),
+        eq(providerActionBindings.intentId, action.id),
+      ),
+    );
+  expect(persisted?.canonicalProfile).toBe(fixture.profile);
+  expect(new TextDecoder().decode(persisted.canonicalActionBytes)).toContain(fixture.profile);
+
+  const approver = await sessionToken();
+  const approvalResponse = await app.request(`/v2/provider-actions/${action.id}/approval`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${approver}`,
+      "content-type": "application/json",
+      "x-steward-tenant": F.TENANT,
+    },
+    body: JSON.stringify({
+      decision: "approve",
+      expectedVersion: 1,
+      expectedRequestHash: action.requestHash,
+      expectedActionDigest: action.actionDigest,
+      idempotencyKey: `profile-approve-${fixture.adapterKey}-${options.maliciousOperationDescriptor ? "malicious" : "valid"}`,
+    }),
+  });
+  expect(approvalResponse.status).toBe(200);
+  const executeResponse = await app.request(`/v2/provider-actions/${action.id}/execute`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${approver}`, "x-steward-tenant": F.TENANT },
+  });
+  expect(executeResponse.status).toBe(200);
+  expect(await executeResponse.json()).toMatchObject({ status: "execution_ready" });
+
+  if (options.maliciousOperationDescriptor) {
+    expect(fixture.profile).toBe(GENERIC_HTTP_PROVIDER_ACTION_PROFILE);
+    // Model a malicious registered-operation snapshot without weakening the
+    // append-only action binding. Keep the approved revision number so the real
+    // loader must parse the immutable approved action against the hostile live
+    // descriptor, rather than short-circuiting on revision drift.
+    await db
+      .update(providerOperations)
+      .set({
+        requestProfile: {
+          ...requestProfile,
+          operationDescriptor: {
+            ...(requestProfile.operationDescriptor as Record<string, unknown>),
+            origin: "https://attacker.example",
+          },
+        },
+      })
+      .where(eq(providerOperations.id, F.OP));
+    await db.execute(sql`UPDATE provider_operations SET revision = 1 WHERE id = ${F.OP}`);
+  }
+
+  const dispatch = await dispatchGovernedExecution(action.id, F.TENANT);
+  if (options.maliciousOperationDescriptor) {
+    expect(dispatch).toMatchObject({
+      ok: false,
+      code: "EXEC_AUTH_STALE_DEPENDENCY",
+      httpStatus: 409,
+    });
+    expect(forwardCount).toBe(0);
+  } else {
+    expect(dispatch).toMatchObject({ ok: true, dispatchState: "succeeded" });
+    expect(forwardCount).toBe(1);
+  }
+
+  const admin = await sessionToken(F.APPROVER_2);
+  const humanHeaders = { authorization: `Bearer ${admin}`, "x-steward-tenant": F.TENANT };
+  const caseResponse = await app.request(`/v2/provider-actions/${action.id}/case`, {
+    headers: humanHeaders,
+  });
+  expect(caseResponse.status).toBe(200);
+  expect(await caseResponse.json()).toMatchObject({
+    caseId: action.id,
+    operation: { key: fixture.operationKey, canonicalProfile: fixture.profile },
+    terminalState: options.maliciousOperationDescriptor ? "execution_ready" : "succeeded",
+  });
+  const evidenceResponse = await app.request(`/v2/provider-actions/${action.id}/evidence`, {
+    headers: humanHeaders,
+  });
+  expect(evidenceResponse.status).toBe(200);
+  const evidence = (await evidenceResponse.json()) as {
+    manifest: { caseId: string; operation: { canonicalProfile: string } };
+    bundle: { events: unknown[] };
+  };
+  expect(evidence.manifest).toMatchObject({
+    caseId: action.id,
+    operation: { canonicalProfile: fixture.profile },
+  });
+  expect(evidence.bundle.events.length).toBeGreaterThan(0);
+}
+
 describe("#220 real production profile boundaries", () => {
   test("the live runner covers exactly every registered profile", () => {
     expect(PROFILES.map(({ profile }) => profile).sort()).toEqual([...REGISTERED_PROFILES].sort());
   });
 
   for (const fixture of PROFILES) {
-    test(`${fixture.profile}: authenticated ingress persists, approval reconstructs, evidence assembles, proxy parses`, async () => {
-      const requestProfile = {
-        ...fixture.requestProfile,
-        policyRules: approvalRules(fixture.operationKey),
-      };
-      const db = getDb();
-      await db
-        .update(providerAccounts)
-        .set({ adapterKey: fixture.adapterKey })
-        .where(and(eq(providerAccounts.tenantId, F.TENANT), eq(providerAccounts.id, F.ACCOUNT)));
-      await db
-        .update(providerOperations)
-        .set({ operationKey: fixture.operationKey, requestProfile })
-        .where(and(eq(providerOperations.tenantId, F.TENANT), eq(providerOperations.id, F.OP)));
-      await db
-        .update(providerGrants)
-        .set({ operationKeys: [fixture.operationKey] })
-        .where(and(eq(providerGrants.tenantId, F.TENANT), eq(providerGrants.id, F.GRANT)));
-      await db
-        .update(secretRoutes)
-        .set({
-          hostPattern: fixture.host,
-          pathPattern: fixture.path,
-          method: fixture.method,
-          agentId: F.AGENT,
-          authorityMode: "governed_v2",
-          providerOperationId: F.OP,
-        })
-        .where(and(eq(secretRoutes.tenantId, F.TENANT), eq(secretRoutes.id, F.ROUTE)));
-
-      const actionResponse = await app.request("/v2/provider-actions", {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${await agentToken()}`,
-          "content-type": "application/json",
-          "x-steward-tenant": F.TENANT,
-        },
-        body: JSON.stringify({
-          workspaceId: F.WORKSPACE,
-          providerAccountId: F.ACCOUNT,
-          operationKey: fixture.operationKey,
-          ...(fixture.profile === GENERIC_HTTP_PROVIDER_ACTION_PROFILE
-            ? { method: fixture.method }
-            : {}),
-          arguments: fixture.args,
-          idempotencyKey: `profile-boundary-${fixture.adapterKey}`,
-        }),
-      });
-      expect(actionResponse.status).toBe(202);
-      const action = (await actionResponse.json()) as {
-        id: string;
-        requestHash: string;
-        actionDigest: string;
-      };
-
-      const [persisted] = await db
-        .select({
-          canonicalProfile: providerActionBindings.canonicalProfile,
-          canonicalActionBytes: providerActionBindings.canonicalActionBytes,
-        })
-        .from(providerActionBindings)
-        .where(
-          and(
-            eq(providerActionBindings.tenantId, F.TENANT),
-            eq(providerActionBindings.intentId, action.id),
-          ),
-        );
-      expect(persisted?.canonicalProfile).toBe(fixture.profile);
-      const operationContext = {
-        operationKey: fixture.operationKey,
-        requestProfile,
-      };
-      const parsed = parseGovernedCanonicalActionForDispatch(
-        new Uint8Array(persisted.canonicalActionBytes),
-        fixture.profile,
-        [`https://${fixture.host}`],
-        operationContext,
-      );
-      expect(parsed).toMatchObject({
-        profile: fixture.profile,
-        origin: `https://${fixture.host}`,
-        method: fixture.method,
-        normalizedPath: fixture.path,
-      });
-
-      const human = await sessionToken();
-      const approvalResponse = await app.request(`/v2/provider-actions/${action.id}/approval`, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${human}`,
-          "content-type": "application/json",
-          "x-steward-tenant": F.TENANT,
-        },
-        body: JSON.stringify({
-          decision: "approve",
-          expectedVersion: 1,
-          expectedRequestHash: action.requestHash,
-          expectedActionDigest: action.actionDigest,
-          idempotencyKey: `profile-approve-${fixture.adapterKey}`,
-        }),
-      });
-      expect(approvalResponse.status).toBe(200);
-      const executeResponse = await app.request(`/v2/provider-actions/${action.id}/execute`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${human}`, "x-steward-tenant": F.TENANT },
-      });
-      expect(executeResponse.status).toBe(200);
-      expect(await executeResponse.json()).toMatchObject({ status: "execution_ready" });
-
-      const kase = await getProviderCase(F.TENANT, action.id, [F.WORKSPACE]);
-      expect(kase?.manifest).toMatchObject({
-        caseId: action.id,
-        operation: { key: fixture.operationKey, canonicalProfile: fixture.profile },
-        terminalState: "execution_ready",
-      });
-      const evidence = await getProviderCaseEvidence(F.TENANT, action.id, [F.WORKSPACE]);
-      expect(evidence?.manifest).toMatchObject({
-        caseId: kase?.manifest.caseId,
-        actionDigest: kase?.manifest.actionDigest,
-        requestHash: kase?.manifest.requestHash,
-        operation: kase?.manifest.operation,
-        terminalState: kase?.manifest.terminalState,
-      });
-      expect(evidence?.bundle.events.length).toBeGreaterThan(0);
-      expect(jcsStringify(parsed)).toBe(new TextDecoder().decode(persisted.canonicalActionBytes));
+    test(`${fixture.profile}: identical authenticated ingress→dispatch→evidence runner`, async () => {
+      await runAuthenticatedBoundary(fixture);
     });
   }
+
+  test("the identical authenticated runner rejects a malicious registered fixture pre-claim", async () => {
+    await runAuthenticatedBoundary(PROFILES[2], { maliciousOperationDescriptor: true });
+  });
 });
