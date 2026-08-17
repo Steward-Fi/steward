@@ -183,7 +183,7 @@ export class ERC8183Client {
     });
     const txHash = await this.signer.sendTransaction({ to: this.addresses.agenticCommerce, data });
     const receipt = await this.publicClient.waitForTransactionReceipt({ hash: txHash });
-    return { jobId: decodeJobCreatedId(receipt.logs), txHash };
+    return { jobId: decodeJobCreatedId(receipt.logs, this.addresses.agenticCommerce), txHash };
   }
 
   registerJob(jobId: bigint, policy = this.addresses.optimisticPolicy): Promise<Hex> {
@@ -279,8 +279,16 @@ function validateAddresses(addresses: Partial<RequiredERC8183Addresses>): Requir
   return addresses as RequiredERC8183Addresses;
 }
 
-function decodeJobCreatedId(logs: readonly { data: Hex; topics: readonly Hex[] }[]): bigint {
+function decodeJobCreatedId(
+  logs: readonly { address: Address; data: Hex; topics: readonly Hex[] }[],
+  commerceAddress: Address,
+): bigint {
+  const expectedEmitter = commerceAddress.toLowerCase();
   for (const log of logs) {
+    // Only the commerce contract's JobCreated is authoritative: a lookalike
+    // event from another contract the tx touched would yield a wrong jobId
+    // that later setBudget/fund calls would then fund.
+    if (log.address.toLowerCase() !== expectedEmitter) continue;
     try {
       const decoded = decodeEventLog({
         abi: AGENTIC_COMMERCE_ABI,
