@@ -502,6 +502,9 @@ beforeAll(async () => {
   process.env.STEWARD_JWT_SECRET = "proxy-governed-jwt-secret-with-enough-bytes-here-0123";
   process.env.STEWARD_AUDIT_HMAC_KEY = "a".repeat(64);
   process.env.STEWARD_EXECUTION_AUTH_SECRET = EXEC_SECRET;
+  // Dispatch is exercised against the in-process replay store and no Redis —
+  // the soft development posture, an explicit opt-in since SEC-175.
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
 
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
@@ -591,6 +594,7 @@ afterAll(async () => {
   delete process.env.STEWARD_MASTER_PASSWORD;
   delete process.env.STEWARD_JWT_SECRET;
   delete process.env.STEWARD_EXECUTION_AUTH_SECRET;
+  delete process.env.STEWARD_PROXY_DEV_MODE;
 });
 
 beforeEach(async () => {

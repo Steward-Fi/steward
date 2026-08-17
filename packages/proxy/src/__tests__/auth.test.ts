@@ -42,6 +42,9 @@ beforeAll(async () => {
   // fallback requires STEWARD_ALLOW_DEV_SECRETS). Set a real secret so the
   // signed tokens here verify against the same key the middleware uses.
   process.env.STEWARD_JWT_SECRET = "proxy-auth-test-jwt-secret-with-enough-bytes";
+  // These tests exercise the unsigned-request path — an explicit opt-in to
+  // the soft development posture since SEC-175.
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
     await client.close();
@@ -74,6 +77,7 @@ afterAll(async () => {
   await closeDb().catch(() => {});
   delete process.env.STEWARD_PGLITE_MEMORY;
   delete process.env.STEWARD_JWT_SECRET;
+  delete process.env.STEWARD_PROXY_DEV_MODE;
   delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
   delete process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET;
   delete process.env.STEWARD_PROXY_ALLOW_UNSIGNED_REQUESTS;

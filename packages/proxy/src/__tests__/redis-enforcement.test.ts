@@ -5,7 +5,7 @@
  * and cost estimation integration.
  */
 
-import { beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, beforeEach, describe, expect, it } from "bun:test";
 import { estimateCost, isKnownHost } from "@stwd/redis";
 import {
   checkProxyRateLimit,
@@ -18,6 +18,13 @@ import {
 
 beforeEach(() => {
   delete process.env.REDIS_REQUIRED;
+  // The graceful-degradation tests below exercise the soft development
+  // posture — an explicit opt-in since SEC-175 made denial the default.
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
+});
+
+afterAll(() => {
+  delete process.env.STEWARD_PROXY_DEV_MODE;
 });
 
 // ─── Graceful degradation (no Redis) ─────────────────────────────────────────
@@ -32,6 +39,14 @@ describe("proxy Redis enforcement (no Redis)", () => {
     const result = await checkProxyRateLimit("agent-1", "api.openai.com");
     expect(result.allowed).toBe(true);
     expect(result.remaining).toBe(Infinity);
+  });
+
+  it("checkProxyRateLimit fails closed by default without the dev-mode opt-in (SEC-175)", async () => {
+    delete process.env.STEWARD_PROXY_DEV_MODE;
+
+    const result = await checkProxyRateLimit("agent-1", "api.openai.com");
+
+    expect(result.allowed).toBe(false);
   });
 
   it("trackProxySpend returns 0 without Redis", async () => {

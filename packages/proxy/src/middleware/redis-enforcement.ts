@@ -22,6 +22,7 @@ import {
   settleReservedSpend,
 } from "@stwd/redis";
 import { and, eq } from "drizzle-orm";
+import { isProxyDevMode } from "../config";
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -75,11 +76,17 @@ const PERMISSIVE: RateLimitResult = {
 };
 
 function isRedisRequired(): boolean {
-  return (
-    process.env.REDIS_REQUIRED === "true" ||
-    (process.env.NODE_ENV === "production" &&
-      process.env.STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL !== "true")
-  );
+  if (process.env.REDIS_REQUIRED === "true") return true;
+  // Explicit operator opt-out, honored in every environment (as before
+  // SEC-175) — but an explicit production NODE_ENV still overrides a stray
+  // STEWARD_PROXY_DEV_MODE below.
+  if (process.env.STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL === "true") return false;
+  // SEC-175: default-deny — Redis enforcement is required in every
+  // environment unless the operator explicitly opts into the soft
+  // development posture. NODE_ENV alone no longer unlocks it, and a
+  // production NODE_ENV overrides the dev-mode flag.
+  if (process.env.NODE_ENV === "production") return true;
+  return !isProxyDevMode();
 }
 
 /**
