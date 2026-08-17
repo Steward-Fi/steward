@@ -22,6 +22,7 @@ import type {
 import { runExternalKeyCustodyV1Conformance } from "../external-key-custody-conformance";
 
 const CURVE_ORDER = BigInt("0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
+const KMS_KEY_ARN = "arn:aws:kms:us-east-1:111122223333:key/test";
 
 function hexBytes(value: string): Uint8Array {
   const clean = value.startsWith("0x") ? value.slice(2) : value;
@@ -59,6 +60,7 @@ class MockKms implements AwsKmsSigningClientLike {
     private readonly privateKey: Uint8Array,
     private readonly signatureMode: SignatureMode = "normal",
     private readonly keySpec = "ECC_SECG_P256K1",
+    private readonly responseKeyId = KMS_KEY_ARN,
   ) {}
 
   async send(command: unknown): Promise<unknown> {
@@ -66,7 +68,7 @@ class MockKms implements AwsKmsSigningClientLike {
     this.commands.push(parsed);
     if (parsed.commandName === "GetPublicKeyCommand") {
       return {
-        KeyId: "arn:aws:kms:us-east-1:111122223333:key/test",
+        KeyId: this.responseKeyId,
         PublicKey: spkiForPrivateKey(this.privateKey),
         KeySpec: this.keySpec,
         KeyUsage: "SIGN_VERIFY",
@@ -76,14 +78,18 @@ class MockKms implements AwsKmsSigningClientLike {
     if (parsed.commandName === "SignCommand") {
       const digest = parsed.input.Message as Uint8Array;
       if (this.signatureMode === "malformed") {
-        return { Signature: new Uint8Array([0x30, 0x01, 0x00]) };
+        return { KeyId: this.responseKeyId, Signature: new Uint8Array([0x30, 0x01, 0x00]) };
       }
       const signature = secp256k1.sign(digest, this.privateKey, { lowS: true });
       const encoded =
         this.signatureMode === "high-s"
           ? new secp256k1.Signature(signature.r, CURVE_ORDER - signature.s).toBytes("der")
           : signature.toBytes("der");
-      return { Signature: encoded, SigningAlgorithm: "ECDSA_SHA_256" };
+      return {
+        KeyId: this.responseKeyId,
+        Signature: encoded,
+        SigningAlgorithm: "ECDSA_SHA_256",
+      };
     }
     throw new Error(`unexpected mock command ${parsed.commandName}`);
   }
@@ -121,7 +127,7 @@ function registrationRequest(
     agentId: "agent-1",
     chainFamily: "evm",
     address: addressForPrivateKey(privateKey),
-    handle: { providerId: "aws-kms", keyId: "alias/steward-agent-1", region: "us-east-1" },
+    handle: { providerId: "aws-kms", keyId: KMS_KEY_ARN, region: "us-east-1" },
     venue: "aws-primary",
     purpose: "evm-signing",
     metadata: { owner: "security" },
@@ -138,7 +144,7 @@ function signRequest(
     agentId: "agent-1",
     chainFamily: "evm",
     address: addressForPrivateKey(privateKey),
-    handle: { providerId: "aws-kms", keyId: "alias/steward-agent-1", region: "us-east-1" },
+    handle: { providerId: "aws-kms", keyId: KMS_KEY_ARN, region: "us-east-1" },
     chainId: 8453,
     to: "0x2222222222222222222222222222222222222222",
     value: "123",
@@ -156,6 +162,9 @@ function providerFor(kms: MockKms, rpc: MockRpc): AwsKmsExternalKeyCustodyProvid
     client: kms,
     region: "us-east-1",
     rpcFactory: () => rpc,
+    maxGasLimit: 100_000n,
+    maxGasPriceWei: 2_000_000_000n,
+    maxTotalFeeWei: 100_000_000_000_000n,
   });
 }
 
@@ -186,7 +195,7 @@ describe("AWS KMS asymmetric external custody", () => {
       address: addressForPrivateKey(privateKey),
       exportablePrivateKey: false,
       signingAvailability: "provider-signing",
-      handle: { providerId: "aws-kms", keyId: "alias/steward-agent-1" },
+      handle: { providerId: "aws-kms", keyId: KMS_KEY_ARN },
     });
     const serializedRegistration = JSON.stringify(registration).toLowerCase();
     expect(serializedRegistration).not.toContain("secretkey");
@@ -194,12 +203,24 @@ describe("AWS KMS asymmetric external custody", () => {
     expect(serializedRegistration).not.toContain("ciphertext");
     expect(kms.commands[0]).toEqual({
       commandName: "GetPublicKeyCommand",
-      input: { KeyId: "alias/steward-agent-1" },
+      input: { KeyId: KMS_KEY_ARN },
     });
   });
 
   test("rejects an address mismatch and unsupported AWS key modes", async () => {
     const privateKey = secp256k1.utils.randomPrivateKey();
+    await expect(
+      providerFor(new MockKms(privateKey), new MockRpc()).registerKeyHandle(
+        registrationRequest(privateKey, {
+          handle: {
+            providerId: "aws-kms",
+            keyId: "alias/steward-agent-1",
+            region: "us-east-1",
+          },
+        }),
+      ),
+    ).rejects.toThrow("requires the canonical KMS KeyId");
+
     await expect(
       providerFor(new MockKms(privateKey), new MockRpc()).registerKeyHandle(
         registrationRequest(privateKey, {
@@ -248,7 +269,7 @@ describe("AWS KMS asymmetric external custody", () => {
 
     const signCommand = kms.commands.find((command) => command.commandName === "SignCommand");
     expect(signCommand?.input).toMatchObject({
-      KeyId: "alias/steward-agent-1",
+      KeyId: KMS_KEY_ARN,
       MessageType: "DIGEST",
       SigningAlgorithm: "ECDSA_SHA_256",
     });
@@ -288,7 +309,10 @@ describe("AWS KMS asymmetric external custody", () => {
     kms.send = async (command: unknown) => {
       const parsed = command as { commandName: string; input: { Message: Uint8Array } };
       if (parsed.commandName === "SignCommand") {
-        return { Signature: secp256k1.sign(parsed.input.Message, otherKey).toBytes("der") };
+        return {
+          KeyId: KMS_KEY_ARN,
+          Signature: secp256k1.sign(parsed.input.Message, otherKey).toBytes("der"),
+        };
       }
       return originalSend(command);
     };
@@ -296,6 +320,40 @@ describe("AWS KMS asymmetric external custody", () => {
       providerFor(kms, wrongKeyRpc).signTransaction(signRequest(privateKey, { broadcast: true })),
     ).rejects.toThrow("does not recover");
     expect(wrongKeyRpc.broadcasts).toHaveLength(0);
+
+    const changedIdentityRpc = new MockRpc();
+    const changedIdentityKms = new MockKms(
+      privateKey,
+      "normal",
+      "ECC_SECG_P256K1",
+      "arn:aws:kms:us-east-1:111122223333:key/replaced",
+    );
+    await expect(
+      providerFor(changedIdentityKms, changedIdentityRpc).signTransaction(
+        signRequest(privateKey, { broadcast: true }),
+      ),
+    ).rejects.toThrow("not pinned to the canonical KMS KeyId");
+    expect(
+      changedIdentityKms.commands.some((command) => command.commandName === "SignCommand"),
+    ).toBe(false);
+    expect(changedIdentityRpc.broadcasts).toHaveLength(0);
+
+    const changedSignIdentityRpc = new MockRpc();
+    const changedSignIdentityKms = new MockKms(privateKey);
+    const originalIdentitySend = changedSignIdentityKms.send.bind(changedSignIdentityKms);
+    changedSignIdentityKms.send = async (command: unknown) => {
+      const parsed = command as { commandName: string };
+      const response = await originalIdentitySend(command);
+      return parsed.commandName === "SignCommand"
+        ? { ...(response as object), KeyId: "arn:aws:kms:us-east-1:111122223333:key/replaced" }
+        : response;
+    };
+    await expect(
+      providerFor(changedSignIdentityKms, changedSignIdentityRpc).signTransaction(
+        signRequest(privateKey, { broadcast: true }),
+      ),
+    ).rejects.toThrow("different canonical KeyId");
+    expect(changedSignIdentityRpc.broadcasts).toHaveLength(0);
   });
 
   test("rebinds semantic transaction fields before requesting a signature", async () => {
@@ -317,6 +375,24 @@ describe("AWS KMS asymmetric external custody", () => {
     rpc.transaction = { ...new MockRpc().transaction, gas: 21_001n };
     await expect(providerFor(kms, rpc).signTransaction(signRequest(privateKey))).rejects.toThrow(
       "wrong gas limit",
+    );
+    expect(kms.commands.some((command) => command.commandName === "SignCommand")).toBe(false);
+
+    rpc.transaction = { ...new MockRpc().transaction, to: undefined };
+    await expect(providerFor(kms, rpc).signTransaction(signRequest(privateKey))).rejects.toThrow(
+      "wrong recipient",
+    );
+    expect(kms.commands.some((command) => command.commandName === "SignCommand")).toBe(false);
+
+    rpc.transaction = { ...new MockRpc().transaction, gas: 100_001n };
+    await expect(
+      providerFor(kms, rpc).signTransaction(signRequest(privateKey, { gasLimit: undefined })),
+    ).rejects.toThrow("gas limit maximum");
+    expect(kms.commands.some((command) => command.commandName === "SignCommand")).toBe(false);
+
+    rpc.transaction = { ...new MockRpc().transaction, gasPrice: 2_000_000_001n };
+    await expect(providerFor(kms, rpc).signTransaction(signRequest(privateKey))).rejects.toThrow(
+      "gas price maximum",
     );
     expect(kms.commands.some((command) => command.commandName === "SignCommand")).toBe(false);
   });

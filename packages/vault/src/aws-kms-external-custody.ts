@@ -78,6 +78,17 @@ export interface AwsKmsExternalKeyCustodyOptions {
   client?: AwsKmsSigningClientLike;
   region?: string;
   rpcFactory?: (rpcUrl: string) => AwsKmsEvmRpc;
+  maxGasLimit?: bigint;
+  maxGasPriceWei?: bigint;
+  maxTotalFeeWei?: bigint;
+}
+
+function positiveBigIntEnv(name: string): bigint {
+  const raw = process.env[name]?.trim();
+  if (!raw || !/^\d+$/.test(raw) || BigInt(raw) <= 0n) {
+    throw new Error(`${name} is required and must be a positive integer`);
+  }
+  return BigInt(raw);
 }
 
 function bytesToHex(bytes: Uint8Array): Hex {
@@ -167,7 +178,12 @@ function evmAddressFromSpki(publicKey: Uint8Array): Address {
   return getAddress(publicKeyToAddress(bytesToHex(canonicalPoint)));
 }
 
-function assertAwsSigningKey(output: AwsGetPublicKeyOutput): Uint8Array {
+function assertAwsSigningKey(output: AwsGetPublicKeyOutput): {
+  keyId: string;
+  publicKey: Uint8Array;
+} {
+  if (!output.KeyId?.trim())
+    throw new Error("AWS KMS GetPublicKey did not return a canonical KeyId");
   if (!output.PublicKey) throw new Error("AWS KMS GetPublicKey did not return PublicKey");
   if (output.KeySpec !== "ECC_SECG_P256K1") {
     throw new Error("AWS KMS external custody requires KeySpec ECC_SECG_P256K1");
@@ -178,7 +194,7 @@ function assertAwsSigningKey(output: AwsGetPublicKeyOutput): Uint8Array {
   if (!output.SigningAlgorithms?.includes("ECDSA_SHA_256")) {
     throw new Error("AWS KMS external custody requires ECDSA_SHA_256 signing support");
   }
-  return output.PublicKey;
+  return { keyId: output.KeyId, publicKey: output.PublicKey };
 }
 
 function assertEvmRequest(request: ExternalKeySignTransactionRequest): void {
@@ -258,12 +274,18 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
   private client?: AwsKmsSigningClientLike;
   private readonly region?: string;
   private readonly rpcFactory: (rpcUrl: string) => AwsKmsEvmRpc;
+  private readonly maxGasLimit?: bigint;
+  private readonly maxGasPriceWei?: bigint;
+  private readonly maxTotalFeeWei?: bigint;
 
   constructor(options: AwsKmsExternalKeyCustodyOptions = {}) {
     this.client = options.client;
     this.clientIsInjected = Boolean(options.client);
     this.region = options.region;
     this.rpcFactory = options.rpcFactory ?? defaultRpcFactory;
+    this.maxGasLimit = options.maxGasLimit;
+    this.maxGasPriceWei = options.maxGasPriceWei;
+    this.maxTotalFeeWei = options.maxTotalFeeWei;
   }
 
   static fromEnv(): AwsKmsExternalKeyCustodyProvider {
@@ -272,6 +294,9 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
         process.env.STEWARD_EXTERNAL_CUSTODY_AWS_REGION ??
         process.env.STEWARD_AWS_REGION ??
         process.env.AWS_REGION,
+      maxGasLimit: positiveBigIntEnv("STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_LIMIT"),
+      maxGasPriceWei: positiveBigIntEnv("STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_PRICE_WEI"),
+      maxTotalFeeWei: positiveBigIntEnv("STEWARD_EXTERNAL_CUSTODY_AWS_MAX_TOTAL_FEE_WEI"),
     });
   }
 
@@ -291,8 +316,11 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
     if (!isAddress(request.address)) {
       throw new Error("AWS KMS external custody registration requires a valid EVM address");
     }
-    const resolved = await this.resolveSigningAddress(request.handle.keyId);
-    if (resolved !== getAddress(request.address)) {
+    const resolved = await this.resolveSigningIdentity(request.handle.keyId);
+    if (resolved.keyId !== request.handle.keyId) {
+      throw new Error("AWS KMS external custody registration requires the canonical KMS KeyId");
+    }
+    if (resolved.address !== getAddress(request.address)) {
       throw new Error("AWS KMS public key does not match the requested external wallet address");
     }
     return {
@@ -300,7 +328,7 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
       tenantId: request.tenantId,
       agentId: request.agentId,
       chainFamily: "evm",
-      address: resolved,
+      address: resolved.address,
       handle: {
         providerId: AWS_PROVIDER_ID,
         keyId: request.handle.keyId,
@@ -327,8 +355,11 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
     assertEvmRequest(request);
     assertHandleRegion(request.handle.region, this.region);
     const expectedAddress = getAddress(request.address);
-    const resolvedAddress = await this.resolveSigningAddress(request.handle.keyId);
-    if (resolvedAddress !== expectedAddress) {
+    const resolvedIdentity = await this.resolveSigningIdentity(request.handle.keyId);
+    if (resolvedIdentity.keyId !== request.handle.keyId) {
+      throw new Error("AWS KMS external custody handle is not pinned to the canonical KMS KeyId");
+    }
+    if (resolvedIdentity.address !== expectedAddress) {
       throw new Error(
         "AWS KMS public key no longer matches the registered external wallet address",
       );
@@ -342,7 +373,7 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
     if (transaction.chainId !== request.chainId) {
       throw new Error("AWS KMS RPC prepared a transaction for the wrong chainId");
     }
-    if (transaction.to && getAddress(transaction.to) !== getAddress(request.to)) {
+    if (!transaction.to || getAddress(transaction.to) !== getAddress(request.to)) {
       throw new Error("AWS KMS RPC prepared a transaction for the wrong recipient");
     }
     if ((transaction.value ?? 0n) !== BigInt(request.value)) {
@@ -356,6 +387,22 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
     }
     if (request.gasLimit !== undefined && transaction.gas !== BigInt(request.gasLimit)) {
       throw new Error("AWS KMS RPC prepared a transaction with the wrong gas limit");
+    }
+    if (!this.maxGasLimit || !this.maxGasPriceWei || !this.maxTotalFeeWei) {
+      throw new Error("AWS KMS external custody fee maxima are not configured");
+    }
+    if (!transaction.gas || transaction.gas <= 0n || transaction.gas > this.maxGasLimit) {
+      throw new Error("AWS KMS RPC prepared a transaction above the configured gas limit maximum");
+    }
+    if (
+      !transaction.gasPrice ||
+      transaction.gasPrice <= 0n ||
+      transaction.gasPrice > this.maxGasPriceWei
+    ) {
+      throw new Error("AWS KMS RPC prepared a transaction above the configured gas price maximum");
+    }
+    if (transaction.gas * transaction.gasPrice > this.maxTotalFeeWei) {
+      throw new Error("AWS KMS RPC prepared a transaction above the configured total fee maximum");
     }
 
     const unsigned = serializeTransaction(transaction);
@@ -371,6 +418,9 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
       }),
     )) as AwsSignOutput;
     if (!response.Signature) throw new Error("AWS KMS Sign did not return Signature");
+    if (response.KeyId !== request.handle.keyId) {
+      throw new Error("AWS KMS Sign returned a different canonical KeyId");
+    }
     if (response.SigningAlgorithm && response.SigningAlgorithm !== "ECDSA_SHA_256") {
       throw new Error("AWS KMS Sign returned an unexpected signing algorithm");
     }
@@ -405,11 +455,17 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
     return { result, broadcast: request.broadcast };
   }
 
-  private async resolveSigningAddress(keyId: string): Promise<Address> {
+  private async resolveSigningIdentity(
+    keyId: string,
+  ): Promise<{ address: Address; keyId: string }> {
     const response = (await (
       await this.getClient()
     ).send(await this.createGetPublicKeyCommand({ KeyId: keyId }))) as AwsGetPublicKeyOutput;
-    return evmAddressFromSpki(assertAwsSigningKey(response));
+    const signingKey = assertAwsSigningKey(response);
+    return {
+      address: evmAddressFromSpki(signingKey.publicKey),
+      keyId: signingKey.keyId,
+    };
   }
 
   private async getClient(): Promise<AwsKmsSigningClientLike> {

@@ -116,6 +116,7 @@ export interface MintExecutionAuthorizationInput {
   capability: ExecutionCapability;
   payloadDigest: string;
   backend: ExecutionAuthorization["backend"];
+  backendIdentityDigest?: string;
   policyRevisionHash?: string;
   approvalId?: string;
   idempotencyKey?: string;
@@ -125,6 +126,16 @@ export interface MintExecutionAuthorizationInput {
 export async function mintExecutionAuthorization(
   input: MintExecutionAuthorizationInput,
 ): Promise<ExecutionAuthorization> {
+  if (
+    (input.backend === "external-custody" &&
+      !/^[0-9a-f]{64}$/.test(input.backendIdentityDigest ?? "")) ||
+    (input.backend !== "external-custody" && input.backendIdentityDigest !== undefined)
+  ) {
+    throw new ExecutionAuthorizationError(
+      "External custody authorization requires an exact provider/key/address identity digest",
+      "context_mismatch",
+    );
+  }
   const now = input.now ?? new Date();
   const expiresAt = new Date(now.getTime() + EXECUTION_AUTHORIZATION_TTL_MS);
   const authorization: ExecutionAuthorization = {
@@ -135,6 +146,7 @@ export async function mintExecutionAuthorization(
     capability: input.capability,
     payloadDigest: input.payloadDigest,
     backend: input.backend,
+    backendIdentityDigest: input.backendIdentityDigest,
     policyRevisionHash: input.policyRevisionHash,
     approvalId: input.approvalId,
     nonce: base64Url(randomBytes(24)),
@@ -152,6 +164,7 @@ export async function mintExecutionAuthorization(
     agentId: authorization.agentId,
     capability: authorization.capability,
     backend: authorization.backend,
+    backendIdentityDigest: authorization.backendIdentityDigest,
     payloadDigest: authorization.payloadDigest,
     policyRevisionHash: authorization.policyRevisionHash,
     approvalId: authorization.approvalId,
@@ -171,6 +184,7 @@ export interface ConsumeExecutionAuthorizationContext {
   agentId: string;
   capability: ExecutionCapability;
   backend: ExecutionAuthorization["backend"];
+  backendIdentityDigest?: string;
   payloadDigest: string;
 }
 
@@ -186,6 +200,13 @@ export async function consumeExecutionAuthorization(
       and(
         eq(executionAuthorizationNonces.authorizationId, authorization.id),
         eq(executionAuthorizationNonces.nonce, authorization.nonce),
+        eq(executionAuthorizationNonces.backend, authorization.backend),
+        authorization.backendIdentityDigest
+          ? eq(
+              executionAuthorizationNonces.backendIdentityDigest,
+              authorization.backendIdentityDigest,
+            )
+          : sql`${executionAuthorizationNonces.backendIdentityDigest} IS NULL`,
         eq(executionAuthorizationNonces.status, "active"),
         sql`${executionAuthorizationNonces.expiresAt} > now()`,
       ),
@@ -217,6 +238,7 @@ export function verifyExecutionAuthorization(
     authorization.agentId !== expected.agentId ||
     authorization.capability !== expected.capability ||
     authorization.backend !== expected.backend ||
+    authorization.backendIdentityDigest !== expected.backendIdentityDigest ||
     authorization.payloadDigest !== expected.payloadDigest ||
     authorization.status !== "active"
   ) {
@@ -269,6 +291,7 @@ function signaturePayload(authorization: ExecutionAuthorization): Record<string,
     capability: authorization.capability,
     payloadDigest: authorization.payloadDigest,
     backend: authorization.backend,
+    backendIdentityDigest: authorization.backendIdentityDigest ?? null,
     policyRevisionHash: authorization.policyRevisionHash ?? null,
     approvalId: authorization.approvalId ?? null,
     nonce: authorization.nonce,

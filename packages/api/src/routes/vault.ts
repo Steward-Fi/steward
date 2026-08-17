@@ -1252,7 +1252,9 @@ async function backendBindingMismatchResponse(
     {
       ok: false,
       error:
-        "This wallet uses third-party custody, which is not supported by the execution gateway. Resubmit through a supported custody path.",
+        error.code === "backend_identity_mismatch"
+          ? "The external custody provider, key, or address changed after authorization. Resubmit the transaction."
+          : "The wallet custody backend changed after authorization. Resubmit the transaction.",
       data: { code: error.code },
     },
     409,
@@ -2082,44 +2084,17 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     ? policyRevisionHashForPolicySet(policySet)
     : null;
 
-  // FINDING 4: the execution authorization minted below is cryptographically
-  // bound to backend "local-vault". Resolve the backend this request would
-  // ACTUALLY route to BEFORE minting/signing. External custody is NOT a
-  // gateway-supported backend in #182; a local-vault-bound authorization must
-  // never authorize an third-party-custody execution. Fail closed before the
-  // third-party custody provider is ever reached.
+  let executionTarget: Awaited<ReturnType<typeof vault.resolveExecutionTarget>> = {
+    backend: "local-vault",
+  };
   if (isEvmSignRequest) {
-    const resolvedBackend = await vault.resolveExecutionBackend({
+    executionTarget = await vault.resolveExecutionTarget({
       tenantId,
       agentId,
       chainId: signRequest.chainId,
       venue: signRequest.venue,
       walletAddress: signRequest.walletAddress,
     });
-    if (resolvedBackend !== "local-vault") {
-      await writeVaultAudit(c, {
-        tenantId,
-        actorType: "agent",
-        actorId: agentId,
-        action: "vault.execution_authorization.rejected",
-        resourceType: "transaction",
-        resourceId: agentId,
-        metadata: {
-          agentId,
-          reason: "third-party_custody_not_gateway_supported",
-          resolvedBackend,
-          chainId: signRequest.chainId,
-        },
-      });
-      return c.json<ApiResponse>(
-        {
-          ok: false,
-          error:
-            "This wallet uses third-party custody, which is not supported by the execution gateway. Resubmit through a supported custody path.",
-        },
-        409,
-      );
-    }
   }
 
   // ── Redis rate-limit check (before policy evaluation) ──────────────────────
@@ -2179,6 +2154,8 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
             chainId: signRequest.chainId,
             executionPayloadDigest,
             executionPolicyRevisionHash,
+            executionBackend: executionTarget.backend,
+            executionBackendIdentityDigest: executionTarget.backendIdentityDigest,
             policyResults: evaluation.results,
             actionPayload: transactionActionPayload({
               broadcast: signRequest.broadcast !== false,
@@ -2290,7 +2267,8 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
               agentId,
               capability: "wallet.sign_transaction",
               payloadDigest: executionPayloadDigest,
-              backend: "local-vault",
+              backend: executionTarget.backend,
+              backendIdentityDigest: executionTarget.backendIdentityDigest,
               policyRevisionHash: executionPolicyRevisionHash ?? undefined,
               idempotencyKey: c.req.header("Idempotency-Key") ?? undefined,
             })
@@ -2307,6 +2285,8 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
             txId,
             payloadDigest: executionPayloadDigest,
             policyRevisionHash: executionPolicyRevisionHash,
+            backend: executionTarget.backend,
+            backendIdentityDigest: executionTarget.backendIdentityDigest,
             expiresAt: executionAuthorization.expiresAt,
           },
         });
@@ -3730,6 +3710,9 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       // signing was prevented but no specific rejection audit was produced. We now
       // convert it into the same fail-closed 409 path with a specific reason.
       let approvalExecutionPayloadDigest: string | null = null;
+      let approvalExecutionTarget: Awaited<ReturnType<typeof vault.resolveExecutionTarget>> = {
+        backend: "local-vault",
+      };
       if (isPrimaryEvmApproval) {
         try {
           approvalExecutionPayloadDigest = executionPayloadDigestForEvmSign(approvalSignRequest);
@@ -3785,25 +3768,32 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
             approvalExecutionPayloadDigest,
           );
         }
-        // 5. FINDING 4: the authorization is cryptographically bound to backend
-        //    "local-vault". Resolve the backend the request would ACTUALLY route
-        //    to before minting. External custody is NOT gateway-supported in
-        //    #182; a local-vault-bound authorization must never authorize an
-        //    third-party-custody execution. Fail closed before the provider is
-        //    reached.
-        const resolvedBackend = await vault.resolveExecutionBackend({
+        // 5. Re-resolve the exact custody provider/key/address identity at
+        //    approval time and require it to match the immutable queued
+        //    snapshot. The authorization minted below repeats this commitment,
+        //    and raw signing performs one final fresh re-resolution.
+        approvalExecutionTarget = await vault.resolveExecutionTarget({
           tenantId,
           agentId,
           chainId: approvalSignRequest.chainId,
           venue: approvalSignRequest.venue,
           walletAddress: approvalSignRequest.walletAddress,
         });
-        if (resolvedBackend !== "local-vault") {
+        if (
+          transactionRow.executionBackend !== approvalExecutionTarget.backend ||
+          transactionRow.executionBackendIdentityDigest !==
+            (approvalExecutionTarget.backendIdentityDigest ?? null)
+        ) {
           return failClosed(
-            "third-party_custody_not_gateway_supported",
-            "This wallet uses third-party custody, which is not supported by the execution gateway. Resubmit through a supported custody path.",
+            "custody_identity_changed_since_approval_request",
+            "The custody provider, key, or address changed after this approval was requested. Resubmit the transaction.",
             approvalExecutionPayloadDigest,
-            { resolvedBackend },
+            {
+              storedBackend: transactionRow.executionBackend,
+              storedBackendIdentityDigest: transactionRow.executionBackendIdentityDigest,
+              resolvedBackend: approvalExecutionTarget.backend,
+              resolvedBackendIdentityDigest: approvalExecutionTarget.backendIdentityDigest,
+            },
           );
         }
       }
@@ -4005,7 +3995,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
             agentId,
             capability: "wallet.sign_transaction",
             payloadDigest: approvalExecutionPayloadDigest,
-            backend: "local-vault",
+            backend: approvalExecutionTarget.backend,
+            backendIdentityDigest: approvalExecutionTarget.backendIdentityDigest,
             policyRevisionHash: currentExecutionPolicyRevisionHash,
             approvalId: txId,
             idempotencyKey: c.req.header("Idempotency-Key") ?? undefined,
@@ -4023,6 +4014,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
               originalPayloadDigest: transactionRow.executionPayloadDigest,
               originalPolicyRevisionHash: transactionRow.executionPolicyRevisionHash,
               policyRevisionHash: currentExecutionPolicyRevisionHash,
+              backend: approvalExecutionTarget.backend,
+              backendIdentityDigest: approvalExecutionTarget.backendIdentityDigest,
               approvalId: txId,
               expiresAt: executionAuthorization.expiresAt,
             },

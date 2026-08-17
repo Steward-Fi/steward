@@ -222,4 +222,9 @@ export type {
   SignBitcoinPsbtResult,
   VaultConfig,
 } from "./vault";
-export { BackendBindingMismatchError, Vault, Vault as VaultClient } from "./vault";
+export {
+  BackendBindingMismatchError,
+  externalCustodyIdentityDigest,
+  Vault,
+  Vault as VaultClient,
+} from "./vault";

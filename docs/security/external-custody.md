@@ -33,7 +33,15 @@ Configure the deployment:
 ```bash
 STEWARD_EXTERNAL_CUSTODY_PROVIDER=aws-kms
 STEWARD_EXTERNAL_CUSTODY_AWS_REGION=us-east-1
+STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_LIMIT=1000000
+STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_PRICE_WEI=100000000000
+STEWARD_EXTERNAL_CUSTODY_AWS_MAX_TOTAL_FEE_WEI=100000000000000000
 ```
+
+All three maxima are required. They independently cap gas units, gas price,
+and their product. This makes an omitted caller estimate safe: a hostile or
+misconfigured RPC cannot turn a governed intent into an unbounded fee
+authorization.
 
 `STEWARD_MASTER_PASSWORD` and the normal local-custody acknowledgement still
 apply because a deployment can contain both external and server-managed
@@ -70,7 +78,9 @@ await vault.registerExternalKeyHandle({
 
 Registration calls `GetPublicKey`, requires the exact key spec/usage/algorithm,
 derives the Ethereum address from the returned SPKI key, and rejects an address
-mismatch. Steward persists no public-key bytes, signature credentials, or
+mismatch. Mutable aliases are rejected: registration requires the immutable
+canonical KMS key ARN returned by AWS, and every later `GetPublicKey` and `Sign`
+response must repeat that exact key identity. Steward persists no public-key bytes, signature credentials, or
 private material—only the provider handle and verified address. The same
 binding is repeated immediately before every signature to detect a changed
 alias or handle.

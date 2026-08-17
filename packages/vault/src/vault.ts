@@ -24,7 +24,7 @@ import type {
   TxStatus,
   WalletAddressMetadata,
 } from "@stwd/shared";
-import { toCaip2 } from "@stwd/shared";
+import { canonicalJsonStringify, toCaip2 } from "@stwd/shared";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   type Chain,
@@ -320,7 +320,33 @@ export interface SignTransactionOptions {
    * no longer reach the third-party provider. Absent (undefined) preserves the
    * legacy, un-gateway-bound behavior for non-gateway callers.
    */
-  expectedBackend?: "local-vault";
+  expectedBackend?: "local-vault" | "external-custody";
+  expectedBackendIdentityDigest?: string;
+}
+
+export interface ResolvedExecutionTarget {
+  backend: "local-vault" | "external-custody";
+  backendIdentityDigest?: string;
+}
+
+export function externalCustodyIdentityDigest(input: {
+  providerId: string;
+  keyId: string;
+  version?: string;
+  region?: string;
+  address: string;
+}): string {
+  return createHash("sha256")
+    .update(
+      canonicalJsonStringify({
+        providerId: input.providerId,
+        keyId: input.keyId,
+        version: input.version ?? null,
+        region: input.region ?? null,
+        address: input.address.toLowerCase(),
+      }),
+    )
+    .digest("hex");
 }
 
 /**
@@ -331,17 +357,21 @@ export interface SignTransactionOptions {
  * any third-party provider is reached (audited, fund-loss-safe).
  */
 export class BackendBindingMismatchError extends Error {
-  readonly code = "backend_binding_mismatch";
+  readonly code: "backend_binding_mismatch" | "backend_identity_mismatch";
   constructor(
-    readonly expectedBackend: "local-vault",
-    readonly resolvedBackend: "third-party-custody",
+    readonly expectedBackend: "local-vault" | "external-custody",
+    readonly resolvedBackend: "local-vault" | "external-custody",
+    readonly identityChanged = false,
   ) {
     super(
-      `Execution backend binding mismatch: authorization is bound to ` +
-        `"${expectedBackend}" but the wallet re-resolved to "${resolvedBackend}" ` +
-        `at signing time. Refusing to route a ${expectedBackend}-bound ` +
-        `authorization to the third-party custody provider.`,
+      identityChanged
+        ? "External custody provider/key/address identity changed after authorization"
+        : `Execution backend binding mismatch: authorization is bound to ` +
+            `"${expectedBackend}" but the wallet re-resolved to "${resolvedBackend}" ` +
+            `at signing time. Refusing to route a ${expectedBackend}-bound ` +
+            `authorization across custody backends.`,
     );
+    this.code = identityChanged ? "backend_identity_mismatch" : "backend_binding_mismatch";
     this.name = "BackendBindingMismatchError";
   }
 }
@@ -582,13 +612,13 @@ export class Vault {
    * authorize an third-party-custody execution. Callers use this to fail closed
    * BEFORE minting/consuming when the resolved backend is third-party-custody.
    */
-  async resolveExecutionBackend(request: {
+  async resolveExecutionTarget(request: {
     tenantId: string;
     agentId: string;
     chainId?: number;
     venue?: string | null;
     walletAddress?: string;
-  }): Promise<"local-vault" | "third-party-custody"> {
+  }): Promise<ResolvedExecutionTarget> {
     const db = getDb();
     const chainId = request.chainId || this.config.chainId || 8453;
     const isSolana = chainId === 101 || chainId === 102;
@@ -606,7 +636,7 @@ export class Vault {
           venue ? eq(encryptedChainKeys.venue, venue) : isNull(encryptedChainKeys.venue),
         ),
       );
-    if (chainKey) return "local-vault";
+    if (chainKey) return { backend: "local-vault" };
 
     // 2. No local chain key: an third-party-custody wallet takes precedence in
     //    signTransaction's resolution, so the request would route to the
@@ -616,12 +646,29 @@ export class Vault {
       chainFamily: chainFamilyToUse,
       venue,
     });
-    if (resolvedWallet) return "third-party-custody";
+    if (resolvedWallet) {
+      return {
+        backend: "external-custody",
+        backendIdentityDigest: externalCustodyIdentityDigest({
+          providerId: resolvedWallet.metadata.externalKey.providerId,
+          keyId: resolvedWallet.metadata.externalKey.keyId,
+          version: resolvedWallet.metadata.externalKey.version,
+          region: resolvedWallet.metadata.externalKey.region,
+          address: resolvedWallet.address,
+        }),
+      };
+    }
 
     // 3. No third-party wallet: signTransaction falls back to the legacy local
     //    encrypted_keys table (or throws missing-key). Either way this is a
     //    local-vault backend from the gateway's perspective.
-    return "local-vault";
+    return { backend: "local-vault" };
+  }
+
+  async resolveExecutionBackend(
+    request: Parameters<Vault["resolveExecutionTarget"]>[0],
+  ): Promise<"local-vault" | "external-custody"> {
+    return (await this.resolveExecutionTarget(request)).backend;
   }
 
   private async assertNoExternalKeyWalletsForExport(agentId: string): Promise<void> {
@@ -1310,6 +1357,9 @@ export class Vault {
       );
 
     if (chainKey) {
+      if (options.expectedBackend === "external-custody") {
+        throw new BackendBindingMismatchError("external-custody", "local-vault");
+      }
       secretKey = await this.keyStore.decrypt(
         {
           ciphertext: chainKey.ciphertext,
@@ -1343,7 +1393,20 @@ export class Vault {
         // BEFORE any provider routing so a local-vault-bound authorization can
         // never reach the external custody provider.
         if (options.expectedBackend === "local-vault") {
-          throw new BackendBindingMismatchError("local-vault", "third-party-custody");
+          throw new BackendBindingMismatchError("local-vault", "external-custody");
+        }
+        const resolvedIdentityDigest = externalCustodyIdentityDigest({
+          providerId: externalWallet.metadata.externalKey.providerId,
+          keyId: externalWallet.metadata.externalKey.keyId,
+          version: externalWallet.metadata.externalKey.version,
+          region: externalWallet.metadata.externalKey.region,
+          address: externalWallet.address,
+        });
+        if (
+          options.expectedBackend === "external-custody" &&
+          options.expectedBackendIdentityDigest !== resolvedIdentityDigest
+        ) {
+          throw new BackendBindingMismatchError("external-custody", "external-custody", true);
         }
         if (request.walletAddress && externalWallet.address) {
           if (externalWallet.address.toLowerCase() !== request.walletAddress.toLowerCase()) {
