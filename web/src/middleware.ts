@@ -11,6 +11,13 @@ const SECURITY_HEADERS = [
     "Permissions-Policy",
     "camera=(), microphone=(), geolocation=(), browsing-topics=(), payment=()",
   ],
+  // SEC-156: cross-origin isolation hardening. COOP uses same-origin-allow-
+  // popups (not same-origin) so the OAuth/WalletConnect popup flows keep their
+  // window.opener postMessage channel — plain same-origin would sever it the
+  // moment the popup navigates cross-origin. CORP keeps our subresources from
+  // being embedded cross-origin (XS-leak surface).
+  ["Cross-Origin-Opener-Policy", "same-origin-allow-popups"],
+  ["Cross-Origin-Resource-Policy", "same-origin"],
 ] as const;
 
 // HTTPS enforcement is ON by default and MUST stay on in production. Both HSTS
@@ -54,8 +61,11 @@ export function middleware(request: NextRequest) {
 export const config = {
   matcher: [
     {
+      // SEC-155: the exclusion is anchored to `api/` so only true API route
+      // handlers skip the security-header middleware — a future route that
+      // merely starts with "api" (e.g. /api-keys) still gets CSP/XFO/HSTS.
       source:
-        "/((?!api|_next/static|_next/image|favicon.ico|icon-192.png|icon-512.png|apple-touch-icon.png|site.webmanifest).*)",
+        "/((?!api/|_next/static|_next/image|favicon.ico|icon-192.png|icon-512.png|apple-touch-icon.png|site.webmanifest).*)",
       missing: [
         { type: "header", key: "next-router-prefetch" },
         { type: "header", key: "purpose", value: "prefetch" },

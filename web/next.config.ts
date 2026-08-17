@@ -27,6 +27,11 @@ const SECURITY_HEADERS = [
     key: "Permissions-Policy",
     value: "camera=(), microphone=(), geolocation=(), browsing-topics=(), payment=()",
   },
+  // SEC-156: mirror the middleware COOP/CORP hardening on static assets.
+  // same-origin-allow-popups preserves the OAuth/WalletConnect popup
+  // window.opener channel (see web/src/middleware.ts).
+  { key: "Cross-Origin-Opener-Policy", value: "same-origin-allow-popups" },
+  { key: "Cross-Origin-Resource-Policy", value: "same-origin" },
 ];
 
 const config: NextConfig = {
