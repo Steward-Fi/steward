@@ -38,11 +38,11 @@
 import { platformAuthMiddleware } from "@stwd/auth";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import { logger } from "hono/logger";
 import { authorizationSignature } from "./middleware/authorization-signature";
 import { correlationId } from "./middleware/correlation";
 import { idempotencyMiddleware } from "./middleware/idempotency";
 import { requestExpiry } from "./middleware/request-expiry";
+import { requestLogger } from "./middleware/request-logger";
 import { securityHeaders } from "./middleware/security-headers";
 import { tenantCors } from "./middleware/tenant-cors";
 import { getOpenApiSpec } from "./openapi";
@@ -119,7 +119,9 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
 
   app.use("*", securityHeaders);
   app.use("*", tenantCors);
-  app.use("*", logger());
+  // SEC-015: query-stripping logger — hono's logger() would write one-time
+  // auth tokens in callback query strings to stdout.
+  app.use("*", requestLogger());
   app.use("*", correlationId);
 
   app.use(
