@@ -71,9 +71,10 @@ export class ChallengeStore {
   /**
    * Delete a challenge explicitly.
    *
-   * Awaits the backend delete so callers can rely on the entry being gone,
-   * but never rejects: a backend outage is logged as a warning instead of
-   * crashing the caller (entries still expire via their TTL).
+   * Awaits a best-effort backend delete, but never rejects: a backend outage
+   * is logged as a warning instead of crashing the caller. Callers that need
+   * atomic one-time-use semantics must use consume(); a failed delete can
+   * leave the entry present until its TTL expires.
    */
   async delete(key: string): Promise<void> {
     try {

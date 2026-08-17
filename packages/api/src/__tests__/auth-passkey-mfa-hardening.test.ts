@@ -52,29 +52,39 @@ describe("passkey MFA hardening", () => {
     expect(mfaStart).toBeGreaterThanOrEqual(0);
     const mfaGuard = authSource.indexOf(guard, mfaStart);
     const mfaCounterUpdate = authSource.indexOf(".set({ counter:", mfaStart);
+    const mfaCompareAndSwap = authSource.indexOf(
+      "eq(authenticators.counter, cred.counter)",
+      mfaCounterUpdate,
+    );
     expect(mfaGuard).toBeGreaterThan(mfaStart);
     expect(mfaGuard).toBeLessThan(mfaCounterUpdate);
+    expect(mfaCompareAndSwap).toBeGreaterThan(mfaCounterUpdate);
 
     const loginStart = authSource.indexOf('auth.post("/passkey/login/verify"');
     expect(loginStart).toBeGreaterThanOrEqual(0);
     const loginGuard = authSource.indexOf(guard, loginStart);
     const loginCounterUpdate = authSource.indexOf(".set({ counter:", loginStart);
+    const loginCompareAndSwap = authSource.indexOf(
+      "eq(authenticators.counter, cred.counter)",
+      loginCounterUpdate,
+    );
     expect(loginGuard).toBeGreaterThan(loginStart);
     expect(loginGuard).toBeLessThan(loginCounterUpdate);
+    expect(loginCompareAndSwap).toBeGreaterThan(loginCounterUpdate);
   });
 
-  it("atomically claims non-zero passkey counters to reject concurrent clones", () => {
+  it("atomically claims passkey counters to reject concurrent clones", () => {
     const compareAndSwap = "eq(authenticators.counter, cred.counter)";
 
     const mfaStart = authSource.indexOf("const completePasskeyMfaHandler");
     const mfaCas = authSource.indexOf(compareAndSwap, mfaStart);
-    const mfaFailure = authSource.indexOf("updatedMfaCounter.length === 0", mfaCas);
+    const mfaFailure = authSource.indexOf("updatedMfaCounters.length !== 1", mfaCas);
     expect(mfaCas).toBeGreaterThan(mfaStart);
     expect(mfaFailure).toBeGreaterThan(mfaCas);
 
     const loginStart = authSource.indexOf('auth.post("/passkey/login/verify"');
     const loginCas = authSource.indexOf(compareAndSwap, loginStart);
-    const loginFailure = authSource.indexOf("updatedCounter.length === 0", loginCas);
+    const loginFailure = authSource.indexOf("updatedCounters.length !== 1", loginCas);
     expect(loginCas).toBeGreaterThan(loginStart);
     expect(loginFailure).toBeGreaterThan(loginCas);
   });

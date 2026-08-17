@@ -124,7 +124,7 @@ function expandIpv6Words(address: string): number[] | null {
 
 /**
  * Extract the IPv4 address embedded in an IPv6 transition mechanism
- * (NAT64 64:ff9b::/96 + local-use 64:ff9b:1::/48 per RFC 6052/8215,
+ * (NAT64 64:ff9b::/96 per RFC 6052,
  * 6to4 2002::/16 per RFC 3056) so it can be screened against isPrivateIpv4.
  */
 function embeddedTransitionIpv4(address: string): string | null {
@@ -140,21 +140,6 @@ function embeddedTransitionIpv4(address: string): string | null {
     words[4] === 0 &&
     words[5] === 0;
   if (isWellKnownNat64) return fromWords(words[6], words[7]);
-
-  // RFC 6052's /48 layout is prefix(48) | IPv4-high(16) | u(8) |
-  // IPv4-low(16) | suffix(40). It is not a /96 address with extra prefix
-  // words, so the IPv4 bits must be reconstructed across words 3–5.
-  const isLocalUseNat64 =
-    words[0] === 0x64 &&
-    words[1] === 0xff9b &&
-    words[2] === 1 &&
-    (words[4] & 0xff00) === 0 &&
-    (words[5] & 0x00ff) === 0 &&
-    words[6] === 0 &&
-    words[7] === 0;
-  if (isLocalUseNat64) {
-    return fromWords(words[3], ((words[4] & 0xff) << 8) | (words[5] >> 8));
-  }
   if (words[0] === 0x2002) return fromWords(words[1], words[2]);
   return null;
 }
@@ -174,6 +159,10 @@ function isPrivateIpv6(hostname: string): boolean {
   const embedded = embeddedTransitionIpv4(normalized);
   if (embedded) return isPrivateIpv4(embedded);
   const words = expandIpv6Words(normalized);
+  // RFC 8215 reserves 64:ff9b:1::/48 for local use and explicitly says no
+  // assumption can be made about an embedded IPv4 address or its location.
+  // Treat the entire non-globally-reachable prefix as non-public.
+  if (words?.[0] === 0x64 && words[1] === 0xff9b && words[2] === 1) return true;
   // Teredo (2001:0000::/32) obfuscates the embedded client IPv4 — block outright.
   if (words?.[0] === 0x2001 && words[1] === 0) return true;
   return (

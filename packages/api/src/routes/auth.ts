@@ -512,24 +512,49 @@ function smsVerifyAttemptKey(phone: string, purpose: string): string {
   return `sms-verify-attempts:${hashSha256Hex(`${purpose}:${phone}`)}`;
 }
 
+function smsVerifyAttemptSlotKey(phone: string, purpose: string, slot: number): string {
+  return `${smsVerifyAttemptKey(phone, purpose)}:${slot}`;
+}
+
 export async function getSmsVerifyFailedAttempts(phone: string, purpose: string): Promise<number> {
-  const raw = await getMfaBackend().get(smsVerifyAttemptKey(phone, purpose));
-  if (!raw) return 0;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+  const attempts = await Promise.all(
+    Array.from({ length: SMS_VERIFY_MAX_FAILED_ATTEMPTS }, (_, index) =>
+      getMfaBackend().get(smsVerifyAttemptSlotKey(phone, purpose, index + 1)),
+    ),
+  );
+  return attempts.filter((value) => value !== null).length;
+}
+
+/**
+ * Atomically reserve one of the five verification-attempt slots. Using
+ * set-if-absent slots keeps the limit correct under concurrent requests on
+ * every shipped backend without relying on a read-then-write counter.
+ */
+export async function claimSmsVerifyAttempt(phone: string, purpose: string): Promise<boolean> {
+  for (let slot = 1; slot <= SMS_VERIFY_MAX_FAILED_ATTEMPTS; slot++) {
+    if (
+      await getMfaBackend().setIfNotExists(
+        smsVerifyAttemptSlotKey(phone, purpose, slot),
+        "1",
+        SMS_VERIFY_FAILED_ATTEMPT_TTL_MS,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export async function recordSmsVerifyFailure(phone: string, purpose: string): Promise<void> {
-  const next = (await getSmsVerifyFailedAttempts(phone, purpose)) + 1;
-  await getMfaBackend().set(
-    smsVerifyAttemptKey(phone, purpose),
-    String(next),
-    SMS_VERIFY_FAILED_ATTEMPT_TTL_MS,
-  );
+  await claimSmsVerifyAttempt(phone, purpose);
 }
 
 export async function clearSmsVerifyFailures(phone: string, purpose: string): Promise<void> {
-  await getMfaBackend().delete(smsVerifyAttemptKey(phone, purpose));
+  await Promise.all(
+    Array.from({ length: SMS_VERIFY_MAX_FAILED_ATTEMPTS }, (_, index) =>
+      getMfaBackend().delete(smsVerifyAttemptSlotKey(phone, purpose, index + 1)),
+    ),
+  );
 }
 
 function totpVerifyAttemptKey(scope: string): string {
@@ -7302,17 +7327,13 @@ const completePasskeyMfaHandler = async (c: Context) => {
     return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 401);
   }
 
-  const updatedMfaCounter = await getDb()
+  const updatedMfaCounters = await getDb()
     .update(authenticators)
     .set({ counter: verification.authenticationInfo.newCounter })
-    .where(
-      cred.counter > 0
-        ? and(eq(authenticators.id, cred.id), eq(authenticators.counter, cred.counter))
-        : eq(authenticators.id, cred.id),
-    )
+    .where(and(eq(authenticators.id, cred.id), eq(authenticators.counter, cred.counter)))
     .returning({ id: authenticators.id });
-  if (cred.counter > 0 && updatedMfaCounter.length === 0) {
-    console.warn(`[PasskeyAuth] Concurrent MFA counter update for credential ${cred.id}`);
+  if (updatedMfaCounters.length !== 1) {
+    console.warn(`[PasskeyAuth] Concurrent MFA counter update rejected for credential ${cred.id}`);
     return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 401);
   }
 
@@ -8205,17 +8226,13 @@ auth.post("/passkey/login/verify", async (c) => {
   }
 
   // Update counter to prevent replay attacks
-  const updatedCounter = await db
+  const updatedCounters = await db
     .update(authenticators)
     .set({ counter: verification.authenticationInfo.newCounter })
-    .where(
-      cred.counter > 0
-        ? and(eq(authenticators.id, cred.id), eq(authenticators.counter, cred.counter))
-        : eq(authenticators.id, cred.id),
-    )
+    .where(and(eq(authenticators.id, cred.id), eq(authenticators.counter, cred.counter)))
     .returning({ id: authenticators.id });
-  if (cred.counter > 0 && updatedCounter.length === 0) {
-    console.warn(`[PasskeyAuth] Concurrent counter update for credential ${cred.id}`);
+  if (updatedCounters.length !== 1) {
+    console.warn(`[PasskeyAuth] Concurrent counter update rejected for credential ${cred.id}`);
     return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
   }
 
@@ -10243,7 +10260,7 @@ function expandOidcIpv6Words(address: string): number[] | null {
 
 /**
  * Extract the IPv4 address embedded in an IPv6 transition mechanism
- * (NAT64 64:ff9b::/96 + local-use 64:ff9b:1::/48 per RFC 6052/8215,
+ * (NAT64 64:ff9b::/96 per RFC 6052,
  * 6to4 2002::/16 per RFC 3056) so it can be screened against
  * isPrivateOidcIpv4.
  */
@@ -10260,20 +10277,6 @@ function embeddedTransitionOidcIpv4(address: string): string | null {
     words[4] === 0 &&
     words[5] === 0;
   if (isWellKnownNat64) return fromWords(words[6], words[7]);
-
-  // RFC 6052 /48: prefix(48) | IPv4-high(16) | u(8) |
-  // IPv4-low(16) | suffix(40).
-  const isLocalUseNat64 =
-    words[0] === 0x64 &&
-    words[1] === 0xff9b &&
-    words[2] === 1 &&
-    (words[4] & 0xff00) === 0 &&
-    (words[5] & 0x00ff) === 0 &&
-    words[6] === 0 &&
-    words[7] === 0;
-  if (isLocalUseNat64) {
-    return fromWords(words[3], ((words[4] & 0xff) << 8) | (words[5] >> 8));
-  }
   if (words[0] === 0x2002) return fromWords(words[1], words[2]);
   return null;
 }
@@ -10295,6 +10298,10 @@ function isPrivateOidcIpv6(address: string): boolean {
   const embedded = embeddedTransitionOidcIpv4(normalized);
   if (embedded) return isPrivateOidcIpv4(embedded);
   const words = expandOidcIpv6Words(normalized);
+  // RFC 8215 reserves 64:ff9b:1::/48 for local use and explicitly says no
+  // assumption can be made about an embedded IPv4 address or its location.
+  // Treat the entire non-globally-reachable prefix as non-public.
+  if (words?.[0] === 0x64 && words[1] === 0xff9b && words[2] === 1) return true;
   // Teredo (2001:0000::/32) obfuscates the embedded client IPv4 — block outright.
   if (words?.[0] === 0x2001 && words[1] === 0) return true;
   return (

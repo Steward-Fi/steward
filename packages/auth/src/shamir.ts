@@ -13,8 +13,8 @@
  * layered above this module — Shamir itself just guarantees the math.
  *
  * Wire format per share: byte 0 = x-coordinate (1..255), bytes 1.. = y bytes
- * of the split payload. The payload is `version(1) || secret || checksum(4)`
- * where checksum is the first 4 bytes of SHA-256(secret) — so combine can
+ * of the split payload. The payload is `version(1) || secret || sha256(32)`
+ * so combine can
  * detect corrupted, mixed, or from-a-different-split shares instead of
  * silently returning a wrong secret (SEC-142). Encoded as hex for transport.
  * The threshold is intentionally NOT in the share — callers must communicate
@@ -68,15 +68,12 @@ function evalPoly(coeffs: Uint8Array, x: number): number {
 }
 
 const SHARE_FORMAT_VERSION = 0x01;
-const SECRET_CHECKSUM_BYTES = 4;
+const SECRET_CHECKSUM_BYTES = 32;
 /** Generous cap — secrets here are keys, mnemonics, vault passwords. */
 const MAX_SECRET_BYTES = 4096;
 
 function secretChecksum(secret: Uint8Array): Uint8Array {
-  return new Uint8Array(createHash("sha256").update(secret).digest()).subarray(
-    0,
-    SECRET_CHECKSUM_BYTES,
-  );
+  return new Uint8Array(createHash("sha256").update(secret).digest());
 }
 
 export interface SplitOptions {
@@ -212,7 +209,9 @@ export function combineShares(hexShares: string[], threshold: number): Uint8Arra
     payload[i] = acc;
   }
 
-  // Envelope validation: version byte + truncated-SHA-256 integrity check.
+  // Envelope validation: version byte + full SHA-256 integrity check. This is
+  // a corruption/mix-up detector, not authenticity; callers still need an
+  // authenticated channel and trusted share holders.
   if (payload.length < 1 + 1 + SECRET_CHECKSUM_BYTES) {
     throw new Error("combineShares: reconstructed payload is too short");
   }

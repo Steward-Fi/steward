@@ -104,6 +104,7 @@ import { redactWalletMetadataSecrets } from "../services/wallet-metadata";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 import {
   assertAllowedOAuthRedirectUri,
+  claimSmsVerifyAttempt,
   clearSmsVerifyFailures,
   createSessionToken,
   decryptImportSessionJson,
@@ -112,9 +113,6 @@ import {
   getEmailAuthForTenant,
   getImportSessionBackend,
   getPhoneAuth,
-  getSmsVerifyFailedAttempts,
-  recordSmsVerifyFailure,
-  SMS_VERIFY_MAX_FAILED_ATTEMPTS,
 } from "./auth";
 
 // ─── Session payload types ────────────────────────────────────────────────────
@@ -3131,9 +3129,7 @@ for (const channel of ["sms", "whatsapp"] as const) {
 
     const userId = c.get("userId");
     const linkPurpose = phoneLinkPurpose(channel, userId);
-    if (
-      (await getSmsVerifyFailedAttempts(body.phone, linkPurpose)) >= SMS_VERIFY_MAX_FAILED_ATTEMPTS
-    ) {
+    if (!(await claimSmsVerifyAttempt(body.phone, linkPurpose))) {
       return c.json<ApiResponse>(
         {
           ok: false,
@@ -3145,7 +3141,6 @@ for (const channel of ["sms", "whatsapp"] as const) {
 
     const verified = await getPhoneAuth().verifyOtp(body.phone, body.code, linkPurpose);
     if (!verified.valid) {
-      await recordSmsVerifyFailure(body.phone, linkPurpose);
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
     }
     await clearSmsVerifyFailures(body.phone, linkPurpose);
