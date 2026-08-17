@@ -60,10 +60,12 @@ quoteRoutes.get("/", async (c) => {
   const nonce = c.req.query("nonce") ?? crypto.randomUUID();
   // normalizeReportData caps report_data at 64 bytes; reject oversized
   // nonces as a client error instead of an unhandled 500.
+  // TextEncoder instead of Buffer.byteLength: this package also builds for
+  // Cloudflare Workers, where the Buffer global is not available.
   const nonceByteLength =
     nonce.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(nonce)
       ? nonce.length / 2
-      : Buffer.byteLength(nonce, "utf8");
+      : new TextEncoder().encode(nonce).length;
   if (nonceByteLength > 64) {
     return c.json({ error: "nonce must be <= 64 bytes" }, 400);
   }
