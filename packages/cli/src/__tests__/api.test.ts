@@ -94,15 +94,18 @@ describe("StewardApiClient", () => {
 
   test("applies a request deadline to every API call", async () => {
     let signal: AbortSignal | undefined;
+    let redirect: RequestRedirect | undefined;
     const client = new StewardApiClient({
       baseUrl: "https://api.example.test",
       fetchImpl: (async (_url, init) => {
         signal = init?.signal as AbortSignal;
+        redirect = init?.redirect;
         return Response.json({ ok: true, data: {} });
       }) as typeof fetch,
     });
     await client.request("GET", "/health");
     expect(signal).toBeInstanceOf(AbortSignal);
+    expect(redirect).toBe("error");
   });
 
   test("rejects credential-bearing and public plaintext API URLs", () => {

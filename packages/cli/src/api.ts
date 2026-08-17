@@ -124,6 +124,10 @@ export class StewardApiClient {
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(API_REQUEST_TIMEOUT_MS),
+      // The client attaches bearer, platform, or tenant credentials. Never let
+      // fetch replay those headers to a Location selected by an intermediary or
+      // compromised endpoint; operators must configure the canonical API URL.
+      redirect: "error",
     });
     const text = await readBoundedResponse(res);
     const parsed = text ? safeJson(text) : null;
