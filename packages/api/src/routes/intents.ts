@@ -31,7 +31,7 @@ import {
   transactions,
   vault,
 } from "../services/context";
-import { redactIntentResponseValue, toIntentResponse } from "../services/intent-response";
+import { redactSignedTransactions, toIntentResponse } from "../services/intent-response";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
@@ -1073,8 +1073,8 @@ function dispatchIntentWebhook(
     action_type: row.intentType,
     status: row.status,
     resource_id: row.resourceId,
-    authorization_details: redactIntentResponseValue(row.authorizationDetails),
-    execution_result: redactIntentResponseValue(row.executionResult),
+    authorization_details: row.authorizationDetails,
+    execution_result: redactSignedTransactions(row.executionResult),
     rejection_reason: row.rejectionReason,
     cancellation_reason: row.cancellationReason,
     failure_reason: row.failureReason,
@@ -1099,7 +1099,7 @@ function dispatchWalletActionSuccessWebhook(
     dispatchWebhook(tenantId, agentId, "wallet_action.send_calls.succeeded", {
       actionId: executionResult.actionId,
       intent_id: executionResult.actionId,
-      signedCalls: redactIntentResponseValue(executionResult.signedCalls),
+      signedCalls: redactSignedTransactions(executionResult.signedCalls),
     });
   }
 }
@@ -1863,7 +1863,7 @@ async function updateIntentStatus(
       return c.json<ApiResponse>({ ok: false, error: failureReason }, 400);
     }
 
-    const storedExecutionResult = redactIntentResponseValue(executionResult) as Record<
+    const storedExecutionResult = redactSignedTransactions(executionResult) as Record<
       string,
       unknown
     >;

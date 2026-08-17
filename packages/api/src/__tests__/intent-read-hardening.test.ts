@@ -2,28 +2,72 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  redactIntentResponseValue,
+  redactSignedTransactions,
+  toIntentResponse,
   toProviderActionStatusResponse,
 } from "../services/intent-response";
 
 const routeSource = readFileSync(join(import.meta.dir, "..", "routes", "intents.ts"), "utf8");
 
 describe("intent read hardening", () => {
-  it("behaviorally redacts adversarial nested and array credential shapes", () => {
-    const canary = "intent-hardening-canary";
-    const redacted = redactIntentResponseValue({
+  it("preserves benign generic intent data while redacting signed transactions", () => {
+    const value = {
       tokenAddress: "0xabc",
+      prose: [
+        "token price is rising",
+        "authorization required by policy",
+        "secret sauce recipe",
+        "cookie policy accepted",
+      ],
+      cookiePolicy: "accepted",
+      authorizationStatus: "required",
+      privateKeyRequired: false,
       nested: [
-        { password: `${canary}-password`, passphrase: `${canary}-passphrase` },
-        { auth: `Bearer ${canary}-auth`, clientSecretValue: `${canary}-client-secret` },
-        { privateKeyPem: `-----BEGIN PRIVATE KEY-----\n${canary}\n-----END PRIVATE KEY-----` },
-        { cookieHeader: `session=${canary}-cookie` },
-        { endpoint: `https://user:${canary}-userinfo@example.test/path` },
+        { signedTx: "0xsigned", txHash: "0xhash" },
+        { signed_tx: "0xsigned-snake", status: "complete" },
+      ],
+    };
+
+    expect(redactSignedTransactions(value)).toEqual({
+      ...value,
+      nested: [
+        { signedTx: "[redacted]", txHash: "0xhash" },
+        { signed_tx: "[redacted]", status: "complete" },
       ],
     });
-    const text = JSON.stringify(redacted);
-    expect(text).not.toContain(canary);
-    expect(text).toContain('"tokenAddress":"0xabc"');
+  });
+
+  it("keeps generic GET, webhook, and persistence on the signedTx-only contract", () => {
+    const authorizationDetails = { authorizationStatus: "required", cookiePolicy: "accepted" };
+    const payload = { prose: "token price is rising", privateKeyRequired: false };
+    const response = toIntentResponse({
+      id: "intent-1",
+      authorizationDetails,
+      payload,
+      executionResult: { signedTx: "0xsigned", prose: "secret sauce recipe" },
+      createdAt: new Date("2026-08-16T00:00:00.000Z"),
+    } as Parameters<typeof toIntentResponse>[0]);
+
+    expect(response.authorizationDetails).toBe(authorizationDetails);
+    expect(response.payload).toBe(payload);
+    expect(response.executionResult).toEqual({
+      signedTx: "[redacted]",
+      prose: "secret sauce recipe",
+    });
+
+    const webhookStart = routeSource.indexOf("function dispatchIntentWebhook");
+    const webhookEnd = routeSource.indexOf(
+      "function dispatchWalletActionSuccessWebhook",
+      webhookStart,
+    );
+    const webhookBody = routeSource.slice(webhookStart, webhookEnd);
+    expect(webhookBody).toContain("authorization_details: row.authorizationDetails");
+    expect(webhookBody).toContain(
+      "execution_result: redactSignedTransactions(row.executionResult)",
+    );
+    expect(routeSource).toContain(
+      "const storedExecutionResult = redactSignedTransactions(executionResult)",
+    );
   });
 
   it("provider-action status DTO is an explicit scalar allowlist", () => {
@@ -95,15 +139,5 @@ describe("intent read hardening", () => {
     );
     expect(transferBody).toContain("const txId = row.id");
     expect(transferBody).not.toContain("row.resourceId || row.id");
-  });
-
-  it("redacts authorization details before dispatching intent webhooks", () => {
-    const start = routeSource.indexOf("function dispatchIntentWebhook");
-    const end = routeSource.indexOf("function dispatchWalletActionSuccessWebhook", start);
-    const body = routeSource.slice(start, end);
-    expect(body).toContain(
-      "authorization_details: redactIntentResponseValue(row.authorizationDetails)",
-    );
-    expect(body).not.toContain("authorization_details: row.authorizationDetails");
   });
 });
