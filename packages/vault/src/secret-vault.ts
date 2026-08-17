@@ -466,7 +466,6 @@ export class SecretVault {
       approvalConfig?: Record<string, unknown>;
     },
   ): Promise<SecretRoute> {
-    await lockSecretRouteNamespaces(db as never, tenantId, [config.agentId]);
     const normalizedConfig = {
       ...config,
       hostPattern: config.hostPattern.trim().toLowerCase(),
@@ -501,6 +500,11 @@ export class SecretVault {
     if (!agent) {
       throw new Error(`Agent ${normalizedConfig.agentId} not found for tenant ${tenantId}`);
     }
+
+    // Preserve the precise validation contract above, then take the durable
+    // namespace lock immediately before mutation. If the agent disappears in
+    // the validation/lock gap, the lock helper still fails closed.
+    await lockSecretRouteNamespaces(db as never, tenantId, [normalizedConfig.agentId]);
 
     const [row] = await db
       .insert(secretRoutes)

@@ -289,8 +289,6 @@ describe("SecretVault lifecycle semantics", () => {
     await expect(
       vault.updateRoute(tenantId, governed.id, { pathPattern: "/v1/responses" }),
     ).rejects.toThrow(/provider operation authoring/);
-    expect((await vault.getRoute(tenantId, governed.id))?.pathPattern).toBe(
-      "/v1/chat/completions",
-    );
+    expect((await vault.getRoute(tenantId, governed.id))?.pathPattern).toBe("/v1/chat/completions");
   });
 });

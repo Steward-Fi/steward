@@ -382,13 +382,11 @@ describe("audited capability mutations", () => {
     const changed = validateCapabilitySpec({ secretId, ...GH_SPEC, pathPattern: changedPath });
     if (!changed.ok) throw new Error(changed.error);
     await expect(
-      failingStore.updateCapability(
+      failingStore.updateCapability(tenantId, cap.id, { spec: changed.spec }, undefined, () => ({
         tenantId,
-        cap.id,
-        { spec: changed.spec },
-        undefined,
-        () => ({ tenantId, actorType: "user", action: "capability.update" }),
-      ),
+        actorType: "user",
+        action: "capability.update",
+      })),
     ).rejects.toThrow("required audit unavailable");
     expect((await store.getCapabilityById(tenantId, cap.id))?.pathPattern).toBe(
       GH_SPEC.pathPattern,
