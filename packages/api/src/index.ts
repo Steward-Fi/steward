@@ -13,11 +13,11 @@
  */
 
 import { validateJwtSecretEnv } from "@stwd/auth";
-import { closeDb, getDb, runMigrations } from "@stwd/db";
+import { closeDb, getDb, getMigrationExpectation, runMigrations } from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
 import { sql } from "drizzle-orm";
 import { composeApp } from "./compose";
-import { initRedis, shutdownRedis } from "./middleware/redis";
+import { getRedisClient, initRedis, isRedisConfigured, shutdownRedis } from "./middleware/redis";
 import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
 import {
   API_VERSION,
@@ -106,16 +106,96 @@ const requestLogCleanupTimer = setInterval(() => {
 // on the Cloudflare control plane for instance health.
 
 app.get("/ready", async (c) => {
-  const checks: Record<string, { ok: boolean; error?: string; source?: string }> = {};
+  const checks: Record<
+    string,
+    { ok: boolean; required?: boolean; error?: string; source?: string; detail?: unknown }
+  > = {};
 
-  checks.migrations = { ok: migrationsRan };
+  const expectedMigration = getMigrationExpectation();
+  checks.migrations = { ok: false, detail: { expected: expectedMigration.tag } };
 
   try {
     const db = getDb();
-    await db.execute(sql`SELECT 1`);
-    checks.database = { ok: true };
+    const pglite = shouldUsePGLite();
+    const result = pglite
+      ? await db.execute(sql`
+          SELECT
+            EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000 AS database_time_ms,
+            EXISTS(
+              SELECT 1 FROM __steward_migrations WHERE tag = ${expectedMigration.tag}
+            ) AS expected_migration_applied
+        `)
+      : await db.execute(sql`
+          SELECT
+            EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS database_time_ms,
+            (SELECT MAX(created_at) FROM drizzle.__drizzle_migrations) AS migration_created_at
+        `);
+    const rows = Array.isArray(result)
+      ? result
+      : ((result as unknown as { rows?: unknown[] }).rows ?? []);
+    const row = rows[0] as
+      | { database_time_ms?: string | number; migration_created_at?: string | number | null }
+      | undefined;
+    const databaseTimeMs = Number(row?.database_time_ms);
+    const migrationCreatedAt = Number(row?.migration_created_at);
+    const expectedMigrationApplied =
+      (row as { expected_migration_applied?: unknown } | undefined)?.expected_migration_applied ===
+      true;
+    const databaseSkewMs = Math.abs(Date.now() - databaseTimeMs);
+    checks.database = {
+      ok: Number.isFinite(databaseTimeMs) && databaseSkewMs <= 30_000,
+      detail: { clockSkewMs: Math.round(databaseSkewMs), serverTime: new Date().toISOString() },
+    };
+    checks.migrations = {
+      ok:
+        migrationsRan &&
+        (pglite ? expectedMigrationApplied : migrationCreatedAt === expectedMigration.createdAt),
+      detail: {
+        expected: expectedMigration.tag,
+        expectedCreatedAt: expectedMigration.createdAt,
+        ...(pglite
+          ? { expectedMigrationApplied }
+          : { actualCreatedAt: Number.isFinite(migrationCreatedAt) ? migrationCreatedAt : null }),
+      },
+    };
   } catch (err: unknown) {
     checks.database = { ok: false, error: err instanceof Error ? err.message : "unknown" };
+  }
+
+  try {
+    const redis = getRedisClient();
+    checks.redis = redis
+      ? { ok: (await redis.ping()).toUpperCase() === "PONG" }
+      : isRedisConfigured()
+        ? { ok: false, error: "Redis is configured but not connected" }
+        : { ok: false, required: false, error: "Redis is not configured (optional mode)" };
+  } catch (err: unknown) {
+    checks.redis = { ok: false, error: err instanceof Error ? err.message : "unknown" };
+  }
+
+  const proxyUrl = process.env.STEWARD_PROXY_URL?.replace(/\/+$/, "");
+  if (!proxyUrl) {
+    checks.proxyClock = {
+      ok: false,
+      required: false,
+      error: "STEWARD_PROXY_URL not configured",
+    };
+  } else {
+    try {
+      const startedAt = Date.now();
+      const response = await fetch(`${proxyUrl}/health`, { signal: AbortSignal.timeout(3_000) });
+      const body = (await response.json()) as { serverTime?: unknown };
+      const endedAt = Date.now();
+      const proxyTime = Date.parse(String(body.serverTime ?? ""));
+      const midpoint = startedAt + (endedAt - startedAt) / 2;
+      const skewMs = Math.abs(proxyTime - midpoint);
+      checks.proxyClock = {
+        ok: response.ok && Number.isFinite(proxyTime) && skewMs <= 30_000,
+        detail: { clockSkewMs: Math.round(skewMs) },
+      };
+    } catch (err: unknown) {
+      checks.proxyClock = { ok: false, error: err instanceof Error ? err.message : "unknown" };
+    }
   }
 
   if (!process.env.STEWARD_MASTER_PASSWORD) {
@@ -141,7 +221,7 @@ app.get("/ready", async (c) => {
       : {}),
   };
 
-  const allOk = Object.values(checks).every((c) => c.ok);
+  const allOk = Object.values(checks).every((check) => check.ok || check.required === false);
   return c.json(
     {
       status: allOk ? "ready" : "not_ready",

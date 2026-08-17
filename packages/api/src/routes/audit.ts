@@ -5,7 +5,8 @@
  * Mount: app.route("/audit", auditRoutes)
  */
 
-import { proxyAuditLog } from "@stwd/db";
+import { auditChainHeads, auditCheckpoints, proxyAuditLog } from "@stwd/db";
+import { shouldUsePGLite } from "@stwd/db/pglite";
 import { and, count, desc, eq, gte, inArray, lte, type SQL, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { auditOwnerAdminMfaGate } from "../middleware/audit-gate";
@@ -15,7 +16,12 @@ import {
   signAuditBundle,
   verifyAuditChain,
 } from "../services/audit";
-import { AuditSigningKeyError, isCheckpointSigningConfigured } from "../services/audit-checkpoint";
+import {
+  AuditSigningKeyError,
+  isCheckpointSigningConfigured,
+  type SignedCheckpoint,
+  verifyCheckpoint,
+} from "../services/audit-checkpoint";
 import {
   type ApiResponse,
   type AppVariables,
@@ -24,6 +30,7 @@ import {
   db,
   transactions,
 } from "../services/context";
+import { inspectGovernedRoutes } from "../services/governed-route-inventory";
 
 export const auditRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -800,6 +807,82 @@ auditRoutes.post("/verify", async (c) => {
           ? undefined
           : "Partial verification is anchored to the stored predecessor hash and is not proof that earlier audit rows are intact.",
     },
+  });
+});
+
+// ─── GET /audit/integrity ───────────────────────────────────────────────────
+//
+// A bounded operator diagnostic: verify the full live HMAC chain, then verify
+// the newest persisted Ed25519 checkpoint and require it to commit to the
+// current chain head. The normal audit owner/admin + recent-MFA gate above
+// applies; no HMAC key or private signing material is returned.
+auditRoutes.get("/integrity", async (c) => {
+  const tenantId = c.get("tenantId");
+  const configuredLimit = Number(process.env.STEWARD_DOCTOR_AUDIT_MAX_EVENTS ?? "100000");
+  const maxEvents =
+    Number.isSafeInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : 100_000;
+  const data = await db.transaction(async (tx) => {
+    if (!shouldUsePGLite()) {
+      await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`);
+    }
+    const [head] = await tx
+      .select({ seq: auditChainHeads.expectedSeq, hmac: auditChainHeads.headHmac })
+      .from(auditChainHeads)
+      .where(eq(auditChainHeads.tenantId, tenantId))
+      .limit(1);
+    const chain = await verifyAuditChain(tenantId, {
+      requireHead: true,
+      maxRows: maxEvents,
+      executor: tx,
+    });
+    const [row] = await tx
+      .select()
+      .from(auditCheckpoints)
+      .where(eq(auditCheckpoints.tenantId, tenantId))
+      .orderBy(desc(auditCheckpoints.seq), desc(auditCheckpoints.id))
+      .limit(1);
+    const governedRoutes = await inspectGovernedRoutes(tenantId, tx);
+
+    let checkpointValid = false;
+    let checkpointAtHead = false;
+    if (row && head && !("limitExceeded" in chain && chain.limitExceeded)) {
+      const checkpoint: SignedCheckpoint = {
+        payload: row.payload as unknown as SignedCheckpoint["payload"],
+        signature: row.signature,
+        publicKey: row.publicKey,
+      };
+      checkpointValid = verifyCheckpoint(checkpoint);
+      checkpointAtHead =
+        row.seq === Number(head.seq) &&
+        Buffer.from(row.headHmac).toString("hex") === Buffer.from(head.hmac).toString("hex") &&
+        checkpoint.payload.seq === Number(head.seq) &&
+        checkpoint.payload.headHmac === Buffer.from(head.hmac).toString("hex");
+    }
+    const limitExceeded = "limitExceeded" in chain && chain.limitExceeded === true;
+    return {
+      valid: chain.valid && checkpointValid && checkpointAtHead,
+      chainValid: chain.valid,
+      checkpointPresent: Boolean(row),
+      checkpointValid,
+      checkpointAtHead,
+      checkpointSeq: row?.seq ?? null,
+      chainHeadSeq: head ? Number(head.seq) : null,
+      bounded: true,
+      eventsInspected: chain.valid ? chain.count : maxEvents,
+      maxEvents,
+      governedRoutes,
+      ...(limitExceeded
+        ? {
+            error:
+              "audit chain exceeds the bounded doctor verification limit; use an offline export",
+          }
+        : {}),
+    };
+  });
+
+  return c.json<ApiResponse>({
+    ok: true,
+    data,
   });
 });
 

@@ -34,6 +34,7 @@ export {
   setPGLiteOverride,
 } from "./client";
 export { runMigrations } from "./migrate";
+export { getMigrationExpectation, type MigrationExpectation } from "./migration-status";
 export { encryptOAuthAccountPlaintextTokens } from "./oauth-token-encryption";
 export {
   pluginAdvisoryLockKey,

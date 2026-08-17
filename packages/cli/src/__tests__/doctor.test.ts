@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { StewardApiClient } from "../api";
+import { join, resolve } from "node:path";
+import { ApiError, type StewardApiClient } from "../api";
 import { runDoctor } from "../doctor";
 import { describeSecret } from "../format";
 
@@ -12,12 +13,42 @@ import { describeSecret } from "../format";
 function stubApi(): StewardApiClient {
   return {
     baseUrl: "http://stub.local",
-    request: async () => ({ ok: true }),
+    request: async (_method: string, path: string) => {
+      if (path === "/ready") {
+        return {
+          checks: {
+            migrations: { ok: true, detail: { expected: "journal-tip" } },
+            redis: { ok: true },
+            proxyClock: { ok: true, detail: { clockSkewMs: 2 } },
+            database: {
+              ok: true,
+              detail: { clockSkewMs: 1, serverTime: new Date().toISOString() },
+            },
+          },
+        };
+      }
+      if (path === "/audit/integrity") {
+        return {
+          valid: true,
+          chainValid: true,
+          checkpointPresent: true,
+          checkpointValid: true,
+          checkpointAtHead: true,
+          checkpointSeq: 4,
+          chainHeadSeq: 4,
+          governedRoutes: {
+            ok: true,
+            detail: { governedRoutes: 1, nullOperationRoutes: 0, dualModeRoutes: 0 },
+          },
+        };
+      }
+      return { ok: true };
+    },
   } as unknown as StewardApiClient;
 }
 
-/** All contiguous substrings of length >= 4 of `value`. */
-function substringsOf(value: string, min = 4): string[] {
+/** Long contiguous fragments whose accidental appearance in static output is negligible. */
+function substringsOf(value: string, min = 12): string[] {
   const out: string[] = [];
   for (let len = min; len <= value.length; len++) {
     for (let i = 0; i + len <= value.length; i++) out.push(value.slice(i, i + len));
@@ -40,7 +71,7 @@ describe("describeSecret", () => {
 });
 
 describe("steward doctor secret redaction", () => {
-  test("no >=4-char substring of any secret appears in pretty or JSON output", async () => {
+  test("no long fragment of any secret appears in pretty or JSON output", async () => {
     const dir = mkdtempSync(join(tmpdir(), "steward-doctor-"));
     try {
       // Realistic high-entropy secrets (random hex), so accidental overlaps with
@@ -162,5 +193,117 @@ describe("PR6 governed-route prerequisites (strict)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("operator-integrity diagnostics", () => {
+  test("preserves structured readiness diagnostics from an HTTP 503", async () => {
+    const api = {
+      baseUrl: "http://stub.local",
+      request: async (_method: string, path: string) => {
+        if (path === "/health") return { ok: true };
+        if (path === "/ready") {
+          throw new ApiError("not ready", 503, {
+            status: "not_ready",
+            checks: {
+              migrations: { ok: false, detail: { expected: "0085", actual: "0084" } },
+              redis: { ok: false, required: false },
+              proxyClock: { ok: false, required: false },
+              database: {
+                ok: true,
+                detail: { clockSkewMs: 0, serverTime: new Date().toISOString() },
+              },
+            },
+          });
+        }
+        return { valid: true, governedRoutes: { ok: true } };
+      },
+    } as unknown as StewardApiClient;
+    const result = await runDoctor({ strict: true, api });
+    expect(result.checks.find((check) => check.name === "ops:migration-tip")?.ok).toBe(false);
+    expect(result.checks.find((check) => check.name === "ops:redis-reachability")?.ok).toBe(true);
+    expect(result.checks.find((check) => check.name === "ops:proxy-clock-skew")?.ok).toBe(true);
+  });
+
+  test("strict mode reports that tenant-key auth cannot satisfy the audit MFA gate", async () => {
+    const api = {
+      baseUrl: "http://stub.local",
+      request: async (_method: string, path: string) => {
+        if (path === "/health") return { ok: true };
+        if (path === "/ready") return stubApi().request("GET", path);
+        throw new ApiError("Owner/admin session with recent MFA required", 403, {
+          error: "Owner/admin session with recent MFA required",
+        });
+      },
+    } as unknown as StewardApiClient;
+    const result = await runDoctor({ strict: true, api });
+    const check = result.checks.find((entry) => entry.name === "ops:audit-checkpoint-integrity");
+    expect(check?.ok).toBe(false);
+    expect(check?.detail).toContain("recent MFA");
+  });
+
+  test("the real --strict CLI exits nonzero when any gate fails", () => {
+    const result = spawnSync(
+      process.execPath,
+      ["packages/cli/src/index.ts", "doctor", "--strict", "--json", "--env", "/dev/null"],
+      {
+        cwd: resolve(import.meta.dir, "../../../.."),
+        env: {
+          ...process.env,
+          STEWARD_API_URL: "http://127.0.0.1:1",
+          STEWARD_API_TOKEN: "",
+          STEWARD_TOKEN: "",
+          STEWARD_TENANT_KEY: "",
+        },
+        encoding: "utf8",
+        timeout: 10_000,
+      },
+    );
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stdout).ok).toBe(false);
+  });
+
+  test("strict mode fails closed for every unavailable or failed operational check", async () => {
+    const api = {
+      baseUrl: "http://stub.local",
+      request: async (_method: string, path: string) => {
+        if (path === "/ready") {
+          return {
+            checks: {
+              migrations: { ok: false, detail: { expected: "0084", actual: "0083" } },
+              redis: { ok: false, error: "unreachable" },
+              proxyClock: { ok: false, detail: { clockSkewMs: 60_000 } },
+              database: {
+                ok: false,
+                detail: { clockSkewMs: 60_000, serverTime: new Date().toISOString() },
+              },
+            },
+          };
+        }
+        if (path === "/audit/integrity") {
+          return {
+            valid: false,
+            chainValid: true,
+            checkpointPresent: true,
+            checkpointValid: true,
+            checkpointAtHead: false,
+            governedRoutes: { ok: false, detail: { nullOperationRoutes: 1 } },
+          };
+        }
+        return { ok: true };
+      },
+    } as unknown as StewardApiClient;
+    const result = await runDoctor({ strict: true, api });
+    for (const name of [
+      "ops:migration-tip",
+      "ops:redis-reachability",
+      "ops:governed-route-inventory",
+      "ops:proxy-clock-skew",
+      "ops:api-database-clock-skew",
+      "ops:audit-checkpoint-integrity",
+    ]) {
+      expect(result.checks.find((check) => check.name === name)?.ok).toBe(false);
+    }
+    expect(result.ok).toBe(false);
   });
 });

@@ -2999,6 +2999,50 @@ function auditPaths(prefix = ""): Record<string, unknown> {
         },
       },
     },
+    [`${prefix}/audit/integrity`]: {
+      get: {
+        tags: ["Audits"],
+        summary: "Verify audit chain and latest checkpoint at the current head",
+        description:
+          "Requires an owner/admin browser session with recent MFA. Used by steward doctor to verify the live HMAC chain and the newest persisted Ed25519 checkpoint without returning signing or HMAC key material.",
+        security: [{ bearerAuth: [] }],
+        responses: {
+          "200": jsonResponse({
+            type: "object",
+            required: [
+              "valid",
+              "chainValid",
+              "checkpointPresent",
+              "checkpointValid",
+              "checkpointAtHead",
+              "checkpointSeq",
+              "chainHeadSeq",
+              "governedRoutes",
+            ],
+            properties: {
+              valid: { type: "boolean" },
+              chainValid: { type: "boolean" },
+              checkpointPresent: { type: "boolean" },
+              checkpointValid: { type: "boolean" },
+              checkpointAtHead: { type: "boolean" },
+              checkpointSeq: { type: ["integer", "null"] },
+              chainHeadSeq: { type: ["integer", "null"] },
+              governedRoutes: {
+                type: "object",
+                required: ["governedRoutes", "nullOperationRoutes", "dualModeRoutes", "ok"],
+                properties: {
+                  governedRoutes: { type: "integer" },
+                  nullOperationRoutes: { type: "integer" },
+                  dualModeRoutes: { type: "integer" },
+                  ok: { type: "boolean" },
+                },
+              },
+            },
+          }),
+          ...errorResponses(),
+        },
+      },
+    },
   };
 }
 
