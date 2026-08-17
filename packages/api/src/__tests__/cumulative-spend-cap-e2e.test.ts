@@ -45,6 +45,7 @@ import {
   providerActionAuditOutbox,
   providerActionBindings,
   providerActionReservationGenerations,
+  providerAgentBudgets,
   providerGrants,
   providerOperations,
   providerRoleBindings,
@@ -53,6 +54,7 @@ import {
   tenants,
   users,
   userTenants,
+  vaultSigningFreezes,
   workspaces,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -188,10 +190,12 @@ async function cleanupRedis() {
 async function wipe() {
   const db = getDb();
   await db.delete(providerActionAuditOutbox);
+  await db.delete(vaultSigningFreezes);
   await db.delete(approvalQueue);
   await db.delete(providerActionBindings);
   await db.delete(intents);
   await db.delete(providerGrants);
+  await db.delete(providerAgentBudgets);
   await db.delete(providerRoleBindings);
   await db.delete(providerOperations);
   await db.delete(providerAccounts);
@@ -493,6 +497,143 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     if (t.kind === "policy_denied") {
       expect(t.code).toBe(PROVIDER_POLICY_REASON.CUMULATIVE_SPEND_CAP_EXCEEDED);
     }
+  });
+
+  test("#208 concurrent actions cannot cross a first-class count budget", async () => {
+    await seed({ maxBytes: 1_000_000 });
+    await getDb().insert(providerAgentBudgets).values({
+      tenantId: CS.TENANT,
+      agentId: CS.AGENT,
+      dimension: "count",
+      windowSeconds: 86_400,
+      max: 3,
+      autoFreeze: true,
+    });
+
+    // This assertion is deliberately load-bearing mutation proof: bypassing the
+    // budget reservation admits all ten actions and changes the exact 3/7 split.
+    const outcomes = await Promise.all(
+      Array.from({ length: 10 }, (_, index) =>
+        proposeTweet(`budget-${index}`, `cs-208-race-${index}`),
+      ),
+    );
+    expect(outcomes.filter((outcome) => outcome.kind === "allowed")).toHaveLength(3);
+    const denied = outcomes.filter((outcome) => outcome.kind === "policy_denied");
+    expect(denied).toHaveLength(7);
+    expect(denied.every((outcome) => outcome.code === "PROVIDER_AGENT_BUDGET_EXHAUSTED")).toBe(
+      true,
+    );
+
+    const exhaustionEvents = await getDb()
+      .select()
+      .from(providerActionAuditOutbox)
+      .where(eq(providerActionAuditOutbox.action, "provider.budget.exhausted"));
+    expect(exhaustionEvents).toHaveLength(7);
+    expect(
+      exhaustionEvents.every(
+        (event) =>
+          event.resourceType === "provider_action" &&
+          typeof event.resourceId === "string" &&
+          event.resourceId.length > 0,
+      ),
+    ).toBe(true);
+    const freezes = await getDb()
+      .select()
+      .from(vaultSigningFreezes)
+      .where(eq(vaultSigningFreezes.agentId, CS.AGENT));
+    expect(freezes).toHaveLength(1);
+    expect(freezes[0]?.liftedAt).toBeNull();
+  });
+
+  test("#208 notional budgets debit the declared amount and denied reservations do not leak", async () => {
+    await seed({ maxBytes: 1_000_000 });
+    await getDb().insert(providerAgentBudgets).values({
+      tenantId: CS.TENANT,
+      workspaceId: CS.WORKSPACE,
+      agentId: CS.AGENT,
+      dimension: "notional",
+      windowSeconds: 604_800,
+      max: 10,
+      currency: "BYTES",
+    });
+
+    expect((await proposeTweet("123456", "cs-208-notional-a")).kind).toBe("allowed");
+    const crossing = await proposeTweet("12345", "cs-208-notional-b");
+    expect(crossing.kind).toBe("policy_denied");
+    if (crossing.kind === "policy_denied") {
+      expect(crossing.code).toBe("PROVIDER_AGENT_BUDGET_EXHAUSTED");
+    }
+    // The rejected 5-byte reservation is removed atomically, leaving room for
+    // the exact remaining four bytes.
+    expect((await proposeTweet("1234", "cs-208-notional-c")).kind).toBe("allowed");
+  });
+
+  test("#208 approval resume re-debits the current budget before consumption", async () => {
+    process.env.STEWARD_EXECUTION_AUTH_SECRET =
+      "k1:issue-208-real-redis-test-secret-with-enough-entropy";
+    await seed({ maxBytes: 1_000_000, requireApproval: true });
+    await getDb().insert(providerAgentBudgets).values({
+      tenantId: CS.TENANT,
+      agentId: CS.AGENT,
+      dimension: "count",
+      windowSeconds: 86_400,
+      max: 1,
+    });
+    const queued = await proposeTweet("queued-budget", "cs-208-queued");
+    expect(queued.kind).toBe("approval_required");
+    if (queued.kind !== "approval_required") throw new Error("expected approval");
+    expect(
+      (
+        await providerApprovalService.decide({
+          intentId: queued.intentId,
+          tenantId: CS.TENANT,
+          authenticatedUserId: CS.GRANTOR,
+          sessionMfaVerifiedAt: Date.now(),
+          decision: "approve",
+          expectedVersion: 1,
+          expectedRequestHash: queued.requestHash,
+          expectedActionDigest: queued.actionDigest,
+          reasonCode: null,
+          reason: null,
+          idempotencyKey: "cs-208-approve",
+        })
+      ).ok,
+    ).toBe(true);
+
+    // A different governed operation for this agent consumed the sole global
+    // count slot while this action waited for its human approval.
+    expect(
+      await reserveCumulativeSpend({
+        stream: {
+          agentId: CS.AGENT,
+          scope: "agent",
+          scopeKey: "budget:global:count",
+          currency: "__agent_budget_count__",
+        },
+        caps: [{ windowSeconds: 86_400, max: 1 }],
+        amount: 1,
+        reservationId: `concurrent-budget-${RUN}`,
+      }),
+    ).toMatchObject({ ok: true });
+
+    expect(
+      await providerApprovalService.resume({ intentId: queued.intentId, tenantId: CS.TENANT }),
+    ).toEqual({
+      ok: false,
+      code: "PROVIDER_AGENT_BUDGET_EXHAUSTED",
+      httpStatus: 403,
+    });
+    const [binding] = await getDb()
+      .select()
+      .from(providerActionBindings)
+      .where(eq(providerActionBindings.intentId, queued.intentId));
+    expect(binding.status).toBe("approved");
+    expect(binding.executionPolicyDecision).toBeNull();
+    const events = await getDb()
+      .select()
+      .from(providerActionAuditOutbox)
+      .where(eq(providerActionAuditOutbox.intentId, queued.intentId));
+    expect(events.some((event) => event.action === "provider.budget.exhausted")).toBe(true);
   });
 
   test("#240 crash after terminal commit: C2 settles persisted handles exactly once under a worker race", async () => {

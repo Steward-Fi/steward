@@ -477,6 +477,13 @@
       "when": 1784659200000,
       "tag": "0087_external_custody_execution_binding",
       "breakpoints": true
+    },
+    {
+      "idx": 88,
+      "version": "7",
+      "when": 1784745600000,
+      "tag": "0088_provider_agent_budgets",
+      "breakpoints": true
     }
   ]
 }

@@ -4,6 +4,7 @@ import {
   closeDb,
   getDb,
   providerAccounts,
+  providerAgentBudgets,
   providerGrants,
   providerOperations,
   providerRoleBindings,
@@ -495,5 +496,74 @@ describe("provider authority foundation", () => {
     expect(auditEvents.some((event) => event.action === "provider.role_binding.issue")).toBe(true);
     expect(auditEvents.some((event) => event.action === "provider.workspace.create")).toBe(true);
     expect(auditEvents.some((event) => event.action === "provider.grant.issue")).toBe(true);
+  });
+
+  test("operators can create, list, revise, and disable first-class agent budgets", async () => {
+    await getDb()
+      .update(providerRoleBindings)
+      .set({ expiresAt: null })
+      .where(eq(providerRoleBindings.roleKey, "tenant_authority_admin"));
+    const admin = mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: 0 });
+    const count = await store.createAgentBudget(admin, {
+      agentId: "agent-x",
+      dimension: "count",
+      windowSeconds: 86_400,
+      max: 500,
+      autoFreeze: true,
+    });
+    expect(count).toMatchObject({
+      agentId: "agent-x",
+      workspaceId: null,
+      dimension: "count",
+      max: 500,
+      revision: 1,
+    });
+    const notional = await store.createAgentBudget(
+      mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: 0 }),
+      {
+        agentId: "agent-x",
+        workspaceId: WORKSPACE_A,
+        dimension: "notional",
+        windowSeconds: 604_800,
+        max: 10_000,
+        currency: "USD",
+      },
+    );
+    expect(await store.listAgentBudgets("tenant-main", "agent-x")).toHaveLength(2);
+
+    const disabled = await store.updateAgentBudget(
+      mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: notional.revision }),
+      notional.id,
+      {
+        dimension: "notional",
+        windowSeconds: 604_800,
+        max: 9_000,
+        currency: "USD",
+        enabled: false,
+      },
+    );
+    expect(disabled).toMatchObject({ max: 9_000, enabled: false, revision: 2 });
+    await expect(
+      store.updateAgentBudget(
+        mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: 1 }),
+        notional.id,
+        {
+          dimension: "notional",
+          windowSeconds: 604_800,
+          max: 8_000,
+          currency: "USD",
+        },
+      ),
+    ).rejects.toMatchObject({ code: "revision_conflict" });
+    expect(
+      (
+        await getDb()
+          .select()
+          .from(providerAgentBudgets)
+          .where(eq(providerAgentBudgets.id, count.id))
+      )[0]?.autoFreeze,
+    ).toBe(true);
+    expect(auditEvents.some((event) => event.action === "provider.agent_budget.create")).toBe(true);
+    expect(auditEvents.some((event) => event.action === "provider.agent_budget.update")).toBe(true);
   });
 });

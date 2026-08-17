@@ -3,6 +3,7 @@ import {
   agents,
   getDb,
   providerAccounts,
+  providerAgentBudgets,
   providerAuthorityTenantState,
   providerGrants,
   providerOperations,
@@ -68,6 +69,8 @@ const ROLES = new Set([
   "workspace_approver",
 ]);
 const RISK_CLASSES = new Set(["read", "write", "consequential"]);
+const BUDGET_DIMENSIONS = new Set(["count", "notional"]);
+const MAX_BUDGET_WINDOW_SECONDS = 30 * 24 * 60 * 60;
 
 export class ProviderAuthorityError extends Error {
   constructor(
@@ -106,6 +109,57 @@ function assertText(value: unknown, field: string, max = 512): string {
     );
   }
   return normalized;
+}
+
+function normalizeBudgetInput(input: {
+  dimension: unknown;
+  windowSeconds: unknown;
+  max: unknown;
+  currency?: unknown;
+  autoFreeze?: unknown;
+  enabled?: unknown;
+}) {
+  if (typeof input.dimension !== "string" || !BUDGET_DIMENSIONS.has(input.dimension)) {
+    throw new ProviderAuthorityError("invalid budget dimension", "bad_request", 400);
+  }
+  if (
+    !Number.isSafeInteger(input.windowSeconds) ||
+    (input.windowSeconds as number) < 1 ||
+    (input.windowSeconds as number) > MAX_BUDGET_WINDOW_SECONDS
+  ) {
+    throw new ProviderAuthorityError("invalid budget windowSeconds", "bad_request", 400);
+  }
+  if (!Number.isSafeInteger(input.max) || (input.max as number) < 0) {
+    throw new ProviderAuthorityError("invalid budget max", "bad_request", 400);
+  }
+  const currency =
+    input.currency === undefined || input.currency === null
+      ? null
+      : assertText(input.currency, "currency", 64);
+  if (
+    (input.dimension === "count" && currency !== null) ||
+    (input.dimension === "notional" && currency === null)
+  ) {
+    throw new ProviderAuthorityError(
+      "count budgets omit currency; notional budgets require currency",
+      "bad_request",
+      400,
+    );
+  }
+  if (input.autoFreeze !== undefined && typeof input.autoFreeze !== "boolean") {
+    throw new ProviderAuthorityError("invalid budget autoFreeze", "bad_request", 400);
+  }
+  if (input.enabled !== undefined && typeof input.enabled !== "boolean") {
+    throw new ProviderAuthorityError("invalid budget enabled", "bad_request", 400);
+  }
+  return {
+    dimension: input.dimension as "count" | "notional",
+    windowSeconds: input.windowSeconds as number,
+    max: input.max as number,
+    currency,
+    autoFreeze: input.autoFreeze ?? false,
+    enabled: input.enabled ?? true,
+  };
 }
 
 function assertMutationContext(ctx: MutationContext): void {
@@ -1351,6 +1405,161 @@ export class ProviderAuthorityStore {
       .where(
         and(eq(providerGrants.tenantId, tenantId), eq(providerGrants.workspaceId, workspaceId)),
       );
+  }
+
+  async listAgentBudgets(tenantId: string, agentId: string, workspaceId?: string) {
+    const [agent] = await this.db()
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.tenantId, tenantId), eq(agents.id, agentId)))
+      .limit(1);
+    if (!agent) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+    const conditions = [
+      eq(providerAgentBudgets.tenantId, tenantId),
+      eq(providerAgentBudgets.agentId, agentId),
+    ];
+    if (workspaceId) conditions.push(eq(providerAgentBudgets.workspaceId, workspaceId));
+    return this.db()
+      .select()
+      .from(providerAgentBudgets)
+      .where(and(...conditions))
+      .orderBy(providerAgentBudgets.createdAt, providerAgentBudgets.id);
+  }
+
+  async createAgentBudget(
+    ctx: MutationContext,
+    input: {
+      agentId: string;
+      workspaceId?: string | null;
+      dimension: unknown;
+      windowSeconds: unknown;
+      max: unknown;
+      currency?: unknown;
+      autoFreeze?: unknown;
+    },
+  ) {
+    assertMutationContext(ctx);
+    if (ctx.expectedRevision !== 0) {
+      throw new ProviderAuthorityError(
+        "new budget expectedRevision must be 0",
+        "revision_conflict",
+        409,
+      );
+    }
+    const workspaceId = input.workspaceId ?? null;
+    if (workspaceId) await this.requireWorkspaceAdmin(ctx, workspaceId, true);
+    else if (!(await this.hasTenantAdmin(ctx))) {
+      throw new ProviderAuthorityError("tenant authority required", "forbidden", 403);
+    }
+    const [agent] = await this.db()
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.tenantId, ctx.tenantId), eq(agents.id, input.agentId)))
+      .limit(1);
+    if (!agent) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+    if (workspaceId) {
+      const [workspace] = await this.db()
+        .select({ id: workspaces.id })
+        .from(workspaces)
+        .where(
+          and(
+            eq(workspaces.tenantId, ctx.tenantId),
+            eq(workspaces.id, workspaceId),
+            eq(workspaces.status, "active"),
+          ),
+        )
+        .limit(1);
+      if (!workspace) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+    }
+    const normalized = normalizeBudgetInput(input);
+    const id = randomUUID();
+    await ctx.audit({
+      action: "provider.agent_budget.create",
+      resourceType: "provider_agent_budget",
+      resourceId: id,
+      metadata: {
+        agentId: input.agentId,
+        workspaceId,
+        dimension: normalized.dimension,
+        windowSeconds: normalized.windowSeconds,
+        max: normalized.max,
+        currency: normalized.currency,
+        autoFreeze: normalized.autoFreeze,
+        reason: ctx.reason,
+      },
+    });
+    const [row] = await this.db()
+      .insert(providerAgentBudgets)
+      .values({
+        id,
+        tenantId: ctx.tenantId,
+        workspaceId,
+        agentId: input.agentId,
+        ...normalized,
+      })
+      .returning();
+    return row;
+  }
+
+  async updateAgentBudget(
+    ctx: MutationContext,
+    id: string,
+    input: {
+      dimension: unknown;
+      windowSeconds: unknown;
+      max: unknown;
+      currency?: unknown;
+      autoFreeze?: unknown;
+      enabled?: unknown;
+    },
+  ) {
+    assertMutationContext(ctx);
+    const [current] = await this.db()
+      .select()
+      .from(providerAgentBudgets)
+      .where(and(eq(providerAgentBudgets.tenantId, ctx.tenantId), eq(providerAgentBudgets.id, id)))
+      .limit(1);
+    if (!current) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+    if (current.workspaceId) await this.requireWorkspaceAdmin(ctx, current.workspaceId, true);
+    else if (!(await this.hasTenantAdmin(ctx))) {
+      throw new ProviderAuthorityError("tenant authority required", "forbidden", 403);
+    }
+    if (current.revision !== ctx.expectedRevision) {
+      throw new ProviderAuthorityError("budget revision conflict", "revision_conflict", 409);
+    }
+    const normalized = normalizeBudgetInput(input);
+    await ctx.audit({
+      action: "provider.agent_budget.update",
+      resourceType: "provider_agent_budget",
+      resourceId: id,
+      metadata: {
+        agentId: current.agentId,
+        workspaceId: current.workspaceId,
+        expectedRevision: current.revision,
+        dimension: normalized.dimension,
+        windowSeconds: normalized.windowSeconds,
+        max: normalized.max,
+        currency: normalized.currency,
+        autoFreeze: normalized.autoFreeze,
+        enabled: normalized.enabled,
+        reason: ctx.reason,
+      },
+    });
+    const [updated] = await this.db()
+      .update(providerAgentBudgets)
+      .set(normalized)
+      .where(
+        and(
+          eq(providerAgentBudgets.tenantId, ctx.tenantId),
+          eq(providerAgentBudgets.id, id),
+          eq(providerAgentBudgets.revision, current.revision),
+        ),
+      )
+      .returning();
+    if (!updated) {
+      throw new ProviderAuthorityError("budget revision conflict", "revision_conflict", 409);
+    }
+    return updated;
   }
 
   async revokeGrant(ctx: MutationContext, id: string) {
