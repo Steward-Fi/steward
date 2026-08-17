@@ -112,6 +112,8 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
         agentId: AGENT_ID,
         transaction: v0TransferWithPriorityFee(feePayer, 1_000_000),
         broadcast: false,
+        // SEC-163: these tests intentionally exercise the no-envelope path.
+        allowBlindSign: true,
       }),
     ).rejects.toThrow(/priority fee.*exceeds the allowed maximum/i);
   });
@@ -125,6 +127,7 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
         agentId: AGENT_ID,
         transaction: legacyTransferWithPriorityFee(feePayer, 1_000_000),
         broadcast: false,
+        allowBlindSign: true,
       }),
     ).rejects.toThrow(/priority fee.*exceeds the allowed maximum/i);
   });
@@ -137,6 +140,7 @@ describe("Vault.signSolanaTransaction priority fee cap", () => {
       agentId: AGENT_ID,
       transaction: legacyTransferWithPriorityFee(feePayer, 1_000),
       broadcast: false,
+      allowBlindSign: true,
     });
 
     const signed = Transaction.from(fromBase64(result.signature));

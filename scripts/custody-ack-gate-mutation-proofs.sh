@@ -11,25 +11,27 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FACTORY="$ROOT/packages/api/src/services/vault-factory.ts"
 BACKUP="$(mktemp)"
+# SEC-201: mktemp instead of a predictable /tmp path (symlink-safe on shared hosts)
+LOG="$(mktemp -t custody-ack-mut.XXXXXX)"
 TEST="vault-factory.test.ts"
 
 cleanup() {
   cp "$BACKUP" "$FACTORY"
-  rm -f "$BACKUP"
+  rm -f "$BACKUP" "$LOG"
 }
 trap cleanup EXIT
 
 cp "$FACTORY" "$BACKUP"
 
 run_tests() {
-  ( cd "$ROOT/packages/api" && bun scripts/run-tests-isolated.ts "$TEST" ) >/tmp/custody-ack-mut.log 2>&1
+  ( cd "$ROOT/packages/api" && bun scripts/run-tests-isolated.ts "$TEST" ) >"$LOG" 2>&1
 }
 
 expect_red() {
   local label="$1"
   if run_tests; then
     echo "MUTATION SURVIVED ($label): tests still GREEN after weakening the guard. FAIL."
-    tail -20 /tmp/custody-ack-mut.log
+    tail -20 "$LOG"
     exit 1
   fi
   echo "  killed: $label (tests went RED as required)"
@@ -37,7 +39,7 @@ expect_red() {
 }
 
 echo "[0] baseline: unmutated suite must be GREEN"
-run_tests || { echo "baseline RED — fix before mutating"; tail -20 /tmp/custody-ack-mut.log; exit 1; }
+run_tests || { echo "baseline RED — fix before mutating"; tail -20 "$LOG"; exit 1; }
 echo "  ok"
 
 echo "[1] mutation: gate always returns early (never throws)"
@@ -60,5 +62,5 @@ expect_red "unknown mode fails open"
 echo
 echo "ALL MUTATIONS KILLED. Restoring original and confirming GREEN."
 cp "$BACKUP" "$FACTORY"
-run_tests || { echo "restore left suite RED — investigate"; tail -20 /tmp/custody-ack-mut.log; exit 1; }
+run_tests || { echo "restore left suite RED — investigate"; tail -20 "$LOG"; exit 1; }
 echo "GREEN. Mutation proofs complete."

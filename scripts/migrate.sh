@@ -100,6 +100,10 @@ echo ""
 PASSED=0
 FAILED=0
 
+# SEC-201: mktemp instead of a predictable /tmp path (symlink-safe on shared hosts)
+MIGRATE_LOG="$(mktemp -t steward-migrate.XXXXXX)"
+trap 'rm -f "$MIGRATE_LOG"' EXIT
+
 for sql_file in "${MIGRATIONS[@]}"; do
   name="$(basename "$sql_file")"
 
@@ -115,12 +119,12 @@ for sql_file in "${MIGRATIONS[@]}"; do
 
   echo -n "[migrate] $name ... "
 
-  if PGPASSWORD="$PSQL_PASSWORD" psql "$PSQL_URL" -v ON_ERROR_STOP=1 -f "$sql_file" > /tmp/migrate_out.log 2>&1; then
+  if PGPASSWORD="$PSQL_PASSWORD" psql "$PSQL_URL" -v ON_ERROR_STOP=1 -f "$sql_file" > "$MIGRATE_LOG" 2>&1; then
     echo -e "\033[32mOK\033[0m"
     PASSED=$((PASSED + 1))
   else
     echo -e "\033[31mFAILED\033[0m"
-    cat /tmp/migrate_out.log
+    cat "$MIGRATE_LOG"
     FAILED=$((FAILED + 1))
     echo ""
     echo "[migrate] ABORTING: migration $name failed"

@@ -5,19 +5,21 @@ rotation=scripts/rotate-master-password.ts
 auth=packages/shared/src/provider-execution-auth.ts
 rotation_copy=$(mktemp)
 auth_copy=$(mktemp)
+# SEC-201: mktemp instead of a predictable /tmp path (symlink-safe on shared hosts)
+log_file=$(mktemp -t steward-key-rotation-mutation.XXXXXX)
 cp "$rotation" "$rotation_copy"
 cp "$auth" "$auth_copy"
 restore() {
   cp "$rotation_copy" "$rotation"
   cp "$auth_copy" "$auth"
-  rm -f "$rotation_copy" "$auth_copy"
+  rm -f "$rotation_copy" "$auth_copy" "$log_file"
 }
 trap restore EXIT
 
 expect_killed() {
   local label=$1
   shift
-  if "$@" >/tmp/steward-key-rotation-mutation.log 2>&1; then
+  if "$@" >"$log_file" 2>&1; then
     echo "SURVIVED: $label" >&2
     exit 1
   fi
