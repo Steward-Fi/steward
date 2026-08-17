@@ -283,7 +283,13 @@ namespace Steward
 
         private static async Task<StewardTransportResponse> DefaultTransportAsync(StewardTransportRequest request, CancellationToken cancellationToken)
         {
-            using var http = new HttpClient { Timeout = request.Timeout };
+            // Do not follow redirects automatically: HttpClient would copy the
+            // X-Steward-* credential/signing headers to the redirect target
+            // (it strips only Authorization), so an open redirect or hostile
+            // proxy could exfiltrate them (SEC-126). A 3xx surfaces as a
+            // response instead — callers configure the canonical API URL.
+            using var handler = new HttpClientHandler { AllowAutoRedirect = false };
+            using var http = new HttpClient(handler) { Timeout = request.Timeout };
             using var message = new HttpRequestMessage(new HttpMethod(request.Method), request.Url);
             foreach (var pair in request.Headers)
             {

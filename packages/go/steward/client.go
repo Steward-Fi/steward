@@ -83,6 +83,32 @@ var sensitivePrefixes = []string{
 	"/accounts",
 }
 
+var stewardCredentialHeaders = []string{
+	"Authorization",
+	"X-Steward-Key",
+	"X-Steward-Platform-Key",
+	"X-Steward-App-Id",
+	"X-Steward-Signature",
+	"X-Steward-Signing-Key-Id",
+	"X-Steward-Request-Timestamp",
+	"Idempotency-Key",
+}
+
+// stripStewardCredentialsOnCrossHostRedirect drops credential and signing
+// headers when a redirect targets a different host, so an open redirect or
+// hostile proxy cannot exfiltrate them (SEC-126).
+func stripStewardCredentialsOnCrossHostRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 {
+		return nil
+	}
+	if !strings.EqualFold(req.URL.Hostname(), via[0].URL.Hostname()) {
+		for _, header := range stewardCredentialHeaders {
+			req.Header.Del(header)
+		}
+	}
+	return nil
+}
+
 func NewClient(config Config) (*Client, error) {
 	if strings.TrimSpace(config.BaseURL) == "" {
 		return nil, errors.New("base URL is required")
@@ -93,7 +119,13 @@ func NewClient(config Config) (*Client, error) {
 	}
 	httpClient := config.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+		httpClient = &http.Client{
+			Timeout: 30 * time.Second,
+			// Never forward Steward credential headers to a different host on
+			// redirect: net/http strips only Authorization/Cookie and copies
+			// X-Steward-* headers to any host (SEC-126).
+			CheckRedirect: stripStewardCredentialsOnCrossHostRedirect,
+		}
 	}
 	now := config.Now
 	if now == nil {

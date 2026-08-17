@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -169,6 +170,40 @@ func TestAccountsAndGlobalWalletMutationsAreSigned(t *testing.T) {
 		if got := captured.Header.Get("X-Steward-Signature"); !strings.HasPrefix(got, "v1=") || len(got) != 67 {
 			t.Fatalf("unsigned mutation %s: signature %q", path, got)
 		}
+	}
+}
+
+// SEC-126: the default HTTP client must not forward credential headers to a
+// different host when a redirect is followed.
+func TestCrossHostRedirectStripsCredentialHeaders(t *testing.T) {
+	var redirected *http.Request
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		redirected = req
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"data":{"id":"ok"}}`))
+	}))
+	defer target.Close()
+	// Redirect to the same listener under a DIFFERENT hostname (both names are
+	// loopback, but the host string differs) so the cross-host check engages.
+	crossHostURL := strings.Replace(target.URL, "127.0.0.1", "localhost", 1)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		http.Redirect(w, req, crossHostURL+"/harvest", http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	client, err := NewClient(Config{BaseURL: redirector.URL, APIKey: "tenant-key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := client.Get(context.Background(), "/accounts", nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	if redirected == nil {
+		t.Fatal("redirect was not followed")
+	}
+	if got := redirected.Header.Get("X-Steward-Key"); got != "" {
+		t.Fatalf("credential header leaked cross-host: X-Steward-Key=%q", got)
 	}
 }
 

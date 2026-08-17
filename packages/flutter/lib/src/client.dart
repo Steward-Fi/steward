@@ -100,8 +100,14 @@ class StewardClient {
       headers ?? const <String, String>{},
       idempotencyKey,
     );
+    // Do not follow redirects automatically: package:http forwards all headers
+    // (including X-Steward-* credentials and signatures) to the redirect
+    // target, so an open redirect or hostile proxy could exfiltrate them
+    // (SEC-126). A 3xx surfaces as a response instead — consumers configure
+    // the canonical API URL.
     final response = await _client.send(
       http.Request(method.toUpperCase(), uri)
+        ..followRedirects = false
         ..headers.addAll(requestHeaders)
         ..bodyBytes = encodedBody ?? const <int>[],
     );
