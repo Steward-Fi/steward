@@ -1,5 +1,5 @@
 /**
- * #201 generic-http profile migration (0084).
+ * #201 generic-http profile migration (0085).
  *
  * Applies the full migration chain into an in-memory PGlite database and proves
  * the widened `provider_action_bindings_profile_chk`:
@@ -82,7 +82,7 @@ function bindingInsert(profile: string): string {
   `;
 }
 
-describe("#201 generic-http profile migration (0084)", () => {
+describe("#201 generic-http profile migration (0085)", () => {
   test("profile CHECK is present and named", async () => {
     const client = new PGlite("memory://");
     await applyAll(client);
