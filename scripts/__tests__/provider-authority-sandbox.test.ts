@@ -95,7 +95,7 @@ describe("provider authority sandbox operator primitives", () => {
     expect(calls).toBe(0);
   });
 
-  it("rejects credential-bearing and public plaintext service URLs", () => {
+  it("rejects credential-bearing and public plaintext service URLs", async () => {
     expect(() => validateServiceUrl("STEWARD_API_URL", "http://api.example.test")).toThrow(
       "must use HTTPS",
     );
@@ -103,6 +103,16 @@ describe("provider authority sandbox operator primitives", () => {
       "must not contain credentials",
     );
     expect(() => validateServiceUrl("GITHUB_API_URL", "http://127.0.0.1:3000")).not.toThrow();
+    await expect(
+      reconcileGithubMarker({
+        apiBase: "http://api.example.test",
+        owner: "o",
+        repo: "r",
+        pullNumber: 1,
+        marker: "m",
+        token: "secret",
+      }),
+    ).rejects.toThrow("must use HTTPS");
   });
 
   it("bounds declared and streamed HTTP bodies", async () => {
@@ -122,6 +132,15 @@ describe("provider authority sandbox operator primitives", () => {
         requestJson("https://api.example.test", {}, (async () => response) as typeof fetch),
       ).rejects.toThrow("exceeded the 1 MiB sandbox limit");
     }
+  });
+
+  it("disables HTTP redirects before credential-bearing fetches", async () => {
+    let redirectMode: RequestRedirect | undefined;
+    await requestJson("https://api.example.test", {}, (async (_url, options) => {
+      redirectMode = options?.redirect;
+      return new Response("{}");
+    }) as typeof fetch);
+    expect(redirectMode).toBe("error");
   });
 
   it("fails closed with the exact build prerequisite command", () => {
@@ -268,6 +287,46 @@ describe("provider authority sandbox operator primitives", () => {
     });
     expect(result.reachedAfterUpstream).toBe(true);
     expect(result.timedOut).toBe(true);
+    expect(result.outputExceeded).toBe(false);
+  });
+
+  it("fails the child result closed when output exceeds one MiB", async () => {
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: EventEmitter;
+      stderr: EventEmitter;
+      kill: (signal: string) => void;
+    };
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = (signal) => child.emit("close", null, signal);
+    const spawnImpl = () => {
+      setTimeout(() => child.stderr.emit("data", Buffer.alloc(1024 * 1024 + 1)), 1);
+      return child;
+    };
+    const result = await runDispatchChild({ STEWARD_TENANT_ID: "tenant" }, "intent", { spawnImpl });
+    expect(result.outputExceeded).toBe(true);
+    expect(result.timedOut).toBe(false);
+  });
+
+  it("records child spawn errors without copying the OS error text", async () => {
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: EventEmitter;
+      stderr: EventEmitter;
+      kill: (signal: string) => void;
+    };
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => {};
+    const spawnImpl = () => {
+      setTimeout(() => {
+        child.emit("error", new Error("CANARY_OS_ERROR"));
+        child.emit("close", -2, null);
+      }, 1);
+      return child;
+    };
+    const result = await runDispatchChild({ STEWARD_TENANT_ID: "tenant" }, "intent", { spawnImpl });
+    expect(result.spawnError).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("CANARY_OS_ERROR");
   });
 
   it("scrubs tokens, authorization values, and PEM blocks from every surface", () => {

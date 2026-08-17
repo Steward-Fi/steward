@@ -145,6 +145,8 @@ export function mintGithubAppJwt(appId, privateKey, now = Math.floor(Date.now() 
 export async function requestJson(url, options, fetchImpl = fetch) {
   const response = await fetchImpl(url, {
     ...options,
+    // Never forward an authorization header across an unexpected redirect.
+    redirect: options?.redirect ?? "error",
     signal: options?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   const declared = response.headers.get("content-length");
@@ -246,13 +248,14 @@ export async function reconcileGithubMarker({
   fetchImpl = fetch,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
+  const validatedApiBase = validateServiceUrl("GITHUB_API_URL", apiBase);
   let requests = 0;
   let rateLimited = false;
   const observations = [];
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     for (let page = 1; page <= maxPages; page++) {
       requests++;
-      const url = `${apiBase.replace(/\/$/, "")}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${encodeURIComponent(pullNumber)}/comments?per_page=100&page=${page}`;
+      const url = `${validatedApiBase}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${encodeURIComponent(pullNumber)}/comments?per_page=100&page=${page}`;
       const { response, body: rows } = await requestJson(
         url,
         {

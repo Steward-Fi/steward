@@ -65,6 +65,7 @@ export function runDispatchChild(
     let stderr = "";
     let reachedAfterUpstream = false;
     let outputExceeded = false;
+    let spawnError = false;
     let killTimer;
     child.stdout.on("data", (chunk) => {
       if (Buffer.byteLength(stdout) + chunk.byteLength > MAX_CHILD_OUTPUT_BYTES) {
@@ -86,6 +87,11 @@ export function runDispatchChild(
       }
       stderr += chunk;
     });
+    child.on("error", () => {
+      // Node follows this with `close`; retain only a boolean so an OS error
+      // cannot echo a sensitive environment value into artifacts or logs.
+      spawnError = true;
+    });
     const safetyTimer = setTimeout(() => child.kill("SIGKILL"), 60_000);
     child.on("close", (code, signal) => {
       if (killTimer) clearTimeout(killTimer);
@@ -106,6 +112,7 @@ export function runDispatchChild(
         reachedAfterUpstream,
         timedOut: signal === "SIGKILL" && reachedAfterUpstream,
         outputExceeded,
+        spawnError,
       });
     });
   });
@@ -274,10 +281,18 @@ async function main() {
         return value;
       })(),
     });
+    if (first.spawnError) throw new Error("crash-window child failed to spawn");
+    if (first.outputExceeded) throw new Error("crash-window child exceeded the output limit");
     if (!first.timedOut || !first.reachedAfterUpstream) {
       throw new Error("crash-window worker did not prove the post-upstream barrier");
     }
     const replay = await runDispatchChild(env, intentId);
+    if (replay.spawnError) throw new Error("replay child failed to spawn");
+    if (replay.outputExceeded) throw new Error("replay child exceeded the output limit");
+    const childOutput = `${first.stdout}\n${first.stderr}\n${replay.stdout}\n${replay.stderr}`;
+    if (secretValues.some((value) => value.length >= 4 && childOutput.includes(value))) {
+      throw new Error("credential canary appeared in dispatch child output");
+    }
     if (replay.timedOut || replay.result?.code !== "EXEC_TERMINAL_STATE") {
       throw new Error("fresh-worker replay was not rejected as terminal");
     }
