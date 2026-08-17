@@ -244,13 +244,21 @@ function verifyRfc3161Anchor(anchor, payload, options) {
     if (policyOid !== anchor.policyOid || (options.tsaPolicy && policyOid !== options.tsaPolicy)) {
       fail("verified RFC 3161 policy OID is not allowed");
     }
-    const accuracyLine = inspected.stdout.match(/^Accuracy:\s*(.+)$/m)?.[1] ?? "";
+    const accuracyLine = inspected.stdout.match(/^Accuracy:\s*(.+)$/m)?.[1];
+    if (!accuracyLine || /^\s*unspecified\s*$/i.test(accuracyLine)) {
+      fail("verified RFC 3161 TSTInfo did not contain Accuracy");
+    }
+    let foundAccuracyComponent = false;
     const accuracyPart = (name, scale) => {
       const found = accuracyLine.match(new RegExp(`(?:0x([0-9a-f]+)|([0-9]+))\\s+${name}`, "i"));
+      if (found) foundAccuracyComponent = true;
       return found ? Number.parseInt(found[1] ?? found[2], found[1] ? 16 : 10) * scale : 0;
     };
     const accuracyMillis =
       accuracyPart("seconds", 1000) + accuracyPart("millis", 1) + accuracyPart("micros", 0.001);
+    if (!foundAccuracyComponent || !Number.isFinite(accuracyMillis) || accuracyMillis < 0) {
+      fail("verified RFC 3161 TSTInfo contained invalid Accuracy");
+    }
     if (accuracyMillis !== anchor.accuracyMillis || time.toISOString() !== anchor.genTime) {
       fail("RFC 3161 proof metadata does not match the signed TSTInfo");
     }

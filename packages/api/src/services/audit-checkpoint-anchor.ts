@@ -279,14 +279,17 @@ export interface VerifiedRfc3161Token {
   trustAnchorSha256: string;
 }
 
-function parseAccuracyMillis(text: string): number {
+function parseAccuracyMillis(text: string): number | null {
   const line = text.match(/^Accuracy:\s*(.+)$/m)?.[1];
-  if (!line) return 0;
+  if (!line || /^\s*unspecified\s*$/i.test(line)) return null;
+  let foundComponent = false;
   const number = (name: string) => {
     const value = line.match(new RegExp(`(?:0x([0-9a-f]+)|([0-9]+))\\s+${name}`, "i"));
+    if (value) foundComponent = true;
     return value ? Number.parseInt(value[1] ?? value[2], value[1] ? 16 : 10) : 0;
   };
-  return number("seconds") * 1000 + number("millis") + number("micros") / 1000;
+  const accuracyMillis = number("seconds") * 1000 + number("millis") + number("micros") / 1000;
+  return foundComponent ? accuracyMillis : Number.NaN;
 }
 
 /**
@@ -365,6 +368,9 @@ export function verifyRfc3161TimestampResponse(input: {
       });
     }
     const accuracyMillis = parseAccuracyMillis(text);
+    if (accuracyMillis === null) {
+      throw new AuditCheckpointAnchorError("RFC 3161 accuracy is missing");
+    }
     if (!Number.isFinite(accuracyMillis) || accuracyMillis < 0) {
       throw new AuditCheckpointAnchorError("RFC 3161 accuracy is invalid");
     }

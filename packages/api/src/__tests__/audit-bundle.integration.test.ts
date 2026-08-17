@@ -36,6 +36,7 @@ let auditRoutesModule: Awaited<typeof import("../routes/audit")>;
 let tmpDir: string;
 let tsaCaPath: string;
 let tsaConfigPath: string;
+let tsaNoAccuracyConfigPath: string;
 
 interface BundleEvent {
   seq: number;
@@ -84,6 +85,7 @@ function setupTestTsa(): void {
   const extensions = join(tmpDir, "tsa-extensions.cnf");
   const serial = join(tmpDir, "tsa-serial");
   tsaConfigPath = join(tmpDir, "tsa.cnf");
+  tsaNoAccuracyConfigPath = join(tmpDir, "tsa-no-accuracy.cnf");
 
   runOpenSsl([
     "req",
@@ -136,13 +138,13 @@ function setupTestTsa(): void {
     extensions,
   ]);
   writeFileSync(serial, "01\n");
-  writeFileSync(
-    tsaConfigPath,
-    `[ tsa ]\ndefault_tsa = tsa_config1\n[ tsa_config1 ]\ndir = ${tmpDir}\nserial = ${serial}\ncrypto_device = builtin\nsigner_cert = ${tsaCert}\ncerts = ${tsaCaPath}\nsigner_key = ${tsaKey}\nsigner_digest = sha256\ndefault_policy = 1.2.3.4.1\ndigests = sha256\naccuracy = secs:1\nordering = yes\ntsa_name = yes\ness_cert_id_chain = no\n`,
-  );
+  const config = (accuracy: string) =>
+    `[ tsa ]\ndefault_tsa = tsa_config1\n[ tsa_config1 ]\ndir = ${tmpDir}\nserial = ${serial}\ncrypto_device = builtin\nsigner_cert = ${tsaCert}\ncerts = ${tsaCaPath}\nsigner_key = ${tsaKey}\nsigner_digest = sha256\ndefault_policy = 1.2.3.4.1\ndigests = sha256\n${accuracy}ordering = yes\ntsa_name = yes\ness_cert_id_chain = no\n`;
+  writeFileSync(tsaConfigPath, config("accuracy = secs:1\n"));
+  writeFileSync(tsaNoAccuracyConfigPath, config(""));
 }
 
-function attachTestAnchor(bundle: Bundle): void {
+function attachTestAnchor(bundle: Bundle, configPath = tsaConfigPath, accuracyMillis = 1000): void {
   const payload = bundle.checkpoint.payload;
   const ordered = Object.fromEntries(
     Object.keys(payload)
@@ -158,7 +160,7 @@ function attachTestAnchor(bundle: Bundle): void {
     "ts",
     "-reply",
     "-config",
-    tsaConfigPath,
+    configPath,
     "-queryfile",
     queryPath,
     "-out",
@@ -180,7 +182,7 @@ function attachTestAnchor(bundle: Bundle): void {
     nonce: Buffer.from(nonceBytes).toString("hex"),
     policyOid,
     genTime: new Date(timeText).toISOString(),
-    accuracyMillis: 1000,
+    accuracyMillis,
     verifiedAt: new Date().toISOString(),
     trustAnchorSha256: createHash("sha256").update(readFileSync(tsaCaPath)).digest("hex"),
     timestampResponse: readFileSync(responsePath).toString("base64"),
@@ -559,6 +561,51 @@ describe("audit evidence bundle endpoint + offline verifier", () => {
         maxFutureSkewMs: 0,
       }),
     ).toThrow("future");
+  });
+
+  it("rejects a genuine TSA token without signed Accuracy at acquisition and offline verification", async () => {
+    const bundle = await fetchBundle();
+    const digest = auditCheckpointAnchorDigest(bundle.checkpoint as never);
+    const query = createRfc3161TimestampQuery(
+      digest,
+      Uint8Array.from({ length: 16 }, (_, index) => index + 17),
+    );
+    const queryPath = join(tmpDir, `no-accuracy-${Math.random().toString(36).slice(2)}.tsq`);
+    const responsePath = `${queryPath}.tsr`;
+    writeFileSync(queryPath, query);
+    runOpenSsl([
+      "ts",
+      "-reply",
+      "-config",
+      tsaNoAccuracyConfigPath,
+      "-queryfile",
+      queryPath,
+      "-out",
+      responsePath,
+    ]);
+    const response = readFileSync(responsePath);
+    const inspected = spawnSync("openssl", ["ts", "-reply", "-in", responsePath, "-text"], {
+      encoding: "utf8",
+    });
+    expect(inspected.status).toBe(0);
+    expect(inspected.stdout).toMatch(/^Accuracy:\s*unspecified\s*$/m);
+
+    expect(() =>
+      verifyRfc3161TimestampResponse({
+        query,
+        response,
+        caFile: tsaCaPath,
+        requestStartedAt: Date.now() - 1_000,
+        maxPastAgeMs: 300_000,
+        maxFutureSkewMs: 300_000,
+      }),
+    ).toThrow("accuracy is missing");
+
+    const offlineBundle = await fetchBundle();
+    attachTestAnchor(offlineBundle, tsaNoAccuracyConfigPath, 0);
+    const offline = runVerifier(offlineBundle, ["--tsa-ca", tsaCaPath, "--require-anchor"]);
+    expect(offline.code).toBe(1);
+    expect(offline.stderr).toContain("did not contain Accuracy");
   });
 
   it("persists the exact strictly verified proof with the signed checkpoint", async () => {
