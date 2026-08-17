@@ -74,6 +74,8 @@ const WINDOWED_INVOKE_CURRENCY = "__calls__";
 /** Max window we retain reservation entries for (30d - matches other trackers). */
 const MAX_WINDOW_SECONDS = 2592000;
 const RETENTION_MS = MAX_WINDOW_SECONDS * 1000;
+const MAX_LEGACY_BRIDGE_ENTRIES = 10_000;
+const LEGACY_BRIDGE_VERSION = "steward.cumulative-spend-bridge.v1";
 
 /** The spend-stream identity. Editing a cap does NOT change this key, so history
  *  persists across cap edits (codex P1). */
@@ -142,6 +144,10 @@ function streamKey(s: CumulativeSpendStream): string {
   return `cumspend:${enc(s.agentId)}:${s.scope}:${enc(s.scopeKey)}:${enc(s.currency)}`;
 }
 
+function legacyStreamKey(s: CumulativeSpendStream): string {
+  return streamKey({ ...s, tenantId: undefined });
+}
+
 export interface CumulativeSpendBatchGroup {
   stream: CumulativeSpendStream & { tenantId: string };
   caps: CumulativeSpendCap[];
@@ -173,6 +179,13 @@ for g = 1, nGroups do
   local memberBar = string.find(member, '|', 1, true)
   local reservationId = string.sub(member, 1, memberBar - 1)
   local nCaps = tonumber(ARGV[cursor]); cursor = cursor + 1
+  local nLegacy = tonumber(ARGV[cursor]); cursor = cursor + 1
+  for i = 1, nLegacy do
+    local legacyMember = ARGV[cursor]; cursor = cursor + 1
+    local legacyScore = tonumber(ARGV[cursor]); cursor = cursor + 1
+    redis.call('ZADD', KEYS[g], legacyScore, legacyMember)
+  end
+  if nLegacy > 0 then redis.call('PEXPIRE', KEYS[g], ttl) end
   redis.call('ZREMRANGEBYSCORE', KEYS[g], 0, retentionCutoff)
   parsed[g] = {amount=amount, member=member, reservationId=reservationId}
   for c = 1, nCaps do
@@ -216,6 +229,49 @@ for g = 1, nGroups do
   end
 end
 return out
+`;
+
+// Atomically closes the rolling-version gap on one legacy stream. The old ZSET
+// is snapshotted and replaced by a durable STRING in the same command. An old
+// binary that loses this race attempts ZSET commands against the STRING and
+// fails closed with WRONGTYPE; every old write that won the race is in the
+// returned snapshot. Keeping the snapshot at the legacy key makes crash recovery
+// deterministic: a process may die before importing v2 and safely retry later.
+const FENCE_AND_SNAPSHOT_LEGACY_LUA = `
+local kind = redis.call('TYPE', KEYS[1])
+if type(kind) == 'table' then kind = kind.ok end
+if kind == 'string' then
+  return redis.call('GET', KEYS[1])
+end
+if kind ~= 'none' and kind ~= 'zset' then
+  return redis.error_reply('unsupported cumulative spend legacy key type')
+end
+local entries = {}
+if kind == 'zset' then
+  redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, tonumber(ARGV[2]))
+  if redis.call('ZCARD', KEYS[1]) > tonumber(ARGV[3]) then
+    return redis.error_reply('cumulative spend legacy bridge is too large')
+  end
+  local raw = redis.call('ZRANGE', KEYS[1], 0, -1, 'WITHSCORES')
+  for i = 1, #raw, 2 do
+    local member = raw[i]
+    local firstBar = string.find(member, '|', 1, true)
+    if not firstBar then return redis.error_reply('corrupt cumulative spend legacy member') end
+    local rest = string.sub(member, firstBar + 1)
+    local secondBar = string.find(rest, '|', 1, true)
+    local amount = tonumber(secondBar and string.sub(rest, 1, secondBar - 1) or rest)
+    if amount == nil then return redis.error_reply('corrupt cumulative spend legacy amount') end
+    entries[#entries + 1] = {member, tonumber(raw[i + 1])}
+  end
+end
+local payload = cjson.encode({
+  version = ARGV[4],
+  tenantId = ARGV[1],
+  cutoverAt = tonumber(ARGV[5]),
+  entries = entries
+})
+redis.call('SET', KEYS[1], payload)
+return payload
 `;
 
 // ATOMIC multi-cap reserve over a rolling stream.
@@ -352,6 +408,13 @@ const SUM_LUA = `
 local now = tonumber(ARGV[1])
 local windowStart = tonumber(ARGV[2])
 local retentionCutoff = tonumber(ARGV[3])
+local nLegacy = tonumber(ARGV[4])
+local cursor = 5
+for i = 1, nLegacy do
+  local member = ARGV[cursor]; cursor = cursor + 1
+  local score = tonumber(ARGV[cursor]); cursor = cursor + 1
+  redis.call('ZADD', KEYS[1], score, member)
+end
 redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, retentionCutoff)
 local members = redis.call('ZRANGEBYSCORE', KEYS[1], '(' .. windowStart, now)
 local sum = 0
@@ -371,6 +434,88 @@ for i = 1, #members do
 end
 return {sum}
 `;
+
+interface LegacyBridgeSnapshot {
+  tenantId: string;
+  entries: Array<[member: string, score: number]>;
+}
+
+async function fenceAndSnapshotLegacyStream(
+  stream: CumulativeSpendStream & { tenantId: string },
+  now: number,
+): Promise<LegacyBridgeSnapshot> {
+  const redis = getRedis();
+  const raw = await redis.eval(
+    FENCE_AND_SNAPSHOT_LEGACY_LUA,
+    1,
+    legacyStreamKey(stream),
+    stream.tenantId,
+    String(now - RETENTION_MS),
+    String(MAX_LEGACY_BRIDGE_ENTRIES),
+    LEGACY_BRIDGE_VERSION,
+    String(now),
+  );
+  if (typeof raw !== "string") throw new Error("invalid cumulative spend legacy bridge payload");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("invalid cumulative spend legacy bridge JSON");
+  }
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("invalid cumulative spend legacy bridge object");
+  }
+  const value = parsed as Record<string, unknown>;
+  if (
+    value.version !== LEGACY_BRIDGE_VERSION ||
+    typeof value.tenantId !== "string" ||
+    (value.entries !== undefined &&
+      !Array.isArray(value.entries) &&
+      !(value.entries && typeof value.entries === "object"))
+  ) {
+    throw new Error("invalid cumulative spend legacy bridge schema");
+  }
+  // Redis cjson represents an empty Lua array as `{}`. Accept only that exact
+  // representation; treating an arbitrary object as empty could turn a damaged
+  // snapshot into an allow-side history reset.
+  if (
+    value.entries !== undefined &&
+    !Array.isArray(value.entries) &&
+    (typeof value.entries !== "object" ||
+      value.entries === null ||
+      Object.keys(value.entries).length !== 0)
+  ) {
+    throw new Error("invalid cumulative spend legacy bridge entries");
+  }
+  const rawEntries = Array.isArray(value.entries) ? value.entries : [];
+  const entries: Array<[string, number]> = [];
+  for (const entry of rawEntries) {
+    if (
+      !Array.isArray(entry) ||
+      entry.length !== 2 ||
+      typeof entry[0] !== "string" ||
+      typeof entry[1] !== "number" ||
+      !Number.isFinite(entry[1])
+    ) {
+      throw new Error("invalid cumulative spend legacy bridge entry");
+    }
+    entries.push([entry[0], entry[1]]);
+  }
+  if (entries.length > MAX_LEGACY_BRIDGE_ENTRIES) {
+    throw new Error("cumulative spend legacy bridge is too large");
+  }
+  if (value.tenantId !== stream.tenantId) {
+    // Agent ids are globally unique in Steward. A live snapshot claimed by a
+    // different tenant is therefore an ownership ambiguity and must fail
+    // closed. Empty historical namespaces may be shared safely by low-level
+    // tests/callers because there is no history to attribute.
+    if (entries.some(([, score]) => score > now - RETENTION_MS)) {
+      throw new Error("cumulative spend legacy stream is owned by another tenant");
+    }
+    return { tenantId: stream.tenantId, entries: [] };
+  }
+  return { tenantId: value.tenantId, entries };
+}
 
 function isNonNegInt(v: number): boolean {
   // Redis Lua numbers are IEEE-754 doubles. Values above MAX_SAFE_INTEGER may
@@ -434,6 +579,26 @@ export async function reserveCumulativeSpend(
     throw new Error("invalid cumulative spend reservationId");
   }
   const reservationId = input.reservationId ?? `${now}:${nextSeq()}`;
+  if (stream.tenantId) {
+    const batch = await reserveCumulativeSpendBatch({
+      groups: [
+        {
+          stream: { ...stream, tenantId: stream.tenantId },
+          caps: input.caps,
+          amount: input.amount,
+          reservationId,
+        },
+      ],
+      now,
+    });
+    return batch.ok
+      ? {
+          ok: true,
+          priorSums: batch.priorSums[0] ?? [],
+          reservationId: batch.reservationIds?.[0],
+        }
+      : { ok: false, priorSums: batch.priorSums[0] ?? [] };
+  }
   const member = `${reservationId}|${input.amount}|reserved`;
   const key = streamKey(stream);
 
@@ -475,6 +640,7 @@ export async function reserveCumulativeSpendBatch(input: {
     throw new Error("cumulative spend batch requires at least one group");
   const now = input.now ?? Date.now();
   const keys: string[] = [];
+  const snapshots: LegacyBridgeSnapshot[] = [];
   const args: string[] = [
     String(now),
     String(now - RETENTION_MS),
@@ -496,8 +662,18 @@ export async function reserveCumulativeSpendBatch(input: {
         throw new Error("invalid cumulative spend batch cap");
     }
     keys.push(streamKey(group.stream));
+    snapshots.push(await fenceAndSnapshotLegacyStream(group.stream, now));
     const member = `${group.reservationId}|${group.amount}|reserved`;
-    args.push(String(group.amount), member, String(group.caps.length));
+    const snapshot = snapshots[snapshots.length - 1];
+    args.push(
+      String(group.amount),
+      member,
+      String(group.caps.length),
+      String(snapshot.entries.length),
+    );
+    for (const [legacyMember, score] of snapshot.entries) {
+      args.push(legacyMember, String(score));
+    }
     for (const cap of group.caps) {
       args.push(String(now - cap.windowSeconds * 1000), String(cap.max));
     }
@@ -563,6 +739,10 @@ export async function getCumulativeSpendSum(
   const key = streamKey(input);
   try {
     const redis = getRedis();
+    const legacyEntries = input.tenantId
+      ? (await fenceAndSnapshotLegacyStream({ ...input, tenantId: input.tenantId }, now)).entries
+      : [];
+    const legacyArgs = legacyEntries.flatMap(([member, score]) => [member, String(score)]);
     const res = (await redis.eval(
       SUM_LUA,
       1,
@@ -570,6 +750,8 @@ export async function getCumulativeSpendSum(
       String(now),
       String(windowStart),
       String(retentionCutoff),
+      String(legacyEntries.length),
+      ...legacyArgs,
     )) as [number];
     const [sum] = res;
     if (sum < 0) return null; // corrupt member -> fail closed

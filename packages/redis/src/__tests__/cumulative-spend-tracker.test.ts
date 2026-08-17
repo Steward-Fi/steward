@@ -102,6 +102,91 @@ describeRedis("reserveCumulativeSpend - REAL concurrency single-winner", () => {
 });
 
 describeRedis("tenant-bound atomic reservation batches", () => {
+  test("bridges live v1 history before v2 admission without resetting the cap", async () => {
+    const common = {
+      agentId: AGENT,
+      scope: "operation" as const,
+      scopeKey: "legacy-history",
+      currency: "USD",
+    };
+    const caps = [{ windowSeconds: 3600, max: 10 }];
+    const legacy = await reserveCumulativeSpend({
+      stream: common,
+      caps,
+      amount: 7,
+      reservationId: "legacy-settled",
+    });
+    await settleCumulativeSpend({ stream: common, reservationId: legacy.reservationId as string });
+
+    const denied = await reserveCumulativeSpend({
+      stream: { ...common, tenantId: "tenant-history" },
+      caps,
+      amount: 4,
+      reservationId: "v2-must-see-v1",
+    });
+    expect(denied).toEqual({ ok: false, priorSums: [7] });
+    expect(
+      await getCumulativeSpendSum({
+        ...common,
+        tenantId: "tenant-history",
+        windowSeconds: 3600,
+      }),
+    ).toEqual({ sum: 7 });
+
+    // The legacy ZSET is now a durable snapshot/fence. An unaware old binary
+    // cannot write after cutover and silently escape the tenant-bound stream.
+    await expect(
+      reserveCumulativeSpend({
+        stream: common,
+        caps,
+        amount: 1,
+        reservationId: "late-old-writer",
+      }),
+    ).rejects.toThrow();
+  });
+
+  test("concurrent old/new writers have no cutover gap", async () => {
+    const caps = [{ windowSeconds: 3600, max: 10 }];
+    for (let i = 0; i < 25; i++) {
+      const common = {
+        agentId: AGENT,
+        scope: "operation" as const,
+        scopeKey: `rolling-cutover-${i}`,
+        currency: "USD",
+      };
+      await reserveCumulativeSpend({
+        stream: common,
+        caps,
+        amount: 4,
+        reservationId: `seed-${i}`,
+      });
+      const [oldWriter, newWriter] = await Promise.allSettled([
+        reserveCumulativeSpend({
+          stream: common,
+          caps,
+          amount: 4,
+          reservationId: `old-${i}`,
+        }),
+        reserveCumulativeSpend({
+          stream: { ...common, tenantId: "tenant-rolling" },
+          caps,
+          amount: 4,
+          reservationId: `new-${i}`,
+        }),
+      ]);
+      const oldAdmitted = oldWriter.status === "fulfilled" && oldWriter.value.ok;
+      const newAdmitted = newWriter.status === "fulfilled" && newWriter.value.ok;
+      expect(Number(oldAdmitted) + Number(newAdmitted)).toBe(1);
+      expect(
+        await getCumulativeSpendSum({
+          ...common,
+          tenantId: "tenant-rolling",
+          windowSeconds: 3600,
+        }),
+      ).toEqual({ sum: 8 });
+    }
+  });
+
   test("the same agent id in two tenants has independent history", async () => {
     const common = { agentId: AGENT, scope: "agent" as const, scopeKey: "", currency: "USD" };
     await reserveCumulativeSpend({
