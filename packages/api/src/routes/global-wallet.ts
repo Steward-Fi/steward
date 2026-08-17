@@ -175,9 +175,25 @@ function requestOrigin(c: Context, explicitOrigin?: unknown): string | null {
   const explicit = normalizeOrigin(explicitOrigin);
   const originHeader = normalizeOrigin(c.req.header("Origin"));
   const refererOrigin = originFromReferer(c.req.header("Referer"));
+  // Browser traffic: the browser-asserted Origin/Referer header wins and a
+  // mismatched body field fails closed — a malicious page cannot lie about its
+  // origin, so consent really is origin-bound.
   if (originHeader) return explicit && explicit !== originHeader ? null : originHeader;
   if (refererOrigin) return explicit && explicit !== refererOrigin ? null : refererOrigin;
+  // SEC-212: non-browser callers send no Origin/Referer, so the body `origin`
+  // field is self-asserted. The remaining controls are the app client's
+  // allowedOrigins allowlist + user session + recent MFA — "origin-bound
+  // consent" is NOT attested for these flows. Consent audits record
+  // originSource so self-asserted grants are distinguishable.
   return explicit;
+}
+
+/** True when the request's origin was observed from an Origin/Referer header
+ * (browser traffic) rather than self-asserted in the request body (SEC-212). */
+function isHeaderObservedOrigin(c: Context): boolean {
+  return Boolean(
+    normalizeOrigin(c.req.header("Origin")) ?? originFromReferer(c.req.header("Referer")),
+  );
 }
 
 function parseScopes(value: unknown, allowed?: readonly string[] | null): string[] | string {
@@ -705,11 +721,14 @@ globalWalletRoutes.post("/consent/approve", async (c) => {
   }
 
   const now = new Date();
+  // SEC-212: distinguish server-observed (browser header) origins from
+  // self-asserted (non-browser body) origins in the consent audit trail.
+  const originSource = isHeaderObservedOrigin(c) ? "header" : "client-asserted";
   await writeGlobalWalletAudit(c, {
     tenantId: parsed.tenantId,
     action: "global_wallet.consent.approve.authorized",
     resourceId: `${parsed.clientId}:${origin}`,
-    metadata: { clientId: parsed.clientId, origin, redirectUri, scopes, walletIndex },
+    metadata: { clientId: parsed.clientId, origin, originSource, redirectUri, scopes, walletIndex },
   });
 
   const revokedAtApprove = await getDb()
@@ -760,7 +779,7 @@ globalWalletRoutes.post("/consent/approve", async (c) => {
       tenantId: parsed.tenantId,
       action: "global_wallet.consent.approved",
       resourceId: consent.id,
-      metadata: { clientId: parsed.clientId, origin, redirectUri, scopes, walletIndex },
+      metadata: { clientId: parsed.clientId, origin, originSource, redirectUri, scopes, walletIndex },
     });
   } catch (error) {
     await getDb().transaction(async (tx) => {
