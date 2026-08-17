@@ -194,4 +194,23 @@ describe("resolveRpcUrl", () => {
       else process.env.SIWE_RPC_8453 = previous;
     }
   });
+
+  it("fails closed in production without an operator-configured RPC (SEC-140)", () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousRpc = process.env.SIWE_RPC_1;
+    process.env.NODE_ENV = "production";
+    delete process.env.SIWE_RPC_1;
+    try {
+      // No env override → no hardcoded public fallback in production.
+      expect(resolveRpcUrl(1)).toBeNull();
+      // An operator-configured override still wins.
+      process.env.SIWE_RPC_1 = "https://my-private-mainnet-rpc.example.com";
+      expect(resolveRpcUrl(1)).toBe("https://my-private-mainnet-rpc.example.com");
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousRpc === undefined) delete process.env.SIWE_RPC_1;
+      else process.env.SIWE_RPC_1 = previousRpc;
+    }
+  });
 });

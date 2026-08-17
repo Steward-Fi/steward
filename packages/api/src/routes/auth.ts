@@ -509,7 +509,7 @@ export async function checkAuthRateLimit(
   }
 }
 
-const SMS_VERIFY_MAX_FAILED_ATTEMPTS = 5;
+export const SMS_VERIFY_MAX_FAILED_ATTEMPTS = 5;
 const SMS_VERIFY_FAILED_ATTEMPT_TTL_MS = 10 * 60 * 1000;
 const TOTP_VERIFY_MAX_FAILED_ATTEMPTS = 5;
 const TOTP_VERIFY_FAILED_ATTEMPT_TTL_MS = 10 * 60 * 1000;
@@ -519,24 +519,49 @@ function smsVerifyAttemptKey(phone: string, purpose: string): string {
   return `sms-verify-attempts:${hashSha256Hex(`${purpose}:${phone}`)}`;
 }
 
-async function getSmsVerifyFailedAttempts(phone: string, purpose: string): Promise<number> {
-  const raw = await getMfaBackend().get(smsVerifyAttemptKey(phone, purpose));
-  if (!raw) return 0;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+function smsVerifyAttemptSlotKey(phone: string, purpose: string, slot: number): string {
+  return `${smsVerifyAttemptKey(phone, purpose)}:${slot}`;
 }
 
-async function recordSmsVerifyFailure(phone: string, purpose: string): Promise<void> {
-  const next = (await getSmsVerifyFailedAttempts(phone, purpose)) + 1;
-  await getMfaBackend().set(
-    smsVerifyAttemptKey(phone, purpose),
-    String(next),
-    SMS_VERIFY_FAILED_ATTEMPT_TTL_MS,
+export async function getSmsVerifyFailedAttempts(phone: string, purpose: string): Promise<number> {
+  const attempts = await Promise.all(
+    Array.from({ length: SMS_VERIFY_MAX_FAILED_ATTEMPTS }, (_, index) =>
+      getMfaBackend().get(smsVerifyAttemptSlotKey(phone, purpose, index + 1)),
+    ),
   );
+  return attempts.filter((value) => value !== null).length;
 }
 
-async function clearSmsVerifyFailures(phone: string, purpose: string): Promise<void> {
-  await getMfaBackend().delete(smsVerifyAttemptKey(phone, purpose));
+/**
+ * Atomically reserve one of the five verification-attempt slots. Using
+ * set-if-absent slots keeps the limit correct under concurrent requests on
+ * every shipped backend without relying on a read-then-write counter.
+ */
+export async function claimSmsVerifyAttempt(phone: string, purpose: string): Promise<boolean> {
+  for (let slot = 1; slot <= SMS_VERIFY_MAX_FAILED_ATTEMPTS; slot++) {
+    if (
+      await getMfaBackend().setIfNotExists(
+        smsVerifyAttemptSlotKey(phone, purpose, slot),
+        "1",
+        SMS_VERIFY_FAILED_ATTEMPT_TTL_MS,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export async function recordSmsVerifyFailure(phone: string, purpose: string): Promise<void> {
+  await claimSmsVerifyAttempt(phone, purpose);
+}
+
+export async function clearSmsVerifyFailures(phone: string, purpose: string): Promise<void> {
+  await Promise.all(
+    Array.from({ length: SMS_VERIFY_MAX_FAILED_ATTEMPTS }, (_, index) =>
+      getMfaBackend().delete(smsVerifyAttemptSlotKey(phone, purpose, index + 1)),
+    ),
+  );
 }
 
 function totpVerifyAttemptKey(scope: string): string {
@@ -1140,7 +1165,7 @@ function originHostFromRequest(c: Context): string | undefined {
 function requiredOriginHostFromRequest(c: Context): string | null {
   const originHost = originHostFromRequest(c);
   if (!originHost) return null;
-  return getAllowedSiweDomains(c).includes(originHost) ? originHost : null;
+  return getAllowedSiweDomains().includes(originHost) ? originHost : null;
 }
 
 async function setSiweNonce(nonce: string, record: SiweNonceRecord): Promise<void> {
@@ -1375,7 +1400,7 @@ async function lockOAuthCodeRedemption(code: string): Promise<boolean> {
 }
 
 async function releaseOAuthCodeRedemptionLock(code: string): Promise<void> {
-  getOAuthCodeStore().delete(`oauth-code-lock:${code}`);
+  await getOAuthCodeStore().delete(`oauth-code-lock:${code}`);
 }
 
 async function markOidcIdTokenUsedOnce(
@@ -2351,7 +2376,7 @@ function ethereumWalletTenantId(address: string): string {
   return `eth:${address.toLowerCase()}`;
 }
 
-function getAllowedSiweDomains(c?: Context): string[] {
+function getAllowedSiweDomains(): string[] {
   const raw = process.env.SIWE_ALLOWED_DOMAINS?.trim();
   if (raw) {
     const domains = raw
@@ -2365,10 +2390,10 @@ function getAllowedSiweDomains(c?: Context): string[] {
   try {
     return [new URL(appUrl).host.toLowerCase()];
   } catch {
-    if (process.env.NODE_ENV !== "production") {
-      const host = c?.req.header("host")?.trim().toLowerCase();
-      if (host) return [host];
-    }
+    // SEC-144: fail closed. Never derive allowed SIWE domains from the
+    // request Host header — a missing or invalid APP_URL must not silently
+    // disable domain binding. Set SIWE_ALLOWED_DOMAINS (or a valid APP_URL)
+    // explicitly.
     return [];
   }
 }
@@ -2692,7 +2717,7 @@ async function requiredTelegramOriginHostFromRequest(
   if (!originHost) return null;
 
   if (!tenantId) {
-    return getAllowedSiweDomains(c).includes(originHost) ? originHost : null;
+    return getAllowedSiweDomains().includes(originHost) ? originHost : null;
   }
 
   const [row] = await getDb()
@@ -4532,7 +4557,7 @@ auth.post("/farcaster/verify", async (c) => {
   let farcasterUser: Awaited<ReturnType<typeof verifyFarcasterLogin>>;
   try {
     farcasterUser = await verifyFarcasterLogin(farcasterPayload, {
-      expectedDomain: getAllowedSiweDomains(c),
+      expectedDomain: getAllowedSiweDomains(),
       maxMessageAgeMs: 10 * 60 * 1000,
     });
   } catch (error) {
@@ -5632,7 +5657,7 @@ auth.get("/nonce", async (c) => {
     );
   }
   await setSiweNonce(nonce, {
-    allowedDomains: getAllowedSiweDomains(c),
+    allowedDomains: getAllowedSiweDomains(),
     originHost,
     tenantId: tenantId || undefined,
   });
@@ -5704,7 +5729,7 @@ auth.post("/verify", async (c) => {
     }
   }
 
-  const allowedDomains = getAllowedSiweDomains(c);
+  const allowedDomains = getAllowedSiweDomains();
   if (!allowedDomains.includes(siweMessage.domain.toLowerCase())) {
     return c.json<ApiResponse>({ ok: false, error: "SIWE domain not allowed" }, 401);
   }
@@ -5929,7 +5954,7 @@ auth.post("/verify/solana", async (c) => {
     );
   }
 
-  const allowedDomains = getAllowedSiweDomains(c);
+  const allowedDomains = getAllowedSiweDomains();
   if (!allowedDomains.includes(parsed.domain.toLowerCase())) {
     return c.json<ApiResponse>({ ok: false, error: "SIWS domain not allowed" }, 401);
   }
@@ -6640,14 +6665,21 @@ auth.post("/mfa/totp/complete", async (c) => {
 
   let method: "totp" | "recovery_code" = "totp";
   if (hasRecoveryCode) {
+    // SEC-146: consume the challenge BEFORE burning the recovery code. The
+    // burn is irreversible, so a concurrent completion must lose on the
+    // challenge consume — not forfeit a valid recovery code to a 401.
+    // Consequence: an invalid recovery code now consumes the challenge too
+    // (each guess needs a fresh MFA challenge), which is the fail-closed
+    // direction — the per-challenge attempt counter no longer applies here.
+    if ((await getMfaBackend().consume(challengeKey)) === null) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid or expired MFA challenge" }, 401);
+    }
     const verified = await verifyRecoveryCode(
       recoveryCodeStore,
       challenge.userId,
       body.recoveryCode ?? "",
     );
     if (!verified.valid) {
-      const failures = await recordTotpVerifyFailure(attemptScope);
-      if (failures >= TOTP_VERIFY_MAX_FAILED_ATTEMPTS) await getMfaBackend().delete(challengeKey);
       return c.json<ApiResponse>({ ok: false, error: "Invalid code" }, 401);
     }
     method = "recovery_code";
@@ -6665,9 +6697,6 @@ auth.post("/mfa/totp/complete", async (c) => {
       ...verified.stored,
       lastAcceptedStep: verified.acceptedStep,
     });
-  }
-  if (hasRecoveryCode && (await getMfaBackend().consume(challengeKey)) === null) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired MFA challenge" }, 401);
   }
   await clearTotpVerifyFailures(attemptScope);
 
@@ -7294,10 +7323,26 @@ const completePasskeyMfaHandler = async (c: Context) => {
     return c.json<ApiResponse>({ ok: false, error: "User is not a member of this tenant" }, 403);
   }
 
-  await getDb()
+  // SEC-141: reject counter regression. Once an authenticator has reported a
+  // non-zero counter, a response whose counter does not exceed the stored
+  // value indicates a cloned/exported credential. Authenticators that never
+  // increment (always 0) keep a stored counter of 0 and are unaffected.
+  if (cred.counter > 0 && verification.authenticationInfo.newCounter <= cred.counter) {
+    console.warn(
+      `[PasskeyAuth] MFA counter regression for credential ${cred.id}: stored ${cred.counter}, got ${verification.authenticationInfo.newCounter}`,
+    );
+    return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 401);
+  }
+
+  const updatedMfaCounters = await getDb()
     .update(authenticators)
     .set({ counter: verification.authenticationInfo.newCounter })
-    .where(eq(authenticators.id, cred.id));
+    .where(and(eq(authenticators.id, cred.id), eq(authenticators.counter, cred.counter)))
+    .returning({ id: authenticators.id });
+  if (updatedMfaCounters.length !== 1) {
+    console.warn(`[PasskeyAuth] Concurrent MFA counter update rejected for credential ${cred.id}`);
+    return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 401);
+  }
 
   const [user] = await getDb()
     .select({
@@ -7965,10 +8010,11 @@ auth.post("/passkey/register/verify", async (c) => {
       body.response as unknown as Parameters<PasskeyAuth["verifyRegistration"]>[1],
     );
   } catch (err) {
+    console.warn("[PasskeyAuth] Registration failed:", err);
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: err instanceof Error ? err.message : "Verification failed",
+        error: "Registration verification failed",
       },
       400,
     );
@@ -8175,11 +8221,27 @@ auth.post("/passkey/login/verify", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
   }
 
+  // SEC-141: reject counter regression. Once an authenticator has reported a
+  // non-zero counter, a response whose counter does not exceed the stored
+  // value indicates a cloned/exported credential. Authenticators that never
+  // increment (always 0) keep a stored counter of 0 and are unaffected.
+  if (cred.counter > 0 && verification.authenticationInfo.newCounter <= cred.counter) {
+    console.warn(
+      `[PasskeyAuth] Counter regression for credential ${cred.id}: stored ${cred.counter}, got ${verification.authenticationInfo.newCounter}`,
+    );
+    return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
+  }
+
   // Update counter to prevent replay attacks
-  await db
+  const updatedCounters = await db
     .update(authenticators)
     .set({ counter: verification.authenticationInfo.newCounter })
-    .where(eq(authenticators.id, cred.id));
+    .where(and(eq(authenticators.id, cred.id), eq(authenticators.counter, cred.counter)))
+    .returning({ id: authenticators.id });
+  if (updatedCounters.length !== 1) {
+    console.warn(`[PasskeyAuth] Concurrent counter update rejected for credential ${cred.id}`);
+    return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
+  }
 
   // Ensure wallet is provisioned (idempotent)
   let walletAddress = user.walletAddress;
@@ -10160,6 +10222,72 @@ function isPrivateOidcIpv4(address: string): boolean {
   );
 }
 
+function expandOidcIpv6Words(address: string): number[] | null {
+  let normalized = address.toLowerCase();
+  // Convert a dotted-quad tail (e.g. 64:ff9b::10.0.0.1) to two hex words.
+  if (normalized.includes(".")) {
+    const colonIndex = normalized.lastIndexOf(":");
+    if (colonIndex === -1) return null;
+    const quad = normalized
+      .slice(colonIndex + 1)
+      .split(".")
+      .map((part) => Number(part));
+    if (
+      quad.length !== 4 ||
+      quad.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
+    ) {
+      return null;
+    }
+    normalized = `${normalized.slice(0, colonIndex)}:${((quad[0] << 8) | quad[1]).toString(16)}:${((quad[2] << 8) | quad[3]).toString(16)}`;
+  }
+  const halves = normalized.split("::");
+  if (halves.length > 2) return null;
+
+  const parseWords = (part: string): number[] | null => {
+    if (!part) return [];
+    const words = part.split(":");
+    const parsed = words.map((word) => {
+      if (!/^[0-9a-f]{1,4}$/.test(word)) return Number.NaN;
+      return Number.parseInt(word, 16);
+    });
+    return parsed.some((word) => !Number.isInteger(word) || word < 0 || word > 0xffff)
+      ? null
+      : parsed;
+  };
+
+  const left = parseWords(halves[0]);
+  const right = parseWords(halves[1] ?? "");
+  if (!left || !right) return null;
+
+  const missing = 8 - left.length - right.length;
+  if ((halves.length === 1 && missing !== 0) || missing < 0) return null;
+
+  return [...left, ...Array.from({ length: missing }, () => 0), ...right];
+}
+
+/**
+ * Extract the IPv4 address embedded in an IPv6 transition mechanism
+ * (NAT64 64:ff9b::/96 per RFC 6052,
+ * 6to4 2002::/16 per RFC 3056) so it can be screened against
+ * isPrivateOidcIpv4.
+ */
+function embeddedTransitionOidcIpv4(address: string): string | null {
+  const words = expandOidcIpv6Words(address);
+  if (!words) return null;
+  const fromWords = (high: number, low: number) =>
+    [high >> 8, high & 0xff, low >> 8, low & 0xff].join(".");
+  const isWellKnownNat64 =
+    words[0] === 0x64 &&
+    words[1] === 0xff9b &&
+    words[2] === 0 &&
+    words[3] === 0 &&
+    words[4] === 0 &&
+    words[5] === 0;
+  if (isWellKnownNat64) return fromWords(words[6], words[7]);
+  if (words[0] === 0x2002) return fromWords(words[1], words[2]);
+  return null;
+}
+
 function isPrivateOidcIpv6(address: string): boolean {
   const normalized = address.toLowerCase();
   const ipv4Mapped = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
@@ -10174,6 +10302,15 @@ function isPrivateOidcIpv6(address: string): boolean {
       );
     }
   }
+  const embedded = embeddedTransitionOidcIpv4(normalized);
+  if (embedded) return isPrivateOidcIpv4(embedded);
+  const words = expandOidcIpv6Words(normalized);
+  // RFC 8215 reserves 64:ff9b:1::/48 for local use and explicitly says no
+  // assumption can be made about an embedded IPv4 address or its location.
+  // Treat the entire non-globally-reachable prefix as non-public.
+  if (words?.[0] === 0x64 && words[1] === 0xff9b && words[2] === 1) return true;
+  // Teredo (2001:0000::/32) obfuscates the embedded client IPv4 — block outright.
+  if (words?.[0] === 0x2001 && words[1] === 0) return true;
   return (
     normalized === "::" ||
     normalized === "::1" ||
@@ -10335,14 +10472,20 @@ async function exchangeOidcAuthorizationCode(opts: {
     throw new Error("OIDC token endpoint returned invalid JSON");
   }
   if (!response.ok) {
-    const error =
+    // SEC-139: the IdP-supplied `error` string is untrusted text. Log it
+    // server-side for operators, but never echo it into the client-facing
+    // 502 response.
+    const idpError =
       payload &&
       typeof payload === "object" &&
       "error" in payload &&
       typeof payload.error === "string"
         ? payload.error
-        : "OIDC token endpoint rejected authorization code";
-    throw new Error(error);
+        : undefined;
+    if (idpError) {
+      console.warn("[OIDC] Token endpoint rejected authorization code:", idpError);
+    }
+    throw new Error("OIDC token endpoint rejected authorization code");
   }
   if (
     !payload ||

@@ -346,6 +346,66 @@ async function getIdentityJwtSigningConfig(
 /** Validate JWT env at service startup; throws clear errors for invalid production config. */
 export function validateJwtSecretEnv(options?: JwtSecretOptions): void {
   getJwtSecret(options);
+  validateAgentTokenExpiryEnv();
+}
+
+// Matches the relative-duration grammar jose accepts in setExpirationTime,
+// restricted to positive forward durations ("30d", "12h", "15 minutes").
+const DURATION_PATTERN =
+  /^(\d+|\d+\.\d+) ?(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|w|years?|yrs?|y)$/i;
+
+const DURATION_UNIT_SECONDS: Record<string, number> = {
+  s: 1,
+  sec: 1,
+  secs: 1,
+  second: 1,
+  seconds: 1,
+  m: 60,
+  min: 60,
+  mins: 60,
+  minute: 60,
+  minutes: 60,
+  h: 3600,
+  hr: 3600,
+  hrs: 3600,
+  hour: 3600,
+  hours: 3600,
+  d: 86400,
+  day: 86400,
+  days: 86400,
+  w: 604800,
+  week: 604800,
+  weeks: 604800,
+  y: 31557600,
+  yr: 31557600,
+  yrs: 31557600,
+  year: 31557600,
+  years: 31557600,
+};
+
+/** Hard upper bound for AGENT_TOKEN_EXPIRY: one year. */
+export const AGENT_TOKEN_EXPIRY_MAX_SECONDS = DURATION_UNIT_SECONDS.y;
+
+/**
+ * Validate AGENT_TOKEN_EXPIRY format and bound at startup (SEC-134). A bad
+ * value otherwise surfaces as a 500 at token-signing time, and an unbounded
+ * value mints effectively-permanent agent tokens.
+ */
+export function validateAgentTokenExpiryEnv(value: string = AGENT_TOKEN_EXPIRY): void {
+  const match = DURATION_PATTERN.exec(value.trim());
+  const seconds = match
+    ? Number.parseFloat(match[1]) * (DURATION_UNIT_SECONDS[match[2].toLowerCase()] ?? Number.NaN)
+    : Number.NaN;
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    throw new Error(
+      `⛔ AGENT_TOKEN_EXPIRY "${value}" is not a valid positive duration (examples: "30m", "12h", "30d").`,
+    );
+  }
+  if (seconds > AGENT_TOKEN_EXPIRY_MAX_SECONDS) {
+    throw new Error(
+      `⛔ AGENT_TOKEN_EXPIRY "${value}" exceeds the one-year maximum; agent tokens must not be effectively permanent.`,
+    );
+  }
 }
 
 export async function signJwtPayload(

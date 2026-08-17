@@ -339,6 +339,30 @@ describe("getProviderConfig", () => {
       process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS = original;
     }
   });
+
+  it("rejects custom OAuth2 providers that shadow a built-in id", () => {
+    const original = process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS;
+    process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS = JSON.stringify([
+      {
+        id: "google",
+        clientId: "custom-id",
+        clientSecret: "custom-secret",
+        authorizationUrl: "https://idp.example.com/auth",
+        tokenUrl: "https://idp.example.com/token",
+        userInfoUrl: "https://idp.example.com/userinfo",
+        scopes: ["openid"],
+      },
+    ]);
+    // Both the bare id and the namespaced form normalize to the same
+    // collision and must fail closed instead of silently overriding Google.
+    expect(() => getProviderConfig("google")).toThrow("shadows a built-in provider");
+    expect(() => getProviderConfig("custom:google")).toThrow("shadows a built-in provider");
+    if (original === undefined) {
+      delete process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS;
+    } else {
+      process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS = original;
+    }
+  });
 });
 
 // ─── OAuthClient.generateAuthUrl ─────────────────────────────────────────────

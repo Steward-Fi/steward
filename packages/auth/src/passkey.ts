@@ -7,6 +7,17 @@
  *
  * Challenges are stored in an in-memory ChallengeStore with a 5-minute TTL.
  * In production you should swap this for a Redis-backed store.
+ *
+ * Security defaults (SEC-143):
+ *   - `userVerification: "required"` at both ceremonies, matching the
+ *     `requireUserVerification: true` checks at verify — authenticators that
+ *     cannot perform UV fail at options/ceremony time instead of registering
+ *     a credential that can never verify.
+ *   - `attestationType: "none"`: attestation is not requested, so hardware-
+ *     bound keys cannot be enforced and authenticator supply-chain properties
+ *     are not verified. Consumer passkey UX (platform authenticators, synced
+ *     credentials) is the target; requiring attestation is a product decision
+ *     that would exclude those authenticators.
  */
 
 import type {
@@ -120,7 +131,9 @@ export class PasskeyAuth {
       excludeCredentials: existingCredentials.map((id) => ({ id })),
       authenticatorSelection: {
         residentKey: "preferred",
-        userVerification: "preferred",
+        // Match requireUserVerification at verify (SEC-143): authenticators
+        // that cannot do UV fail here instead of after registration.
+        userVerification: "required",
         ...(options?.authenticatorAttachment
           ? { authenticatorAttachment: options.authenticatorAttachment }
           : {}),
@@ -199,7 +212,8 @@ export class PasskeyAuth {
   ): Promise<PublicKeyCredentialRequestOptionsJSON> {
     const authOptions = await swGenAuth({
       rpID: this.config.rpID,
-      userVerification: "preferred",
+      // Match requireUserVerification at verify (SEC-143).
+      userVerification: "required",
       allowCredentials: options?.allowCredentials?.map((c) => ({
         id: c.id,
         ...(c.transports && c.transports.length > 0 ? { transports: c.transports } : {}),

@@ -315,6 +315,44 @@ describe("OIDC JWT auth", () => {
     expect(response.status).toBe(401);
   });
 
+  it("rejects OIDC tokens missing exp or iat claims", async () => {
+    const withoutExp = await new SignJWT({
+      sub: "no-exp-user",
+      email: "no-exp-user@a.example.test",
+      email_verified: true,
+    })
+      .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+      .setIssuer(ISSUER)
+      .setAudience("aud-a")
+      .setIssuedAt()
+      .sign(privateKey);
+
+    const missingExp = await authRoutes.request("/jwt/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenantId: TENANT_A, providerId: PROVIDER_ID, token: withoutExp }),
+    });
+    expect(missingExp.status).toBe(401);
+
+    const withoutIat = await new SignJWT({
+      sub: "no-iat-user",
+      email: "no-iat-user@a.example.test",
+      email_verified: true,
+    })
+      .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+      .setIssuer(ISSUER)
+      .setAudience("aud-a")
+      .setExpirationTime("5m")
+      .sign(privateKey);
+
+    const missingIat = await authRoutes.request("/jwt/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenantId: TENANT_A, providerId: PROVIDER_ID, token: withoutIat }),
+    });
+    expect(missingIat.status).toBe(401);
+  });
+
   it("enforces disabled OIDC login methods for mixed-case provider ids", async () => {
     const token = await oidcToken("disabled-provider-user", "aud-disabled");
 

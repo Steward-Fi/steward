@@ -260,6 +260,19 @@ describe("auth and audit hardening", () => {
     }
   });
 
+  it("genericizes passkey register/verify failures instead of echoing internal error messages", () => {
+    const routeStart = authSource.indexOf('auth.post("/passkey/register/verify"');
+    expect(routeStart).toBeGreaterThanOrEqual(0);
+    const routeEnd = authSource.indexOf("\nauth.", routeStart + 1);
+    const routeSource = authSource.slice(routeStart, routeEnd === -1 ? undefined : routeEnd);
+    const catchStart = routeSource.indexOf("} catch (err) {");
+    expect(catchStart).toBeGreaterThanOrEqual(0);
+    const catchSource = routeSource.slice(catchStart, routeSource.indexOf("}", catchStart + 1));
+    expect(catchSource).not.toContain("err.message");
+    expect(catchSource).toContain('console.warn("[PasskeyAuth] Registration failed:", err)');
+    expect(catchSource).toContain('error: "Registration verification failed"');
+  });
+
   it("validates tenant access before storing OAuth tokens or passkey authenticators", () => {
     const passkeyVerifyStart = authSource.indexOf('auth.post("/passkey/register/verify"');
     expect(passkeyVerifyStart).toBeGreaterThanOrEqual(0);

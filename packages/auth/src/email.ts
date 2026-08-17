@@ -694,6 +694,17 @@ export class EmailAuth {
     return { email, tenantId: payload.tenantId, valid: true, challengeId };
   }
 
+  /**
+   * Record a failed code attempt against the pending challenge; locks the
+   * challenge after MAX_EMAIL_LOGIN_CODE_ATTEMPTS failures.
+   *
+   * Accepted trade-off (SEC-136): the attempt counter is keyed by email, so
+   * anyone who knows a victim's address can burn the attempts and force the
+   * victim to re-request a code. That is inherent to any attempt limiter —
+   * the alternative (no limiter) leaves the 6-digit code brute-forceable.
+   * Impact is availability-only (re-request); no code is ever confirmed or
+   * consumed by failed attempts.
+   */
   async recordEmailLoginCodeFailure(
     email: string,
     tenantId?: string,

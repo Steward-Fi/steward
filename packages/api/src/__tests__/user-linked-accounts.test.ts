@@ -1284,6 +1284,90 @@ describe("user linked account routes", () => {
     }
   });
 
+  it("locks phone-link verify after 5 invalid codes, rejecting even the correct code", async () => {
+    process.env.SMS_PROVIDER = "mock";
+    process.env.STEWARD_TEST_INBOX = "true";
+    MockSmsInbox.clear();
+    try {
+      const phone = "+14155550199";
+      const sendResponse = await userRoutes.request("/me/accounts/phone/sms/send", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await tokenFor(userId)}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ phone }),
+      });
+      expect(sendResponse.status).toBe(200);
+      const message = MockSmsInbox.last(phone);
+      expect(message?.code).toMatch(/^\d{6}$/);
+
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const invalidAttempt = await userRoutes.request("/me/accounts/phone/sms/verify", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${await tokenFor(userId)}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ phone, code: "000000" }),
+        });
+        expect(invalidAttempt.status).toBe(401);
+      }
+
+      const lockedOut = await userRoutes.request("/me/accounts/phone/sms/verify", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await tokenFor(userId)}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ phone, code: message?.code }),
+      });
+      expect(lockedOut.status).toBe(429);
+    } finally {
+      MockSmsInbox.clear();
+      delete process.env.SMS_PROVIDER;
+      delete process.env.STEWARD_TEST_INBOX;
+    }
+  });
+
+  it("atomically admits only 5 concurrent phone-link guesses", async () => {
+    process.env.SMS_PROVIDER = "mock";
+    process.env.STEWARD_TEST_INBOX = "true";
+    MockSmsInbox.clear();
+    try {
+      const phone = "+14155550200";
+      const sendResponse = await userRoutes.request("/me/accounts/phone/sms/send", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await tokenFor(userId)}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ phone }),
+      });
+      expect(sendResponse.status).toBe(200);
+      const token = await tokenFor(userId);
+      const responses = await Promise.all(
+        Array.from({ length: 6 }, () =>
+          userRoutes.request("/me/accounts/phone/sms/verify", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ phone, code: "000000" }),
+          }),
+        ),
+      );
+      expect(responses.map((response) => response.status).sort()).toEqual([
+        401, 401, 401, 401, 401, 429,
+      ]);
+    } finally {
+      MockSmsInbox.clear();
+      delete process.env.SMS_PROVIDER;
+      delete process.env.STEWARD_TEST_INBOX;
+    }
+  });
+
   it("links Telegram and Farcaster accounts with one-time proofs and blocks cross-user reuse", async () => {
     process.env.TELEGRAM_BOT_TOKEN = TELEGRAM_BOT_TOKEN;
     process.env.FARCASTER_LOGIN_ENABLED = "true";

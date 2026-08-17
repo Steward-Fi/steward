@@ -334,6 +334,15 @@ function getCustomProviderConfigs(): CustomOAuthProviderInput[] {
     if (!/^[a-zA-Z0-9_.:-]{1,64}$/.test(id)) {
       throw new Error(`Custom OAuth provider at index ${index} has an invalid id`);
     }
+    // SEC-137: custom providers win over built-ins in getProviderConfig, so an
+    // id matching a built-in would silently shadow it. Reject the collision —
+    // built-in endpoint overrides already have a supported mechanism
+    // (<PROVIDER>_AUTHORIZATION_URL / _TOKEN_URL / _USERINFO_URL env vars).
+    if ((BUILT_IN_PROVIDERS as readonly string[]).includes(id)) {
+      throw new Error(
+        `Custom OAuth provider "${id}" shadows a built-in provider; use a distinct id or the ${envPrefix(id)}_*_URL overrides`,
+      );
+    }
     for (const [name, url] of [
       ["authorizationUrl", authorizationUrl],
       ["tokenUrl", tokenUrl],
