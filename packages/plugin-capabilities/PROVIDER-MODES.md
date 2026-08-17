@@ -35,15 +35,25 @@ Idempotency-Key: random-unguessable-value
                 "permissions": { "issues": "write" } } }
 → { "mode": "token", "issuer": "github-app-installation",
     "leaseId": "...", "token": "<GitHub installation token>",
+    "acknowledgementRequired": true, "acknowledgementDeadlineSeconds": 30,
     "expiresAt": "...", "resource": { ... } }
 ```
 This is an actual GitHub App installation token, not a Steward JWT and not a
 stored PAT. The configured allowlist and live capability grant constrain the
-requested repositories and permissions. Steward returns it once with
-`Cache-Control: no-store`; only its SHA-256 digest, status, expiry and immutable
-tenant/workspace/agent/grant/capability/resource binding are persisted. Reusing
-the idempotency key returns `409` and never replays the credential. GitHub does
-not accept a caller-selected installation-token TTL, so this endpoint accepts
+requested repositories and permissions. Steward returns the token once with
+`Cache-Control: no-store`; its SHA-256 digest and an AAD-bound encrypted
+revocation handle are retained with the immutable tenant/workspace/agent/grant/
+capability/resource binding. The holder must then prove receipt:
+
+```
+POST /capabilities/manifest/leases/:leaseId/ack
+{ "token": "<the delivered GitHub installation token>" }
+```
+
+Until that proof commits, the lease stays `delivery_pending`; bounded recovery
+revokes stale unacknowledged delivery using the encrypted handle. Reusing the
+idempotency key returns `409` and never replays the credential. GitHub does not
+accept a caller-selected installation-token TTL, so this endpoint accepts
 exactly `ttlSeconds: 3600`; shorter values are rejected rather than presented as
 an upstream lifetime Steward cannot enforce.
 
@@ -70,20 +80,26 @@ only the scrubbed upstream response.
   an upstream token.
 - Renewal is a fresh issuance with a new idempotency key and a complete live
   grant/scope check. A token is never replayed.
+- Capability disable/delete, relevant capability changes, and grant revocation
+  tombstone authority before sweeping every bound lease with its exact encrypted
+  token. An issuer finishing concurrently observes the changed authority and
+  self-revokes instead of delivering.
 - `POST /capabilities/manifest/leases/:leaseId/revoke` requires the token as
   proof of possession. Steward compares its digest, calls GitHub's token revoke
-  endpoint, and marks the lease revoked only after GitHub succeeds. The token is
-  needed because Steward intentionally does not retain plaintext. Revoker failure
-  returns `503` and leaves the lease active (fail closed about revocation state).
-- If durable finalization fails after GitHub issues a token, Steward revokes the
-  in-memory token before returning an error. A process kill in the narrow window
-  between upstream issuance and durable finalization can leave an untracked token
-  alive until GitHub expiry; this is the explicit precommit-orphan boundary.
-- Revocation uses a durable claim. If the process dies after GitHub accepts the
-  revocation but before Steward commits the result, the holder can retry after
-  the 30-second claim timeout. A success response or GitHub's invalid-token
-  response confirms that the credential is no longer usable, so the lease cannot
-  remain permanently `revoking`; undocumented not-found responses fail closed.
+  endpoint, and marks the lease revoked only after GitHub proves invalidation.
+  Plaintext is exercised only inside the escrow callback. An ambiguous revoker
+  failure returns `503` and persists `needs_attention` with the sealed handle;
+  it never reasserts that the provider credential is active.
+- If interruption happens after an upstream issue call but before a sealed
+  handle is durable, the provider outcome is honestly recorded as unknown. If a
+  handle is durable, stale delivery/revocation recovery claims the exact scanned
+  status and `updated_at` snapshot before exercising that exact token, so it
+  cannot revoke a lease that was acknowledged concurrently.
+- A success response or GitHub's documented invalid-token response proves that
+  the credential is unusable. An undocumented `404` is not treated as proof.
+- Lease lifecycle events and lease identities are append-only at the database
+  boundary; parent agent/workspace deletion is restricted so evidence cannot be
+  removed by cascade.
 
 These tests use a deterministic fake upstream boundary. They do not constitute
 live GitHub, Railway, or deployment proof.

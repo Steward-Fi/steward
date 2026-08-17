@@ -382,6 +382,22 @@ describe("AgentClient — bounded credential transport", () => {
       message: "response exceeded maximum size",
     });
   });
+
+  test("acknowledges one-time lease delivery with token proof", async () => {
+    const { client } = await setup();
+    await client.enroll();
+    let requestUrl = "";
+    let requestBody = "";
+    (client as unknown as { fetchImpl: typeof fetch }).fetchImpl = async (url, init) => {
+      requestUrl = String(url);
+      requestBody = String(init?.body);
+      return Response.json({ ok: true, data: { active: true } });
+    };
+
+    await client.acknowledgeLease("lease/one", "github-token-proof");
+    expect(requestUrl).toEndWith("/capabilities/manifest/leases/lease%2Fone/ack");
+    expect(JSON.parse(requestBody)).toEqual({ token: "github-token-proof" });
+  });
 });
 
 describe("AgentKeypair — key never leaks", () => {

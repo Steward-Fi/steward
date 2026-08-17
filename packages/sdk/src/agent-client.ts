@@ -88,6 +88,9 @@ export interface TokenCapability {
   /** Upstream lease identity. Present for real provider-token mode. */
   leaseId?: string;
   issuer?: string;
+  /** Upstream leases remain delivery-pending until the holder proves receipt. */
+  acknowledgementRequired?: boolean;
+  acknowledgementDeadlineSeconds?: number;
   resource?: { repositories: string[]; permissions: Record<string, "read" | "write" | "admin"> };
   /** @deprecated legacy Steward-JWT fields; not present on upstream leases. */
   jti?: string;
@@ -455,6 +458,8 @@ export class AgentClient {
           capabilityId: string;
           leaseId?: string;
           issuer?: string;
+          acknowledgementRequired?: boolean;
+          acknowledgementDeadlineSeconds?: number;
           expiresAt?: string;
           resource?: TokenCapability["resource"];
         }
@@ -487,6 +492,8 @@ export class AgentClient {
         scopes: raw.scopes,
         leaseId: raw.leaseId,
         issuer: raw.issuer,
+        acknowledgementRequired: raw.acknowledgementRequired,
+        acknowledgementDeadlineSeconds: raw.acknowledgementDeadlineSeconds,
         resource: raw.resource,
         manifest: raw.manifest,
         capabilityId: raw.capabilityId,
@@ -505,6 +512,15 @@ export class AgentClient {
    * Steward deliberately persists only its digest. */
   async revokeLease(leaseId: string, token: string): Promise<void> {
     await this.postAuthed(`/capabilities/manifest/leases/${encodeURIComponent(leaseId)}/revoke`, {
+      token,
+    });
+  }
+
+  /** Confirm that a one-time upstream token reached its intended holder. Call
+   * only after the caller has accepted custody; unacknowledged deliveries are
+   * revoked by Steward's bounded recovery sweep. */
+  async acknowledgeLease(leaseId: string, token: string): Promise<void> {
+    await this.postAuthed(`/capabilities/manifest/leases/${encodeURIComponent(leaseId)}/ack`, {
       token,
     });
   }

@@ -97,8 +97,10 @@ const cap = await agent.issue("github:app:acme", {
   },
 });
 if (cap.mode === "token") {
-  // Delivered once with no-store headers. Steward persists only its digest.
-  // Keep it only as long as needed, then revoke with proof of possession:
+  // Delivered once with no-store headers. Confirm custody before use; Steward
+  // revokes an unacknowledged delivery after the bounded ACK deadline.
+  await agent.acknowledgeLease(cap.leaseId!, cap.token);
+  // Keep it only as long as needed, then revoke with proof of possession.
   await agent.revokeLease(cap.leaseId!, cap.token);
 }
 ```
