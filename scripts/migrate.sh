@@ -53,6 +53,20 @@ if [[ -z "${DATABASE_URL:-}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# SEC-050: keep the DB password out of psql's argv. `psql "$DATABASE_URL"`
+# exposes the full connection string (password included) in ps /
+# /proc/*/cmdline for the duration of every migration file. Strip the
+# password from the URL and pass it via the PGPASSWORD environment instead.
+# ---------------------------------------------------------------------------
+PSQL_URL="$DATABASE_URL"
+PSQL_PASSWORD=""
+if [[ "$DATABASE_URL" =~ ^(postgres(ql)?://)([^:@/]+):([^@]+)@(.+)$ ]]; then
+  PSQL_URL="${BASH_REMATCH[1]}${BASH_REMATCH[3]}@${BASH_REMATCH[5]}"
+  # Percent-decode the password component (PGPASSWORD is used literally).
+  PSQL_PASSWORD="$(printf '%b' "${BASH_REMATCH[4]//%/\\x}")"
+fi
+
+# ---------------------------------------------------------------------------
 # Find migration directory (relative to repo root or /opt/steward)
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -101,7 +115,7 @@ for sql_file in "${MIGRATIONS[@]}"; do
 
   echo -n "[migrate] $name ... "
 
-  if psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$sql_file" > /tmp/migrate_out.log 2>&1; then
+  if PGPASSWORD="$PSQL_PASSWORD" psql "$PSQL_URL" -v ON_ERROR_STOP=1 -f "$sql_file" > /tmp/migrate_out.log 2>&1; then
     echo -e "\033[32mOK\033[0m"
     PASSED=$((PASSED + 1))
   else
