@@ -2456,11 +2456,10 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       const authorizationError = executionAuthorizationErrorResponse(c, e);
       if (authorizationError) return authorizationError;
       const requestId = c.get("requestId") || "unknown";
-      const rawMessage = e instanceof Error ? e.message : "Unknown error";
-      console.error(`[${requestId}] Sign transaction failed for agent ${agentId}:`, e);
+      console.error(`[${requestId}] Sign transaction failed for agent ${agentId}`);
 
       dispatchWebhook(tenantId, agentId, "tx_failed", {
-        error: rawMessage,
+        error: "Transaction signing failed",
         requestId,
       });
 
@@ -4261,11 +4260,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       if (authorizationError) return authorizationError;
 
       const requestId = c.get("requestId") || "unknown";
-      const rawMessage = e instanceof Error ? e.message : "Unknown error";
-      console.error(
-        `[${requestId}] Approve transaction failed for agent ${agentId}, tx ${txId}:`,
-        e,
-      );
+      const safeFailureMessage = "Transaction approval execution failed";
+      console.error(`[${requestId}] Approve transaction failed for agent ${agentId}, tx ${txId}`);
 
       if (irreversibleResult && completedTxHash) {
         console.error(
@@ -4280,13 +4276,13 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       if (transactionRow.actionType === "send_calls") {
         dispatchWebhook(tenantId, agentId, "wallet_action.send_calls.failed", {
           actionId: txId,
-          error: rawMessage,
+          error: safeFailureMessage,
           requestId,
         });
       } else {
         dispatchWebhook(tenantId, agentId, "tx_failed", {
           txId,
-          error: rawMessage,
+          error: safeFailureMessage,
           requestId,
         });
       }
@@ -4294,7 +4290,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         intentId: txId,
         actionType: transactionRow.actionType,
         status: "failed",
-        error: rawMessage,
+        error: safeFailureMessage,
         referenceId: actionReferenceId(transactionRow.actionPayload),
         policyResults: transactionRow.policyResults,
       });

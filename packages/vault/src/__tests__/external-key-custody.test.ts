@@ -206,16 +206,28 @@ describe("external key custody seam", () => {
     await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
     await vault.importExternalKeyHandle(externalHandleRequest());
 
+    const target = await vault.resolveExecutionTarget({
+      tenantId: TENANT_ID,
+      agentId: "agent-external",
+      chainId: 8453,
+      venue: "hsm-primary",
+    });
     await expect(
-      vault.signTransaction({
-        tenantId: TENANT_ID,
-        agentId: "agent-external",
-        chainId: 8453,
-        to: "0x2222222222222222222222222222222222222222",
-        value: "1",
-        venue: "hsm-primary",
-        broadcast: false,
-      }),
+      vault.signTransaction(
+        {
+          tenantId: TENANT_ID,
+          agentId: "agent-external",
+          chainId: 8453,
+          to: "0x2222222222222222222222222222222222222222",
+          value: "1",
+          venue: "hsm-primary",
+          broadcast: false,
+        },
+        {
+          expectedBackend: target.backend,
+          expectedBackendIdentityDigest: target.backendIdentityDigest,
+        },
+      ),
     ).rejects.toThrow("External key custody signing provider is not configured for this wallet");
   });
 
@@ -225,16 +237,28 @@ describe("external key custody seam", () => {
     await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
     await vault.importExternalKeyHandle(externalHandleRequest());
 
+    const target = await vault.resolveExecutionTarget({
+      tenantId: TENANT_ID,
+      agentId: "agent-external",
+      chainId: 8453,
+      venue: "hsm-primary",
+    });
     await expect(
-      vault.signTransaction({
-        tenantId: TENANT_ID,
-        agentId: "agent-external",
-        chainId: 8453,
-        to: "0x2222222222222222222222222222222222222222",
-        value: "1",
-        venue: "hsm-primary",
-        broadcast: false,
-      }),
+      vault.signTransaction(
+        {
+          tenantId: TENANT_ID,
+          agentId: "agent-external",
+          chainId: 8453,
+          to: "0x2222222222222222222222222222222222222222",
+          value: "1",
+          venue: "hsm-primary",
+          broadcast: false,
+        },
+        {
+          expectedBackend: target.backend,
+          expectedBackendIdentityDigest: target.backendIdentityDigest,
+        },
+      ),
     ).rejects.toThrow("External key custody signing provider is not configured for this wallet");
   });
 
@@ -253,6 +277,12 @@ describe("external key custody seam", () => {
     vault = await freshVault(provider);
     await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
     await vault.importExternalKeyHandle(externalHandleRequest());
+    const target = await vault.resolveExecutionTarget({
+      tenantId: TENANT_ID,
+      agentId: "agent-external",
+      chainId: 8453,
+      venue: "hsm-primary",
+    });
 
     const signed = await vault.signTransaction(
       {
@@ -265,7 +295,11 @@ describe("external key custody seam", () => {
         venue: "hsm-primary",
         broadcast: false,
       },
-      { txId: "external-tx-1" },
+      {
+        txId: "external-tx-1",
+        expectedBackend: target.backend,
+        expectedBackendIdentityDigest: target.backendIdentityDigest,
+      },
     );
 
     expect(signed).toBe("0xsigned-by-external-provider");
@@ -338,10 +372,7 @@ describe("external key custody seam", () => {
     expect(rows).toHaveLength(0);
   });
 
-  test("still routes to the provider when the sign is NOT backend-bound (precheck path unchanged)", async () => {
-    // Belt-and-suspenders: an external-custody wallet signed WITHOUT a bound
-    // backend (a non-gateway caller) still reaches the provider exactly as
-    // before. The TOCTOU guard only engages when options.expectedBackend is set.
+  test("blocks external custody before the provider when the caller has no backend binding", async () => {
     const provider = new TestExternalKeyProvider("provider-signing", async () => ({
       result: "0xsigned-by-external-provider",
       broadcast: false,
@@ -350,22 +381,22 @@ describe("external key custody seam", () => {
     await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
     await vault.importExternalKeyHandle(externalHandleRequest());
 
-    const signed = await vault.signTransaction(
-      {
-        tenantId: TENANT_ID,
-        agentId: "agent-external",
-        chainId: 8453,
-        to: "0x2222222222222222222222222222222222222222",
-        value: "1",
-        data: "0x",
-        venue: "hsm-primary",
-        broadcast: false,
-      },
-      { txId: "toctou-unbound-1" },
-    );
-
-    expect(signed).toBe("0xsigned-by-external-provider");
-    expect(provider.signCalls).toHaveLength(1);
+    await expect(
+      vault.signTransaction(
+        {
+          tenantId: TENANT_ID,
+          agentId: "agent-external",
+          chainId: 8453,
+          to: "0x2222222222222222222222222222222222222222",
+          value: "1",
+          data: "0x",
+          venue: "hsm-primary",
+          broadcast: false,
+        },
+        { txId: "toctou-unbound-1" },
+      ),
+    ).rejects.toThrow("Execution backend binding mismatch");
+    expect(provider.signCalls).toHaveLength(0);
   });
 
   test("break-glass private key export refuses agents with external custody wallets", async () => {

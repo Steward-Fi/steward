@@ -166,6 +166,17 @@ describe("vault factory", () => {
     expect(line).not.toContain("us-east-1");
   });
 
+  it("requires a dedicated explicit AWS external-custody region", () => {
+    process.env.STEWARD_MASTER_PASSWORD = "factory-master";
+    process.env.STEWARD_EXTERNAL_CUSTODY_PROVIDER = "aws-kms";
+    process.env.AWS_REGION = "us-west-2";
+    process.env.STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_LIMIT = "100000";
+    process.env.STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_PRICE_WEI = "2000000000";
+    process.env.STEWARD_EXTERNAL_CUSTODY_AWS_MAX_TOTAL_FEE_WEI = "100000000000000";
+
+    expect(() => createConfiguredVault()).toThrow("explicit AWS region");
+  });
+
   it("fails closed for an unknown external custody provider", () => {
     process.env.STEWARD_MASTER_PASSWORD = "factory-master";
     process.env.STEWARD_EXTERNAL_CUSTODY_PROVIDER = "not-a-provider";

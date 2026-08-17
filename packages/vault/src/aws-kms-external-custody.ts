@@ -67,6 +67,7 @@ export interface AwsKmsSigningClientLike {
 }
 
 export interface AwsKmsEvmRpc {
+  getChainId(): Promise<number>;
   prepareTransaction(
     request: ExternalKeySignTransactionRequest,
     address: Address,
@@ -225,13 +226,30 @@ function assertEvmRequest(request: ExternalKeySignTransactionRequest): void {
   if (!request.rpcUrl?.trim()) throw new Error("AWS KMS external custody requires an EVM RPC URL");
 }
 
-function assertHandleRegion(
-  handleRegion: string | undefined,
-  configuredRegion: string | undefined,
-): void {
-  if (handleRegion !== undefined && handleRegion !== configuredRegion) {
+function assertHandleRegion(handleRegion: string | undefined, configuredRegion: string): void {
+  if (handleRegion !== configuredRegion) {
     throw new Error(
       "AWS KMS external custody handle region must match STEWARD_EXTERNAL_CUSTODY_AWS_REGION",
+    );
+  }
+}
+
+function assertAwsRegion(region: string | undefined): asserts region is string {
+  if (!region || !/^[a-z]{2}(?:-[a-z0-9]+)+-\d+$/.test(region)) {
+    throw new Error(
+      "STEWARD_EXTERNAL_CUSTODY_AWS_REGION is required and must be an explicit AWS region",
+    );
+  }
+}
+
+function assertCanonicalKmsKeyArn(keyId: string, region: string): void {
+  const match =
+    /^arn:(aws(?:-us-gov|-cn|-iso|-iso-b)?):kms:([a-z0-9-]+):(\d{12}):key\/([A-Za-z0-9-]+)$/.exec(
+      keyId,
+    );
+  if (!match || match[2] !== region) {
+    throw new Error(
+      "AWS KMS external custody requires a canonical KMS key ARN in the configured region",
     );
   }
 }
@@ -239,6 +257,9 @@ function assertHandleRegion(
 function defaultRpcFactory(rpcUrl: string): AwsKmsEvmRpc {
   const client = createPublicClient({ transport: http(rpcUrl) });
   return {
+    getChainId() {
+      return client.getChainId();
+    },
     async prepareTransaction(request, address) {
       const to = getAddress(request.to);
       const value = BigInt(request.value);
@@ -272,13 +293,14 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
 
   private readonly clientIsInjected: boolean;
   private client?: AwsKmsSigningClientLike;
-  private readonly region?: string;
+  private readonly region: string;
   private readonly rpcFactory: (rpcUrl: string) => AwsKmsEvmRpc;
   private readonly maxGasLimit?: bigint;
   private readonly maxGasPriceWei?: bigint;
   private readonly maxTotalFeeWei?: bigint;
 
   constructor(options: AwsKmsExternalKeyCustodyOptions = {}) {
+    assertAwsRegion(options.region);
     this.client = options.client;
     this.clientIsInjected = Boolean(options.client);
     this.region = options.region;
@@ -290,10 +312,7 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
 
   static fromEnv(): AwsKmsExternalKeyCustodyProvider {
     return new AwsKmsExternalKeyCustodyProvider({
-      region:
-        process.env.STEWARD_EXTERNAL_CUSTODY_AWS_REGION ??
-        process.env.STEWARD_AWS_REGION ??
-        process.env.AWS_REGION,
+      region: process.env.STEWARD_EXTERNAL_CUSTODY_AWS_REGION,
       maxGasLimit: positiveBigIntEnv("STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_LIMIT"),
       maxGasPriceWei: positiveBigIntEnv("STEWARD_EXTERNAL_CUSTODY_AWS_MAX_GAS_PRICE_WEI"),
       maxTotalFeeWei: positiveBigIntEnv("STEWARD_EXTERNAL_CUSTODY_AWS_MAX_TOTAL_FEE_WEI"),
@@ -313,6 +332,7 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
         `AWS KMS external custody handle requires providerId=${AWS_PROVIDER_ID} and keyId`,
       );
     }
+    assertCanonicalKmsKeyArn(request.handle.keyId, this.region);
     if (!isAddress(request.address)) {
       throw new Error("AWS KMS external custody registration requires a valid EVM address");
     }
@@ -354,6 +374,7 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
     assertNoExternalPrivateKeyMaterial(request);
     assertEvmRequest(request);
     assertHandleRegion(request.handle.region, this.region);
+    assertCanonicalKmsKeyArn(request.handle.keyId, this.region);
     const expectedAddress = getAddress(request.address);
     const resolvedIdentity = await this.resolveSigningIdentity(request.handle.keyId);
     if (resolvedIdentity.keyId !== request.handle.keyId) {
@@ -366,6 +387,9 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
     }
 
     const rpc = this.rpcFactory(request.rpcUrl!);
+    if ((await rpc.getChainId()) !== request.chainId) {
+      throw new Error("AWS KMS RPC endpoint is connected to the wrong chainId");
+    }
     const transaction = await rpc.prepareTransaction(request, expectedAddress);
     if (transaction.type !== undefined && transaction.type !== "legacy") {
       throw new Error("AWS KMS reference custody supports legacy EIP-155 transactions only");
@@ -421,7 +445,7 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
     if (response.KeyId !== request.handle.keyId) {
       throw new Error("AWS KMS Sign returned a different canonical KeyId");
     }
-    if (response.SigningAlgorithm && response.SigningAlgorithm !== "ECDSA_SHA_256") {
+    if (response.SigningAlgorithm !== "ECDSA_SHA_256") {
       throw new Error("AWS KMS Sign returned an unexpected signing algorithm");
     }
 
@@ -451,7 +475,11 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
       // chain-bound value itself. yParity above remains the recovery proof.
       v: yParity === 0 ? 27n : 28n,
     });
+    const expectedTransactionHash = keccak256(serialized);
     const result = request.broadcast ? await rpc.broadcast(serialized) : serialized;
+    if (request.broadcast && result.toLowerCase() !== expectedTransactionHash.toLowerCase()) {
+      throw new Error("AWS KMS RPC returned a transaction hash that does not match signed bytes");
+    }
     return { result, broadcast: request.broadcast };
   }
 

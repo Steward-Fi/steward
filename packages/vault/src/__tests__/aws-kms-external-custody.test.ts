@@ -3,6 +3,7 @@ import { secp256k1 } from "@noble/curves/secp256k1";
 import {
   getAddress,
   type Hex,
+  keccak256,
   parseTransaction,
   recoverTransactionAddress,
   type TransactionSerializableLegacy,
@@ -78,7 +79,11 @@ class MockKms implements AwsKmsSigningClientLike {
     if (parsed.commandName === "SignCommand") {
       const digest = parsed.input.Message as Uint8Array;
       if (this.signatureMode === "malformed") {
-        return { KeyId: this.responseKeyId, Signature: new Uint8Array([0x30, 0x01, 0x00]) };
+        return {
+          KeyId: this.responseKeyId,
+          Signature: new Uint8Array([0x30, 0x01, 0x00]),
+          SigningAlgorithm: "ECDSA_SHA_256",
+        };
       }
       const signature = secp256k1.sign(digest, this.privateKey, { lowS: true });
       const encoded =
@@ -97,6 +102,7 @@ class MockKms implements AwsKmsSigningClientLike {
 
 class MockRpc implements AwsKmsEvmRpc {
   readonly broadcasts: Hex[] = [];
+  chainId = 8453;
   transaction: TransactionSerializableLegacy = {
     type: "legacy",
     chainId: 8453,
@@ -108,13 +114,17 @@ class MockRpc implements AwsKmsEvmRpc {
     data: "0x",
   };
 
+  async getChainId(): Promise<number> {
+    return this.chainId;
+  }
+
   async prepareTransaction(): Promise<TransactionSerializableLegacy> {
     return this.transaction;
   }
 
   async broadcast(serializedTransaction: Hex): Promise<Hex> {
     this.broadcasts.push(serializedTransaction);
-    return "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    return keccak256(serializedTransaction);
   }
 }
 
@@ -219,7 +229,7 @@ describe("AWS KMS asymmetric external custody", () => {
           },
         }),
       ),
-    ).rejects.toThrow("requires the canonical KMS KeyId");
+    ).rejects.toThrow("canonical KMS key ARN");
 
     await expect(
       providerFor(new MockKms(privateKey), new MockRpc()).registerKeyHandle(
@@ -312,6 +322,7 @@ describe("AWS KMS asymmetric external custody", () => {
         return {
           KeyId: KMS_KEY_ARN,
           Signature: secp256k1.sign(parsed.input.Message, otherKey).toBytes("der"),
+          SigningAlgorithm: "ECDSA_SHA_256",
         };
       }
       return originalSend(command);
@@ -397,6 +408,66 @@ describe("AWS KMS asymmetric external custody", () => {
     expect(kms.commands.some((command) => command.commandName === "SignCommand")).toBe(false);
   });
 
+  test("pins the dedicated KMS region and canonical key ARN", async () => {
+    const privateKey = secp256k1.utils.randomPrivateKey();
+    expect(
+      () =>
+        new AwsKmsExternalKeyCustodyProvider({
+          client: new MockKms(privateKey),
+          region: undefined,
+        }),
+    ).toThrow("explicit AWS region");
+    await expect(
+      providerFor(new MockKms(privateKey), new MockRpc()).registerKeyHandle(
+        registrationRequest(privateKey, {
+          handle: {
+            providerId: "aws-kms",
+            keyId: "arn:aws:kms:us-west-2:111122223333:key/test",
+            region: "us-east-1",
+          },
+        }),
+      ),
+    ).rejects.toThrow("canonical KMS key ARN in the configured region");
+  });
+
+  test("rejects wrong-chain RPCs and dishonest broadcast hashes", async () => {
+    const privateKey = secp256k1.utils.randomPrivateKey();
+    const wrongChainRpc = new MockRpc();
+    wrongChainRpc.chainId = 1;
+    await expect(
+      providerFor(new MockKms(privateKey), wrongChainRpc).signTransaction(
+        signRequest(privateKey, { broadcast: true }),
+      ),
+    ).rejects.toThrow("wrong chainId");
+    expect(wrongChainRpc.broadcasts).toHaveLength(0);
+
+    const dishonestRpc = new MockRpc();
+    dishonestRpc.broadcast = async (serializedTransaction: Hex) => {
+      dishonestRpc.broadcasts.push(serializedTransaction);
+      return "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    };
+    await expect(
+      providerFor(new MockKms(privateKey), dishonestRpc).signTransaction(
+        signRequest(privateKey, { broadcast: true }),
+      ),
+    ).rejects.toThrow("does not match signed bytes");
+  });
+
+  test("requires KMS to repeat the exact signing algorithm", async () => {
+    const privateKey = secp256k1.utils.randomPrivateKey();
+    const kms = new MockKms(privateKey);
+    const originalSend = kms.send.bind(kms);
+    kms.send = async (command: unknown) => {
+      const response = await originalSend(command);
+      return (command as { commandName: string }).commandName === "SignCommand"
+        ? { ...(response as object), SigningAlgorithm: undefined }
+        : response;
+    };
+    await expect(
+      providerFor(kms, new MockRpc()).signTransaction(signRequest(privateKey)),
+    ).rejects.toThrow("unexpected signing algorithm");
+  });
+
   test("broadcasts only the address-verified serialized transaction", async () => {
     const privateKey = secp256k1.utils.randomPrivateKey();
     const rpc = new MockRpc();
@@ -404,7 +475,7 @@ describe("AWS KMS asymmetric external custody", () => {
       signRequest(privateKey, { broadcast: true }),
     );
     expect(result).toEqual({
-      result: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      result: keccak256(rpc.broadcasts[0]),
       broadcast: true,
     });
     expect(rpc.broadcasts).toHaveLength(1);

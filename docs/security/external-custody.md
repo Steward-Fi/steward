@@ -95,12 +95,12 @@ For an EVM transaction the provider:
 
 1. validates chain, recipient, value, calldata, gas and nonce inputs;
 2. resolves fees/nonce/gas from the operator-configured RPC;
-3. rechecks that the prepared transaction still matches the semantic request;
+3. verifies the RPC chain ID and rechecks that the prepared transaction still matches the semantic request;
 4. hashes the canonical unsigned legacy transaction with Keccak-256;
 5. calls KMS `Sign` with `MessageType=DIGEST` and `ECDSA_SHA_256`;
 6. strictly decodes DER, validates scalar ranges, and normalizes high-s output;
 7. derives `yParity` only by recovering the registered address;
-8. broadcasts only after that recovery succeeds.
+8. broadcasts only after that recovery succeeds and requires the RPC-returned hash to equal the local hash of the signed bytes.
 
 A malformed response, wrong key, wrong address, unsupported algorithm, mutated
 RPC preparation, missing RPC, or KMS error fails closed before broadcast.

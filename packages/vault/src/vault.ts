@@ -317,8 +317,9 @@ export interface SignTransactionOptions {
    * resolveExecutionBackend -> sign TOCTOU: if the wallet's backend flips (a
    * local key is removed and an third-party-custody key inserted) between the
    * gateway's precheck and the raw sign, a local-vault-bound authorization can
-   * no longer reach the third-party provider. Absent (undefined) preserves the
-   * legacy, un-gateway-bound behavior for non-gateway callers.
+   * no longer reach the third-party provider. External custody always
+   * requires this binding; absent (undefined) remains valid only for legacy
+   * local-vault callers.
    */
   expectedBackend?: "local-vault" | "external-custody";
   expectedBackendIdentityDigest?: string;
@@ -1384,17 +1385,17 @@ export class Vault {
         venue,
       });
       if (externalWallet) {
-        // Backend-binding re-resolution (TOCTOU close).
-        // This branch means the request re-resolved to external custody using
-        // the SAME fresh wallet lookup that will actually sign (no second racy
-        // read). If the caller's authorization was bound to "local-vault" (the
-        // only gateway-supported backend), the wallet's backend has FLIPPED
-        // since the gateway's resolveExecutionBackend precheck. Fail closed
-        // BEFORE any provider routing so a local-vault-bound authorization can
-        // never reach the external custody provider.
-        if (options.expectedBackend === "local-vault") {
-          throw new BackendBindingMismatchError("local-vault", "external-custody");
+        if (options.expectedBackend !== "external-custody") {
+          throw new BackendBindingMismatchError(
+            options.expectedBackend ?? "local-vault",
+            "external-custody",
+          );
         }
+        // Backend-binding re-resolution (TOCTOU close).
+        // This branch uses the SAME fresh wallet lookup that will actually sign
+        // (no second racy read). External custody is reachable only through an
+        // exact backend + identity binding; legacy raw callers fail closed
+        // before any provider routing.
         const resolvedIdentityDigest = externalCustodyIdentityDigest({
           providerId: externalWallet.metadata.externalKey.providerId,
           keyId: externalWallet.metadata.externalKey.keyId,
