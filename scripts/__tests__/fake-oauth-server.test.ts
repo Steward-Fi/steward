@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
 import { OAuthClient } from "../../packages/auth/src/oauth";
 import { clearFakeOAuthState, setFakeOAuthUser, startFakeOAuthServer } from "../fake-oauth-server";
 
@@ -93,5 +94,12 @@ describe("fake-oauth-server", () => {
     });
     const profile = (await profileRes.json()) as { email: string };
     expect(profile.email).toBe("bob@example.com");
+  });
+
+  it("binds loopback only (SEC-128) — an auth-bypass stub must not listen on all interfaces", () => {
+    // Pre-fix: Bun.serve({ port }) defaults to 0.0.0.0, exposing the
+    // accept-any-credential / mint-any-identity provider to the network.
+    const source = readFileSync(new URL("../fake-oauth-server.ts", import.meta.url), "utf8");
+    expect(source).toContain('hostname: "127.0.0.1"');
   });
 });
