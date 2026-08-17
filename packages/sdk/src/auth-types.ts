@@ -333,6 +333,12 @@ export interface StewardAuthConfig {
    * When set, all sign-in methods include this tenantId in requests.
    */
   tenantId?: string;
+  /**
+   * Permit a plaintext non-loopback baseUrl (warns at construction). HTTPS is
+   * required by default so session credentials never travel cleartext
+   * off-loopback.
+   */
+  allowInsecureBaseUrl?: boolean;
 }
 
 /** Response shape from POST /auth/refresh */

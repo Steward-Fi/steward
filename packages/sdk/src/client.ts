@@ -1,3 +1,4 @@
+import { assertSecureBaseUrl } from "./base-url.ts";
 import type {
   AgentAccountSummary,
   AgentBalance,
@@ -194,6 +195,11 @@ export interface StewardClientConfig {
    * injected scripts can read request headers. Prefer bearerToken in browsers.
    */
   allowUnsafeBrowserSecrets?: boolean;
+  /**
+   * Permit a plaintext non-loopback baseUrl (warns at construction). HTTPS is
+   * required by default so credentials never travel cleartext off-loopback.
+   */
+  allowInsecureBaseUrl?: boolean;
 }
 
 export interface QuorumSignerCredential {
@@ -1374,6 +1380,7 @@ export class StewardClient {
     requestSigningSecret,
     requestSigningKeyId,
     allowUnsafeBrowserSecrets,
+    allowInsecureBaseUrl,
   }: StewardClientConfig) {
     if (
       isBrowserRuntime() &&
@@ -1385,6 +1392,7 @@ export class StewardClient {
         0,
       );
     }
+    assertSecureBaseUrl(baseUrl, allowInsecureBaseUrl);
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.apiKey = apiKey;
     this.appId = appId;

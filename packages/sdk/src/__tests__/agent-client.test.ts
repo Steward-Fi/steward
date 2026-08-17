@@ -71,7 +71,7 @@ async function setup(opts?: {
   });
   const keypair = await AgentKeypair.fromPkcs8Base64(kp.pkcs8Base64);
   const client = new AgentClient({
-    baseUrl: "http://mock",
+    baseUrl: "http://localhost",
     agentId: AGENT_ID,
     keypair,
     fetchImpl: server.fetch,
@@ -114,7 +114,7 @@ describe("AgentClient — enroll (keypair-only boot)", () => {
     const wrong = await generateMockKeyPair();
     const wrongKeypair = await AgentKeypair.fromPkcs8Base64(wrong.pkcs8Base64);
     const client = new AgentClient({
-      baseUrl: "http://mock",
+      baseUrl: "http://localhost",
       agentId: AGENT_ID,
       keypair: wrongKeypair,
       fetchImpl: server.fetch,
@@ -126,7 +126,7 @@ describe("AgentClient — enroll (keypair-only boot)", () => {
     const correct = await generateMockKeyPair();
     server.activeSigner(AGENT_ID)!.publicKeyRawBase64 = correct.publicKeyRawBase64;
     const good = new AgentClient({
-      baseUrl: "http://mock",
+      baseUrl: "http://localhost",
       agentId: AGENT_ID,
       keypair: await AgentKeypair.fromPkcs8Base64(correct.pkcs8Base64),
       fetchImpl: server.fetch,
@@ -139,7 +139,7 @@ describe("AgentClient — enroll (keypair-only boot)", () => {
     const { server, kp } = await setup();
     server.revokeSigner(AGENT_ID);
     const client = new AgentClient({
-      baseUrl: "http://mock",
+      baseUrl: "http://localhost",
       agentId: AGENT_ID,
       keypair: await AgentKeypair.fromPkcs8Base64(kp.pkcs8Base64),
       fetchImpl: server.fetch,
