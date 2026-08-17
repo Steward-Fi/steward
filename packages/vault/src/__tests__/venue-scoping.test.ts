@@ -357,6 +357,39 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
     ).rejects.toThrow(/Agent ghost not found/);
   });
 
+  test("createWallet rejects a mismatched caller-asserted tenantId (SEC-162)", async () => {
+    await vault.createAgent(TENANT_ID, "sol", "Sol");
+
+    // Another tenant asserting ownership of "sol" cannot squat venue slots.
+    await expect(
+      vault.createWallet({
+        agentId: "sol",
+        tenantId: "other-tenant",
+        venue: "hyperliquid",
+        chainType: "evm",
+      }),
+    ).rejects.toThrow(`Agent sol not found for tenant other-tenant`);
+    // No venue wallet was written by the rejected call.
+    expect(
+      (await vault.listWallets({ agentId: "sol" })).filter((w) => w.venue === "hyperliquid"),
+    ).toHaveLength(0);
+
+    // The matching tenant passes, and omitting tenantId stays backward compatible.
+    const asserted = await vault.createWallet({
+      agentId: "sol",
+      tenantId: TENANT_ID,
+      venue: "hyperliquid",
+      chainType: "evm",
+    });
+    expect(asserted.venue).toBe("hyperliquid");
+    const unasserted = await vault.createWallet({
+      agentId: "sol",
+      venue: "polymarket",
+      chainType: "evm",
+    });
+    expect(unasserted.venue).toBe("polymarket");
+  });
+
   test("private key is never returned by createWallet", async () => {
     await vault.createAgent(TENANT_ID, "sol", "Sol");
     const wallet = await vault.createWallet({

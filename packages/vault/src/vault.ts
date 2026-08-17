@@ -3596,6 +3596,16 @@ export class Vault {
    */
   async createWallet(args: {
     agentId: string;
+    /**
+     * SEC-162: optional caller-asserted tenant, verified against the agent's
+     * real tenant before any wallet row is written. The AAD on the encrypted
+     * key material was always bound to `agentRow.tenantId` (so cross-tenant
+     * key theft was never possible); this check closes the residual DoS —
+     * a caller reaching this method with another tenant's agentId can no
+     * longer squat venue wallet slots for that agent. Routes that know the
+     * tenant MUST pass it.
+     */
+    tenantId?: string;
     venue?: string;
     scope?: string;
     chainType: WalletChainFamily;
@@ -3623,6 +3633,12 @@ export class Vault {
       .where(eq(agents.id, agentId));
     if (!agentRow) {
       throw new Error(`Agent ${agentId} not found`);
+    }
+    // Defense-in-depth tenant binding (SEC-162). Same "not found" phrasing as
+    // the other tenant-scoped lookups so a mismatch does not confirm the
+    // agent's existence under another tenant.
+    if (args.tenantId !== undefined && agentRow.tenantId !== args.tenantId) {
+      throw new Error(`Agent ${agentId} not found for tenant ${args.tenantId}`);
     }
 
     let address: string;
