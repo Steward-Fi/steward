@@ -14,7 +14,7 @@ services:
     profiles: ["enterprise-reference"]
     build:
       context: ../..
-      dockerfile: deploy/Dockerfile
+      dockerfile: Dockerfile
     image: steward:${STEWARD_IMAGE_TAG:-enterprise-reference}
     command: ["bun", "packages/db/src/migrate.ts"]
     environment:
@@ -34,7 +34,7 @@ services:
     profiles: ["enterprise-reference"]
     build:
       context: ../..
-      dockerfile: deploy/Dockerfile
+      dockerfile: Dockerfile
     image: steward:${STEWARD_IMAGE_TAG:-enterprise-reference}
     environment:
       PORT: "3200"

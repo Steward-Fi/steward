@@ -12,7 +12,7 @@ services:
   steward:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile
+      dockerfile: Dockerfile
     image: steward:latest
     container_name: steward
     restart: unless-stopped
@@ -55,7 +55,7 @@ services:
   steward-proxy:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile
+      dockerfile: Dockerfile
     image: steward:latest
     container_name: steward-proxy
     restart: unless-stopped
