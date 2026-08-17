@@ -28,6 +28,7 @@ import {
   toUpdateIsolatedMarginAction,
   toUsdSendAction,
   toWithdrawAction,
+  validateBuilderFeeEnv,
 } from "./index";
 
 const PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" as const;
@@ -145,6 +146,35 @@ describe("Hyperliquid L1 signing", () => {
       expect(() =>
         toExchangeAction({ coin: "BTC", side: "buy", size: 0.02, limitPx: "30000" }),
       ).toThrow();
+    } finally {
+      if (oldAddress === undefined) delete process.env.HL_BUILDER_ADDRESS;
+      else process.env.HL_BUILDER_ADDRESS = oldAddress;
+      if (oldFee === undefined) delete process.env.HL_BUILDER_FEE_TENTHS_BP;
+      else process.env.HL_BUILDER_FEE_TENTHS_BP = oldFee;
+    }
+  });
+
+  test("SEC-186: validateBuilderFeeEnv fails fast on malformed env, no-ops when unconfigured", () => {
+    const oldAddress = process.env.HL_BUILDER_ADDRESS;
+    const oldFee = process.env.HL_BUILDER_FEE_TENTHS_BP;
+    try {
+      delete process.env.HL_BUILDER_ADDRESS;
+      delete process.env.HL_BUILDER_FEE_TENTHS_BP;
+      expect(() => validateBuilderFeeEnv()).not.toThrow();
+
+      process.env.HL_BUILDER_ADDRESS = "0xABCDEF0123456789abcdef0123456789ABCDEF01";
+      process.env.HL_BUILDER_FEE_TENTHS_BP = "10";
+      expect(() => validateBuilderFeeEnv()).not.toThrow();
+
+      process.env.HL_BUILDER_FEE_TENTHS_BP = "101";
+      expect(() => validateBuilderFeeEnv()).toThrow(/Invalid HL builder fee configuration/);
+
+      process.env.HL_BUILDER_FEE_TENTHS_BP = "10.5";
+      expect(() => validateBuilderFeeEnv()).toThrow(/Invalid HL builder fee configuration/);
+
+      process.env.HL_BUILDER_ADDRESS = "not-an-address";
+      process.env.HL_BUILDER_FEE_TENTHS_BP = "10";
+      expect(() => validateBuilderFeeEnv()).toThrow(/Invalid HL builder fee configuration/);
     } finally {
       if (oldAddress === undefined) delete process.env.HL_BUILDER_ADDRESS;
       else process.env.HL_BUILDER_ADDRESS = oldAddress;

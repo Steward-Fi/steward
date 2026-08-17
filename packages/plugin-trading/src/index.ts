@@ -21,6 +21,7 @@
  */
 
 import type { AppVariables, StewardPlugin } from "@stwd/shared";
+import { validateBuilderFeeEnv } from "@stwd/venue-hyperliquid";
 import type { Hono } from "hono";
 import type { StewardAppContext } from "./context";
 import { createEvmSwapRoutes } from "./routes/evm-swap";
@@ -103,6 +104,10 @@ export const tradingPlugin: StewardApiPlugin = {
   webhookEvents: TRADING_WEBHOOK_EVENTS,
   register(app, ctx) {
     const { requireAgentJwt, operatorAuth, tenantAuth } = ctx;
+
+    // SEC-186: fail fast at composition (startup) when the HL builder-fee env
+    // config is malformed instead of throwing at order time.
+    validateBuilderFeeEnv();
 
     // ── trade-specific auth middleware (verbatim from app.ts ~lines 172-182) ──
     for (const path of [
