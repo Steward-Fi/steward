@@ -173,6 +173,10 @@ describe("user membership hardening", () => {
     expect(acceptRoute).toContain("emailVerified");
     expect(acceptRoute).toContain("/^[a-f0-9]{64}$/i.test(body.token)");
     expect(acceptRoute).toContain("hashSha256Hex(body.token)");
+    // SEC-075: the invitation must be bound server-side to the accepting
+    // account's verified email — in BOTH the candidate lookup and the atomic
+    // accept update — so a leaked link cannot add a different signed-in user.
+    expect(acceptRoute).toContain("eq(tenantInvitations.email, email)");
     expect(acceptRoute).toContain('eq(tenantInvitations.status, "pending")');
     expect(acceptRoute).toContain("gte(tenantInvitations.expiresAt, new Date())");
     expect(acceptRoute.indexOf('action: "tenant.invitation.accept.authorized"')).toBeLessThan(
