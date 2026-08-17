@@ -230,7 +230,10 @@ async function handlePostExecute(c: RouteContext) {
   // Resume is state-idempotent: the persisted binding/nonce permits one claim.
   // There is deliberately no request-key contract. Reject every body instead of
   // accepting and silently ignoring a caller-supplied idempotency key.
-  if ((await c.req.raw.clone().arrayBuffer()).byteLength > 0) {
+  // Do not clone or consume a body that is forbidden in the first place. Aside
+  // from being unnecessary, buffering here would let an authenticated caller
+  // force an allocation before receiving the rejection.
+  if (c.req.raw.body !== null) {
     return err(c, "RESUME_BODY_NOT_ALLOWED", 400);
   }
 

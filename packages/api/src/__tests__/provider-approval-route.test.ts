@@ -192,6 +192,24 @@ describe("PR3 approval + execute routes", () => {
     expect(((await retryBody.json()) as { error: { code: string } }).error.code).toBe(
       "RESUME_BODY_NOT_ALLOWED",
     );
+
+    const unclonable = new Request(`http://localhost/v2/provider-actions/${intentId}/execute`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${await humanToken(F.APPROVER)}`,
+        "content-type": "application/octet-stream",
+        "x-steward-tenant": F.TENANT,
+      },
+      body: new Uint8Array([0x7b]),
+    });
+    unclonable.clone = () => {
+      throw new Error("execute route must not clone or consume request bodies");
+    };
+    const unconsumed = await app.request(unclonable);
+    expect(unconsumed.status).toBe(400);
+    expect(((await unconsumed.json()) as { error: { code: string } }).error.code).toBe(
+      "RESUME_BODY_NOT_ALLOWED",
+    );
   });
 
   test("happy path: human approver approves (200), then execute resumes (200 execution_ready)", async () => {
