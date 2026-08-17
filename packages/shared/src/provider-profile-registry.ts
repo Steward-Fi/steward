@@ -22,6 +22,7 @@
  * building the action.
  */
 
+import { AWS_PROVIDER_ACTION_PROFILE } from "./aws-provider-action.js";
 import { GENERIC_HTTP_PROVIDER_ACTION_PROFILE } from "./generic-http-provider-action.js";
 import {
   GOOGLE_ALLOWED_ORIGINS,
@@ -46,6 +47,8 @@ export type ProviderProfileDescriptor =
       kind: "adapter-fixed";
       /** Exact origins emitted by the hard-coded adapter. */
       allowedOrigins: readonly string[];
+      /** Region-bound adapters derive one exact origin from canonical action bytes. */
+      dynamicOriginPolicy?: "aws-ec2-region";
     })
   | (ProviderProfileDescriptorBase & {
       kind: "config-driven";
@@ -57,6 +60,16 @@ export type ProviderProfileDescriptor =
  * x, Slack, and Google Workspace are adapter-fixed; generic-http is config-driven.
  */
 const REGISTRY: ReadonlyMap<string, ProviderProfileDescriptor> = new Map([
+  [
+    AWS_PROVIDER_ACTION_PROFILE,
+    Object.freeze<ProviderProfileDescriptor>({
+      profile: AWS_PROVIDER_ACTION_PROFILE,
+      kind: "adapter-fixed",
+      label: "AWS",
+      allowedOrigins: Object.freeze([]),
+      dynamicOriginPolicy: "aws-ec2-region",
+    }),
+  ],
   [
     GITHUB_PROVIDER_ACTION_PROFILE,
     Object.freeze<ProviderProfileDescriptor>({

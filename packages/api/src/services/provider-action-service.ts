@@ -51,6 +51,7 @@ import {
   type ProviderPolicyRule,
   windowedInvokeBucketKey,
 } from "@stwd/policy-engine";
+import { type AwsActionBuild, type AwsOperationKey, buildAwsAction } from "@stwd/provider-aws";
 import {
   buildGithubAction,
   type GithubActionBuild,
@@ -68,6 +69,7 @@ import {
 } from "@stwd/provider-slack";
 import { buildXAction, type XActionBuild, type XOperationKey } from "@stwd/provider-x";
 import {
+  type AwsCanonicalActionV1,
   assertRegisteredProfile,
   CanonError,
   computeProviderPolicyInputDigest,
@@ -105,6 +107,7 @@ import {
  * policyArgs, safeSummary), so the pipeline consumes them uniformly.
  */
 export type ConcreteProviderActionBuild =
+  | AwsActionBuild
   | GithubActionBuild
   | SlackActionBuild
   | GoogleActionBuild
@@ -128,6 +131,7 @@ export interface DeferredGenericBuild {
 export type ProviderActionBuild = ConcreteProviderActionBuild | DeferredGenericBuild;
 /** The structurally-shared canonical action shape every adapter emits. */
 type AnyCanonicalActionV1 =
+  | AwsCanonicalActionV1
   | GithubCanonicalActionV1
   | GoogleActionBuild["action"]
   | XCanonicalActionV1
@@ -525,6 +529,19 @@ function rebuildApprovedAction(
     return rebuildGenericApprovedAction(operationKey, action, descriptor);
   }
   const body = action.canonicalBody === null ? undefined : asRecord(action.canonicalBody);
+  if (operationKey === "aws.ec2.DescribeInstances" || operationKey === "aws.ec2.StopInstances") {
+    const origin = new URL(String(action.origin));
+    const match = /^ec2\.([a-z]{2}(?:-[a-z0-9]+){1,3}-[1-9][0-9]?)\.amazonaws\.com$/.exec(
+      origin.hostname,
+    );
+    return buildAwsAction(operationKey as AwsOperationKey, {
+      region: match?.[1],
+      ...(body?.InstanceIds !== undefined ? { instanceIds: body.InstanceIds } : {}),
+      ...(body?.Force !== undefined ? { force: body.Force } : {}),
+      ...(body?.Hibernate !== undefined ? { hibernate: body.Hibernate } : {}),
+      ...(body?.DryRun !== undefined ? { dryRun: body.DryRun } : {}),
+    });
+  }
   if (operationKey === "x.tweet.create") {
     const reply = body?.reply === undefined ? undefined : asRecord(body.reply);
     return buildXAction(operationKey as XOperationKey, {

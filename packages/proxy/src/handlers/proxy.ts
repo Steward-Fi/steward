@@ -45,6 +45,7 @@ import {
   reserveProxySpendLimit,
   trackProxySpend,
 } from "../middleware/redis-enforcement";
+import { injectAwsSigV4AtFinalBoundary } from "../sigv4";
 import { resolveTarget } from "./alias";
 import { holdProxyApprovalRequest } from "./approvals";
 import {
@@ -237,6 +238,15 @@ function injectCredential(
   return { headers, url, body };
 }
 
+function bytesToBody(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+}
+
 function stripHopByHopHeaders(headers: Headers): Set<string> {
   const blocked = new Set([
     "authorization",
@@ -327,7 +337,7 @@ async function parseJsonRequestBody(c: Context): Promise<Record<string, unknown>
     return body && typeof body === "object" && !Array.isArray(body)
       ? (body as Record<string, unknown>)
       : null;
-  } catch {
+  } catch (err) {
     return null;
   }
 }
@@ -1975,8 +1985,36 @@ export async function handleProxy(c: Context): Promise<Response> {
     injectedCredentialValue && rawCredentialValue
       ? credentialLeakVariants([injectedCredentialValue, rawCredentialValue])
       : [];
+  let outboundBody: ReadableStream<Uint8Array> | null =
+    method !== "GET" && method !== "HEAD" ? c.req.raw.body : null;
   try {
-    injectCredential(outboundHeaders, outboundUrl, null, route, credential);
+    if (route.injectionStrategy === "sigv4") {
+      const config = route.injectionConfig as { service?: unknown; region?: unknown };
+      const bodyBytes = new Uint8Array(await c.req.raw.clone().arrayBuffer());
+      if (bodyBytes.byteLength > MAX_PROXY_IDEMPOTENCY_BODY_BYTES) {
+        throw new Error("SigV4 request body exceeds the signing limit");
+      }
+      const injected = injectAwsSigV4AtFinalBoundary({
+        authorityMode,
+        routeHostPattern: route.hostPattern,
+        routePathPattern: route.pathPattern,
+        method,
+        url: outboundUrl,
+        headers: outboundHeaders,
+        body: bodyBytes,
+        service: config.service,
+        region: config.region,
+        credentialSecret: credential,
+      });
+      for (const [name, value] of injected.headers) outboundHeaders.set(name, value);
+      injectedCredentialValue = injected.headers.get("authorization");
+      sensitiveCredentialValues = credentialLeakVariants(injected.sensitiveValues);
+      outboundBody = bytesToBody(bodyBytes);
+    } else if (route.injectionStrategy === "header") {
+      injectCredential(outboundHeaders, outboundUrl, null, route, credential);
+    } else {
+      throw new Error("Unknown credential injection strategy");
+    }
   } catch {
     credential = "";
     injectedCredentialValue = null;
@@ -2004,10 +2042,10 @@ export async function handleProxy(c: Context): Promise<Response> {
       outboundUrl,
       method,
       outboundHeaders,
-      method !== "GET" && method !== "HEAD" ? c.req.raw.body : null,
+      outboundBody,
       dnsCheck.records,
     );
-  } catch (err) {
+  } catch {
     const latencyMs = Date.now() - startTime;
     // Fetch errors can embed the full outbound URL. Query-injected credentials
     // must never be copied from that error into application logs.

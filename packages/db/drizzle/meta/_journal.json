@@ -561,6 +561,13 @@
       "when": 1787020073000,
       "tag": "0099_google_disconnect_lifecycle_kind",
       "breakpoints": true
+    },
+    {
+      "idx": 100,
+      "version": "7",
+      "when": 1787031495000,
+      "tag": "0100_sigv4_injection",
+      "breakpoints": true
     }
   ]
 }

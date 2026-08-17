@@ -1861,6 +1861,11 @@ export const secretRoutes = pgTable(
     injectAs: varchar("inject_as", { length: 50 }).notNull(),
     injectKey: varchar("inject_key", { length: 255 }).notNull(),
     injectFormat: varchar("inject_format", { length: 255 }).default("{value}"),
+    injectionStrategy: varchar("injection_strategy", { length: 32 }).notNull().default("header"),
+    injectionConfig: jsonb("injection_config")
+      .$type<{ service?: string; region?: string }>()
+      .notNull()
+      .default({}),
     priority: integer("priority").notNull().default(0),
     enabled: boolean("enabled").notNull().default(true),
     requiresApproval: boolean("requires_approval").notNull().default(false),

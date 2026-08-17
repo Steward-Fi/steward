@@ -5,6 +5,7 @@ import type { VenueId } from "./types/venue.js";
 
 // ─── Chain providers (extensible registry) ───
 export * from "./chains/index.js";
+export * from "./aws-provider-action.js";
 export * from "./execution-contract.js";
 export * from "./execution-payload.js";
 export * from "./generic-http-provider-action.js";
