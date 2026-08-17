@@ -53,6 +53,18 @@ describe("trustedClientIp (capability audit)", () => {
     expect(await requestIp({ "cf-connecting-ip": "203.0.113.9" })).toBe("203.0.113.9");
   });
 
+  test("Cloudflare mode fails closed when its authoritative header is absent or invalid", async () => {
+    process.env.STEWARD_TRUST_CLOUDFLARE = "true";
+    expect(
+      await requestIp({
+        "cf-connecting-ip": "invalid",
+        "x-forwarded-for": "198.51.100.1",
+        "x-envoy-external-address": "203.0.113.9",
+      }),
+    ).toBeNull();
+    expect(await requestIp({ "x-envoy-external-address": "203.0.113.9" })).toBeNull();
+  });
+
   test("with hops=1 the right-most x-forwarded-for entry wins (left-most is spoofable)", async () => {
     process.env.STEWARD_TRUSTED_PROXY_HOPS = "1";
     expect(await requestIp({ "x-forwarded-for": "198.51.100.1, 203.0.113.9" })).toBe("203.0.113.9");

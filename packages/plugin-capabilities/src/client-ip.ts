@@ -69,9 +69,13 @@ export function trustedClientIp(c: Context): string | undefined {
   if (trustCloudflare) {
     const cf = c.req.header("cf-connecting-ip")?.trim();
     if (cf && isIP(cf)) return cf;
+    // Cloudflare mode is exclusive: a missing/invalid authoritative header
+    // may indicate edge bypass, so never fall through to client-forgeable
+    // forwarded headers.
+    return undefined;
   }
   const hops = trustedProxyHops();
-  if (hops === 0 && !trustCloudflare) return undefined;
+  if (hops === 0) return undefined;
 
   const fromEnvoy = () => normalizeIpCandidate(c.req.header("x-envoy-external-address"));
   const fromForwardedFor = () => {

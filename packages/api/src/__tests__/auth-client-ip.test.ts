@@ -263,10 +263,16 @@ describe("trustedClientIp", () => {
     expect(
       await probeIp({ "cf-connecting-ip": "9.9.9.9", "x-forwarded-for": "198.51.100.7" }),
     ).toBe("9.9.9.9");
-    // Flag on + invalid CF value falls through to the XFF path.
-    expect(await probeIp({ "cf-connecting-ip": "junk", "x-forwarded-for": "198.51.100.7" })).toBe(
-      "198.51.100.7",
-    );
+    // Flag on makes CF authoritative. Missing/invalid values fail closed and
+    // cannot fall through to client-controlled proxy headers.
+    expect(
+      await probeIp({
+        "cf-connecting-ip": "junk",
+        "x-forwarded-for": "198.51.100.7",
+        "x-envoy-external-address": "203.0.113.9",
+      }),
+    ).toBeNull();
+    expect(await probeIp({ "x-envoy-external-address": "203.0.113.9" })).toBeNull();
   });
 });
 

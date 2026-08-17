@@ -241,9 +241,8 @@ let clientIpDiagLoggedAt = 0;
 /**
  * TEMPORARY diagnostics — remove once Railway's forwarded-header shape is
  * confirmed in production logs. Fires (throttled) only when trust IS
- * configured yet no candidate validated, dumping the raw header values so a
- * still-failing parse can be fixed precisely instead of guessed at.
- * JSON.stringify keeps attacker-controlled header bytes on one escaped line.
+ * configured yet no candidate validated. Never log raw forwarded headers:
+ * they are attacker-controlled and may contain credential-shaped content.
  */
 function logNoTrustedClientIpDiag(c: Context, hops: number): void {
   const now = Date.now();
@@ -253,10 +252,9 @@ function logNoTrustedClientIpDiag(c: Context, hops: number): void {
     "[AuthRateLimit][diag] trust configured but no client IP derived; falling back to coarse subject",
     JSON.stringify({
       hops,
-      "x-forwarded-for": c.req.header("x-forwarded-for") ?? null,
-      "x-real-ip": c.req.header("x-real-ip") ?? null,
-      "x-envoy-external-address": c.req.header("x-envoy-external-address") ?? null,
-      "cf-connecting-ip": c.req.header("cf-connecting-ip") ?? null,
+      forwardedForPresent: Boolean(c.req.header("x-forwarded-for")),
+      envoyAddressPresent: Boolean(c.req.header("x-envoy-external-address")),
+      cloudflareAddressPresent: Boolean(c.req.header("cf-connecting-ip")),
     }),
   );
 }
@@ -270,8 +268,8 @@ function logNoTrustedClientIpDiag(c: Context, hops: number): void {
  *   ignored as client-forgeable.
  * - x-envoy-external-address: Railway's Envoy edge sets this to the single
  *   external client address it observed (possibly with a :port). It is only
- *   consulted once the operator has opted into a trusted edge (hops > 0 or
- *   Cloudflare trust) — on a bare deployment a client could set it — and it
+ *   consulted once the operator has configured trusted proxy hops — on a bare
+ *   deployment a client could set it — and it
  *   identifies the CLIENT only when that edge is the outermost trusted hop,
  *   so with hops >= 2 the positional x-forwarded-for read stays authoritative
  *   and Envoy's value is only a rescue when that read fails.
@@ -291,9 +289,15 @@ export function trustedClientIp(c: Context): string | undefined {
   if (trustCloudflare) {
     const cf = c.req.header("cf-connecting-ip")?.trim();
     if (cf && isIP(cf)) return cf;
+    // Cloudflare mode is an exclusive trust contract. If the authoritative
+    // header is absent or malformed, do not fall through to other forwarded
+    // headers: those may be supplied by the client when the request bypasses
+    // the configured edge.
+    logNoTrustedClientIpDiag(c, 0);
+    return undefined;
   }
   const hops = trustedProxyHops();
-  if (hops === 0 && !trustCloudflare) return undefined;
+  if (hops === 0) return undefined;
 
   const fromEnvoy = () => normalizeIpCandidate(c.req.header("x-envoy-external-address"));
   const fromForwardedFor = () => {
