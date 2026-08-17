@@ -1,13 +1,17 @@
 import { describe, expect, it } from "bun:test";
 import type { GithubOperationKey } from "@stwd/provider-github";
 import type { XOperationKey } from "@stwd/provider-x";
+import { parseGovernedCanonicalActionForDispatch } from "@stwd/proxy/src/handlers/governed-execution";
 import {
   CanonError,
+  canonicalApprovalCommitmentObject,
+  computeApprovalCommitmentHash,
   GENERIC_GOLDEN_DESCRIPTOR_A,
   GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
   GITHUB_PROVIDER_ACTION_PROFILE,
   inspectProviderProfileConformance,
   jcsStringify,
+  type ProviderApprovalCommitmentV1,
   REGISTERED_PROFILES,
   strictParseJson,
   validateGenericHttpDescriptor,
@@ -113,6 +117,12 @@ function buildFromProductionSpec(
   }
 }
 
+function allowedOriginsFromProductionSpec(spec: ProductionProviderProfileSpec): readonly string[] {
+  return spec.kind === "config-driven"
+    ? spec.allowedOrigins(GENERIC_DESCRIPTOR)
+    : spec.allowedOrigins;
+}
+
 function thrownCode(fn: () => unknown): string {
   try {
     fn();
@@ -122,7 +132,126 @@ function thrownCode(fn: () => unknown): string {
   }
 }
 
+const HASH = `sha256:${"1".repeat(64)}`;
+
+/**
+ * One runner for every registered production profile and for mutation proof.
+ * Every stage consumes the prior stage's serialized output, so a friendly
+ * handwritten snapshot cannot hide drift at a later deserialization boundary.
+ */
+function runFullBoundaryConformance(
+  spec: ProductionProviderProfileSpec,
+  mutate?: (
+    action: ReturnType<typeof buildFromProductionSpec>["action"],
+  ) => ReturnType<typeof buildFromProductionSpec>["action"],
+): string[] {
+  const built = buildFromProductionSpec(spec, { ...FIXTURES[spec.profile].args });
+  const apiAction = mutate ? mutate(built.action) : built.action;
+  const allowedOrigins = allowedOriginsFromProductionSpec(spec);
+  const apiViolations = inspectProviderProfileConformance(spec.profile, allowedOrigins, apiAction, [
+    "registered-malicious-canary",
+  ]);
+  if (apiViolations.length > 0) throw new Error(`api:${apiViolations.join(",")}`);
+
+  // Public wire snapshot: strict parser and exact JCS bytes used for persistence.
+  const wireText = jcsStringify(apiAction);
+  const wireAction = strictParseJson(wireText) as typeof apiAction;
+  expect(jcsStringify(wireAction)).toBe(wireText);
+
+  // Exact parser used by the governed proxy dispatch boundary.
+  const proxyAction = parseGovernedCanonicalActionForDispatch(new TextEncoder().encode(wireText));
+  expect(jcsStringify(proxyAction)).toBe(wireText);
+
+  // Approval reconstruction binds the registered profile and action digest.
+  const approval: ProviderApprovalCommitmentV1 = {
+    schemaVersion: "steward.provider-approval-commitment.v1",
+    intentId: "intent-conformance",
+    tenantId: "tenant-conformance",
+    workspaceId: "00000000-0000-4000-8000-000000000001",
+    requestActor: { type: "agent", id: "agent-conformance", revision: 1 },
+    providerAccount: {
+      id: "00000000-0000-4000-8000-000000000002",
+      revision: 1,
+      status: "active",
+    },
+    operation: {
+      id: "00000000-0000-4000-8000-000000000003",
+      key: FIXTURES[spec.profile].operationKey,
+      revision: 1,
+      riskClass: "write",
+      canonicalProfile: proxyAction.profile,
+    },
+    requestHash: HASH,
+    actionDigest: HASH,
+    accessDecision: {
+      id: "00000000-0000-4000-8000-000000000004",
+      hash: HASH,
+      effect: "allow",
+      matchedBindings: [],
+      matchedGrants: [],
+    },
+    policyDecision: {
+      id: "00000000-0000-4000-8000-000000000005",
+      hash: HASH,
+      effect: "approval_required",
+      policyRevisionHash: HASH,
+      approvalPolicyRevisionHash: HASH,
+      evaluatorVersion: "conformance-v1",
+    },
+    executionDependencies: {
+      routeId: "00000000-0000-4000-8000-000000000006",
+      routeRevision: 1,
+      secretId: "00000000-0000-4000-8000-000000000007",
+      secretVersion: 1,
+    },
+    approvalRequirements: {
+      role: "workspace_approver",
+      requesterSeparation: true,
+      maxMfaAgeSeconds: 300,
+      requiredMfaAssurance: "current-session-mfa",
+    },
+    requestedAt: "2026-01-01T00:00:00.000Z",
+    expiresAt: "2026-01-01T00:05:00.000Z",
+  };
+  const approvalText = jcsStringify(canonicalApprovalCommitmentObject(approval));
+  const reloadedApproval = strictParseJson(approvalText) as ProviderApprovalCommitmentV1;
+  expect(reloadedApproval.operation.canonicalProfile).toBe(spec.profile);
+  expect(computeApprovalCommitmentHash(reloadedApproval)).toBe(
+    computeApprovalCommitmentHash(approval),
+  );
+
+  // Evidence reconstruction consumes only the persisted wire snapshot/profile.
+  const evidenceText = jcsStringify({
+    operation: { canonicalProfile: reloadedApproval.operation.canonicalProfile },
+    canonicalAction: proxyAction,
+  });
+  const evidence = strictParseJson(evidenceText) as {
+    operation: { canonicalProfile: string };
+    canonicalAction: typeof apiAction;
+  };
+  expect(evidence.operation.canonicalProfile).toBe(spec.profile);
+  expect(
+    inspectProviderProfileConformance(spec.profile, allowedOrigins, evidence.canonicalAction),
+  ).toEqual([]);
+  return ["api", "wire", "proxy", "approval", "evidence"];
+}
+
 describe("#220 executable provider profile conformance", () => {
+  it("runs every registered profile through every production boundary", () => {
+    expect(PRODUCTION_PROVIDER_PROFILE_SPECS.map((spec) => spec.profile).sort()).toEqual(
+      [...REGISTERED_PROFILES].sort(),
+    );
+    for (const spec of PRODUCTION_PROVIDER_PROFILE_SPECS) {
+      expect(runFullBoundaryConformance(spec)).toEqual([
+        "api",
+        "wire",
+        "proxy",
+        "approval",
+        "evidence",
+      ]);
+    }
+  });
+
   it("has exactly one executable production spec for every registered profile", () => {
     expect(PRODUCTION_PROVIDER_PROFILE_SPECS.map((spec) => spec.profile).sort()).toEqual(
       [...REGISTERED_PROFILES].sort(),
@@ -154,7 +283,13 @@ describe("#220 executable provider profile conformance", () => {
           fixture,
         );
         expect(jcsStringify(first.action)).toBe(jcsStringify(reordered.action));
-        expect(inspectProviderProfileConformance(spec.profile, first.action)).toEqual([]);
+        expect(
+          inspectProviderProfileConformance(
+            spec.profile,
+            allowedOriginsFromProductionSpec(spec),
+            first.action,
+          ),
+        ).toEqual([]);
 
         for (const [key, value] of Object.entries(canaries)) {
           const codeA = thrownCode(() =>
@@ -198,22 +333,33 @@ describe("#220 executable provider profile conformance", () => {
     }
   });
 
-  it("mutation proof catches a credential header injected into real production output", () => {
+  it("a malicious registered fixture makes the identical full runner fail", () => {
     const spec = PRODUCTION_PROVIDER_PROFILE_SPECS.find(
       (candidate) => candidate.profile === GITHUB_PROVIDER_ACTION_PROFILE,
     );
     if (!spec) throw new Error("github production profile missing");
-    const built = buildFromProductionSpec(spec, {
-      ...FIXTURES[GITHUB_PROVIDER_ACTION_PROFILE].args,
-    });
-    const mutated = {
+    expect(() =>
+      runFullBoundaryConformance(spec, (action) => ({
+        ...action,
+        selectedHeaders: [
+          ...action.selectedHeaders,
+          ["authorization", "registered-malicious-canary"],
+        ],
+      })),
+    ).toThrow("api:credential-canary-present,credential-header");
+
+    // Defense in depth: even bypassing API/storage, the exact production proxy
+    // parser independently denies the same malicious registered snapshot.
+    const built = buildFromProductionSpec(spec, FIXTURES[GITHUB_PROVIDER_ACTION_PROFILE].args);
+    const malicious = {
       ...built.action,
-      selectedHeaders: [...built.action.selectedHeaders, ["authorization", "mutation-canary"]],
+      selectedHeaders: [["authorization", "registered-malicious-canary"]] as Array<
+        [string, string]
+      >,
     };
-    expect(inspectProviderProfileConformance(spec.profile, mutated, ["mutation-canary"])).toEqual([
-      "credential-canary-present",
-      "credential-header",
-    ]);
+    expect(() =>
+      parseGovernedCanonicalActionForDispatch(new TextEncoder().encode(jcsStringify(malicious))),
+    ).toThrow("canonical action conformance failed");
   });
 
   it("mutation proof catches an SSRF origin and noncanonical method", () => {
@@ -225,12 +371,18 @@ describe("#220 executable provider profile conformance", () => {
       ...FIXTURES[GITHUB_PROVIDER_ACTION_PROFILE].args,
     });
     expect(
-      inspectProviderProfileConformance(spec.profile, {
+      inspectProviderProfileConformance(spec.profile, allowedOriginsFromProductionSpec(spec), {
+        ...built.action,
+        origin: "https://attacker.example",
+      }),
+    ).toEqual(["origin-not-allowed"]);
+    expect(
+      inspectProviderProfileConformance(spec.profile, allowedOriginsFromProductionSpec(spec), {
         ...built.action,
         method: "get",
         origin: "https://127.0.0.1",
       }),
-    ).toEqual(["method-not-canonical", "origin-not-canonical-https"]);
+    ).toEqual(["method-not-canonical", "origin-not-allowed", "origin-not-canonical-https"]);
   });
 
   it("mutation proof catches nested-encoded path traversal", () => {
@@ -253,7 +405,7 @@ describe("#220 executable provider profile conformance", () => {
       "%2525255c",
     ]) {
       expect(
-        inspectProviderProfileConformance(spec.profile, {
+        inspectProviderProfileConformance(spec.profile, allowedOriginsFromProductionSpec(spec), {
           ...built.action,
           normalizedPath: `/repos/${segment}/hello/issues`,
         }),
@@ -281,7 +433,7 @@ describe("#220 executable provider profile conformance", () => {
     for (const spec of PRODUCTION_PROVIDER_PROFILE_SPECS) {
       const built = buildFromProductionSpec(spec, { ...FIXTURES[spec.profile].args });
       expect(
-        inspectProviderProfileConformance(spec.profile, {
+        inspectProviderProfileConformance(spec.profile, allowedOriginsFromProductionSpec(spec), {
           ...built.action,
           canonicalBody: { ok: true },
           orderedQueryPairs: [
@@ -297,5 +449,23 @@ describe("#220 executable provider profile conformance", () => {
         }),
       ).toEqual(["content-type-unsupported", "header-duplicate", "query-duplicate"]);
     }
+  });
+
+  it("mutation proof catches credential-shaped query and nested body fields", () => {
+    const spec = PRODUCTION_PROVIDER_PROFILE_SPECS.find(
+      (candidate) => candidate.profile === GITHUB_PROVIDER_ACTION_PROFILE,
+    );
+    if (!spec) throw new Error("github production profile missing");
+    const built = buildFromProductionSpec(spec, {
+      ...FIXTURES[GITHUB_PROVIDER_ACTION_PROFILE].args,
+    });
+    expect(
+      inspectProviderProfileConformance(spec.profile, allowedOriginsFromProductionSpec(spec), {
+        ...built.action,
+        orderedQueryPairs: [...built.action.orderedQueryPairs, ["access_token", "mutation"]],
+        canonicalBody: { nested: { client_secret: "mutation" } },
+        selectedHeaders: [["content-type", "application/json"]],
+      }),
+    ).toEqual(["credential-body-field", "credential-query"]);
   });
 });

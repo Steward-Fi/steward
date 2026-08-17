@@ -43,18 +43,18 @@ import {
 import {
   assertRegisteredProfile,
   buildProviderExecutionCommitmentV2,
+  CanonError,
   computeActionDigest,
   computeApprovalCommitmentHash,
   computeProviderExecutionCommitmentHash,
-  decodeUtf8Strict,
   type GithubCanonicalActionV1,
   isExecutionAuthV2SecretConfigured,
   isUnregisteredProfileError,
   jcsStringify,
   observeNonceClaimContention,
   type ProviderApprovalCommitmentV1,
+  parseCanonicalProviderActionBytes,
   serializeCanonicalOutboundQuery,
-  strictParseJson,
   verifyProviderExecutionCommitmentV2,
   verifyProviderExecutionPolicyEvidence,
 } from "@stwd/shared";
@@ -207,7 +207,7 @@ async function loadGovernedExecution(
   const q = queueRows[0];
   if (!q || !q.approvalCommitment) return null;
 
-  const canonicalAction = parseCanonicalAction(
+  const canonicalAction = parseGovernedCanonicalActionForDispatch(
     new Uint8Array(binding.canonicalActionBytes as Uint8Array),
   );
 
@@ -251,8 +251,10 @@ async function loadGovernedExecution(
   };
 }
 
-function parseCanonicalAction(bytes: Uint8Array): GithubCanonicalActionV1 {
-  return strictParseJson(decodeUtf8Strict(bytes)) as unknown as GithubCanonicalActionV1;
+export function parseGovernedCanonicalActionForDispatch(
+  bytes: Uint8Array,
+): GithubCanonicalActionV1 {
+  return parseCanonicalProviderActionBytes(bytes) as GithubCanonicalActionV1;
 }
 
 function deny(
@@ -286,7 +288,17 @@ export async function dispatchGovernedExecution(
     return deny("EXEC_AUTH_KEY_UNAVAILABLE", 503, intentId);
   }
 
-  const loaded = await loadGovernedExecution(tenantId, intentId);
+  let loaded: LoadedGovernedExecution | null;
+  try {
+    loaded = await loadGovernedExecution(tenantId, intentId);
+  } catch (error) {
+    // Corrupt/noncanonical persisted bytes are an authority dependency failure,
+    // never an uncaught 500 and never a reason to claim/decrypt/forward.
+    if (error instanceof CanonError || isUnregisteredProfileError(error)) {
+      return deny("EXEC_AUTH_STALE_DEPENDENCY", 409, intentId);
+    }
+    throw error;
+  }
   await hook("afterLoad");
   if (!loaded) return deny("EXEC_AUTH_NOT_READY", 409, intentId);
 

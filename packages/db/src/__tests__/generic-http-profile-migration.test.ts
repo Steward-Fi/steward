@@ -17,6 +17,7 @@ import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
+import { REGISTERED_PROFILES } from "@stwd/shared";
 
 setDefaultTimeout(120_000);
 const migrations = new URL("../../drizzle", import.meta.url).pathname;
@@ -91,9 +92,10 @@ describe("#201 generic-http profile migration (0085)", () => {
        WHERE conname = 'provider_action_bindings_profile_chk'`,
     );
     expect(con.rows).toHaveLength(1);
-    expect(con.rows[0].def).toContain("generic-http.provider-action.v1");
-    expect(con.rows[0].def).toContain("github.provider-action.v1");
-    expect(con.rows[0].def).toContain("x.provider-action.v1");
+    const storedProfiles = [...con.rows[0].def.matchAll(/'([^']+\.provider-action\.v1)'/g)]
+      .map((match) => match[1])
+      .sort();
+    expect(storedProfiles).toEqual([...REGISTERED_PROFILES].sort());
     await client.close();
   });
 
@@ -109,16 +111,18 @@ describe("#201 generic-http profile migration (0085)", () => {
     await client.close();
   });
 
-  test("still admits github + x profiles (no regression)", async () => {
-    for (const profile of ["github.provider-action.v1", "x.provider-action.v1"]) {
+  test("admits and reloads every registered profile (registry-driven)", async () => {
+    for (const profile of REGISTERED_PROFILES) {
       const client = new PGlite("memory://");
       await applyAll(client);
       await seed(client);
       await client.exec(bindingInsert(profile));
-      const rows = await client.query(
-        `SELECT canonical_profile FROM provider_action_bindings WHERE intent_id='intent-201'`,
+      const rows = await client.query<{ canonical_profile: string; action: string }>(
+        `SELECT canonical_profile, encode(canonical_action_bytes, 'hex') AS action
+         FROM provider_action_bindings WHERE intent_id='intent-201'`,
       );
       expect(rows.rows).toHaveLength(1);
+      expect(rows.rows[0]).toEqual({ canonical_profile: profile, action: "7b7d" });
       await client.close();
     }
   });

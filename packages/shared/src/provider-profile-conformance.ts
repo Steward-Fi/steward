@@ -1,7 +1,37 @@
-import { jcsStringify } from "./provider-action.js";
+import { CanonError, decodeUtf8Strict, jcsStringify, strictParseJson } from "./provider-action.js";
+import { assertRegisteredProfile } from "./provider-profile-registry.js";
 
-const CREDENTIAL_HEADER =
-  /^(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|x-auth-token|x-goog-api-key)$/i;
+const CREDENTIAL_NAME =
+  /^(?:authorization|proxyauthorization|cookie|setcookie|apikey|xapikey|xauthtoken|xgoogapikey|xamzsecuritytoken|accesskeyid|secretaccesskey|sessiontoken|accesstoken|refreshtoken|clientsecret|password|privatekey(?:pem)?)$/i;
+
+function normalizedFieldName(value: string): string {
+  return value.replace(/[-_.]/g, "");
+}
+
+function bodyContainsCredentialField(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const pending: object[] = [value];
+  const seen = new WeakSet<object>();
+  let visited = 0;
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current || seen.has(current)) continue;
+    seen.add(current);
+    visited += 1;
+    if (visited > 10_000) return true;
+    for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(current))) {
+      if (!Array.isArray(current) && CREDENTIAL_NAME.test(normalizedFieldName(key))) return true;
+      if (
+        "value" in descriptor &&
+        descriptor.value !== null &&
+        typeof descriptor.value === "object"
+      ) {
+        pending.push(descriptor.value);
+      }
+    }
+  }
+  return false;
+}
 
 export interface ConformanceCanonicalAction {
   profile: string;
@@ -13,6 +43,92 @@ export interface ConformanceCanonicalAction {
   canonicalBody: unknown;
 }
 
+const CANONICAL_ACTION_KEYS = Object.freeze([
+  "canonicalBody",
+  "method",
+  "normalizedPath",
+  "orderedQueryPairs",
+  "origin",
+  "profile",
+  "selectedHeaders",
+] as const);
+
+function isStringPairArray(value: unknown): value is Array<[string, string]> {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (pair) =>
+        Array.isArray(pair) &&
+        pair.length === 2 &&
+        typeof pair[0] === "string" &&
+        typeof pair[1] === "string",
+    )
+  );
+}
+
+/**
+ * Deserialize the exact canonical-action bytes consumed by governed dispatch.
+ * This is deliberately shared by the proxy and the registry-driven conformance
+ * harness so tests cannot validate a friendlier parser than production uses.
+ *
+ * The bytes must already be RFC-8785 canonical. That guarantees the snapshot
+ * inspected here is byte-for-byte the snapshot whose digest/approval is stored;
+ * reserialization, duplicate members, extra fields, and unsafe credential
+ * carriers are rejected instead of being normalized away.
+ */
+export function parseCanonicalProviderActionBytes(bytes: Uint8Array): ConformanceCanonicalAction {
+  const text = decodeUtf8Strict(bytes);
+  const parsed = strictParseJson(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new CanonError("CANON_JSON_SHAPE_INVALID", "canonical action must be an object");
+  }
+  const record = parsed as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (JSON.stringify(keys) !== JSON.stringify(CANONICAL_ACTION_KEYS)) {
+    throw new CanonError("CANON_JSON_SHAPE_INVALID", "canonical action fields do not match");
+  }
+  if (
+    typeof record.profile !== "string" ||
+    typeof record.method !== "string" ||
+    typeof record.origin !== "string" ||
+    typeof record.normalizedPath !== "string" ||
+    !isStringPairArray(record.orderedQueryPairs) ||
+    !isStringPairArray(record.selectedHeaders)
+  ) {
+    throw new CanonError("CANON_JSON_SHAPE_INVALID", "canonical action field type invalid");
+  }
+  assertRegisteredProfile(record.profile);
+  const action = record as unknown as ConformanceCanonicalAction;
+  // Profile builders may deliberately allow provider-specific JSON media types
+  // (for example GitHub vendor JSON). The proxy has no executable profile
+  // descriptor, so it enforces every profile-independent invariant here and
+  // leaves the exact media allowlist to the registered API builder.
+  const violations = inspectProviderProfileConformance(
+    action.profile,
+    [action.origin],
+    action,
+  ).filter(
+    (violation) =>
+      violation !== "content-type-unsupported" &&
+      // Existing digest-tamper probes deliberately produce this state and must
+      // reach the signed digest comparison. The API builder remains the owner
+      // of body/media coupling for newly created actions.
+      violation !== "body-content-type-missing",
+  );
+  if (violations.length > 0) {
+    throw new CanonError(
+      violations.includes("credential-header")
+        ? "CANON_HEADER_CREDENTIAL_FORBIDDEN"
+        : "CANON_JSON_SHAPE_INVALID",
+      `canonical action conformance failed: ${violations.join(",")}`,
+    );
+  }
+  if (jcsStringify(record) !== text) {
+    throw new CanonError("CANON_JSON_SHAPE_INVALID", "canonical action bytes are not canonical");
+  }
+  return action;
+}
+
 /**
  * Inspect the canonical output emitted by a production provider builder. The
  * harness is intentionally builder-agnostic: API tests feed it the executable
@@ -21,6 +137,7 @@ export interface ConformanceCanonicalAction {
  */
 export function inspectProviderProfileConformance(
   expectedProfile: string,
+  allowedOrigins: readonly string[],
   action: ConformanceCanonicalAction,
   credentialCanaries: readonly string[] = [],
 ): string[] {
@@ -53,6 +170,8 @@ export function inspectProviderProfileConformance(
   } catch {
     violations.push("origin-not-canonical-https");
   }
+  if (allowedOrigins.length === 0) violations.push("origin-policy-missing");
+  if (!allowedOrigins.includes(action.origin)) violations.push("origin-not-allowed");
   if (!/^(?:GET|POST|PUT|PATCH|DELETE)$/.test(action.method)) {
     violations.push("method-not-canonical");
   }
@@ -89,6 +208,9 @@ export function inspectProviderProfileConformance(
     }
     if (queryNames.has(pair[0])) violations.push("query-duplicate");
     queryNames.add(pair[0]);
+    if (CREDENTIAL_NAME.test(normalizedFieldName(pair[0]))) {
+      violations.push("credential-query");
+    }
   }
 
   const headerNames = new Set<string>();
@@ -100,8 +222,9 @@ export function inspectProviderProfileConformance(
     const name = pair[0].toLowerCase();
     if (headerNames.has(name)) violations.push("header-duplicate");
     headerNames.add(name);
-    if (CREDENTIAL_HEADER.test(name)) violations.push("credential-header");
+    if (CREDENTIAL_NAME.test(normalizedFieldName(name))) violations.push("credential-header");
   }
+  if (bodyContainsCredentialField(action.canonicalBody)) violations.push("credential-body-field");
   if (action.canonicalBody !== null && headerNames.has("content-type") === false) {
     violations.push("body-content-type-missing");
   }

@@ -29,18 +29,21 @@ export type ProductionProviderProfileSpec =
       readonly profile: typeof GITHUB_PROVIDER_ACTION_PROFILE;
       readonly kind: "adapter-fixed";
       readonly operationKeys: readonly GithubOperationKey[];
+      readonly allowedOrigins: readonly string[];
       build(operationKey: GithubOperationKey, args: unknown): GithubActionBuild;
     }
   | {
       readonly profile: typeof X_PROVIDER_ACTION_PROFILE;
       readonly kind: "adapter-fixed";
       readonly operationKeys: readonly XOperationKey[];
+      readonly allowedOrigins: readonly string[];
       build(operationKey: XOperationKey, args: unknown): XActionBuild;
     }
   | {
       readonly profile: typeof GENERIC_HTTP_PROVIDER_ACTION_PROFILE;
       readonly kind: "config-driven";
       readonly operationKeys: readonly [];
+      allowedOrigins(descriptor: GenericHttpOperationDescriptorV1): readonly string[];
       build(
         operationKey: string,
         args: unknown,
@@ -53,6 +56,7 @@ const GITHUB_SPEC = Object.freeze({
   profile: GITHUB_PROVIDER_ACTION_PROFILE,
   kind: "adapter-fixed" as const,
   operationKeys: Object.freeze([...GITHUB_OPERATION_KEYS]),
+  allowedOrigins: Object.freeze(["https://api.github.com"]),
   build: buildGithubAction,
 });
 
@@ -60,6 +64,7 @@ const X_SPEC = Object.freeze({
   profile: X_PROVIDER_ACTION_PROFILE,
   kind: "adapter-fixed" as const,
   operationKeys: Object.freeze([...X_OPERATION_KEYS]),
+  allowedOrigins: Object.freeze(["https://api.x.com"]),
   build: buildXAction,
 });
 
@@ -67,6 +72,8 @@ const GENERIC_HTTP_SPEC = Object.freeze({
   profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
   kind: "config-driven" as const,
   operationKeys: Object.freeze([]) as readonly [],
+  allowedOrigins: (descriptor: GenericHttpOperationDescriptorV1) =>
+    Object.freeze([descriptor.origin]),
   build: (
     operationKey: string,
     args: unknown,

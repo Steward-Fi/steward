@@ -790,7 +790,10 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
       origin: "https://api.customer.example",
       normalizedPath: "/v1/items",
       orderedQueryPairs: [["mode", "safe"]],
-      selectedHeaders: [["accept", "application/json"]],
+      selectedHeaders: [
+        ["accept", "application/json"],
+        ["content-type", "application/json"],
+      ],
       canonicalBody: { name: "widget" },
     };
     await getDb()
@@ -828,6 +831,28 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
       if (saved === undefined) delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
       else process.env.STEWARD_PROXY_ALLOWED_HOSTS = saved;
     }
+  });
+
+  it("denies a credential carrier in persisted canonical bytes before claim or forward", async () => {
+    const poisoned = {
+      ...ACTION,
+      selectedHeaders: [["authorization", "registered-malicious-canary"]] as Array<
+        [string, string]
+      >,
+    };
+    const { intentId, authorizationId } = await seedExecutionReady({ action: poisoned });
+    const result = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(result).toMatchObject({
+      ok: false,
+      code: "EXEC_AUTH_STALE_DEPENDENCY",
+      httpStatus: 409,
+    });
+    const [nonce] = await getDb()
+      .select({ status: executionAuthorizationNonces.status })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(nonce.status).toBe("active");
+    expect(captured).toBeNull();
   });
 
   it("K01/P43: two concurrent claims → exactly one consumes, one dispatch", async () => {
