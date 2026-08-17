@@ -259,6 +259,74 @@ const SOLANA_RPCS: Record<number, string> = {
   102: "https://api.devnet.solana.com",
 };
 
+/**
+ * SEC-082: default read-only method inventory for rpcPassthrough. Anything not
+ * listed here is rejected — signing, state-modifying, and operator-namespace
+ * methods (eth_sendTransaction, eth_sign*, personal_*, Solana sendTransaction/
+ * signMessage/signTransaction/requestAirdrop, eth_accounts, admin_/debug_/
+ * trace_/txpool_/miner_*) can never be proxied, regardless of the upstream.
+ * STEWARD_VAULT_RPC_ALLOWLIST replaces this list wholesale (fail closed).
+ */
+const DEFAULT_RPC_PASSTHROUGH_ALLOWLIST = [
+  // EVM read-only
+  "eth_chainId",
+  "eth_blockNumber",
+  "eth_getBalance",
+  "eth_getCode",
+  "eth_getStorageAt",
+  "eth_getTransactionCount",
+  "eth_getTransactionByHash",
+  "eth_getTransactionReceipt",
+  "eth_getBlockByNumber",
+  "eth_getBlockByHash",
+  "eth_getBlockTransactionCountByNumber",
+  "eth_getBlockTransactionCountByHash",
+  "eth_getBlockReceipts",
+  "eth_getLogs",
+  "eth_getProof",
+  "eth_call",
+  "eth_estimateGas",
+  "eth_gasPrice",
+  "eth_maxPriorityFeePerGas",
+  "eth_feeHistory",
+  "eth_syncing",
+  "net_version",
+  "net_listening",
+  "net_peerCount",
+  "web3_clientVersion",
+  // Solana read-only
+  "getBalance",
+  "getAccountInfo",
+  "getMultipleAccounts",
+  "getBlock",
+  "getBlocks",
+  "getBlocksWithLimit",
+  "getBlockHeight",
+  "getBlockTime",
+  "getLatestBlockhash",
+  "isBlockhashValid",
+  "getFeeForMessage",
+  "getTransaction",
+  "getSignaturesForAddress",
+  "getSignatureStatuses",
+  "getTokenAccountsByOwner",
+  "getTokenAccountBalance",
+  "getTokenSupply",
+  "getProgramAccounts",
+  "getSupply",
+  "getSlot",
+  "getVersion",
+  "getHealth",
+  "getEpochInfo",
+  "getEpochSchedule",
+  "getGenesisHash",
+  "getRecentPrioritizationFees",
+  "getMinimumBalanceForRentExemption",
+  "getStakeMinimumDelegation",
+  "minimumLedgerSlot",
+  "simulateTransaction",
+];
+
 export function resolveSignVenueSelector(request: Pick<SignRequest, "venue">): string | null {
   return request.venue ?? null;
 }
@@ -3253,6 +3321,16 @@ export class Vault {
   /**
    * Proxy a read-only RPC call to the appropriate chain provider.
    * Supports both EVM and Solana RPC methods.
+   *
+   * SEC-082: enforced as an ALLOWLIST, not a blocklist. A blocklist can never
+   * enumerate every signing/admin method on every upstream (`eth_signTypedData_v3`,
+   * Solana `signMessage`/`signTransaction`, or `admin_`/`debug_`/`trace_`
+   * namespaces when an operator points `config.rpcUrl` at a node with unlocked
+   * accounts), so only known read-only methods pass. Operators tighten or
+   * replace the inventory via STEWARD_VAULT_RPC_ALLOWLIST (comma-separated) —
+   * the same knob the API edge uses. Note the vault's own guards proxy
+   * `eth_getCode` through here, so an override that omits it fails closed
+   * (native-transfer code checks are denied, never bypassed).
    */
   async rpcPassthrough(request: RpcRequest): Promise<RpcResponse> {
     const chainId = request.chainId;
@@ -3269,19 +3347,15 @@ export class Vault {
       throw new Error(`No RPC URL configured for chainId ${chainId}`);
     }
 
-    // Block signing/state-modifying methods - this is read-only passthrough
-    const blockedMethods = [
-      "eth_sendTransaction",
-      "eth_sendRawTransaction",
-      "eth_sign",
-      "personal_sign",
-      "eth_signTypedData",
-      "eth_signTypedData_v4",
-      "sendTransaction",
-    ];
-    if (blockedMethods.includes(request.method)) {
+    const allowlist = new Set(
+      (process.env.STEWARD_VAULT_RPC_ALLOWLIST ?? DEFAULT_RPC_PASSTHROUGH_ALLOWLIST.join(","))
+        .split(",")
+        .map((method) => method.trim())
+        .filter(Boolean),
+    );
+    if (!allowlist.has(request.method)) {
       throw new Error(
-        `Method ${request.method} is not allowed via RPC passthrough - use the signing endpoints`,
+        `Method ${request.method} is not allowed via RPC passthrough - read-only methods only`,
       );
     }
 
