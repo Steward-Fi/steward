@@ -11,7 +11,7 @@
     "./plugin": "./src/plugin.ts"
   },
   "scripts": {
-    "dev": "bun --watch src/index.ts",
+    "dev": "NODE_ENV=development bun --watch src/index.ts",
     "build": "tsc --noEmit",
     "start": "bun src/index.ts",
     "openapi:generate": "bun scripts/generate-openapi.ts",
