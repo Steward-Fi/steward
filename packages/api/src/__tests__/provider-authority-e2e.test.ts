@@ -364,9 +364,15 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
       .limit(1);
     await enableGovernedRoute(op.id);
     fake.expectCredential("authorization", GITHUB_TOKEN_SENTINEL);
+    const outboundBody = JSON.stringify({ body: "governed comment (steward-marker)" });
+    const expectedBodyHash = sha256Text(outboundBody);
 
     fake.script(
-      { method: "POST", path: "/repos/steward-sandbox/hello/issues/1/comments" },
+      {
+        method: "POST",
+        path: "/repos/steward-sandbox/hello/issues/1/comments",
+        bodyHash: expectedBodyHash,
+      },
       { mode: "ok", status: 201, json: GITHUB_FIXTURES.prCommentCreated },
     );
 
@@ -377,6 +383,13 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
     // dispatch succeeded (terminal succeeded).
     expect(dispatch.dispatchState).toBe("succeeded");
     expect(await dispatchStateOf(intentId)).toBe("succeeded");
+    expect(fake.calls()).toHaveLength(1);
+    expect(fake.calls()[0]).toMatchObject({
+      method: "POST",
+      host: "api.github.com",
+      path: "/repos/steward-sandbox/hello/issues/1/comments",
+      bodyHash: expectedBodyHash,
+    });
     // At the forwarder layer the injected credential header IS present...
     expect(fake.calls()[0].credentialHeaderPresent).toBe(true);
     expect(fake.calls()[0].credentialMatchesExpected).toBe(true);
@@ -389,6 +402,7 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
       host: fake.calls()[0]?.host,
       path: fake.calls()[0]?.path,
       bodyHash: fake.calls()[0]?.bodyHash,
+      expectedBodyHash,
       credentialValueHash: fake.calls()[0]?.credentialValueHash,
       credentialMatchesExpected: fake.calls()[0]?.credentialMatchesExpected,
     });

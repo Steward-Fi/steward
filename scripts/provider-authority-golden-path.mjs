@@ -133,7 +133,13 @@ function main() {
   const evidenceValid =
     matrixEvidence.length >= 7 &&
     githubLeg?.dispatchCount === 1 &&
+    githubLeg?.dispatchState === "succeeded" &&
+    githubLeg?.host === "api.github.com" &&
+    githubLeg?.path === "/repos/steward-sandbox/hello/issues/1/comments" &&
     githubLeg?.credentialMatchesExpected === true &&
+    githubLeg?.bodyHash === githubLeg?.expectedBodyHash &&
+    typeof githubLeg?.bodyHash === "string" &&
+    /^[0-9a-f]{64}$/.test(githubLeg.bodyHash) &&
     typeof githubLeg?.credentialValueHash === "string" &&
     /^[0-9a-f]{64}$/.test(githubLeg.credentialValueHash) &&
     xLeg?.adapterKey === "x" &&
