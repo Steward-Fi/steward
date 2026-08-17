@@ -187,6 +187,7 @@ describe("SecretVault no-read-back: get is impossible", () => {
       "createRoute",
       "createRouteWithinTx",
       "createSecret",
+      "createSecretWithinTx",
       "decryptSecret",
       "decryptSecretRow",
       "deleteRoute",
