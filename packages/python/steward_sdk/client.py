@@ -9,8 +9,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import quote, urlencode, urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 JsonObject = dict[str, Any]
@@ -71,9 +71,49 @@ SENSITIVE_SIGNED_PREFIXES = (
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
+# Headers that carry credentials or signing material. urllib capitalizes header
+# names ("X-steward-key"), so comparisons must be case-insensitive.
+_CREDENTIAL_HEADERS = frozenset(
+    name.lower()
+    for name in (
+        "Authorization",
+        "X-Steward-Key",
+        "X-Steward-Platform-Key",
+        "X-Steward-App-Id",
+        "X-Steward-Signature",
+        "X-Steward-Signing-Key-Id",
+        "X-Steward-Request-Timestamp",
+        "Idempotency-Key",
+    )
+)
+
+
+class _StewardRedirectHandler(HTTPRedirectHandler):
+    """Follow redirects, but never forward credential headers to a different
+    host. urllib's default handler converts 301/302/303 POSTs to GET yet copies
+    every header — including API keys and HMAC signatures — to the redirect
+    target, so an open redirect or hostile proxy would exfiltrate them
+    (SEC-125)."""
+
+    def redirect_request(self, req: Request, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Request | None:
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is None:
+            return None
+        old_host = (urlparse(req.full_url).hostname or "").lower()
+        new_host = (urlparse(new_req.full_url).hostname or "").lower()
+        if new_host != old_host:
+            for store in (new_req.headers, new_req.unredirected_hdrs):
+                for name in [key for key in store if key.lower() in _CREDENTIAL_HEADERS]:
+                    del store[name]
+        return new_req
+
+
+_default_opener = build_opener(_StewardRedirectHandler())
+
+
 def _default_transport(request: Request, body: bytes | None, timeout: float) -> tuple[int, Mapping[str, str], bytes]:
     try:
-        with urlopen(request, data=body, timeout=timeout) as response:
+        with _default_opener.open(request, data=body, timeout=timeout) as response:
             return response.status, dict(response.headers.items()), response.read()
     except HTTPError as exc:
         return exc.code, dict(exc.headers.items()), exc.read()
@@ -169,7 +209,7 @@ class StewardClient:
         )
 
     def get_user(self, user_id: str) -> JsonObject:
-        return self.get(f"/platform/users/{user_id}")
+        return self.get(f"/platform/users/{quote(user_id, safe='')}")
 
     def lookup_user(self, **query: str) -> JsonObject:
         return self.get("/platform/users/lookup", query=query)
@@ -181,7 +221,7 @@ class StewardClient:
         return self.post("/user/me/push-subscriptions", subscription)
 
     def revoke_user_push_subscription(self, subscription_id: str) -> JsonObject:
-        return self.delete(f"/user/me/push-subscriptions/{subscription_id}")
+        return self.delete(f"/user/me/push-subscriptions/{quote(subscription_id, safe='')}")
 
     def _headers(
         self,

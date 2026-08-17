@@ -4,6 +4,7 @@ import unittest
 from urllib.request import Request
 
 from steward_sdk import StewardApiError, StewardClient
+from steward_sdk.client import _StewardRedirectHandler
 
 
 class CaptureTransport:
@@ -108,6 +109,55 @@ class StewardClientTests(unittest.TestCase):
                 r"^v1=[0-9a-f]{64}$",
                 f"unsigned mutation: {path}",
             )
+
+    def test_redirect_strips_credential_headers_cross_host(self):
+        # SEC-125: urllib's default redirect handling copies every header to
+        # the redirect target; an open redirect must not receive credentials.
+        handler = _StewardRedirectHandler()
+        original = Request(
+            "https://api.example.test/accounts",
+            headers={
+                "Authorization": "Bearer user-token",
+                "X-Steward-Key": "tenant-key",
+                "X-Steward-Platform-Key": "platform-key",
+                "X-Steward-Signature": "v1=deadbeef",
+                "Content-Type": "application/json",
+            },
+        )
+
+        cross = handler.redirect_request(original, None, 302, "Found", {}, "https://evil.example/harvest")
+        self.assertIsNone(cross.get_header("Authorization"))
+        self.assertIsNone(cross.get_header("X-steward-key"))
+        self.assertIsNone(cross.get_header("X-steward-platform-key"))
+        self.assertIsNone(cross.get_header("X-steward-signature"))
+
+        same_host = handler.redirect_request(original, None, 302, "Found", {}, "https://api.example.test/other")
+        self.assertEqual(same_host.get_header("Authorization"), "Bearer user-token")
+        self.assertEqual(same_host.get_header("X-steward-key"), "tenant-key")
+
+    def test_path_parameters_are_url_encoded(self):
+        # SEC-127: raw interpolation lets `/`, `?`, `#` in an id silently
+        # alter the request path/query.
+        transport = CaptureTransport()
+        client = StewardClient(
+            base_url="https://api.example.test",
+            api_key="tenant-key",
+            transport=transport,
+        )
+
+        client.get_user("user/evil?admin=true#frag")
+        request, _, _ = transport.calls[-1]
+        self.assertEqual(
+            request.full_url,
+            "https://api.example.test/platform/users/user%2Fevil%3Fadmin%3Dtrue%23frag",
+        )
+
+        client.revoke_user_push_subscription("sub/1")
+        request, _, _ = transport.calls[-1]
+        self.assertEqual(
+            request.full_url,
+            "https://api.example.test/user/me/push-subscriptions/sub%2F1",
+        )
 
 
 if __name__ == "__main__":
