@@ -228,12 +228,6 @@ COPY packages/webhooks/package.json          packages/webhooks/package.json
 COPY packages/examples/                      packages/examples/
 
 COPY --from=deps /app/bun.lock ./bun.lock
-# Install only the two runtime entrypoints and their declared workspace
-# dependency closure. An unfiltered monorepo install also pulls the web wallet
-# stack into this server image, making the image large enough to exhaust hosted
-# runners during Docker export.
-RUN bun install --production --frozen-lockfile --ignore-scripts \
-    --filter @stwd/api --filter @stwd/proxy
 
 # Copy compiled output from build stage
 COPY --from=build /app/packages/adapters    packages/adapters
@@ -283,14 +277,16 @@ RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/venue-polymarket  node_modules/@stwd/venue-polymarket && \
     ln -sf ../../../packages/eliza-plugin  node_modules/@stwd/eliza-plugin 2>/dev/null; true
 
-# Re-run the production install AFTER copying the built packages. The
+# Install the production dependency closure AFTER copying the built packages.
 # `COPY --from=build /app/packages/*` lines above overwrite each package dir
 # (including its per-package node_modules) with the BUILD stage's version, whose
 # third-party-dep symlinks (e.g. packages/api/node_modules/drizzle-orm) point at the
 # build stage's `.bun` store paths that don't exist here — leaving DANGLING
 # symlinks (ENOENT reading drizzle-orm at boot). Re-installing rebuilds the
 # per-package node_modules symlinks against THIS stage's `.bun` store, so runtime
-# resolution is correct + deterministic regardless of resolution drift.
+# resolution is correct + deterministic regardless of resolution drift. Doing
+# this exactly once also avoids retaining a complete, immediately-obsolete
+# dependency layer in the exported image.
 RUN bun install --production --frozen-lockfile --ignore-scripts \
     --filter @stwd/api --filter @stwd/proxy
 
