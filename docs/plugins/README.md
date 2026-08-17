@@ -68,6 +68,8 @@ mount hono routes/middleware onto the core app. `ctx` is injected: it carries th
 
 ```ts
 register(app, ctx) {
+  // NOTE: /example/ping is deliberately unauthenticated (constant payload,
+  // hello-world only). Any route touching real state MUST be gated:
   app.get("/example/ping", (c) => c.json({ ok: true }));
   // gate a route: app.post("/example/do", ctx.requireAgentJwt, handler);
 }
