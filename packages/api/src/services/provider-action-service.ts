@@ -91,6 +91,16 @@ import { ApprovalArmError, buildApprovalArm } from "./provider-approval";
 const EVALUATOR_VERSION = "provider-action.v1";
 const POLICY_TYPE = "capability-intent" as const;
 
+/** Select an externally returned reason that agrees with the composed effect.
+ * Rule order is not precedence: an approval rule listed before a failed hard
+ * constraint must never make a hard denial look resumable. */
+function primaryPolicyDenialReason(doc: PersistedPolicyDecisionV1): string {
+  return (
+    doc.reasonCodes.find((code) => code !== "APPROVAL_REQUIRED" && code !== "POLICY_ALLOW") ??
+    "POLICY_HARD_DENY"
+  );
+}
+
 /**
  * A handle to an atomic cumulative-spend reservation (#206). #240 persists this
  * exact identity on the binding so a known outcome can be reconciled after a
@@ -128,12 +138,19 @@ export interface PersistedPolicyReservationHandlesV1 {
 type ReservationReconciliationTarget = "settled" | "released";
 
 let reservationReconciliationFaultForTests: "before_apply" | "after_apply" | null = null;
+let providerPolicyClockForTests: (() => Date) | null = null;
 
 /** Test-only crash injection at the external-effect / DB-CAS boundary. */
 export function __setReservationReconciliationFaultForTests(
   fault: "before_apply" | "after_apply" | null,
 ): void {
   reservationReconciliationFaultForTests = fault;
+}
+
+/** Test-only server clock seam. Provider routes never accept this value from a
+ * request; production always evaluates against a fresh local server instant. */
+export function __setProviderPolicyClockForTests(clock: (() => Date) | null): void {
+  providerPolicyClockForTests = clock;
 }
 
 function persistedReservationHandles(
@@ -964,7 +981,8 @@ class ProviderActionService {
       // covers a deny for a DIFFERENT reason where a cumulativeSpend rule had
       // passed and reserved - the action will not execute, so free its budget.
       await this.reconcilePolicyReservations(tenantId, intentId);
-      const code = (policy as PolicyResult | null)?.doc.reasonCodes[0] ?? "POLICY_HARD_DENY";
+      const policyDoc = (policy as PolicyResult | null)?.doc;
+      const code = policyDoc ? primaryPolicyDenialReason(policyDoc) : "POLICY_HARD_DENY";
       return {
         kind: "policy_denied",
         code,
@@ -1546,7 +1564,7 @@ class ProviderActionService {
      *  deny/failure, leave on outcome_unknown. */
     windowedInvokeReservation?: WindowedInvokeReservationHandle;
   }> {
-    const decidedAt = new Date().toISOString();
+    const decidedAt = (providerPolicyClockForTests?.() ?? new Date()).toISOString();
     const decisionId = randomUUID();
     const { operation, build } = args;
 
@@ -1648,6 +1666,7 @@ class ProviderActionService {
       // github actions report api.github.com, never a hardcoded provider.
       host: hostFromOrigin(build.action.origin),
       path: build.action.normalizedPath,
+      evaluatedAt: decidedAt,
       // Trailing-hour count is not wired in PR2; rules that require it will
       // fail closed (POLICY_INPUT_UNAVAILABLE) exactly as specified.
       invokeCount1h: undefined,
@@ -1766,7 +1785,13 @@ class ProviderActionService {
         decisionHash: string;
         handles: PersistedPolicyReservationHandlesV1 | null;
       }
-    | { ok: false; code: string; httpStatus: number }
+    | {
+        ok: false;
+        code: string;
+        httpStatus: number;
+        decision?: PersistedPolicyDecisionV1;
+        decisionHash?: string;
+      }
   > {
     const generation = args.priorGeneration + 1;
     const canonicalText = Buffer.from(args.canonicalActionBytes).toString("utf8");
@@ -1803,8 +1828,10 @@ class ProviderActionService {
       );
       return {
         ok: false,
-        code: policy.doc.reasonCodes[0] ?? "POLICY_HARD_DENY",
+        code: primaryPolicyDenialReason(policy.doc),
         httpStatus: 403,
+        decision: policy.doc,
+        decisionHash: sha256HexPrefixed(jcsStringify(policy.doc)),
       };
     }
 
