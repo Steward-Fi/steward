@@ -36,8 +36,9 @@ ARG CACHE_BUST=1
 # Copy manifests only — layer-cached until lockfile changes
 COPY package.json bun.lock turbo.json tsconfig.json ./
 
-# Create stub for excluded workspaces so bun doesn't fail on missing references
-RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web/package.json
+# Frozen installs require every workspace manifest to match the lockfile,
+# including workspaces that are not compiled into the API image.
+COPY web/package.json web/package.json
 
 # Package manifests for every workspace package. ALL package.json files declared
 # by the `workspaces` glob in the root package.json must be present, or
@@ -121,8 +122,8 @@ COPY packages/venue-polymarket/package.json  packages/venue-polymarket/package.j
 COPY packages/webhooks/package.json          packages/webhooks/package.json
 COPY packages/examples/                      packages/examples/
 
-# Create stub for excluded workspaces
-RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web/package.json
+# Keep the real web importer so the frozen lockfile remains authoritative.
+COPY web/package.json web/package.json
 
 # Install deps fresh in build stage (bun symlinks don't survive COPY --from in BuildKit)
 RUN bun install --frozen-lockfile --ignore-scripts
@@ -187,8 +188,9 @@ ENV PORT=3200
 # Install production dependencies only (no dev/build tools)
 COPY package.json bun.lock turbo.json tsconfig.json ./
 
-# Create stub for excluded workspaces
-RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web/package.json
+# Keep the real web importer so the frozen production install cannot rewrite
+# the lockfile to match an invented workspace manifest.
+COPY web/package.json web/package.json
 
 COPY packages/adapters/package.json          packages/adapters/package.json
 COPY packages/agent-trader/package.json      packages/agent-trader/package.json
