@@ -272,6 +272,20 @@ describe("0080 provider_action_bindings migration", () => {
     await client.close();
   });
 
+  test("0088 rejects v2 reservation handles bound to another tenant", async () => {
+    const client = new PGlite("memory://");
+    await applyAll(client);
+    await seed(client);
+    await client.exec(bindingInsert());
+    const crossTenant = `'{"schemaVersion":"steward.provider-policy-reservations.v2","generation":1,"phase":"decision","cumulativeSpend":[{"stream":{"tenantId":"tb","agentId":"agent-a","scope":"agent","scopeKey":"","currency":"USD"},"reservationId":"cross-tenant","amount":7}],"windowedInvoke":null}'::jsonb`;
+    await expect(
+      client.exec(`INSERT INTO provider_action_reservation_generations
+        (intent_id,tenant_id,generation,phase,handles)
+        VALUES ('intent-1','ta',1,'decision',${crossTenant})`),
+    ).rejects.toBeDefined();
+    await client.close();
+  });
+
   test("0084 fail-closes a legacy execution_ready row and enqueues rollout evidence", async () => {
     const client = new PGlite("memory://");
     await applyThrough(client, "0083_provider_approval_quorum.sql");

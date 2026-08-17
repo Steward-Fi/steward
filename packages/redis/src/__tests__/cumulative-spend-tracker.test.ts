@@ -24,6 +24,7 @@ import {
   getCumulativeSpendSum,
   getWindowedInvokeCount,
   releaseCumulativeSpend,
+  releaseLegacyCumulativeSpendAfterCutover,
   releaseWindowedInvoke,
   reserveCumulativeSpend,
   reserveCumulativeSpendBatch,
@@ -184,6 +185,99 @@ describeRedis("tenant-bound atomic reservation batches", () => {
           windowSeconds: 3600,
         }),
       ).toEqual({ sum: 8 });
+    }
+  });
+
+  test("a pre-rollout release cannot be reimported after the v2 fence", async () => {
+    const common = {
+      agentId: AGENT,
+      scope: "operation" as const,
+      scopeKey: "legacy-release",
+      currency: "USD",
+    };
+    const legacy = await reserveCumulativeSpend({
+      stream: common,
+      caps: [{ windowSeconds: 3600, max: 20 }],
+      amount: 7,
+      reservationId: "legacy-release-id",
+    });
+    expect(legacy.ok).toBe(true);
+    expect(
+      await reserveCumulativeSpend({
+        stream: { ...common, tenantId: "tenant-release" },
+        caps: [{ windowSeconds: 3600, max: 20 }],
+        amount: 3,
+        reservationId: "v2-survivor",
+      }),
+    ).toMatchObject({ ok: true, priorSums: [7] });
+
+    const release = () =>
+      releaseLegacyCumulativeSpendAfterCutover({
+        stream: { ...common, tenantId: "tenant-release" },
+        reservationId: "legacy-release-id",
+        amount: 7,
+      });
+    await release();
+    await release(); // crash retry is idempotent
+    expect(
+      await reserveCumulativeSpend({
+        stream: { ...common, tenantId: "tenant-release" },
+        caps: [{ windowSeconds: 3600, max: 20 }],
+        amount: 7,
+        reservationId: "legacy-release-id",
+      }),
+    ).toMatchObject({ ok: false });
+    expect(
+      await getCumulativeSpendSum({
+        ...common,
+        tenantId: "tenant-release",
+        windowSeconds: 3600,
+      }),
+    ).toEqual({ sum: 3 });
+    // Re-reading/importing the fenced snapshot must not resurrect the 7 units.
+    expect(
+      await reserveCumulativeSpend({
+        stream: { ...common, tenantId: "tenant-release" },
+        caps: [{ windowSeconds: 3600, max: 20 }],
+        amount: 1,
+        reservationId: "after-release",
+      }),
+    ).toMatchObject({ ok: true, priorSums: [3] });
+  });
+
+  test("release racing a v2 importer leaves only the new reservation", async () => {
+    const caps = [{ windowSeconds: 3600, max: 20 }];
+    for (let i = 0; i < 25; i++) {
+      const common = {
+        agentId: AGENT,
+        scope: "operation" as const,
+        scopeKey: `legacy-release-race-${i}`,
+        currency: "USD",
+      };
+      const reservationId = `legacy-race-${i}`;
+      await reserveCumulativeSpend({ stream: common, caps, amount: 7, reservationId });
+      const [released, admitted] = await Promise.all([
+        releaseLegacyCumulativeSpendAfterCutover({
+          stream: { ...common, tenantId: "tenant-release-race" },
+          reservationId,
+          amount: 7,
+        }),
+        reserveCumulativeSpend({
+          stream: { ...common, tenantId: "tenant-release-race" },
+          caps,
+          amount: 3,
+          reservationId: `new-race-${i}`,
+        }),
+      ]);
+      expect(released).toBeUndefined();
+      expect(admitted.ok).toBe(true);
+      expect(
+        await getCumulativeSpendSum({
+          ...common,
+          tenantId: "tenant-release-race",
+          windowSeconds: 3600,
+        }),
+      ).toEqual({ sum: 3 });
     }
   });
 

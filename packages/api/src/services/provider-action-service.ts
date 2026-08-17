@@ -122,6 +122,7 @@ function isDeferredGenericBuild(b: ProviderActionBuild): b is DeferredGenericBui
 import {
   type CumulativeSpendScope,
   releaseCumulativeSpend,
+  releaseLegacyCumulativeSpendAfterCutover,
   releaseWindowedInvoke,
   reserveCumulativeSpendBatch,
   reserveWindowedInvoke,
@@ -232,6 +233,7 @@ function persistedReservationHandles(
 
 function parsePersistedReservationHandles(
   value: unknown,
+  expectedTenantId?: string,
 ): PersistedPolicyReservationHandlesV1 | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const v = value as Record<string, unknown>;
@@ -253,6 +255,7 @@ function parsePersistedReservationHandles(
     if (
       typeof stream.agentId !== "string" ||
       (tenantBound && typeof stream.tenantId !== "string") ||
+      (tenantBound && expectedTenantId !== undefined && stream.tenantId !== expectedTenantId) ||
       !["operation", "agent", "grant"].includes(String(stream.scope)) ||
       typeof stream.scopeKey !== "string" ||
       typeof stream.currency !== "string" ||
@@ -285,6 +288,7 @@ function parsePersistedReservationHandles(
     if (
       (r.tenantId !== undefined && typeof r.tenantId !== "string") ||
       (tenantBound && typeof r.tenantId !== "string") ||
+      (tenantBound && expectedTenantId !== undefined && r.tenantId !== expectedTenantId) ||
       typeof r.agentId !== "string" ||
       typeof r.operationKey !== "string" ||
       typeof r.reservationId !== "string"
@@ -2693,7 +2697,7 @@ class ProviderActionService {
         .from(providerActionBindings)
         .where(eq(providerActionBindings.intentId, row.intentId))
         .limit(1);
-      const handles = parsePersistedReservationHandles(row.handles);
+      const handles = parsePersistedReservationHandles(row.handles, row.tenantId);
       if (!handles || handles.generation !== row.generation || handles.phase !== row.phase) {
         const message = "malformed immutable reservation generation";
         await this.recordReservationFailure(row, claimId, message, true);
@@ -2721,7 +2725,7 @@ class ProviderActionService {
       try {
         if (reservationReconciliationFaultForTests === "before_apply")
           throw new Error("injected crash before reservation reconciliation");
-        await this.applyPersistedReservationHandles(handles, target);
+        await this.applyPersistedReservationHandles(handles, target, row.tenantId);
         if (reservationReconciliationFaultForTests === "after_apply")
           throw new Error("injected crash after reservation reconciliation");
       } catch (error) {
@@ -2813,16 +2817,25 @@ class ProviderActionService {
   private async applyPersistedReservationHandles(
     handles: PersistedPolicyReservationHandlesV1,
     target: ReservationReconciliationTarget,
+    generationTenantId?: string,
   ): Promise<void> {
     await Promise.all(
       handles.cumulativeSpend.map((r) =>
         target === "settled"
           ? settleCumulativeSpend({ stream: r.stream, reservationId: r.reservationId })
-          : releaseCumulativeSpend({
-              stream: r.stream,
-              reservationId: r.reservationId,
-              amount: r.amount,
-            }),
+          : handles.schemaVersion === "steward.provider-policy-reservations.v1" &&
+              !r.stream.tenantId &&
+              generationTenantId
+            ? releaseLegacyCumulativeSpendAfterCutover({
+                stream: { ...r.stream, tenantId: generationTenantId },
+                reservationId: r.reservationId,
+                amount: r.amount,
+              })
+            : releaseCumulativeSpend({
+                stream: r.stream,
+                reservationId: r.reservationId,
+                amount: r.amount,
+              }),
       ),
     );
     if (target === "released" && handles.windowedInvoke) {

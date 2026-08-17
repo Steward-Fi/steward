@@ -33,6 +33,7 @@ export {
   type ReserveCumulativeSpendInput,
   type ReserveCumulativeSpendResult,
   releaseCumulativeSpend,
+  releaseLegacyCumulativeSpendAfterCutover,
   releaseWindowedInvoke,
   reserveCumulativeSpend,
   reserveCumulativeSpendBatch,

@@ -148,6 +148,12 @@ function legacyStreamKey(s: CumulativeSpendStream): string {
   return streamKey({ ...s, tenantId: undefined });
 }
 
+function legacyReleaseTombstoneKey(s: CumulativeSpendStream & { tenantId: string }): string {
+  // The stream hash tag is preserved, so this SET and every tenant-bound stream
+  // for the agent remain in one Redis Cluster slot.
+  return `${streamKey(s)}:legacy-release-tombstones`;
+}
+
 export interface CumulativeSpendBatchGroup {
   stream: CumulativeSpendStream & { tenantId: string };
   caps: CumulativeSpendCap[];
@@ -180,11 +186,19 @@ for g = 1, nGroups do
   local reservationId = string.sub(member, 1, memberBar - 1)
   local nCaps = tonumber(ARGV[cursor]); cursor = cursor + 1
   local nLegacy = tonumber(ARGV[cursor]); cursor = cursor + 1
-  for i = 1, nLegacy do
-    local legacyMember = ARGV[cursor]; cursor = cursor + 1
-    local legacyScore = tonumber(ARGV[cursor]); cursor = cursor + 1
-    redis.call('ZADD', KEYS[g], legacyScore, legacyMember)
-  end
+	for i = 1, nLegacy do
+		local legacyMember = ARGV[cursor]; cursor = cursor + 1
+		local legacyScore = tonumber(ARGV[cursor]); cursor = cursor + 1
+		local firstBar = string.find(legacyMember, '|', 1, true)
+		if not firstBar then return {-1} end
+		local legacyReservationId = string.sub(legacyMember, 1, firstBar - 1)
+		-- A v1 reconciliation may race after this worker read the immutable
+		-- snapshot but before this batch imports it. Its v2 tombstone is the
+		-- monotonic authority: never resurrect the released legacy member.
+		if redis.call('SISMEMBER', KEYS[nGroups + g], legacyReservationId) == 0 then
+			redis.call('ZADD', KEYS[g], legacyScore, legacyMember)
+		end
+	end
   if nLegacy > 0 then redis.call('PEXPIRE', KEYS[g], ttl) end
   redis.call('ZREMRANGEBYSCORE', KEYS[g], 0, retentionCutoff)
   parsed[g] = {amount=amount, member=member, reservationId=reservationId}
@@ -211,16 +225,21 @@ for g = 1, nGroups do
   end
 end
 for g = 1, nGroups do
-  local p = parsed[g]
+	local p = parsed[g]
+	if redis.call('SISMEMBER', KEYS[nGroups + g], p.reservationId) == 1 then
+		-- A terminal pre-rollout generation owns this identity. A stale retry
+		-- must fail closed and cannot erase the permanent release tombstone.
+		out[1] = 0
+	end
   -- Remove any pre-crash member with this reservation identity, including an
   -- older amount. This makes a changed retry replace rather than double-debit.
   local live = redis.call('ZRANGEBYSCORE', KEYS[g], retentionCutoff, now)
-  for i = 1, #live do
-    local bar = string.find(live[i], '|', 1, true)
-    if bar and string.sub(live[i], 1, bar - 1) == p.reservationId then
-      redis.call('ZREM', KEYS[g], live[i])
-    end
-  end
+	for i = 1, #live do
+		local bar = string.find(live[i], '|', 1, true)
+		if bar and string.sub(live[i], 1, bar - 1) == p.reservationId then
+			redis.call('ZREM', KEYS[g], live[i])
+		end
+	end
   if out[1] == 1 then
     -- A retry adopts the orphan at the current admission time. Keeping the
     -- pre-crash score could make a freshly committed action age out early.
@@ -272,6 +291,52 @@ local payload = cjson.encode({
 })
 redis.call('SET', KEYS[1], payload)
 return payload
+`;
+
+// Install the monotonic marker in the tenant-bound stream before editing the
+// cross-slot legacy snapshot. A concurrent importer either ran before this
+// script (and is removed here) or runs after it (and observes the tombstone).
+const TOMBSTONE_LEGACY_RELEASE_IN_V2_LUA = `
+local reservationId = ARGV[1]
+redis.call('SADD', KEYS[2], reservationId)
+local members = redis.call('ZRANGE', KEYS[1], 0, -1)
+for i = 1, #members do
+	local bar = string.find(members[i], '|', 1, true)
+	if bar and string.sub(members[i], 1, bar - 1) == reservationId then
+		redis.call('ZREM', KEYS[1], members[i])
+	end
+end
+return 1
+`;
+
+// The fence guarantees this key is a STRING and prevents every old binary from
+// writing again. Removing the released member from the snapshot is idempotent;
+// the v2 tombstone above protects against importers that already read it.
+const REMOVE_FROM_FENCED_LEGACY_LUA = `
+local kind = redis.call('TYPE', KEYS[1])
+if type(kind) == 'table' then kind = kind.ok end
+if kind ~= 'string' then
+	return redis.error_reply('cumulative spend legacy release requires fenced snapshot')
+end
+local payload = cjson.decode(redis.call('GET', KEYS[1]))
+if payload.version ~= ARGV[1] or payload.tenantId ~= ARGV[2] then
+	return redis.error_reply('cumulative spend legacy release ownership mismatch')
+end
+local kept = {}
+local entries = payload.entries
+if type(entries) == 'table' then
+	for i = 1, #entries do
+		local member = entries[i][1]
+		local bar = string.find(member, '|', 1, true)
+		if not bar then return redis.error_reply('corrupt cumulative spend legacy member') end
+		if string.sub(member, 1, bar - 1) ~= ARGV[3] then
+			kept[#kept + 1] = entries[i]
+		end
+	end
+end
+payload.entries = kept
+redis.call('SET', KEYS[1], cjson.encode(payload))
+return 1
 `;
 
 // ATOMIC multi-cap reserve over a rolling stream.
@@ -640,6 +705,7 @@ export async function reserveCumulativeSpendBatch(input: {
     throw new Error("cumulative spend batch requires at least one group");
   const now = input.now ?? Date.now();
   const keys: string[] = [];
+  const tombstoneKeys: string[] = [];
   const snapshots: LegacyBridgeSnapshot[] = [];
   const args: string[] = [
     String(now),
@@ -662,6 +728,7 @@ export async function reserveCumulativeSpendBatch(input: {
         throw new Error("invalid cumulative spend batch cap");
     }
     keys.push(streamKey(group.stream));
+    tombstoneKeys.push(legacyReleaseTombstoneKey(group.stream));
     snapshots.push(await fenceAndSnapshotLegacyStream(group.stream, now));
     const member = `${group.reservationId}|${group.amount}|reserved`;
     const snapshot = snapshots[snapshots.length - 1];
@@ -679,7 +746,13 @@ export async function reserveCumulativeSpendBatch(input: {
     }
   }
   const redis = getRedis();
-  const raw = (await redis.eval(RESERVE_BATCH_LUA, keys.length, ...keys, ...args)) as number[];
+  const raw = (await redis.eval(
+    RESERVE_BATCH_LUA,
+    keys.length + tombstoneKeys.length,
+    ...keys,
+    ...tombstoneKeys,
+    ...args,
+  )) as number[];
   if (raw[0] === -1) throw new Error("cumulative spend stream contained a corrupt member");
   let cursor = 1;
   const priorSums = input.groups.map((group) => {
@@ -721,6 +794,48 @@ export async function releaseCumulativeSpend(input: {
   const member = `${input.reservationId}|${input.amount}|reserved`;
   const redis = getRedis();
   await redis.zrem(key, member);
+}
+
+/** Reclaim a pre-v2 reservation after its legacy stream has been fenced.
+ *
+ * The two keys intentionally cannot share a Redis Cluster slot. Correctness is
+ * obtained by monotonic ordering instead: fence old writers, install a v2
+ * tombstone (which also removes an already-imported member), then edit the
+ * immutable snapshot. Every step is idempotent and safe to retry after a crash.
+ */
+export async function releaseLegacyCumulativeSpendAfterCutover(input: {
+  stream: CumulativeSpendStream & { tenantId: string };
+  reservationId: string;
+  amount: number;
+}): Promise<void> {
+  if (!isNonNegInt(input.amount)) throw new Error("invalid legacy cumulative spend amount");
+  if (
+    !input.reservationId ||
+    input.reservationId.length > 200 ||
+    input.reservationId.includes("|")
+  ) {
+    throw new Error("invalid legacy cumulative spend reservationId");
+  }
+  const now = Date.now();
+  // This atomically converts the old ZSET into a durable snapshot before any
+  // release work, so an unaware rolling binary can no longer repost the member.
+  await fenceAndSnapshotLegacyStream(input.stream, now);
+  const redis = getRedis();
+  await redis.eval(
+    TOMBSTONE_LEGACY_RELEASE_IN_V2_LUA,
+    2,
+    streamKey(input.stream),
+    legacyReleaseTombstoneKey(input.stream),
+    input.reservationId,
+  );
+  await redis.eval(
+    REMOVE_FROM_FENCED_LEGACY_LUA,
+    1,
+    legacyStreamKey(input.stream),
+    LEGACY_BRIDGE_VERSION,
+    input.stream.tenantId,
+    input.reservationId,
+  );
 }
 
 /**
