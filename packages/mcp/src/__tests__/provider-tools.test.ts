@@ -252,6 +252,9 @@ describe("credential redaction", () => {
         passphrase: canary,
         private_key: canary,
         clientJwt: canary,
+        clientSecretValue: canary,
+        cookieHeader: canary,
+        accessKeyId: canary,
         signature: canary,
         nested: { sessionPassword: canary },
       }),
@@ -265,13 +268,35 @@ describe("credential redaction", () => {
     const ghToken = "ghp_canarytoken123456";
     const slackToken = "xoxb-canary-123456789";
     const password = "free-text-passwd-canary";
+    const opaqueJwt = "opaque-jwt-canary";
+    const signature = "signature-canary";
     const clean = sanitizeProviderPayload(
-      `upstream 500: jwt=${jwt} key=${apiKey} gh=${ghToken} slack=${slackToken} password: ${password}`,
+      `upstream 500: jwt=${jwt} opaque jwt=${opaqueJwt} key=${apiKey} gh=${ghToken} slack=${slackToken} password: ${password} signature=${signature}`,
     ) as string;
-    for (const canary of [jwt, apiKey, ghToken, slackToken, password]) {
+    for (const canary of [jwt, opaqueJwt, apiKey, ghToken, slackToken, password, signature]) {
       expect(clean).not.toContain(canary);
     }
     expect(clean).toContain("[redacted]");
+  });
+
+  test("fails closed on accessors and cycles without invoking provider code", () => {
+    let invoked = false;
+    const payload: Record<string, unknown> = { public: "safe" };
+    Object.defineProperty(payload, "computed", {
+      enumerable: true,
+      get() {
+        invoked = true;
+        return "getter-secret";
+      },
+    });
+    payload.self = payload;
+
+    expect(sanitizeProviderPayload(payload)).toEqual({
+      public: "safe",
+      computed: "[redacted]",
+      self: "[redacted]",
+    });
+    expect(invoked).toBe(false);
   });
 
   test("leaves non-secret free text and identifiers intact", () => {

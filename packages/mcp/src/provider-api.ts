@@ -1,4 +1,4 @@
-import { describeThrown } from "@stwd/shared";
+import { describeThrown, isSensitiveCredentialKey } from "@stwd/shared";
 import type { StewardMcpConfig } from "./config.js";
 
 export interface ProviderApi {
@@ -9,23 +9,43 @@ export interface ProviderApi {
 // Coverage is deliberately conservative — over-broad patterns would redact
 // legitimate tool output (tx hashes, ids) — so the first line of defense
 // remains upstream errors not embedding secrets at all.
-const SENSITIVE_KEY =
-  /authorization|bearer|token|secret|credential|api[-_]?key|cookie|pass(?:word|phrase|wd)|private[-_]?key|jwt|signature/i;
+function isSensitiveProviderKey(key: string): boolean {
+  // Use the repository-wide classifier so this MCP boundary cannot drift
+  // behind newly recognized credential carrier names. `passwd` and
+  // signatures are retained as MCP-specific conservative additions.
+  return isSensitiveCredentialKey(key) || /passwd|signature/i.test(key);
+}
 const SECRET_TEXT =
-  /(?:bearer\s+|(?:api[-_]?key|token|secret|credential|pass(?:word|phrase|wd)|private[-_]?key)["'\s:=]+)[^\s,"'}]+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*|\bsk-[A-Za-z0-9]{8,}|\bgh[po]_[A-Za-z0-9]{8,}|\bxox[baprs]-[A-Za-z0-9-]{8,}/gi;
+  /(?:bearer\s+|(?:auth(?:orization)?|token|secret|credential|api[-_]?key|cookie(?:[-_]?header)?|pass(?:word|phrase|wd)|private[-_]?key|jwt|signature|client[-_]?secret|access[-_]?key(?:[-_]?id)?|secret[-_]?access[-_]?key|session[-_]?(?:id|cookie)|signing[-_]?key|encryption[-_]?key|mnemonic|seed[-_]?phrase|recovery[-_]?phrase|pat)(?:\s*["']?\s*[:=]\s*["']?|\s+))[^\s,"'}]+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*|\bsk-[A-Za-z0-9]{8,}|\bgh[po]_[A-Za-z0-9]{8,}|\bxox[baprs]-[A-Za-z0-9-]{8,}/gi;
 
-export function sanitizeProviderPayload(value: unknown, depth = 0): unknown {
+export function sanitizeProviderPayload(
+  value: unknown,
+  depth = 0,
+  ancestors = new Set<object>(),
+): unknown {
   if (depth > 20) return "[redacted]";
   if (typeof value === "string") return value.replace(SECRET_TEXT, "[redacted]");
-  if (Array.isArray(value)) return value.map((item) => sanitizeProviderPayload(item, depth + 1));
   if (value && typeof value === "object") {
-    const clean: Record<string, unknown> = {};
-    for (const [key, nested] of Object.entries(value)) {
-      clean[key] = SENSITIVE_KEY.test(key)
-        ? "[redacted]"
-        : sanitizeProviderPayload(nested, depth + 1);
+    // Untrusted provider values must not execute accessors during a scrub, and
+    // cycles fail closed instead of being traversed repeatedly to the limit.
+    if (ancestors.has(value)) return "[redacted]";
+    ancestors.add(value);
+    try {
+      if (Array.isArray(value)) {
+        return value.map((item) => sanitizeProviderPayload(item, depth + 1, ancestors));
+      }
+      const clean: Record<string, unknown> = {};
+      for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(value))) {
+        if (!descriptor.enumerable) continue;
+        clean[key] =
+          isSensitiveProviderKey(key) || !("value" in descriptor)
+            ? "[redacted]"
+            : sanitizeProviderPayload(descriptor.value, depth + 1, ancestors);
+      }
+      return clean;
+    } finally {
+      ancestors.delete(value);
     }
-    return clean;
   }
   return value;
 }
