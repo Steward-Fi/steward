@@ -432,6 +432,33 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     await cleanupRedis();
   });
 
+  test("v2 release rejects a handle whose Redis tenant namespace is foreign", async () => {
+    await expect(
+      providerActionService.releasePolicyReservationHandles(
+        {
+          schemaVersion: "steward.provider-policy-reservations.v2",
+          generation: 1,
+          phase: "decision",
+          cumulativeSpend: [
+            {
+              stream: {
+                tenantId: "foreign-tenant",
+                agentId: CS.AGENT,
+                scope: "agent",
+                scopeKey: "",
+                currency: "BYTES",
+              },
+              reservationId: "foreign-handle",
+              amount: 1,
+            },
+          ],
+          windowedInvoke: null,
+        },
+        CS.TENANT,
+      ),
+    ).rejects.toThrow("invalid persisted policy reservation handles");
+  });
+
   test("E2E #1: a sequence of allow invokes crosses the agent cap; the crossing invoke denies", async () => {
     // Each "a" is 1 byte. Cap = 250 bytes over PT24H, agent-scoped.
     // tweet of 100 bytes, then 100 bytes (running 200 <= 250 => allow), then a

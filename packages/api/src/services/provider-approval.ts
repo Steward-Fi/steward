@@ -2284,7 +2284,7 @@ class ProviderApprovalService {
       if (executionHandlesToRelease !== null) {
         const { providerActionService } = await import("./provider-action-service.js");
         await providerActionService
-          .releasePolicyReservationHandles(executionHandlesToRelease)
+          .releasePolicyReservationHandles(executionHandlesToRelease, input.tenantId)
           .catch((releaseError) =>
             console.error(
               "[provider-approval] failed to release rolled-back reservation:",

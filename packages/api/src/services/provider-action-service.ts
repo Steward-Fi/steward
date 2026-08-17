@@ -276,12 +276,18 @@ function parsePersistedReservationHandles(
     const stream = r.stream as Record<string, unknown>;
     if (
       typeof stream.agentId !== "string" ||
+      stream.agentId.length === 0 ||
       (tenantBound && typeof stream.tenantId !== "string") ||
+      (tenantBound && (stream.tenantId as string).length === 0) ||
       (tenantBound && expectedTenantId !== undefined && stream.tenantId !== expectedTenantId) ||
       !["operation", "agent", "grant"].includes(String(stream.scope)) ||
       typeof stream.scopeKey !== "string" ||
       typeof stream.currency !== "string" ||
+      stream.currency.length === 0 ||
       typeof r.reservationId !== "string" ||
+      r.reservationId.length === 0 ||
+      r.reservationId.length > 200 ||
+      r.reservationId.includes("|") ||
       !Number.isSafeInteger(r.amount) ||
       (r.amount as number) < 0
     )
@@ -310,10 +316,16 @@ function parsePersistedReservationHandles(
     if (
       (r.tenantId !== undefined && typeof r.tenantId !== "string") ||
       (tenantBound && typeof r.tenantId !== "string") ||
+      (tenantBound && (r.tenantId as string).length === 0) ||
       (tenantBound && expectedTenantId !== undefined && r.tenantId !== expectedTenantId) ||
       typeof r.agentId !== "string" ||
+      r.agentId.length === 0 ||
       typeof r.operationKey !== "string" ||
-      typeof r.reservationId !== "string"
+      r.operationKey.length === 0 ||
+      typeof r.reservationId !== "string" ||
+      r.reservationId.length === 0 ||
+      r.reservationId.length > 200 ||
+      r.reservationId.includes("|")
     )
       return null;
     windowedInvoke = {
@@ -2552,6 +2564,7 @@ class ProviderActionService {
           generation,
           "execution",
         ),
+        args.tenantId,
       );
       const code = primaryPolicyDenialReason(policy.doc);
       return {
@@ -2578,11 +2591,11 @@ class ProviderActionService {
     };
   }
 
-  async releasePolicyReservationHandles(handles: unknown): Promise<void> {
+  async releasePolicyReservationHandles(handles: unknown, expectedTenantId: string): Promise<void> {
     if (handles === null) return;
-    const parsed = parsePersistedReservationHandles(handles);
+    const parsed = parsePersistedReservationHandles(handles, expectedTenantId);
     if (!parsed) throw new Error("invalid persisted policy reservation handles");
-    await this.applyPersistedReservationHandles(parsed, "released");
+    await this.applyPersistedReservationHandles(parsed, "released", expectedTenantId);
   }
 
   /**

@@ -512,10 +512,40 @@ describeRedis("tenant-bound atomic reservation batches", () => {
       ).toEqual({ sum: 1 });
     }
   });
+
+  test("a denied batch retry preserves every existing stable reservation", async () => {
+    const tenantId = "tenant-denied-retry";
+    const groups = ["global", "workspace"].map((scope) => ({
+      stream: {
+        tenantId,
+        agentId: AGENT,
+        scope: "agent" as const,
+        scopeKey: `budget:${scope}:count`,
+        currency: "__agent_budget_count__",
+      },
+      caps: [{ windowSeconds: 3600, max: 10 }],
+      amount: 4,
+      reservationId: `stable-denied-${scope}`,
+    }));
+    expect(await reserveCumulativeSpendBatch({ groups })).toMatchObject({ ok: true });
+
+    const denied = await reserveCumulativeSpendBatch({
+      groups: groups.map((group) => ({
+        ...group,
+        caps: [{ windowSeconds: 3600, max: 3 }],
+      })),
+    });
+    expect(denied.ok).toBe(false);
+    for (const group of groups) {
+      expect(await getCumulativeSpendSum({ ...group.stream, windowSeconds: 3600 })).toEqual({
+        sum: 4,
+      });
+    }
+  });
 });
 
 describeRedis("stable reservation identity - crash retry semantics", () => {
-  test("parallel retries debit once and a now-denied orphan is atomically reclaimed", async () => {
+  test("parallel retries debit once and a denied retry preserves the existing hold", async () => {
     const stable = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const input = {
       stream: STREAM,
@@ -531,14 +561,14 @@ describeRedis("stable reservation identity - crash retry semantics", () => {
     expect(b).toMatchObject({ ok: true, priorSums: [0], reservationId: stable });
     expect(await getCumulativeSpendSum({ ...STREAM, windowSeconds: 3600 })).toEqual({ sum: 4 });
 
-    // If current authoritative policy no longer admits the pre-commit orphan,
-    // retry denies and removes that exact member in the same Lua operation.
+    // The reservation may already represent a committed or outcome-unknown
+    // action. A lower cap must deny the retry without implicitly releasing it.
     const denied = await reserveCumulativeSpend({
       ...input,
       caps: [{ windowSeconds: 3600, max: 3 }],
     });
     expect(denied).toMatchObject({ ok: false, priorSums: [0] });
-    expect(await getCumulativeSpendSum({ ...STREAM, windowSeconds: 3600 })).toEqual({ sum: 0 });
+    expect(await getCumulativeSpendSum({ ...STREAM, windowSeconds: 3600 })).toEqual({ sum: 4 });
   });
 });
 
@@ -672,6 +702,23 @@ describeRedis("fail closed", () => {
     expect(snap).toBeNull();
   });
 
+  test("sum overflow is corruption instead of a rounded money-cap comparison", async () => {
+    const redis = getRedis();
+    const key = cumulativeSpendStreamKeyForTest(STREAM);
+    const now = Date.now();
+    await redis.zadd(key, now - 2, `overflow-a|${Number.MAX_SAFE_INTEGER}|reserved`);
+    await redis.zadd(key, now - 1, "overflow-b|1|reserved");
+    await expect(
+      reserveCumulativeSpend({
+        stream: STREAM,
+        caps: [{ windowSeconds: 3600, max: Number.MAX_SAFE_INTEGER }],
+        amount: 0,
+        now,
+      }),
+    ).rejects.toThrow("corrupt member");
+    expect(await getCumulativeSpendSum({ ...STREAM, windowSeconds: 3600, now })).toBeNull();
+  });
+
   test("invalid amount / window / empty caps throws (never free budget)", async () => {
     const caps = [{ windowSeconds: 3600, max: 5_000_000 }];
     await expect(reserveCumulativeSpend({ stream: STREAM, caps, amount: -1 })).rejects.toThrow();
@@ -687,6 +734,23 @@ describeRedis("fail closed", () => {
         amount: 1,
       }),
     ).rejects.toThrow();
+    await expect(
+      reserveCumulativeSpend({
+        stream: { ...STREAM, tenantId: "" },
+        caps,
+        amount: 1,
+      }),
+    ).rejects.toThrow("stream");
+    await expect(
+      reserveCumulativeSpend({ stream: STREAM, caps, amount: 1, now: Number.NaN }),
+    ).rejects.toThrow("timestamp");
+    expect(
+      await getCumulativeSpendSum({
+        ...STREAM,
+        windowSeconds: 3600,
+        now: Number.POSITIVE_INFINITY,
+      }),
+    ).toBeNull();
   });
 
   test("over-retention window (> 30d) throws (codex P1)", async () => {

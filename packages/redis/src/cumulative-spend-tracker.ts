@@ -178,6 +178,7 @@ export interface CumulativeSpendBatchResult {
 // ALL streams admit. This prevents provisional holds on one stream from causing
 // a concurrent false exhaustion/freeze when another stream later denies.
 const RESERVE_BATCH_LUA = `
+local maxSafe = 9007199254740991
 local now = tonumber(ARGV[1])
 local retentionCutoff = tonumber(ARGV[2])
 local ttl = tonumber(ARGV[3])
@@ -223,12 +224,12 @@ for g = 1, nGroups do
         local secondBar = string.find(rest, '|', 1, true)
         local amtStr = secondBar and string.sub(rest, 1, secondBar - 1) or rest
         local amt = tonumber(amtStr)
-        if amt == nil then return {-1} end
+        if amt == nil or amt < 0 or amt ~= math.floor(amt) or amt > maxSafe or sum > maxSafe - amt then return {-1} end
         sum = sum + amt
       end
     end
     out[outCursor] = sum; outCursor = outCursor + 1
-    if (sum + amount) > maxv then out[1] = 0 end
+    if amount > maxv or sum > maxv - amount then out[1] = 0 end
   end
 end
 for g = 1, nGroups do
@@ -238,16 +239,21 @@ for g = 1, nGroups do
 		-- must fail closed and cannot erase the permanent release tombstone.
 		out[1] = 0
 	end
-  -- Remove any pre-crash member with this reservation identity, including an
-  -- older amount. This makes a changed retry replace rather than double-debit.
-  local live = redis.call('ZRANGEBYSCORE', KEYS[g], retentionCutoff, now)
-	for i = 1, #live do
-		local bar = string.find(live[i], '|', 1, true)
-		if bar and string.sub(live[i], 1, bar - 1) == p.reservationId then
-			redis.call('ZREM', KEYS[g], live[i])
-		end
-	end
-  if out[1] == 1 then
+end
+-- Denial must be side-effect-free for existing reservations. The same stable
+-- identity may already represent a committed or outcome-unknown action; a cap
+-- reduction must not turn a denied retry into an implicit release. Only an
+-- admitted retry may atomically replace/adopt its earlier member.
+if out[1] == 1 then
+  for g = 1, nGroups do
+    local p = parsed[g]
+    local live = redis.call('ZRANGEBYSCORE', KEYS[g], retentionCutoff, now)
+	  for i = 1, #live do
+		  local bar = string.find(live[i], '|', 1, true)
+		  if bar and string.sub(live[i], 1, bar - 1) == p.reservationId then
+			  redis.call('ZREM', KEYS[g], live[i])
+		  end
+	  end
     -- A retry adopts the orphan at the current admission time. Keeping the
     -- pre-crash score could make a freshly committed action age out early.
     redis.call('ZADD', KEYS[g], now, p.member)
@@ -264,6 +270,7 @@ return out
 // returned snapshot. Keeping the snapshot at the legacy key makes crash recovery
 // deterministic: a process may die before importing v2 and safely retry later.
 const FENCE_AND_SNAPSHOT_LEGACY_LUA = `
+local maxSafe = 9007199254740991
 local kind = redis.call('TYPE', KEYS[1])
 if type(kind) == 'table' then kind = kind.ok end
 if kind == 'string' then
@@ -286,7 +293,9 @@ if kind == 'zset' then
     local rest = string.sub(member, firstBar + 1)
     local secondBar = string.find(rest, '|', 1, true)
     local amount = tonumber(secondBar and string.sub(rest, 1, secondBar - 1) or rest)
-    if amount == nil then return redis.error_reply('corrupt cumulative spend legacy amount') end
+    if amount == nil or amount < 0 or amount ~= math.floor(amount) or amount > maxSafe then
+      return redis.error_reply('corrupt cumulative spend legacy amount')
+    end
     entries[#entries + 1] = {member, tonumber(raw[i + 1])}
   end
 end
@@ -354,6 +363,7 @@ return 1
 // verify sum+amount <= max. Only if ALL caps hold, ZADD the entry ONCE. Returns
 // {ok, priorSum_1, priorSum_2, ...}. ok=-1 => corrupt member (fail closed).
 const RESERVE_LUA = `
+local maxSafe = 9007199254740991
 local now = tonumber(ARGV[1])
 local retentionCutoff = tonumber(ARGV[2])
 local amount = tonumber(ARGV[3])
@@ -381,7 +391,7 @@ for c = 1, nCaps do
         local secondBar = string.find(rest, '|', 1, true)
         local amtStr = secondBar and string.sub(rest, 1, secondBar - 1) or rest
         local amt = tonumber(amtStr)
-        if amt == nil then return {-1} end
+        if amt == nil or amt < 0 or amt ~= math.floor(amt) or amt > maxSafe or sum > maxSafe - amt then return {-1} end
         sum = sum + amt
       end
     else
@@ -389,18 +399,20 @@ for c = 1, nCaps do
     end
   end
   out[c + 1] = sum
-  if (sum + amount) > maxv then
+  if amount > maxv or sum > maxv - amount then
     out[1] = 0
   end
 end
-local live = redis.call('ZRANGEBYSCORE', KEYS[1], retentionCutoff, now)
-for i = 1, #live do
-  local bar = string.find(live[i], '|', 1, true)
-  if bar and string.sub(live[i], 1, bar - 1) == reservationId then
-    redis.call('ZREM', KEYS[1], live[i])
-  end
-end
 if out[1] == 1 then
+  -- A denied retry must preserve an existing committed/outcome-unknown hold.
+  -- Replace by stable identity only after current policy admits the retry.
+  local live = redis.call('ZRANGEBYSCORE', KEYS[1], retentionCutoff, now)
+  for i = 1, #live do
+    local bar = string.find(live[i], '|', 1, true)
+    if bar and string.sub(live[i], 1, bar - 1) == reservationId then
+      redis.call('ZREM', KEYS[1], live[i])
+    end
+  end
   -- Refresh an adopted orphan to the authoritative retry time.
   redis.call('ZADD', KEYS[1], now, member)
   redis.call('PEXPIRE', KEYS[1], ttl)
@@ -410,6 +422,7 @@ return out
 
 // Read-only window sum (advisory). Prune retention-expired, sum the live window.
 const SUM_LUA = `
+local maxSafe = 9007199254740991
 local now = tonumber(ARGV[1])
 local windowStart = tonumber(ARGV[2])
 local retentionCutoff = tonumber(ARGV[3])
@@ -449,7 +462,7 @@ for i = 1, #members do
     local secondBar = string.find(rest, '|', 1, true)
     local amtStr = secondBar and string.sub(rest, 1, secondBar - 1) or rest
     local amt = tonumber(amtStr)
-    if amt == nil then return {-1} end
+    if amt == nil or amt < 0 or amt ~= math.floor(amt) or amt > maxSafe or sum > maxSafe - amt then return {-1} end
     sum = sum + amt
   else
     return {-1}
@@ -552,6 +565,23 @@ function isValidWindow(w: number): boolean {
   return typeof w === "number" && Number.isSafeInteger(w) && w > 0 && w <= MAX_WINDOW_SECONDS;
 }
 
+function isValidTimestamp(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function isValidStream(stream: CumulativeSpendStream): boolean {
+  return (
+    typeof stream.agentId === "string" &&
+    stream.agentId.length > 0 &&
+    (["operation", "agent", "grant"] as const).includes(stream.scope) &&
+    typeof stream.scopeKey === "string" &&
+    typeof stream.currency === "string" &&
+    stream.currency.length > 0 &&
+    (stream.tenantId === undefined ||
+      (typeof stream.tenantId === "string" && stream.tenantId.length > 0))
+  );
+}
+
 function nextSeq(): string {
   // A process-local counter can repeat after a restart, and Math.random is not
   // an appropriate uniqueness source for money-accounting reservations. A UUID
@@ -586,12 +616,10 @@ export async function reserveCumulativeSpend(
       throw new Error(`invalid cumulative spend window: ${cap.windowSeconds}`);
   }
   const { stream } = input;
-  if (typeof stream.agentId !== "string" || stream.agentId.length === 0)
-    throw new Error("cumulative spend reserve requires agentId");
-  if (typeof stream.currency !== "string" || stream.currency.length === 0)
-    throw new Error("cumulative spend reserve requires currency");
+  if (!isValidStream(stream)) throw new Error("invalid cumulative spend stream");
 
   const now = input.now ?? Date.now();
+  if (!isValidTimestamp(now)) throw new Error("invalid cumulative spend timestamp");
   const retentionCutoff = now - RETENTION_MS;
   if (
     input.reservationId !== undefined &&
@@ -602,7 +630,7 @@ export async function reserveCumulativeSpend(
     throw new Error("invalid cumulative spend reservationId");
   }
   const reservationId = input.reservationId ?? `${now}:${nextSeq()}`;
-  if (stream.tenantId) {
+  if (stream.tenantId !== undefined) {
     const batch = await reserveCumulativeSpendBatch({
       groups: [
         {
@@ -662,6 +690,7 @@ export async function reserveCumulativeSpendBatch(input: {
   if (!Array.isArray(input.groups) || input.groups.length === 0)
     throw new Error("cumulative spend batch requires at least one group");
   const now = input.now ?? Date.now();
+  if (!isValidTimestamp(now)) throw new Error("invalid cumulative spend batch timestamp");
   const keys: string[] = [];
   const tombstoneKeys: string[] = [];
   const snapshots: LegacyBridgeSnapshot[] = [];
@@ -771,7 +800,14 @@ export async function releaseCumulativeSpend(input: {
   reservationId: string;
   amount: number;
 }): Promise<void> {
-  if (!isNonNegInt(input.amount)) return;
+  if (
+    !isNonNegInt(input.amount) ||
+    !isValidStream(input.stream) ||
+    !input.reservationId ||
+    input.reservationId.length > 200 ||
+    input.reservationId.includes("|")
+  )
+    return;
   const key = streamKey(input.stream);
   const member = `${input.reservationId}|${input.amount}|reserved`;
   const redis = getRedis();
@@ -790,7 +826,8 @@ export async function releaseLegacyCumulativeSpendAfterCutover(input: {
   reservationId: string;
   amount: number;
 }): Promise<void> {
-  if (!isNonNegInt(input.amount)) throw new Error("invalid legacy cumulative spend amount");
+  if (!isNonNegInt(input.amount) || !isValidStream(input.stream) || !input.stream.tenantId)
+    throw new Error("invalid legacy cumulative spend stream or amount");
   if (
     !input.reservationId ||
     input.reservationId.length > 200 ||
@@ -851,8 +888,9 @@ export async function releaseLegacyWindowedInvokeAfterCutover(input: {
 export async function getCumulativeSpendSum(
   input: CumulativeSpendStream & { windowSeconds: number; now?: number },
 ): Promise<CumulativeSpendSnapshot | null> {
-  if (!isValidWindow(input.windowSeconds)) return null;
+  if (!isValidWindow(input.windowSeconds) || !isValidStream(input)) return null;
   const now = input.now ?? Date.now();
+  if (!isValidTimestamp(now)) return null;
   const windowStart = now - input.windowSeconds * 1000;
   const retentionCutoff = now - RETENTION_MS;
   const key = streamKey(input);
@@ -914,7 +952,7 @@ export async function reserveWindowedInvoke(input: {
   try {
     const res = await reserveCumulativeSpend({
       stream: {
-        ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+        ...(input.tenantId !== undefined ? { tenantId: input.tenantId } : {}),
         agentId: input.agentId,
         scope: "operation",
         scopeKey: input.operationKey,
@@ -946,7 +984,7 @@ export async function releaseWindowedInvoke(input: {
 }): Promise<void> {
   await releaseCumulativeSpend({
     stream: {
-      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      ...(input.tenantId !== undefined ? { tenantId: input.tenantId } : {}),
       agentId: input.agentId,
       scope: "operation",
       scopeKey: input.operationKey,
@@ -969,7 +1007,7 @@ export async function getWindowedInvokeCount(input: {
   now?: number;
 }): Promise<number | null> {
   const snap = await getCumulativeSpendSum({
-    ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+    ...(input.tenantId !== undefined ? { tenantId: input.tenantId } : {}),
     agentId: input.agentId,
     scope: "operation",
     scopeKey: input.operationKey,
