@@ -176,6 +176,23 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     { bodyHash: string; response: TradeIdempotencyResponse; expiresAt: number }
   >();
 
+  // The in-memory idempotency fallbacks are bounded (SEC-043): expired entries
+  // are swept on store and the oldest entries are evicted past the cap, so a
+  // caller minting unique keys cannot grow process memory without bound.
+  // (Mirrors evm-swap.ts's MAX_IDEMPOTENCY_ENTRIES.)
+  const MAX_MEMORY_IDEMPOTENCY_ENTRIES = 1_000;
+  function sweepMemoryIdempotency(
+    map: Map<string, { bodyHash: string; response: TradeIdempotencyResponse; expiresAt: number }>,
+    now: number,
+  ): void {
+    for (const [entryKey, entry] of map) {
+      if (entry.expiresAt <= now || map.size >= MAX_MEMORY_IDEMPOTENCY_ENTRIES) {
+        map.delete(entryKey);
+      }
+      if (map.size < MAX_MEMORY_IDEMPOTENCY_ENTRIES) break;
+    }
+  }
+
   function getSessionManager(): TradeSessionManager {
     return new TradeSessionManager({ redis: getRedisClient() });
   }
@@ -346,6 +363,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     }
     return {
       store(response: TradeIdempotencyResponse) {
+        sweepMemoryIdempotency(memoryIdempotency, now);
         memoryIdempotency.set(mapKey, {
           bodyHash,
           response,
@@ -1263,6 +1281,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     }
     return {
       store(response: TradeIdempotencyResponse) {
+        sweepMemoryIdempotency(pmMemoryIdempotency, now);
         pmMemoryIdempotency.set(mapKey, {
           bodyHash,
           response,
