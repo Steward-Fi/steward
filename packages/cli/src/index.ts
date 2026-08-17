@@ -2,7 +2,17 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  constants as fsConstants,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { StewardApiClient } from "./api";
 import { boolFlag, intFlag, parseArgs, parseJsonFlag, required, stringFlag } from "./args";
@@ -25,6 +35,40 @@ type ArchiveChunkReference = {
 
 const MAX_ARCHIVE_CHUNKS = 2_048;
 const MAX_ARCHIVE_MANIFEST_BYTES = 768 * 1024;
+
+/** Read an untrusted archive file without following symlinks, blocking on
+ * special files, or allocating beyond its validated size. */
+export function readBoundedRegularFile(
+  path: string,
+  maxBytes: number,
+  expectedBytes?: number,
+): Buffer {
+  const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error(`Archive input is not a regular file: ${path}`);
+    if (!Number.isSafeInteger(stat.size) || stat.size < 1 || stat.size > maxBytes) {
+      throw new Error(`Archive input exceeds the ${maxBytes} byte limit: ${path}`);
+    }
+    if (expectedBytes !== undefined && stat.size !== expectedBytes) {
+      throw new Error(`Archive input size does not match the signed manifest: ${path}`);
+    }
+    const bytes = Buffer.alloc(stat.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (count === 0) break;
+      offset += count;
+    }
+    const extra = Buffer.alloc(1);
+    if (offset !== bytes.length || readSync(fd, extra, 0, 1, offset) !== 0) {
+      throw new Error(`Archive input changed while it was being read: ${path}`);
+    }
+    return bytes;
+  } finally {
+    closeSync(fd);
+  }
+}
 
 export function assertSafeArchiveChunks(
   chunks: unknown,
@@ -330,7 +374,12 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
   }
   if (action === "restore") {
     const inputDirectory = required(stringFlag(ctx.flags, "in"), "in");
-    const archive = JSON.parse(readFileSync(join(inputDirectory, "manifest.json"), "utf8")) as {
+    const archive = JSON.parse(
+      readBoundedRegularFile(
+        join(inputDirectory, "manifest.json"),
+        MAX_ARCHIVE_MANIFEST_BYTES,
+      ).toString("utf8"),
+    ) as {
       archiveId: string;
       manifest: { archiveId: string; chunks: Array<{ index: number; file: string }> };
       manifestSha256: string;
@@ -347,7 +396,11 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
       signature: archive.signature,
     });
     for (const chunk of archive.manifest.chunks) {
-      const jsonl = readFileSync(join(inputDirectory, chunk.file), "utf8");
+      const jsonl = readBoundedRegularFile(
+        join(inputDirectory, chunk.file),
+        1024 * 1024,
+        chunk.byteLength,
+      ).toString("utf8");
       await ctx.api.requestRaw(
         "PUT",
         `/audit/archives/${encodeURIComponent(archive.archiveId)}/restore/chunks/${chunk.index}`,

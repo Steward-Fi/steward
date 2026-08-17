@@ -3,8 +3,11 @@
 /** Offline verifier for a Steward signed JSONL audit archive directory. */
 
 import { createHash, createPublicKey, verify } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readSync } from "node:fs";
 import { dirname, join } from "node:path";
+
+const MAX_MANIFEST_BYTES = 1024 * 1024;
+const MAX_CHUNK_BYTES = 1024 * 1024;
 
 function fail(message) {
   console.error(`FAIL: ${message}`);
@@ -30,6 +33,37 @@ function canonicalBytes(value) {
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function readBoundedRegularFile(path, maxBytes, expectedBytes) {
+  let fd;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error("not a regular file");
+    if (!Number.isSafeInteger(stat.size) || stat.size < 1 || stat.size > maxBytes) {
+      throw new Error(`exceeds the ${maxBytes} byte limit`);
+    }
+    if (expectedBytes !== undefined && stat.size !== expectedBytes) {
+      throw new Error("size does not match the signed manifest");
+    }
+    const bytes = Buffer.alloc(stat.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (count === 0) break;
+      offset += count;
+    }
+    const extra = Buffer.alloc(1);
+    if (offset !== bytes.length || readSync(fd, extra, 0, 1, offset) !== 0) {
+      throw new Error("changed while being read");
+    }
+    return bytes;
+  } catch (error) {
+    throw new Error(`${path}: ${error.message}`);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 const manifestPath = process.argv[2];
@@ -61,7 +95,7 @@ if (!expectedFingerprint) {
 }
 let envelope;
 try {
-  envelope = JSON.parse(readFileSync(manifestPath, "utf8"));
+  envelope = JSON.parse(readBoundedRegularFile(manifestPath, MAX_MANIFEST_BYTES).toString("utf8"));
 } catch (error) {
   fail(`manifest cannot be read: ${error.message}`);
 }
@@ -108,7 +142,7 @@ for (let index = 0; index < manifest.chunks.length; index++) {
   const path = join(archiveDir, chunk.file);
   let raw;
   try {
-    raw = readFileSync(path);
+    raw = readBoundedRegularFile(path, MAX_CHUNK_BYTES, chunk.byteLength);
   } catch (error) {
     fail(`chunk ${index} cannot be read: ${error.message}`);
   }

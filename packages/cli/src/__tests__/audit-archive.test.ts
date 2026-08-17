@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { assertSafeArchiveChunks, assertSafeArchiveManifestTransport } from "../index";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  assertSafeArchiveChunks,
+  assertSafeArchiveManifestTransport,
+  readBoundedRegularFile,
+} from "../index";
 
 describe("audit archive filesystem boundaries", () => {
   test("accepts only canonical, sequential chunk basenames", () => {
@@ -53,5 +61,29 @@ describe("audit archive filesystem boundaries", () => {
     expect(() =>
       assertSafeArchiveManifestTransport({ chunks, padding: "x".repeat(768 * 1024) }),
     ).toThrow("safe API transport limit");
+  });
+
+  test("bounded reads reject oversized, symlink, and FIFO archive inputs without blocking", () => {
+    const directory = mkdtempSync(join(tmpdir(), "steward-archive-input-"));
+    try {
+      const regular = join(directory, "regular.jsonl");
+      writeFileSync(regular, "safe\n");
+      expect(readBoundedRegularFile(regular, 5, 5).toString("utf8")).toBe("safe\n");
+
+      const oversized = join(directory, "oversized.jsonl");
+      writeFileSync(oversized, Buffer.alloc(17));
+      expect(() => readBoundedRegularFile(oversized, 16)).toThrow("16 byte limit");
+
+      const symlink = join(directory, "symlink.jsonl");
+      symlinkSync(regular, symlink);
+      expect(() => readBoundedRegularFile(symlink, 16)).toThrow();
+
+      const fifo = join(directory, "fifo.jsonl");
+      const made = spawnSync("mkfifo", [fifo]);
+      expect(made.status).toBe(0);
+      expect(() => readBoundedRegularFile(fifo, 16)).toThrow("not a regular file");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
