@@ -130,8 +130,8 @@ describe("provider execution authorization v2 crypto", () => {
   it("domain separation: a v2 signature does not validate as a v1 HMAC of the same bytes", () => {
     // Same secret material fed to both, but v1 uses a different HKDF salt/info +
     // no domain prefix, so the digests must differ.
-    process.env.STEWARD_EXECUTION_AUTH_SECRET = "k1:shared-secret-entropy-abcdef";
-    process.env.STEWARD_JWT_SECRET = "shared-secret-entropy-abcdef";
+    process.env.STEWARD_EXECUTION_AUTH_SECRET = "k1:shared-secret-entropy-abcdef-padded32";
+    process.env.STEWARD_JWT_SECRET = "shared-secret-entropy-abcdef-padded32";
     const c = commitment({ keyId: "k1" });
     const v2sig = signProviderExecutionCommitmentV2(c);
     // Re-derive a v1-style HMAC by hand would require the v1 key; instead assert
