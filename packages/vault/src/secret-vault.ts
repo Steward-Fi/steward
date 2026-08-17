@@ -864,12 +864,14 @@ export class SecretVault {
 /**
  * SEC-164: the legacy-root decrypt fallback exists only so pre-domain-
  * separation secrets stay readable until they are re-encrypted under the
- * domain-separated root. It defaults to ENABLED for backward compatibility;
- * after `migrateLegacyRootSecrets` runs clean (and a verifying dry-run shows
- * every row under the domain root), operators set
- * STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK=false so the fallback fails closed
- * and full domain separation is enforced.
+ * domain-separated root. Production defaults to fail closed; an operator with
+ * unmigrated rows must explicitly acknowledge the temporary compatibility
+ * window with STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK=true, run the migration,
+ * then remove the flag. Non-production retains the compatibility default.
  */
 function allowLegacySecretRootFallback(): boolean {
-  return process.env.STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK !== "false";
+  const configured = process.env.STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK;
+  if (configured === "true") return true;
+  if (configured === "false") return false;
+  return process.env.NODE_ENV !== "production";
 }

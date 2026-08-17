@@ -201,6 +201,23 @@ describe("SEC-164 legacy-root secret re-encryption", () => {
     }
   });
 
+  it("defaults the legacy-root fallback off in production unless explicitly acknowledged", async () => {
+    const late = await insertLegacySecret("legacy-production", "legacy-production-value");
+    const priorNodeEnv = process.env.NODE_ENV;
+    delete process.env.STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK;
+    process.env.NODE_ENV = "production";
+    try {
+      await expect(vault.decryptSecret(TENANT_ID, late.id)).rejects.toThrow();
+      process.env.STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK = "true";
+      expect(await vault.decryptSecret(TENANT_ID, late.id)).toBe("legacy-production-value");
+    } finally {
+      delete process.env.STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK;
+      if (priorNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = priorNodeEnv;
+      await getDb().delete(secrets).where(eq(secrets.id, late.id));
+    }
+  });
+
   it("reports rows that authenticate under neither root and leaves them untouched", async () => {
     const [corrupt] = await getDb()
       .insert(secrets)

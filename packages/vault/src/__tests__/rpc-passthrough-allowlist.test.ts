@@ -14,7 +14,8 @@ const vault = new Vault({ masterPassword: "rpc-passthrough-allowlist-test" });
 const originalFetch = globalThis.fetch;
 const originalEnv = process.env.STEWARD_VAULT_RPC_ALLOWLIST;
 
-let fetchCalls: Array<{ url: string; method: string }>;
+let fetchCalls: Array<{ url: string; init?: RequestInit }>;
+let responseFactory: () => Response;
 
 function okRpcResponse(): Response {
   return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: "0x1" }), {
@@ -25,9 +26,10 @@ function okRpcResponse(): Response {
 
 beforeEach(() => {
   fetchCalls = [];
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
-    fetchCalls.push({ url: String(input), method: "POST" });
-    return okRpcResponse();
+  responseFactory = okRpcResponse;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    fetchCalls.push({ url: String(input), init });
+    return responseFactory();
   }) as typeof fetch;
   delete process.env.STEWARD_VAULT_RPC_ALLOWLIST;
 });
@@ -77,7 +79,7 @@ describe("rpcPassthrough allowlist (SEC-082)", () => {
     expect(fetchCalls.length).toBe(2);
   });
 
-  test("STEWARD_VAULT_RPC_ALLOWLIST replaces the default inventory (fail closed)", async () => {
+  test("STEWARD_VAULT_RPC_ALLOWLIST only tightens the default inventory", async () => {
     process.env.STEWARD_VAULT_RPC_ALLOWLIST = "eth_getLogs";
 
     // Operator-listed method passes...
@@ -98,5 +100,26 @@ describe("rpcPassthrough allowlist (SEC-082)", () => {
     await expect(vault.rpcPassthrough({ method: "eth_getCode", chainId: 84532 })).rejects.toThrow(
       /not allowed via RPC passthrough/,
     );
+  });
+
+  test("an env override cannot add a signing or unknown RPC method", async () => {
+    process.env.STEWARD_VAULT_RPC_ALLOWLIST = "eth_getCode,eth_sendRawTransaction";
+    await expect(vault.rpcPassthrough({ method: "eth_getCode", chainId: 84532 })).rejects.toThrow(
+      /contains an unsupported method/,
+    );
+    await expect(
+      vault.rpcPassthrough({ method: "eth_sendRawTransaction", chainId: 84532 }),
+    ).rejects.toThrow(/contains an unsupported method/);
+    expect(fetchCalls).toHaveLength(0);
+  });
+
+  test("disables redirects, applies a deadline, and rejects oversized responses", async () => {
+    responseFactory = () =>
+      new Response("{}", { headers: { "content-length": String(1024 * 1024 + 1) } });
+    await expect(vault.rpcPassthrough({ method: "eth_chainId", chainId: 84532 })).rejects.toThrow(
+      /exceeded maximum size/,
+    );
+    expect(fetchCalls[0]?.init?.redirect).toBe("error");
+    expect(fetchCalls[0]?.init?.signal).toBeInstanceOf(AbortSignal);
   });
 });

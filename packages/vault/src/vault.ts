@@ -274,7 +274,7 @@ const SOLANA_RPCS: Record<number, string> = {
  * methods (eth_sendTransaction, eth_sign*, personal_*, Solana sendTransaction/
  * signMessage/signTransaction/requestAirdrop, eth_accounts, admin_/debug_/
  * trace_/txpool_/miner_*) can never be proxied, regardless of the upstream.
- * STEWARD_VAULT_RPC_ALLOWLIST replaces this list wholesale (fail closed).
+ * STEWARD_VAULT_RPC_ALLOWLIST may only tighten this inventory (fail closed).
  */
 const DEFAULT_RPC_PASSTHROUGH_ALLOWLIST = [
   // EVM read-only
@@ -335,6 +335,62 @@ const DEFAULT_RPC_PASSTHROUGH_ALLOWLIST = [
   "minimumLedgerSlot",
   "simulateTransaction",
 ];
+const DEFAULT_RPC_PASSTHROUGH_METHODS = new Set(DEFAULT_RPC_PASSTHROUGH_ALLOWLIST);
+const RPC_PASSTHROUGH_TIMEOUT_MS = 10_000;
+const RPC_PASSTHROUGH_MAX_RESPONSE_BYTES = 1024 * 1024;
+
+async function readBoundedRpcResponse(response: Response): Promise<RpcResponse> {
+  if (!response.ok) {
+    void response.body?.cancel().catch(() => {});
+    throw new Error(`RPC request failed with status ${response.status}`);
+  }
+  const declared = response.headers.get("content-length");
+  if (declared !== null) {
+    const length = Number(declared);
+    if (
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      length > RPC_PASSTHROUGH_MAX_RESPONSE_BYTES
+    ) {
+      void response.body?.cancel().catch(() => {});
+      throw new Error("RPC response exceeded maximum size");
+    }
+  }
+  if (!response.body) throw new Error("RPC response was empty");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > RPC_PASSTHROUGH_MAX_RESPONSE_BYTES) {
+        void reader.cancel().catch(() => {});
+        throw new Error("RPC response exceeded maximum size");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw new Error("RPC response was malformed");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("RPC response was malformed");
+  }
+  return parsed as RpcResponse;
+}
 
 export function resolveSignVenueSelector(request: Pick<SignRequest, "venue">): string | null {
   return request.venue ?? null;
@@ -3435,7 +3491,7 @@ export class Vault {
    * Solana `signMessage`/`signTransaction`, or `admin_`/`debug_`/`trace_`
    * namespaces when an operator points `config.rpcUrl` at a node with unlocked
    * accounts), so only known read-only methods pass. Operators tighten or
-   * replace the inventory via STEWARD_VAULT_RPC_ALLOWLIST (comma-separated) —
+   * tighten the inventory via STEWARD_VAULT_RPC_ALLOWLIST (comma-separated) —
    * the same knob the API edge uses. Note the vault's own guards proxy
    * `eth_getCode` through here, so an override that omits it fails closed
    * (native-transfer code checks are denied, never bypassed).
@@ -3455,12 +3511,17 @@ export class Vault {
       throw new Error(`No RPC URL configured for chainId ${chainId}`);
     }
 
-    const allowlist = new Set(
-      (process.env.STEWARD_VAULT_RPC_ALLOWLIST ?? DEFAULT_RPC_PASSTHROUGH_ALLOWLIST.join(","))
-        .split(",")
-        .map((method) => method.trim())
-        .filter(Boolean),
-    );
+    const configured = process.env.STEWARD_VAULT_RPC_ALLOWLIST;
+    const configuredMethods = configured
+      ?.split(",")
+      .map((method) => method.trim())
+      .filter(Boolean);
+    if (configuredMethods?.some((method) => !DEFAULT_RPC_PASSTHROUGH_METHODS.has(method))) {
+      throw new Error("STEWARD_VAULT_RPC_ALLOWLIST contains an unsupported method");
+    }
+    const allowlist = configuredMethods
+      ? new Set(configuredMethods)
+      : DEFAULT_RPC_PASSTHROUGH_METHODS;
     if (!allowlist.has(request.method)) {
       throw new Error(
         `Method ${request.method} is not allowed via RPC passthrough - read-only methods only`,
@@ -3476,13 +3537,10 @@ export class Vault {
         method: request.method,
         params: request.params ?? [],
       }),
+      redirect: "error",
+      signal: AbortSignal.timeout(RPC_PASSTHROUGH_TIMEOUT_MS),
     });
-
-    if (!response.ok) {
-      throw new Error(`RPC request failed: ${response.status} ${response.statusText}`);
-    }
-
-    return (await response.json()) as RpcResponse;
+    return readBoundedRpcResponse(response);
   }
 
   // ──────────────────────────────────────────────────────────────────────

@@ -113,7 +113,7 @@ bun run scripts/migrate-legacy-secret-root.ts --confirm
 bun run scripts/migrate-legacy-secret-root.ts --dry-run
 ```
 
-Then set `STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK=false` on every consumer, restart, and perform a non-value-bearing smoke test of one secret injection. With the flag off, any row still requiring the legacy root fails closed with a decrypt error instead of silently using the shared root; rerun the migration if that surfaces a straggler. The fallback defaults to enabled, so deployments that have not run the migration keep working.
+Then remove `STEWARD_SECRET_VAULT_LEGACY_ROOT_FALLBACK=true` from every production consumer (or set it explicitly to `false`), restart, and perform a non-value-bearing smoke test of one secret injection. With the flag off, any row still requiring the legacy root fails closed with a decrypt error instead of silently using the shared root; rerun the migration if that surfaces a straggler. Production defaults to fail closed when the flag is unset. Set it to `true` only as a temporary, explicit compatibility acknowledgement while migrating legacy rows; non-production keeps the compatibility default.
 
 Rollback: the migration rewrites ciphertext only — plaintext, AAD, and row identity are unchanged — so there is no data restore beyond the standard backup protocol. Before the flag cutover, verification failure means rerunning the script; after it, unset the flag while you investigate. The contract test is `packages/vault/src/__tests__/secret-legacy-root-migration.test.ts`.
 
