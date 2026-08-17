@@ -91,6 +91,14 @@ describe("middleware security hardening", () => {
     expect(globalRateLimitSource).toContain('"Rate limit exceeded"');
   });
 
+  it("trims /ready fingerprint detail unless a probe token is presented (SEC-071)", () => {
+    expect(indexSource).toContain("function readyProbeAuthorized(");
+    expect(indexSource).toContain("STEWARD_READY_PROBE_TOKEN");
+    expect(indexSource).toContain("timingSafeEqual");
+    expect(indexSource).toContain('"x-steward-probe-token"');
+    expect(indexSource).toContain("checks: verbose ? checks : publicChecks");
+  });
+
   it("documents production security headers and dashboard CSP checks in source", () => {
     expect(securityHeadersSource).toContain('"X-Frame-Options": "DENY"');
     expect(securityHeadersSource).toContain('"Content-Security-Policy"');

@@ -12,6 +12,7 @@
  *   - `Bun.serve` plus SIGINT/SIGTERM graceful shutdown
  */
 
+import { createHash, timingSafeEqual } from "node:crypto";
 import { validateJwtSecretEnv } from "@stwd/auth";
 import { closeDb, getDb, getMigrationExpectation, runMigrations } from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
@@ -107,6 +108,21 @@ const requestLogCleanupTimer = setInterval(() => {
 //
 // Only mounted on the Bun entry. Workers expose `/health` (in app.ts) and rely
 // on the Cloudflare control plane for instance health.
+//
+// SEC-071: the full check payload discloses deployment fingerprint details
+// (migration tags, auth-store/Redis backend identity, whether
+// STEWARD_MASTER_PASSWORD is set, DB/proxy clock skew, error strings).
+// Unauthenticated callers get the same 200/503 status plus per-check ok flags
+// only; operators can set STEWARD_READY_PROBE_TOKEN and send it as
+// X-Steward-Probe-Token to receive the full diagnostic detail.
+
+function readyProbeAuthorized(presented: string | undefined): boolean {
+  const expected = process.env.STEWARD_READY_PROBE_TOKEN;
+  if (!expected || !presented) return false;
+  const a = createHash("sha256").update(expected).digest();
+  const b = createHash("sha256").update(presented).digest();
+  return timingSafeEqual(a, b);
+}
 
 app.get("/ready", async (c) => {
   const checks: Record<
@@ -225,12 +241,19 @@ app.get("/ready", async (c) => {
   };
 
   const allOk = Object.values(checks).every((check) => check.ok || check.required === false);
+  const verbose = readyProbeAuthorized(c.req.header("x-steward-probe-token"));
+  const publicChecks = Object.fromEntries(
+    Object.entries(checks).map(([name, check]) => [
+      name,
+      { ok: check.ok, ...(check.required === false ? { required: false } : {}) },
+    ]),
+  );
   return c.json(
     {
       status: allOk ? "ready" : "not_ready",
       version: API_VERSION,
       uptime: Math.floor((Date.now() - startTime) / 1000),
-      checks,
+      checks: verbose ? checks : publicChecks,
     },
     allOk ? 200 : 503,
   );
