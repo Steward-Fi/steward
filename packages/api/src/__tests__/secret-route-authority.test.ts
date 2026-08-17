@@ -13,13 +13,12 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
+import { withTenantAuditedTransaction } from "../services/audit";
 import {
   assertGovernedRouteUpdateIsSafe,
   assertNoOppositeAuthorityOverlap,
-  compensateCreatedSecretRoute,
-  compensateDeletedSecretRoute,
-  compensateUpdatedSecretRoute,
   lockSecretRouteNamespaces,
+  type RouteAuthorityTx,
   SecretRouteAuthorityConflict,
   secretRouteAuthorityPatternsOverlap,
 } from "../services/secret-route-authority";
@@ -34,6 +33,27 @@ const ACCOUNT = "72000000-0000-4000-8000-000000000011";
 const GOVERNED_OPERATION = "72000000-0000-4000-8000-000000000012";
 const RACE_OPERATION = "72000000-0000-4000-8000-000000000013";
 const USER = "72000000-0000-4000-8000-000000000099";
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+async function failRequiredAudit(
+  appendAudit: Parameters<Parameters<typeof withTenantAuditedTransaction>[1]>[1],
+) {
+  await appendAudit({
+    tenantId: `${TENANT}-wrong`,
+    actorType: "user",
+    actorId: USER,
+    action: "secret_route.test",
+    resourceType: "secret_route",
+    metadata: {},
+  });
+}
 
 describe("secret route authority exclusivity", () => {
   beforeAll(async () => {
@@ -303,23 +323,41 @@ describe("secret route authority exclusivity", () => {
     expect(() => assertGovernedRouteUpdateIsSafe(governed, { enabled: false })).not.toThrow();
   });
 
-  test("update compensation never rewrites a concurrently promoted route", async () => {
+  test("update and required audit roll back atomically before a concurrent promotion", async () => {
     await getDb()
       .update(secretRoutes)
       .set({ authorityMode: "legacy", providerOperationId: null, pathPattern: "/v1/items/*" })
       .where(eq(secretRoutes.id, GOVERNED));
-    const [before] = await getDb().select().from(secretRoutes).where(eq(secretRoutes.id, GOVERNED));
-    const [after] = await getDb()
-      .update(secretRoutes)
-      .set({ pathPattern: "/v1/changed/*" })
-      .where(eq(secretRoutes.id, GOVERNED))
-      .returning();
-
-    await getDb()
-      .update(secretRoutes)
-      .set({ authorityMode: "governed_v2", providerOperationId: GOVERNED_OPERATION })
-      .where(eq(secretRoutes.id, GOVERNED));
-    expect(await compensateUpdatedSecretRoute(getDb(), before, after)).toBe(false);
+    const mutated = deferred();
+    const failNow = deferred();
+    const update = withTenantAuditedTransaction(TENANT, async (txRaw, appendAudit) => {
+      const tx = txRaw as RouteAuthorityTx;
+      await lockSecretRouteNamespaces(tx, TENANT, [AGENT]);
+      await tx
+        .update(secretRoutes)
+        .set({ pathPattern: "/v1/changed/*" })
+        .where(eq(secretRoutes.id, GOVERNED));
+      mutated.resolve();
+      await failNow.promise;
+      await failRequiredAudit(appendAudit);
+    });
+    await mutated.promise;
+    const promote = getDb().transaction(async (tx) => {
+      await lockSecretRouteNamespaces(tx, TENANT, [AGENT]);
+      const [route] = await tx.select().from(secretRoutes).where(eq(secretRoutes.id, GOVERNED));
+      await assertNoOppositeAuthorityOverlap(tx, {
+        ...route,
+        agentId: AGENT,
+        authorityMode: "governed_v2",
+      });
+      await tx
+        .update(secretRoutes)
+        .set({ authorityMode: "governed_v2", providerOperationId: GOVERNED_OPERATION })
+        .where(eq(secretRoutes.id, GOVERNED));
+    });
+    failNow.resolve();
+    await expect(update).rejects.toThrow("audit event tenant does not match");
+    await promote;
     const [current] = await getDb()
       .select()
       .from(secretRoutes)
@@ -327,67 +365,123 @@ describe("secret route authority exclusivity", () => {
     expect(current).toMatchObject({
       authorityMode: "governed_v2",
       providerOperationId: GOVERNED_OPERATION,
-      pathPattern: "/v1/changed/*",
+      pathPattern: "/v1/items/*",
     });
-    await getDb()
-      .update(secretRoutes)
-      .set({ pathPattern: "/v1/items/*" })
-      .where(eq(secretRoutes.id, GOVERNED));
   });
 
-  test("create compensation never deletes a concurrently promoted route", async () => {
+  test("create and required audit roll back atomically before a concurrent promotion", async () => {
+    const createdId = "72000000-0000-4000-8000-000000000007";
     await getDb()
       .update(secretRoutes)
-      .set({ authorityMode: "legacy", providerOperationId: null })
-      .where(eq(secretRoutes.id, GOVERNED));
-    const [created] = await getDb()
-      .select()
-      .from(secretRoutes)
-      .where(eq(secretRoutes.id, GOVERNED));
-    await getDb()
-      .update(secretRoutes)
-      .set({ authorityMode: "governed_v2", providerOperationId: GOVERNED_OPERATION })
-      .where(eq(secretRoutes.id, GOVERNED));
+      .set({
+        authorityMode: "legacy",
+        providerOperationId: null,
+        hostPattern: "create-race.example.com",
+        pathPattern: "/v3/create/*",
+      })
+      .where(eq(secretRoutes.id, RACE_TARGET));
+    const mutated = deferred();
+    const failNow = deferred();
+    const create = withTenantAuditedTransaction(TENANT, async (txRaw, appendAudit) => {
+      const tx = txRaw as RouteAuthorityTx;
+      await lockSecretRouteNamespaces(tx, TENANT, [AGENT]);
+      const [created] = await tx
+        .insert(secretRoutes)
+        .values({
+          id: createdId,
+          tenantId: TENANT,
+          agentId: AGENT,
+          secretId: SECRET,
+          hostPattern: "create-race.example.com",
+          pathPattern: "/v3/create/item",
+          method: "POST",
+          injectAs: "header",
+          injectKey: "authorization",
+          enabled: true,
+        })
+        .returning();
+      await assertNoOppositeAuthorityOverlap(tx, { ...created, agentId: AGENT });
+      mutated.resolve();
+      await failNow.promise;
+      await failRequiredAudit(appendAudit);
+    });
+    await mutated.promise;
+    const promote = getDb().transaction(async (tx) => {
+      await lockSecretRouteNamespaces(tx, TENANT, [AGENT]);
+      const [route] = await tx.select().from(secretRoutes).where(eq(secretRoutes.id, RACE_TARGET));
+      await assertNoOppositeAuthorityOverlap(tx, {
+        ...route,
+        agentId: AGENT,
+        authorityMode: "governed_v2",
+      });
+      await tx
+        .update(secretRoutes)
+        .set({ authorityMode: "governed_v2", providerOperationId: RACE_OPERATION })
+        .where(eq(secretRoutes.id, RACE_TARGET));
+    });
+    failNow.resolve();
+    await expect(create).rejects.toThrow("audit event tenant does not match");
+    await promote;
+    expect(
+      await getDb().select().from(secretRoutes).where(eq(secretRoutes.id, createdId)),
+    ).toHaveLength(0);
+  });
 
-    expect(await compensateCreatedSecretRoute(getDb(), created)).toBe(false);
+  test("delete and required audit roll back atomically before promotion", async () => {
+    const deleteId = "72000000-0000-4000-8000-000000000008";
+    const deleteOperation = "72000000-0000-4000-8000-000000000018";
+    await getDb().insert(secretRoutes).values({
+      id: deleteId,
+      tenantId: TENANT,
+      agentId: AGENT,
+      secretId: SECRET,
+      hostPattern: "delete-race.example.com",
+      pathPattern: "/v4/delete/*",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "authorization",
+      enabled: true,
+    });
+    const mutated = deferred();
+    const failNow = deferred();
+    const remove = withTenantAuditedTransaction(TENANT, async (txRaw, appendAudit) => {
+      const tx = txRaw as RouteAuthorityTx;
+      await lockSecretRouteNamespaces(tx, TENANT, [AGENT]);
+      await tx.delete(secretRoutes).where(eq(secretRoutes.id, deleteId));
+      mutated.resolve();
+      await failNow.promise;
+      await failRequiredAudit(appendAudit);
+    });
+    await mutated.promise;
+    const promote = getDb().transaction(async (tx) => {
+      await lockSecretRouteNamespaces(tx, TENANT, [AGENT]);
+      const [route] = await tx.select().from(secretRoutes).where(eq(secretRoutes.id, deleteId));
+      await assertNoOppositeAuthorityOverlap(tx, {
+        ...route,
+        agentId: AGENT,
+        authorityMode: "governed_v2",
+      });
+      await tx.insert(providerOperations).values({
+        id: deleteOperation,
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        providerAccountId: ACCOUNT,
+        operationKey: "route.authority.delete-race",
+        riskClass: "write",
+        secretRouteId: deleteId,
+      });
+      await tx
+        .update(secretRoutes)
+        .set({ authorityMode: "governed_v2", providerOperationId: deleteOperation })
+        .where(eq(secretRoutes.id, deleteId));
+    });
+    failNow.resolve();
+    await expect(remove).rejects.toThrow("audit event tenant does not match");
+    await promote;
     const [current] = await getDb()
       .select()
       .from(secretRoutes)
-      .where(eq(secretRoutes.id, GOVERNED));
+      .where(eq(secretRoutes.id, deleteId));
     expect(current.authorityMode).toBe("governed_v2");
-  });
-
-  test("delete compensation refuses to recreate legacy overlap after concurrent promotion", async () => {
-    const deletedId = "72000000-0000-4000-8000-000000000007";
-    const [deleted] = await getDb()
-      .insert(secretRoutes)
-      .values({
-        id: deletedId,
-        tenantId: TENANT,
-        agentId: AGENT,
-        secretId: SECRET,
-        hostPattern: "api.example.com",
-        pathPattern: "/v1/delete-race/*",
-        method: "POST",
-        injectAs: "header",
-        injectKey: "authorization",
-        authorityMode: "legacy",
-        enabled: true,
-      })
-      .returning();
-    await getDb().delete(secretRoutes).where(eq(secretRoutes.id, deletedId));
-    await getDb()
-      .update(secretRoutes)
-      .set({ pathPattern: "/v1/delete-race/*" })
-      .where(eq(secretRoutes.id, GOVERNED));
-
-    expect(await compensateDeletedSecretRoute(getDb(), deleted)).toBe(false);
-    expect(
-      await getDb().select().from(secretRoutes).where(eq(secretRoutes.id, deletedId)),
-    ).toHaveLength(0);
-    await getDb()
-      .update(secretRoutes)
-      .set({ pathPattern: "/v1/items/*" })
-      .where(eq(secretRoutes.id, GOVERNED));
   });
 });
