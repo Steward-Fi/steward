@@ -278,6 +278,25 @@ function requireTenantAdminOrApiKey(c: Parameters<typeof requireTenantLevel>[0])
   return requireTenantAdminSession(c);
 }
 
+/**
+ * SEC-209: agent-token minting, vault-policy-set replacement, and agent
+ * deletion are root-equivalent mutations. A bare tenant API key (one shared
+ * secret, no step-up possible) is no longer sufficient for them by default —
+ * they require a human owner/admin session with recent MFA, consistent with
+ * the sibling webhooks/secrets/audit surfaces. Operators that depend on
+ * machine automation can explicitly restore the legacy api-key path via
+ * STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS=true (documented as fully-root).
+ */
+function allowApiKeyAdminMutations(c: Parameters<typeof requireTenantLevel>[0]): boolean {
+  return (
+    c.get("authType") === "api-key" && process.env.STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS === "true"
+  );
+}
+
+function requireSensitiveMutationPrincipal(c: Parameters<typeof requireTenantLevel>[0]): boolean {
+  return requireTenantAdminSession(c) || allowApiKeyAdminMutations(c);
+}
+
 function generateAgentId(): string {
   return `agt_${crypto.randomUUID()}`;
 }
@@ -874,6 +893,47 @@ function hasBuilderPerpAsset(assets: readonly string[]): boolean {
   return assets.some((asset) => /^[a-z0-9]+:[A-Z0-9]+$/.test(asset));
 }
 
+/**
+ * SEC-208: `agentPolicies` is the enforcement source for trade-session
+ * ceilings, so an agent token must never RAISE its own limits (that would
+ * defeat the human-ceiling model — any compromised agent token could mint
+ * itself unlimited trading authority). Returns a human-readable violation
+ * when `next` loosens any dimension relative to `before` (the current row,
+ * or the platform defaults when no row exists yet); null when the change is
+ * a pure tightening. Widening requires the owner/admin + recent-MFA path.
+ */
+function policyLooseningViolation(
+  before: AgentTradePolicySnapshot,
+  next: {
+    dailyCap: number;
+    perOrderCap: number;
+    leverageCap: number;
+    allowedAssets: string[];
+    allowedVenues: string[];
+    allowBuilderPerps: boolean;
+  },
+): string | null {
+  if (next.dailyCap > before.dailyCap) {
+    return `dailyCap cannot be raised above ${before.dailyCap} with an agent token (use an owner/admin session with recent MFA to loosen limits)`;
+  }
+  if (next.perOrderCap > before.perOrderCap) {
+    return `perOrderCap cannot be raised above ${before.perOrderCap} with an agent token (use an owner/admin session with recent MFA to loosen limits)`;
+  }
+  if (next.leverageCap > before.leverageCap) {
+    return `leverageCap cannot be raised above ${before.leverageCap} with an agent token (use an owner/admin session with recent MFA to loosen limits)`;
+  }
+  if (!next.allowedAssets.every((asset) => before.allowedAssets.includes(asset))) {
+    return "allowedAssets cannot be widened with an agent token (use an owner/admin session with recent MFA to loosen limits)";
+  }
+  if (!next.allowedVenues.every((venue) => before.allowedVenues.includes(venue))) {
+    return "allowedVenues cannot be widened with an agent token (use an owner/admin session with recent MFA to loosen limits)";
+  }
+  if (next.allowBuilderPerps && !before.allowBuilderPerps) {
+    return "allowBuilderPerps cannot be enabled with an agent token (use an owner/admin session with recent MFA to loosen limits)";
+  }
+  return null;
+}
+
 // ─── Create agent ─────────────────────────────────────────────────────────────
 
 agentRoutes.post("/", async (c) => {
@@ -1318,7 +1378,9 @@ agentRoutes.post("/:agentId/token", async (c) => {
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
 
-  if (!requireTenantAdminOrApiKey(c)) {
+  // SEC-209: minting agent tokens is root-equivalent — human admin session
+  // (API key only via explicit STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS opt-in).
+  if (!requireSensitiveMutationPrincipal(c)) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -1600,17 +1662,33 @@ agentRoutes.get("/:agentId/policy", async (c) => {
 });
 
 agentRoutes.put("/:agentId/policy", async (c) => {
-  if (c.get("authType") !== "agent-token") {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Agent policy updates require agent JWT authentication" },
-      403,
-    );
-  }
-  if (!requireAgentAccess(c)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Forbidden: token scope does not match agent" },
-      403,
-    );
+  // SEC-208: two write paths into the trade-policy table —
+  //   1. agent token (self-update): TIGHTEN-ONLY, enforced below after
+  //      validation via policyLooseningViolation.
+  //   2. human owner/admin session with recent MFA: unrestricted (subject to
+  //      the platform ceilings), restoring the human-ceiling administration
+  //      path this route previously lacked.
+  // Tenant API keys stay rejected, as before.
+  const isAgentSelfUpdate = c.get("authType") === "agent-token";
+  if (isAgentSelfUpdate) {
+    if (!requireAgentAccess(c)) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Forbidden: token scope does not match agent" },
+        403,
+      );
+    }
+  } else {
+    if (!requireTenantAdminSession(c)) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Agent policy updates require an agent token or an owner/admin session",
+        },
+        403,
+      );
+    }
+    const mfaResponse = requireRecentAdminMfa(c, "Agent policy updates");
+    if (mfaResponse) return mfaResponse;
   }
 
   const tenantId = c.get("tenantId");
@@ -1683,7 +1761,25 @@ agentRoutes.put("/:agentId/policy", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "perOrderCap cannot exceed dailyCap" }, 400);
   }
 
-  const updatedBy = c.get("agentSubject") ?? `agent:${agentId}`;
+  // SEC-208: agent self-updates are tighten-only — reject any loosening here
+  // (fail closed, AFTER input validation so malformed bodies still 400).
+  if (isAgentSelfUpdate) {
+    const loosening = policyLooseningViolation(before, {
+      dailyCap: dailyCapValue,
+      perOrderCap: perOrderCapValue,
+      leverageCap: leverageCapValue,
+      allowedAssets: allowedAssetsValue,
+      allowedVenues: allowedVenuesValue,
+      allowBuilderPerps: allowBuilderPerpsValue,
+    });
+    if (loosening) {
+      return c.json<ApiResponse>({ ok: false, error: loosening }, 403);
+    }
+  }
+
+  const updatedBy = isAgentSelfUpdate
+    ? (c.get("agentSubject") ?? `agent:${agentId}`)
+    : (c.get("userId") ?? "unknown");
   const updatedReason = body.reason.trim();
   const [upserted] = await db
     .insert(agentPolicies)
@@ -1720,7 +1816,7 @@ agentRoutes.put("/:agentId/policy", async (c) => {
   const diff = policyDiff(before, after);
   await writeAuditEvent({
     tenantId,
-    actorType: "agent",
+    actorType: isAgentSelfUpdate ? "agent" : "user",
     actorId: updatedBy,
     action: "agent.policy.updated",
     resourceType: "agent_policy",
@@ -1770,7 +1866,9 @@ agentRoutes.get("/:agentId", async (c) => {
 // ─── Delete agent ─────────────────────────────────────────────────────────────
 
 agentRoutes.delete("/:agentId", async (c) => {
-  if (!requireTenantAdminOrApiKey(c)) {
+  // SEC-209: deleting an agent destroys its key material — human admin
+  // session (API key only via explicit opt-in).
+  if (!requireSensitiveMutationPrincipal(c)) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -3448,7 +3546,9 @@ agentRoutes.get("/:agentId/policies", async (c) => {
 // ─── Update agent policies ────────────────────────────────────────────────────
 
 agentRoutes.put("/:agentId/policies", async (c) => {
-  if (!requireTenantAdminOrApiKey(c)) {
+  // SEC-209: replacing an agent's vault policy set removes its spend caps —
+  // human admin session (API key only via explicit opt-in).
+  if (!requireSensitiveMutationPrincipal(c)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Policy updates require owner or admin session" },
       403,

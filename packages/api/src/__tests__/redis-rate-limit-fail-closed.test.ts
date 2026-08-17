@@ -105,4 +105,35 @@ describe("Redis rate-limit wrappers", () => {
     expect(result.remaining).toBe(Infinity);
     expect(checkRateLimitMock).not.toHaveBeenCalled();
   });
+
+  it("SEC-016: fails closed when Redis is configured but unavailable at boot", async () => {
+    // REDIS_URL set (production posture) but the connection fails: the helpers
+    // must NOT silently disable rate limiting.
+    pingMock.mockImplementation(async () => {
+      throw new Error("connect ECONNREFUSED");
+    });
+    expect(await redisMiddleware.initRedis()).toBe(false);
+
+    const proxyResult = await redisMiddleware.checkProxyRateLimit(
+      "agent-proxy",
+      "api.example.test",
+      60_000,
+      10,
+    );
+    expect(proxyResult).toEqual({ allowed: false, remaining: 0, resetMs: 60_000 });
+
+    const agentResult = await redisMiddleware.checkAgentRateLimit("agent-vault", 60_000, 10);
+    expect(agentResult).toEqual({ allowed: false, remaining: 0, resetMs: 60_000 });
+    expect(checkRateLimitMock).not.toHaveBeenCalled();
+  });
+
+  it("SEC-016: keeps the unconfigured local-development agent path permissive", async () => {
+    delete process.env.REDIS_URL;
+    await redisMiddleware.shutdownRedis();
+
+    const result = await redisMiddleware.checkAgentRateLimit("agent-vault", 60_000, 10);
+
+    expect(result.allowed).toBe(true);
+    expect(result.remaining).toBe(Infinity);
+  });
 });

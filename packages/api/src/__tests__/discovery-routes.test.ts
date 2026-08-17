@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
 import {
   agentRegistrations,
   agents,
@@ -11,6 +11,15 @@ import {
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
+
+// SEC-017: registration-time agent-card URL validation now resolves DNS and
+// fails closed on unresolvable hosts. The tests below intentionally use
+// `.invalid` hostnames as *syntactically* valid public-looking URLs, so mock
+// the resolver to a public answer — the string-level rejections in
+// "rejects unsafe ERC-8004 agent card URLs" never reach DNS.
+mock.module("node:dns/promises", () => ({
+  lookup: async () => [{ address: "93.184.216.34", family: 4 }],
+}));
 
 describe("public discovery routes", () => {
   let discoveryRoutes: typeof import("../routes/erc8004").discoveryRoutes;

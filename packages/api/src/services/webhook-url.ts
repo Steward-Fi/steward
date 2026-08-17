@@ -1,3 +1,4 @@
+import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
 const ALLOW_INSECURE_WEBHOOK_URLS = process.env.STEWARD_ALLOW_INSECURE_WEBHOOK_URLS === "true";
@@ -143,4 +144,63 @@ export function validateWebhookUrl(url: string): string | null {
   } catch {
     return "url must be a valid HTTPS URL";
   }
+}
+
+// ─── DNS-resolving validation (SEC-017) ──────────────────────────────────────
+
+export type DnsAnswer = { address: string; family: number };
+export type DnsResolver = (hostname: string) => Promise<DnsAnswer[]>;
+
+const defaultResolver: DnsResolver = (hostname) => lookup(hostname, { all: true, verbatim: true });
+
+function isNonPublicAddress(address: string): boolean {
+  const normalized = address.toLowerCase();
+  const version = isIP(normalized);
+  if (version === 4) return isNonPublicIpv4(normalized);
+  if (version === 6) return isNonPublicIpv6(normalized);
+  // Unexpected answer form — fail closed.
+  return true;
+}
+
+/**
+ * SEC-017: `validateWebhookUrl` only inspects the hostname STRING, so a name
+ * like `169.254.169.254.nip.io` (public DNS → link-local) or a DNS rebinding
+ * (public A record at config time, private at fetch time) passes it. This
+ * async variant additionally resolves the hostname and rejects when ANY
+ * answer is a non-public address, failing closed on resolution errors. Use it
+ * at registration time AND at delivery time (fresh answers close the
+ * config→fetch rebinding window). The resolver is injectable for tests.
+ */
+export async function validateWebhookUrlResolved(
+  url: string,
+  resolver: DnsResolver = defaultResolver,
+): Promise<string | null> {
+  const stringError = validateWebhookUrl(url);
+  if (stringError) return stringError;
+
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname
+      .replace(/^\[|\]$/g, "")
+      .replace(/\.+$/g, "")
+      .toLowerCase();
+  } catch {
+    return "url must be a valid HTTPS URL";
+  }
+  // IP literals are fully covered by the string-level checks above.
+  if (isIP(hostname)) return null;
+
+  let answers: DnsAnswer[];
+  try {
+    answers = await resolver(hostname);
+  } catch {
+    return "url host could not be resolved";
+  }
+  if (answers.length === 0) return "url host could not be resolved";
+  for (const answer of answers) {
+    if (isNonPublicAddress(answer.address)) {
+      return "url host must resolve to a public address";
+    }
+  }
+  return null;
 }

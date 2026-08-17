@@ -43,7 +43,12 @@
     "/v2/workspaces",
     "/v2/provider-accounts",
     "/v2/provider-role-bindings",
-    "/v2/provider-grants"
+    "/v2/provider-grants",
+    "/v1/kms",
+    "/v2/provider-actions",
+    "/dashboard",
+    "/agent-enroll",
+    "/v1/agent-enroll"
   ],
   "tags": [
     {
@@ -417,14 +422,14 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -722,14 +727,14 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -1040,14 +1045,14 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -1356,14 +1361,14 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -1658,14 +1663,14 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -1981,14 +1986,14 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -2281,14 +2286,14 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -2585,14 +2590,14 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -2889,14 +2894,14 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -3193,14 +3198,14 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -3490,14 +3495,14 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -3758,14 +3763,14 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -4069,14 +4074,14 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -4380,14 +4385,14 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -4645,14 +4650,14 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -4944,14 +4949,14 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -5208,14 +5213,14 @@
           "sensitive": true,
           "sensitivePrefix": "/auth",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -5503,6 +5508,29 @@
               }
             }
           },
+          "408": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
           "409": {
             "description": "JSON response",
             "content": {
@@ -5525,6 +5553,78 @@
                 }
               }
             }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Steward-Request-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Expires-At",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signing-Key-Id",
+            "in": "header",
+            "required": false,
+            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-steward-hardening": {
+          "sensitive": true,
+          "sensitivePrefix": "/v2/provider-actions",
+          "requestExpiry": {
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "acceptedHeaders": [
+              "X-Steward-Request-Timestamp",
+              "X-Steward-Request-Expires-At"
+            ]
+          },
+          "authorizationSignature": {
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
+            "header": "X-Steward-Signature",
+            "schemes": [
+              "v1=hmac-sha256",
+              "p256=ecdsa-secp256r1"
+            ],
+            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+          },
+          "idempotency": {
+            "header": "Idempotency-Key",
+            "requiredForSignedRequests": true,
+            "replayStorage": "enabled when callers provide a key in a replay-safe authenticated context"
           }
         }
       }
@@ -5960,14 +6060,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/workspaces",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -6268,14 +6368,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/workspaces",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -6731,14 +6831,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/provider-accounts",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -7039,14 +7139,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/provider-accounts",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -7512,14 +7612,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/provider-accounts",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -7975,14 +8075,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/provider-role-bindings",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -8283,14 +8383,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/provider-role-bindings",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -8746,14 +8846,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/provider-grants",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -9054,14 +9154,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v2/provider-grants",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -9895,6 +9995,29 @@
               }
             }
           },
+          "408": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
           "409": {
             "description": "JSON response",
             "content": {
@@ -9917,6 +10040,78 @@
                 }
               }
             }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Steward-Request-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Expires-At",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signing-Key-Id",
+            "in": "header",
+            "required": false,
+            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-steward-hardening": {
+          "sensitive": true,
+          "sensitivePrefix": "/v2/provider-actions",
+          "requestExpiry": {
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "acceptedHeaders": [
+              "X-Steward-Request-Timestamp",
+              "X-Steward-Request-Expires-At"
+            ]
+          },
+          "authorizationSignature": {
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
+            "header": "X-Steward-Signature",
+            "schemes": [
+              "v1=hmac-sha256",
+              "p256=ecdsa-secp256r1"
+            ],
+            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+          },
+          "idempotency": {
+            "header": "Idempotency-Key",
+            "requiredForSignedRequests": true,
+            "replayStorage": "enabled when callers provide a key in a replay-safe authenticated context"
           }
         }
       }
@@ -10092,6 +10287,29 @@
               }
             }
           },
+          "408": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
           "409": {
             "description": "JSON response",
             "content": {
@@ -10114,6 +10332,78 @@
                 }
               }
             }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Steward-Request-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Expires-At",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signing-Key-Id",
+            "in": "header",
+            "required": false,
+            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-steward-hardening": {
+          "sensitive": true,
+          "sensitivePrefix": "/v2/provider-actions",
+          "requestExpiry": {
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
+            "acceptedHeaders": [
+              "X-Steward-Request-Timestamp",
+              "X-Steward-Request-Expires-At"
+            ]
+          },
+          "authorizationSignature": {
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
+            "header": "X-Steward-Signature",
+            "schemes": [
+              "v1=hmac-sha256",
+              "p256=ecdsa-secp256r1"
+            ],
+            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+          },
+          "idempotency": {
+            "header": "Idempotency-Key",
+            "requiredForSignedRequests": true,
+            "replayStorage": "enabled when callers provide a key in a replay-safe authenticated context"
           }
         }
       }
@@ -12212,14 +12502,14 @@
           "sensitive": true,
           "sensitivePrefix": "/accounts",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -13385,14 +13675,14 @@
           "sensitive": true,
           "sensitivePrefix": "/accounts",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -13639,14 +13929,14 @@
           "sensitive": true,
           "sensitivePrefix": "/accounts",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -14806,14 +15096,14 @@
           "sensitive": true,
           "sensitivePrefix": "/accounts",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -15320,14 +15610,14 @@
           "sensitive": true,
           "sensitivePrefix": "/accounts",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -16491,14 +16781,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/accounts",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -17664,14 +17954,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/accounts",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -17918,14 +18208,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/accounts",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -19085,14 +19375,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/accounts",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -19599,14 +19889,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/accounts",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -20145,14 +20435,14 @@
           "sensitive": true,
           "sensitivePrefix": "/policies",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -20543,14 +20833,14 @@
           "sensitive": true,
           "sensitivePrefix": "/policies",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -21070,14 +21360,14 @@
           "sensitive": true,
           "sensitivePrefix": "/policies",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -21321,14 +21611,14 @@
           "sensitive": true,
           "sensitivePrefix": "/policies",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -21621,14 +21911,14 @@
           "sensitive": true,
           "sensitivePrefix": "/policies",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -22167,14 +22457,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/policies",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -22565,14 +22855,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/policies",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -23092,14 +23382,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/policies",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -23343,14 +23633,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/policies",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -23643,14 +23933,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/policies",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -24204,14 +24494,14 @@
           "sensitive": true,
           "sensitivePrefix": "/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -24731,14 +25021,14 @@
           "sensitive": true,
           "sensitivePrefix": "/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -24978,14 +25268,14 @@
           "sensitive": true,
           "sensitivePrefix": "/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -25539,14 +25829,14 @@
           "sensitive": true,
           "sensitivePrefix": "/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -25869,14 +26159,14 @@
           "sensitive": true,
           "sensitivePrefix": "/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -26395,14 +26685,14 @@
           "sensitive": true,
           "sensitivePrefix": "/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -26642,14 +26932,14 @@
           "sensitive": true,
           "sensitivePrefix": "/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -27203,14 +27493,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -27730,14 +28020,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -27977,14 +28267,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -28538,14 +28828,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -28868,14 +29158,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -29394,14 +29684,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -29641,14 +29931,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/condition-sets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -30562,14 +30852,14 @@
           "sensitive": true,
           "sensitivePrefix": "/agents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -31049,14 +31339,14 @@
           "sensitive": true,
           "sensitivePrefix": "/agents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -31419,14 +31709,14 @@
           "sensitive": true,
           "sensitivePrefix": "/agents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -32053,14 +32343,14 @@
           "sensitive": true,
           "sensitivePrefix": "/agents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -32444,14 +32734,14 @@
           "sensitive": true,
           "sensitivePrefix": "/agents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -32766,14 +33056,14 @@
           "sensitive": true,
           "sensitivePrefix": "/agents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -33687,14 +33977,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/agents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -34174,14 +34464,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/agents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -34544,14 +34834,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/agents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -35178,14 +35468,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/agents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -35569,14 +35859,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/agents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -35891,14 +36181,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/agents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -36980,14 +37270,14 @@
           "sensitive": true,
           "sensitivePrefix": "/intents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -37837,14 +38127,14 @@
           "sensitive": true,
           "sensitivePrefix": "/intents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -38326,14 +38616,14 @@
           "sensitive": true,
           "sensitivePrefix": "/intents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -38814,14 +39104,14 @@
           "sensitive": true,
           "sensitivePrefix": "/intents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -39302,14 +39592,14 @@
           "sensitive": true,
           "sensitivePrefix": "/intents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -39790,14 +40080,14 @@
           "sensitive": true,
           "sensitivePrefix": "/intents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -40278,14 +40568,14 @@
           "sensitive": true,
           "sensitivePrefix": "/intents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -40766,14 +41056,14 @@
           "sensitive": true,
           "sensitivePrefix": "/intents",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -45229,14 +45519,14 @@
           "sensitive": true,
           "sensitivePrefix": "/user",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -45557,14 +45847,14 @@
           "sensitive": true,
           "sensitivePrefix": "/user",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -46323,14 +46613,14 @@
           "sensitive": true,
           "sensitivePrefix": "/user",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -46726,14 +47016,14 @@
           "sensitive": true,
           "sensitivePrefix": "/user",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -48571,14 +48861,14 @@
           "sensitive": true,
           "sensitivePrefix": "/wallets/batch",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -48949,14 +49239,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/wallets/batch",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -49530,14 +49820,14 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -49944,14 +50234,14 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -50715,14 +51005,14 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -51049,14 +51339,14 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -51518,14 +51808,14 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -52089,14 +52379,14 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -52553,14 +52843,14 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -53111,14 +53401,14 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -53877,14 +54167,14 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -54211,14 +54501,14 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -54542,14 +54832,14 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -55095,14 +55385,14 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -55436,14 +55726,14 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -55781,14 +56071,14 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -56060,14 +56350,14 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -56396,14 +56686,14 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -57099,14 +57389,14 @@
           "sensitive": true,
           "sensitivePrefix": "/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -57680,14 +57970,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -58094,14 +58384,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -58865,14 +59155,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -59199,14 +59489,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -59668,14 +59958,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -60239,14 +60529,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -60703,14 +60993,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -61261,14 +61551,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -62027,14 +62317,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -62361,14 +62651,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -62692,14 +62982,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -63245,14 +63535,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -63586,14 +63876,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -63931,14 +64221,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -64210,14 +64500,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -64546,14 +64836,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -65249,14 +65539,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/adapters",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -65885,14 +66175,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/users",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -66233,14 +66523,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/users",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -66798,14 +67088,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/users",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -67131,14 +67421,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/users",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -67486,14 +67776,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/users",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -68071,14 +68361,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/users",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -69749,14 +70039,14 @@
           "sensitive": true,
           "sensitivePrefix": "/audit",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -70474,14 +70764,14 @@
           "sensitive": true,
           "sensitivePrefix": "/secrets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -71095,14 +71385,14 @@
           "sensitive": true,
           "sensitivePrefix": "/secrets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -71479,14 +71769,14 @@
           "sensitive": true,
           "sensitivePrefix": "/secrets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -71731,14 +72021,14 @@
           "sensitive": true,
           "sensitivePrefix": "/secrets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -72249,14 +72539,14 @@
           "sensitive": true,
           "sensitivePrefix": "/secrets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -72501,14 +72791,14 @@
           "sensitive": true,
           "sensitivePrefix": "/secrets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -72823,14 +73113,14 @@
           "sensitive": true,
           "sensitivePrefix": "/secrets",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -73451,14 +73741,14 @@
           "sensitive": true,
           "sensitivePrefix": "/webhooks",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -73848,14 +74138,14 @@
           "sensitive": true,
           "sensitivePrefix": "/webhooks",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -74104,14 +74394,14 @@
           "sensitive": true,
           "sensitivePrefix": "/webhooks",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -74377,14 +74667,14 @@
           "sensitive": true,
           "sensitivePrefix": "/webhooks",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -75274,14 +75564,14 @@
           "sensitive": true,
           "sensitivePrefix": "/webhooks",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -75594,14 +75884,14 @@
           "sensitive": true,
           "sensitivePrefix": "/webhooks",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -76402,14 +76692,14 @@
           "sensitive": true,
           "sensitivePrefix": "/approvals",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -76761,14 +77051,14 @@
           "sensitive": true,
           "sensitivePrefix": "/approvals",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -77354,14 +77644,14 @@
           "sensitive": true,
           "sensitivePrefix": "/approvals",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -78225,14 +78515,14 @@
           "sensitive": true,
           "sensitivePrefix": "/global-wallet",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -78865,14 +79155,14 @@
           "sensitive": true,
           "sensitivePrefix": "/global-wallet",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -79213,14 +79503,14 @@
           "sensitive": true,
           "sensitivePrefix": "/global-wallet",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -79631,14 +79921,14 @@
           "sensitive": true,
           "sensitivePrefix": "/global-wallet",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -79947,14 +80237,14 @@
           "sensitive": true,
           "sensitivePrefix": "/global-wallet",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -80464,14 +80754,14 @@
           "sensitive": true,
           "sensitivePrefix": "/trade",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -81007,14 +81297,14 @@
           "sensitive": true,
           "sensitivePrefix": "/trade",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -81438,14 +81728,14 @@
           "sensitive": true,
           "sensitivePrefix": "/trade",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -81782,14 +82072,14 @@
           "sensitive": true,
           "sensitivePrefix": "/trade",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -82110,14 +82400,14 @@
           "sensitive": true,
           "sensitivePrefix": "/trade",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -82508,14 +82798,14 @@
           "sensitive": true,
           "sensitivePrefix": "/trade",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -82843,14 +83133,14 @@
           "sensitive": true,
           "sensitivePrefix": "/trade",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -83180,14 +83470,14 @@
           "sensitive": true,
           "sensitivePrefix": "/trade",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -83532,14 +83822,14 @@
           "sensitive": true,
           "sensitivePrefix": "/trade",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -84049,14 +84339,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/trade",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -84592,14 +84882,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/trade",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -85023,14 +85313,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/trade",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -85367,14 +85657,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/trade",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -85695,14 +85985,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/trade",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -86093,14 +86383,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/trade",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -86428,14 +86718,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/trade",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -86765,14 +87055,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/trade",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -87117,14 +87407,14 @@
           "sensitive": true,
           "sensitivePrefix": "/v1/trade",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -88043,14 +88333,14 @@
           "sensitive": true,
           "sensitivePrefix": "/tenants",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -88532,14 +88822,14 @@
           "sensitive": true,
           "sensitivePrefix": "/tenants",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -88980,14 +89270,14 @@
           "sensitive": true,
           "sensitivePrefix": "/tenants",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -90088,14 +90378,14 @@
           "sensitive": true,
           "sensitivePrefix": "/tenants",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -90416,14 +90706,14 @@
           "sensitive": true,
           "sensitivePrefix": "/tenants",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -90966,14 +91256,14 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -91277,14 +91567,14 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -91524,14 +91814,14 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -92204,14 +92494,14 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -92471,14 +92761,14 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -92808,14 +93098,14 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -93506,14 +93796,14 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -93815,14 +94105,14 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -94206,14 +94496,14 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -94765,14 +95055,14 @@
           "sensitive": true,
           "sensitivePrefix": "/platform",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -95571,14 +95861,14 @@
           "sensitive": true,
           "sensitivePrefix": "/user",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -96107,14 +96397,14 @@
           "sensitive": true,
           "sensitivePrefix": "/vault",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -96424,14 +96714,14 @@
           "sensitive": true,
           "sensitivePrefix": "/vault",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -96935,14 +97225,14 @@
           "sensitive": true,
           "sensitivePrefix": "/vault",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -97564,14 +97854,14 @@
           "sensitive": true,
           "sensitivePrefix": "/vault",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -98070,14 +98360,14 @@
           "sensitive": true,
           "sensitivePrefix": "/vault",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -98678,14 +98968,14 @@
           "sensitive": true,
           "sensitivePrefix": "/vault",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
@@ -99249,14 +99539,14 @@
           "sensitive": true,
           "sensitivePrefix": "/vault",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
