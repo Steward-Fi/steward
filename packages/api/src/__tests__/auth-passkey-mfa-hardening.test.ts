@@ -41,4 +41,25 @@ describe("passkey MFA hardening", () => {
     expect(counterUpdate).toBeGreaterThan(consumeChallenge);
     expect(mfaMethod).toBeGreaterThan(counterUpdate);
   });
+
+  it("rejects passkey counter regression before persisting the counter (SEC-141)", () => {
+    // Both the login route and the MFA complete/verify handler must reject a
+    // non-increasing counter from an authenticator that previously reported
+    // one — and must do so before updating the stored counter.
+    const guard = "verification.authenticationInfo.newCounter <= cred.counter";
+
+    const mfaStart = authSource.indexOf("const completePasskeyMfaHandler");
+    expect(mfaStart).toBeGreaterThanOrEqual(0);
+    const mfaGuard = authSource.indexOf(guard, mfaStart);
+    const mfaCounterUpdate = authSource.indexOf(".set({ counter:", mfaStart);
+    expect(mfaGuard).toBeGreaterThan(mfaStart);
+    expect(mfaGuard).toBeLessThan(mfaCounterUpdate);
+
+    const loginStart = authSource.indexOf('auth.post("/passkey/login/verify"');
+    expect(loginStart).toBeGreaterThanOrEqual(0);
+    const loginGuard = authSource.indexOf(guard, loginStart);
+    const loginCounterUpdate = authSource.indexOf(".set({ counter:", loginStart);
+    expect(loginGuard).toBeGreaterThan(loginStart);
+    expect(loginGuard).toBeLessThan(loginCounterUpdate);
+  });
 });

@@ -7287,6 +7287,17 @@ const completePasskeyMfaHandler = async (c: Context) => {
     return c.json<ApiResponse>({ ok: false, error: "User is not a member of this tenant" }, 403);
   }
 
+  // SEC-141: reject counter regression. Once an authenticator has reported a
+  // non-zero counter, a response whose counter does not exceed the stored
+  // value indicates a cloned/exported credential. Authenticators that never
+  // increment (always 0) keep a stored counter of 0 and are unaffected.
+  if (cred.counter > 0 && verification.authenticationInfo.newCounter <= cred.counter) {
+    console.warn(
+      `[PasskeyAuth] MFA counter regression for credential ${cred.id}: stored ${cred.counter}, got ${verification.authenticationInfo.newCounter}`,
+    );
+    return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 401);
+  }
+
   await getDb()
     .update(authenticators)
     .set({ counter: verification.authenticationInfo.newCounter })
@@ -8166,6 +8177,17 @@ auth.post("/passkey/login/verify", async (c) => {
   }
 
   if (!verification.verified) {
+    return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
+  }
+
+  // SEC-141: reject counter regression. Once an authenticator has reported a
+  // non-zero counter, a response whose counter does not exceed the stored
+  // value indicates a cloned/exported credential. Authenticators that never
+  // increment (always 0) keep a stored counter of 0 and are unaffected.
+  if (cred.counter > 0 && verification.authenticationInfo.newCounter <= cred.counter) {
+    console.warn(
+      `[PasskeyAuth] Counter regression for credential ${cred.id}: stored ${cred.counter}, got ${verification.authenticationInfo.newCounter}`,
+    );
     return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
   }
 
