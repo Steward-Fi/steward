@@ -50,4 +50,16 @@ describe("Google governed operations", () => {
       ["timeMin", "2026-01-01T00:00:00Z"],
     ]);
   });
+  it("rejects date-like values that are not strict RFC3339 instants", () => {
+    for (const invalid of [
+      "2026-01-02T00:00:00",
+      "2026-02-30T00:00:00Z",
+      "2026-01-02 00:00:00Z",
+      "2026-01-02T00:00:00+15:00",
+    ]) {
+      expect(() => buildGoogleAction("google.calendar.events.list", { timeMin: invalid })).toThrow(
+        "timeMin must be RFC3339",
+      );
+    }
+  });
 });

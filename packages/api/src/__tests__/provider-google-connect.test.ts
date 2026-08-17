@@ -36,6 +36,7 @@ import { and, eq } from "drizzle-orm";
 import { providerAuthorityStore } from "../services/provider-authority-store";
 import {
   __runDefaultGoogleForwardForTests,
+  __setGoogleConnectCommitHookForTests,
   __setGoogleForwardForTests,
   assertGoogleConnectStoreIsSafe,
   completeGoogleConnect,
@@ -106,9 +107,12 @@ class MemoryConnectStore implements PendingConnectStore {
     return rec.value;
   }
   async consume(key: string): Promise<string | null> {
-    const value = await this.get(key);
-    if (value !== null) this.map.delete(key);
-    return value;
+    // Keep the read+delete synchronous so this fake preserves the production
+    // store's atomic GETDEL semantics under concurrent callbacks.
+    const rec = this.map.get(key);
+    if (!rec) return null;
+    this.map.delete(key);
+    return rec.expiresAt <= this.now ? null : rec.value;
   }
 }
 
@@ -286,11 +290,13 @@ beforeAll(async () => {
 
 afterAll(async () => {
   __setGoogleForwardForTests(null);
+  __setGoogleConnectCommitHookForTests(null);
   await closeDb();
 });
 
 afterEach(async () => {
   __setGoogleForwardForTests(null);
+  __setGoogleConnectCommitHookForTests(null);
   // Reset connected accounts + credential secrets between tests.
   const db = getDb();
   await db.delete(providerAccounts).where(eq(providerAccounts.tenantId, TENANT));
@@ -436,6 +442,148 @@ describe("connect", () => {
     expect(rows.length).toBe(1);
     expect(rows[0].revision).toBe(2);
     expect(rows[0].credentialVersion).toBe(2);
+  });
+
+  test("injected initial persistence failure rolls back secret/account and revokes issued grant", async () => {
+    const store = new MemoryConnectStore();
+    const fake = installFakeX();
+    const initiated = await initiateGoogleConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+    });
+    const restoreHook = __setGoogleConnectCommitHookForTests(() => {
+      throw new Error("injected commit failure");
+    });
+    await expect(
+      completeGoogleConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store,
+        vault,
+      }),
+    ).rejects.toThrow("injected commit failure");
+    restoreHook();
+
+    const db = getDb();
+    expect(
+      await db.select().from(providerAccounts).where(eq(providerAccounts.tenantId, TENANT)),
+    ).toHaveLength(0);
+    expect(await db.select().from(secrets).where(eq(secrets.tenantId, TENANT))).toHaveLength(0);
+    expect(fake.counters.revoke).toBe(1);
+    fake.restore();
+  });
+
+  test("injected reconnect failure preserves old account/credential and revokes only new grant", async () => {
+    const firstStore = new MemoryConnectStore();
+    const first = await connectHappy(firstStore);
+    const before = await decryptCredential(first.completed.providerAccountId);
+    const db = getDb();
+    const [beforeAccount] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, first.completed.providerAccountId));
+
+    const store = new MemoryConnectStore();
+    const fake = installFakeX({
+      exchangeToken: { access_token: "access-new", refresh_token: "refresh-new" },
+    });
+    const initiated = await initiateGoogleConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+    });
+    const restoreHook = __setGoogleConnectCommitHookForTests(() => {
+      throw new Error("injected reconnect failure");
+    });
+    await expect(
+      completeGoogleConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code-new",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store,
+        vault,
+      }),
+    ).rejects.toThrow("injected reconnect failure");
+    restoreHook();
+
+    const [afterAccount] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, first.completed.providerAccountId));
+    expect(afterAccount.credentialSecretId).toBe(beforeAccount.credentialSecretId);
+    expect(afterAccount.credentialVersion).toBe(beforeAccount.credentialVersion);
+    expect(afterAccount.revision).toBe(beforeAccount.revision);
+    expect(await decryptCredential(first.completed.providerAccountId)).toEqual(before);
+    const activeSecrets = await db
+      .select()
+      .from(secrets)
+      .where(
+        and(
+          eq(secrets.tenantId, TENANT),
+          eq(secrets.name, googleCredentialSecretName(WORKSPACE, "google-user-123")),
+        ),
+      );
+    expect(activeSecrets).toHaveLength(1);
+    expect(activeSecrets[0].deletedAt).toBeNull();
+    expect(fake.counters.revoke).toBe(1);
+    fake.restore();
+  });
+
+  test("concurrent duplicate callback has one winner and revokes the loser's issued grant", async () => {
+    const store = new MemoryConnectStore();
+    const fake = installFakeX();
+    const initiated = await initiateGoogleConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+    });
+    const args = {
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      callerUserId: ADMIN,
+      code: "auth-code",
+      state: initiated.state,
+      connectToken: initiated.connectToken,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+      vault,
+    };
+    const outcomes = await Promise.allSettled([
+      completeGoogleConnect(args),
+      completeGoogleConnect(args),
+    ]);
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    const rejected = outcomes.find((outcome) => outcome.status === "rejected");
+    expect(rejected).toMatchObject({ reason: { code: "GOOGLE_STATE_REUSED" } });
+    expect(fake.counters.revoke).toBe(1);
+    const db = getDb();
+    expect(
+      await db.select().from(providerAccounts).where(eq(providerAccounts.tenantId, TENANT)),
+    ).toHaveLength(1);
+    expect(await db.select().from(secrets).where(eq(secrets.tenantId, TENANT))).toHaveLength(1);
+    fake.restore();
   });
 });
 

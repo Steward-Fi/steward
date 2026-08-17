@@ -146,6 +146,37 @@ export class SecretVault {
   }
 
   /**
+   * Create a secret inside a caller-owned transaction. This is the atomic
+   * counterpart to {@link createSecret}: callers that also link the new secret
+   * from another row can commit the ciphertext, link, and required audit event
+   * as one unit instead of leaving an orphan if the outer mutation fails.
+   */
+  async createSecretWithinTx(
+    tx: SecretTxExecutor,
+    tenantId: string,
+    name: string,
+    value: string,
+    options?: CreateSecretOptions,
+  ): Promise<SecretMetadata> {
+    const encrypted = this.keyStore.encrypt(value, { tenantId, name, version: 1 });
+    const [row] = await tx
+      .insert(secrets)
+      .values({
+        tenantId,
+        name,
+        description: options?.description ?? null,
+        ciphertext: encrypted.ciphertext,
+        iv: encrypted.iv,
+        authTag: encrypted.tag,
+        salt: encrypted.salt,
+        version: 1,
+        expiresAt: options?.expiresAt ?? null,
+      })
+      .returning();
+    return this.toMetadata(row);
+  }
+
+  /**
    * Get secret metadata by name (latest non-deleted version). Never returns decrypted value.
    */
   async getSecret(tenantId: string, name: string): Promise<SecretMetadata | null> {

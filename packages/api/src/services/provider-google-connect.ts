@@ -237,6 +237,19 @@ export function __setGoogleForwardForTests(fn: GoogleForwardFn | null): () => vo
   };
 }
 
+let beforeConnectCommitForTests: (() => void | Promise<void>) | null = null;
+
+/** Inject a failure immediately before the connect audit append. Test-only. */
+export function __setGoogleConnectCommitHookForTests(
+  hook: (() => void | Promise<void>) | null,
+): () => void {
+  const previous = beforeConnectCommitForTests;
+  beforeConnectCommitForTests = hook;
+  return () => {
+    beforeConnectCommitForTests = previous;
+  };
+}
+
 // ── Config ────────────────────────────────────────────────────────────────────
 export interface GoogleConnectConfig {
   clientId: string;
@@ -516,6 +529,10 @@ export async function completeGoogleConnect(
   //    duplicate callback loses the race and gets GOOGLE_STATE_REUSED.
   const consumed = await input.store.consume(key);
   if (consumed !== raw) {
+    // This callback already obtained live credentials before it lost the
+    // single-use-state race. Revoke them so a duplicate callback cannot leave
+    // an untracked grant at Google.
+    await revokeIssuedTokensBestEffort(input.config, tokenRes);
     throw new GoogleConnectError("GOOGLE_STATE_REUSED", 401, "connect state already used");
   }
 
@@ -542,16 +559,47 @@ export async function completeGoogleConnect(
   // 6. Persist tokens as a versioned vault secret + create/update the account,
   //    all inside one tenant-audited transaction so the audit event commits with
   //    the state mutation.
-  return persistConnectedAccount({
-    tenantId: input.tenantId,
-    workspaceId: input.workspaceId,
-    callerUserId: input.callerUserId,
-    vault: input.vault,
-    identity,
-    payload,
-    scopesGranted,
-    requestId: input.requestId ?? null,
-  });
+  try {
+    return await persistConnectedAccount({
+      tenantId: input.tenantId,
+      workspaceId: input.workspaceId,
+      callerUserId: input.callerUserId,
+      vault: input.vault,
+      identity,
+      payload,
+      scopesGranted,
+      requestId: input.requestId ?? null,
+    });
+  } catch (error) {
+    // The authorization code has already been exchanged and the state consumed,
+    // so persistence cannot be retried safely. Compensate by revoking the newly
+    // issued Google grant. The database transaction below guarantees the old
+    // account/credential remains intact on reconnect failure.
+    await revokeIssuedTokensBestEffort(input.config, tokenRes);
+    throw error;
+  }
+}
+
+async function revokeIssuedTokensBestEffort(
+  config: GoogleConnectConfig,
+  tokenRes: GoogleTokenResponse,
+): Promise<void> {
+  const token = tokenRes.refresh_token || tokenRes.access_token;
+  if (!token) return;
+  try {
+    await forwardImpl({
+      url: GOOGLE_REVOKE_URL,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      body: new URLSearchParams({ token, client_id: config.clientId }).toString(),
+    });
+  } catch {
+    // Best effort only: preserve the original persistence/race failure. Google
+    // credentials are never written to logs or returned from this path.
+  }
 }
 
 interface GoogleIdentity {
@@ -638,19 +686,12 @@ export function googleCredentialSecretName(workspaceId: string, googleUserId: st
 }
 
 async function persistConnectedAccount(input: PersistInput): Promise<CompleteConnectResult> {
-  // Write the credential secret OUTSIDE the audited tx (the vault owns its own
-  // encryption + version row); then link + audit atomically. createSecret always
-  // writes version 1; a reconnect uses rotateSecret to bump the version so the
-  // lineage (secret name) is stable and the OLD ciphertext is soft-deleted.
+  // Serialize on the tenant audit lock, then write/rotate the credential,
+  // account link, and audit event in ONE transaction. A failed reconnect leaves
+  // the old ciphertext active and the account pointing at it; a failed initial
+  // connect leaves no orphan secret.
   const secretName = googleCredentialSecretName(input.workspaceId, input.identity.id);
   const serialized = JSON.stringify(input.payload);
-
-  const existing = await input.vault.getSecret(input.tenantId, secretName);
-  const meta = existing
-    ? await input.vault.rotateSecret(input.tenantId, secretName, serialized)
-    : await input.vault.createSecret(input.tenantId, secretName, serialized, {
-        description: "Google Workspace provider-account OAuth credential",
-      });
 
   return withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
     const tx = txRaw as DbExecutor;
@@ -668,6 +709,24 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
       )
       .limit(1)
       .for("update");
+
+    const [existingSecret] = await tx
+      .select({ id: secrets.id })
+      .from(secrets)
+      .where(
+        and(
+          eq(secrets.tenantId, input.tenantId),
+          eq(secrets.name, secretName),
+          sql`${secrets.deletedAt} IS NULL`,
+        ),
+      )
+      .limit(1)
+      .for("update");
+    const meta = existingSecret
+      ? await input.vault.rotateSecretWithinTx(tx, input.tenantId, secretName, serialized)
+      : await input.vault.createSecretWithinTx(tx, input.tenantId, secretName, serialized, {
+          description: "Google Workspace provider-account OAuth credential",
+        });
 
     const displayName = input.identity.email || input.identity.id;
 
@@ -720,6 +779,7 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
       providerAccountId = created.id;
     }
 
+    await beforeConnectCommitForTests?.();
     await append({
       tenantId: input.tenantId,
       actorType: "user",
@@ -1037,7 +1097,39 @@ function parseGoogleCredential(value: string): GoogleCredentialPayload {
   const p = raw as Record<string, unknown>;
   const bounded = (v: unknown, max: number): v is string =>
     typeof v === "string" && v.length > 0 && v.length <= max;
-  const validIso = (v: unknown): v is string => bounded(v, 64) && Number.isFinite(Date.parse(v));
+  const validIso = (v: unknown): v is string => {
+    if (!bounded(v, 64)) return false;
+    // RFC 3339 date-time with a mandatory zone. Date.parse alone accepts local
+    // timestamps and normalizes impossible calendar dates, neither of which is
+    // valid for a persisted security credential.
+    const match =
+      /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/.exec(
+        v,
+      );
+    if (!match) return false;
+    const instant = Date.parse(v);
+    if (!Number.isFinite(instant)) return false;
+    const [, year, month, day, hour, minute, second, , zone] = match;
+    if (Number(month) < 1 || Number(month) > 12 || Number(day) < 1 || Number(day) > 31)
+      return false;
+    if (Number(hour) > 23 || Number(minute) > 59 || Number(second) > 59) return false;
+    // Validate calendar normalization in the value's own offset.
+    const offsetMinutes =
+      zone === "Z"
+        ? 0
+        : (zone.startsWith("-") ? -1 : 1) *
+          (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(4, 6)));
+    if (Math.abs(offsetMinutes) > 14 * 60) return false;
+    const local = new Date(instant + offsetMinutes * 60_000);
+    return (
+      local.getUTCFullYear() === Number(year) &&
+      local.getUTCMonth() + 1 === Number(month) &&
+      local.getUTCDate() === Number(day) &&
+      local.getUTCHours() === Number(hour) &&
+      local.getUTCMinutes() === Number(minute) &&
+      local.getUTCSeconds() === Number(second)
+    );
+  };
   if (
     p.schemaVersion !== "steward.provider-google.credential.v1" ||
     !bounded(p.accessToken, 16_384) ||

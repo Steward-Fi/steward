@@ -68,6 +68,34 @@ const email = (v: unknown): string => {
 };
 const sha = (s: string) => `sha256:${createHash("sha256").update(s).digest("hex")}`;
 
+/** Strict RFC 3339 instant validation (mandatory timezone, real calendar date). */
+const rfc3339Instant = (value: string): number | null => {
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/.exec(
+      value,
+    );
+  if (!match) return null;
+  const [, year, month, day, hour, minute, second, , zone] = match;
+  const instant = Date.parse(value);
+  if (!Number.isFinite(instant)) return null;
+  if (Number(hour) > 23 || Number(minute) > 59 || Number(second) > 59) return null;
+  const offsetMinutes =
+    zone === "Z"
+      ? 0
+      : (zone.startsWith("-") ? -1 : 1) *
+        (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(4, 6)));
+  if (Math.abs(offsetMinutes) > 14 * 60) return null;
+  const local = new Date(instant + offsetMinutes * 60_000);
+  return local.getUTCFullYear() === Number(year) &&
+    local.getUTCMonth() + 1 === Number(month) &&
+    local.getUTCDate() === Number(day) &&
+    local.getUTCHours() === Number(hour) &&
+    local.getUTCMinutes() === Number(minute) &&
+    local.getUTCSeconds() === Number(second)
+    ? instant
+    : null;
+};
+
 function gmail(raw: unknown): GoogleActionBuild {
   const a = object(raw);
   exact(a, ["to", "subject", "body"]);
@@ -121,7 +149,7 @@ function list(raw: unknown): GoogleActionBuild {
   for (const k of ["timeMin", "timeMax"] as const)
     if (a[k] !== undefined) {
       const s = str(a[k], k, 64)!;
-      if (!Number.isFinite(Date.parse(s)))
+      if (rfc3339Instant(s) === null)
         throw new CanonError("CANON_FIELD_TYPE_INVALID", `${k} must be RFC3339`);
       q.push([k, s]);
     }
@@ -152,11 +180,9 @@ function insert(raw: unknown): GoogleActionBuild {
   const summary = str(a.summary, "summary", 1024)!;
   const start = str(a.start, "start", 64)!;
   const end = str(a.end, "end", 64)!;
-  if (
-    !Number.isFinite(Date.parse(start)) ||
-    !Number.isFinite(Date.parse(end)) ||
-    Date.parse(end) <= Date.parse(start)
-  )
+  const startInstant = rfc3339Instant(start);
+  const endInstant = rfc3339Instant(end);
+  if (startInstant === null || endInstant === null || endInstant <= startInstant)
     throw new CanonError("CANON_FIELD_TYPE_INVALID", "event time range is invalid");
   const attendees = a.attendees === undefined ? [] : a.attendees;
   if (!Array.isArray(attendees) || attendees.length > 100)
