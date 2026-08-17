@@ -512,7 +512,20 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       return c.json<ApiResponse>({ ok: false, error: "agentId is required" }, 400);
     }
 
-    const status = await getAgentTokenStatus(agentId);
+    // SEC-091: fail closed against the cross-tenant agent/token oracle. An
+    // agent-scoped token may only query ITSELF; a tenant credential may only
+    // observe agents registered to ITS tenant. A foreign agent is reported
+    // exactly like a nonexistent one ("unknown"), so agent existence and
+    // token-expiry/observation state no longer leak across tenants.
+    if (!canAccessAgent(c, agentId)) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Forbidden: agent token cannot query another agent's token status" },
+        403,
+      );
+    }
+    const tenantId = c.get("tenantId");
+    const agent = tenantId ? await ensureAgentForTenant(tenantId, agentId) : undefined;
+    const status = agent ? await getAgentTokenStatus(agentId) : null;
     if (!status) {
       return c.json(
         responseData({
