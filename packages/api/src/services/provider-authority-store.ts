@@ -332,6 +332,44 @@ export class ProviderAuthorityStore {
     return { type: "workspace" as const, operationKeys: binding.operationKeys };
   }
 
+  /** A workspace budget may only target an agent that currently has provider
+   * authority in that workspace. Agents are tenant-global, so existence in the
+   * tenant alone is not enough to establish this narrower relationship. */
+  private async hasWorkspaceAgentAuthority(
+    tenantId: string,
+    workspaceId: string,
+    agentId: string,
+    environment: string,
+    at = new Date(),
+  ): Promise<boolean> {
+    const [grants, bindings] = await Promise.all([
+      this.db()
+        .select()
+        .from(providerGrants)
+        .where(
+          and(
+            eq(providerGrants.tenantId, tenantId),
+            eq(providerGrants.workspaceId, workspaceId),
+            eq(providerGrants.agentId, agentId),
+            eq(providerGrants.status, "active"),
+          ),
+        ),
+      this.db()
+        .select()
+        .from(providerRoleBindings)
+        .where(
+          and(
+            eq(providerRoleBindings.tenantId, tenantId),
+            eq(providerRoleBindings.workspaceId, workspaceId),
+            eq(providerRoleBindings.principalType, "agent"),
+            eq(providerRoleBindings.principalId, agentId),
+            eq(providerRoleBindings.status, "active"),
+          ),
+        ),
+    ]);
+    return [...grants, ...bindings].some((row) => activeAt(row, at, environment));
+  }
+
   private async ensureTenantState(tenantId: string): Promise<number> {
     await this.db()
       .insert(providerAuthorityTenantState)
@@ -1496,8 +1534,11 @@ export class ProviderAuthorityStore {
       );
     }
     const workspaceId = input.workspaceId ?? null;
-    if (workspaceId) await this.requireWorkspaceAdmin(ctx, workspaceId, true);
-    else if (!(await this.hasTenantAdmin(ctx))) {
+    const normalized = normalizeBudgetInput(input);
+    const tenantAuthority = await this.hasTenantAdmin(ctx);
+    if (workspaceId && !normalized.autoFreeze) {
+      await this.requireWorkspaceAdmin(ctx, workspaceId, true);
+    } else if (!tenantAuthority) {
       throw new ProviderAuthorityError("tenant authority required", "forbidden", 403);
     }
     const [agent] = await this.db()
@@ -1508,7 +1549,7 @@ export class ProviderAuthorityStore {
     if (!agent) throw new ProviderAuthorityError("resource not found", "not_found", 404);
     if (workspaceId) {
       const [workspace] = await this.db()
-        .select({ id: workspaces.id })
+        .select({ id: workspaces.id, environment: workspaces.environment })
         .from(workspaces)
         .where(
           and(
@@ -1519,8 +1560,17 @@ export class ProviderAuthorityStore {
         )
         .limit(1);
       if (!workspace) throw new ProviderAuthorityError("resource not found", "not_found", 404);
+      if (
+        !(await this.hasWorkspaceAgentAuthority(
+          ctx.tenantId,
+          workspaceId,
+          input.agentId,
+          workspace.environment,
+        ))
+      ) {
+        throw new ProviderAuthorityError("resource not found", "not_found", 404);
+      }
     }
-    const normalized = normalizeBudgetInput(input);
     const id = randomUUID();
     return withTenantAuditedTransaction(ctx.tenantId, async (txRaw, append) => {
       const tx = txRaw as DbExecutor;
@@ -1581,14 +1631,43 @@ export class ProviderAuthorityStore {
       .where(and(eq(providerAgentBudgets.tenantId, ctx.tenantId), eq(providerAgentBudgets.id, id)))
       .limit(1);
     if (!current) throw new ProviderAuthorityError("resource not found", "not_found", 404);
-    if (current.workspaceId) await this.requireWorkspaceAdmin(ctx, current.workspaceId, true);
-    else if (!(await this.hasTenantAdmin(ctx))) {
+    const normalized = normalizeBudgetInput(input);
+    const tenantAuthority = await this.hasTenantAdmin(ctx);
+    // autoFreeze materializes as a tenant-global agent signing freeze. A
+    // delegated workspace admin may manage ordinary workspace caps, but may
+    // never create, retain, alter, disable, or re-enable that global authority.
+    if (current.workspaceId && !current.autoFreeze && !normalized.autoFreeze) {
+      await this.requireWorkspaceAdmin(ctx, current.workspaceId, true);
+    } else if (!tenantAuthority) {
       throw new ProviderAuthorityError("tenant authority required", "forbidden", 403);
     }
     if (current.revision !== ctx.expectedRevision) {
       throw new ProviderAuthorityError("budget revision conflict", "revision_conflict", 409);
     }
-    const normalized = normalizeBudgetInput(input);
+    if (current.workspaceId && normalized.enabled) {
+      const [workspace] = await this.db()
+        .select({ environment: workspaces.environment })
+        .from(workspaces)
+        .where(
+          and(
+            eq(workspaces.tenantId, ctx.tenantId),
+            eq(workspaces.id, current.workspaceId),
+            eq(workspaces.status, "active"),
+          ),
+        )
+        .limit(1);
+      if (
+        !workspace ||
+        !(await this.hasWorkspaceAgentAuthority(
+          ctx.tenantId,
+          current.workspaceId,
+          current.agentId,
+          workspace.environment,
+        ))
+      ) {
+        throw new ProviderAuthorityError("resource not found", "not_found", 404);
+      }
+    }
     return withTenantAuditedTransaction(ctx.tenantId, async (txRaw, append) => {
       const tx = txRaw as DbExecutor;
       const [lockedAgent] = await tx

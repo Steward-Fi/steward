@@ -504,14 +504,18 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
 
   test("#208 concurrent actions cannot cross a first-class count budget", async () => {
     await seed({ maxBytes: 1_000_000 });
-    await getDb().insert(providerAgentBudgets).values({
-      tenantId: CS.TENANT,
-      agentId: CS.AGENT,
-      dimension: "count",
-      windowSeconds: 86_400,
-      max: 3,
-      autoFreeze: true,
-    });
+    const [budget] = await getDb()
+      .insert(providerAgentBudgets)
+      .values({
+        tenantId: CS.TENANT,
+        agentId: CS.AGENT,
+        dimension: "count",
+        windowSeconds: 86_400,
+        max: 3,
+        autoFreeze: true,
+      })
+      .returning({ id: providerAgentBudgets.id });
+    if (!budget) throw new Error("expected seeded agent budget");
 
     // This assertion is deliberately load-bearing mutation proof: bypassing the
     // budget reservation admits all ten actions and changes the exact 3/7 split.
@@ -546,6 +550,7 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
       .where(eq(vaultSigningFreezes.agentId, CS.AGENT));
     expect(freezes).toHaveLength(1);
     expect(freezes[0]?.liftedAt).toBeNull();
+    expect(freezes[0]?.reason).toBe(`provider agent budget exhausted; budgetId=${budget.id}`);
   });
 
   test("#208 notional budgets debit the declared amount and denied reservations do not leak", async () => {

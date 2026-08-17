@@ -639,6 +639,103 @@ describe("provider authority foundation", () => {
     ).toBe(true);
   });
 
+  test("workspace admins cannot turn a workspace budget into a tenant-global freeze", async () => {
+    await getDb()
+      .insert(providerGrants)
+      .values({
+        tenantId: "tenant-main",
+        workspaceId: WORKSPACE_A,
+        providerAccountId: ACCOUNT_A,
+        agentId: "agent-x",
+        operationKeys: ["github.issue.list"],
+        expiresAt: new Date(Date.now() + 60 * 60_000),
+        status: "active",
+        grantedByUserId: ADMIN,
+        reason: "budget authority fixture",
+      });
+    const workspaceAdmin = mutation({
+      actorUserId: OTHER,
+      tenantRole: "member",
+      expectedRevision: 0,
+    });
+
+    const ordinary = await store.createAgentBudget(workspaceAdmin, {
+      agentId: "agent-x",
+      workspaceId: WORKSPACE_A,
+      dimension: "count",
+      windowSeconds: 12_345,
+      max: 5,
+    });
+    expect(ordinary).toMatchObject({ workspaceId: WORKSPACE_A, autoFreeze: false });
+
+    await expect(
+      store.createAgentBudget(
+        mutation({
+          actorUserId: OTHER,
+          tenantRole: "member",
+          expectedRevision: 0,
+        }),
+        {
+          agentId: "agent-x",
+          workspaceId: WORKSPACE_A,
+          dimension: "count",
+          windowSeconds: 12_346,
+          max: 0,
+          autoFreeze: true,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "forbidden" });
+
+    const freezing = await store.createAgentBudget(
+      mutation({
+        actorUserId: ADMIN,
+        tenantRole: "admin",
+        expectedRevision: 0,
+      }),
+      {
+        agentId: "agent-x",
+        workspaceId: WORKSPACE_A,
+        dimension: "count",
+        windowSeconds: 12_346,
+        max: 0,
+        autoFreeze: true,
+      },
+    );
+    await expect(
+      store.updateAgentBudget(
+        mutation({
+          actorUserId: OTHER,
+          tenantRole: "member",
+          expectedRevision: freezing.revision,
+        }),
+        freezing.id,
+        {
+          dimension: "count",
+          windowSeconds: 12_346,
+          max: 1,
+          autoFreeze: false,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "forbidden" });
+
+    await expect(
+      store.createAgentBudget(
+        mutation({
+          actorUserId: OTHER,
+          tenantRole: "member",
+          expectedRevision: 0,
+        }),
+        {
+          agentId: "agent-y",
+          workspaceId: WORKSPACE_A,
+          dimension: "count",
+          windowSeconds: 12_347,
+          max: 5,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "not_found", status: 404 });
+  });
+
   test("budget insert failure rolls back its required audit event", async () => {
     const context = mutation({
       actorUserId: ADMIN,

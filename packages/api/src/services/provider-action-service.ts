@@ -2163,13 +2163,23 @@ class ProviderActionService {
     let windowedInvokeReservation: WindowedInvokeReservationHandle | undefined;
     try {
       if (agentBudgets.autoFreeze) {
+        const autoFreezeBudgetId = agentBudgets.exhausted
+          .filter((result) =>
+            agentBudgets.snapshots.some(
+              (snapshot) => snapshot.id === result.budgetId && snapshot.autoFreeze === true,
+            ),
+          )
+          .map((result) => result.budgetId)
+          .sort()[0];
         await (args.db ?? this.db())
           .insert(vaultSigningFreezes)
           .values({
             tenantId: args.tenantId,
             scopeType: "agent",
             agentId: args.actorAgentId,
-            reason: "provider agent budget exhausted",
+            reason: autoFreezeBudgetId
+              ? `provider agent budget exhausted; budgetId=${autoFreezeBudgetId}`
+              : "provider agent budget exhausted",
             createdByType: "system",
             createdById: "provider-budget-enforcer",
           })
