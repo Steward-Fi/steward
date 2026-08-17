@@ -265,6 +265,22 @@ describe("window resolution and boundary", () => {
     );
     expect(result.passed).toBe(false);
   });
+
+  test("prototype-key named windows resolve to null (SEC-106)", () => {
+    // `NAMED_WINDOW_SECONDS["__proto__"]` on a plain object would return
+    // Object.prototype — an object, not a number — escaping the
+    // unknown-window → deny contract.
+    for (const named of ["__proto__", "constructor", "toString"]) {
+      expect(
+        resolveWindowSeconds({
+          metric: "tx_count",
+          window: { named: named as "1h" },
+          comparator: "gt",
+          threshold: "1",
+        }),
+      ).toBeNull();
+    }
+  });
 });
 
 // ─── scope coverage ─────────────────────────────────────────────────────────────
