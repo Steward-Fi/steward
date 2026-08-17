@@ -11,6 +11,7 @@ import {
 export const GITHUB_APP_LEASE_ISSUER = "github-app-installation";
 export const MAX_UPSTREAM_LEASE_TTL_SECONDS = 3600;
 const MIN_UPSTREAM_LEASE_TTL_SECONDS = 60;
+const REVOCATION_CLAIM_TIMEOUT_MS = 30_000;
 
 export interface GitHubLeaseResource {
   repositories: string[];
@@ -388,7 +389,7 @@ export async function issueUpstreamCredentialLease(input: {
 
   try {
     await input.db.transaction(async (tx: Db) => {
-      await tx
+      const finalized = await tx
         .update(upstreamCredentialLeases)
         .set({
           tokenHash: sha256(issued.token),
@@ -402,7 +403,9 @@ export async function issueUpstreamCredentialLease(input: {
             eq(upstreamCredentialLeases.id, claim.id),
             eq(upstreamCredentialLeases.status, "issuing"),
           ),
-        );
+        )
+        .returning({ id: upstreamCredentialLeases.id });
+      if (finalized.length !== 1) throw new Error("lease issuance claim was lost");
       await tx.insert(upstreamCredentialLeaseEvents).values({
         leaseId: claim.id,
         tenantId: input.tenantId,
@@ -476,8 +479,14 @@ export async function revokeUpstreamCredentialLease(input: {
       ),
     );
   if (!lease) return { ok: false, status: 404, error: "lease not found" };
-  if (lease.status !== "active") return { ok: false, status: 409, error: "lease is not active" };
-  if (lease.expiresAt && new Date(lease.expiresAt).getTime() <= now.getTime()) {
+  if (lease.status !== "active" && lease.status !== "revoking") {
+    return { ok: false, status: 409, error: "lease is not active" };
+  }
+  if (
+    lease.status === "active" &&
+    lease.expiresAt &&
+    new Date(lease.expiresAt).getTime() <= now.getTime()
+  ) {
     await input.db.transaction(async (tx: Db) => {
       await tx
         .update(upstreamCredentialLeases)
@@ -499,53 +508,78 @@ export async function revokeUpstreamCredentialLease(input: {
   }
   if (!equalHash(lease.tokenHash, input.token))
     return { ok: false, status: 403, error: "lease token proof does not match" };
+  const claimCutoff = new Date(now.getTime() - REVOCATION_CLAIM_TIMEOUT_MS);
   const [claimed] = await input.db
     .update(upstreamCredentialLeases)
     .set({ status: "revoking", updatedAt: now })
     .where(
-      and(eq(upstreamCredentialLeases.id, lease.id), eq(upstreamCredentialLeases.status, "active")),
+      lease.status === "active"
+        ? and(
+            eq(upstreamCredentialLeases.id, lease.id),
+            eq(upstreamCredentialLeases.status, "active"),
+          )
+        : and(
+            eq(upstreamCredentialLeases.id, lease.id),
+            eq(upstreamCredentialLeases.status, "revoking"),
+            lte(upstreamCredentialLeases.updatedAt, claimCutoff),
+          ),
     )
     .returning({ id: upstreamCredentialLeases.id });
   if (!claimed) return { ok: false, status: 409, error: "lease is not active" };
   try {
     await input.issuer.revoke(input.token);
   } catch {
+    await input.db
+      .transaction(async (tx: Db) => {
+        await tx
+          .update(upstreamCredentialLeases)
+          .set({ status: "active", lastError: "upstream revoker failed", updatedAt: new Date() })
+          .where(
+            and(
+              eq(upstreamCredentialLeases.id, lease.id),
+              eq(upstreamCredentialLeases.status, "revoking"),
+            ),
+          );
+        await tx.insert(upstreamCredentialLeaseEvents).values({
+          leaseId: lease.id,
+          tenantId: input.tenantId,
+          action: "lease.revoke",
+          decision: "deny",
+          metadata: { reason: "upstream revoker failed" },
+        });
+      })
+      .catch(() => {
+        // A durable revoking claim is recoverable after the bounded claim
+        // timeout; never claim that the provider token is active or revoked.
+      });
+    return { ok: false, status: 503, error: "upstream credential revoker unavailable" };
+  }
+  try {
     await input.db.transaction(async (tx: Db) => {
-      await tx
+      const finalized = await tx
         .update(upstreamCredentialLeases)
-        .set({ status: "active", lastError: "upstream revoker failed", updatedAt: new Date() })
+        .set({ status: "revoked", revokedAt: now, lastError: null, updatedAt: now })
         .where(
           and(
             eq(upstreamCredentialLeases.id, lease.id),
             eq(upstreamCredentialLeases.status, "revoking"),
           ),
-        );
+        )
+        .returning({ id: upstreamCredentialLeases.id });
+      if (finalized.length !== 1) throw new Error("lease revocation claim was lost");
       await tx.insert(upstreamCredentialLeaseEvents).values({
         leaseId: lease.id,
         tenantId: input.tenantId,
         action: "lease.revoke",
-        decision: "deny",
-        metadata: { reason: "upstream revoker failed" },
+        decision: "allow",
       });
     });
-    return { ok: false, status: 503, error: "upstream credential revoker unavailable" };
+  } catch {
+    return {
+      ok: false,
+      status: 503,
+      error: "upstream credential was revoked but durable confirmation failed; retry later",
+    };
   }
-  await input.db.transaction(async (tx: Db) => {
-    await tx
-      .update(upstreamCredentialLeases)
-      .set({ status: "revoked", revokedAt: now, lastError: null, updatedAt: now })
-      .where(
-        and(
-          eq(upstreamCredentialLeases.id, lease.id),
-          eq(upstreamCredentialLeases.status, "revoking"),
-        ),
-      );
-    await tx.insert(upstreamCredentialLeaseEvents).values({
-      leaseId: lease.id,
-      tenantId: input.tenantId,
-      action: "lease.revoke",
-      decision: "allow",
-    });
-  });
   return { ok: true };
 }

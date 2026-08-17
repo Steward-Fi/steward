@@ -89,10 +89,10 @@ import {
   ensureAgentForTenant,
   getPolicySet,
   isValidAnyAddress,
+  MASTER_PASSWORD,
   policyEngine,
   priceOracle,
   safeJsonParse,
-  MASTER_PASSWORD,
   tenantAuth,
   vault,
 } from "./services/context";

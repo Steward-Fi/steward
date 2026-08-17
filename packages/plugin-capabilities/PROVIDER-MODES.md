@@ -74,6 +74,10 @@ only the scrubbed upstream response.
   in-memory token before returning an error. A process kill in the narrow window
   between upstream issuance and durable finalization can leave an untracked token
   alive until GitHub expiry; this is the explicit precommit-orphan boundary.
+- Revocation uses a durable claim. If the process dies after GitHub accepts the
+  revocation but before Steward commits the result, the holder can retry after
+  the 30-second claim timeout. GitHub's idempotent missing-token response is
+  treated as confirmation, so the lease cannot remain permanently `revoking`.
 
 These tests use a deterministic fake upstream boundary. They do not constitute
 live GitHub, Railway, or deployment proof.

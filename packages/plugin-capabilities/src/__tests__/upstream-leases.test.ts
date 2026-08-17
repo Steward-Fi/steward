@@ -262,6 +262,55 @@ describe("upstream credential leases", () => {
     ).toBe(true);
   });
 
+  test("a stale revocation claim is safely retried after a post-revoke process crash", async () => {
+    const issuer = new FakeIssuer();
+    const issued = await issueUpstreamCredentialLease(issueArgs(issuer));
+    if (!issued.ok) throw new Error("expected issuance");
+    await harness.db
+      .update(upstreamCredentialLeases)
+      .set({ status: "revoking", updatedAt: new Date(NOW.getTime() - 31_000) })
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+
+    const recovered = await revokeUpstreamCredentialLease({
+      db: harness.db,
+      tenantId: TENANT,
+      agentId: AGENT,
+      leaseId: issued.leaseId,
+      token: TOKEN,
+      issuer,
+      now: NOW,
+    });
+    expect(recovered).toEqual({ ok: true });
+    expect(issuer.revokeCalls).toBe(1);
+    const [row] = await harness.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+    expect(row.status).toBe("revoked");
+  });
+
+  test("a live revocation claim cannot be stolen before its timeout", async () => {
+    const issuer = new FakeIssuer();
+    const issued = await issueUpstreamCredentialLease(issueArgs(issuer));
+    if (!issued.ok) throw new Error("expected issuance");
+    await harness.db
+      .update(upstreamCredentialLeases)
+      .set({ status: "revoking", updatedAt: NOW })
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+
+    const duplicate = await revokeUpstreamCredentialLease({
+      db: harness.db,
+      tenantId: TENANT,
+      agentId: AGENT,
+      leaseId: issued.leaseId,
+      token: TOKEN,
+      issuer,
+      now: NOW,
+    });
+    expect(duplicate).toMatchObject({ ok: false, status: 409 });
+    expect(issuer.revokeCalls).toBe(0);
+  });
+
   test("bounded expiry changes durable status and appends evidence", async () => {
     const issuer = new FakeIssuer();
     const issued = await issueUpstreamCredentialLease(issueArgs(issuer));
