@@ -28,14 +28,21 @@ for a provider we have not deliberately classified as token-safe).
 
 ### token mode
 ```
-POST /capabilities/manifest/github:app:org/issue   { "ttlSeconds": 120 }
-→ { "mode": "token", "token": "<short-lived JWT>", "ttlSeconds": 120,
-    "scopes": ["cap:github:app:org"] }
+POST /capabilities/manifest/github:app:org/issue
+Idempotency-Key: random-unguessable-value
+{ "workspaceId": "...", "ttlSeconds": 3600,
+  "resource": { "repositories": ["steward"],
+                "permissions": { "issues": "write" } } }
+→ { "mode": "token", "issuer": "github-app-installation",
+    "leaseId": "...", "token": "<GitHub installation token>",
+    "expiresAt": "...", "resource": { ... } }
 ```
-The token is a minute-scale agent JWT scoped to exactly this capability
-(`cap:<manifest-id>`) — it carries ONLY the `cap:` scope (never the broad
-`agent` scope) and the tenant surface refuses `cap:`-scoped tokens, so it is
-not a general agent credential. The agent renews before expiry (`.../renew`).
+This is an actual GitHub App installation token, not a Steward JWT and not a
+stored PAT. The configured allowlist and live capability grant constrain the
+requested repositories and permissions. Steward returns it once with
+`Cache-Control: no-store`; only its SHA-256 digest, status, expiry and immutable
+tenant/workspace/agent/grant/capability/resource binding are persisted. Reusing
+the idempotency key returns `409` and never replays the credential.
 
 ### broker mode
 ```
@@ -51,13 +58,22 @@ POST /capabilities/discord-send/invoke   { "body": { ... } }
 The credential-injection proxy injects the secret outbound and the agent receives
 only the scrubbed upstream response.
 
-## Renewal & revocation
+## Expiry, renewal & revocation
 
-- **TTL** is minute-scale (`DEFAULT_ISSUE_TTL_SECONDS = 120`, hard ceiling
-  `MAX_ISSUE_TTL_SECONDS = 300`). Agents auto-renew.
-- **Revocation** is an operator act: disable the capability or revoke the grant
-  via the existing capability CRUD. The change takes effect at the agent's **next
-  renewal** — bounded by the TTL, satisfying the Pillar-A green criterion
-  (<5 min). Every renewal is a fresh, fully-checked issuance.
-- For an immediate kill, the minted `jti` is surfaced so it can be revoked via the
-  existing JWT revocation store.
+- GitHub chooses installation-token expiry (currently about one hour). Steward
+  rejects a provider response whose expiry exceeds the requested/configured cap;
+  it does not pretend a shorter local timestamp shortens an upstream token.
+- Renewal is a fresh issuance with a new idempotency key and a complete live
+  grant/scope check. A token is never replayed.
+- `POST /capabilities/manifest/leases/:leaseId/revoke` requires the token as
+  proof of possession. Steward compares its digest, calls GitHub's token revoke
+  endpoint, and marks the lease revoked only after GitHub succeeds. The token is
+  needed because Steward intentionally does not retain plaintext. Revoker failure
+  returns `503` and leaves the lease active (fail closed about revocation state).
+- If durable finalization fails after GitHub issues a token, Steward revokes the
+  in-memory token before returning an error. A process kill in the narrow window
+  between upstream issuance and durable finalization can leave an untracked token
+  alive until GitHub expiry; this is the explicit precommit-orphan boundary.
+
+These tests use a deterministic fake upstream boundary. They do not constitute
+live GitHub, Railway, or deployment proof.

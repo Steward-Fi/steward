@@ -87,9 +87,19 @@ if (res.status === "pending_approval") {
 }
 
 // token mode (GitHub App token is natively short-lived + scopable):
-const cap = await agent.issue("github:app:acme", { ttlSeconds: 120 });
+const cap = await agent.issue("github:app:acme", {
+  ttlSeconds: 3600,
+  workspaceId: process.env.STEWARD_WORKSPACE_ID!,
+  idempotencyKey: crypto.randomUUID(),
+  resource: {
+    repositories: ["steward"],
+    permissions: { issues: "write" },
+  },
+});
 if (cap.mode === "token") {
-  // use cap.token as a short-lived, capability-scoped bearer for that provider
+  // Delivered once with no-store headers. Steward persists only its digest.
+  // Keep it only as long as needed, then revoke with proof of possession:
+  await agent.revokeLease(cap.leaseId!, cap.token);
 }
 ```
 

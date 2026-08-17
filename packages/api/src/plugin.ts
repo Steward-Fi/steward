@@ -72,6 +72,7 @@ import {
 } from "@stwd/policy-engine";
 import type { PluginMigrationSource, StewardPlugin } from "@stwd/shared";
 import { WebhookEventRegistry } from "@stwd/shared";
+import { SecretVault } from "@stwd/vault";
 import type { Hono } from "hono";
 import {
   requireAgentJwt,
@@ -91,6 +92,7 @@ import {
   policyEngine,
   priceOracle,
   safeJsonParse,
+  MASTER_PASSWORD,
   tenantAuth,
   vault,
 } from "./services/context";
@@ -185,6 +187,11 @@ export interface StewardAppContext {
   withTenantAuditedTransaction: typeof withTenantAuditedTransaction;
   getAgentTokenStatus: typeof getAgentTokenStatus;
   getRedisClient: typeof getRedisClient;
+  exerciseCredentialSecret<T>(
+    tenantId: string,
+    secretId: string,
+    use: (plaintext: string) => Promise<T>,
+  ): Promise<T>;
   requireAgentJwt: typeof requireAgentJwt;
   /**
    * Capability-surface authenticator: verifies the agent JWT and installs the
@@ -229,6 +236,7 @@ export type StewardApiPlugin = StewardPlugin<StewardApp, StewardAppContext, Eval
  * root and passed to {@link registerPlugin}.
  */
 export function buildPluginContext(): StewardAppContext {
+  const credentialVault = new SecretVault(MASTER_PASSWORD);
   return {
     db,
     vault,
@@ -242,6 +250,8 @@ export function buildPluginContext(): StewardAppContext {
     withTenantAuditedTransaction,
     getAgentTokenStatus,
     getRedisClient,
+    exerciseCredentialSecret: (tenantId, secretId, use) =>
+      credentialVault.exerciseSecret(tenantId, secretId, use),
     requireAgentJwt,
     requireCapabilityAgentJwt,
     requireProviderAgentJwt,

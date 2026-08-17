@@ -12,7 +12,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { verifyToken } from "@stwd/auth";
 import type { AppVariables } from "@stwd/shared";
 import { Hono } from "hono";
 import type { StewardAppContext } from "../context";
@@ -41,7 +40,6 @@ const GH_SPEC = {
 function buildCtx(db: unknown): StewardAppContext {
   return {
     db,
-    getRedisClient: () => null,
     async writeAuditEvent(ev: Record<string, unknown>) {
       // Reconstruct the structured event from the core-audit shape for assertion.
       const md = (ev.metadata ?? {}) as Record<string, unknown>;
@@ -126,7 +124,7 @@ describe("manifest routes", () => {
     expect(ids).toEqual(["discord:bot-token:soliza", "github:app:org"]);
   });
 
-  test("token mode: github issue returns a short-lived scoped token", async () => {
+  test("token mode: github refuses issuance without an upstream lease configuration", async () => {
     await seedManifestCapability("gh-comment", "github:app:org");
     const app = buildApp(harness!.db, { agent: true });
 
@@ -135,28 +133,7 @@ describe("manifest routes", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ttlSeconds: 90 }),
     });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      ok: boolean;
-      data: { mode: string; token: string; ttlSeconds: number; scopes: string[] };
-    };
-    expect(body.data.mode).toBe("token");
-    expect(body.data.ttlSeconds).toBe(90);
-    expect(body.data.scopes).toContain("cap:github:app:org");
-    // SEC-033: never the broad `agent` scope on a capability token.
-    expect(body.data.scopes).not.toContain("agent");
-
-    const payload = await verifyToken(body.data.token);
-    expect(payload.agentId).toBe(agentId);
-    expect((payload.scopes as string[]) ?? []).toContain("cap:github:app:org");
-    expect((payload.scopes as string[]) ?? []).not.toContain("agent");
-
-    // audit: exactly one issue/allow/token event.
-    expect(
-      auditLog.some(
-        (e) => e.action === "capability.issue" && e.decision === "allow" && e.mode === "token",
-      ),
-    ).toBe(true);
+    expect(res.status).toBe(400);
   });
 
   test("broker mode: discord issue returns a delegation, no token", async () => {
@@ -177,14 +154,13 @@ describe("manifest routes", () => {
     expect(auditLog.some((e) => e.mode === "broker" && e.decision === "allow")).toBe(true);
   });
 
-  test("renew hits the same path (audit action = renew)", async () => {
+  test("renew also refuses an unconfigured upstream lease", async () => {
     await seedManifestCapability("gh-comment", "github:app:org");
     const app = buildApp(harness!.db, { agent: true });
     const res = await app.request("/capabilities/manifest/github:app:org/renew", {
       method: "POST",
     });
-    expect(res.status).toBe(200);
-    expect(auditLog.some((e) => e.action === "capability.renew")).toBe(true);
+    expect(res.status).toBe(400);
   });
 
   test("revocation: revoked grant → 403 not_granted at next issue", async () => {

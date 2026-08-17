@@ -85,9 +85,14 @@ export interface ManifestEntry {
 export interface TokenCapability {
   mode: "token";
   token: string;
-  jti: string;
-  ttlSeconds: number;
-  scopes: string[];
+  /** Upstream lease identity. Present for real provider-token mode. */
+  leaseId?: string;
+  issuer?: string;
+  resource?: { repositories: string[]; permissions: Record<string, "read" | "write" | "admin"> };
+  /** @deprecated legacy Steward-JWT fields; not present on upstream leases. */
+  jti?: string;
+  ttlSeconds?: number;
+  scopes?: string[];
   manifest: string;
   capabilityId: string;
   /** epoch ms at which this capability token expires. */
@@ -103,6 +108,15 @@ export interface BrokerCapability {
 }
 
 export type IssuedCapability = TokenCapability | BrokerCapability;
+
+export interface CapabilityIssueOptions {
+  ttlSeconds?: number;
+  /** Required by upstream token-mode providers. */
+  workspaceId?: string;
+  resource?: TokenCapability["resource"];
+  /** Required for one-time provider-token delivery; never reused for renewal. */
+  idempotencyKey?: string;
+}
 
 /**
  * 202 approval-pending is a FIRST-CLASS state, not an exception: a broker invoke
@@ -400,20 +414,20 @@ export class AgentClient {
    * Issue a capability by manifest id. token-mode returns a short-lived scoped
    * token; broker-mode returns a delegation descriptor (exercise via invoke()).
    */
-  async issue(manifestId: string, opts?: { ttlSeconds?: number }): Promise<IssuedCapability> {
+  async issue(manifestId: string, opts?: CapabilityIssueOptions): Promise<IssuedCapability> {
     return this.issueOrRenew(manifestId, false, opts);
   }
 
   /** Renew a capability (identical security path; refreshes a token-mode token,
    * re-checks a broker grant). Revocation lands here: a revoked grant → 403. */
-  async renew(manifestId: string, opts?: { ttlSeconds?: number }): Promise<IssuedCapability> {
+  async renew(manifestId: string, opts?: CapabilityIssueOptions): Promise<IssuedCapability> {
     return this.issueOrRenew(manifestId, true, opts);
   }
 
   private async issueOrRenew(
     manifestId: string,
     isRenewal: boolean,
-    opts?: { ttlSeconds?: number },
+    opts?: CapabilityIssueOptions,
   ): Promise<IssuedCapability> {
     const path = `/capabilities/manifest/${encodeURIComponent(manifestId)}/${
       isRenewal ? "renew" : "issue"
@@ -428,6 +442,10 @@ export class AgentClient {
           scopes: string[];
           manifest: string;
           capabilityId: string;
+          leaseId?: string;
+          issuer?: string;
+          expiresAt?: string;
+          resource?: TokenCapability["resource"];
         }
       | {
           ok: true;
@@ -436,17 +454,29 @@ export class AgentClient {
           manifest: string;
           capabilityId: string;
         }
-    >(path, opts?.ttlSeconds !== undefined ? { ttlSeconds: opts.ttlSeconds } : {});
+    >(
+      path,
+      opts
+        ? { ttlSeconds: opts.ttlSeconds, workspaceId: opts.workspaceId, resource: opts.resource }
+        : {},
+      opts?.idempotencyKey ? { "Idempotency-Key": opts.idempotencyKey } : undefined,
+    );
 
     if (raw.mode === "token") {
       const expFromJwt = readJwtExpMs(raw.token);
-      const expiresAt = expFromJwt ?? this.now() + raw.ttlSeconds * 1000;
+      const upstreamExpiry = raw.expiresAt ? Date.parse(raw.expiresAt) : Number.NaN;
+      const expiresAt = Number.isFinite(upstreamExpiry)
+        ? upstreamExpiry
+        : (expFromJwt ?? this.now() + raw.ttlSeconds * 1000);
       return {
         mode: "token",
         token: raw.token,
         jti: raw.jti,
         ttlSeconds: raw.ttlSeconds,
         scopes: raw.scopes,
+        leaseId: raw.leaseId,
+        issuer: raw.issuer,
+        resource: raw.resource,
         manifest: raw.manifest,
         capabilityId: raw.capabilityId,
         expiresAt,
@@ -458,6 +488,14 @@ export class AgentClient {
       manifest: raw.manifest,
       capabilityId: raw.capabilityId,
     };
+  }
+
+  /** Revoke a one-time upstream lease. The token is supplied as proof because
+   * Steward deliberately persists only its digest. */
+  async revokeLease(leaseId: string, token: string): Promise<void> {
+    await this.postAuthed(`/capabilities/manifest/leases/${encodeURIComponent(leaseId)}/revoke`, {
+      token,
+    });
   }
 
   // ── broker invoke ─────────────────────────────────────────────────────────────
@@ -536,11 +574,20 @@ export class AgentClient {
   private async getAuthed<T>(path: string): Promise<T> {
     return this.authed<T>(path, "GET");
   }
-  private async postAuthed<T>(path: string, body: unknown): Promise<T> {
-    return this.authed<T>(path, "POST", body);
+  private async postAuthed<T>(
+    path: string,
+    body: unknown,
+    headers?: Record<string, string>,
+  ): Promise<T> {
+    return this.authed<T>(path, "POST", body, headers);
   }
 
-  private async authed<T>(path: string, method: "GET" | "POST", body?: unknown): Promise<T> {
+  private async authed<T>(
+    path: string,
+    method: "GET" | "POST",
+    body?: unknown,
+    extraHeaders?: Record<string, string>,
+  ): Promise<T> {
     if (!this.isEnrolled() || !this.token) throw new NotEnrolledError();
     const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
       method,
@@ -548,6 +595,7 @@ export class AgentClient {
         "Content-Type": "application/json",
         Accept: "application/json",
         Authorization: `Bearer ${this.token}`,
+        ...extraHeaders,
       },
       body: method === "POST" ? JSON.stringify(body ?? {}) : undefined,
     }).catch((e: unknown) => {
