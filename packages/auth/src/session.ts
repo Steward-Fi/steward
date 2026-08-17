@@ -60,14 +60,18 @@ export class SessionManager {
    * claim, so every session token can be individually revoked.
    *
    * @param userId  The user's UUID or identifier — included as a top-level claim
-   * @param extra   Optional additional claims to embed in the token
+   * @param extra   Optional additional claims to embed in the token. Spread
+   *                BEFORE userId and stripped of any jti, so request-derived
+   *                claims can never override the authenticated userId or
+   *                pre-select a session jti (SEC-134).
    * @returns       A compact JWT string suitable for use as a session token
    */
   async createSession(userId: string, extra?: Record<string, unknown>): Promise<string> {
+    const { jti: _extraJti, ...safeExtra } = extra ?? {};
     return signJwtPayload(
       {
+        ...safeExtra,
         userId,
-        ...extra,
       },
       this.expiresIn,
       this.secret,
