@@ -79,9 +79,10 @@ describe("validateWebhookUrlResolved (SEC-017)", () => {
   const publicAnswer = [{ address: "93.184.216.34", family: 4 }];
 
   it("rejects a public hostname that resolves to a private address (nip.io style)", async () => {
-    const result = await validateWebhookUrlResolved("https://169.254.169.254.nip.io/hook", async () => [
-      { address: "169.254.169.254", family: 4 },
-    ]);
+    const result = await validateWebhookUrlResolved(
+      "https://169.254.169.254.nip.io/hook",
+      async () => [{ address: "169.254.169.254", family: 4 }],
+    );
     expect(result).toBe("url host must resolve to a public address");
   });
 

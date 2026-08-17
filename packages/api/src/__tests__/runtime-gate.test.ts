@@ -14,14 +14,14 @@ describe("resolveClientIp (SEC-014)", () => {
   }
 
   it("ignores X-Forwarded-For/X-Real-IP entirely with zero trusted proxy hops", () => {
-    expect(
-      resolveClientIp(headers({ "x-forwarded-for": "1.2.3.4" }), "10.0.0.9", 0),
-    ).toBe("10.0.0.9");
+    expect(resolveClientIp(headers({ "x-forwarded-for": "1.2.3.4" }), "10.0.0.9", 0)).toBe(
+      "10.0.0.9",
+    );
     expect(resolveClientIp(headers({ "x-real-ip": "1.2.3.4" }), "10.0.0.9", 0)).toBe("10.0.0.9");
     // So rotating a spoofed header cannot mint fresh rate-limit identities:
-    expect(
-      resolveClientIp(headers({ "x-forwarded-for": "5.6.7.8" }), "10.0.0.9", 0),
-    ).toBe("10.0.0.9");
+    expect(resolveClientIp(headers({ "x-forwarded-for": "5.6.7.8" }), "10.0.0.9", 0)).toBe(
+      "10.0.0.9",
+    );
   });
 
   it("falls back to a shared unknown bucket when no peer is available", () => {

@@ -28,13 +28,13 @@ import {
 } from "./services/context";
 import { startProviderReservationReconciliationScheduler } from "./services/provider-reservation-reconciliation-scheduler";
 import { startRetentionScheduler } from "./services/retention";
-import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
 import {
   InMemoryRateLimiter,
   parseNonNegativeInt,
   parsePositiveInt,
   resolveClientIp,
 } from "./services/runtime-gate";
+import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
 import { configuredVaultStartupLogLine, getConfiguredVault } from "./services/vault-factory";
 import { startWebhookRetryScheduler } from "./services/webhook-retry-scheduler";
 
@@ -90,13 +90,10 @@ function runtimeGate(request: Request, peerAddress: string | null): Response | n
   const ip = resolveClientIp(request.headers, peerAddress, trustedProxyHops);
   const verdict = rateLimiter.check(ip);
   if (verdict.limited) {
-    return Response.json(
-      { ok: false, error: "Rate limit exceeded" } satisfies ApiResponse,
-      {
-        status: 429,
-        headers: { "Retry-After": verdict.retryAfterSeconds.toString() },
-      },
-    );
+    return Response.json({ ok: false, error: "Rate limit exceeded" } satisfies ApiResponse, {
+      status: 429,
+      headers: { "Retry-After": verdict.retryAfterSeconds.toString() },
+    });
   }
   return null;
 }

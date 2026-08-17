@@ -64,9 +64,7 @@ export function resolveClientIp(
   return peerAddress ?? "unknown";
 }
 
-export type RateLimitVerdict =
-  | { limited: false }
-  | { limited: true; retryAfterSeconds: number };
+export type RateLimitVerdict = { limited: false } | { limited: true; retryAfterSeconds: number };
 
 /**
  * Fixed-window in-memory limiter with a hard cap on tracked keys. Only safe

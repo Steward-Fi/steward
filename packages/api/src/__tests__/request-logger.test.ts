@@ -11,7 +11,10 @@ describe("requestLogger (SEC-015)", () => {
   it("logs method + path + status but never the query string", async () => {
     const lines: string[] = [];
     const app = new Hono();
-    app.use("*", requestLogger((line) => lines.push(line)));
+    app.use(
+      "*",
+      requestLogger((line) => lines.push(line)),
+    );
     app.get("/auth/callback/email", (c) => c.json({ ok: true }));
 
     const res = await app.request("/auth/callback/email?token=super-secret-one-time-token");

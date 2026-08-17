@@ -289,8 +289,7 @@ function requireTenantAdminOrApiKey(c: Parameters<typeof requireTenantLevel>[0])
  */
 function allowApiKeyAdminMutations(c: Parameters<typeof requireTenantLevel>[0]): boolean {
   return (
-    c.get("authType") === "api-key" &&
-    process.env.STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS === "true"
+    c.get("authType") === "api-key" && process.env.STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS === "true"
   );
 }
 
