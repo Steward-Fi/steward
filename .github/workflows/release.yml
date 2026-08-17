@@ -10,10 +10,8 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     # contents:write is required to create GitHub Releases
-    # packages:write for GHCR (docker workflow handles this separately, but good to have)
     permissions:
       contents: write
-      packages: write
 
     steps:
       # Checkout the full repo
