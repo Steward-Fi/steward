@@ -36,6 +36,8 @@ import {
   getCheckpointSigner,
 } from "./audit-checkpoint";
 import {
+  AuditCheckpointAnchorError,
+  configuredAuditCheckpointAnchor,
   maybeAnchorAuditCheckpoint,
   type Rfc3161CheckpointAnchorProof,
 } from "./audit-checkpoint-anchor";
@@ -631,7 +633,8 @@ export async function signAuditBundle(
   // Default/off mode returns synchronously without constructing a sink or
   // touching the network. Required mode throws instead of emitting an
   // unanchored bundle; best-effort mode logs and preserves the v1 envelope.
-  const anchor = await maybeAnchorAuditCheckpoint(signed);
+  const anchorConfiguration = configuredAuditCheckpointAnchor();
+  const anchor = await maybeAnchorAuditCheckpoint(signed, anchorConfiguration);
   // Process-local operational gauge only. Durable checkpoint evidence is the
   // signed payload/table below and remains authoritative across restarts.
   try {
@@ -642,7 +645,11 @@ export async function signAuditBundle(
 
   // Persist the checkpoint (append-only provenance). Best-effort: a persistence
   // failure must not deny the auditor their signed bundle (self-contained).
-  if (head) {
+  // Unanchored empty exports retain the historical no-row behavior. Once a
+  // third-party proof exists, however, persist it even for the signed empty
+  // checkpoint: required mode must never return a proof that has no durable
+  // checkpoint binding.
+  if (head || anchor) {
     try {
       await getDb()
         .insert(auditCheckpoints)
@@ -653,8 +660,16 @@ export async function signAuditBundle(
           payload: checkpointPayload as unknown as Record<string, unknown>,
           signature: signed.signature,
           publicKey: signed.publicKey,
+          anchorProof: anchor as unknown as Record<string, unknown> | undefined,
+          anchorVerifiedAt: anchor ? new Date(anchor.verifiedAt) : undefined,
         });
     } catch (err) {
+      if (anchor && anchorConfiguration.mode === "required") {
+        throw new AuditCheckpointAnchorError(
+          "Required RFC 3161 checkpoint proof could not be persisted atomically",
+          { cause: err },
+        );
+      }
       console.error(`[audit] checkpoint persistence failed for tenant ${tenantId}:`, err);
     }
   }

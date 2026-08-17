@@ -10,12 +10,18 @@ import { eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
 import { resetCheckpointSignerCache } from "../services/audit-checkpoint";
-import { createRfc3161TimestampQuery } from "../services/audit-checkpoint-anchor";
+import {
+  auditCheckpointAnchorDigest,
+  createRfc3161TimestampQuery,
+  Rfc3161TimestampSink,
+  verifyRfc3161TimestampResponse,
+} from "../services/audit-checkpoint-anchor";
 import type { AppVariables } from "../services/context";
 import { inspectGovernedRoutes } from "../services/governed-route-inventory";
 
 const TENANT_ID = "audit-bundle-tenant";
 const OTHER_TENANT_ID = "audit-bundle-other-tenant";
+const EMPTY_TENANT_ID = "audit-bundle-empty-tenant";
 const VERIFIER = join(
   import.meta.dir,
   "..",
@@ -146,7 +152,8 @@ function attachTestAnchor(bundle: Bundle): void {
   const digest = createHash("sha256").update(JSON.stringify(ordered)).digest("hex");
   const queryPath = join(tmpDir, `query-${Math.random().toString(36).slice(2)}.tsq`);
   const responsePath = `${queryPath}.tsr`;
-  writeFileSync(queryPath, createRfc3161TimestampQuery(digest));
+  const nonceBytes = Uint8Array.from({ length: 16 }, (_, index) => index + 1);
+  writeFileSync(queryPath, createRfc3161TimestampQuery(digest, nonceBytes));
   runOpenSsl([
     "ts",
     "-reply",
@@ -157,12 +164,25 @@ function attachTestAnchor(bundle: Bundle): void {
     "-out",
     responsePath,
   ]);
+  const inspected = spawnSync("openssl", ["ts", "-reply", "-in", responsePath, "-text"], {
+    encoding: "utf8",
+  });
+  if (inspected.status !== 0) throw new Error("failed to inspect test timestamp");
+  const policyOid = inspected.stdout.match(/^Policy OID:\s*([^\s]+)\s*$/m)?.[1];
+  const timeText = inspected.stdout.match(/^Time stamp:\s*(.+)$/m)?.[1];
+  if (!policyOid || !timeText) throw new Error("test timestamp fields missing");
   bundle.checkpoint.anchor = {
     v: 1,
     type: "rfc3161",
     sinkId: "rfc3161",
     hashAlgorithm: "sha256",
     checkpointDigest: digest,
+    nonce: Buffer.from(nonceBytes).toString("hex"),
+    policyOid,
+    genTime: new Date(timeText).toISOString(),
+    accuracyMillis: 1000,
+    verifiedAt: new Date().toISOString(),
+    trustAnchorSha256: createHash("sha256").update(readFileSync(tsaCaPath)).digest("hex"),
     timestampResponse: readFileSync(responsePath).toString("base64"),
   };
 }
@@ -175,6 +195,7 @@ describe("audit evidence bundle endpoint + offline verifier", () => {
     process.env.STEWARD_MASTER_PASSWORD = "audit-bundle-master-password";
     delete process.env.STEWARD_AUDIT_CHECKPOINT_ANCHOR_MODE;
     delete process.env.STEWARD_AUDIT_RFC3161_URL;
+    delete process.env.STEWARD_AUDIT_RFC3161_CA_FILE;
 
     // Deterministic Ed25519 signing key for the run (PKCS#8 PEM path).
     const { privateKey } = generateKeyPairSync("ed25519");
@@ -195,6 +216,7 @@ describe("audit evidence bundle endpoint + offline verifier", () => {
       .values([
         { id: TENANT_ID, name: "Audit Bundle", apiKeyHash: "audit-bundle" },
         { id: OTHER_TENANT_ID, name: "Audit Bundle Other", apiKeyHash: "audit-bundle-other" },
+        { id: EMPTY_TENANT_ID, name: "Audit Bundle Empty", apiKeyHash: "audit-bundle-empty" },
       ]);
 
     for (let i = 1; i <= 4; i++) {
@@ -227,6 +249,7 @@ describe("audit evidence bundle endpoint + offline verifier", () => {
     delete process.env.STEWARD_AUDIT_SIGNING_KEY;
     delete process.env.STEWARD_AUDIT_CHECKPOINT_ANCHOR_MODE;
     delete process.env.STEWARD_AUDIT_RFC3161_URL;
+    delete process.env.STEWARD_AUDIT_RFC3161_CA_FILE;
     resetCheckpointSignerCache();
   });
 
@@ -427,6 +450,209 @@ describe("audit evidence bundle endpoint + offline verifier", () => {
     expect(stdout).toContain("not operator-proof");
   });
 
+  it("accepts a real CMS token only after nonce, freshness, policy, signature, and path checks", async () => {
+    const bundle = await fetchBundle();
+    const digest = auditCheckpointAnchorDigest(bundle.checkpoint as never);
+    const fakeResponse = Uint8Array.from([
+      0x30,
+      0x29,
+      0x30,
+      0x03,
+      0x02,
+      0x01,
+      0x00,
+      0x30,
+      0x22,
+      0x04,
+      0x20,
+      ...Buffer.from(digest, "hex"),
+    ]);
+    const fakeSink = new Rfc3161TimestampSink({
+      url: "https://tsa.example.test/timestamp",
+      caFile: tsaCaPath,
+      fetch: async () =>
+        new Response(fakeResponse, {
+          status: 200,
+          headers: { "content-type": "application/timestamp-reply" },
+        }),
+    });
+    await expect(fakeSink.anchor(bundle.checkpoint as never)).rejects.toThrow(
+      "trust verification failed",
+    );
+    let observedQuery = new Uint8Array();
+    let observedResponse = new Uint8Array();
+    const sink = new Rfc3161TimestampSink({
+      url: "https://tsa.example.test/timestamp",
+      caFile: tsaCaPath,
+      fetch: async (_input, init) => {
+        const queryPath = join(tmpDir, `live-query-${Math.random().toString(36).slice(2)}.tsq`);
+        const responsePath = `${queryPath}.tsr`;
+        observedQuery = init?.body as Uint8Array;
+        writeFileSync(queryPath, observedQuery);
+        runOpenSsl([
+          "ts",
+          "-reply",
+          "-config",
+          tsaConfigPath,
+          "-queryfile",
+          queryPath,
+          "-out",
+          responsePath,
+        ]);
+        observedResponse = readFileSync(responsePath);
+        return new Response(observedResponse, {
+          status: 200,
+          headers: { "content-type": "application/timestamp-reply" },
+        });
+      },
+    });
+    const proof = await sink.anchor(bundle.checkpoint as never);
+    expect(proof.nonce).toMatch(/^[0-9a-f]{32}$/);
+    expect(proof.policyOid.length).toBeGreaterThan(0);
+    expect(proof.accuracyMillis).toBe(1000);
+    expect(proof.trustAnchorSha256).toBe(
+      createHash("sha256").update(readFileSync(tsaCaPath)).digest("hex"),
+    );
+    expect(() =>
+      verifyRfc3161TimestampResponse({
+        query: createRfc3161TimestampQuery(proof.checkpointDigest),
+        response: observedResponse,
+        caFile: tsaCaPath,
+        requestStartedAt: Date.now(),
+        maxPastAgeMs: 300_000,
+        maxFutureSkewMs: 300_000,
+      }),
+    ).toThrow("trust verification failed");
+    expect(() =>
+      verifyRfc3161TimestampResponse({
+        query: observedQuery,
+        response: observedResponse,
+        caFile: tsaCaPath,
+        requestStartedAt: Date.now() + 60 * 60_000,
+        maxPastAgeMs: 0,
+        maxFutureSkewMs: 0,
+      }),
+    ).toThrow("stale");
+    // Accuracy is an uncertainty interval, not slack. Even when bare genTime
+    // overlaps the window, both interval endpoints must fit the freshness
+    // policy.
+    const genTime = Date.parse(proof.genTime);
+    expect(() =>
+      verifyRfc3161TimestampResponse({
+        query: observedQuery,
+        response: observedResponse,
+        caFile: tsaCaPath,
+        requestStartedAt: genTime + 500,
+        verifiedAt: genTime + 5_000,
+        maxPastAgeMs: 0,
+        maxFutureSkewMs: 0,
+      }),
+    ).toThrow("stale");
+    expect(() =>
+      verifyRfc3161TimestampResponse({
+        query: observedQuery,
+        response: observedResponse,
+        caFile: tsaCaPath,
+        requestStartedAt: genTime - 5_000,
+        verifiedAt: genTime - 500,
+        maxPastAgeMs: 10_000,
+        maxFutureSkewMs: 0,
+      }),
+    ).toThrow("future");
+  });
+
+  it("persists the exact strictly verified proof with the signed checkpoint", async () => {
+    const originalFetch = globalThis.fetch;
+    process.env.STEWARD_AUDIT_CHECKPOINT_ANCHOR_MODE = "required";
+    process.env.STEWARD_AUDIT_RFC3161_URL = "https://tsa.example.test/timestamp";
+    process.env.STEWARD_AUDIT_RFC3161_CA_FILE = tsaCaPath;
+    globalThis.fetch = async (_input, init) => {
+      const queryPath = join(tmpDir, `persist-query-${Math.random().toString(36).slice(2)}.tsq`);
+      const responsePath = `${queryPath}.tsr`;
+      writeFileSync(queryPath, init?.body as Uint8Array);
+      runOpenSsl([
+        "ts",
+        "-reply",
+        "-config",
+        tsaConfigPath,
+        "-queryfile",
+        queryPath,
+        "-out",
+        responsePath,
+      ]);
+      return new Response(readFileSync(responsePath), {
+        status: 200,
+        headers: { "content-type": "application/timestamp-reply" },
+      });
+    };
+    try {
+      const bundle = await fetchBundle();
+      expect(bundle.checkpoint.anchor).toBeDefined();
+      const rows = await getDb()
+        .select()
+        .from(auditCheckpoints)
+        .where(eq(auditCheckpoints.tenantId, TENANT_ID));
+      const persisted = rows.find(
+        (row) => row.anchorProof?.checkpointDigest === bundle.checkpoint.anchor?.checkpointDigest,
+      );
+      expect(persisted?.anchorProof).toEqual(bundle.checkpoint.anchor);
+      expect(persisted?.anchorVerifiedAt).toBeInstanceOf(Date);
+      await expect(
+        (async () =>
+          getDb().execute(
+            sql`UPDATE audit_checkpoints SET anchor_proof = NULL WHERE id = ${persisted?.id}`,
+          ))(),
+      ).rejects.toThrow("Failed query");
+    } finally {
+      globalThis.fetch = originalFetch;
+      delete process.env.STEWARD_AUDIT_CHECKPOINT_ANCHOR_MODE;
+      delete process.env.STEWARD_AUDIT_RFC3161_URL;
+      delete process.env.STEWARD_AUDIT_RFC3161_CA_FILE;
+    }
+  });
+
+  it("persists a required proof even for an empty signed checkpoint", async () => {
+    const originalFetch = globalThis.fetch;
+    process.env.STEWARD_AUDIT_CHECKPOINT_ANCHOR_MODE = "required";
+    process.env.STEWARD_AUDIT_RFC3161_URL = "https://tsa.example.test/timestamp";
+    process.env.STEWARD_AUDIT_RFC3161_CA_FILE = tsaCaPath;
+    globalThis.fetch = async (_input, init) => {
+      const queryPath = join(tmpDir, `empty-query-${Math.random().toString(36).slice(2)}.tsq`);
+      const responsePath = `${queryPath}.tsr`;
+      writeFileSync(queryPath, init?.body as Uint8Array);
+      runOpenSsl([
+        "ts",
+        "-reply",
+        "-config",
+        tsaConfigPath,
+        "-queryfile",
+        queryPath,
+        "-out",
+        responsePath,
+      ]);
+      return new Response(readFileSync(responsePath), {
+        status: 200,
+        headers: { "content-type": "application/timestamp-reply" },
+      });
+    };
+    try {
+      const bundle = await fetchBundle("", EMPTY_TENANT_ID);
+      expect(bundle.events).toHaveLength(0);
+      expect(bundle.checkpoint.anchor).toBeDefined();
+      const rows = await getDb()
+        .select()
+        .from(auditCheckpoints)
+        .where(eq(auditCheckpoints.tenantId, EMPTY_TENANT_ID));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.anchorProof).toEqual(bundle.checkpoint.anchor);
+    } finally {
+      globalThis.fetch = originalFetch;
+      delete process.env.STEWARD_AUDIT_CHECKPOINT_ANCHOR_MODE;
+      delete process.env.STEWARD_AUDIT_RFC3161_URL;
+      delete process.env.STEWARD_AUDIT_RFC3161_CA_FILE;
+    }
+  });
+
   it("fails offline anchor verification for a missing proof or wrong imprint", async () => {
     const unanchored = await fetchBundle();
     const missing = runVerifier(unanchored, ["--tsa-ca", tsaCaPath, "--require-anchor"]);
@@ -441,6 +667,27 @@ describe("audit evidence bundle endpoint + offline verifier", () => {
     const invalid = runVerifier(wrongImprint, ["--tsa-ca", tsaCaPath, "--require-anchor"]);
     expect(invalid.code).toBe(1);
     expect(invalid.stderr).toContain("digest does not match");
+
+    const wrongNonce = await fetchBundle();
+    attachTestAnchor(wrongNonce);
+    if (wrongNonce.checkpoint.anchor) wrongNonce.checkpoint.anchor.nonce = "ff".repeat(16);
+    const nonceFailure = runVerifier(wrongNonce, ["--tsa-ca", tsaCaPath, "--require-anchor"]);
+    expect(nonceFailure.code).toBe(1);
+    expect(nonceFailure.stderr).toContain("nonce does not match");
+
+    const inaccurateCutoff = await fetchBundle();
+    attachTestAnchor(inaccurateCutoff);
+    const anchor = inaccurateCutoff.checkpoint.anchor;
+    const cutoff = new Date(Date.parse(String(anchor?.genTime)) + 500).toISOString();
+    const cutoffFailure = runVerifier(inaccurateCutoff, [
+      "--tsa-ca",
+      tsaCaPath,
+      "--require-anchor",
+      "--anchored-before",
+      cutoff,
+    ]);
+    expect(cutoffFailure.code).toBe(1);
+    expect(cutoffFailure.stderr).toContain("latest accuracy bound");
   });
 
   it("FAILS the verifier at the right seq when an event byte is flipped", async () => {

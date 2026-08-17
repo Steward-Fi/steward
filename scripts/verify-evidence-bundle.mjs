@@ -77,6 +77,7 @@ function usage(msg) {
     "  --tsa-ca <pem>  Verify an included RFC 3161 token against this auditor-supplied CA.",
   );
   console.error("  --tsa-untrusted <pem>  Optional intermediate TSA certificate chain.");
+  console.error("  --tsa-policy <oid>  Require the signed TSTInfo policy OID.");
   console.error("  --require-anchor  Fail unless an RFC 3161 proof is present and verifies.");
   console.error("  --anchored-before <ISO-8601>  Require verified TSA time at/before this bound.");
   process.exit(2);
@@ -91,6 +92,7 @@ function parseArgs() {
   let tsaUntrusted;
   let requireAnchor = false;
   let anchoredBefore;
+  let tsaPolicy;
   const clean = (s) => s.toLowerCase().replace(/[^0-9a-f]/g, "");
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -101,12 +103,18 @@ function parseArgs() {
       i++;
     } else if (a.startsWith("--expected-key-fingerprint=") || a.startsWith("--fp=")) {
       expectedFps.push(clean(a.slice(a.indexOf("=") + 1)));
-    } else if (a === "--tsa-ca" || a === "--tsa-untrusted" || a === "--anchored-before") {
+    } else if (
+      a === "--tsa-ca" ||
+      a === "--tsa-untrusted" ||
+      a === "--anchored-before" ||
+      a === "--tsa-policy"
+    ) {
       const v = argv[i + 1];
       if (!v) usage(`${a} requires a value`);
       if (a === "--tsa-ca") tsaCa = v;
       if (a === "--tsa-untrusted") tsaUntrusted = v;
       if (a === "--anchored-before") anchoredBefore = v;
+      if (a === "--tsa-policy") tsaPolicy = v;
       i++;
     } else if (a === "--require-anchor") {
       requireAnchor = true;
@@ -132,7 +140,15 @@ function parseArgs() {
   if ((requireAnchor || anchoredBefore) && !tsaCa) {
     usage("--require-anchor/--anchored-before require an auditor-supplied --tsa-ca");
   }
-  return { bundleArg, expectedFps, tsaCa, tsaUntrusted, requireAnchor, anchoredBefore };
+  return {
+    bundleArg,
+    expectedFps,
+    tsaCa,
+    tsaUntrusted,
+    tsaPolicy,
+    requireAnchor,
+    anchoredBefore,
+  };
 }
 
 function checkpointAnchorDigest(payload) {
@@ -162,7 +178,16 @@ function verifyRfc3161Anchor(anchor, payload, options) {
     anchor.type !== "rfc3161" ||
     anchor.hashAlgorithm !== "sha256" ||
     typeof anchor.sinkId !== "string" ||
-    !/^[0-9a-f]{64}$/.test(anchor.checkpointDigest)
+    !/^[0-9a-f]{64}$/.test(anchor.checkpointDigest) ||
+    !/^[0-9a-f]{32}$/.test(anchor.nonce) ||
+    typeof anchor.policyOid !== "string" ||
+    typeof anchor.genTime !== "string" ||
+    !Number.isFinite(Date.parse(anchor.genTime)) ||
+    !Number.isFinite(anchor.accuracyMillis) ||
+    anchor.accuracyMillis < 0 ||
+    typeof anchor.verifiedAt !== "string" ||
+    !Number.isFinite(Date.parse(anchor.verifiedAt)) ||
+    !/^[0-9a-f]{64}$/.test(anchor.trustAnchorSha256)
   ) {
     fail("checkpoint RFC 3161 anchor schema is invalid");
   }
@@ -178,6 +203,17 @@ function verifyRfc3161Anchor(anchor, payload, options) {
   const responsePath = join(dir, "response.tsr");
   try {
     writeFileSync(responsePath, response, { mode: 0o600 });
+    const inspected = spawnSync("openssl", ["ts", "-reply", "-in", responsePath, "-text"], {
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    if (inspected.error || inspected.status !== 0) {
+      fail("RFC 3161 token could not be inspected for its timestamp");
+    }
+    const match = inspected.stdout.match(/^Time stamp:\s*(.+)$/m);
+    if (!match) fail("RFC 3161 token did not contain a timestamp");
+    const time = new Date(match[1]);
+    if (!Number.isFinite(time.getTime())) fail("RFC 3161 token timestamp is not parseable");
     const verifyArgs = [
       "ts",
       "-verify",
@@ -187,6 +223,8 @@ function verifyRfc3161Anchor(anchor, payload, options) {
       responsePath,
       "-CAfile",
       options.tsaCa,
+      "-attime",
+      String(Math.floor(time.getTime() / 1000)),
     ];
     if (options.tsaUntrusted) verifyArgs.push("-untrusted", options.tsaUntrusted);
     const verified = spawnSync("openssl", verifyArgs, {
@@ -197,23 +235,37 @@ function verifyRfc3161Anchor(anchor, payload, options) {
     if (verified.status !== 0) {
       fail(`RFC 3161 token verification failed: ${(verified.stderr || verified.stdout).trim()}`);
     }
-    const inspected = spawnSync("openssl", ["ts", "-reply", "-in", responsePath, "-text"], {
-      encoding: "utf8",
-      timeout: 30_000,
-    });
-    if (inspected.error || inspected.status !== 0) {
-      fail("verified RFC 3161 token could not be inspected for its timestamp");
+    const policyOid = inspected.stdout.match(/^Policy OID:\s*([^\s]+)\s*$/m)?.[1];
+    const nonceText = inspected.stdout.match(/^Nonce:\s*(0x[0-9a-f]+|[0-9]+)\s*$/im)?.[1];
+    if (!policyOid || !nonceText) fail("verified RFC 3161 TSTInfo is missing policy or nonce");
+    const tokenNonce = BigInt(nonceText).toString(16).padStart(32, "0");
+    if (tokenNonce !== anchor.nonce)
+      fail("verified RFC 3161 nonce does not match the proof binding");
+    if (policyOid !== anchor.policyOid || (options.tsaPolicy && policyOid !== options.tsaPolicy)) {
+      fail("verified RFC 3161 policy OID is not allowed");
     }
-    const match = inspected.stdout.match(/^Time stamp:\s*(.+)$/m);
-    if (!match) fail("verified RFC 3161 token did not contain a timestamp");
-    const time = new Date(match[1]);
-    if (!Number.isFinite(time.getTime())) fail("RFC 3161 token timestamp is not parseable");
-    if (options.anchoredBefore && time > new Date(options.anchoredBefore)) {
+    const accuracyLine = inspected.stdout.match(/^Accuracy:\s*(.+)$/m)?.[1] ?? "";
+    const accuracyPart = (name, scale) => {
+      const found = accuracyLine.match(new RegExp(`(?:0x([0-9a-f]+)|([0-9]+))\\s+${name}`, "i"));
+      return found ? Number.parseInt(found[1] ?? found[2], found[1] ? 16 : 10) * scale : 0;
+    };
+    const accuracyMillis =
+      accuracyPart("seconds", 1000) + accuracyPart("millis", 1) + accuracyPart("micros", 0.001);
+    if (accuracyMillis !== anchor.accuracyMillis || time.toISOString() !== anchor.genTime) {
+      fail("RFC 3161 proof metadata does not match the signed TSTInfo");
+    }
+    const latestTime = new Date(time.getTime() + accuracyMillis);
+    if (options.anchoredBefore && latestTime > new Date(options.anchoredBefore)) {
       fail(
-        `RFC 3161 anchor time ${time.toISOString()} is after required bound ${options.anchoredBefore}`,
+        `RFC 3161 latest accuracy bound ${latestTime.toISOString()} is after required bound ${options.anchoredBefore}`,
       );
     }
-    return { present: true, verified: true, time: time.toISOString() };
+    return {
+      present: true,
+      verified: true,
+      time: time.toISOString(),
+      latestTime: latestTime.toISOString(),
+    };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

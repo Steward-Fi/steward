@@ -38,4 +38,5 @@ export {
   type Rfc3161CheckpointAnchorProof,
   Rfc3161TimestampSink,
   registerAuditCheckpointAnchorSink,
+  verifyRfc3161TimestampResponse,
 } from "./services/audit-checkpoint-anchor";

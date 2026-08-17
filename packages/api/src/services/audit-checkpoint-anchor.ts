@@ -7,7 +7,11 @@
  * assembly.
  */
 
-import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { canonicalCheckpointBytes, type SignedCheckpoint } from "./audit-checkpoint";
 
 export type AuditCheckpointAnchorMode = "off" | "best-effort" | "required";
@@ -19,6 +23,14 @@ export interface Rfc3161CheckpointAnchorProof {
   hashAlgorithm: "sha256";
   /** SHA-256 of canonicalCheckpointBytes(checkpoint.payload). */
   checkpointDigest: string;
+  /** Request nonce, verified inside the signed TSTInfo by OpenSSL. */
+  nonce: string;
+  policyOid: string;
+  genTime: string;
+  accuracyMillis: number;
+  verifiedAt: string;
+  /** SHA-256 of the operator-configured acquisition trust-anchor PEM bytes. */
+  trustAnchorSha256: string;
   /** Base64 DER TimeStampResp, including the TSA certificate when supplied. */
   timestampResponse: string;
 }
@@ -55,6 +67,12 @@ export interface Rfc3161TimestampSinkOptions {
   url: string;
   timeoutMs?: number;
   fetch?: typeof globalThis.fetch;
+  caFile: string;
+  untrustedFile?: string;
+  expectedPolicyOid?: string;
+  maxPastAgeMs?: number;
+  maxFutureSkewMs?: number;
+  opensslPath?: string;
 }
 
 export class AuditCheckpointAnchorError extends Error {
@@ -70,6 +88,10 @@ function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary);
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function hexToBytes(hex: string): Uint8Array {
@@ -90,16 +112,31 @@ function concatBytes(...chunks: Uint8Array[]): Uint8Array {
   return out;
 }
 
+function derLength(length: number): Uint8Array {
+  if (length < 128) return Uint8Array.of(length);
+  const bytes: number[] = [];
+  for (let value = length; value > 0; value >>>= 8) bytes.unshift(value & 0xff);
+  return Uint8Array.of(0x80 | bytes.length, ...bytes);
+}
+
+function der(tag: number, content: Uint8Array): Uint8Array {
+  return concatBytes(Uint8Array.of(tag), derLength(content.length), content);
+}
+
 /** Digest anchored by the TSA. The Ed25519 signature authenticates these bytes separately. */
 export function auditCheckpointAnchorDigest(checkpoint: SignedCheckpoint): string {
   return createHash("sha256").update(canonicalCheckpointBytes(checkpoint.payload)).digest("hex");
 }
 
 /**
- * DER TimeStampReq v1 with SHA-256 MessageImprint and certReq=true.
- * The fixed-size SHA-256 request uses only short-form DER lengths.
+ * DER TimeStampReq v1 with SHA-256 MessageImprint, an unpredictable 128-bit
+ * nonce, and certReq=true. The nonce is mandatory: it prevents a previously
+ * issued token from satisfying a new required-mode acquisition.
  */
-export function createRfc3161TimestampQuery(checkpointDigest: string): Uint8Array {
+export function createRfc3161TimestampQuery(
+  checkpointDigest: string,
+  nonceBytes: Uint8Array = randomBytes(16),
+): Uint8Array {
   if (!/^[0-9a-f]{64}$/.test(checkpointDigest)) {
     throw new AuditCheckpointAnchorError(
       "RFC 3161 checkpoint digest must be 32-byte lowercase hex",
@@ -108,16 +145,24 @@ export function createRfc3161TimestampQuery(checkpointDigest: string): Uint8Arra
   const sha256AlgorithmIdentifier = Uint8Array.from([
     0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00,
   ]);
-  const imprint = concatBytes(
-    Uint8Array.from([0x30, 0x31]),
-    sha256AlgorithmIdentifier,
-    Uint8Array.from([0x04, 0x20]),
-    hexToBytes(checkpointDigest),
+  if (nonceBytes.length !== 16 || nonceBytes.every((byte) => byte === 0)) {
+    throw new AuditCheckpointAnchorError("RFC 3161 nonce must be a non-zero 128-bit value");
+  }
+  const imprint = der(
+    0x30,
+    concatBytes(sha256AlgorithmIdentifier, der(0x04, hexToBytes(checkpointDigest))),
   );
-  return concatBytes(
-    Uint8Array.from([0x30, 0x39, 0x02, 0x01, 0x01]),
-    imprint,
-    Uint8Array.from([0x01, 0x01, 0xff]),
+  let integer = nonceBytes;
+  while (integer.length > 1 && integer[0] === 0) integer = integer.slice(1);
+  if ((integer[0] & 0x80) !== 0) integer = concatBytes(Uint8Array.of(0), integer);
+  return der(
+    0x30,
+    concatBytes(
+      der(0x02, Uint8Array.of(1)),
+      imprint,
+      der(0x02, integer),
+      der(0x01, Uint8Array.of(0xff)),
+    ),
   );
 }
 
@@ -191,17 +236,122 @@ export function assertGrantedRfc3161Response(bytes: Uint8Array): void {
   }
 }
 
-function assertRfc3161ResponseContainsImprint(bytes: Uint8Array, digest: string): void {
-  const expected = concatBytes(Uint8Array.from([0x04, 0x20]), hexToBytes(digest));
-  outer: for (let offset = 0; offset <= bytes.length - expected.length; offset++) {
-    for (let i = 0; i < expected.length; i++) {
-      if (bytes[offset + i] !== expected[i]) continue outer;
+export interface VerifiedRfc3161Token {
+  policyOid: string;
+  genTime: string;
+  accuracyMillis: number;
+  trustAnchorSha256: string;
+}
+
+function parseAccuracyMillis(text: string): number {
+  const line = text.match(/^Accuracy:\s*(.+)$/m)?.[1];
+  if (!line) return 0;
+  const number = (name: string) => {
+    const value = line.match(new RegExp(`(?:0x([0-9a-f]+)|([0-9]+))\\s+${name}`, "i"));
+    return value ? Number.parseInt(value[1] ?? value[2], value[1] ? 16 : 10) : 0;
+  };
+  return number("seconds") * 1000 + number("millis") + number("micros") / 1000;
+}
+
+/**
+ * Strict acquisition verification. `openssl ts -verify -queryfile` validates
+ * the TimeStampResp/CMS SignedData/TSTInfo structure, signed message imprint,
+ * signed nonce, signer EKU/signature, and certificate path to `caFile`.
+ */
+export function verifyRfc3161TimestampResponse(input: {
+  query: Uint8Array;
+  response: Uint8Array;
+  caFile: string;
+  untrustedFile?: string;
+  expectedPolicyOid?: string;
+  opensslPath?: string;
+  requestStartedAt: number;
+  verifiedAt?: number;
+  maxPastAgeMs: number;
+  maxFutureSkewMs: number;
+}): VerifiedRfc3161Token {
+  const directory = mkdtempSync(join(tmpdir(), "steward-tsa-acquire-"));
+  const queryPath = join(directory, "request.tsq");
+  const responsePath = join(directory, "response.tsr");
+  const caPath = join(directory, "trusted-ca.pem");
+  const untrustedPath = join(directory, "untrusted.pem");
+  const openssl = input.opensslPath ?? "openssl";
+  try {
+    const caBytes = readFileSync(input.caFile);
+    writeFileSync(queryPath, input.query, { mode: 0o600 });
+    writeFileSync(responsePath, input.response, { mode: 0o600 });
+    writeFileSync(caPath, caBytes, { mode: 0o600 });
+    if (input.untrustedFile) {
+      writeFileSync(untrustedPath, readFileSync(input.untrustedFile), { mode: 0o600 });
     }
-    return;
+    const inspected = spawnSync(openssl, ["ts", "-reply", "-in", responsePath, "-text"], {
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    if (inspected.error || inspected.status !== 0) {
+      throw new AuditCheckpointAnchorError("RFC 3161 CMS/TSTInfo trust verification failed");
+    }
+    const text = inspected.stdout;
+    const policyOid = text.match(/^Policy OID:\s*([^\s]+)\s*$/m)?.[1];
+    const timeText = text.match(/^Time stamp:\s*(.+)$/m)?.[1];
+    const nonce = text.match(/^Nonce:\s*(0x[0-9a-f]+|[0-9]+)\s*$/im)?.[1];
+    if (!policyOid || !timeText || !nonce || !/^Hash Algorithm:\s*sha256\s*$/im.test(text)) {
+      throw new AuditCheckpointAnchorError("RFC 3161 TSTInfo is missing required signed fields");
+    }
+    if (input.expectedPolicyOid && policyOid !== input.expectedPolicyOid) {
+      throw new AuditCheckpointAnchorError("RFC 3161 TSA policy OID is not allowed");
+    }
+    const genTimeMs = Date.parse(timeText);
+    if (!Number.isFinite(genTimeMs)) {
+      throw new AuditCheckpointAnchorError("RFC 3161 genTime is not parseable");
+    }
+    // RFC 3161 tokens are long-lived evidence. Validate the TSA certificate
+    // path at the signed generation time, rather than at the later acquisition
+    // or audit time when the signing certificate may legitimately be expired.
+    // The inspected time is not trusted until this verification succeeds.
+    const args = [
+      "ts",
+      "-verify",
+      "-queryfile",
+      queryPath,
+      "-in",
+      responsePath,
+      "-CAfile",
+      caPath,
+      "-attime",
+      String(Math.floor(genTimeMs / 1000)),
+    ];
+    if (input.untrustedFile) args.push("-untrusted", untrustedPath);
+    const verified = spawnSync(openssl, args, { encoding: "utf8", timeout: 30_000 });
+    if (verified.error || verified.status !== 0) {
+      throw new AuditCheckpointAnchorError("RFC 3161 CMS/TSTInfo trust verification failed", {
+        cause: verified.error,
+      });
+    }
+    const accuracyMillis = parseAccuracyMillis(text);
+    if (!Number.isFinite(accuracyMillis) || accuracyMillis < 0) {
+      throw new AuditCheckpointAnchorError("RFC 3161 accuracy is invalid");
+    }
+    const verifiedAt = input.verifiedAt ?? Date.now();
+    // The signed time can be anywhere inside [genTime-accuracy,
+    // genTime+accuracy]. Require the entire interval to fit the configured
+    // acquisition window; mere overlap would let an imprecise TSA bypass the
+    // freshness bound.
+    if (genTimeMs - accuracyMillis < input.requestStartedAt - input.maxPastAgeMs) {
+      throw new AuditCheckpointAnchorError("RFC 3161 genTime is stale for this acquisition");
+    }
+    if (genTimeMs + accuracyMillis > verifiedAt + input.maxFutureSkewMs) {
+      throw new AuditCheckpointAnchorError("RFC 3161 genTime is implausibly in the future");
+    }
+    return {
+      policyOid,
+      genTime: new Date(genTimeMs).toISOString(),
+      accuracyMillis,
+      trustAnchorSha256: createHash("sha256").update(caBytes).digest("hex"),
+    };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
-  throw new AuditCheckpointAnchorError(
-    "RFC 3161 response does not contain the requested SHA-256 message imprint",
-  );
 }
 
 async function readTimestampResponse(response: Response): Promise<Uint8Array> {
@@ -257,6 +407,7 @@ export class Rfc3161TimestampSink implements AuditCheckpointAnchorSink {
   private readonly url: URL;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof globalThis.fetch;
+  private readonly options: Rfc3161TimestampSinkOptions;
 
   constructor(options: Rfc3161TimestampSinkOptions) {
     this.url = validateTimestampUrl(options.url);
@@ -265,11 +416,18 @@ export class Rfc3161TimestampSink implements AuditCheckpointAnchorSink {
       throw new AuditCheckpointAnchorError("RFC 3161 timeout must be between 100 and 60000ms");
     }
     this.fetchImpl = options.fetch ?? globalThis.fetch;
+    if (!options.caFile?.trim()) {
+      throw new AuditCheckpointAnchorError("RFC 3161 trusted CA file is required");
+    }
+    this.options = options;
   }
 
   async anchor(checkpoint: SignedCheckpoint): Promise<Rfc3161CheckpointAnchorProof> {
     const checkpointDigest = auditCheckpointAnchorDigest(checkpoint);
-    const query = createRfc3161TimestampQuery(checkpointDigest);
+    const nonceBytes = randomBytes(16);
+    const nonce = bytesToHex(nonceBytes);
+    const query = createRfc3161TimestampQuery(checkpointDigest, nonceBytes);
+    const requestStartedAt = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -289,19 +447,47 @@ export class Rfc3161TimestampSink implements AuditCheckpointAnchorSink {
       if (!response.ok) {
         throw new AuditCheckpointAnchorError(`RFC 3161 TSA returned HTTP ${response.status}`);
       }
+      if (
+        (response.headers.get("content-type") ?? "").split(";", 1)[0].trim().toLowerCase() !==
+        "application/timestamp-reply"
+      ) {
+        throw new AuditCheckpointAnchorError("RFC 3161 TSA returned an invalid content type");
+      }
       const declaredLength = Number(response.headers.get("content-length") ?? "0");
-      if (declaredLength > MAX_TIMESTAMP_RESPONSE_BYTES) {
+      if (
+        !Number.isFinite(declaredLength) ||
+        declaredLength < 0 ||
+        declaredLength > MAX_TIMESTAMP_RESPONSE_BYTES
+      ) {
         throw new AuditCheckpointAnchorError("RFC 3161 response exceeds 1 MiB");
       }
       const bytes = await readTimestampResponse(response);
       assertGrantedRfc3161Response(bytes);
-      assertRfc3161ResponseContainsImprint(bytes, checkpointDigest);
+      const verifiedAt = Date.now();
+      const verified = verifyRfc3161TimestampResponse({
+        query,
+        response: bytes,
+        caFile: this.options.caFile,
+        untrustedFile: this.options.untrustedFile,
+        expectedPolicyOid: this.options.expectedPolicyOid,
+        opensslPath: this.options.opensslPath,
+        requestStartedAt,
+        verifiedAt,
+        maxPastAgeMs: this.options.maxPastAgeMs ?? 5 * 60_000,
+        maxFutureSkewMs: this.options.maxFutureSkewMs ?? 5 * 60_000,
+      });
       return {
         v: 1,
         type: "rfc3161",
         sinkId: this.id,
         hashAlgorithm: "sha256",
         checkpointDigest,
+        nonce,
+        policyOid: verified.policyOid,
+        genTime: verified.genTime,
+        accuracyMillis: verified.accuracyMillis,
+        verifiedAt: new Date(verifiedAt).toISOString(),
+        trustAnchorSha256: verified.trustAnchorSha256,
         timestampResponse: bytesToBase64(bytes),
       };
     } catch (error) {
@@ -347,7 +533,32 @@ export function configuredAuditCheckpointAnchor(): {
   }
   const rawTimeout = process.env.STEWARD_AUDIT_RFC3161_TIMEOUT_MS?.trim();
   const timeoutMs = rawTimeout ? Number(rawTimeout) : undefined;
-  return { mode, sink: new Rfc3161TimestampSink({ url, timeoutMs }) };
+  const caFile = process.env.STEWARD_AUDIT_RFC3161_CA_FILE?.trim();
+  if (!caFile) {
+    throw new AuditCheckpointAnchorError(
+      "STEWARD_AUDIT_RFC3161_CA_FILE is required when RFC 3161 anchoring is enabled",
+    );
+  }
+  const seconds = (name: string, fallback: number) => {
+    const raw = process.env[name]?.trim();
+    const value = raw ? Number(raw) : fallback;
+    if (!Number.isSafeInteger(value) || value < 0 || value > 3600) {
+      throw new AuditCheckpointAnchorError(`${name} must be an integer from 0 to 3600 seconds`);
+    }
+    return value * 1000;
+  };
+  return {
+    mode,
+    sink: new Rfc3161TimestampSink({
+      url,
+      timeoutMs,
+      caFile,
+      untrustedFile: process.env.STEWARD_AUDIT_RFC3161_UNTRUSTED_FILE?.trim(),
+      expectedPolicyOid: process.env.STEWARD_AUDIT_RFC3161_POLICY_OID?.trim(),
+      maxPastAgeMs: seconds("STEWARD_AUDIT_RFC3161_MAX_AGE_SECONDS", 300),
+      maxFutureSkewMs: seconds("STEWARD_AUDIT_RFC3161_MAX_FUTURE_SKEW_SECONDS", 300),
+    }),
+  };
 }
 
 /** Anchor according to environment policy; required mode never degrades silently. */

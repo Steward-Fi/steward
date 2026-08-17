@@ -17,6 +17,7 @@ const ENV_KEYS = [
   "STEWARD_AUDIT_CHECKPOINT_ANCHOR_MODE",
   "STEWARD_AUDIT_CHECKPOINT_ANCHOR_PROVIDER",
   "STEWARD_AUDIT_RFC3161_URL",
+  "STEWARD_AUDIT_RFC3161_CA_FILE",
   "STEWARD_AUDIT_RFC3161_TIMEOUT_MS",
 ] as const;
 const originalEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
@@ -41,9 +42,8 @@ function checkpoint() {
   return createCheckpointSigner(pem).sign(payload);
 }
 
-// Minimal structurally granted TimeStampResp carrying the requested imprint.
-// Full CMS signature trust is the offline verifier's job with an
-// auditor-supplied CA.
+// Deliberately fake non-CMS response used to prove acquisition never accepts a
+// byte scan or a shallow ASN.1 wrapper as a timestamp token.
 function grantedResponse(digest: string): Uint8Array {
   const imprint = Buffer.from(digest, "hex");
   return Uint8Array.from([
@@ -90,40 +90,23 @@ describe("audit checkpoint anchoring", () => {
     expect(configuredAuditCheckpointAnchor()).toEqual({ mode: "off" });
   });
 
-  it("builds the exact SHA-256 RFC 3161 query and attaches only opaque public proof", async () => {
+  it("uses a fresh nonce and rejects a fabricated non-CMS response in required acquisition", async () => {
     const signed = checkpoint();
     const responseBytes = grantedResponse(auditCheckpointAnchorDigest(signed));
-    let observedUrl = "";
-    let observedInit: RequestInit | undefined;
+    const first = createRfc3161TimestampQuery(auditCheckpointAnchorDigest(signed));
+    const second = createRfc3161TimestampQuery(auditCheckpointAnchorDigest(signed));
+    expect(first).not.toEqual(second);
     const sink = new Rfc3161TimestampSink({
       url: "https://tsa.example.test/v1",
-      fetch: async (input, init) => {
-        observedUrl = String(input);
-        observedInit = init;
+      caFile: "/definitely-not-a-trust-anchor.pem",
+      fetch: async () => {
         return new Response(responseBytes, {
           status: 200,
           headers: { "content-type": "application/timestamp-reply" },
         });
       },
     });
-    const proof = await sink.anchor(signed);
-    expect(observedUrl).toBe("https://tsa.example.test/v1");
-    expect(observedInit?.method).toBe("POST");
-    expect(observedInit?.redirect).toBe("error");
-    expect(new Headers(observedInit?.headers).get("content-type")).toBe(
-      "application/timestamp-query",
-    );
-    const expectedQuery = createRfc3161TimestampQuery(auditCheckpointAnchorDigest(signed));
-    expect(Buffer.from(observedInit?.body as Uint8Array)).toEqual(Buffer.from(expectedQuery));
-    expect(proof).toEqual({
-      v: 1,
-      type: "rfc3161",
-      sinkId: "rfc3161",
-      hashAlgorithm: "sha256",
-      checkpointDigest: auditCheckpointAnchorDigest(signed),
-      timestampResponse: Buffer.from(responseBytes).toString("base64"),
-    });
-    expect(JSON.stringify(proof).toLowerCase()).not.toContain("private");
+    await expect(sink.anchor(signed)).rejects.toThrow();
   });
 
   it("rejects malformed, denied, oversized and token-less responses", () => {
@@ -160,6 +143,7 @@ describe("audit checkpoint anchoring", () => {
     expect(() => configuredAuditCheckpointAnchor()).toThrow("URL is required");
 
     process.env.NODE_ENV = "production";
+    process.env.STEWARD_AUDIT_RFC3161_CA_FILE = "/tmp/tsa-ca.pem";
     process.env.STEWARD_AUDIT_RFC3161_URL = "http://tsa.example.test";
     expect(() => configuredAuditCheckpointAnchor()).toThrow("HTTPS");
   });

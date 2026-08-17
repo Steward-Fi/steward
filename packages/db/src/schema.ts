@@ -2643,6 +2643,8 @@ export const auditCheckpoints = pgTable(
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
     signature: text("signature").notNull(),
     publicKey: text("public_key").notNull(),
+    anchorProof: jsonb("anchor_proof").$type<Record<string, unknown>>(),
+    anchorVerifiedAt: timestamp("anchor_verified_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
