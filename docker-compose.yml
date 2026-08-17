@@ -158,6 +158,8 @@ services:
       # Explicit soft posture for functional dev/test stacks. Empty by default;
       # NODE_ENV=production always overrides it in proxy security guards.
       STEWARD_PROXY_DEV_MODE: "${STEWARD_PROXY_DEV_MODE:-}"
+      STEWARD_PROXY_RATE_LIMIT_MAX: "${STEWARD_PROXY_RATE_LIMIT_MAX:-60}"
+      STEWARD_PROXY_RATE_LIMIT_WINDOW_MS: "${STEWARD_PROXY_RATE_LIMIT_WINDOW_MS:-60000}"
       REDIS_URL: "redis://redis:6379"
       # Cleartext redis:// on the private compose network requires an explicit
       # opt-out in production (mirrors STEWARD_ALLOW_INSECURE_DB). Set
