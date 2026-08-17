@@ -17,8 +17,19 @@ export const DEFAULT_ALIASES: Record<string, string> = {
   x: "api.x.com",
 };
 
+/** Parse a bounded integer setting at module load so malformed resource limits fail closed. */
+export function boundedPositiveIntegerEnv(name: string, fallback: number, maximum: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
+    throw new Error(`${name} must be an integer between 1 and ${maximum}`);
+  }
+  return value;
+}
+
 /** Default port for the proxy server */
-export const PROXY_PORT = parseInt(process.env.STEWARD_PROXY_PORT || "8080", 10);
+export const PROXY_PORT = boundedPositiveIntegerEnv("STEWARD_PROXY_PORT", 8080, 65_535);
 
 /** Required JWT scope for proxy access */
 export const PROXY_SCOPE = "api:proxy";
