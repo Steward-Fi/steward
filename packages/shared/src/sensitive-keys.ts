@@ -60,7 +60,7 @@ const SENSITIVE_CREDENTIAL_KEY_SUFFIXES = [
   "jwt",
 ];
 
-const SENSITIVE_CREDENTIAL_KEY_DECORATORS = ["header", "value"];
+const SENSITIVE_CREDENTIAL_KEY_DECORATORS = ["header", "value", "pem"];
 
 function normalizeSensitiveKey(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]/g, "");

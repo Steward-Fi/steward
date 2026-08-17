@@ -390,7 +390,13 @@ describe("#220 executable provider profile conformance", () => {
       "profile-mismatch",
     );
 
-    for (const key of ["auth", "passphrase", "clientSecretValue", "cookieHeader"]) {
+    for (const key of [
+      "auth",
+      "passphrase",
+      "clientSecretValue",
+      "cookieHeader",
+      "privateKeyPem",
+    ]) {
       expect(() =>
         parse({
           ...built.action,
