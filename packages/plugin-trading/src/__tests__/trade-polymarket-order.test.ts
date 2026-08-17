@@ -510,6 +510,7 @@ describe("POST /v1/trade/polymarket/order", () => {
     // getWallet/signing spy and no raw private key leaves the vault.
     const wallet = await sharedTestContext.vault.createWallet({
       agentId,
+      tenantId,
       venue: "polymarket",
       chainType: "evm",
     });
