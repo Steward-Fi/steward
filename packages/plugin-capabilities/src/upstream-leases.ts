@@ -157,11 +157,12 @@ async function recordFailure(
   leaseId: string,
   tenantId: string,
   error: string,
+  status: "failed" | "needs_attention" = "failed",
 ): Promise<void> {
   await db.transaction(async (tx: Db) => {
     await tx
       .update(upstreamCredentialLeases)
-      .set({ status: "failed", lastError: error.slice(0, 500), updatedAt: new Date() })
+      .set({ status, lastError: error.slice(0, 500), updatedAt: new Date() })
       .where(eq(upstreamCredentialLeases.id, leaseId));
     await tx.insert(upstreamCredentialLeaseEvents).values({
       leaseId,
@@ -366,12 +367,16 @@ export async function issueUpstreamCredentialLease(input: {
     issued.expiresAt.getTime() <= now.getTime() ||
     issued.expiresAt.getTime() > now.getTime() + input.ttlSeconds * 1000 + 30_000
   ) {
-    await input.issuer.revoke(issued.token).catch(() => {});
+    const revoked = await input.issuer.revoke(issued.token).then(
+      () => true,
+      () => false,
+    );
     await recordFailure(
       input.db,
       claim.id,
       input.tenantId,
       "upstream expiry exceeded requested ttl",
+      revoked ? "failed" : "needs_attention",
     );
     return {
       ok: false,

@@ -26,12 +26,13 @@ class FakeIssuer implements UpstreamTokenIssuer {
   revokeCalls = 0;
   failIssue = false;
   failRevoke = false;
+  expiryOffsetMs = 3_590_000;
 
   async issue() {
     this.issueCalls += 1;
     await new Promise((resolve) => setTimeout(resolve, 10));
     if (this.failIssue) throw new Error("issuer down");
-    return { token: TOKEN, expiresAt: new Date(NOW.getTime() + 3_590_000) };
+    return { token: TOKEN, expiresAt: new Date(NOW.getTime() + this.expiryOffsetMs) };
   }
 
   async revoke(token: string) {
@@ -282,5 +283,19 @@ describe("upstream credential leases", () => {
       .from(upstreamCredentialLeaseEvents)
       .where(eq(upstreamCredentialLeaseEvents.leaseId, issued.leaseId));
     expect(events.at(-1)).toMatchObject({ action: "lease.expire", decision: "allow" });
+  });
+
+  test("an overlong upstream token is revoked or durably flagged for attention", async () => {
+    const issuer = new FakeIssuer();
+    issuer.expiryOffsetMs = 4_000_000;
+    issuer.failRevoke = true;
+    const denied = await issueUpstreamCredentialLease(
+      issueArgs(issuer, "idempotency-expiry-contract"),
+    );
+    expect(denied).toMatchObject({ ok: false, code: "issuer_contract_violation" });
+    expect(issuer.revokeCalls).toBe(1);
+    const rows = await harness.db.select().from(upstreamCredentialLeases);
+    expect(rows[0].status).toBe("needs_attention");
+    expect(JSON.stringify(rows[0])).not.toContain(TOKEN);
   });
 });
