@@ -101,6 +101,29 @@ describe("#101 deploy/DEPLOYMENT.md docs reconciled with fail-closed code", () =
   });
 });
 
+describe("SEC-020 deploy/migrate-agent-keys.sh keeps the platform key off every argv", () => {
+  const script = read("migrate-agent-keys.sh");
+
+  test("platform key is read on the remote side, never interpolated into ssh/curl argv", () => {
+    // Pre-fix: the key was a positional arg interpolated into the remote curl
+    // header (visible in local ps/history AND the node's process list):
+    //   -H 'X-Steward-Platform-Key: ${PLATFORM_KEY}'
+    expect(script).not.toContain("X-Steward-Platform-Key: ${PLATFORM_KEY}");
+    // The remote shell resolves the key itself (sed on the node's 0600 .env,
+    // or cat from ssh stdin for the deprecated arg path).
+    expect(script).toContain("sed -n 's/^STEWARD_PLATFORM_KEY=//p'");
+    expect(script).toContain("X-Steward-Platform-Key: \\${PK}");
+  });
+
+  test("agent tokens are written to a mode-0600 file, not echoed to stdout", () => {
+    // Pre-fix: `echo "${NEW_ENV_VARS}"` printed per-agent STEWARD_AGENT_TOKEN
+    // values to stdout (scrollback / CI logs).
+    expect(script).not.toMatch(/echo\s+"\$\{NEW_ENV_VARS\}"/);
+    expect(script).toContain("mktemp");
+    expect(script).toContain("not printed here");
+  });
+});
+
 describe("SEC-019 no deploy/provision SSH runs with host-key verification disabled", () => {
   const SCRIPTS_DIR = join(DEPLOY_DIR, "..", "scripts");
   const artifacts: Array<[string, string]> = [
