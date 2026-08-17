@@ -338,22 +338,42 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     return { allowed: true, resetMs: current.resetAt - now };
   }
 
+  type RouteIdempotency = {
+    conflict?: boolean;
+    inProgress?: boolean;
+    response?: TradeIdempotencyResponse;
+    claim?: () => Promise<RouteIdempotency>;
+    store?: (response: TradeIdempotencyResponse) => Promise<void>;
+    release?: () => Promise<void>;
+  };
+
+  function routeIdempotency(
+    check: Awaited<ReturnType<typeof hlIdempotencyStore.check>>,
+  ): RouteIdempotency {
+    return {
+      conflict: check.conflict,
+      inProgress: check.inProgress,
+      response: check.record,
+      claim: check.claim
+        ? async () => routeIdempotency(await check.claim!())
+        : undefined,
+      store: check.store,
+      release: check.release,
+    };
+  }
+
   async function getIdempotency(
     tenantId: string,
     agentId: string,
     key: string | undefined,
     body: SubmitOrderBody,
-  ): Promise<{
-    conflict?: boolean;
-    response?: TradeIdempotencyResponse;
-    store?: (response: TradeIdempotencyResponse) => Promise<void>;
-  }> {
+  ): Promise<RouteIdempotency> {
     const check = await hlIdempotencyStore.check(
       `${tenantId}:${agentId}`,
       key,
       hashBody({ ...body, idempotencyKey: undefined }),
     );
-    return { conflict: check.conflict, response: check.record, store: check.store };
+    return routeIdempotency(check);
   }
 
   async function resolvePolicyLimitPx(
@@ -909,7 +929,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       return c.json<ApiResponse>({ ok: false, error: "Idempotency-Key is required" }, 400);
     }
 
-    const idempotency = await getIdempotency(tenantId, agentId, body.idempotencyKey, body);
+    let idempotency = await getIdempotency(tenantId, agentId, body.idempotencyKey, body);
     if (idempotency.conflict) {
       return c.json<ApiResponse>(
         { ok: false, error: "Idempotency key reused with a different body" },
@@ -918,6 +938,10 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     }
     if (idempotency.response) {
       return tradeReplayResponse(c, idempotency.response);
+    }
+    if (idempotency.inProgress) {
+      c.header("Retry-After", "1");
+      return c.json<ApiResponse>({ ok: false, error: "Request with this idempotency key is in progress" }, 409);
     }
 
     const session = await getSessionManager().getActive(tenantId, body.sessionId);
@@ -1051,6 +1075,18 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
 
     const walletAddress = session.walletId;
     const manager = getSessionManager();
+    idempotency = idempotency.claim ? await idempotency.claim() : idempotency;
+    if (idempotency.conflict) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency key reused with a different body" },
+        409,
+      );
+    }
+    if (idempotency.response) return tradeReplayResponse(c, idempotency.response);
+    if (idempotency.inProgress) {
+      c.header("Retry-After", "1");
+      return c.json<ApiResponse>({ ok: false, error: "Request with this idempotency key is in progress" }, 409);
+    }
     const fenced = await manager.withActiveSubmissionFence(
       { tenantId, id: session.id },
       async (sessionFromFence?: TradeSession) => {
@@ -1291,17 +1327,13 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     agentId: string,
     key: string | undefined,
     body: PmSubmitOrderBody,
-  ): Promise<{
-    conflict?: boolean;
-    response?: TradeIdempotencyResponse;
-    store?: (response: TradeIdempotencyResponse) => Promise<void>;
-  }> {
+  ): Promise<RouteIdempotency> {
     const check = await pmIdempotencyStore.check(
       `${tenantId}:${agentId}`,
       key,
       hashBody({ ...body, idempotencyKey: undefined }),
     );
-    return { conflict: check.conflict, response: check.record, store: check.store };
+    return routeIdempotency(check);
   }
 
   async function enforcePolymarketOrderRateLimit(
@@ -1673,7 +1705,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       return c.json<ApiResponse>({ ok: false, error: "Idempotency-Key is required" }, 400);
     }
 
-    const idempotency = await getPmIdempotency(tenantId, agentId, body.idempotencyKey, body);
+    let idempotency = await getPmIdempotency(tenantId, agentId, body.idempotencyKey, body);
     if (idempotency.conflict) {
       return c.json<ApiResponse>(
         { ok: false, error: "Idempotency key reused with a different body" },
@@ -1682,6 +1714,10 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     }
     if (idempotency.response) {
       return tradeReplayResponse(c, idempotency.response);
+    }
+    if (idempotency.inProgress) {
+      c.header("Retry-After", "1");
+      return c.json<ApiResponse>({ ok: false, error: "Request with this idempotency key is in progress" }, 409);
     }
 
     // Validate price + amount as positive finite numbers up front (the policy gate
@@ -1860,6 +1896,18 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     };
 
     const manager = getSessionManager();
+    idempotency = idempotency.claim ? await idempotency.claim() : idempotency;
+    if (idempotency.conflict) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency key reused with a different body" },
+        409,
+      );
+    }
+    if (idempotency.response) return tradeReplayResponse(c, idempotency.response);
+    if (idempotency.inProgress) {
+      c.header("Retry-After", "1");
+      return c.json<ApiResponse>({ ok: false, error: "Request with this idempotency key is in progress" }, 409);
+    }
     // Fence reserve→submit against concurrent revocation (mirrors HL's
     // withActiveSubmissionFence). After SEC-044 the fence's advisory lock covers
     // ONLY the DB-level active check — it is released before this callback runs

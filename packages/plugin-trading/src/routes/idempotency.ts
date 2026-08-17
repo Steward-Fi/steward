@@ -1,37 +1,11 @@
 /**
- * idempotency.ts — durable idempotency backing for the trade + operator routes
- * (SEC-043).
+ * Durable, multi-replica idempotency for fund-moving trading routes.
  *
- * Wave-2 bounded the process-local maps (1_000 entries + expired-sweep) and
- * stored ambiguous-outcome 502 envelopes, but the maps were still per-process:
- * a restart or a second replica silently lost dedup, so a retried
- * withdraw/order could double-execute a fund movement.
- *
- * This store keeps the wave-2 semantics and adds a Redis-backed record when a
- * client is available (production always has one — durable stores are asserted
- * at startup), keyed `idempotency:<namespace>:<scope>:<key>` with the same 24h
- * TTL. Without Redis it falls back to the bounded process-local map (dev /
- * single-replica), exactly like the routes' rate limiters.
- *
- * Semantics (unchanged from wave-2):
- *   - same key + same body      -> replay the stored outcome (no re-execution)
- *   - same key + DIFFERENT body -> conflict (the routes answer 409)
- *   - missing/expired           -> fresh; `store` records the final outcome
- *                                  (success OR ambiguous 502) so retries replay
- *
- * Failure posture:
- *   - a Redis error on CHECK fails CLOSED (throws): executing without the
- *     dedup record risks a double fund-movement; the caller's retry replays
- *     once Redis recovers.
- *   - a Redis error on STORE is logged and swallowed: the movement already
- *     executed, so the caller must still see the real outcome. A later retry
- *     may re-execute — the same accepted residual as a crash between venue
- *     execution and persistence.
- *
- * Known residual (pre-existing, unchanged): two requests with the same key
- * in-flight CONCURRENTLY can both pass the check before either stores. This
- * store closes the sequential-retry / restart / multi-replica gaps the audit
- * flagged; claim-before-execute hardening is separate work.
+ * Callers first `check()` for an existing result, then invoke the returned
+ * `claim()` immediately before the first externally mutating operation. The
+ * claim is an atomic Redis SET PX NX (or a synchronous in-memory insertion),
+ * so only one replica may execute. The owner replaces or releases its claim
+ * with token-checked Lua CAS operations.
  */
 
 import type { IoredisLike } from "@stwd/redis";
@@ -43,22 +17,58 @@ export interface IdempotencyRecord {
 
 export interface IdempotencyCheck<TRecord extends IdempotencyRecord> {
   conflict?: boolean;
+  inProgress?: boolean;
   record?: TRecord;
+  claim?: () => Promise<IdempotencyCheck<TRecord>>;
   store?: (record: TRecord) => Promise<void>;
+  release?: () => Promise<void>;
 }
 
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_MEMORY_ENTRIES = 1_000;
 
+type PendingValue = { state: "pending"; bodyHash: string; claimToken: string };
+type CompletedValue<TRecord> = {
+  state: "completed";
+  bodyHash: string;
+  record: TRecord;
+};
+
+const COMPLETE_IF_OWNER = `
+local current = redis.call("GET", KEYS[1])
+if not current then return 0 end
+local ok, decoded = pcall(cjson.decode, current)
+if not ok or decoded["state"] ~= "pending" or decoded["claimToken"] ~= ARGV[1] then
+  return 0
+end
+redis.call("SET", KEYS[1], ARGV[2], "PX", ARGV[3])
+return 1
+`;
+
+const DELETE_IF_OWNER = `
+local current = redis.call("GET", KEYS[1])
+if not current then return 0 end
+local ok, decoded = pcall(cjson.decode, current)
+if not ok or decoded["state"] ~= "pending" or decoded["claimToken"] ~= ARGV[1] then
+  return 0
+end
+return redis.call("DEL", KEYS[1])
+`;
+
 export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
   private readonly memory = new Map<
     string,
-    { bodyHash: string; record: TRecord; expiresAt: number }
+    {
+      bodyHash: string;
+      state: "pending" | "completed";
+      claimToken?: string;
+      record?: TRecord;
+      expiresAt: number;
+    }
   >();
 
   constructor(
     private readonly options: {
-      /** Key prefix segment, e.g. "trade" or "trade:operator". */
       namespace: string;
       getRedisClient: () => IoredisLike | null;
     },
@@ -77,10 +87,105 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
     }
   }
 
-  /**
-   * Look up `key` within `scope`. `bodyHash` is the caller-computed canonical
-   * body fingerprint; a mismatch on an existing entry is a conflict.
-   */
+  private parseExisting(raw: string): PendingValue | CompletedValue<TRecord> {
+    let value: unknown;
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      throw new Error("Malformed durable idempotency record");
+    }
+    if (!value || typeof value !== "object") {
+      throw new Error("Malformed durable idempotency record");
+    }
+    const candidate = value as Record<string, unknown>;
+    // Records written by the earlier SEC-043 implementation remain replayable.
+    if (typeof candidate.bodyHash === "string" && candidate.record && !candidate.state) {
+      return {
+        state: "completed",
+        bodyHash: candidate.bodyHash,
+        record: candidate.record as TRecord,
+      };
+    }
+    if (
+      candidate.state === "pending" &&
+      typeof candidate.bodyHash === "string" &&
+      typeof candidate.claimToken === "string"
+    ) {
+      return candidate as PendingValue;
+    }
+    if (
+      candidate.state === "completed" &&
+      typeof candidate.bodyHash === "string" &&
+      candidate.record
+    ) {
+      return candidate as CompletedValue<TRecord>;
+    }
+    throw new Error("Malformed durable idempotency record");
+  }
+
+  private outcome(
+    existing: PendingValue | CompletedValue<TRecord>,
+    bodyHash: string,
+  ): IdempotencyCheck<TRecord> {
+    if (existing.bodyHash !== bodyHash) return { conflict: true };
+    if (existing.state === "pending") return { inProgress: true };
+    return { record: existing.record };
+  }
+
+  private ownerHandles(
+    redis: IoredisLike,
+    redisKey: string,
+    bodyHash: string,
+    claimToken: string,
+  ): IdempotencyCheck<TRecord> {
+    return {
+      store: async (record) => {
+        const completed: CompletedValue<TRecord> = { state: "completed", bodyHash, record };
+        try {
+          const replaced = await redis.eval(
+            COMPLETE_IF_OWNER,
+            1,
+            redisKey,
+            claimToken,
+            JSON.stringify(completed),
+            IDEMPOTENCY_TTL_MS,
+          );
+          if (Number(replaced) !== 1) {
+            console.error("[idempotency] outcome was not persisted: claim ownership was lost");
+          }
+        } catch (err) {
+          // The pending marker remains fail-closed, preventing a duplicate retry.
+          console.error("[idempotency] failed to persist outcome; claim remains pending:", err);
+        }
+      },
+      release: async () => {
+        await redis.eval(DELETE_IF_OWNER, 1, redisKey, claimToken);
+      },
+    };
+  }
+
+  private async claimRedis(
+    redis: IoredisLike,
+    redisKey: string,
+    bodyHash: string,
+  ): Promise<IdempotencyCheck<TRecord>> {
+    const claimToken = crypto.randomUUID();
+    const pending: PendingValue = { state: "pending", bodyHash, claimToken };
+    const serialized = JSON.stringify(pending);
+    const claimed = await redis.set(redisKey, serialized, "PX", IDEMPOTENCY_TTL_MS, "NX");
+    if (claimed) return this.ownerHandles(redis, redisKey, bodyHash, claimToken);
+    const raw = await redis.get(redisKey);
+    // An expiry exactly between SET NX and GET is safe to retry once.
+    if (raw === null) {
+      const retry = await redis.set(redisKey, serialized, "PX", IDEMPOTENCY_TTL_MS, "NX");
+      if (retry) return this.ownerHandles(redis, redisKey, bodyHash, claimToken);
+      const raced = await redis.get(redisKey);
+      if (raced === null) throw new Error("Unable to establish durable idempotency claim");
+      return this.outcome(this.parseExisting(raced), bodyHash);
+    }
+    return this.outcome(this.parseExisting(raw), bodyHash);
+  }
+
   async check(
     scope: string,
     key: string | undefined,
@@ -90,51 +195,54 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
     const now = Date.now();
     const redis = this.options.getRedisClient();
     if (redis) {
-      // Fail CLOSED on a Redis error (see the module doc).
-      const raw = await redis.get(this.redisKey(scope, key));
-      if (raw !== null) {
-        let existing: { bodyHash?: unknown; record?: unknown } | null = null;
-        try {
-          existing = JSON.parse(raw) as { bodyHash?: unknown; record?: unknown };
-        } catch {
-          existing = null;
-        }
-        if (typeof existing?.bodyHash === "string" && existing.record) {
-          if (existing.bodyHash !== bodyHash) return { conflict: true };
-          return { record: existing.record as TRecord };
-        }
-        // An unparsable entry cannot vouch for a prior execution — treat as
-        // absent and let store() overwrite it below.
-      }
-      return {
-        store: async (record) => {
-          const payload = JSON.stringify({ bodyHash, record });
-          await redis
-            .set(this.redisKey(scope, key), payload, "PX", IDEMPOTENCY_TTL_MS)
-            .catch((err) => {
-              // The movement already executed; losing the record means a later
-              // retry re-executes. Log loudly — nothing safer remains.
-              console.error(
-                "[idempotency] failed to persist the outcome record; a retry may re-execute:",
-                err,
-              );
-            });
-        },
-      };
+      const redisKey = this.redisKey(scope, key);
+      const raw = await redis.get(redisKey);
+      if (raw !== null) return this.outcome(this.parseExisting(raw), bodyHash);
+      return { claim: () => this.claimRedis(redis, redisKey, bodyHash) };
     }
 
-    // Process-local fallback (dev / single-replica): bounded + swept, mirroring
-    // the wave-2 maps.
     const mapKey = `${scope}:${key}`;
     const existing = this.memory.get(mapKey);
     if (existing && existing.expiresAt > now) {
       if (existing.bodyHash !== bodyHash) return { conflict: true };
-      return { record: existing.record };
+      if (existing.state === "pending") return { inProgress: true };
+      return { record: existing.record } as IdempotencyCheck<TRecord>;
     }
     return {
-      store: async (record) => {
-        this.sweepMemory(now);
-        this.memory.set(mapKey, { bodyHash, record, expiresAt: now + IDEMPOTENCY_TTL_MS });
+      claim: async () => {
+        const claimNow = Date.now();
+        const raced = this.memory.get(mapKey);
+        if (raced && raced.expiresAt > claimNow) {
+          if (raced.bodyHash !== bodyHash) return { conflict: true };
+          if (raced.state === "pending") return { inProgress: true };
+          return { record: raced.record } as IdempotencyCheck<TRecord>;
+        }
+        this.sweepMemory(claimNow);
+        const claimToken = crypto.randomUUID();
+        this.memory.set(mapKey, {
+          bodyHash,
+          state: "pending",
+          claimToken,
+          expiresAt: claimNow + IDEMPOTENCY_TTL_MS,
+        });
+        return {
+          store: async (record) => {
+            const current = this.memory.get(mapKey);
+            if (current?.state !== "pending" || current.claimToken !== claimToken) return;
+            this.memory.set(mapKey, {
+              bodyHash,
+              state: "completed",
+              record,
+              expiresAt: Date.now() + IDEMPOTENCY_TTL_MS,
+            });
+          },
+          release: async () => {
+            const current = this.memory.get(mapKey);
+            if (current?.state === "pending" && current.claimToken === claimToken) {
+              this.memory.delete(mapKey);
+            }
+          },
+        };
       },
     };
   }
