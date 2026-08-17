@@ -107,10 +107,10 @@ export default function ProviderApprovalDetailPage() {
       <h1 id="approval-detail-heading" className="font-display text-2xl font-600 mb-1">
         Provider action approval
       </h1>
-      <p className="text-text-tertiary text-xs font-mono mb-6 break-all">{id}</p>
+      <p className="text-text-secondary text-xs font-mono mb-6 break-all">{id}</p>
 
       {state === "loading" && (
-        <p role="status" className="text-text-tertiary">
+        <p role="status" className="text-text-secondary">
           Loading approval…
         </p>
       )}
@@ -141,30 +141,38 @@ export default function ProviderApprovalDetailPage() {
               Exact action
             </h2>
             <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
-              <dt className="text-text-tertiary">Status</dt>
+              <dt className="text-text-secondary">Status</dt>
               <dd className="font-mono">{detail.status}</dd>
-              <dt className="text-text-tertiary">Operation</dt>
+              <dt className="text-text-secondary">Operation</dt>
               <dd className="font-mono break-all">{detail.operationId}</dd>
-              <dt className="text-text-tertiary">Provider account</dt>
+              <dt className="text-text-secondary">Provider account</dt>
               <dd className="font-mono break-all">{detail.providerAccountId}</dd>
-              <dt className="text-text-tertiary">Workspace</dt>
+              <dt className="text-text-secondary">Workspace</dt>
               <dd className="font-mono break-all">{detail.workspaceId}</dd>
-              <dt className="text-text-tertiary">Action digest</dt>
+              <dt className="text-text-secondary">Action digest</dt>
               <dd className="font-mono break-all">{detail.actionDigest}</dd>
-              <dt className="text-text-tertiary">Request hash</dt>
+              <dt className="text-text-secondary">Request hash</dt>
               <dd className="font-mono break-all">{detail.requestHash}</dd>
-              <dt className="text-text-tertiary">Expires</dt>
+              <dt className="text-text-secondary">Expires</dt>
               <dd className="font-mono">{detail.expiresAt ?? "n/a"}</dd>
             </dl>
 
             {detail.safeSummary && (
               <div className="mt-4">
-                <h3 className="text-text-tertiary text-xs uppercase tracking-wide mb-2">
+                <h3 className="text-text-secondary text-xs uppercase tracking-wide mb-2">
                   Safe summary (redacted, never full request bytes)
                 </h3>
-                <pre className="bg-bg-surface border border-border-subtle p-3 text-xs overflow-x-auto">
-                  {JSON.stringify(detail.safeSummary, null, 2)}
-                </pre>
+                <div
+                  role="region"
+                  // biome-ignore lint/a11y/noNoninteractiveTabindex: WCAG requires keyboard focus for a scrollable region.
+                  tabIndex={0}
+                  aria-label="Redacted safe summary"
+                  className="overflow-x-auto"
+                >
+                  <pre className="bg-bg-surface border border-border-subtle p-3 text-xs min-w-max">
+                    {JSON.stringify(detail.safeSummary, null, 2)}
+                  </pre>
+                </div>
               </div>
             )}
           </section>

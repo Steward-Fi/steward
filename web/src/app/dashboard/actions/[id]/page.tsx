@@ -99,10 +99,10 @@ export default function ProviderActionCasePage() {
       <h1 id="case-heading" className="font-display text-2xl font-600 mb-1">
         Provider action case
       </h1>
-      <p className="text-text-tertiary text-xs font-mono mb-6 break-all">{id}</p>
+      <p className="text-text-secondary text-xs font-mono mb-6 break-all">{id}</p>
 
       {state === "loading" && (
-        <p role="status" className="text-text-tertiary">
+        <p role="status" className="text-text-secondary">
           Loading case…
         </p>
       )}
@@ -150,26 +150,26 @@ export default function ProviderActionCasePage() {
               Commitments
             </h2>
             <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
-              <dt className="text-text-tertiary">Operation</dt>
+              <dt className="text-text-secondary">Operation</dt>
               <dd className="font-mono break-all">
                 {manifest.operation.key} (rev {manifest.operation.revision},{" "}
                 {manifest.operation.riskClass})
               </dd>
-              <dt className="text-text-tertiary">Action digest</dt>
+              <dt className="text-text-secondary">Action digest</dt>
               <dd className="font-mono break-all">{manifest.actionDigest}</dd>
-              <dt className="text-text-tertiary">Request hash</dt>
+              <dt className="text-text-secondary">Request hash</dt>
               <dd className="font-mono break-all">{manifest.requestHash}</dd>
-              <dt className="text-text-tertiary">Idempotency key hash</dt>
+              <dt className="text-text-secondary">Idempotency key hash</dt>
               <dd className="font-mono break-all">{manifest.idempotencyKeyHash}</dd>
               {manifest.execution && (
                 <>
-                  <dt className="text-text-tertiary">Dispatch state</dt>
+                  <dt className="text-text-secondary">Dispatch state</dt>
                   <dd className="font-mono">{manifest.execution.dispatchState}</dd>
-                  <dt className="text-text-tertiary">Upstream status</dt>
+                  <dt className="text-text-secondary">Upstream status</dt>
                   <dd className="font-mono">{manifest.execution.upstreamStatusCode ?? "n/a"}</dd>
-                  <dt className="text-text-tertiary">Reconciled</dt>
+                  <dt className="text-text-secondary">Reconciled</dt>
                   <dd className="font-mono">{String(manifest.execution.reconciled)}</dd>
-                  <dt className="text-text-tertiary">Provider idempotency (hash)</dt>
+                  <dt className="text-text-secondary">Provider idempotency (hash)</dt>
                   <dd className="font-mono break-all">
                     {manifest.execution.providerIdempotencyKeyHash ?? "n/a"}
                   </dd>
@@ -198,15 +198,23 @@ export default function ProviderActionCasePage() {
               </p>
             )}
 
-            <h3 className="text-text-tertiary text-xs uppercase tracking-wide mt-4 mb-2">
+            <h3 className="text-text-secondary text-xs uppercase tracking-wide mt-4 mb-2">
               Verify offline (bind trust to your out-of-band key fingerprint)
             </h3>
-            <pre className="bg-bg-surface border border-border-subtle p-3 text-xs overflow-x-auto">
-              {verifyCommand}
-            </pre>
+            <div
+              role="region"
+              // biome-ignore lint/a11y/noNoninteractiveTabindex: WCAG requires keyboard focus for a scrollable region.
+              tabIndex={0}
+              aria-label="Offline evidence verification command"
+              className="overflow-x-auto"
+            >
+              <pre className="bg-bg-surface border border-border-subtle p-3 text-xs min-w-max">
+                {verifyCommand}
+              </pre>
+            </div>
 
             {/* Operator-key trust limit (E7). */}
-            <p className="text-text-tertiary text-xs mt-3 leading-relaxed">
+            <p className="text-text-secondary text-xs mt-3 leading-relaxed">
               Trust limit: a valid signature proves this evidence chain is internally consistent
               under the <strong>operator&apos;s</strong> audit signing key. It is NOT an
               operator-integrity proof, NOT MPC, and NOT exactly-once. Always verify against a
