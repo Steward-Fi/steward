@@ -70,24 +70,49 @@ cp deploy/enterprise-reference/provider-github-sandbox.env.example \
 # ...fill from your secret store, then:
 set -a; . deploy/enterprise-reference/provider-github-sandbox.env; set +a
 
+# Build the trusted dispatcher and its workspace dependencies. The harness
+# checks these outputs but never installs or builds code implicitly.
+bunx turbo run build --filter=@stwd/proxy...
+
 # Validate wiring without a consequential write:
 node scripts/provider-authority-sandbox.mjs --preflight
+
+# Run only after the throwaway authority graph is provisioned. This exits 2
+# with honest Gate D STOP when a required live observation was not seen.
+node scripts/provider-authority-sandbox.mjs
 ```
 
 Requirements:
 
 - A **throwaway** GitHub org + repo (e.g. `steward-sandbox/hello`) with a
-  dedicated GitHub App scoped to that repo only (`issues:read`,
-  `pull_requests:write`).
+  dedicated GitHub App scoped to that repo only (`metadata:read`,
+  `issues:write`). GitHub pull-request comments use the Issues comments API.
 - The App private key + installation ID supplied via **env only**
   (`GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY`).
   The committed artifact is a `*.example` with placeholders and presence guards.
+- Pre-provisioned sandbox-only workspace, provider account, governed secret
+  route, provider-agent JWT, recent-MFA approver session, and the database/vault/
+  execution/audit environment used by that same Steward deployment.
+
+`--preflight` performs no network request. The live command rotates the minted
+installation token through the MFA-gated secret API, drives create → approve →
+execute over the public API, then starts an isolated local worker that imports
+`dispatchGovernedExecution`. There is intentionally no public dispatch route.
 
 The write operation (`github.pr.comment.create`) is **not** natively idempotent
-at GitHub; on a post-dispatch timeout Steward records `outcome_unknown` and
-reconciles via the created comment's stable `id`/`node_id` marker rather than
-blindly re-posting. A rate-limit (429/403 with `Retry-After`) is classified as a
-bounded `failed` with the retry-after surfaced, never auto-retried.
+at GitHub. The harness first rotates the sandbox secret after mint to prove stale
+credentials fail before provider I/O. It then races eight isolated workers,
+pauses the single upstream winner after the response, kills it to model the
+crash window, and proves a fresh worker cannot re-post. Every minted GitHub
+installation token is explicitly revoked after reconciliation (with GitHub's
+short expiry as the failure-path backstop).
+Because Steward has no live reconciliation service, the harness then performs a
+bounded, paginated, read-only GitHub marker lookup and records that distinction
+in `provider-reconciliation.json`. A missing marker is a Gate D STOP, not a
+success. A rate-limit (429/403 with `Retry-After`) is classified with capped
+waiting and no blind write retry; when no live rate-limit occurs, M16 is recorded
+as `not_observed` and Gate D remains STOP even though the classifier is tested
+hermetically.
 
 ## 3. Offline verification
 
