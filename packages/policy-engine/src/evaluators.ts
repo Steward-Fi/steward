@@ -1252,8 +1252,26 @@ function evaluateEvmSelectorConstraint(
 
       return { ...base, passed: true };
     }
-    default:
+    default: {
+      // `maxNativeValueWei` is selector-agnostic and was already enforced
+      // above. Any OTHER declared constraint requires decoding calldata for a
+      // selector this engine does not know — fail closed rather than let the
+      // operator believe a recipient/amount/tokenId gate is enforced when it
+      // is a silent no-op (SEC-038). Empty arrays are no-ops, matching the
+      // known-selector arms.
+      const hasUnenforceableConstraint = Object.entries(constraint).some(([key, value]) => {
+        if (key === "maxNativeValueWei" || value === undefined) return false;
+        return !(Array.isArray(value) && value.length === 0);
+      });
+      if (hasUnenforceableConstraint) {
+        return {
+          ...base,
+          passed: false,
+          reason: `Selector constraints cannot be enforced for unrecognized selector ${selector}`,
+        };
+      }
       return { ...base, passed: true };
+    }
   }
 }
 

@@ -190,6 +190,60 @@ describe("Contract Allowlist Policy", () => {
     expect(result.reason).toContain("exceeds selector maxNativeValueWei 1");
   });
 
+  it("fails closed when a constraint is declared for a selector the engine cannot decode (SEC-038)", async () => {
+    // swapExactTokensForTokens(uint256,uint256,address[],address,uint256) —
+    // allowlisted, but not one of the 8 selectors with a constraint decoder.
+    const swapSelector = "0x38ed1739";
+    const swapRule = makeContractAllowlistRule({
+      contracts: [
+        {
+          address: contract,
+          selectors: [swapSelector],
+          constraints: { [swapSelector]: { maxAmount: "1000" } },
+        },
+      ],
+    });
+    const result = await evaluatePolicy(
+      swapRule,
+      makeContext({
+        request: {
+          ...makeContext().request,
+          to: contract,
+          data: `${swapSelector}${abiUint(500)}${abiUint(1)}`,
+        },
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("unrecognized selector");
+  });
+
+  it("still passes an unrecognized selector when only maxNativeValueWei is constrained", async () => {
+    const swapSelector = "0x38ed1739";
+    const swapRule = makeContractAllowlistRule({
+      contracts: [
+        {
+          address: contract,
+          selectors: [swapSelector],
+          constraints: { [swapSelector]: { maxNativeValueWei: "10", recipientAllowlist: [] } },
+        },
+      ],
+    });
+    const result = await evaluatePolicy(
+      swapRule,
+      makeContext({
+        request: {
+          ...makeContext().request,
+          to: contract,
+          value: "10",
+          data: `${swapSelector}00`,
+        },
+      }),
+    );
+
+    expect(result.passed).toBe(true);
+  });
+
   it("fails when selector is not allowed for the contract", async () => {
     const result = await evaluatePolicy(
       rule,
