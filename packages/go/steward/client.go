@@ -38,7 +38,7 @@ type Client struct {
 	config  Config
 	http    *http.Client
 	now     func() time.Time
-	newID   func() string
+	newID   func() (string, error)
 }
 
 type APIError struct {
@@ -131,8 +131,11 @@ func NewClient(config Config) (*Client, error) {
 	if now == nil {
 		now = time.Now
 	}
-	newID := config.NewID
-	if newID == nil {
+	newID := func() (string, error) { return "", nil }
+	if config.NewID != nil {
+		userNewID := config.NewID
+		newID = func() (string, error) { return userNewID(), nil }
+	} else {
 		newID = randomID
 	}
 	return &Client{baseURL: base, config: config, http: httpClient, now: now, newID: newID}, nil
@@ -172,7 +175,9 @@ func (c *Client) Request(ctx context.Context, method string, path string, body a
 	if err != nil {
 		return err
 	}
-	c.applyHeaders(req, method, canonicalPath, rawBody)
+	if err := c.applyHeaders(req, method, canonicalPath, rawBody); err != nil {
+		return err
+	}
 	res, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -185,7 +190,7 @@ func (c *Client) Request(ctx context.Context, method string, path string, body a
 	return decodeResponse(res.StatusCode, payload, out)
 }
 
-func (c *Client) applyHeaders(req *http.Request, method string, path string, body []byte) {
+func (c *Client) applyHeaders(req *http.Request, method string, path string, body []byte) error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	switch {
@@ -211,7 +216,11 @@ func (c *Client) applyHeaders(req *http.Request, method string, path string, bod
 		}
 		idempotencyKey := req.Header.Get("Idempotency-Key")
 		if idempotencyKey == "" {
-			idempotencyKey = c.newID()
+			generated, err := c.newID()
+			if err != nil {
+				return err
+			}
+			idempotencyKey = generated
 			req.Header.Set("Idempotency-Key", idempotencyKey)
 		}
 		if c.config.RequestSigningKeyID != "" && req.Header.Get("X-Steward-Signing-Key-Id") == "" {
@@ -224,6 +233,7 @@ func (c *Client) applyHeaders(req *http.Request, method string, path string, bod
 		mac.Write([]byte(canonical))
 		req.Header.Set("X-Steward-Signature", "v1="+hex.EncodeToString(mac.Sum(nil)))
 	}
+	return nil
 }
 
 func decodeResponse(status int, payload []byte, out any) error {
@@ -279,12 +289,14 @@ func isSensitiveMutation(path string, method string) bool {
 	return false
 }
 
-func randomID() string {
+func randomID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
+		// Fail closed: never fall back to a predictable (timestamp-derived)
+		// idempotency key (SEC-196).
+		return "", fmt.Errorf("crypto/rand unavailable for idempotency key: %w", err)
 	}
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }

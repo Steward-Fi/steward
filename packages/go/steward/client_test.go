@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -239,4 +240,24 @@ func asAPIError(err error, target **APIError) bool {
 	}
 	*target = apiErr
 	return true
+}
+
+// SEC-196: the default idempotency-key generator must return crypto-rand
+// UUIDs (or an error) — never a predictable timestamp-derived fallback.
+func TestRandomIDReturnsCryptoUUIDs(t *testing.T) {
+	first, err := randomID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := randomID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uuidShape := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	if !uuidShape.MatchString(first) {
+		t.Fatalf("randomID is not a UUID (timestamp fallback?): %q", first)
+	}
+	if first == second {
+		t.Fatal("randomID produced duplicate ids")
+	}
 }
