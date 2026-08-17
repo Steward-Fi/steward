@@ -9,7 +9,7 @@ Steward runs as two **systemd services** on each Milady node, built from source 
 - `steward.service` — REST API on port 3200
 - `steward-proxy.service` — API proxy gateway on port 8080
 
-**Current production nodes:** milady-core-1 through milady-core-6 (all Hetzner dedicated servers).
+**Production nodes:** see your operator-local inventory (SEC-130 — node addresses are deliberately not committed to this repo; see Node Inventory below).
 
 ---
 
@@ -203,7 +203,7 @@ curl -sf http://localhost:3200/platform/tenants -H "X-Steward-Platform-Key: $PLA
 ### Quick update (source sync + restart)
 
 ```bash
-NODE_IP="88.99.66.168"  # milady-core-1
+NODE_IP="<node-ip>"  # from your operator-local inventory (never committed — see Node Inventory)
 
 # 1. Sync updated source
 rsync -az --delete \
@@ -225,7 +225,9 @@ ssh root@${NODE_IP} "curl -sf http://localhost:3200/health"
 ### Update all nodes at once
 
 ```bash
-NODES="88.99.66.168 178.63.251.122 138.201.80.125 85.10.193.52 136.243.47.243 195.201.57.227"
+# Node IPs come from your operator-local inventory — the same one
+# scripts/deploy-all.sh reads (STEWARD_NODES or scripts/deploy-nodes.local.conf).
+NODES="<node-ip-1> <node-ip-2> <node-ip-3>"
 
 for NODE in $NODES; do
   echo "=== Updating ${NODE} ==="
@@ -414,14 +416,23 @@ Note: The root `docker-compose.yml` includes a local Postgres. For Neon, use the
 
 ## Node Inventory
 
-| Node | IP | API (:3200) | Proxy (:8080) | Notes |
-|------|-----|------------|--------------|-------|
-| milady-core-1 | 88.99.66.168 | ✅ Running | ✅ Running | Primary; front with your own domain/TLS |
-| milady-core-2 | 178.63.251.122 | ✅ Running | ✅ Running | |
-| milady-core-3 | 138.201.80.125 | ✅ Running | ✅ Running | |
-| milady-core-4 | 85.10.193.52 | ✅ Running | ✅ Running | |
-| milady-core-5 | 136.243.47.243 | ✅ Running | ✅ Running | |
-| milady-core-6 | 195.201.57.227 | ✅ Running | ✅ Running | |
+Node addresses are **operator-local configuration and are intentionally not
+committed to this public repo** (SEC-130): a committed inventory of
+custodial-wallet hosts is a confirmed target list and a network-reconnaissance
+shortcut. Keep your inventory in one of:
+
+- `STEWARD_NODES="milady=<ip> core-1=<ip> ..."` (consumed by `scripts/deploy-all.sh`)
+- `scripts/deploy-nodes.local.conf` (gitignored; one `name=<ip>` per line)
+
+Track node health/notes in your own ops system, not in this document.
+
+> **Threat note — agent→API traffic on the Docker bridge:** the systemd
+> topology below has agents reaching the API as plain HTTP to
+> `http://172.18.0.1:3200` on the docker bridge. Bearer tokens are visible to
+> any process able to tap host traffic (other containers, host compromise).
+> Prefer the `deploy/docker-compose.yml` isolated-network path (agents reach
+> the API by container name on `milady-isolated`; host ports are
+> loopback-only) and front all external access with TLS.
 
 ---
 

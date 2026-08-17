@@ -101,6 +101,38 @@ describe("#101 deploy/DEPLOYMENT.md docs reconciled with fail-closed code", () =
   });
 });
 
+describe("SEC-130 no production node inventory committed in deploy artifacts", () => {
+  const SCRIPTS_DIR = join(DEPLOY_DIR, "..", "scripts");
+
+  test("deploy-all.sh carries no hardcoded node IPs and reads an operator-local inventory", () => {
+    const script = readFileSync(join(SCRIPTS_DIR, "deploy-all.sh"), "utf8");
+    // Pre-fix: seven production host IPs were committed in the NODES map —
+    // a confirmed target list in a public repo.
+    expect(script).not.toMatch(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/);
+    expect(script).toContain("STEWARD_NODES");
+    expect(script).toContain("deploy-nodes.local.conf");
+  });
+
+  test("DEPLOYMENT.md carries no production node IPs and documents the bridge threat", () => {
+    const doc = read("DEPLOYMENT.md");
+    expect(doc).not.toContain("88.99.66.168");
+    expect(doc).not.toContain("178.63.251.122");
+    expect(doc).not.toContain("138.201.80.125");
+    expect(doc).not.toContain("85.10.193.52");
+    expect(doc).not.toContain("136.243.47.243");
+    expect(doc).not.toContain("195.201.57.227");
+    expect(doc).not.toContain("89.167.63.246");
+    // The agent→API plain-HTTP-on-the-docker-bridge topology must be
+    // documented as a threat with the isolated-network path preferred.
+    expect(doc).toContain("Threat note");
+  });
+
+  test("the operator-local inventory file is gitignored", () => {
+    const gitignore = readFileSync(join(DEPLOY_DIR, "..", ".gitignore"), "utf8");
+    expect(gitignore).toContain("deploy-nodes.local.conf");
+  });
+});
+
 describe("SEC-081 enterprise backup service keeps the DSN out of container env and dumps owner-only", () => {
   const compose = readFileSync(
     join(DEPLOY_DIR, "enterprise-reference", "docker-compose.yml"),

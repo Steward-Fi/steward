@@ -3,10 +3,18 @@ set -euo pipefail
 
 # =============================================================================
 # Steward Fleet Deployer
-# Usage: ./scripts/deploy-all.sh [--migrate] [--restart]
+# Usage: STEWARD_NODES="milady=<ip> core-1=<ip> ..." ./scripts/deploy-all.sh [--migrate] [--restart]
 #
-# Deploys to milady (canary) first, then core-1 through core-6.
+# Deploys to the FIRST node (canary) first, then the rest in order.
 # Aborts if canary fails.
+#
+# Node inventory is operator-local config, NEVER committed to this public
+# repo (SEC-130 — a committed inventory of custodial-wallet hosts is a
+# confirmed target list for attackers). Provide it via:
+#   STEWARD_NODES="milady=<ip-1> core-1=<ip-2> ..."  (space-separated name=ip,
+#                                                      deploy order; first = canary)
+# or a gitignored file (default: scripts/deploy-nodes.local.conf, override
+# with STEWARD_NODES_CONF) with one name=<ip> per line.
 # =============================================================================
 
 GREEN='\033[32m'
@@ -29,21 +37,44 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Nodes: milady (canary) first, then agents
+# Help before anything that can fail (e.g. a missing node inventory)
 # ---------------------------------------------------------------------------
-declare -A NODES
-NODES=(
-  [milady]="89.167.63.246"
-  [core-1]="88.99.66.168"
-  [core-2]="178.63.251.122"
-  [core-3]="138.201.80.125"
-  [core-4]="85.10.193.52"
-  [core-5]="136.243.47.243"
-  [core-6]="195.201.57.227"
-)
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help)
+      echo "Usage: STEWARD_NODES=\"milady=<ip> core-1=<ip> ...\" $0 [--migrate] [--restart]"
+      echo "  --migrate  Run DB migrations (only on canary node)"
+      echo "  --restart  Restart steward services after deploy"
+      exit 0
+      ;;
+  esac
+done
 
-# Ordered deploy sequence
-NODE_ORDER=(milady core-1 core-2 core-3 core-4 core-5 core-6)
+# ---------------------------------------------------------------------------
+# Nodes: operator-local inventory (see header). First entry is the canary.
+# ---------------------------------------------------------------------------
+NODES_CONF="${STEWARD_NODES_CONF:-$SCRIPT_DIR/deploy-nodes.local.conf}"
+NODE_LIST="${STEWARD_NODES:-}"
+if [[ -z "$NODE_LIST" && -f "$NODES_CONF" ]]; then
+  NODE_LIST="$(grep -vE '^\s*(#|$)' "$NODES_CONF" | tr '\n' ' ')"
+fi
+if [[ -z "$NODE_LIST" ]]; then
+  echo "No node inventory configured (SEC-130: inventories are operator-local)."
+  echo "  Set STEWARD_NODES=\"milady=<ip> core-1=<ip> ...\" or create"
+  echo "  $NODES_CONF (gitignored) with one name=<ip> per line."
+  exit 1
+fi
+
+declare -A NODES
+NODE_ORDER=()
+for pair in $NODE_LIST; do
+  if [[ "$pair" != *=* ]]; then
+    echo "Invalid node entry (expected name=<ip>): $pair"
+    exit 1
+  fi
+  NODES["${pair%%=*}"]="${pair#*=}"
+  NODE_ORDER+=("${pair%%=*}")
+done
 
 # ---------------------------------------------------------------------------
 # Forward flags to deploy.sh
@@ -55,12 +86,7 @@ for arg in "$@"; do
   case "$arg" in
     --migrate)  EXTRA_FLAGS+=("--migrate"); DO_MIGRATE=true ;;
     --restart)  EXTRA_FLAGS+=("--restart") ;;
-    -h|--help)
-      echo "Usage: $0 [--migrate] [--restart]"
-      echo "  --migrate  Run DB migrations (only on canary node)"
-      echo "  --restart  Restart steward services after deploy"
-      exit 0
-      ;;
+    -h|--help)  ;; # handled above, before inventory loading
     *)
       echo "Unknown argument: $arg"
       exit 1
@@ -83,7 +109,7 @@ echo ""
 # ---------------------------------------------------------------------------
 # Canary: deploy to milady first (with --migrate if requested)
 # ---------------------------------------------------------------------------
-CANARY="milady"
+CANARY="${NODE_ORDER[0]}"
 CANARY_IP="${NODES[$CANARY]}"
 
 echo -e "${CYAN}[fleet]${RESET} ${BOLD}Canary deploy: $CANARY ($CANARY_IP)${RESET}"
