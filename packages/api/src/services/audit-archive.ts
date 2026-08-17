@@ -11,6 +11,10 @@ export const MAX_AUDIT_RETENTION_DAYS = 3650;
 export const MIN_ARCHIVE_CHUNK_SIZE = 1;
 export const MAX_ARCHIVE_CHUNK_SIZE = 10_000;
 export const MAX_ARCHIVE_EVENTS_PER_RUN = 50_000;
+export const MAX_ARCHIVE_CHUNKS = 2_048;
+/** Leaves 256 KiB for the API envelope, signature, key, and JSON wrapper under
+ * the CLI and composed app's 1 MiB request/response ceilings. */
+export const MAX_ARCHIVE_MANIFEST_BYTES = 768 * 1024;
 /** Must stay aligned with the fully composed app's global request-body limit.
  * Restore uploads are exact signed JSONL chunks, so every archive we create
  * must be uploadable again through the public API. */
@@ -187,6 +191,19 @@ function canonicalJsonValue(value: unknown): unknown {
 
 function canonicalBytes(value: unknown): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(canonicalJsonValue(value)));
+}
+
+function assertManifestTransportBounds(manifest: AuditArchiveManifestPayload): Uint8Array {
+  if (manifest.chunks.length < 1 || manifest.chunks.length > MAX_ARCHIVE_CHUNKS) {
+    throw new Error(`Audit archive manifest exceeds the ${MAX_ARCHIVE_CHUNKS} chunk limit`);
+  }
+  const bytes = canonicalBytes(manifest);
+  if (bytes.length > MAX_ARCHIVE_MANIFEST_BYTES) {
+    throw new Error(
+      `Audit archive manifest exceeds the ${MAX_ARCHIVE_MANIFEST_BYTES} byte transport limit`,
+    );
+  }
+  return bytes;
 }
 
 function sha256Hex(value: string | Uint8Array): string {
@@ -663,6 +680,11 @@ export async function createAuditArchive(input: {
         }
       }
       for (let offset = 0; offset < encoded.length; ) {
+        if (index >= MAX_ARCHIVE_CHUNKS) {
+          throw new Error(
+            `Audit archive requires more than ${MAX_ARCHIVE_CHUNKS} chunks; narrow the sequence range`,
+          );
+        }
         const batchStart = offset;
         let byteLength = 0;
         while (
@@ -723,7 +745,7 @@ export async function createAuditArchive(input: {
       format: "application/x-ndjson",
       chunks,
     };
-    const manifestBytes = canonicalBytes(manifest);
+    const manifestBytes = assertManifestTransportBounds(manifest);
     const manifestSha256 = sha256Hex(manifestBytes);
     const signature = bytesToBase64(sign(null, manifestBytes, signingIdentity.privateKey));
     await tx.execute(sql`
@@ -1078,12 +1100,14 @@ function verifySuppliedArchiveManifest(input: {
         manifest.retentionPolicyRevision < 1)) ||
     !Array.isArray(manifest.chunks) ||
     manifest.chunks.length < 1 ||
+    manifest.chunks.length > MAX_ARCHIVE_CHUNKS ||
     !/^[0-9a-f]{64}$/.test(manifest.startPrevHash) ||
     !/^[0-9a-f]{64}$/.test(manifest.endHmac) ||
     !KEY_ID_PATTERN.test(manifest.signingKeyId)
   ) {
     throw new Error("Restored audit archive manifest is invalid");
   }
+  const bytes = assertManifestTransportBounds(manifest);
   let expectedSeq = manifest.fromSeq;
   let observedEvents = 0;
   for (let index = 0; index < manifest.chunks.length; index++) {
@@ -1113,7 +1137,6 @@ function verifySuppliedArchiveManifest(input: {
   if (expectedSeq !== manifest.toSeq + 1 || observedEvents !== manifest.eventCount) {
     throw new Error("Restored audit archive manifest chunk coverage is invalid");
   }
-  const bytes = canonicalBytes(manifest);
   if (sha256Hex(bytes) !== input.manifestSha256) {
     throw new Error("Restored audit archive manifest digest does not match");
   }

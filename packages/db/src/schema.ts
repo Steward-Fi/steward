@@ -2680,6 +2680,10 @@ export const auditArchives = pgTable(
       "audit_archives_policy_revision_valid",
       sql`${table.retentionPolicyRevision} IS NULL OR ${table.retentionPolicyRevision} > 0`,
     ),
+    manifestTransportBound: check(
+      "audit_archives_manifest_transport_bound",
+      sql`${table.manifest} IS NULL OR octet_length(${table.manifest}::text) <= 786432`,
+    ),
     sealedFieldsValid: check(
       "audit_archives_sealed_fields_valid",
       sql`${table.status} = 'building' OR

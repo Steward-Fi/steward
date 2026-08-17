@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS "audit_archives" (
   CONSTRAINT "audit_archives_source_valid" CHECK ("source" IN ('native', 'imported')),
   CONSTRAINT "audit_archives_policy_revision_valid"
     CHECK ("retention_policy_revision" IS NULL OR "retention_policy_revision" > 0),
+  CONSTRAINT "audit_archives_manifest_transport_bound"
+    CHECK ("manifest" IS NULL OR octet_length("manifest"::text) <= 786432),
   CONSTRAINT "audit_archives_sealed_fields_valid" CHECK (
     "status" = 'building' OR
     ("manifest" IS NOT NULL AND "manifest_sha256" ~ '^[0-9a-f]{64}$' AND

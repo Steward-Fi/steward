@@ -23,11 +23,14 @@ type ArchiveChunkReference = {
   byteLength?: number;
 };
 
+const MAX_ARCHIVE_CHUNKS = 2_048;
+const MAX_ARCHIVE_MANIFEST_BYTES = 768 * 1024;
+
 export function assertSafeArchiveChunks(
   chunks: unknown,
   requireIntegrityFields = false,
 ): asserts chunks is ArchiveChunkReference[] {
-  if (!Array.isArray(chunks) || chunks.length === 0 || chunks.length > 50_000) {
+  if (!Array.isArray(chunks) || chunks.length === 0 || chunks.length > MAX_ARCHIVE_CHUNKS) {
     throw new Error("Archive manifest has an invalid chunk list");
   }
   for (let index = 0; index < chunks.length; index++) {
@@ -46,6 +49,13 @@ export function assertSafeArchiveChunks(
     ) {
       throw new Error(`Archive manifest chunk ${index} is invalid or unsafe`);
     }
+  }
+}
+
+export function assertSafeArchiveManifestTransport(manifest: unknown): void {
+  const encoded = new TextEncoder().encode(JSON.stringify(manifest));
+  if (encoded.length > MAX_ARCHIVE_MANIFEST_BYTES) {
+    throw new Error("Archive manifest exceeds the safe API transport limit");
   }
 }
 
@@ -70,6 +80,15 @@ export function auditArchiveVerificationMode(flags: Record<string, string | bool
   }
   if (integrityOnly && fingerprint) {
     throw new Error("Use --verify with --fp for trusted verification");
+  }
+  if (!verifyTrusted && (fingerprint || keyId)) {
+    throw new Error("--fp and --key-id require --verify");
+  }
+  if (fingerprint && !/^[0-9a-f]{64}$/i.test(fingerprint)) {
+    throw new Error("--fp must be exactly 64 hexadecimal characters");
+  }
+  if (keyId && !/^[A-Za-z0-9_.:-]{1,64}$/.test(keyId)) {
+    throw new Error("--key-id is invalid");
   }
   if (verifyTrusted) return { mode: "trusted", fingerprint, keyId };
   if (integrityOnly) return { mode: "integrity-only", keyId };
@@ -321,6 +340,7 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
       throw new Error("Archive id does not match the signed manifest");
     }
     assertSafeArchiveChunks(archive.manifest.chunks, true);
+    assertSafeArchiveManifestTransport(archive.manifest);
     const started = await ctx.api.request("POST", "/audit/archives/restore", {
       manifest: archive.manifest,
       manifestSha256: archive.manifestSha256,
@@ -363,6 +383,7 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
       prunedAt: string | null;
     }>("POST", "/audit/archives", { fromSeq, toSeq, chunkSize });
     assertSafeArchiveChunks(archive.manifest.chunks, true);
+    assertSafeArchiveManifestTransport(archive.manifest);
     mkdirSync(out, { recursive: true, mode: 0o700 });
     const manifestPath = join(out, "manifest.json");
     if (existsSync(manifestPath)) {

@@ -16,6 +16,8 @@ import {
   getAuditArchiveManifest,
   listAuditArchives,
   MAX_ARCHIVE_CHUNK_BYTES,
+  MAX_ARCHIVE_CHUNKS,
+  MAX_ARCHIVE_MANIFEST_BYTES,
   pruneSealedAuditArchive,
   putAuditArchiveRestoreChunk,
   recordAuditArchiveDurabilityAcknowledgement,
@@ -455,5 +457,55 @@ describe("durable audit retention archives", () => {
     expect(
       archive.manifest.chunks.every((chunk) => chunk.byteLength <= MAX_ARCHIVE_CHUNK_BYTES),
     ).toBe(true);
+  });
+
+  it("keeps the maximum one-event chunk archive inside request and response bounds", async () => {
+    const before = await getDb().execute(
+      sql`SELECT COALESCE(MAX(seq), 0)::int AS seq FROM audit_events WHERE tenant_id = ${OTHER}`,
+    );
+    const fromSeq = Number(rows<{ seq: number }>(before)[0].seq) + 1;
+    for (let i = 0; i < MAX_ARCHIVE_CHUNKS; i++) {
+      await writeAuditEvent({
+        tenantId: OTHER,
+        actorType: "system",
+        action: "archive.transport-bound.fixture",
+        metadata: { i },
+      });
+    }
+    const archive = await createAuditArchive({
+      tenantId: OTHER,
+      fromSeq,
+      toSeq: fromSeq + MAX_ARCHIVE_CHUNKS - 1,
+      chunkSize: 1,
+    });
+    expect(archive.manifest.chunks).toHaveLength(MAX_ARCHIVE_CHUNKS);
+    const manifestBytes = new TextEncoder().encode(canonical(archive.manifest)).length;
+    expect(manifestBytes).toBeLessThanOrEqual(MAX_ARCHIVE_MANIFEST_BYTES);
+    expect(
+      new TextEncoder().encode(JSON.stringify({ ok: true, data: archive })).length,
+    ).toBeLessThan(1024 * 1024);
+    expect(
+      new TextEncoder().encode(
+        JSON.stringify({
+          manifest: archive.manifest,
+          manifestSha256: archive.manifestSha256,
+          signature: archive.signature,
+        }),
+      ).length,
+    ).toBeLessThan(1024 * 1024);
+
+    await writeAuditEvent({
+      tenantId: OTHER,
+      actorType: "system",
+      action: "archive.transport-bound.overflow",
+    });
+    await expect(
+      createAuditArchive({
+        tenantId: OTHER,
+        fromSeq,
+        toSeq: fromSeq + MAX_ARCHIVE_CHUNKS,
+        chunkSize: 1,
+      }),
+    ).rejects.toThrow(`more than ${MAX_ARCHIVE_CHUNKS} chunks`);
   });
 });

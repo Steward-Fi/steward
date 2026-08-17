@@ -9,6 +9,18 @@ describe("audit archive verification trust mode", () => {
     expect(
       auditArchiveVerificationMode({ verify: true, fp: "a".repeat(64), "key-id": "archive-v1" }),
     ).toEqual({ mode: "trusted", fingerprint: "a".repeat(64), keyId: "archive-v1" });
+    expect(() => auditArchiveVerificationMode({ fp: "a".repeat(64) })).toThrow(
+      "--fp and --key-id require --verify",
+    );
+    expect(() => auditArchiveVerificationMode({ "key-id": "archive-v1" })).toThrow(
+      "--fp and --key-id require --verify",
+    );
+    expect(() => auditArchiveVerificationMode({ verify: true, fp: "not-hex" })).toThrow(
+      "exactly 64 hexadecimal",
+    );
+    expect(() =>
+      auditArchiveVerificationMode({ verify: true, fp: "a".repeat(64), "key-id": "bad key" }),
+    ).toThrow("--key-id is invalid");
   });
 
   it("makes embedded-key checking an explicit integrity-only mode", () => {

@@ -17,6 +17,8 @@ Archive chunks are capped at 1 MiB so every archive emitted by Steward remains
 restorable through the public API's bounded request surface. `archiveChunkSize`
 is a maximum event count; Steward splits earlier when the encoded byte limit is
 reached and fails closed if one audit event alone cannot fit.
+Signed manifests are capped at 2,048 chunks and 768 KiB, leaving headroom for
+the response/request envelope under the CLI and API 1 MiB transport ceiling.
 
 You can also download `GET /audit/archives/:archiveId` and each `GET /audit/archives/:archiveId/chunks/:index` directly. Store the response as `manifest.json` and chunks under the filenames in `manifest.chunks`. Verify offline:
 

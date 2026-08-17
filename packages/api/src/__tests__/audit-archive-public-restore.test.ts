@@ -8,6 +8,8 @@ import type { Hono } from "hono";
 import {
   type AuditArchiveManifestPayload,
   MAX_ARCHIVE_CHUNK_BYTES,
+  MAX_ARCHIVE_CHUNKS,
+  MAX_ARCHIVE_MANIFEST_BYTES,
 } from "../services/audit-archive";
 import {
   parseSigningKey,
@@ -61,6 +63,40 @@ function signedEnvelope(jsonl: string, byteLength = new TextEncoder().encode(jso
         file: "chunk-000000.jsonl",
       },
     ],
+  };
+  const bytes = Buffer.from(canonical(manifest));
+  return {
+    archiveId,
+    manifest,
+    manifestSha256: createHash("sha256").update(bytes).digest("hex"),
+    signature: sign(null, bytes, parseSigningKey(SIGNING_KEY)).toString("base64"),
+  };
+}
+
+function signedManyChunkEnvelope(chunkCount: number) {
+  const archiveId = randomUUID();
+  const manifest: AuditArchiveManifestPayload = {
+    schemaVersion: "steward.audit-archive.v1",
+    archiveId,
+    tenantId: TENANT,
+    createdAt: new Date().toISOString(),
+    fromSeq: 1,
+    toSeq: chunkCount,
+    eventCount: chunkCount,
+    signingKeyId: SIGNING_KEY_ID,
+    retentionPolicyRevision: null,
+    startPrevHash: "0".repeat(64),
+    endHmac: "1".repeat(64),
+    format: "application/x-ndjson",
+    chunks: Array.from({ length: chunkCount }, (_, index) => ({
+      index,
+      fromSeq: index + 1,
+      toSeq: index + 1,
+      eventCount: 1,
+      sha256: "a".repeat(64),
+      byteLength: 1,
+      file: `chunk-${String(index).padStart(6, "0")}.jsonl`,
+    })),
   };
   const bytes = Buffer.from(canonical(manifest));
   return {
@@ -190,6 +226,25 @@ publicRestoreTests("audit archive restore through the public app", () => {
       ok: false,
       error: "Restored audit archive manifest chunk 0 is invalid",
     });
+  });
+
+  test("accepts the maximum transport-safe one-event chunk manifest", async () => {
+    const envelope = signedManyChunkEnvelope(MAX_ARCHIVE_CHUNKS);
+    const manifestBytes = new TextEncoder().encode(canonical(envelope.manifest)).length;
+    const body = JSON.stringify({
+      manifest: envelope.manifest,
+      manifestSha256: envelope.manifestSha256,
+      signature: envelope.signature,
+    });
+    expect(manifestBytes).toBeLessThanOrEqual(MAX_ARCHIVE_MANIFEST_BYTES);
+    expect(new TextEncoder().encode(body).length).toBeLessThan(1024 * 1024);
+
+    const response = await app.request("/audit/archives/restore", {
+      method: "POST",
+      headers: await headers(),
+      body,
+    });
+    expect(response.status).toBe(201);
   });
 });
 
