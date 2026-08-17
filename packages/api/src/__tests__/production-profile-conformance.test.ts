@@ -3,15 +3,13 @@ import type { GithubOperationKey } from "@stwd/provider-github";
 import type { XOperationKey } from "@stwd/provider-x";
 import { parseGovernedCanonicalActionForDispatch } from "@stwd/proxy/src/handlers/governed-execution";
 import {
+  buildGenericHttpAction,
   CanonError,
-  canonicalApprovalCommitmentObject,
-  computeApprovalCommitmentHash,
   GENERIC_GOLDEN_DESCRIPTOR_A,
   GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
   GITHUB_PROVIDER_ACTION_PROFILE,
   inspectProviderProfileConformance,
   jcsStringify,
-  type ProviderApprovalCommitmentV1,
   REGISTERED_PROFILES,
   strictParseJson,
   validateGenericHttpDescriptor,
@@ -123,6 +121,19 @@ function allowedOriginsFromProductionSpec(spec: ProductionProviderProfileSpec): 
     : spec.allowedOrigins;
 }
 
+function operationContext(spec: ProductionProviderProfileSpec) {
+  return {
+    operationKey: FIXTURES[spec.profile].operationKey,
+    requestProfile:
+      spec.profile === GENERIC_HTTP_PROVIDER_ACTION_PROFILE
+        ? {
+            profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+            operationDescriptor: GENERIC_DESCRIPTOR,
+          }
+        : { profile: spec.profile },
+  };
+}
+
 function thrownCode(fn: () => unknown): string {
   try {
     fn();
@@ -132,14 +143,12 @@ function thrownCode(fn: () => unknown): string {
   }
 }
 
-const HASH = `sha256:${"1".repeat(64)}`;
-
 /**
- * One runner for every registered production profile and for mutation proof.
- * Every stage consumes the prior stage's serialized output, so a friendly
- * handwritten snapshot cannot hide drift at a later deserialization boundary.
+ * Pure canonicalization runner for every registered production profile and for
+ * mutation proof.  The separate production-profile-boundary-e2e suite covers
+ * authenticated ingress, durable reload, approval/resume, and case evidence.
  */
-function runFullBoundaryConformance(
+function runCanonicalBoundaryConformance(
   spec: ProductionProviderProfileSpec,
   mutate?: (
     action: ReturnType<typeof buildFromProductionSpec>["action"],
@@ -163,96 +172,20 @@ function runFullBoundaryConformance(
     new TextEncoder().encode(wireText),
     spec.profile,
     allowedOrigins,
+    operationContext(spec),
   );
   expect(jcsStringify(proxyAction)).toBe(wireText);
 
-  // Approval reconstruction binds the registered profile and action digest.
-  const approval: ProviderApprovalCommitmentV1 = {
-    schemaVersion: "steward.provider-approval-commitment.v1",
-    intentId: "intent-conformance",
-    tenantId: "tenant-conformance",
-    workspaceId: "00000000-0000-4000-8000-000000000001",
-    requestActor: { type: "agent", id: "agent-conformance", revision: 1 },
-    providerAccount: {
-      id: "00000000-0000-4000-8000-000000000002",
-      revision: 1,
-      status: "active",
-    },
-    operation: {
-      id: "00000000-0000-4000-8000-000000000003",
-      key: FIXTURES[spec.profile].operationKey,
-      revision: 1,
-      riskClass: "write",
-      canonicalProfile: proxyAction.profile,
-    },
-    requestHash: HASH,
-    actionDigest: HASH,
-    accessDecision: {
-      id: "00000000-0000-4000-8000-000000000004",
-      hash: HASH,
-      effect: "allow",
-      matchedBindings: [],
-      matchedGrants: [],
-    },
-    policyDecision: {
-      id: "00000000-0000-4000-8000-000000000005",
-      hash: HASH,
-      effect: "approval_required",
-      policyRevisionHash: HASH,
-      approvalPolicyRevisionHash: HASH,
-      evaluatorVersion: "conformance-v1",
-    },
-    executionDependencies: {
-      routeId: "00000000-0000-4000-8000-000000000006",
-      routeRevision: 1,
-      secretId: "00000000-0000-4000-8000-000000000007",
-      secretVersion: 1,
-    },
-    approvalRequirements: {
-      role: "workspace_approver",
-      requesterSeparation: true,
-      maxMfaAgeSeconds: 300,
-      requiredMfaAssurance: "current-session-mfa",
-    },
-    requestedAt: "2026-01-01T00:00:00.000Z",
-    expiresAt: "2026-01-01T00:05:00.000Z",
-  };
-  const approvalText = jcsStringify(canonicalApprovalCommitmentObject(approval));
-  const reloadedApproval = strictParseJson(approvalText) as ProviderApprovalCommitmentV1;
-  expect(reloadedApproval.operation.canonicalProfile).toBe(spec.profile);
-  expect(computeApprovalCommitmentHash(reloadedApproval)).toBe(
-    computeApprovalCommitmentHash(approval),
-  );
-
-  // Evidence reconstruction consumes only the persisted wire snapshot/profile.
-  const evidenceText = jcsStringify({
-    operation: { canonicalProfile: reloadedApproval.operation.canonicalProfile },
-    canonicalAction: proxyAction,
-  });
-  const evidence = strictParseJson(evidenceText) as {
-    operation: { canonicalProfile: string };
-    canonicalAction: typeof apiAction;
-  };
-  expect(evidence.operation.canonicalProfile).toBe(spec.profile);
-  expect(
-    inspectProviderProfileConformance(spec.profile, allowedOrigins, evidence.canonicalAction),
-  ).toEqual([]);
-  return ["api", "wire", "proxy", "approval", "evidence"];
+  return ["builder", "wire", "proxy"];
 }
 
 describe("#220 executable provider profile conformance", () => {
-  it("runs every registered profile through every production boundary", () => {
+  it("runs every registered profile through canonical builder and proxy parsing", () => {
     expect(PRODUCTION_PROVIDER_PROFILE_SPECS.map((spec) => spec.profile).sort()).toEqual(
       [...REGISTERED_PROFILES].sort(),
     );
     for (const spec of PRODUCTION_PROVIDER_PROFILE_SPECS) {
-      expect(runFullBoundaryConformance(spec)).toEqual([
-        "api",
-        "wire",
-        "proxy",
-        "approval",
-        "evidence",
-      ]);
+      expect(runCanonicalBoundaryConformance(spec)).toEqual(["builder", "wire", "proxy"]);
     }
   });
 
@@ -263,6 +196,109 @@ describe("#220 executable provider profile conformance", () => {
     expect(new Set(PRODUCTION_PROVIDER_PROFILE_SPECS.map((spec) => spec.profile)).size).toBe(
       REGISTERED_PROFILES.length,
     );
+  });
+
+  it("the proxy parser reconstructs every fixed operation and rejects widened fields", () => {
+    for (const spec of PRODUCTION_PROVIDER_PROFILE_SPECS) {
+      if (spec.kind !== "adapter-fixed") continue;
+      for (const fixture of OPERATION_FIXTURES[spec.profile]) {
+        const built = buildFromProductionSpec(spec, { ...fixture.args }, fixture);
+        const parse = (action: typeof built.action) =>
+          parseGovernedCanonicalActionForDispatch(
+            new TextEncoder().encode(jcsStringify(action)),
+            spec.profile,
+            spec.allowedOrigins,
+            { operationKey: fixture.operationKey, requestProfile: { profile: spec.profile } },
+          );
+
+        expect(jcsStringify(parse(built.action))).toBe(jcsStringify(built.action));
+        expect(() =>
+          parse({
+            ...built.action,
+            orderedQueryPairs: [...built.action.orderedQueryPairs, ["x-extra", "1"]],
+          }),
+        ).toThrow("operation-action-mismatch");
+        expect(() =>
+          parse({
+            ...built.action,
+            selectedHeaders: [...built.action.selectedHeaders, ["x-extra", "ok"]],
+          }),
+        ).toThrow("operation-action-mismatch");
+      }
+    }
+  });
+
+  it("the proxy parser rejects widened or type-confused fixed bodies", () => {
+    const github = PRODUCTION_PROVIDER_PROFILE_SPECS.find(
+      (candidate) => candidate.profile === GITHUB_PROVIDER_ACTION_PROFILE,
+    );
+    const x = PRODUCTION_PROVIDER_PROFILE_SPECS.find(
+      (candidate) => candidate.profile === X_PROVIDER_ACTION_PROFILE,
+    );
+    if (!github || github.kind !== "adapter-fixed" || !x || x.kind !== "adapter-fixed") {
+      throw new Error("fixed production profiles missing");
+    }
+
+    const commentFixture = OPERATION_FIXTURES[GITHUB_PROVIDER_ACTION_PROFILE][1];
+    const comment = buildFromProductionSpec(github, { ...commentFixture.args }, commentFixture);
+    expect(() =>
+      parseGovernedCanonicalActionForDispatch(
+        new TextEncoder().encode(
+          jcsStringify({ ...comment.action, canonicalBody: { body: "looks good", extra: true } }),
+        ),
+        github.profile,
+        github.allowedOrigins,
+        { operationKey: commentFixture.operationKey, requestProfile: { profile: github.profile } },
+      ),
+    ).toThrow("operation-action-mismatch");
+
+    const tweetFixture = OPERATION_FIXTURES[X_PROVIDER_ACTION_PROFILE][0];
+    const tweet = buildFromProductionSpec(x, { ...tweetFixture.args }, tweetFixture);
+    expect(() =>
+      parseGovernedCanonicalActionForDispatch(
+        new TextEncoder().encode(jcsStringify({ ...tweet.action, canonicalBody: null })),
+        x.profile,
+        x.allowedOrigins,
+        { operationKey: tweetFixture.operationKey, requestProfile: { profile: x.profile } },
+      ),
+    ).toThrow("operation-action-mismatch");
+    expect(() =>
+      parseGovernedCanonicalActionForDispatch(
+        new TextEncoder().encode(
+          jcsStringify({
+            ...tweet.action,
+            canonicalBody: { text: "hello world", reply: { in_reply_to_tweet_id: 123 } },
+          }),
+        ),
+        x.profile,
+        x.allowedOrigins,
+        { operationKey: tweetFixture.operationKey, requestProfile: { profile: x.profile } },
+      ),
+    ).toThrow("operation-action-mismatch");
+  });
+
+  it("accepts a descriptor-backed generic HEAD action at the proxy boundary", () => {
+    const descriptor = validateGenericHttpDescriptor({
+      profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+      origin: "https://api.example.com",
+      methods: ["HEAD"],
+      pathTemplate: [{ literal: "v1" }, { literal: "health" }],
+      projection: { policyArgs: [], safeSummary: [] },
+    });
+    const built = buildGenericHttpAction("generic.health.head", descriptor, "HEAD", {});
+    const parsed = parseGovernedCanonicalActionForDispatch(
+      new TextEncoder().encode(jcsStringify(built.action)),
+      GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+      [descriptor.origin],
+      {
+        operationKey: "generic.health.head",
+        requestProfile: {
+          profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+          operationDescriptor: descriptor,
+        },
+      },
+    );
+    expect(jcsStringify(parsed)).toBe(jcsStringify(built.action));
   });
 
   for (const spec of PRODUCTION_PROVIDER_PROFILE_SPECS) {
@@ -343,7 +379,7 @@ describe("#220 executable provider profile conformance", () => {
     );
     if (!spec) throw new Error("github production profile missing");
     expect(() =>
-      runFullBoundaryConformance(spec, (action) => ({
+      runCanonicalBoundaryConformance(spec, (action) => ({
         ...action,
         selectedHeaders: [
           ...action.selectedHeaders,
@@ -366,6 +402,7 @@ describe("#220 executable provider profile conformance", () => {
         new TextEncoder().encode(jcsStringify(malicious)),
         spec.profile,
         allowedOriginsFromProductionSpec(spec),
+        operationContext(spec),
       ),
     ).toThrow("canonical action conformance failed");
   });
@@ -381,6 +418,7 @@ describe("#220 executable provider profile conformance", () => {
         new TextEncoder().encode(jcsStringify(action)),
         spec.profile,
         allowedOriginsFromProductionSpec(spec),
+        operationContext(spec),
       );
 
     expect(() => parse({ ...built.action, origin: "https://attacker.example" })).toThrow(

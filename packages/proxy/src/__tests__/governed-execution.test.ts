@@ -136,7 +136,10 @@ const ACTION: GithubCanonicalActionV1 = {
     ["per_page", "30"],
     ["state", "open"],
   ],
-  selectedHeaders: [["accept", "application/vnd.github+json"]],
+  selectedHeaders: [
+    ["accept", "application/vnd.github+json"],
+    ["x-github-api-version", "2022-11-28"],
+  ],
   canonicalBody: null,
 };
 
@@ -199,7 +202,7 @@ async function seedBase() {
     workspaceId: IDS.workspace,
     providerAccountId: IDS.account,
     secretRouteId: IDS.route,
-    operationKey: "issues.list",
+    operationKey: "github.issue.list",
     riskClass: "read",
     revision: 1,
   });
@@ -239,6 +242,47 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
   const secretVersion = opts.secretVersion ?? 1;
   const action = opts.action ?? ACTION;
   const generic = action.profile === "generic-http.provider-action.v1";
+  if (generic) {
+    await db
+      .update(providerOperations)
+      .set({
+        requestProfile: {
+          profile: "generic-http.provider-action.v1",
+          operationDescriptor: {
+            profile: "generic-http.provider-action.v1",
+            origin: "https://api.customer.example",
+            methods: ["POST"],
+            pathTemplate: [{ literal: "v1" }, { literal: "items" }],
+            query: [
+              {
+                name: "mode",
+                type: "string",
+                required: true,
+                pattern: "^safe$",
+              },
+            ],
+            headers: [{ name: "accept", value: "application/json" }],
+            body: {
+              contentType: "application/json",
+              fields: [
+                {
+                  name: "name",
+                  type: "string",
+                  required: true,
+                  pattern: "^[a-z]{1,64}$",
+                  maxBytes: 64,
+                },
+                { name: "alpha", type: "int" },
+                { name: "zeta", type: "int" },
+              ],
+            },
+            projection: { policyArgs: [], safeSummary: [] },
+          },
+        },
+      })
+      .where(eq(providerOperations.id, IDS.operation));
+    await db.execute(sql`UPDATE provider_operations SET revision = 1 WHERE id = ${IDS.operation}`);
+  }
   const actionDigest = generic
     ? computeGenericHttpActionDigest(action as GenericHttpCanonicalActionV1)
     : computeActionDigest(action as GithubCanonicalActionV1);
@@ -259,7 +303,7 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
     providerAccount: { id: IDS.account, revision: 1, status: "active" },
     operation: {
       id: IDS.operation,
-      key: "issues.list",
+      key: "github.issue.list",
       revision: 1,
       riskClass: "read",
       canonicalProfile: action.profile,
@@ -304,7 +348,7 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
     requestHash,
     actionDigest,
     operationId: IDS.operation,
-    operationKey: "issues.list",
+    operationKey: "github.issue.list",
     effect: "approval_required",
     reasonCodes: ["APPROVAL_REQUIRED"],
     policyResults: [],
@@ -355,7 +399,7 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
     actionDigest,
     requestEnvelope: { schemaVersion: "steward.provider-request.v1" },
     requestHash,
-    idempotencyKeyHash: sha256HexPrefixed("idem:1"),
+    idempotencyKeyHash: sha256HexPrefixed(`idem:${intentId}`),
     safeSummary: {},
     accessDecisionId: randomUUID(),
     accessEffect: "allow",
@@ -861,26 +905,80 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     }
   });
 
-  it("denies a credential carrier in persisted canonical bytes before claim or forward", async () => {
-    const poisoned = {
-      ...ACTION,
-      selectedHeaders: [["authorization", "registered-malicious-canary"]] as Array<
-        [string, string]
-      >,
+  it("denies malformed and operation-widening canonical bytes before claim or forward", async () => {
+    const mutations: GithubCanonicalActionV1[] = [
+      {
+        ...ACTION,
+        selectedHeaders: [["authorization", "registered-malicious-canary"]],
+      },
+      { ...ACTION, origin: "https://attacker.example" },
+      { ...ACTION, method: "POST" },
+      { ...ACTION, normalizedPath: "/repos/acme/widgets/hooks" },
+      { ...ACTION, canonicalBody: { client_secret: "registered-malicious-canary" } },
+      { ...ACTION, canonicalBody: { harmless: true } },
+      {
+        ...ACTION,
+        selectedHeaders: [["content-type", "text/plain"]],
+        canonicalBody: { harmless: true },
+      },
+    ];
+    for (const poisoned of mutations) {
+      const { intentId, authorizationId } = await seedExecutionReady({ action: poisoned });
+      const result = await dispatchGovernedExecution(intentId, IDS.tenant);
+      expect(result).toMatchObject({
+        ok: false,
+        code: "EXEC_AUTH_STALE_DEPENDENCY",
+        httpStatus: 409,
+      });
+      const [nonce] = await getDb()
+        .select({ status: executionAuthorizationNonces.status })
+        .from(executionAuthorizationNonces)
+        .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+      expect(nonce.status).toBe("active");
+      expect(captured).toBeNull();
+    }
+
+    await getDb()
+      .update(secretRoutes)
+      .set({ hostPattern: "api.customer.example", pathPattern: "/v1/items", method: "POST" })
+      .where(eq(secretRoutes.id, IDS.route));
+    await getDb().execute(
+      sql`UPDATE secret_routes SET authority_revision = 1 WHERE id = ${IDS.route}`,
+    );
+    const generic: GenericHttpCanonicalActionV1 = {
+      profile: "generic-http.provider-action.v1",
+      method: "POST",
+      origin: "https://api.customer.example",
+      normalizedPath: "/v1/items",
+      orderedQueryPairs: [["mode", "safe"]],
+      selectedHeaders: [
+        ["accept", "application/json"],
+        ["content-type", "application/json"],
+      ],
+      canonicalBody: { name: "safe" },
     };
-    const { intentId, authorizationId } = await seedExecutionReady({ action: poisoned });
-    const result = await dispatchGovernedExecution(intentId, IDS.tenant);
-    expect(result).toMatchObject({
-      ok: false,
-      code: "EXEC_AUTH_STALE_DEPENDENCY",
-      httpStatus: 409,
-    });
-    const [nonce] = await getDb()
-      .select({ status: executionAuthorizationNonces.status })
-      .from(executionAuthorizationNonces)
-      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
-    expect(nonce.status).toBe("active");
-    expect(captured).toBeNull();
+    for (const poisoned of [
+      { ...generic, orderedQueryPairs: [["mode", "unsafe"]] as Array<[string, string]> },
+      { ...generic, canonicalBody: { name: "ATTACKER" } },
+      {
+        ...generic,
+        selectedHeaders: [["content-type", "application/json"]] as Array<[string, string]>,
+      },
+    ]) {
+      const { intentId, authorizationId } = await seedExecutionReady({ action: poisoned });
+      const result = await dispatchGovernedExecution(intentId, IDS.tenant);
+      expect(result).toMatchObject({
+        ok: false,
+        code: "EXEC_AUTH_STALE_DEPENDENCY",
+        httpStatus: 409,
+      });
+      const [nonce] = await getDb()
+        .select({ status: executionAuthorizationNonces.status })
+        .from(executionAuthorizationNonces)
+        .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+      expect(nonce.status).toBe("active");
+      expect(captured).toBeNull();
+    }
   });
 
   it("denies an action-controlled origin before claim or forward", async () => {
@@ -1331,12 +1429,27 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     // idempotency guard would fire for a legacy request. A governed dispatch must
     // bypass that guard (it carries its own single-use nonce), so the forward is
     // reached instead of a local 400 for a missing Idempotency-Key.
-    const savedMethod = ACTION.method;
-    const savedBody = ACTION.canonicalBody;
-    (ACTION as { method: string }).method = "POST";
-    (ACTION as { canonicalBody: unknown }).canonicalBody = { title: "bug" };
-    try {
-      const { intentId, authorizationId } = await seedExecutionReady();
+    const action: GenericHttpCanonicalActionV1 = {
+      profile: "generic-http.provider-action.v1",
+      method: "POST",
+      origin: "https://api.customer.example",
+      normalizedPath: "/v1/items",
+      orderedQueryPairs: [["mode", "safe"]],
+      selectedHeaders: [
+        ["accept", "application/json"],
+        ["content-type", "application/json"],
+      ],
+      canonicalBody: { name: "bug" },
+    };
+    await getDb()
+      .update(secretRoutes)
+      .set({ hostPattern: "api.customer.example", pathPattern: "/v1/items", method: "POST" })
+      .where(eq(secretRoutes.id, IDS.route));
+    await getDb().execute(
+      sql`UPDATE secret_routes SET authority_revision = 1 WHERE id = ${IDS.route}`,
+    );
+    {
+      const { intentId, authorizationId } = await seedExecutionReady({ action });
       const res = await dispatchGovernedExecution(intentId, IDS.tenant);
       // The forward was reached (no 400 idempotency short-circuit) and the method
       // is the mutating one.
@@ -1353,9 +1466,6 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
       expect(n.status).toBe("consumed");
       expect(n.ds).not.toBe("none");
       void res;
-    } finally {
-      (ACTION as { method: string }).method = savedMethod;
-      (ACTION as { canonicalBody: unknown }).canonicalBody = savedBody;
     }
   });
 
@@ -1484,15 +1594,30 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
   });
 
   it("P35: the forwarded body is JCS-serialized (byte-identical to the committed canonical action), NOT JSON.stringify insertion order (codex P2)", async () => {
-    const savedMethod = ACTION.method;
-    const savedBody = ACTION.canonicalBody;
-    // Keys deliberately in NON-lexicographic insertion order + an integer-like key
-    // so JSON.stringify (insertion order) and JCS (sorted) produce DIFFERENT bytes.
-    const body = { zeta: 1, alpha: 2, "10": 3, "2": 4 } as Record<string, unknown>;
-    (ACTION as { method: string }).method = "POST";
-    (ACTION as { canonicalBody: unknown }).canonicalBody = body;
-    try {
-      const { intentId } = await seedExecutionReady();
+    // Keys deliberately in NON-lexicographic insertion order so JSON.stringify
+    // (insertion order) and JCS (sorted) produce DIFFERENT bytes.
+    const body = { zeta: 1, name: "safe", alpha: 2 } as Record<string, unknown>;
+    const action: GenericHttpCanonicalActionV1 = {
+      profile: "generic-http.provider-action.v1",
+      method: "POST",
+      origin: "https://api.customer.example",
+      normalizedPath: "/v1/items",
+      orderedQueryPairs: [["mode", "safe"]],
+      selectedHeaders: [
+        ["accept", "application/json"],
+        ["content-type", "application/json"],
+      ],
+      canonicalBody: body,
+    };
+    await getDb()
+      .update(secretRoutes)
+      .set({ hostPattern: "api.customer.example", pathPattern: "/v1/items", method: "POST" })
+      .where(eq(secretRoutes.id, IDS.route));
+    await getDb().execute(
+      sql`UPDATE secret_routes SET authority_revision = 1 WHERE id = ${IDS.route}`,
+    );
+    {
+      const { intentId } = await seedExecutionReady({ action });
       await dispatchGovernedExecution(intentId, IDS.tenant);
       expect(captured).not.toBeNull();
       // The forwarded bytes must equal the JCS serialization, and must NOT equal
@@ -1501,9 +1626,6 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
       const insertion = JSON.stringify(body);
       expect(capturedBody).toBe(jcs);
       expect(jcs).not.toBe(insertion); // guard: the fixture actually differentiates
-    } finally {
-      (ACTION as { method: string }).method = savedMethod;
-      (ACTION as { canonicalBody: unknown }).canonicalBody = savedBody;
     }
   });
 
