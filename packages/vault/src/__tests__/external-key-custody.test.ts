@@ -574,6 +574,63 @@ describe("external key custody seam", () => {
     expect(tx).toEqual({ status: "outcome_unknown", txHash });
   });
 
+  for (const scenario of [
+    {
+      name: "provider fails after the durable checkpoint",
+      complete: async () => {
+        throw new Error("provider failed after preparing the broadcast");
+      },
+    },
+    {
+      name: "provider substitutes the returned transaction hash",
+      complete: async () => ({ result: `0x${"ef".repeat(32)}`, broadcast: true as const }),
+    },
+  ]) {
+    test(`preserves the prepared hash when the ${scenario.name}`, async () => {
+      const preparedHash = `0x${"de".repeat(32)}`;
+      const provider = new TestExternalKeyProvider("provider-signing", async (request) => {
+        expect(request.onPreparedBroadcast).toBeFunction();
+        await request.onPreparedBroadcast?.(preparedHash);
+        return scenario.complete();
+      });
+      vault = await freshVault(provider);
+      await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
+      await vault.importExternalKeyHandle(externalHandleRequest());
+      const target = await vault.resolveExecutionTarget({
+        tenantId: TENANT_ID,
+        agentId: "agent-external",
+        chainId: 8453,
+        venue: "hsm-primary",
+      });
+
+      let thrown: unknown;
+      try {
+        await vault.signTransaction(
+          {
+            tenantId: TENANT_ID,
+            agentId: "agent-external",
+            chainId: 8453,
+            to: "0x2222222222222222222222222222222222222222",
+            value: "1",
+            venue: "hsm-primary",
+            broadcast: true,
+          },
+          {
+            txId: `external-${scenario.name.replaceAll(" ", "-")}`,
+            expectedBackend: target.backend,
+            expectedBackendIdentityDigest: target.backendIdentityDigest,
+          },
+        );
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(ExternalBroadcastOutcomeUnknownError);
+      expect((thrown as ExternalBroadcastOutcomeUnknownError).transactionHash).toBe(preparedHash);
+      expect(provider.signCalls).toHaveLength(1);
+    });
+  }
+
   // ── ROUND 3 / ITEM 3: backend-resolution TOCTOU (fail closed at sign) ────
   // resolveExecutionBackend is a separate, stale-able DB read. Between the
   // gateway's precheck (which may see "local-vault") and the raw sign, the
