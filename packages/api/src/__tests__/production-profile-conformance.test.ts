@@ -471,7 +471,15 @@ describe("#220 executable provider profile conformance", () => {
               [string, string]
             >,
           },
-          { ...built.action, selectedHeaders: [] },
+          {
+            ...built.action,
+            selectedHeaders:
+              built.action.selectedHeaders.length === 0
+                ? [["x-attacker", "1"]]
+                : built.action.selectedHeaders.map(([name, value], index) =>
+                    index === 0 ? [name, `${value}-attacker`] : [name, value],
+                  ),
+          },
           {
             ...built.action,
             canonicalBody:
@@ -480,7 +488,7 @@ describe("#220 executable provider profile conformance", () => {
                 : { ...(built.action.canonicalBody as Record<string, unknown>), attacker: true },
           },
         ].filter((mutation) => jcsStringify(mutation) !== jcsStringify(built.action));
-        expect(mutations.length).toBeGreaterThanOrEqual(4);
+        expect(mutations).toHaveLength(5);
         for (const mutation of mutations) {
           expect(() => parse(mutation as typeof built.action)).toThrow("operation-action-mismatch");
         }
