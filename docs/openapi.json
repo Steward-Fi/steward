@@ -97215,14 +97215,14 @@
           "sensitive": true,
           "sensitivePrefix": "/vault",
           "requestExpiry": {
-            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true",
             "acceptedHeaders": [
               "X-Steward-Request-Timestamp",
               "X-Steward-Request-Expires-At"
             ]
           },
           "authorizationSignature": {
-            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
             "header": "X-Steward-Signature",
             "schemes": [
               "v1=hmac-sha256",
