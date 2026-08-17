@@ -10,6 +10,8 @@ export {
   encryptWebhookSecret,
   isEncryptedWebhookSecret,
 } from "./secret-codec";
+export type { VerifyWebhookSignatureInput } from "./verify";
+export { verifyWebhookSignature } from "./verify";
 export type {
   QueuedWebhookDelivery,
   RetryQueueOptions,

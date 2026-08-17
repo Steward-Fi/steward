@@ -14,7 +14,8 @@ const SIGNATURE_SCHEME = "v2";
 // bodies contain '.', and a plain `.`-join would let an attacker re-split a
 // captured signature (e.g. eventType "a.b"+body "c" vs "a"+body "b.c") to forge
 // a colliding-but-valid message. body is last/unbounded so needs no prefix.
-function canonicalSignedPayload(
+// Exported so receivers (verifyWebhookSignature) sign the identical material.
+export function canonicalSignedPayload(
   timestamp: string,
   deliveryId: string,
   eventType: string,
