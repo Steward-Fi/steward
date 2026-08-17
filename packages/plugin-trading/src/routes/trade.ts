@@ -279,6 +279,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       | "trade.session.created"
       | "trade.session.revoked"
       | "trade.order.submitted"
+      | "trade.order.submitted-after-revoke"
       | "trade.order.submit.authorized"
       | "trade.order.leverage.set"
       | "trade.order.leverage.failed"
@@ -1197,6 +1198,23 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           return envelope;
         }
 
+        // SEC-044: the submission fence no longer blocks revocation across
+        // venue I/O, so a revoke may have committed while the order was in
+        // flight. The order has landed regardless — detect + audit the race so
+        // operators can flatten manually.
+        const activeAfterSubmit = await getSessionManager().getActive(tenantId, session.id);
+        if (!activeAfterSubmit) {
+          await auditTradeEvent(tenantId, agentId, "trade.order.submitted-after-revoke", {
+            sessionId: session.id,
+            venue: "hyperliquid",
+            asset: parsedAsset.data,
+            leverage: effectiveLeverage,
+            size: body.size,
+            sizeUsd,
+            orderId: result.orderId ?? null,
+          });
+        }
+
         const response = {
           orderId: result.orderId ?? crypto.randomUUID(),
           status: result.status,
@@ -1776,9 +1794,11 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
 
     const manager = getSessionManager();
     // Fence reserve→submit against concurrent revocation (mirrors HL's
-    // withActiveSubmissionFence): the spend reservation and the venue submit run
-    // under an advisory lock that the revoke path also takes, so a revoke that
-    // commits before this block cannot interleave with an in-flight submit.
+    // withActiveSubmissionFence). After SEC-044 the fence's advisory lock covers
+    // ONLY the DB-level active check — it is released before this callback runs
+    // (never held across signing/venue I/O) — so revoke-vs-submit ordering here
+    // rests on the atomic reserveSpend re-check, the pre-submit activity
+    // re-check below, and the post-submit re-verification.
     const fenced = await manager.withActiveSubmissionFence(
       { tenantId, id: session.id },
       async () => {
@@ -1843,6 +1863,28 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           const envelope: TradeIdempotencyResponse = {
             status: 400,
             body: { ok: false, error: "Order could not be built; not submitted" },
+          };
+          idempotency.store?.(envelope);
+          return envelope;
+        }
+
+        // SEC-044: re-confirm the session is still active BEFORE submitting
+        // (the fence no longer holds the advisory lock across venue I/O). A
+        // revoke that landed during the build must abort the submit; the
+        // reserved spend is released because nothing reached the venue.
+        const activeAfterBuild = await getSessionManager().getActive(tenantId, session.id);
+        if (!activeAfterBuild) {
+          await getSessionManager().releaseSpend({
+            tenantId,
+            id: session.id,
+            amountUsd: notionalUsd,
+          });
+          const envelope: TradeIdempotencyResponse = {
+            status: 409,
+            body: {
+              ok: false,
+              error: "Trade session was revoked before order submission",
+            },
           };
           idempotency.store?.(envelope);
           return envelope;
@@ -1957,6 +1999,25 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           };
           idempotency.store?.(envelope);
           return envelope;
+        }
+
+        // SEC-044: the submission fence no longer blocks revocation across
+        // venue I/O, so a revoke may have committed while the order was in
+        // flight. The order has landed regardless — detect + audit the race so
+        // operators can flatten manually.
+        const activeAfterSubmit = await getSessionManager().getActive(tenantId, session.id);
+        if (!activeAfterSubmit) {
+          await auditTradeEvent(tenantId, agentId, "trade.order.submitted-after-revoke", {
+            sessionId: session.id,
+            venue: "polymarket",
+            tokenId: body.tokenId,
+            conditionId: body.conditionId ?? null,
+            side: body.side,
+            amount,
+            price,
+            notionalUsd,
+            orderId: result.orderId ?? null,
+          });
         }
 
         const response = {
