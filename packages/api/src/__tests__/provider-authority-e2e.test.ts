@@ -131,11 +131,15 @@ function encryptCredential(
 async function enableGovernedRoute(
   operationId: string,
   credential = GITHUB_TOKEN_SENTINEL,
+  credentialName = "github",
 ): Promise<void> {
   const db = getDb();
   await db
     .update(secrets)
-    .set(encryptCredential(F.TENANT, "github", credential))
+    .set({
+      name: credentialName,
+      ...encryptCredential(F.TENANT, credentialName, credential),
+    })
     .where(and(eq(secrets.id, F.SECRET), eq(secrets.tenantId, F.TENANT)));
   await db
     .update(secretRoutes)
@@ -189,9 +193,16 @@ async function configureXWrite(): Promise<void> {
     .where(eq(providerGrants.id, F.GRANT));
   await getDb()
     .update(secretRoutes)
-    .set({ hostPattern: "api.x.com" })
+    .set({
+      hostPattern: "api.x.com",
+      pathPattern: "/2/tweets",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "authorization",
+      injectFormat: "Bearer {value}",
+    })
     .where(eq(secretRoutes.id, F.ROUTE));
-  await enableGovernedRoute(X_OP, X_TOKEN_SENTINEL);
+  await enableGovernedRoute(X_OP, X_TOKEN_SENTINEL, "x-oauth");
 }
 
 function idem(seed: string): string {
@@ -385,7 +396,9 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
 
   it("M19: X consequential write traverses create→approve→resume→dispatch exactly once and stays canary-clean", async () => {
     await configureXWrite();
-    fake.expectCredential("authorization", X_TOKEN_SENTINEL);
+    // Match the actual X route contract, not merely the raw vault plaintext:
+    // terminal I/O must receive the provider's Bearer-formatted credential.
+    fake.expectCredential("authorization", `Bearer ${X_TOKEN_SENTINEL}`);
     const outboundBody = JSON.stringify({ text: "governed tweet" });
     const expectedBodyHash = sha256Text(outboundBody);
     fake.script(
