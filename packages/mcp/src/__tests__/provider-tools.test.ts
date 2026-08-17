@@ -275,8 +275,7 @@ describe("credential redaction", () => {
   });
 
   test("leaves non-secret free text and identifiers intact", () => {
-    const text =
-      "order oid_123 failed: insufficient balance for 0.01 BTC; tx 0x" + "a".repeat(64);
+    const text = "order oid_123 failed: insufficient balance for 0.01 BTC; tx 0x" + "a".repeat(64);
     expect(sanitizeProviderPayload(text)).toBe(text);
   });
 });

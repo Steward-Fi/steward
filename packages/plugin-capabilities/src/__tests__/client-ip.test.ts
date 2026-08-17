@@ -55,16 +55,14 @@ describe("trustedClientIp (capability audit)", () => {
 
   test("with hops=1 the right-most x-forwarded-for entry wins (left-most is spoofable)", async () => {
     process.env.STEWARD_TRUSTED_PROXY_HOPS = "1";
-    expect(await requestIp({ "x-forwarded-for": "198.51.100.1, 203.0.113.9" })).toBe(
-      "203.0.113.9",
-    );
+    expect(await requestIp({ "x-forwarded-for": "198.51.100.1, 203.0.113.9" })).toBe("203.0.113.9");
   });
 
   test("with hops=2 the client entry is the second from the right", async () => {
     process.env.STEWARD_TRUSTED_PROXY_HOPS = "2";
-    expect(
-      await requestIp({ "x-forwarded-for": "10.0.0.1, 198.51.100.1, 203.0.113.9" }),
-    ).toBe("198.51.100.1");
+    expect(await requestIp({ "x-forwarded-for": "10.0.0.1, 198.51.100.1, 203.0.113.9" })).toBe(
+      "198.51.100.1",
+    );
   });
 
   test("honors x-envoy-external-address with port stripping once trust is opted in", async () => {
@@ -81,8 +79,6 @@ describe("trustedClientIp (capability audit)", () => {
 
   test("legacy STEWARD_TRUST_PROXY_HEADERS=true maps to hops=1", async () => {
     process.env.STEWARD_TRUST_PROXY_HEADERS = "true";
-    expect(await requestIp({ "x-forwarded-for": "198.51.100.1, 203.0.113.9" })).toBe(
-      "203.0.113.9",
-    );
+    expect(await requestIp({ "x-forwarded-for": "198.51.100.1, 203.0.113.9" })).toBe("203.0.113.9");
   });
 });
