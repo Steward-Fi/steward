@@ -20,6 +20,9 @@ import {
 const EXECUTION_AUTH_V2_HKDF_SALT = "steward:execution-authorization:v2:salt";
 const EXECUTION_AUTH_V2_HKDF_INFO = "steward:execution-authorization:v2:hmac";
 
+/** Minimum accepted length for each STEWARD_EXECUTION_AUTH_SECRET entry. */
+const MIN_EXECUTION_AUTH_SECRET_CHARS = 32;
+
 export type ProviderExecutionAuthV2ErrorCode =
   | "secret_unavailable"
   | "unknown_key"
@@ -89,6 +92,17 @@ export function loadExecutionAuthV2Keys(): ProviderExecutionAuthV2KeyEntry[] {
     if (keyId.length === 0 || secret.length === 0) continue;
     if (seen.has(keyId)) continue;
     seen.add(keyId);
+    // Entropy floor (SEC-117): v2 signatures/commitments appear in exportable
+    // evidence bundles, giving an attacker offline verification material — a
+    // short secret reduces HMAC security to its brute-forceability. Require
+    // ~256 bits of secret material (32 chars), matching the audit-HMAC floor.
+    if (secret.length < MIN_EXECUTION_AUTH_SECRET_CHARS) {
+      throw new ProviderExecutionAuthV2Error(
+        `STEWARD_EXECUTION_AUTH_SECRET entry '${keyId}' is too weak: needs >= ${MIN_EXECUTION_AUTH_SECRET_CHARS} characters of entropy. ` +
+          "Generate with `openssl rand -hex 32`.",
+        "secret_unavailable",
+      );
+    }
     const derived = hkdfSync(
       "sha256",
       new TextEncoder().encode(secret),

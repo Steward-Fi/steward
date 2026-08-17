@@ -9,6 +9,7 @@ export {
   recordAggregationEvent,
 } from "./aggregation-tracker.js";
 export {
+  assertRedisUrlTls,
   disconnectRedis,
   getRedis,
   getRedisDriver,
