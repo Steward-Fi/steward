@@ -62,10 +62,6 @@ pub struct Config {
     pub tenant_id: Option<String>,
     pub request_signing_secret: Option<String>,
     pub request_signing_key_id: Option<String>,
-    /// Permit a plaintext non-loopback base_url (warns at construction). HTTPS
-    /// is required by default so credentials never travel cleartext
-    /// off-loopback (SEC-200).
-    pub allow_insecure_base_url: bool,
     pub timeout: Option<Duration>,
     pub transport: Option<Arc<dyn Transport>>,
     pub now: Option<Arc<dyn Fn() -> SystemTime + Send + Sync>>,
@@ -78,6 +74,12 @@ pub struct Client {
     transport: Arc<dyn Transport>,
     now: Arc<dyn Fn() -> SystemTime + Send + Sync>,
     new_id: Arc<dyn Fn() -> String + Send + Sync>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct ClientOptions {
+    /// Permit plaintext non-loopback HTTP with a construction-time warning.
+    pub allow_insecure_base_url: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +195,9 @@ fn is_loopback_host(host: &str) -> bool {
 // keys, bearer tokens, and HMAC-signed credentials, none of which may travel
 // to a plaintext non-loopback endpoint (SEC-200, mirroring SEC-048).
 fn assert_secure_base_url(parsed: &url::Url, allow_insecure_base_url: bool) -> Result<(), Error> {
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(Error::Config("base URL must use HTTP or HTTPS".to_string()));
+    }
     if parsed.scheme() == "https"
         || (parsed.scheme() == "http" && parsed.host_str().is_some_and(is_loopback_host))
     {
@@ -215,12 +220,19 @@ fn assert_secure_base_url(parsed: &url::Url, allow_insecure_base_url: bool) -> R
 
 impl Client {
     pub fn new(config: Config) -> Result<Self, Error> {
+        Self::new_with_options(config, ClientOptions::default())
+    }
+
+    /// Construct with explicit transport-security exceptions without adding a
+    /// required field to the public Config struct (which would break existing
+    /// external struct literals).
+    pub fn new_with_options(config: Config, options: ClientOptions) -> Result<Self, Error> {
         if config.base_url.trim().is_empty() {
             return Err(Error::Config("base URL is required".to_string()));
         }
         let parsed = url::Url::parse(&config.base_url)
             .map_err(|err| Error::Config(format!("invalid base URL: {err}")))?;
-        assert_secure_base_url(&parsed, config.allow_insecure_base_url)?;
+        assert_secure_base_url(&parsed, options.allow_insecure_base_url)?;
         let base_url = config.base_url.trim_end_matches('/').to_string();
         let transport = config
             .transport

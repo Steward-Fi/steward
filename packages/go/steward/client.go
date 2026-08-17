@@ -108,6 +108,9 @@ func isLoopbackHost(hostname string) bool {
 // keys, bearer tokens, and HMAC-signed credentials, none of which may travel
 // to a plaintext non-loopback endpoint (SEC-200, mirroring SEC-048).
 func assertSecureBaseURL(base *url.URL, allowInsecure bool) error {
+	if base.Scheme != "http" && base.Scheme != "https" {
+		return errors.New("base URL must use HTTP or HTTPS")
+	}
 	if base.Scheme == "https" || (base.Scheme == "http" && isLoopbackHost(base.Hostname())) {
 		return nil
 	}
@@ -125,7 +128,8 @@ func stripStewardCredentialsOnCrossHostRedirect(req *http.Request, via []*http.R
 	if len(via) == 0 {
 		return nil
 	}
-	if !strings.EqualFold(req.URL.Hostname(), via[0].URL.Hostname()) {
+	if !strings.EqualFold(req.URL.Hostname(), via[0].URL.Hostname()) ||
+		(strings.EqualFold(via[0].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https")) {
 		for _, header := range stewardCredentialHeaders {
 			req.Header.Del(header)
 		}

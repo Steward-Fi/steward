@@ -231,7 +231,9 @@ fn accounts_and_global_wallet_mutations_are_signed() {
     .unwrap();
 
     for path in ["/accounts", "/global-wallet/consent/approve"] {
-        client.post(path, &json!({}), RequestOptions::default()).unwrap();
+        client
+            .post(path, &json!({}), RequestOptions::default())
+            .unwrap();
         let request = transport.last_request();
         let signature = request
             .headers
@@ -246,13 +248,19 @@ fn accounts_and_global_wallet_mutations_are_signed() {
 // non-loopback endpoint unless the operator explicitly opts out.
 #[test]
 fn plaintext_non_loopback_base_url_rejected() {
-    for base_url in ["http://api.example.test", "http://192.168.1.10:3200", "ftp://api.example.test"] {
+    for base_url in [
+        "http://api.example.test",
+        "http://192.168.1.10:3200",
+        "ftp://api.example.test",
+    ] {
         match Client::new(Config {
             base_url: base_url.to_string(),
             api_key: Some("tenant-key".to_string()),
             ..Config::default()
         }) {
-            Err(Error::Config(message)) => assert!(message.contains("HTTPS"), "unexpected: {message}"),
+            Err(Error::Config(message)) => {
+                assert!(message.contains("HTTPS"), "unexpected: {message}")
+            }
             _ => panic!("expected config error for {base_url}"),
         }
     }
@@ -274,11 +282,15 @@ fn plaintext_non_loopback_base_url_rejected() {
 
 #[test]
 fn allow_insecure_base_url_opts_out() {
-    Client::new(Config {
-        base_url: "http://api.example.test".to_string(),
-        api_key: Some("tenant-key".to_string()),
-        allow_insecure_base_url: true,
-        ..Config::default()
-    })
+    Client::new_with_options(
+        Config {
+            base_url: "http://api.example.test".to_string(),
+            api_key: Some("tenant-key".to_string()),
+            ..Config::default()
+        },
+        steward_sdk::ClientOptions {
+            allow_insecure_base_url: true,
+        },
+    )
     .expect("allow_insecure_base_url should permit plaintext non-loopback");
 }

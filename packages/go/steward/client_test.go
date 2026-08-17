@@ -208,6 +208,22 @@ func TestCrossHostRedirectStripsCredentialHeaders(t *testing.T) {
 	}
 }
 
+func TestSameHostHTTPSDowngradeStripsCredentialHeaders(t *testing.T) {
+	original, _ := http.NewRequest(http.MethodGet, "https://api.example.test/accounts", nil)
+	downgrade, _ := http.NewRequest(http.MethodGet, "http://api.example.test/harvest", nil)
+	downgrade.Header.Set("Authorization", "Bearer user-token")
+	downgrade.Header.Set("X-Steward-Key", "tenant-key")
+	downgrade.Header.Set("X-Steward-Signature", "v1=deadbeef")
+	if err := stripStewardCredentialsOnCrossHostRedirect(downgrade, []*http.Request{original}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"Authorization", "X-Steward-Key", "X-Steward-Signature"} {
+		if got := downgrade.Header.Get(name); got != "" {
+			t.Fatalf("credential header leaked on HTTPS downgrade: %s=%q", name, got)
+		}
+	}
+}
+
 func TestAPIErrorIncludesStatusAndPayload(t *testing.T) {
 	client, err := NewClient(Config{
 		BaseURL: "https://api.example.test",

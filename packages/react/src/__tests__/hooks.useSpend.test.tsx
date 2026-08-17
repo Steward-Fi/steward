@@ -120,6 +120,7 @@ describe("computeSpendStats()", () => {
           txHash: "0xhash2",
         }),
         txRecord({ id: "tx-failed", status: "failed" }), // not counted
+        txRecord({ id: "tx-signed", status: "signed" }), // signed is not on-chain spend
       ],
       NOW,
     );

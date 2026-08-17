@@ -43,12 +43,11 @@ class StewardClientConfig:
     tenant_id: str | None = None
     request_signing_secret: str | None = None
     request_signing_key_id: str | None = None
-    # Permit a plaintext non-loopback base_url (warns at construction). HTTPS
-    # is required by default so credentials never travel cleartext
-    # off-loopback (SEC-200).
-    allow_insecure_base_url: bool = False
     timeout: float = 30.0
     transport: Transport | None = None
+    # Appended to preserve the positional argument order of the published
+    # config constructor. Permit plaintext non-loopback HTTP with a warning.
+    allow_insecure_base_url: bool = False
 
 
 # Keep in lockstep with the equivalent list in EVERY other SDK (sdk, go, java,
@@ -106,7 +105,9 @@ class _StewardRedirectHandler(HTTPRedirectHandler):
             return None
         old_host = (urlparse(req.full_url).hostname or "").lower()
         new_host = (urlparse(new_req.full_url).hostname or "").lower()
-        if new_host != old_host:
+        old_scheme = urlparse(req.full_url).scheme.lower()
+        new_scheme = urlparse(new_req.full_url).scheme.lower()
+        if new_host != old_host or (old_scheme == "https" and new_scheme != "https"):
             for store in (new_req.headers, new_req.unredirected_hdrs):
                 for name in [key for key in store if key.lower() in _CREDENTIAL_HEADERS]:
                     del store[name]
@@ -154,6 +155,8 @@ def _assert_secure_base_url(base_url: str, allow_insecure_base_url: bool) -> Non
     parsed = urlparse(base_url)
     if not parsed.scheme or not parsed.hostname:
         raise ValueError("base_url must be a valid absolute URL")
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("base_url must use HTTP or HTTPS")
     if parsed.scheme == "https" or (parsed.scheme == "http" and _is_loopback_host(parsed.hostname)):
         return
     if allow_insecure_base_url:

@@ -141,6 +141,11 @@ namespace Steward
                 throw new ArgumentException("BaseUrl must be a valid absolute URL", nameof(baseUrl), e);
             }
 
+            if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+            {
+                throw new ArgumentException("BaseUrl must use HTTP or HTTPS", nameof(baseUrl));
+            }
+
             if (uri.Scheme == Uri.UriSchemeHttps
                 || (uri.Scheme == Uri.UriSchemeHttp && IsLoopbackHost(uri.Host)))
             {

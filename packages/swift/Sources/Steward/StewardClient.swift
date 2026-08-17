@@ -109,6 +109,9 @@ public final class StewardClient {
               let host = components.host?.lowercased() else {
             throw StewardAPIError(status: 0, message: "baseURL must be a valid absolute URL", data: nil)
         }
+        guard scheme == "http" || scheme == "https" else {
+            throw StewardAPIError(status: 0, message: "baseURL must use HTTP or HTTPS", data: nil)
+        }
         if scheme == "https" || (scheme == "http" && isLoopbackHost(host)) {
             return
         }

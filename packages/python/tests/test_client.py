@@ -133,6 +133,11 @@ class StewardClientTests(unittest.TestCase):
 
         same_host = handler.redirect_request(original, None, 302, "Found", {}, "https://api.example.test/other")
         self.assertEqual(same_host.get_header("Authorization"), "Bearer user-token")
+
+        downgrade = handler.redirect_request(original, None, 302, "Found", {}, "http://api.example.test/other")
+        self.assertIsNone(downgrade.get_header("Authorization"))
+        self.assertIsNone(downgrade.get_header("X-steward-key"))
+        self.assertIsNone(downgrade.get_header("X-steward-signature"))
         self.assertEqual(same_host.get_header("X-steward-key"), "tenant-key")
 
     def test_path_parameters_are_url_encoded(self):

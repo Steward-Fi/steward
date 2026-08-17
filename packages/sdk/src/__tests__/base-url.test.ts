@@ -41,6 +41,10 @@ describe("assertSecureBaseUrl", () => {
       warn.mockRestore();
     }
   });
+
+  test("the insecure opt-out permits HTTP only, never arbitrary URL schemes", () => {
+    expect(() => assertSecureBaseUrl("ftp://api.steward.example", true)).toThrow(/HTTPS/);
+  });
 });
 
 describe("SDK constructors enforce HTTPS baseUrl", () => {

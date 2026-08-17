@@ -1,8 +1,9 @@
 // Production-ready StewardSessionStorage backed by `flutter_secure_storage`
 // (Keychain on iOS, EncryptedSharedPreferences/Keystore on Android).
 //
-// This file is an example, not part of the published library, so that the
-// package stays free of a hard flutter_secure_storage dependency. To use it:
+// This file is an example, not part of the published library. The package
+// declares flutter_secure_storage only as a dev dependency so consumers do
+// not inherit it as a runtime dependency. To use it:
 //
 //   1. Add the dependency to your app's pubspec.yaml:
 //

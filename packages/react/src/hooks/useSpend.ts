@@ -8,7 +8,7 @@ import { getAllTransactions } from "../utils/transactions.js";
 type SpendRange = "24h" | "7d" | "30d" | "all";
 
 /** Statuses that represent value actually committed on-chain. */
-const SPEND_STATUSES: readonly TxStatus[] = ["signed", "broadcast", "confirmed"];
+const SPEND_STATUSES: readonly TxStatus[] = ["broadcast", "confirmed"];
 
 const RANGE_MS: Record<Exclude<SpendRange, "all">, number> = {
   "24h": 24 * 60 * 60 * 1000,

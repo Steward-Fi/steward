@@ -295,6 +295,9 @@ public final class StewardClient {
             throw new IllegalArgumentException("baseUrl must be a valid absolute URL", e);
         }
         String scheme = uri.getScheme();
+        if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
+            throw new IllegalArgumentException("baseUrl must use HTTP or HTTPS");
+        }
         if ("https".equalsIgnoreCase(scheme)
                 || ("http".equalsIgnoreCase(scheme) && isLoopbackHost(uri.getHost()))) {
             return;
