@@ -44,7 +44,12 @@ export function computeScaledLimit(config: ReputationScalingConfig, score: numbe
 
   // Linear: base + (max - base) * (score / 100)
   const range = max - base;
-  return base + (range * BigInt(clampedScore)) / 100n;
+  // Scores are allowed to be fractional. Convert through the same fixed-point
+  // representation as the logarithmic curve instead of BigInt(score), which
+  // throws for ordinary values such as 72.5 and turns policy evaluation into a
+  // 500 rather than a deterministic decision.
+  const scoreFixed = BigInt(Math.round(clampedScore * 10_000));
+  return base + (range * scoreFixed) / 1_000_000n;
 }
 
 export function evaluateReputationScaling(
@@ -57,11 +62,25 @@ export function evaluateReputationScaling(
   // Fail closed with a structured deny on malformed config instead of throwing
   // inside `BigInt(...)` (SEC-105) — consistent with the other defensive
   // evaluators.
-  if (!/^\d+$/.test(config.baseMaxPerTx) || !/^\d+$/.test(config.maxMaxPerTx)) {
+  const isUint256 = (value: unknown): value is string => {
+    if (typeof value !== "string" || !/^\d+$/.test(value)) return false;
+    const normalized = value.replace(/^0+/, "") || "0";
+    const max = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+    return (
+      normalized.length < max.length || (normalized.length === max.length && normalized <= max)
+    );
+  };
+  if (
+    !config ||
+    !isUint256(config.baseMaxPerTx) ||
+    !isUint256(config.maxMaxPerTx) ||
+    BigInt(config.maxMaxPerTx) < BigInt(config.baseMaxPerTx) ||
+    (config.curve !== "linear" && config.curve !== "logarithmic")
+  ) {
     return {
       ...base,
       passed: false,
-      reason: "Reputation-scaling limits must be base-10 wei strings",
+      reason: "Reputation-scaling config requires ordered uint256 wei limits and a supported curve",
     };
   }
 

@@ -33,21 +33,32 @@ function ctx(
   args: Record<string, unknown> = {},
   extra: Partial<ProviderPolicyContext> = {},
 ): ProviderPolicyContext {
+  const builtArgs = {
+    isReply: false,
+    hasUrl: false,
+    summoned: false,
+    textCodePointLength: 5,
+    textByteLength: 5,
+    ...args,
+  };
+  const { x: extraX, ...rest } = extra;
   return {
     operationKey: OP_TWEET,
-    args: {
-      isReply: false,
-      hasUrl: false,
-      summoned: false,
-      textCodePointLength: 5,
-      textByteLength: 5,
-      ...args,
-    },
+    args: builtArgs,
     method: "POST",
     host: "api.x.com",
     path: "/2/tweets",
     invokeCount1h: 0,
-    ...extra,
+    x: {
+      ...(typeof builtArgs.isReply === "boolean" ? { isReply: builtArgs.isReply } : {}),
+      ...(typeof builtArgs.hasUrl === "boolean" ? { hasUrl: builtArgs.hasUrl } : {}),
+      ...(typeof builtArgs.summoned === "boolean" ? { summoned: builtArgs.summoned } : {}),
+      ...(typeof builtArgs.textCodePointLength === "number"
+        ? { textCodePointLength: builtArgs.textCodePointLength }
+        : {}),
+      ...extraX,
+    },
+    ...rest,
   };
 }
 
@@ -204,6 +215,27 @@ describe("permissioned-X: contentPolicy", () => {
     expect(d.reasonCodes).toContain(R.CONFIGURATION_INVALID);
   });
 
+  it("short nested-quantifier blockedPatterns fail closed without matching", () => {
+    const rule: ProviderPolicyRule = {
+      id: "r-short-redos",
+      type: "capability-intent",
+      enabled: true,
+      config: {
+        capabilities: [OP_TWEET],
+        effect: "allow",
+        constraints: { x: { contentPolicy: { blockedPatterns: ["(a+)+$"] } } },
+      },
+    };
+    const started = performance.now();
+    const d = composeProviderActionPolicyDecision(
+      [rule],
+      ctx({}, { policyText: `${"a".repeat(8191)}!` }),
+    );
+    expect(d.effect).toBe("hard_deny");
+    expect(d.reasonCodes).toContain(R.CONFIGURATION_INVALID);
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
   it("over-long policyText fails closed instead of being scanned (SEC-107 ReDoS bound)", () => {
     const x: XConstraints = { contentPolicy: { blockedPatterns: ["spam"] } };
     const c = ctx({}, { policyText: `gm ${"x".repeat(9000)}` });
@@ -326,6 +358,15 @@ describe("permissioned-X: escalation", () => {
     expect(d.effect).toBe("hard_deny");
     expect(d.reasonCodes).toContain(R.X_URL_FORBIDDEN);
   });
+
+  it("never falls back to caller-influenced args when a typed signal is absent", () => {
+    const noUrls: XConstraints = { contentPolicy: { allowUrls: false } };
+    const c = ctx({ hasUrl: false });
+    delete (c.x as { hasUrl?: boolean }).hasUrl;
+    const d = decide(noUrls, c);
+    expect(d.effect).toBe("hard_deny");
+    expect(d.reasonCodes).toContain(R.INPUT_UNAVAILABLE);
+  });
 });
 
 // ─── x-block scoping + fail-closed ──────────────────────────────────────────
@@ -381,7 +422,7 @@ describe("permissioned-X: scoping + fail-closed", () => {
   it("allowUrls=false fails closed when the hasUrl signal is absent", () => {
     const x: XConstraints = { contentPolicy: { allowUrls: false } };
     const c = ctx();
-    delete (c.args as Record<string, unknown>).hasUrl;
+    delete (c.x as { hasUrl?: boolean }).hasUrl;
     const d = decide(x, c);
     expect(d.effect).toBe("hard_deny");
     expect(d.reasonCodes).toContain(R.INPUT_UNAVAILABLE);
@@ -396,14 +437,14 @@ describe("permissioned-X: scoping + fail-closed", () => {
   it("replyPolicy fails closed when the isReply signal is absent", () => {
     const x: XConstraints = { replyPolicy: { mode: "none" } };
     const c = ctx();
-    delete (c.args as Record<string, unknown>).isReply;
+    delete (c.x as { isReply?: boolean }).isReply;
     expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
 
   it("summoned-only fails closed when the summoned signal is absent on a reply", () => {
     const x: XConstraints = { replyPolicy: { mode: "summoned-only" } };
     const c = ctx({ isReply: true });
-    delete (c.args as Record<string, unknown>).summoned;
+    delete (c.x as { summoned?: boolean }).summoned;
     expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
 

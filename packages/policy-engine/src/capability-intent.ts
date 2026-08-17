@@ -70,11 +70,117 @@ export const CAPABILITY_INTENT_RULE_TYPE = "capability-intent" as const;
  * `argMatches` / X `blockedPatterns` regexes come from tenant-admin policy
  * config and run against agent-influenced invoke args / tweet text with no
  * engine-side match timeout, so a catastrophically-backtracking pattern (even
- * pasted innocently) could hang the API event loop. Both the pattern and the
- * matched input are length-capped; anything over the cap fails closed (deny).
+ * pasted innocently) could hang the API event loop. Length caps alone do not
+ * make a short pattern such as `(a+)+$` safe. Steward therefore accepts a
+ * deliberately restricted, auditable linear-time subset in addition to
+ * bounding both the pattern and input. Unsupported syntax fails closed.
  */
 export const MAX_POLICY_PATTERN_LENGTH = 256;
 export const MAX_POLICY_PATTERN_INPUT_LENGTH = 8_192;
+
+/**
+ * Validate the policy-regex subset that is safe to execute on the API thread.
+ *
+ * The subset permits literals, character classes, anchors, dot, escapes and
+ * fixed repetitions. It permits at most one variable repetition (`*`, `+`,
+ * `?`, or a ranged `{m,n}`), and excludes groups, alternation, lookarounds and
+ * backreferences. Those excluded constructs are where JavaScript's backtracking
+ * engine admits exponential ambiguity. For an unanchored search (X blocked
+ * patterns), a variable repetition additionally requires an explicit `^` so
+ * the engine cannot retry the expression at every input offset.
+ */
+function isSafePolicyPattern(pattern: string, fullMatch: boolean): boolean {
+  if (pattern.length === 0 || pattern.length > MAX_POLICY_PATTERN_LENGTH) return false;
+
+  let escaped = false;
+  let inClass = false;
+  let classHasContent = false;
+  let canQuantify = false;
+  let variableRepetitions = 0;
+
+  const addVariableRepetition = () => {
+    variableRepetitions += 1;
+    return variableRepetitions <= 1;
+  };
+
+  for (let i = 0; i < pattern.length; i += 1) {
+    const ch = pattern[i];
+    if (escaped) {
+      // Backreferences are context-sensitive and outside the safe subset.
+      if (/[1-9k]/.test(ch)) return false;
+      escaped = false;
+      if (inClass) classHasContent = true;
+      else canQuantify = true;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (inClass) {
+      if (ch === "]") {
+        if (!classHasContent) return false;
+        inClass = false;
+        canQuantify = true;
+      } else {
+        classHasContent = true;
+      }
+      continue;
+    }
+    if (ch === "[") {
+      inClass = true;
+      classHasContent = false;
+      canQuantify = false;
+      continue;
+    }
+    if (ch === "]" || ch === "(" || ch === ")" || ch === "|") return false;
+    if (ch === "^" || ch === "$") {
+      canQuantify = false;
+      continue;
+    }
+    if (ch === "*" || ch === "+" || ch === "?") {
+      if (!canQuantify || !addVariableRepetition()) return false;
+      canQuantify = false;
+      continue;
+    }
+    if (ch === "{") {
+      if (!canQuantify) return false;
+      const end = pattern.indexOf("}", i + 1);
+      if (end < 0) return false;
+      const body = pattern.slice(i + 1, end);
+      const repetition = /^(\d+)(?:,(\d*))?$/.exec(body);
+      if (!repetition) return false;
+      const min = Number(repetition[1]);
+      const hasComma = body.includes(",");
+      const max = hasComma && repetition[2] !== "" ? Number(repetition[2]) : min;
+      if (
+        !Number.isSafeInteger(min) ||
+        !Number.isSafeInteger(max) ||
+        min < 0 ||
+        max < min ||
+        max > MAX_POLICY_PATTERN_INPUT_LENGTH
+      ) {
+        return false;
+      }
+      if (hasComma && (repetition[2] === "" || max !== min) && !addVariableRepetition()) {
+        return false;
+      }
+      canQuantify = false;
+      i = end;
+      continue;
+    }
+    canQuantify = true;
+  }
+
+  if (escaped || inClass) return false;
+  if (!fullMatch && variableRepetitions > 0 && !pattern.startsWith("^")) return false;
+  try {
+    new RegExp(pattern);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // ─── Permissioned-X: per-post price table (versioned constant) ────────────────
 //
@@ -675,11 +781,11 @@ function parseXConstraints(rawInput: unknown): XConstraints | { error: string } 
           error:
             "capability-intent: `x.contentPolicy.blockedPatterns` must be a non-empty string[] of non-empty strings",
         };
-      // SEC-107: bound operator-supplied regexes at parse time (same cap as
-      // argMatches) so a pathological pattern fails closed as a config error.
-      if (cp.blockedPatterns.some((p) => (p as string).length > MAX_POLICY_PATTERN_LENGTH))
+      // SEC-107: accept only the bounded linear-time subset at parse time.
+      if (cp.blockedPatterns.some((p) => !isSafePolicyPattern(p as string, false)))
         return {
-          error: `capability-intent: \`x.contentPolicy.blockedPatterns\` patterns must not exceed ${MAX_POLICY_PATTERN_LENGTH} chars`,
+          error:
+            "capability-intent: `x.contentPolicy.blockedPatterns` contains an unsafe or unsupported regex",
         };
       content.blockedPatterns = cp.blockedPatterns as string[];
     }
@@ -928,16 +1034,17 @@ function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: strin
     if (c.argMatches !== undefined && !isStringRecord(c.argMatches)) {
       return { error: "capability-intent: `constraints.argMatches` must be Record<string,string>" };
     }
-    // SEC-107: bound operator-supplied regexes at store/parse time, not just at
-    // evaluation time, so a pathological pattern fails closed as a config error.
+    // SEC-107: validate the safe subset at store/parse time, not just at
+    // evaluation time, so a pathological pattern fails closed as config.
     if (
       c.argMatches !== undefined &&
       Object.values(c.argMatches as Record<string, string>).some(
-        (p) => p.length > MAX_POLICY_PATTERN_LENGTH,
+        (p) => !isSafePolicyPattern(p, true),
       )
     ) {
       return {
-        error: `capability-intent: \`constraints.argMatches\` patterns must not exceed ${MAX_POLICY_PATTERN_LENGTH} chars`,
+        error:
+          "capability-intent: `constraints.argMatches` contains an unsafe or unsupported regex",
       };
     }
 
@@ -1041,11 +1148,11 @@ function evaluateConstraints(
     for (const [key, pattern] of Object.entries(constraints.argMatches)) {
       // SEC-107: cap the operator-supplied pattern length so a pathological
       // regex cannot be smuggled in via config.
-      if (typeof pattern !== "string" || pattern.length > MAX_POLICY_PATTERN_LENGTH) {
+      if (typeof pattern !== "string" || !isSafePolicyPattern(pattern, true)) {
         return {
           ...base,
           passed: false,
-          reason: `capability-intent: regex for arg "${key}" missing or exceeds ${MAX_POLICY_PATTERN_LENGTH} chars`,
+          reason: `capability-intent: regex for arg "${key}" is unsafe or unsupported`,
         };
       }
       let re: RegExp;
@@ -1506,7 +1613,7 @@ export interface ProviderPolicyContext {
      *  over the same-named `args` entry, which is caller-influenced (SEC-182). */
     readonly isReply?: boolean;
     /** adapter-derived "the user summoned the agent" signal (replyPolicy
-     *  summoned-only). PREFERRED over `args` (SEC-182). */
+     *  summoned-only). The policy engine never reads this from `args`. */
     readonly summoned?: boolean;
     /** adapter-derived "the post body contains a URL" signal (allowUrls /
      *  spend / escalation policies). PREFERRED over `args` (SEC-182). */
@@ -1789,7 +1896,7 @@ function evaluateProviderConstraints(
   if (constraints.argMatches) {
     for (const [key, pattern] of Object.entries(constraints.argMatches)) {
       // SEC-107: same ReDoS bounds as the legacy-plane evaluator.
-      if (typeof pattern !== "string" || pattern.length > MAX_POLICY_PATTERN_LENGTH) {
+      if (typeof pattern !== "string" || !isSafePolicyPattern(pattern, true)) {
         return PROVIDER_POLICY_REASON.CONFIGURATION_INVALID;
       }
       let re: RegExp;
@@ -1936,34 +2043,18 @@ export type XConstraintVerdict =
   | { kind: "escalate" };
 
 /**
- * Read a REQUIRED boolean policy arg. Returns the boolean value, or `undefined`
- * when the arg is absent or not a boolean. A permissioned-X policy that DEPENDS
- * on this signal must fail closed (POLICY_INPUT_UNAVAILABLE) on `undefined` — we
- * NEVER coerce a missing/mistyped signal to `false`, because that would let a
- * URL/reply gate silently pass on an operation whose build doesn't carry the
- * signal (e.g. x.tweet.delete / x.user.me.read, or a malformed context). This is
- * the content-shape fail-closed contract (codex P2, PR review).
- */
-function readBool(args: Record<string, unknown>, key: string): boolean | undefined {
-  const v = args[key];
-  return typeof v === "boolean" ? v : undefined;
-}
-
-/**
- * Read an X security signal, PREFERRING the typed, adapter-populated `ctx.x`
- * channel over the caller-influenced `args` bag (SEC-182). The engine cannot
- * distinguish adapter-derived values from pass-through caller args inside
- * `args`; the typed channel is populated server-side from the adapter's
- * validated build. The args read remains as the legacy fallback for adapters
- * that do not wire the typed fields yet — the fail-closed contract (missing =>
- * POLICY_INPUT_UNAVAILABLE) is unchanged either way.
+ * Read an X security signal exclusively from the typed, adapter-populated
+ * `ctx.x` channel (SEC-182). `args` is caller-influenced, and a compatibility
+ * fallback would let a third-party adapter bypass URL/reply gates by reflecting
+ * attacker-chosen booleans. Adapters that have not wired the typed field fail
+ * closed with POLICY_INPUT_UNAVAILABLE.
  */
 function xBoolSignal(
   ctx: ProviderPolicyContext,
   key: "isReply" | "summoned" | "hasUrl",
 ): boolean | undefined {
   const typed = ctx.x?.[key];
-  return typeof typed === "boolean" ? typed : readBool(ctx.args, key);
+  return typeof typed === "boolean" ? typed : undefined;
 }
 
 /**
@@ -1988,8 +2079,6 @@ export function evaluateXConstraints(
   if (!ctx.operationKey.startsWith("x.")) {
     return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.CONFIGURATION_INVALID };
   }
-
-  const { args } = ctx;
 
   // ── replyPolicy ──
   // A replyPolicy DEPENDS on the `isReply` signal; absent/non-boolean => fail
@@ -2034,9 +2123,8 @@ export function evaluateXConstraints(
       }
     }
     if (x.contentPolicy.maxLength !== undefined) {
-      // SEC-182: prefer the typed, adapter-populated length signal over the
-      // caller-influenced `args` bag (same fallback contract as xBoolSignal).
-      const len = ctx.x?.textCodePointLength ?? args.textCodePointLength;
+      // SEC-182: length is authoritative only on the typed adapter channel.
+      const len = ctx.x?.textCodePointLength;
       // A content-length policy REQUIRES the length signal. Absent => fail closed.
       if (typeof len !== "number" || !Number.isInteger(len)) {
         return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
@@ -2060,7 +2148,7 @@ export function evaluateXConstraints(
       for (const pattern of x.contentPolicy.blockedPatterns) {
         // SEC-107: cap the operator-supplied pattern length so a pathological
         // regex cannot be smuggled in via config.
-        if (typeof pattern !== "string" || pattern.length > MAX_POLICY_PATTERN_LENGTH) {
+        if (typeof pattern !== "string" || !isSafePolicyPattern(pattern, false)) {
           return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.CONFIGURATION_INVALID };
         }
         let re: RegExp;

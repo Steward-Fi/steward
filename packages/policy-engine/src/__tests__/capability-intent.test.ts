@@ -198,7 +198,7 @@ describe("capability-intent — argMatches constraint", () => {
       makeContext({ capability: cap({ args: { branch: "anything" } }) }),
     );
     expect(r.passed).toBe(false);
-    expect(r.reason).toContain("invalid regex");
+    expect(r.reason).toContain("unsafe or unsupported regex");
   });
 
   it("denies an over-long operator pattern (SEC-107 ReDoS bound)", () => {
@@ -207,7 +207,18 @@ describe("capability-intent — argMatches constraint", () => {
       makeContext({ capability: cap({ args: { branch: "feat/x" } }) }),
     );
     expect(r.passed).toBe(false);
-    expect(r.reason).toContain("must not exceed 256 chars");
+    expect(r.reason).toContain("unsafe or unsupported regex");
+  });
+
+  it("denies a short catastrophically-backtracking pattern before execution", () => {
+    const started = performance.now();
+    const r = evaluateCapabilityIntent(
+      rule({ ...base, constraints: { argMatches: { branch: "(a+)+$" } } }),
+      makeContext({ capability: cap({ args: { branch: `${"a".repeat(8191)}!` } }) }),
+    );
+    expect(r.passed).toBe(false);
+    expect(r.reason).toContain("unsafe or unsupported regex");
+    expect(performance.now() - started).toBeLessThan(100);
   });
 
   it("denies an over-long agent-controlled arg value (SEC-107 ReDoS bound)", () => {

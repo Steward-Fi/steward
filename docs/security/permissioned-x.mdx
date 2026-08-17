@@ -115,7 +115,7 @@ constraint and a cost lever:
 - `maxLength: number` — deny a post whose adapter-counted code-point length
   exceeds the cap (`POLICY_X_CONTENT_TOO_LONG`). This is stricter-or-equal to X's
   280 weighted limit (the adapter already bounds 1..280).
-- `blockedPatterns: string[]` — each is an anchored regex; a match on the text
+- `blockedPatterns: string[]` — each is a bounded safe-subset regex; a match on the text
   denies (`POLICY_X_CONTENT_BLOCKED`). An **invalid** regex in config denies
   (`POLICY_CONFIGURATION_INVALID`) — fail closed, never throw.
 
@@ -178,6 +178,12 @@ would-be allow into an approval.
   `x.dm.*` operation. We do NOT ship a dead DM rule.
 - **mention/hashtag restrictions:** expressible TODAY via
   `contentPolicy.blockedPatterns` (e.g. block `@competitor`, block `#banned`).
+
+Policy regexes deliberately exclude grouping, alternation, lookarounds, and
+backreferences, and permit at most one variable repetition. Unanchored
+`blockedPatterns` with a variable repetition are rejected; prefix them with `^`
+when repetition is required. This fail-closed subset prevents JavaScript regex
+backtracking from blocking the API event loop.
   A dedicated structured surface is deferred; the pattern channel covers the
   Phase-1 need without a second matcher.
 - **quiet hours:** `quietHours: { startMinuteUtc, endMinuteUtc }` gates writes to

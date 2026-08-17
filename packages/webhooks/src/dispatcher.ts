@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { LookupAddress } from "node:dns";
 import type { RequestOptions } from "node:http";
 import { isIP, type LookupFunction } from "node:net";
@@ -183,6 +183,11 @@ function isNonPublicIpv6(address: string): boolean {
   const ipv4Embedded = embeddedIpv4FromIpv6(normalized);
   if (ipv4Embedded) return isNonPublicIpv4(ipv4Embedded);
   const words = expandIpv6Words(normalized);
+  // RFC 8215 reserves 64:ff9b:1::/48 for local-use IPv4/IPv6 translation.
+  // The embedded IPv4 bits are placed differently for the supported RFC 6052
+  // prefix lengths, so extracting only words[6]/[7] is not a complete guard.
+  // IANA marks the whole /48 as not globally reachable: reject it outright.
+  if (words?.[0] === 0x0064 && words[1] === 0xff9b && words[2] === 0x0001) return true;
   if (words?.[0] === 0x2001 && (words[1] === 0 || words[1] === 0xdb8)) return true;
   // 2001:2::/48 benchmarking (RFC 5180) — documentation/special-use, never a
   // public webhook target (SEC-178).
@@ -382,35 +387,20 @@ async function postWebhook(
   });
 }
 
-/**
- * SEC-101: the bare-URL (legacy) form carries no per-tenant secret, so the
- * process-wide STEWARD_WEBHOOK_SECRET used to sign every tenant's legacy
- * endpoint directly — one key compromise forged events for ALL of them. Derive
- * a per-tenant signing key from the master secret instead: a captured derived
- * key is scoped to a single tenant's legacy endpoint. (Receivers on this path
- * were never provisioned a key, so verification there was never possible; the
- * derivation bounds blast radius without changing the wire scheme.)
- */
-function deriveLegacyWebhookSecret(masterSecret: string, tenantId: string): string {
-  return createHmac("sha256", masterSecret)
-    .update(`steward-legacy-webhook-secret:${tenantId}`)
-    .digest("hex");
-}
-
-function normalizeWebhook(webhook: WebhookConfig | string, tenantId: string): WebhookConfig {
+function normalizeWebhook(webhook: WebhookConfig | string): WebhookConfig {
   if (typeof webhook !== "string") {
     return webhook;
   }
-
-  const masterSecret = (globalThis as { process?: { env?: Record<string, string | undefined> } })
-    .process?.env?.STEWARD_WEBHOOK_SECRET;
-  if (!masterSecret) {
-    throw new Error(
-      "Webhook secret is required. Pass a WebhookConfig or set STEWARD_WEBHOOK_SECRET.",
-    );
-  }
-
-  return { url: webhook, secret: deriveLegacyWebhookSecret(masterSecret, tenantId) };
+  // SEC-101: a bare URL has no receiver-provisioned tenant secret. Deriving a
+  // replacement key server-side would silently break every receiver that knew
+  // only the old process-wide secret, while retaining that master secret would
+  // leave every tenant forgeable after one disclosure. Fail closed and require
+  // an explicit per-endpoint WebhookConfig. The API's former bare-URL fan-out is
+  // removed; tenant webhook URLs are already mirrored into webhook_configs with
+  // independently generated encrypted secrets.
+  throw new WebhookValidationError(
+    "Legacy string webhook configuration is not supported; pass a WebhookConfig with a per-endpoint secret",
+  );
 }
 
 export class WebhookDispatcher {
@@ -444,7 +434,7 @@ export class WebhookDispatcher {
     event: WebhookEvent,
     webhook: WebhookConfig | string,
   ): Promise<WebhookDeliveryResult> {
-    const config = normalizeWebhook(webhook, event.tenantId);
+    const config = normalizeWebhook(webhook);
 
     // An empty events array means "subscribe to all" everywhere else
     // (acceptsConfiguredWebhookEvent, persistent-queue) — a truthy [] must

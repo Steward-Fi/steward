@@ -313,7 +313,7 @@ export class PolicyEngine {
     };
     try {
       await this.auditHook(event);
-    } catch (err) {
+    } catch {
       // Audit failures must never block a trade. The engine swallows, but not
       // silently (SEC-104): count and log every failure so a persistently
       // failing hook is visible to operators instead of quietly disabling the
@@ -321,7 +321,6 @@ export class PolicyEngine {
       this.auditHookFailureCount += 1;
       console.warn(
         `[steward] policy audit hook failed (${this.auditHookFailureCount} since engine start); policy.evaluated events are being dropped`,
-        err,
       );
     }
   }

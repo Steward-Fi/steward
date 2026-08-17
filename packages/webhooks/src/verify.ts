@@ -34,7 +34,8 @@ export interface VerifyWebhookSignatureInput {
  * compares with `crypto.timingSafeEqual` — NEVER `===`, which leaks prefix
  * length through timing. Also enforces a freshness window on
  * `X-Steward-Sent-At` so a captured signature cannot be replayed outside the
- * tolerance.
+ * tolerance. Receivers MUST additionally persist and reject duplicate
+ * `deliveryId` values to prevent replay inside that permitted clock-skew window.
  *
  * Fails closed: returns false on any malformed input; never throws.
  */
@@ -43,13 +44,19 @@ export function verifyWebhookSignature(input: VerifyWebhookSignatureInput): bool
     const tolerance = input.toleranceSeconds ?? 300;
     const now = input.nowSeconds ?? Math.floor(Date.now() / 1000);
 
+    // Canonical unix seconds only. Number(""), exponent notation, fractions,
+    // unsafe integers, NaN option values, or Infinity must never turn the
+    // freshness check into `NaN > tolerance === false` and bypass replay age.
+    if (!/^(?:0|[1-9]\d*)$/.test(input.sentAt)) return false;
     const sentAtSeconds = Number(input.sentAt);
-    if (!Number.isFinite(sentAtSeconds)) return false;
+    if (!Number.isSafeInteger(sentAtSeconds)) return false;
+    if (!Number.isSafeInteger(now) || now < 0) return false;
+    if (!Number.isSafeInteger(tolerance) || tolerance < 0) return false;
     if (Math.abs(now - sentAtSeconds) > tolerance) return false;
 
     // The signed material is only meaningful with real field values; an empty
     // delivery id or event type would verify an attacker-shaped payload.
-    if (!input.deliveryId || !input.eventType) return false;
+    if (!input.deliveryId.trim() || !input.eventType.trim() || !input.secret) return false;
 
     if (!input.signature.startsWith("v2=")) return false;
     const providedHex = input.signature.slice(3);

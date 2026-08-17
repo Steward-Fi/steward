@@ -282,7 +282,7 @@ describe("reputation-scaling malformed input (SEC-105)", () => {
       txValue: 1n,
     });
     expect(result.passed).toBe(false);
-    expect(result.reason).toContain("wei strings");
+    expect(result.reason).toContain("ordered uint256 wei limits");
   });
 
   it("treats a non-finite score as 0 instead of throwing inside BigInt(NaN)", () => {
@@ -294,5 +294,27 @@ describe("reputation-scaling malformed input (SEC-105)", () => {
       txValue: BigInt("100000000000000000"),
     });
     expect(result.passed).toBe(true); // exactly at the score-0 base limit
+  });
+
+  it("evaluates fractional scores deterministically instead of throwing", () => {
+    expect(
+      computeScaledLimit({ baseMaxPerTx: "0", maxMaxPerTx: "100", curve: "linear" }, 72.5),
+    ).toBe(72n);
+  });
+
+  it("denies null, inverted, oversized, and unknown-curve configs", () => {
+    for (const config of [
+      null,
+      { baseMaxPerTx: "2", maxMaxPerTx: "1", curve: "linear" },
+      { baseMaxPerTx: "0", maxMaxPerTx: `1${"0".repeat(78)}`, curve: "linear" },
+      { baseMaxPerTx: "0", maxMaxPerTx: "1", curve: "quadratic" },
+    ]) {
+      const result = evaluateReputationScaling(makeRule("reputation-scaling", config as any), {
+        reputationScore: 50,
+        txValue: 0n,
+      });
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("ordered uint256 wei limits");
+    }
   });
 });

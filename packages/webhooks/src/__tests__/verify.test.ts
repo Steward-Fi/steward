@@ -79,9 +79,32 @@ describe("verifyWebhookSignature (SEC-177)", () => {
     expect(verifyWebhookSignature({ ...baseInput, signature, sentAt: "soon" })).toBe(false);
     expect(verifyWebhookSignature({ ...baseInput, signature, deliveryId: "" })).toBe(false);
     expect(verifyWebhookSignature({ ...baseInput, signature, eventType: "" })).toBe(false);
+    expect(verifyWebhookSignature({ ...baseInput, signature, secret: "" })).toBe(false);
     // Uppercase hex is not the emitted format; reject rather than coerce.
     expect(verifyWebhookSignature({ ...baseInput, signature: signature.toUpperCase() })).toBe(
       false,
     );
+  });
+
+  it("fails closed on non-canonical timestamps and invalid freshness options", () => {
+    for (const sentAt of ["", "+1800000000", "01800000000", "1.8e9", "1800000000.5"]) {
+      expect(
+        verifyWebhookSignature({
+          ...baseInput,
+          sentAt,
+          signature: sign({ ...baseInput, sentAt }),
+        }),
+      ).toBe(false);
+    }
+    const signature = sign(baseInput);
+    expect(verifyWebhookSignature({ ...baseInput, signature, nowSeconds: Number.NaN })).toBe(false);
+    expect(
+      verifyWebhookSignature({
+        ...baseInput,
+        signature,
+        toleranceSeconds: Number.POSITIVE_INFINITY,
+      }),
+    ).toBe(false);
+    expect(verifyWebhookSignature({ ...baseInput, signature, toleranceSeconds: -1 })).toBe(false);
   });
 });

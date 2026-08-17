@@ -104,12 +104,13 @@ describe("WebhookDispatcher SSRF guard for IP-literal URLs", () => {
     });
 
     for (const url of [
-      "http://[::ffff:0:7f00:1]/hook", // RFC 8215 translated, embeds 127.0.0.1
+      "http://[::ffff:0:7f00:1]/hook", // RFC 2765 translated, embeds 127.0.0.1
       "http://[::ffff:0:a00:1]/hook", // translated, embeds 10.0.0.1
       "http://[::ffff:0:ac10:1]/hook", // translated, embeds 172.16.0.1
       "http://[::ffff:7f00:1]/hook", // IPv4-mapped hex form of 127.0.0.1
       "http://[100::5]/hook", // 100::/64 discard-only (RFC 6666)
       "http://[2001:2::1]/hook", // 2001:2::/48 benchmarking (RFC 5180)
+      "http://[64:ff9b:1:abcd:0:5431:7f00:1]/hook", // RFC 8215 local-use /48
     ]) {
       const result = await dispatcher.dispatch(makeEvent(), { url, secret: SECRET });
       expect(result.success).toBe(false);
@@ -130,6 +131,7 @@ describe("WebhookDispatcher SSRF guard for IP-literal URLs", () => {
       "http://[100:1::]/hook", // outside 100::/64
       "http://[2001:2:1::]/hook", // outside 2001:2::/48
       "http://[::ffff:1:7f00:1]/hook", // words[5] !== 0: not the translated prefix
+      "http://[64:ff9b:2::1]/hook", // outside RFC 8215 64:ff9b:1::/48
     ]) {
       const result = await dispatcher.dispatch(makeEvent(), { url, secret: SECRET });
       expect(result.success).toBe(false);
