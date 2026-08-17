@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import {
+  type AppendRequiredAudit,
   and,
   asc,
   eq,
@@ -68,15 +69,10 @@ export type ExerciseLeaseToken = <T>(
   sealed: SealedLeaseToken,
   use: (token: string) => Promise<T>,
 ) => Promise<T>;
-export type LeaseAuditWriter = (event: {
-  tenantId: string;
-  actorType: "agent" | "system" | "user";
-  actorId?: string;
-  action: string;
-  resourceType: "upstream-credential-lease";
-  resourceId: string;
-  metadata: Record<string, unknown>;
-}) => Promise<void>;
+export type LeaseAuditedTransaction = <T>(
+  tenantId: string,
+  fn: (tx: Db, appendRequiredAudit: AppendRequiredAudit) => Promise<T>,
+) => Promise<T>;
 
 type Db = any;
 
@@ -99,12 +95,13 @@ async function readLiveLeaseAuthority(
   },
   now: Date,
   lock = false,
-): Promise<{ secretId: string; config: GitHubAppLeaseConfig } | null> {
+): Promise<{ secretId: string; config: GitHubAppLeaseConfig; grantExpiresAt: Date | null } | null> {
   let query = db
     .select({
       id: capabilityGrants.id,
       secretId: capabilities.secretId,
       constraints: capabilities.constraints,
+      grantExpiresAt: capabilityGrants.expiresAt,
     })
     .from(capabilityGrants)
     .innerJoin(
@@ -132,7 +129,26 @@ async function readLiveLeaseAuthority(
   const [row] = await query;
   if (!row) return null;
   const config = parseGitHubLeaseConfig(row.constraints);
-  return config ? { secretId: row.secretId, config } : null;
+  return config ? { secretId: row.secretId, config, grantExpiresAt: row.grantExpiresAt } : null;
+}
+
+function coreAuditEvent(input: {
+  tenantId: string;
+  leaseId: string;
+  action: string;
+  actorType?: "agent" | "system" | "user";
+  actorId?: string;
+  metadata?: Record<string, unknown>;
+}) {
+  return {
+    tenantId: input.tenantId,
+    actorType: input.actorType ?? ("system" as const),
+    ...(input.actorId ? { actorId: input.actorId } : {}),
+    action: input.action,
+    resourceType: "upstream-credential-lease",
+    resourceId: input.leaseId,
+    metadata: input.metadata ?? {},
+  };
 }
 
 function leaseAuthorityDigest(secretId: string, config: GitHubAppLeaseConfig): string {
@@ -254,17 +270,29 @@ function validateResource(
 }
 
 async function recordFailure(
-  db: Db,
+  auditedTransaction: LeaseAuditedTransaction,
   leaseId: string,
   tenantId: string,
   error: string,
   status: "failed" | "needs_attention" = "failed",
 ): Promise<void> {
-  await db.transaction(async (tx: Db) => {
-    await tx
+  await auditedTransaction(tenantId, async (tx: Db, appendRequiredAudit) => {
+    const updated = await tx
       .update(upstreamCredentialLeases)
       .set({ status, lastError: error.slice(0, 500), updatedAt: new Date() })
-      .where(eq(upstreamCredentialLeases.id, leaseId));
+      .where(
+        and(
+          eq(upstreamCredentialLeases.id, leaseId),
+          eq(upstreamCredentialLeases.tenantId, tenantId),
+          or(
+            eq(upstreamCredentialLeases.status, "issuing"),
+            eq(upstreamCredentialLeases.status, "delivery_pending"),
+            eq(upstreamCredentialLeases.status, "revoking"),
+          ),
+        ),
+      )
+      .returning({ id: upstreamCredentialLeases.id });
+    if (updated.length === 0) return;
     await tx.insert(upstreamCredentialLeaseEvents).values({
       leaseId,
       tenantId,
@@ -272,11 +300,20 @@ async function recordFailure(
       decision: "deny",
       metadata: { reason: error.slice(0, 200) },
     });
+    await appendRequiredAudit(
+      coreAuditEvent({
+        tenantId,
+        leaseId,
+        action: `upstream_credential_lease.${status}`,
+        metadata: { reason: error.slice(0, 200) },
+      }),
+    );
   });
 }
 
 async function recordRecoverableSealedFailure(input: {
   db: Db;
+  auditedTransaction: LeaseAuditedTransaction;
   leaseId: string;
   tenantId: string;
   token: string;
@@ -285,7 +322,7 @@ async function recordRecoverableSealedFailure(input: {
   error: string;
   now: Date;
 }): Promise<void> {
-  await input.db.transaction(async (tx: Db) => {
+  await input.auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {
     const persisted = await tx
       .update(upstreamCredentialLeases)
       .set({
@@ -319,20 +356,66 @@ async function recordRecoverableSealedFailure(input: {
       decision: "deny",
       metadata: { reason: input.error.slice(0, 200), recoverableRevocationHandle: true },
     });
+    await appendRequiredAudit(
+      coreAuditEvent({
+        tenantId: input.tenantId,
+        leaseId: input.leaseId,
+        action: "upstream_credential_lease.needs_attention",
+        metadata: { reason: input.error.slice(0, 200), recoverableRevocationHandle: true },
+      }),
+    );
   });
+}
+
+async function persistPendingSealedRevocation(input: {
+  db: Db;
+  leaseId: string;
+  tenantId: string;
+  token: string;
+  sealed: SealedLeaseToken;
+  expiresAt: Date;
+  error: string;
+  now: Date;
+}): Promise<void> {
+  const persisted = await input.db
+    .update(upstreamCredentialLeases)
+    .set({
+      tokenHash: sha256(input.token),
+      tokenCiphertext: input.sealed.ciphertext,
+      tokenIv: input.sealed.iv,
+      tokenAuthTag: input.sealed.tag,
+      tokenSalt: input.sealed.salt,
+      expiresAt: input.expiresAt,
+      status: "revoking",
+      lastError: input.error.slice(0, 500),
+      updatedAt: input.now,
+    })
+    .where(
+      and(
+        eq(upstreamCredentialLeases.id, input.leaseId),
+        eq(upstreamCredentialLeases.tenantId, input.tenantId),
+        or(
+          eq(upstreamCredentialLeases.status, "issuing"),
+          eq(upstreamCredentialLeases.status, "delivery_pending"),
+        ),
+      ),
+    )
+    .returning({ id: upstreamCredentialLeases.id });
+  if (persisted.length !== 1) throw new Error("pending lease revocation could not be persisted");
 }
 
 /** Bounded durable expiry sweep. Issuance invokes it opportunistically; a host
  * may also schedule it directly when no new leases are being requested. */
 export async function expireUpstreamCredentialLeases(input: {
   db: Db;
+  auditedTransaction: LeaseAuditedTransaction;
   tenantId: string;
   now?: Date;
   limit?: number;
 }): Promise<number> {
   const now = input.now ?? new Date();
   const limit = Math.max(1, Math.min(input.limit ?? 100, 500));
-  return input.db.transaction(async (tx: Db) => {
+  return input.auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {
     const due = await tx
       .select({ id: upstreamCredentialLeases.id })
       .from(upstreamCredentialLeases)
@@ -365,6 +448,13 @@ export async function expireUpstreamCredentialLeases(input: {
         action: "lease.expire",
         decision: "allow",
       });
+      await appendRequiredAudit(
+        coreAuditEvent({
+          tenantId: input.tenantId,
+          leaseId: row.id,
+          action: "upstream_credential_lease.expired",
+        }),
+      );
     }
     return expired;
   });
@@ -379,7 +469,7 @@ export async function recoverInterruptedUpstreamCredentialLeases(input: {
   tenantId: string;
   issuer: UpstreamTokenIssuer;
   exerciseToken: ExerciseLeaseToken;
-  audit: LeaseAuditWriter;
+  auditedTransaction: LeaseAuditedTransaction;
   now?: Date;
   limit?: number;
 }): Promise<{ unknown: number; revoked: number; attention: number }> {
@@ -425,31 +515,45 @@ export async function recoverInterruptedUpstreamCredentialLeases(input: {
   let attention = 0;
   for (const lease of stale) {
     if (lease.status === "issuing") {
-      const changed = await input.db
-        .update(upstreamCredentialLeases)
-        .set({
-          status: "needs_attention",
-          lastError: "issuer outcome unknown after interrupted issuance",
-          updatedAt: now,
-        })
-        .where(
-          and(
-            eq(upstreamCredentialLeases.id, lease.id),
-            eq(upstreamCredentialLeases.status, "issuing"),
-            lte(upstreamCredentialLeases.updatedAt, cutoff),
-          ),
-        )
-        .returning({ id: upstreamCredentialLeases.id });
+      const changed = await input.auditedTransaction(
+        input.tenantId,
+        async (tx: Db, appendRequiredAudit) => {
+          const updated = await tx
+            .update(upstreamCredentialLeases)
+            .set({
+              status: "needs_attention",
+              lastError: "issuer outcome unknown after interrupted issuance",
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(upstreamCredentialLeases.id, lease.id),
+                eq(upstreamCredentialLeases.status, "issuing"),
+                eq(upstreamCredentialLeases.updatedAt, lease.updatedAt),
+                lte(upstreamCredentialLeases.updatedAt, cutoff),
+              ),
+            )
+            .returning({ id: upstreamCredentialLeases.id });
+          if (updated.length === 0) return updated;
+          await tx.insert(upstreamCredentialLeaseEvents).values({
+            leaseId: lease.id,
+            tenantId: input.tenantId,
+            action: "lease.issuer_outcome_unknown",
+            decision: "deny",
+          });
+          await appendRequiredAudit(
+            coreAuditEvent({
+              tenantId: input.tenantId,
+              leaseId: lease.id,
+              action: "upstream_credential_lease.issuer_outcome_unknown",
+              metadata: { grantId: lease.grantId, capabilityId: lease.capabilityId },
+            }),
+          );
+          return updated;
+        },
+      );
       if (changed.length === 0) continue;
       unknown += 1;
-      await input.audit({
-        tenantId: input.tenantId,
-        actorType: "system",
-        action: "upstream_credential_lease.issuer_outcome_unknown",
-        resourceType: "upstream-credential-lease",
-        resourceId: lease.id,
-        metadata: { grantId: lease.grantId, capabilityId: lease.capabilityId },
-      });
       continue;
     }
     await beforeRecoveryClaimForTests?.(lease.id);
@@ -459,7 +563,7 @@ export async function recoverInterruptedUpstreamCredentialLeases(input: {
       lease,
       issuer: input.issuer,
       exerciseToken: input.exerciseToken,
-      audit: input.audit,
+      auditedTransaction: input.auditedTransaction,
       now,
       mode: "stale_recovery",
       staleCutoff: cutoff,
@@ -468,6 +572,63 @@ export async function recoverInterruptedUpstreamCredentialLeases(input: {
     else attention += 1;
   }
   return { unknown, revoked, attention };
+}
+
+/** Process-bounded autonomous sweep entrypoint. It discovers tenants from the
+ * durable lease table so abandoned deliveries are recovered even when that
+ * tenant never performs another issuance request. */
+export async function recoverAllInterruptedUpstreamCredentialLeases(input: {
+  db: Db;
+  issuer: UpstreamTokenIssuer;
+  exerciseToken: ExerciseLeaseToken;
+  auditedTransaction: LeaseAuditedTransaction;
+  now?: Date;
+  tenantLimit?: number;
+  leaseLimitPerTenant?: number;
+  afterTenantId?: string;
+}): Promise<{
+  tenants: number;
+  unknown: number;
+  revoked: number;
+  attention: number;
+  expired: number;
+  nextTenantId: string | null;
+}> {
+  const tenantLimit = Math.max(1, Math.min(input.tenantLimit ?? 100, 500));
+  const tenants = await input.db
+    .selectDistinct({ tenantId: upstreamCredentialLeases.tenantId })
+    .from(upstreamCredentialLeases)
+    .where(
+      input.afterTenantId ? gt(upstreamCredentialLeases.tenantId, input.afterTenantId) : undefined,
+    )
+    .orderBy(asc(upstreamCredentialLeases.tenantId))
+    .limit(tenantLimit);
+  const totals = {
+    tenants: tenants.length,
+    unknown: 0,
+    revoked: 0,
+    attention: 0,
+    expired: 0,
+    nextTenantId: tenants.length === tenantLimit ? (tenants.at(-1)?.tenantId ?? null) : null,
+  };
+  for (const { tenantId } of tenants) {
+    const recovered = await recoverInterruptedUpstreamCredentialLeases({
+      ...input,
+      tenantId,
+      limit: input.leaseLimitPerTenant,
+    });
+    totals.unknown += recovered.unknown;
+    totals.revoked += recovered.revoked;
+    totals.attention += recovered.attention;
+    totals.expired += await expireUpstreamCredentialLeases({
+      db: input.db,
+      auditedTransaction: input.auditedTransaction,
+      tenantId,
+      now: input.now,
+      limit: input.leaseLimitPerTenant,
+    });
+  }
+  return totals;
 }
 
 export async function issueUpstreamCredentialLease(input: {
@@ -484,13 +645,14 @@ export async function issueUpstreamCredentialLease(input: {
   };
   exerciseSecret: ExerciseCredentialSecret;
   sealToken: SealLeaseToken;
-  audit: LeaseAuditWriter;
+  auditedTransaction: LeaseAuditedTransaction;
   issuer: UpstreamTokenIssuer;
   now?: Date;
 }): Promise<LeaseIssueResult> {
   try {
     await expireUpstreamCredentialLeases({
       db: input.db,
+      auditedTransaction: input.auditedTransaction,
       tenantId: input.tenantId,
       now: input.now,
     });
@@ -621,7 +783,7 @@ export async function issueUpstreamCredentialLease(input: {
     );
   } catch {
     await recordFailure(
-      input.db,
+      input.auditedTransaction,
       claim.id,
       input.tenantId,
       "upstream issuer outcome is unknown",
@@ -650,7 +812,7 @@ export async function issueUpstreamCredentialLease(input: {
       () => false,
     );
     await recordFailure(
-      input.db,
+      input.auditedTransaction,
       claim.id,
       input.tenantId,
       "upstream expiry did not match GitHub's one-hour installation-token contract",
@@ -674,7 +836,7 @@ export async function issueUpstreamCredentialLease(input: {
       () => false,
     );
     await recordFailure(
-      input.db,
+      input.auditedTransaction,
       claim.id,
       input.tenantId,
       "credential escrow failed",
@@ -688,7 +850,7 @@ export async function issueUpstreamCredentialLease(input: {
     };
   }
   try {
-    await input.db.transaction(async (tx: Db) => {
+    await input.auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {
       const live = await readLiveLeaseAuthority(
         tx,
         {
@@ -701,6 +863,10 @@ export async function issueUpstreamCredentialLease(input: {
         true,
       );
       if (!live || leaseAuthorityDigest(live.secretId, live.config) !== expectedAuthorityDigest) {
+        authorityInvalidated = true;
+        return;
+      }
+      if (live.grantExpiresAt && live.grantExpiresAt.getTime() < issued.expiresAt.getTime()) {
         authorityInvalidated = true;
         return;
       }
@@ -736,6 +902,21 @@ export async function issueUpstreamCredentialLease(input: {
           resourceHash: resourceHash(resource),
         },
       });
+      await appendRequiredAudit(
+        coreAuditEvent({
+          tenantId: input.tenantId,
+          leaseId: claim.id,
+          action: "upstream_credential_lease.delivery_pending",
+          actorType: "agent",
+          actorId: input.agentId,
+          metadata: {
+            workspaceId: input.workspaceId,
+            grantId: input.resolved.grant.id,
+            capabilityId: input.resolved.capability.id,
+            resourceHash: resourceHash(resource),
+          },
+        }),
+      );
     });
     if (authorityInvalidated) {
       const revoked = await input.issuer.revoke(issued.token).then(
@@ -744,7 +925,7 @@ export async function issueUpstreamCredentialLease(input: {
       );
       if (revoked) {
         await recordFailure(
-          input.db,
+          input.auditedTransaction,
           claim.id,
           input.tenantId,
           "lease authority changed during upstream issuance",
@@ -753,6 +934,7 @@ export async function issueUpstreamCredentialLease(input: {
       } else {
         await recordRecoverableSealedFailure({
           db: input.db,
+          auditedTransaction: input.auditedTransaction,
           leaseId: claim.id,
           tenantId: input.tenantId,
           token: issued.token,
@@ -769,20 +951,6 @@ export async function issueUpstreamCredentialLease(input: {
         error: "grant or capability changed during credential issuance",
       };
     }
-    await input.audit({
-      tenantId: input.tenantId,
-      actorType: "agent",
-      actorId: input.agentId,
-      action: "upstream_credential_lease.delivery_pending",
-      resourceType: "upstream-credential-lease",
-      resourceId: claim.id,
-      metadata: {
-        workspaceId: input.workspaceId,
-        grantId: input.resolved.grant.id,
-        capabilityId: input.resolved.capability.id,
-        resourceHash: resourceHash(resource),
-      },
-    });
   } catch {
     // The token only exists in this frame. If durable finalization fails, revoke
     // it before dropping the reference; a hard kill inside this tiny boundary is
@@ -793,15 +961,27 @@ export async function issueUpstreamCredentialLease(input: {
     );
     if (revoked) {
       await recordFailure(
-        input.db,
+        input.auditedTransaction,
         claim.id,
         input.tenantId,
         "durable finalization failed",
         "failed",
-      ).catch(() => {});
+      ).catch(() =>
+        persistPendingSealedRevocation({
+          db: input.db,
+          leaseId: claim.id,
+          tenantId: input.tenantId,
+          token: issued.token,
+          sealed,
+          expiresAt: issued.expiresAt,
+          error: "provider revoked; durable audit confirmation pending",
+          now: new Date(),
+        }),
+      );
     } else {
       await recordRecoverableSealedFailure({
         db: input.db,
+        auditedTransaction: input.auditedTransaction,
         leaseId: claim.id,
         tenantId: input.tenantId,
         token: issued.token,
@@ -809,7 +989,18 @@ export async function issueUpstreamCredentialLease(input: {
         expiresAt: issued.expiresAt,
         error: "durable finalization failed; revocation outcome unknown",
         now: new Date(),
-      }).catch(() => {});
+      }).catch(() =>
+        persistPendingSealedRevocation({
+          db: input.db,
+          leaseId: claim.id,
+          tenantId: input.tenantId,
+          token: issued.token,
+          sealed,
+          expiresAt: issued.expiresAt,
+          error: "durable audit unavailable; exact provider revocation pending",
+          now: new Date(),
+        }),
+      );
     }
     return {
       ok: false,
@@ -834,7 +1025,7 @@ export async function acknowledgeUpstreamCredentialLease(input: {
   agentId: string;
   leaseId: string;
   token: string;
-  audit: LeaseAuditWriter;
+  auditedTransaction: LeaseAuditedTransaction;
   now?: Date;
 }): Promise<{ ok: true } | { ok: false; status: 403 | 404 | 409 | 503; error: string }> {
   const now = input.now ?? new Date();
@@ -867,19 +1058,7 @@ export async function acknowledgeUpstreamCredentialLease(input: {
     .returning({ id: upstreamCredentialLeases.id });
   if (!claimed) return { ok: false, status: 409, error: "delivery acknowledgement raced" };
   try {
-    // This audit is deliberately staged and truthful: at this boundary the
-    // proof is verified and the durable row is claimed, but activation has not
-    // committed yet. Never emit an immutable "activated" claim before DB state.
-    await input.audit({
-      tenantId: input.tenantId,
-      actorType: "agent",
-      actorId: input.agentId,
-      action: "upstream_credential_lease.activation_authorized",
-      resourceType: "upstream-credential-lease",
-      resourceId: lease.id,
-      metadata: { workspaceId: lease.workspaceId, grantId: lease.grantId },
-    });
-    await input.db.transaction(async (tx: Db) => {
+    await input.auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {
       const activated = await tx
         .update(upstreamCredentialLeases)
         .set({ status: "active", deliveredAt: now, updatedAt: now })
@@ -897,6 +1076,16 @@ export async function acknowledgeUpstreamCredentialLease(input: {
         action: "lease.issue",
         decision: "allow",
       });
+      await appendRequiredAudit(
+        coreAuditEvent({
+          tenantId: input.tenantId,
+          leaseId: lease.id,
+          action: "upstream_credential_lease.activated",
+          actorType: "agent",
+          actorId: input.agentId,
+          metadata: { workspaceId: lease.workspaceId, grantId: lease.grantId },
+        }),
+      );
     });
   } catch {
     await input.db
@@ -926,6 +1115,7 @@ export async function revokeUpstreamCredentialLease(input: {
   leaseId: string;
   token: string;
   issuer: UpstreamTokenIssuer;
+  auditedTransaction: LeaseAuditedTransaction;
   now?: Date;
 }): Promise<{ ok: true } | { ok: false; status: 403 | 404 | 409 | 503; error: string }> {
   const now = input.now ?? new Date();
@@ -954,8 +1144,8 @@ export async function revokeUpstreamCredentialLease(input: {
     lease.expiresAt &&
     new Date(lease.expiresAt).getTime() <= now.getTime()
   ) {
-    await input.db.transaction(async (tx: Db) => {
-      await tx
+    await input.auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {
+      const expired = await tx
         .update(upstreamCredentialLeases)
         .set({ status: "expired", updatedAt: now })
         .where(
@@ -963,13 +1153,24 @@ export async function revokeUpstreamCredentialLease(input: {
             eq(upstreamCredentialLeases.id, lease.id),
             eq(upstreamCredentialLeases.status, "active"),
           ),
-        );
+        )
+        .returning({ id: upstreamCredentialLeases.id });
+      if (expired.length === 0) return;
       await tx.insert(upstreamCredentialLeaseEvents).values({
         leaseId: lease.id,
         tenantId: input.tenantId,
         action: "lease.expire",
         decision: "allow",
       });
+      await appendRequiredAudit(
+        coreAuditEvent({
+          tenantId: input.tenantId,
+          leaseId: lease.id,
+          action: "upstream_credential_lease.expired",
+          actorType: "agent",
+          actorId: input.agentId,
+        }),
+      );
     });
     return { ok: false, status: 409, error: "lease is expired" };
   }
@@ -986,10 +1187,12 @@ export async function revokeUpstreamCredentialLease(input: {
         lease.status === "needs_attention"
         ? and(
             eq(upstreamCredentialLeases.id, lease.id),
+            eq(upstreamCredentialLeases.tenantId, input.tenantId),
             eq(upstreamCredentialLeases.status, lease.status),
           )
         : and(
             eq(upstreamCredentialLeases.id, lease.id),
+            eq(upstreamCredentialLeases.tenantId, input.tenantId),
             eq(upstreamCredentialLeases.status, "revoking"),
             lte(upstreamCredentialLeases.updatedAt, claimCutoff),
           ),
@@ -999,9 +1202,9 @@ export async function revokeUpstreamCredentialLease(input: {
   try {
     await input.issuer.revoke(input.token);
   } catch {
-    await input.db
-      .transaction(async (tx: Db) => {
-        await tx
+    await input
+      .auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {
+        const changed = await tx
           .update(upstreamCredentialLeases)
           .set({
             status: "needs_attention",
@@ -1011,9 +1214,12 @@ export async function revokeUpstreamCredentialLease(input: {
           .where(
             and(
               eq(upstreamCredentialLeases.id, lease.id),
+              eq(upstreamCredentialLeases.tenantId, input.tenantId),
               eq(upstreamCredentialLeases.status, "revoking"),
             ),
-          );
+          )
+          .returning({ id: upstreamCredentialLeases.id });
+        if (changed.length === 0) return;
         await tx.insert(upstreamCredentialLeaseEvents).values({
           leaseId: lease.id,
           tenantId: input.tenantId,
@@ -1021,6 +1227,16 @@ export async function revokeUpstreamCredentialLease(input: {
           decision: "deny",
           metadata: { reason: "upstream revoker failed" },
         });
+        await appendRequiredAudit(
+          coreAuditEvent({
+            tenantId: input.tenantId,
+            leaseId: lease.id,
+            action: "upstream_credential_lease.needs_attention",
+            actorType: "agent",
+            actorId: input.agentId,
+            metadata: { reason: "upstream revoker outcome unknown" },
+          }),
+        );
       })
       .catch(() => {
         // A durable revoking claim is recoverable after the bounded claim
@@ -1029,13 +1245,14 @@ export async function revokeUpstreamCredentialLease(input: {
     return { ok: false, status: 503, error: "upstream credential revoker unavailable" };
   }
   try {
-    await input.db.transaction(async (tx: Db) => {
+    await input.auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {
       const finalized = await tx
         .update(upstreamCredentialLeases)
         .set({ status: "revoked", revokedAt: now, lastError: null, updatedAt: now })
         .where(
           and(
             eq(upstreamCredentialLeases.id, lease.id),
+            eq(upstreamCredentialLeases.tenantId, input.tenantId),
             eq(upstreamCredentialLeases.status, "revoking"),
           ),
         )
@@ -1047,6 +1264,15 @@ export async function revokeUpstreamCredentialLease(input: {
         action: "lease.revoke",
         decision: "allow",
       });
+      await appendRequiredAudit(
+        coreAuditEvent({
+          tenantId: input.tenantId,
+          leaseId: lease.id,
+          action: "upstream_credential_lease.revoked",
+          actorType: "agent",
+          actorId: input.agentId,
+        }),
+      );
     });
   } catch {
     return {
@@ -1076,21 +1302,62 @@ async function revokeExactSealedLease(input: {
   lease: any;
   issuer: UpstreamTokenIssuer;
   exerciseToken: ExerciseLeaseToken;
-  audit: LeaseAuditWriter;
+  auditedTransaction: LeaseAuditedTransaction;
   now: Date;
   mode?: "authority_teardown" | "stale_recovery";
   staleCutoff?: Date;
 }): Promise<{ ok: true; revoked: number } | { ok: false; error: string }> {
   const sealed = sealedTokenFromLease(input.lease);
   if (!sealed) {
-    await input.db
-      .update(upstreamCredentialLeases)
-      .set({
-        status: "needs_attention",
-        lastError: "revocation handle unavailable",
-        updatedAt: input.now,
-      })
-      .where(eq(upstreamCredentialLeases.id, input.lease.id));
+    await input.auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {
+      const exactPredicate =
+        input.mode === "stale_recovery"
+          ? and(
+              eq(upstreamCredentialLeases.status, input.lease.status),
+              eq(upstreamCredentialLeases.updatedAt, input.lease.updatedAt),
+              lte(
+                upstreamCredentialLeases.updatedAt,
+                input.staleCutoff ?? new Date(input.now.getTime() - REVOCATION_CLAIM_TIMEOUT_MS),
+              ),
+            )
+          : or(
+              eq(upstreamCredentialLeases.status, "active"),
+              eq(upstreamCredentialLeases.status, "delivery_pending"),
+              eq(upstreamCredentialLeases.status, "acknowledging"),
+              eq(upstreamCredentialLeases.status, "needs_attention"),
+              eq(upstreamCredentialLeases.status, "revoking"),
+            );
+      const changed = await tx
+        .update(upstreamCredentialLeases)
+        .set({
+          status: "needs_attention",
+          lastError: "revocation handle unavailable",
+          updatedAt: input.now,
+        })
+        .where(
+          and(
+            eq(upstreamCredentialLeases.id, input.lease.id),
+            eq(upstreamCredentialLeases.tenantId, input.tenantId),
+            exactPredicate,
+          ),
+        )
+        .returning({ id: upstreamCredentialLeases.id });
+      if (changed.length === 0) return;
+      await tx.insert(upstreamCredentialLeaseEvents).values({
+        leaseId: input.lease.id,
+        tenantId: input.tenantId,
+        action: "lease.revocation_handle_missing",
+        decision: "deny",
+      });
+      await appendRequiredAudit(
+        coreAuditEvent({
+          tenantId: input.tenantId,
+          leaseId: input.lease.id,
+          action: "upstream_credential_lease.needs_attention",
+          metadata: { reason: "revocation handle unavailable" },
+        }),
+      );
+    });
     return { ok: false, error: "upstream credential requires operator attention" };
   }
   const claimable = ["active", "delivery_pending", "acknowledging", "needs_attention"];
@@ -1130,8 +1397,8 @@ async function revokeExactSealedLease(input: {
       input.issuer.revoke(token),
     );
   } catch {
-    await input.db.transaction(async (tx: Db) => {
-      await tx
+    await input.auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {
+      const changed = await tx
         .update(upstreamCredentialLeases)
         .set({
           status: "needs_attention",
@@ -1141,9 +1408,12 @@ async function revokeExactSealedLease(input: {
         .where(
           and(
             eq(upstreamCredentialLeases.id, input.lease.id),
+            eq(upstreamCredentialLeases.tenantId, input.tenantId),
             eq(upstreamCredentialLeases.status, "revoking"),
           ),
-        );
+        )
+        .returning({ id: upstreamCredentialLeases.id });
+      if (changed.length === 0) return;
       await tx.insert(upstreamCredentialLeaseEvents).values({
         leaseId: input.lease.id,
         tenantId: input.tenantId,
@@ -1151,17 +1421,26 @@ async function revokeExactSealedLease(input: {
         decision: "deny",
         metadata: { reason: "provider outcome unknown" },
       });
+      await appendRequiredAudit(
+        coreAuditEvent({
+          tenantId: input.tenantId,
+          leaseId: input.lease.id,
+          action: "upstream_credential_lease.needs_attention",
+          metadata: { reason: "provider revocation outcome unknown" },
+        }),
+      );
     });
     return { ok: false, error: "upstream credential revocation is incomplete" };
   }
   try {
-    await input.db.transaction(async (tx: Db) => {
+    await input.auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {
       const finalized = await tx
         .update(upstreamCredentialLeases)
         .set({ status: "revoked", revokedAt: input.now, lastError: null, updatedAt: input.now })
         .where(
           and(
             eq(upstreamCredentialLeases.id, input.lease.id),
+            eq(upstreamCredentialLeases.tenantId, input.tenantId),
             eq(upstreamCredentialLeases.status, "revoking"),
           ),
         )
@@ -1173,34 +1452,55 @@ async function revokeExactSealedLease(input: {
         action: "lease.authority_revoke",
         decision: "allow",
       });
+      await appendRequiredAudit(
+        coreAuditEvent({
+          tenantId: input.tenantId,
+          leaseId: input.lease.id,
+          action: "upstream_credential_lease.authority_revoked",
+          metadata: { grantId: input.lease.grantId, capabilityId: input.lease.capabilityId },
+        }),
+      );
     });
   } catch {
     // The provider may already have invalidated the token. Preserve an honest,
     // recoverable state and let the idempotent exact-token revoker reconcile it.
-    await input.db
-      .update(upstreamCredentialLeases)
-      .set({
-        status: "needs_attention",
-        lastError: "provider revoked; durable confirmation incomplete",
-        updatedAt: new Date(),
+    await input
+      .auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {
+        const changed = await tx
+          .update(upstreamCredentialLeases)
+          .set({
+            status: "needs_attention",
+            lastError: "provider revoked; durable confirmation incomplete",
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(upstreamCredentialLeases.id, input.lease.id),
+              eq(upstreamCredentialLeases.tenantId, input.tenantId),
+              eq(upstreamCredentialLeases.status, "revoking"),
+            ),
+          )
+          .returning({ id: upstreamCredentialLeases.id });
+        if (changed.length === 0) return;
+        await tx.insert(upstreamCredentialLeaseEvents).values({
+          leaseId: input.lease.id,
+          tenantId: input.tenantId,
+          action: "lease.authority_revoke",
+          decision: "deny",
+          metadata: { reason: "provider revoked; durable confirmation incomplete" },
+        });
+        await appendRequiredAudit(
+          coreAuditEvent({
+            tenantId: input.tenantId,
+            leaseId: input.lease.id,
+            action: "upstream_credential_lease.needs_attention",
+            metadata: { reason: "provider revoked; durable confirmation incomplete" },
+          }),
+        );
       })
-      .where(
-        and(
-          eq(upstreamCredentialLeases.id, input.lease.id),
-          eq(upstreamCredentialLeases.status, "revoking"),
-        ),
-      )
       .catch(() => {});
     return { ok: false, error: "upstream credential revocation confirmation is incomplete" };
   }
-  await input.audit({
-    tenantId: input.tenantId,
-    actorType: "system",
-    action: "upstream_credential_lease.authority_revoked",
-    resourceType: "upstream-credential-lease",
-    resourceId: input.lease.id,
-    metadata: { grantId: input.lease.grantId, capabilityId: input.lease.capabilityId },
-  });
   return { ok: true, revoked: 1 };
 }
 
@@ -1213,7 +1513,7 @@ export async function revokeUpstreamLeasesForAuthority(input: {
   tenantId: string;
   issuer: UpstreamTokenIssuer;
   exerciseToken: ExerciseLeaseToken;
-  audit: LeaseAuditWriter;
+  auditedTransaction: LeaseAuditedTransaction;
   grantId?: string;
   capabilityId?: string;
   now?: Date;

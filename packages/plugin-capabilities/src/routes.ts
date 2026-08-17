@@ -133,7 +133,7 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
         (async () => {
           throw new Error("credential lease revocation is not configured");
         }),
-      audit: ctx.writeAuditEvent,
+      auditedTransaction: ctx.withTenantAuditedTransaction,
     });
     if (!result.ok) throw new Error(result.error);
   }

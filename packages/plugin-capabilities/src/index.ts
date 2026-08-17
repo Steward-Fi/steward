@@ -36,6 +36,7 @@ import { createManifestRoutes } from "./manifest-routes";
 import { createAgentCapabilityRoutes, createCapabilityRoutes } from "./routes";
 
 export type { StewardAppContext } from "./context";
+export { GitHubAppInstallationTokenIssuer } from "./github-app-issuer";
 export { createInvokeRoutes } from "./invoke";
 export {
   type CapabilityAuditAction,
@@ -80,6 +81,10 @@ export type {
 export { capabilities, capabilityGrants, capabilityInvocations } from "./schema";
 export type { CapabilitySpec } from "./store";
 export { AgentNotFoundError, CapabilityStore, GrantExistsError, isExpired } from "./store";
+export {
+  type LeaseAuditedTransaction,
+  recoverAllInterruptedUpstreamCredentialLeases,
+} from "./upstream-leases";
 export {
   createCapabilitySchema,
   createGrantSchema,

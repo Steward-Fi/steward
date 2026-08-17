@@ -9,6 +9,7 @@ import {
   expireUpstreamCredentialLeases,
   GITHUB_APP_LEASE_ISSUER,
   issueUpstreamCredentialLease,
+  recoverAllInterruptedUpstreamCredentialLeases,
   recoverInterruptedUpstreamCredentialLeases,
   revokeUpstreamCredentialLease,
   revokeUpstreamLeasesForAuthority,
@@ -116,13 +117,19 @@ function issueArgs(issuer: FakeIssuer, key = "idempotency-key-0001") {
       tag: "tag",
       salt: "salt",
     }),
-    audit: async () => {},
+    auditedTransaction: auditedTransaction(),
     issuer,
     now: NOW,
   };
 }
 
 const audit = async () => {};
+function auditedTransaction(auditWriter: (event: any) => Promise<void> = audit) {
+  return <T>(
+    _tenantId: string,
+    fn: (tx: any, appendRequiredAudit: (event: any) => Promise<void>) => Promise<T>,
+  ) => harness.db.transaction((tx: any) => fn(tx, auditWriter));
+}
 const exerciseToken = async <T>(
   _tenantId: string,
   _leaseId: string,
@@ -137,7 +144,7 @@ async function acknowledge(issued: { leaseId: string; token: string }) {
     agentId: AGENT,
     leaseId: issued.leaseId,
     token: issued.token,
-    audit,
+    auditedTransaction: auditedTransaction(),
     now: NOW,
   });
 }
@@ -190,6 +197,29 @@ describe("upstream credential leases", () => {
       });
     }
     expect(issuer.issueCalls).toBe(0);
+  });
+
+  test("denies and revokes when the fixed provider token would outlive its grant", async () => {
+    const issuer = new FakeIssuer();
+    await harness.db
+      .update(capabilityGrants)
+      .set({ expiresAt: new Date(NOW.getTime() + 30 * 60_000) })
+      .where(eq(capabilityGrants.id, GRANT));
+    const denied = await issueUpstreamCredentialLease(
+      issueArgs(issuer, "idempotency-grant-expiry-containment"),
+    );
+    expect(denied).toMatchObject({ ok: false, code: "lease_authority_changed" });
+    expect(issuer.revokeCalls).toBe(1);
+    const [row] = await harness.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(
+        eq(
+          upstreamCredentialLeases.idempotencyKeyHash,
+          sha256("idempotency-grant-expiry-containment"),
+        ),
+      );
+    expect(row.status).toBe("failed");
   });
 
   test("canonical resource hashing uses deterministic code-unit ordering", () => {
@@ -339,6 +369,7 @@ describe("upstream credential leases", () => {
       leaseId: issued.leaseId,
       token: "wrong",
       issuer,
+      auditedTransaction: auditedTransaction(),
       now: NOW,
     });
     expect(wrong).toMatchObject({ ok: false, status: 403 });
@@ -351,6 +382,7 @@ describe("upstream credential leases", () => {
         leaseId: issued.leaseId,
         token: TOKEN,
         issuer,
+        auditedTransaction: auditedTransaction(),
         now: NOW,
       }),
       revokeUpstreamCredentialLease({
@@ -360,6 +392,7 @@ describe("upstream credential leases", () => {
         leaseId: issued.leaseId,
         token: TOKEN,
         issuer,
+        auditedTransaction: auditedTransaction(),
         now: NOW,
       }),
     ]);
@@ -381,13 +414,12 @@ describe("upstream credential leases", () => {
     ).toEqual(["lease.delivery_pending:allow", "lease.issue:allow", "lease.revoke:allow"]);
   });
 
-  test("acknowledgement audit is staged honestly before the atomic active transition", async () => {
+  test("acknowledgement audit commits atomically with the active transition", async () => {
     const issuer = new FakeIssuer();
     const issued = await issueUpstreamCredentialLease(
       issueArgs(issuer, "idempotency-ack-ordering"),
     );
     if (!issued.ok) throw new Error("expected issuance");
-    let observedStatus = "";
     let observedAction = "";
     const result = await acknowledgeUpstreamCredentialLease({
       db: harness.db,
@@ -396,18 +428,12 @@ describe("upstream credential leases", () => {
       leaseId: issued.leaseId,
       token: issued.token,
       now: NOW,
-      audit: async (event) => {
+      auditedTransaction: auditedTransaction(async (event) => {
         observedAction = event.action;
-        const [row] = await harness.db
-          .select({ status: upstreamCredentialLeases.status })
-          .from(upstreamCredentialLeases)
-          .where(eq(upstreamCredentialLeases.id, issued.leaseId));
-        observedStatus = row.status;
-      },
+      }),
     });
     expect(result).toEqual({ ok: true });
-    expect(observedAction).toBe("upstream_credential_lease.activation_authorized");
-    expect(observedStatus).toBe("acknowledging");
+    expect(observedAction).toBe("upstream_credential_lease.activated");
     const [active] = await harness.db
       .select()
       .from(upstreamCredentialLeases)
@@ -437,6 +463,7 @@ describe("upstream credential leases", () => {
       leaseId: issued.leaseId,
       token: TOKEN,
       issuer,
+      auditedTransaction: auditedTransaction(),
       now: NOW,
     });
     expect(revoke).toMatchObject({ ok: false, status: 503 });
@@ -465,6 +492,7 @@ describe("upstream credential leases", () => {
         leaseId: issued.leaseId,
         token: TOKEN,
         issuer,
+        auditedTransaction: auditedTransaction(),
         now: new Date(NOW.getTime() + 1_000),
       }),
     ).toEqual({ ok: true });
@@ -487,6 +515,7 @@ describe("upstream credential leases", () => {
       leaseId: issued.leaseId,
       token: TOKEN,
       issuer,
+      auditedTransaction: auditedTransaction(),
       now: NOW,
     });
     expect(recovered).toEqual({ ok: true });
@@ -515,6 +544,7 @@ describe("upstream credential leases", () => {
       leaseId: issued.leaseId,
       token: TOKEN,
       issuer,
+      auditedTransaction: auditedTransaction(),
       now: NOW,
     });
     expect(duplicate).toMatchObject({ ok: false, status: 409 });
@@ -531,7 +561,12 @@ describe("upstream credential leases", () => {
       .set({ expiresAt: new Date(NOW.getTime() - 1) })
       .where(eq(upstreamCredentialLeases.id, issued.leaseId));
     expect(
-      await expireUpstreamCredentialLeases({ db: harness.db, tenantId: TENANT, now: NOW }),
+      await expireUpstreamCredentialLeases({
+        db: harness.db,
+        auditedTransaction: auditedTransaction(),
+        tenantId: TENANT,
+        now: NOW,
+      }),
     ).toBe(1);
     const [row] = await harness.db
       .select()
@@ -574,12 +609,12 @@ describe("upstream credential leases", () => {
     const auditEvents: unknown[] = [];
     const issued = await issueUpstreamCredentialLease({
       ...issueArgs(issuer, "idempotency-delivery-ack"),
-      audit: async (event) => auditEvents.push(event),
+      auditedTransaction: auditedTransaction(async (event) => auditEvents.push(event)),
     });
     if (!issued.ok) throw new Error("expected issuance");
     const sibling = await issueUpstreamCredentialLease({
       ...issueArgs(issuer, "idempotency-delivery-sibling"),
-      audit: async (event) => auditEvents.push(event),
+      auditedTransaction: auditedTransaction(async (event) => auditEvents.push(event)),
     });
     if (!sibling.ok) throw new Error("expected sibling issuance");
     expect(await acknowledge(sibling)).toEqual({ ok: true });
@@ -601,7 +636,7 @@ describe("upstream credential leases", () => {
       tenantId: TENANT,
       issuer,
       exerciseToken,
-      audit: async (event) => auditEvents.push(event),
+      auditedTransaction: auditedTransaction(async (event) => auditEvents.push(event)),
       now: NOW,
     });
     expect(recovered).toEqual({ unknown: 0, revoked: 1, attention: 0 });
@@ -616,6 +651,31 @@ describe("upstream credential leases", () => {
       .where(eq(upstreamCredentialLeases.id, sibling.leaseId));
     expect(siblingRow.status).toBe("active");
     expect(issuer.revokeCalls).toBe(1);
+  });
+
+  test("all-tenant recovery revokes an abandoned delivery without another issuance", async () => {
+    const issuer = new FakeIssuer();
+    const issued = await issueUpstreamCredentialLease(
+      issueArgs(issuer, "idempotency-autonomous-recovery"),
+    );
+    if (!issued.ok) throw new Error("expected issuance");
+    await harness.db
+      .update(upstreamCredentialLeases)
+      .set({ updatedAt: new Date(NOW.getTime() - 31_000) })
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+    const result = await recoverAllInterruptedUpstreamCredentialLeases({
+      db: harness.db,
+      issuer,
+      exerciseToken,
+      auditedTransaction: auditedTransaction(),
+      now: NOW,
+    });
+    expect(result).toMatchObject({ tenants: 1, revoked: 1 });
+    const [row] = await harness.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+    expect(row.status).toBe("revoked");
   });
 
   test("stale exact-token revocation claims are idempotently reconciled", async () => {
@@ -635,7 +695,7 @@ describe("upstream credential leases", () => {
       tenantId: TENANT,
       issuer,
       exerciseToken,
-      audit,
+      auditedTransaction: auditedTransaction(),
       now: NOW,
     });
     expect(recovered).toEqual({ unknown: 0, revoked: 1, attention: 0 });
@@ -670,7 +730,7 @@ describe("upstream credential leases", () => {
       tenantId: TENANT,
       issuer,
       exerciseToken,
-      audit,
+      auditedTransaction: auditedTransaction(),
       now: NOW,
     });
 
@@ -724,7 +784,6 @@ describe("upstream credential leases", () => {
     });
     expect(row.tokenCiphertext).toBe(Buffer.from(TOKEN).toString("base64"));
     expect(JSON.stringify(row)).not.toContain(TOKEN);
-
     issuer.failRevoke = false;
     await harness.db
       .update(upstreamCredentialLeases)
@@ -736,7 +795,7 @@ describe("upstream credential leases", () => {
         tenantId: TENANT,
         issuer,
         exerciseToken,
-        audit,
+        auditedTransaction: auditedTransaction(),
         now: NOW,
       }),
     ).toEqual({ unknown: 0, revoked: 1, attention: 0 });
@@ -752,9 +811,9 @@ describe("upstream credential leases", () => {
     issuer.failRevoke = true;
     const denied = await issueUpstreamCredentialLease({
       ...issueArgs(issuer, "idempotency-finalization-revoke-recovery"),
-      audit: async () => {
+      auditedTransaction: auditedTransaction(async () => {
         throw new Error("durable audit unavailable");
-      },
+      }),
     });
     expect(denied).toMatchObject({ ok: false, code: "lease_finalization_failed" });
     const [row] = await harness.db
@@ -767,12 +826,27 @@ describe("upstream credential leases", () => {
         ),
       );
     expect(row).toMatchObject({
-      status: "needs_attention",
+      status: "revoking",
       tokenHash: sha256(TOKEN),
       expiresAt: new Date(NOW.getTime() + issuer.expiryOffsetMs),
     });
     expect(row.tokenCiphertext).toBe(Buffer.from(TOKEN).toString("base64"));
     expect(JSON.stringify(row)).not.toContain(TOKEN);
+    issuer.failRevoke = false;
+    await harness.db
+      .update(upstreamCredentialLeases)
+      .set({ updatedAt: new Date(NOW.getTime() - 31_000) })
+      .where(eq(upstreamCredentialLeases.id, row.id));
+    expect(
+      await recoverInterruptedUpstreamCredentialLeases({
+        db: harness.db,
+        tenantId: TENANT,
+        issuer,
+        exerciseToken,
+        auditedTransaction: auditedTransaction(),
+        now: NOW,
+      }),
+    ).toEqual({ unknown: 0, revoked: 1, attention: 0 });
   });
 
   test("stale issuance is truthfully escalated because provider outcome is unknowable", async () => {
@@ -795,7 +869,7 @@ describe("upstream credential leases", () => {
       tenantId: TENANT,
       issuer,
       exerciseToken,
-      audit,
+      auditedTransaction: auditedTransaction(),
       now: NOW,
     });
     expect(recovered.unknown).toBe(1);
@@ -804,6 +878,133 @@ describe("upstream credential leases", () => {
       status: "needs_attention",
       lastError: "issuer outcome unknown after interrupted issuance",
     });
+  });
+
+  test("an audit failure rolls back stale attention and a later sweep emits it exactly once", async () => {
+    const issuer = new FakeIssuer();
+    await harness.db.insert(upstreamCredentialLeases).values({
+      tenantId: TENANT,
+      workspaceId,
+      agentId: AGENT,
+      grantId: GRANT,
+      capabilityId: CAPABILITY,
+      issuer: GITHUB_APP_LEASE_ISSUER,
+      resource: { repositories: ["steward"], permissions: { contents: "read" } },
+      resourceHash: sha256("audit-retry-resource"),
+      idempotencyKeyHash: sha256("audit-retry-stale-issuing"),
+      status: "issuing",
+      updatedAt: new Date(NOW.getTime() - 31_000),
+    });
+    await expect(
+      recoverInterruptedUpstreamCredentialLeases({
+        db: harness.db,
+        tenantId: TENANT,
+        issuer,
+        exerciseToken,
+        auditedTransaction: auditedTransaction(async () => {
+          throw new Error("audit unavailable");
+        }),
+        now: NOW,
+      }),
+    ).rejects.toThrow("audit unavailable");
+    expect((await harness.db.select().from(upstreamCredentialLeases))[0].status).toBe("issuing");
+
+    const durableAudits: unknown[] = [];
+    const recover = () =>
+      recoverInterruptedUpstreamCredentialLeases({
+        db: harness.db,
+        tenantId: TENANT,
+        issuer,
+        exerciseToken,
+        auditedTransaction: auditedTransaction(async (event) => durableAudits.push(event)),
+        now: NOW,
+      });
+    expect((await recover()).unknown).toBe(1);
+    expect((await recover()).unknown).toBe(0);
+    expect(durableAudits).toHaveLength(1);
+  });
+
+  test("issuer failure cannot commit unaudited attention and is later audited exactly once", async () => {
+    const issuer = new FakeIssuer();
+    issuer.failIssue = true;
+    const args = issueArgs(issuer, "idempotency-issuer-audit-retry");
+    args.auditedTransaction = auditedTransaction(async () => {
+      throw new Error("audit unavailable");
+    });
+    await expect(issueUpstreamCredentialLease(args)).rejects.toThrow("audit unavailable");
+    const [issuing] = await harness.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(eq(upstreamCredentialLeases.idempotencyKeyHash, sha256(args.idempotencyKey)));
+    expect(issuing.status).toBe("issuing");
+    await harness.db
+      .update(upstreamCredentialLeases)
+      .set({ updatedAt: new Date(NOW.getTime() - 31_000) })
+      .where(eq(upstreamCredentialLeases.id, issuing.id));
+
+    const durableAudits: unknown[] = [];
+    const recover = () =>
+      recoverInterruptedUpstreamCredentialLeases({
+        db: harness.db,
+        tenantId: TENANT,
+        issuer,
+        exerciseToken,
+        auditedTransaction: auditedTransaction(async (event) => durableAudits.push(event)),
+        now: NOW,
+      });
+    expect((await recover()).unknown).toBe(1);
+    expect((await recover()).unknown).toBe(0);
+    expect(durableAudits).toHaveLength(1);
+  });
+
+  test("post-provider revoke audit failure is recovered and audited exactly once", async () => {
+    const issuer = new FakeIssuer();
+    const issued = await issueUpstreamCredentialLease(
+      issueArgs(issuer, "idempotency-holder-revoke-audit-retry"),
+    );
+    if (!issued.ok) throw new Error("expected issuance");
+    expect(await acknowledge(issued)).toEqual({ ok: true });
+    const failed = await revokeUpstreamCredentialLease({
+      db: harness.db,
+      tenantId: TENANT,
+      agentId: AGENT,
+      leaseId: issued.leaseId,
+      token: TOKEN,
+      issuer,
+      auditedTransaction: auditedTransaction(async () => {
+        throw new Error("audit unavailable");
+      }),
+      now: NOW,
+    });
+    expect(failed).toMatchObject({ ok: false, status: 503 });
+    await harness.db
+      .update(upstreamCredentialLeases)
+      .set({ updatedAt: new Date(NOW.getTime() - 31_000) })
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+    const durableAudits: unknown[] = [];
+    const recovered = await recoverInterruptedUpstreamCredentialLeases({
+      db: harness.db,
+      tenantId: TENANT,
+      issuer,
+      exerciseToken,
+      auditedTransaction: auditedTransaction(async (event) => durableAudits.push(event)),
+      now: NOW,
+    });
+    expect(recovered.revoked).toBe(1);
+    expect(durableAudits).toHaveLength(1);
+    expect(
+      (
+        await recoverInterruptedUpstreamCredentialLeases({
+          db: harness.db,
+          tenantId: TENANT,
+          issuer,
+          exerciseToken,
+          auditedTransaction: auditedTransaction(async (event) => durableAudits.push(event)),
+          now: NOW,
+        })
+      ).revoked,
+    ).toBe(0);
+    expect(durableAudits).toHaveLength(1);
   });
 
   test("authority revocation uses encrypted escrow and append-only evidence cannot be erased", async () => {
@@ -819,7 +1020,7 @@ describe("upstream credential leases", () => {
       capabilityId: CAPABILITY,
       issuer,
       exerciseToken,
-      audit,
+      auditedTransaction: auditedTransaction(),
       now: NOW,
     });
     expect(result).toEqual({ ok: true, revoked: 1 });
@@ -858,5 +1059,49 @@ describe("upstream credential leases", () => {
         .from(upstreamCredentialLeases)
         .where(eq(upstreamCredentialLeases.id, issued.leaseId)),
     ).toHaveLength(1);
+  });
+
+  test("authority revoke audit failure leaves an exact recoverable claim", async () => {
+    const issuer = new FakeIssuer();
+    const issued = await issueUpstreamCredentialLease(
+      issueArgs(issuer, "idempotency-authority-revoke-audit-retry"),
+    );
+    if (!issued.ok) throw new Error("expected issuance");
+    expect(await acknowledge(issued)).toEqual({ ok: true });
+    const failed = await revokeUpstreamLeasesForAuthority({
+      db: harness.db,
+      tenantId: TENANT,
+      capabilityId: CAPABILITY,
+      issuer,
+      exerciseToken,
+      auditedTransaction: auditedTransaction(async () => {
+        throw new Error("audit unavailable");
+      }),
+      now: NOW,
+    });
+    expect(failed).toMatchObject({ ok: false });
+    const [claimed] = await harness.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+    expect(claimed.status).toBe("revoking");
+    await harness.db
+      .update(upstreamCredentialLeases)
+      .set({ updatedAt: new Date(NOW.getTime() - 31_000) })
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+
+    const durableAudits: unknown[] = [];
+    const recover = () =>
+      recoverInterruptedUpstreamCredentialLeases({
+        db: harness.db,
+        tenantId: TENANT,
+        issuer,
+        exerciseToken,
+        auditedTransaction: auditedTransaction(async (event) => durableAudits.push(event)),
+        now: NOW,
+      });
+    expect((await recover()).revoked).toBe(1);
+    expect((await recover()).revoked).toBe(0);
+    expect(durableAudits).toHaveLength(1);
   });
 });

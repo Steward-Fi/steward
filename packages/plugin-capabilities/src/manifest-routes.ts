@@ -222,7 +222,7 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
             tenantId,
             issuer: githubIssuer,
             exerciseToken: ctx.exerciseCredentialLeaseToken,
-            audit: ctx.writeAuditEvent,
+            auditedTransaction: ctx.withTenantAuditedTransaction,
           });
         } catch {
           return c.json<ApiResponse>({ ok: false, error: "credential lease recovery failed" }, 503);
@@ -238,7 +238,7 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
           resolved,
           exerciseSecret: ctx.exerciseCredentialSecret,
           sealToken: ctx.sealCredentialLeaseToken,
-          audit: ctx.writeAuditEvent,
+          auditedTransaction: ctx.withTenantAuditedTransaction,
           issuer: githubIssuer,
         });
         if (!leased.ok) {
@@ -304,24 +304,9 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
       leaseId: c.req.param("leaseId"),
       token: body.token,
       issuer: githubIssuer,
+      auditedTransaction: ctx.withTenantAuditedTransaction,
     });
     if (!result.ok) return c.json<ApiResponse>({ ok: false, error: result.error }, result.status);
-    try {
-      await ctx.writeAuditEvent({
-        tenantId,
-        actorType: "agent",
-        actorId: agentId,
-        action: "upstream_credential_lease.revoked",
-        resourceType: "upstream-credential-lease",
-        resourceId: c.req.param("leaseId"),
-        metadata: {},
-      });
-    } catch {
-      return c.json<ApiResponse>(
-        { ok: false, error: "credential was revoked but durable audit failed" },
-        503,
-      );
-    }
     c.header("Cache-Control", "no-store, max-age=0");
     return c.json<ApiResponse>({ ok: true, data: { revoked: true } });
   });
@@ -342,7 +327,7 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
       agentId,
       leaseId: c.req.param("leaseId"),
       token: body.token,
-      audit: ctx.writeAuditEvent,
+      auditedTransaction: ctx.withTenantAuditedTransaction,
     });
     if (!result.ok) return c.json<ApiResponse>({ ok: false, error: result.error }, result.status);
     c.header("Cache-Control", "no-store, max-age=0");

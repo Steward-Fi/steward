@@ -55,7 +55,17 @@ revokes stale unacknowledged delivery using the encrypted handle. Reusing the
 idempotency key returns `409` and never replays the credential. GitHub does not
 accept a caller-selected installation-token TTL, so this endpoint accepts
 exactly `ttlSeconds: 3600`; shorter values are rejected rather than presented as
-an upstream lifetime Steward cannot enforce.
+an upstream lifetime Steward cannot enforce. Issuance also fails closed when
+the live grant expires before GitHub's fixed one-hour token expiry; a provider
+token is never delivered with a lifetime beyond its authority.
+
+The long-lived API starts an immediate, periodic, cursor-bounded recovery sweep
+for every tenant with durable lease state. It revokes abandoned deliveries and
+stale encrypted handles without waiting for another issuance request, and
+graceful shutdown waits for an in-flight sweep before closing the database.
+Every terminal or `needs_attention` transition and its core audit record commit
+atomically; an audit failure leaves the prior recoverable state for a later
+exact-CAS retry rather than creating an unaudited terminal outcome.
 
 ### broker mode
 ```

@@ -19,6 +19,7 @@ import { shouldUsePGLite } from "@stwd/db/pglite";
 import { sql } from "drizzle-orm";
 import { composeApp } from "./compose";
 import { getRedisClient, initRedis, isRedisConfigured, shutdownRedis } from "./middleware/redis";
+import { resolveEnabledPlugins } from "./plugin-config";
 import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
 import {
   API_VERSION,
@@ -36,6 +37,7 @@ import {
   resolveClientIp,
 } from "./services/runtime-gate";
 import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
+import { startUpstreamCredentialLeaseScheduler } from "./services/upstream-credential-lease-scheduler";
 import { configuredVaultStartupLogLine, getConfiguredVault } from "./services/vault-factory";
 import { startWebhookRetryScheduler } from "./services/webhook-retry-scheduler";
 
@@ -78,6 +80,7 @@ let cancelRetention: (() => void) | undefined;
 let cancelProviderReservationReconciliation: (() => void) | undefined;
 let cancelTransactionReceiptPolling: (() => void) | undefined;
 let cancelWebhookRetryScheduler: (() => void) | undefined;
+let cancelUpstreamCredentialLeaseScheduler: (() => Promise<void>) | undefined;
 
 function runtimeGate(request: Request, peerAddress: string | null): Response | null {
   const url = new URL(request.url);
@@ -334,6 +337,9 @@ if (migrationsRan) {
   }
   cancelTransactionReceiptPolling = startTransactionReceiptPollingScheduler();
   cancelWebhookRetryScheduler = startWebhookRetryScheduler();
+  if (resolveEnabledPlugins().has("capabilities")) {
+    cancelUpstreamCredentialLeaseScheduler = await startUpstreamCredentialLeaseScheduler();
+  }
 }
 
 // Resolve custody before accepting traffic. A configured backend that cannot
@@ -367,6 +373,7 @@ const shutdown = async (signal: string) => {
   if (cancelProviderReservationReconciliation) cancelProviderReservationReconciliation();
   if (cancelTransactionReceiptPolling) cancelTransactionReceiptPolling();
   if (cancelWebhookRetryScheduler) cancelWebhookRetryScheduler();
+  if (cancelUpstreamCredentialLeaseScheduler) await cancelUpstreamCredentialLeaseScheduler();
   rateLimiter.clear();
 
   try {
