@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   agents,
+  auditEvents as persistedAuditEvents,
   closeDb,
   getDb,
   providerAccounts,
@@ -14,10 +15,12 @@ import {
   workspaces,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { type AuthorityAudit, ProviderAuthorityStore } from "../services/provider-authority-store";
 
 setDefaultTimeout(120_000);
+process.env.STEWARD_AUDIT_HMAC_KEY ??=
+  "provider-authority-test-audit-hmac-key-with-adequate-entropy";
 
 const OWNER = "10000000-0000-4000-8000-000000000001";
 const ADMIN = "10000000-0000-4000-8000-000000000002";
@@ -79,7 +82,12 @@ async function seedCore() {
   await db.insert(agents).values([
     { id: "agent-x", tenantId: "tenant-main", name: "X", walletAddress: "0x1" },
     { id: "agent-y", tenantId: "tenant-main", name: "Y", walletAddress: "0x2" },
-    { id: "foreign-agent", tenantId: "tenant-foreign", name: "F", walletAddress: "0x3" },
+    {
+      id: "foreign-agent",
+      tenantId: "tenant-foreign",
+      name: "F",
+      walletAddress: "0x3",
+    },
   ]);
   await db.insert(workspaces).values([
     {
@@ -174,14 +182,22 @@ describe("provider authority foundation", () => {
       }),
     ).rejects.toMatchObject({ code: "forbidden" });
     const created = await store.createWorkspace(
-      mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: 1 }),
+      mutation({
+        actorUserId: ADMIN,
+        tenantRole: "admin",
+        expectedRevision: 1,
+      }),
       { key: "explicit-admin", name: "Allowed", environment: "production" },
     );
     expect(created.key).toBe("explicit-admin");
   });
 
   test("every mutation requires authority, recent MFA, idempotency, revision, and successful pre-commit audit", async () => {
-    const base = mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: 2 });
+    const base = mutation({
+      actorUserId: ADMIN,
+      tenantRole: "admin",
+      expectedRevision: 2,
+    });
     await expect(
       store.createWorkspace(base, {
         key: 123 as unknown as string,
@@ -256,7 +272,11 @@ describe("provider authority foundation", () => {
       ]);
     await expect(
       store.createProviderAccount(
-        mutation({ actorUserId: OTHER, tenantRole: "member", expectedRevision: 1 }),
+        mutation({
+          actorUserId: OTHER,
+          tenantRole: "member",
+          expectedRevision: 1,
+        }),
         {
           workspaceId: WORKSPACE_B,
           adapterKey: "github",
@@ -267,7 +287,11 @@ describe("provider authority foundation", () => {
     ).rejects.toMatchObject({ code: "not_found", status: 404 });
     await expect(
       store.createProviderAccount(
-        mutation({ actorUserId: OWNER, tenantRole: "owner", expectedRevision: 1 }),
+        mutation({
+          actorUserId: OWNER,
+          tenantRole: "owner",
+          expectedRevision: 1,
+        }),
         {
           workspaceId: WORKSPACE_B,
           adapterKey: "github",
@@ -294,7 +318,11 @@ describe("provider authority foundation", () => {
     ).rejects.toMatchObject({ code: "not_found", status: 404 });
     await expect(
       store.issueRoleBinding(
-        mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: 1 }),
+        mutation({
+          actorUserId: ADMIN,
+          tenantRole: "admin",
+          expectedRevision: 1,
+        }),
         {
           workspaceId: WORKSPACE_B,
           principalType: "human",
@@ -350,7 +378,11 @@ describe("provider authority foundation", () => {
       ),
     ).rejects.toMatchObject({ code: "forbidden" });
     const grant = await store.issueGrant(
-      mutation({ actorUserId: OTHER, tenantRole: "member", expectedRevision: workspace.revision }),
+      mutation({
+        actorUserId: OTHER,
+        tenantRole: "member",
+        expectedRevision: workspace.revision,
+      }),
       {
         workspaceId: WORKSPACE_A,
         providerAccountId: ACCOUNT_A,
@@ -375,7 +407,12 @@ describe("provider authority foundation", () => {
       environment: "production" as const,
     };
     expect(
-      (await store.checkAccess({ ...common, evaluatedAt: new Date().toISOString() })).effect,
+      (
+        await store.checkAccess({
+          ...common,
+          evaluatedAt: new Date().toISOString(),
+        })
+      ).effect,
     ).toBe("allow");
     await getDb()
       .insert(providerGrants)
@@ -479,7 +516,11 @@ describe("provider authority foundation", () => {
       .where(eq(providerRoleBindings.id, adminBinding.id));
     await expect(
       store.createWorkspace(
-        mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: 2 }),
+        mutation({
+          actorUserId: ADMIN,
+          tenantRole: "admin",
+          expectedRevision: 2,
+        }),
         { key: "expired-admin", name: "Denied", environment: "production" },
       ),
     ).rejects.toMatchObject({ code: "forbidden" });
@@ -503,7 +544,11 @@ describe("provider authority foundation", () => {
       .update(providerRoleBindings)
       .set({ expiresAt: null })
       .where(eq(providerRoleBindings.roleKey, "tenant_authority_admin"));
-    const admin = mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: 0 });
+    const admin = mutation({
+      actorUserId: ADMIN,
+      tenantRole: "admin",
+      expectedRevision: 0,
+    });
     const count = await store.createAgentBudget(admin, {
       agentId: "agent-x",
       dimension: "count",
@@ -519,7 +564,11 @@ describe("provider authority foundation", () => {
       revision: 1,
     });
     const notional = await store.createAgentBudget(
-      mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: 0 }),
+      mutation({
+        actorUserId: ADMIN,
+        tenantRole: "admin",
+        expectedRevision: 0,
+      }),
       {
         agentId: "agent-x",
         workspaceId: WORKSPACE_A,
@@ -532,7 +581,11 @@ describe("provider authority foundation", () => {
     expect(await store.listAgentBudgets("tenant-main", "agent-x")).toHaveLength(2);
 
     const disabled = await store.updateAgentBudget(
-      mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: notional.revision }),
+      mutation({
+        actorUserId: ADMIN,
+        tenantRole: "admin",
+        expectedRevision: notional.revision,
+      }),
       notional.id,
       {
         dimension: "notional",
@@ -545,7 +598,11 @@ describe("provider authority foundation", () => {
     expect(disabled).toMatchObject({ max: 9_000, enabled: false, revision: 2 });
     await expect(
       store.updateAgentBudget(
-        mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: 1 }),
+        mutation({
+          actorUserId: ADMIN,
+          tenantRole: "admin",
+          expectedRevision: 1,
+        }),
         notional.id,
         {
           dimension: "notional",
@@ -563,7 +620,102 @@ describe("provider authority foundation", () => {
           .where(eq(providerAgentBudgets.id, count.id))
       )[0]?.autoFreeze,
     ).toBe(true);
-    expect(auditEvents.some((event) => event.action === "provider.agent_budget.create")).toBe(true);
-    expect(auditEvents.some((event) => event.action === "provider.agent_budget.update")).toBe(true);
+    const budgetAuditRows = await getDb()
+      .select({
+        action: persistedAuditEvents.action,
+        resourceId: persistedAuditEvents.resourceId,
+      })
+      .from(persistedAuditEvents);
+    expect(
+      budgetAuditRows.some(
+        (event) => event.action === "provider.agent_budget.create" && event.resourceId === count.id,
+      ),
+    ).toBe(true);
+    expect(
+      budgetAuditRows.some(
+        (event) =>
+          event.action === "provider.agent_budget.update" && event.resourceId === notional.id,
+      ),
+    ).toBe(true);
+  });
+
+  test("budget insert failure rolls back its required audit event", async () => {
+    const context = mutation({
+      actorUserId: ADMIN,
+      tenantRole: "admin",
+      expectedRevision: 0,
+    });
+    const definition = {
+      agentId: "agent-x",
+      dimension: "count" as const,
+      windowSeconds: 3_600,
+      max: 10,
+    };
+    await store.createAgentBudget(context, definition);
+    const before = await getDb()
+      .select({ id: persistedAuditEvents.id })
+      .from(persistedAuditEvents)
+      .where(eq(persistedAuditEvents.action, "provider.agent_budget.create"));
+
+    await expect(
+      store.createAgentBudget(
+        mutation({
+          actorUserId: ADMIN,
+          tenantRole: "admin",
+          expectedRevision: 0,
+        }),
+        definition,
+      ),
+    ).rejects.toThrow();
+
+    const after = await getDb()
+      .select({ id: persistedAuditEvents.id })
+      .from(persistedAuditEvents)
+      .where(eq(persistedAuditEvents.action, "provider.agent_budget.create"));
+    expect(after).toHaveLength(before.length);
+  });
+
+  test("a concurrent budget revision race commits exactly one mutation and one audit", async () => {
+    const created = await store.createAgentBudget(
+      mutation({
+        actorUserId: ADMIN,
+        tenantRole: "admin",
+        expectedRevision: 0,
+      }),
+      {
+        agentId: "agent-y",
+        dimension: "count",
+        windowSeconds: 7_200,
+        max: 20,
+      },
+    );
+    const update = (max: number) =>
+      store.updateAgentBudget(
+        mutation({
+          actorUserId: ADMIN,
+          tenantRole: "admin",
+          expectedRevision: created.revision,
+        }),
+        created.id,
+        {
+          dimension: "count",
+          windowSeconds: 7_200,
+          max,
+        },
+      );
+
+    const outcomes = await Promise.allSettled([update(21), update(22)]);
+    expect(outcomes.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const rows = await getDb()
+      .select({ id: persistedAuditEvents.id })
+      .from(persistedAuditEvents)
+      .where(
+        and(
+          eq(persistedAuditEvents.action, "provider.agent_budget.update"),
+          eq(persistedAuditEvents.resourceId, created.id),
+        ),
+      );
+    expect(rows).toHaveLength(1);
   });
 });
