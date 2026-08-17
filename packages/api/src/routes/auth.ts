@@ -502,7 +502,7 @@ export async function checkAuthRateLimit(
   }
 }
 
-const SMS_VERIFY_MAX_FAILED_ATTEMPTS = 5;
+export const SMS_VERIFY_MAX_FAILED_ATTEMPTS = 5;
 const SMS_VERIFY_FAILED_ATTEMPT_TTL_MS = 10 * 60 * 1000;
 const TOTP_VERIFY_MAX_FAILED_ATTEMPTS = 5;
 const TOTP_VERIFY_FAILED_ATTEMPT_TTL_MS = 10 * 60 * 1000;
@@ -512,14 +512,14 @@ function smsVerifyAttemptKey(phone: string, purpose: string): string {
   return `sms-verify-attempts:${hashSha256Hex(`${purpose}:${phone}`)}`;
 }
 
-async function getSmsVerifyFailedAttempts(phone: string, purpose: string): Promise<number> {
+export async function getSmsVerifyFailedAttempts(phone: string, purpose: string): Promise<number> {
   const raw = await getMfaBackend().get(smsVerifyAttemptKey(phone, purpose));
   if (!raw) return 0;
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
 }
 
-async function recordSmsVerifyFailure(phone: string, purpose: string): Promise<void> {
+export async function recordSmsVerifyFailure(phone: string, purpose: string): Promise<void> {
   const next = (await getSmsVerifyFailedAttempts(phone, purpose)) + 1;
   await getMfaBackend().set(
     smsVerifyAttemptKey(phone, purpose),
@@ -528,7 +528,7 @@ async function recordSmsVerifyFailure(phone: string, purpose: string): Promise<v
   );
 }
 
-async function clearSmsVerifyFailures(phone: string, purpose: string): Promise<void> {
+export async function clearSmsVerifyFailures(phone: string, purpose: string): Promise<void> {
   await getMfaBackend().delete(smsVerifyAttemptKey(phone, purpose));
 }
 
