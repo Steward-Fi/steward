@@ -22,6 +22,7 @@ import {
   providerAccounts,
   providerActionAuditOutbox,
   providerActionBindings,
+  providerActionReservationGenerations,
   providerGrants,
   providerOperations,
   providerRoleBindings,
@@ -34,8 +35,10 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq, sql } from "drizzle-orm";
+import { __setProviderPolicyClockForTests } from "../services/provider-action-service";
 import { providerApprovalService } from "../services/provider-approval";
 import {
+  APPROVAL_RULES,
   bindingRow,
   correlatedAudit,
   createApprovalRequired,
@@ -100,6 +103,7 @@ describe("PR3 approval lifecycle", () => {
     setPGLiteOverride(db, async () => client.close());
   });
   afterAll(async () => {
+    __setProviderPolicyClockForTests(null);
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
     if (priorExecutionAuthSecret === undefined) {
@@ -109,6 +113,7 @@ describe("PR3 approval lifecycle", () => {
     }
   });
   beforeEach(async () => {
+    __setProviderPolicyClockForTests(null);
     await wipe();
     await seedFixture();
   });
@@ -217,6 +222,61 @@ describe("PR3 approval lifecycle", () => {
     expect(res2.resumeAttemptId).toBe(res.resumeAttemptId);
     const events2 = (await correlatedAudit(intentId)).length;
     expect(events2).toBe(events1);
+  });
+
+  test("#207 queues in-window but fresh resume recheck denies after business hours", async () => {
+    const windowedRules = APPROVAL_RULES.map((rule) =>
+      rule.config.effect === "allow"
+        ? {
+            ...rule,
+            config: {
+              ...rule.config,
+              constraints: {
+                timeWindow: {
+                  timezone: "UTC",
+                  allow: [{ days: ["mon"], from: "11:00", to: "13:00" }],
+                },
+              },
+            },
+          }
+        : rule,
+    );
+    await getDb()
+      .update(providerOperations)
+      .set({ requestProfile: { policyRules: windowedRules } })
+      .where(eq(providerOperations.id, F.OP));
+
+    __setProviderPolicyClockForTests(() => new Date("2026-08-17T12:00:00.000Z"));
+    const { intentId, requestHash, actionDigest } = await createApprovalRequired("hours-open");
+    expect(
+      (
+        await providerApprovalService.decide(
+          decideInput(intentId, requestHash, actionDigest, {
+            idempotencyKey: "hours-open-approve",
+          }),
+        )
+      ).ok,
+    ).toBe(true);
+
+    // No operation/policy mutation: only the authoritative server instant moves.
+    // The approved immutable action is rebound to a fresh policy decision at
+    // resume and cannot cross the window boundary.
+    __setProviderPolicyClockForTests(() => new Date("2026-08-17T14:00:00.000Z"));
+    expect(await providerApprovalService.resume({ intentId, tenantId: F.TENANT })).toEqual({
+      ok: false,
+      code: "POLICY_HARD_DENY",
+      httpStatus: 403,
+    });
+    expect((await bindingRow(intentId)).status).toBe("approved");
+    expect((await queueRow(intentId)).status).toBe("approved");
+    expect(
+      (
+        await getDb()
+          .select()
+          .from(providerActionReservationGenerations)
+          .where(eq(providerActionReservationGenerations.intentId, intentId))
+      ).length,
+    ).toBe(0);
   });
 
   test("resume idempotent path re-ensures v2 authorization only for an evidence-bound execution_ready row", async () => {

@@ -128,12 +128,19 @@ export interface PersistedPolicyReservationHandlesV1 {
 type ReservationReconciliationTarget = "settled" | "released";
 
 let reservationReconciliationFaultForTests: "before_apply" | "after_apply" | null = null;
+let providerPolicyClockForTests: (() => Date) | null = null;
 
 /** Test-only crash injection at the external-effect / DB-CAS boundary. */
 export function __setReservationReconciliationFaultForTests(
   fault: "before_apply" | "after_apply" | null,
 ): void {
   reservationReconciliationFaultForTests = fault;
+}
+
+/** Test-only server clock seam. Provider routes never accept this value from a
+ * request; production always evaluates against a fresh local server instant. */
+export function __setProviderPolicyClockForTests(clock: (() => Date) | null): void {
+  providerPolicyClockForTests = clock;
 }
 
 function persistedReservationHandles(
@@ -1546,7 +1553,7 @@ class ProviderActionService {
      *  deny/failure, leave on outcome_unknown. */
     windowedInvokeReservation?: WindowedInvokeReservationHandle;
   }> {
-    const decidedAt = new Date().toISOString();
+    const decidedAt = (providerPolicyClockForTests?.() ?? new Date()).toISOString();
     const decisionId = randomUUID();
     const { operation, build } = args;
 
@@ -1767,7 +1774,13 @@ class ProviderActionService {
         decisionHash: string;
         handles: PersistedPolicyReservationHandlesV1 | null;
       }
-    | { ok: false; code: string; httpStatus: number }
+    | {
+        ok: false;
+        code: string;
+        httpStatus: number;
+        decision?: PersistedPolicyDecisionV1;
+        decisionHash?: string;
+      }
   > {
     const generation = args.priorGeneration + 1;
     const canonicalText = Buffer.from(args.canonicalActionBytes).toString("utf8");
@@ -1806,6 +1819,8 @@ class ProviderActionService {
         ok: false,
         code: policy.doc.reasonCodes[0] ?? "POLICY_HARD_DENY",
         httpStatus: 403,
+        decision: policy.doc,
+        decisionHash: sha256HexPrefixed(jcsStringify(policy.doc)),
       };
     }
 
