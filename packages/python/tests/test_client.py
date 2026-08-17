@@ -88,6 +88,27 @@ class StewardClientTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 403)
         self.assertEqual(str(caught.exception), "denied")
 
+    def test_accounts_and_global_wallet_mutations_are_signed(self):
+        # SEC-049: every SDK's signing-prefix list must cover wallet/account
+        # mutations in lockstep (Flutter already signed these).
+        transport = CaptureTransport()
+        client = StewardClient(
+            base_url="https://api.example.test",
+            app_id="app-1",
+            app_secret="secret-1",
+            request_signing_secret="signing-secret",
+            transport=transport,
+        )
+
+        for path in ("/accounts", "/global-wallet/consent/approve"):
+            client.post(path, {})
+            request, _, _ = transport.calls[-1]
+            self.assertRegex(
+                request.get_header("X-steward-signature") or "",
+                r"^v1=[0-9a-f]{64}$",
+                f"unsigned mutation: {path}",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

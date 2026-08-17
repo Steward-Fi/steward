@@ -21,6 +21,9 @@ module Steward
   end
 
   class Client
+    # Keep in lockstep with the equivalent list in EVERY other SDK (sdk, go,
+    # java, python, rust, swift, csharp, flutter): mutations under these
+    # prefixes are HMAC-signed; divergence silently downgrades integrity (SEC-049).
     SENSITIVE_PREFIXES = [
       "/vault",
       "/agents",
@@ -36,7 +39,9 @@ module Steward
       "/platform",
       "/condition-sets",
       "/condition_sets",
-      "/v1/condition_sets"
+      "/v1/condition_sets",
+      "/global-wallet",
+      "/accounts"
     ].freeze
 
     MUTATING_METHODS = %w[POST PUT PATCH DELETE].freeze

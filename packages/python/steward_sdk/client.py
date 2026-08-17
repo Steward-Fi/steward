@@ -46,6 +46,9 @@ class StewardClientConfig:
     transport: Transport | None = None
 
 
+# Keep in lockstep with the equivalent list in EVERY other SDK (sdk, go, java,
+# ruby, rust, swift, csharp, flutter): mutations under these prefixes are
+# HMAC-signed, and divergence silently downgrades integrity (SEC-049).
 SENSITIVE_SIGNED_PREFIXES = (
     "/vault",
     "/agents",
@@ -62,6 +65,8 @@ SENSITIVE_SIGNED_PREFIXES = (
     "/condition-sets",
     "/condition_sets",
     "/v1/condition_sets",
+    "/global-wallet",
+    "/accounts",
 )
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 

@@ -23,6 +23,9 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 public final class StewardClient {
+    // Keep in lockstep with the equivalent list in EVERY other SDK (sdk, go,
+    // python, ruby, rust, swift, csharp, flutter): mutations under these
+    // prefixes are HMAC-signed; divergence silently downgrades integrity (SEC-049).
     private static final List<String> SENSITIVE_PREFIXES = List.of(
         "/vault",
         "/agents",
@@ -38,7 +41,9 @@ public final class StewardClient {
         "/platform",
         "/condition-sets",
         "/condition_sets",
-        "/v1/condition_sets"
+        "/v1/condition_sets",
+        "/global-wallet",
+        "/accounts"
     );
     private static final List<String> MUTATING_METHODS = List.of("POST", "PUT", "PATCH", "DELETE");
 

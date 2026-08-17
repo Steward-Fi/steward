@@ -5,7 +5,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use serde_json::{json, Value};
 use steward_sdk::{
     ApiError, Client, Config, CreateUserInput, Error, PushSubscriptionInput,
-    PushSubscriptionResult, Request, Response, Transport,
+    PushSubscriptionResult, Request, RequestOptions, Response, Transport,
 };
 
 #[derive(Clone)]
@@ -212,5 +212,32 @@ fn api_errors_include_status_and_payload() {
             assert_eq!(data.unwrap(), json!({"ok": false, "error": "denied"}));
         }
         other => panic!("expected API error, got {other:?}"),
+    }
+}
+
+// SEC-049: every SDK's signing-prefix list must cover wallet/account mutations
+// in lockstep (Flutter already signed these).
+#[test]
+fn accounts_and_global_wallet_mutations_are_signed() {
+    let transport = CaptureTransport::new(json!({"ok": true, "data": {"id": "ok"}}));
+    let client = Client::new(Config {
+        base_url: "https://api.example.test".to_string(),
+        app_id: Some("app-1".to_string()),
+        app_secret: Some("secret-1".to_string()),
+        request_signing_secret: Some("signing-secret".to_string()),
+        transport: Some(Arc::new(transport.clone())),
+        ..Config::default()
+    })
+    .unwrap();
+
+    for path in ["/accounts", "/global-wallet/consent/approve"] {
+        client.post(path, &json!({}), RequestOptions::default()).unwrap();
+        let request = transport.last_request();
+        let signature = request
+            .headers
+            .get("X-Steward-Signature")
+            .unwrap_or_else(|| panic!("unsigned mutation: {path}"));
+        assert!(signature.starts_with("v1="));
+        assert_eq!(signature.len(), 67);
     }
 }

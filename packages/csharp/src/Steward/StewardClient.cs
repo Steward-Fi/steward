@@ -80,6 +80,9 @@ namespace Steward
 
     public sealed class StewardClient
     {
+        // Keep in lockstep with the equivalent list in EVERY other SDK (sdk, go,
+        // java, python, ruby, rust, swift, flutter): mutations under these
+        // prefixes are HMAC-signed; divergence silently downgrades integrity (SEC-049).
         private static readonly string[] SensitivePrefixes = new[]
         {
             "/vault",
@@ -96,7 +99,9 @@ namespace Steward
             "/platform",
             "/condition-sets",
             "/condition_sets",
-            "/v1/condition_sets"
+            "/v1/condition_sets",
+            "/global-wallet",
+            "/accounts"
         };
 
         private readonly StewardClientConfig _config;

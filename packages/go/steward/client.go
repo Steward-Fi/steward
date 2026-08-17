@@ -60,6 +60,9 @@ type apiEnvelope struct {
 	Error string          `json:"error,omitempty"`
 }
 
+// Keep in lockstep with the equivalent list in EVERY other SDK (sdk, java,
+// python, ruby, rust, swift, csharp, flutter): mutations under these prefixes
+// are HMAC-signed, and divergence silently downgrades integrity (SEC-049).
 var sensitivePrefixes = []string{
 	"/vault",
 	"/agents",
@@ -76,6 +79,8 @@ var sensitivePrefixes = []string{
 	"/condition-sets",
 	"/condition_sets",
 	"/v1/condition_sets",
+	"/global-wallet",
+	"/accounts",
 }
 
 func NewClient(config Config) (*Client, error) {

@@ -144,6 +144,34 @@ func TestSensitiveMutationsAreSignedAndIdempotent(t *testing.T) {
 	}
 }
 
+// SEC-049: every SDK's signing-prefix list must cover wallet/account mutations
+// in lockstep (Flutter already signed these).
+func TestAccountsAndGlobalWalletMutationsAreSigned(t *testing.T) {
+	var captured *http.Request
+	client, err := NewClient(Config{
+		BaseURL:              "https://api.example.test",
+		AppID:                "app-1",
+		AppSecret:            "secret-1",
+		RequestSigningSecret: "signing-secret",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			captured = req
+			return jsonResponse(200, `{"ok":true,"data":{"id":"ok"}}`), nil
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{"/accounts", "/global-wallet/consent/approve"} {
+		if err := client.Post(context.Background(), path, map[string]any{}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := captured.Header.Get("X-Steward-Signature"); !strings.HasPrefix(got, "v1=") || len(got) != 67 {
+			t.Fatalf("unsigned mutation %s: signature %q", path, got)
+		}
+	}
+}
+
 func TestAPIErrorIncludesStatusAndPayload(t *testing.T) {
 	client, err := NewClient(Config{
 		BaseURL: "https://api.example.test",

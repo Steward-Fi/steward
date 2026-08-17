@@ -60,6 +60,9 @@ public final class StewardClient {
     private let config: StewardConfig
     public let baseURL: String
 
+    // Keep in lockstep with the equivalent list in EVERY other SDK (sdk, go,
+    // java, python, ruby, rust, csharp, flutter): mutations under these
+    // prefixes are HMAC-signed; divergence silently downgrades integrity (SEC-049).
     private static let sensitivePrefixes = [
         "/vault",
         "/agents",
@@ -76,6 +79,8 @@ public final class StewardClient {
         "/condition-sets",
         "/condition_sets",
         "/v1/condition_sets",
+        "/global-wallet",
+        "/accounts",
     ]
 
     public init(config: StewardConfig) throws {

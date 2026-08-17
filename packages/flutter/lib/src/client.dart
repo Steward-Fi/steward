@@ -41,6 +41,9 @@ class StewardClient {
       : _baseUri = Uri.parse(config.baseUrl.replaceFirst(RegExp(r'/+$'), '')),
         _client = config.httpClient ?? http.Client();
 
+  // Keep in lockstep with the equivalent list in EVERY other SDK (sdk, go,
+  // java, python, ruby, rust, swift, csharp): mutations under these prefixes
+  // are HMAC-signed, and divergence silently downgrades integrity (SEC-049).
   static const _sensitivePrefixes = <String>[
     '/vault',
     '/agents',

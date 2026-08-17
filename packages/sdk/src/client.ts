@@ -471,6 +471,9 @@ export interface TradeSessionState {
   revokedBy?: string | null;
 }
 
+// Keep in lockstep with the equivalent list in EVERY other SDK (go, java,
+// python, ruby, rust, swift, csharp, flutter): mutations under these prefixes
+// are HMAC-signed, and divergence silently downgrades integrity (SEC-049).
 const SENSITIVE_SIGNED_PATHS = [
   "/vault",
   "/agents",
@@ -487,6 +490,8 @@ const SENSITIVE_SIGNED_PATHS = [
   "/condition-sets",
   "/condition_sets",
   "/v1/condition_sets",
+  "/global-wallet",
+  "/accounts",
 ];
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
