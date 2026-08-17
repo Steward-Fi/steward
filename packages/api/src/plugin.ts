@@ -396,6 +396,14 @@ export class PluginHost<Ctx> {
    */
   private readonly adapterContributions = new Map<string, string[]>();
   /**
+   * EVERY `(category, provider)` pair this host has registered, durable across
+   * `register()` calls. The collision guard must outlive a single host pass:
+   * the registry's own `register` silently `Map.set`-overwrites, so a plugin
+   * registered in a LATER pass (or core code registering directly) would
+   * otherwise clobber a live money-route adapter without an error.
+   */
+  private readonly registeredAdapterKeys = new Set<string>();
+  /**
    * declared plugin migration sources, in dependency (registration) order. The
    * host does NOT run these during `register` (route registration must not block
    * on a schema migration); instead {@link runMigrations} applies them, called by
@@ -491,12 +499,13 @@ export class PluginHost<Ctx> {
     // `register` would silently OVERWRITE by (category, provider); to prevent a
     // plugin (or two plugins) from silently clobbering a real money-route
     // adapter, the host tracks every (category, provider) it has registered
-    // across the plugin loop and throws PluginHostError BEFORE calling
-    // `registry.register` on a duplicate. Each contribution is also validated
-    // fail-closed: a known category, a non-empty provider, and a present adapter.
+    // DURABLY (across `register()` passes, not just within one) AND consults the
+    // registry itself, so a pair already registered outside this host (core
+    // code, or a previous host sharing the registry) also fails closed. Each
+    // contribution is also validated fail-closed: a known category, a non-empty
+    // provider, and a present adapter.
     {
       const hostRegistry = ctxAdapterRegistry(ctx);
-      const seenAdapters = new Set<string>();
       for (const plugin of ordered) {
         if (!plugin.adapters || plugin.adapters.length === 0) continue;
         if (!hostRegistry) {
@@ -527,7 +536,7 @@ export class PluginHost<Ctx> {
             );
           }
           const key = `${category}::${provider}`;
-          if (seenAdapters.has(key)) {
+          if (this.registeredAdapterKeys.has(key)) {
             throw new PluginHostError(
               `duplicate adapter contribution for (category="${category}", ` +
                 `provider="${provider}") — plugin "${plugin.name}" collides with an ` +
@@ -535,7 +544,15 @@ export class PluginHost<Ctx> {
                 "adapter.",
             );
           }
-          seenAdapters.add(key);
+          if (hostRegistry.has(category, provider)) {
+            throw new PluginHostError(
+              `adapter contribution for (category="${category}", ` +
+                `provider="${provider}") from plugin "${plugin.name}" collides with ` +
+                "an adapter already registered outside the plugin host; refusing " +
+                "to overwrite a live adapter.",
+            );
+          }
+          this.registeredAdapterKeys.add(key);
           // category is narrowed to AdapterCategory; adapter is `unknown` at the
           // shared boundary — cast to the registry's per-category type here, at
           // the api boundary where @stwd/adapters is a legitimate dependency. The
