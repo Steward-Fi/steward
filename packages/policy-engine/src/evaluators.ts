@@ -533,6 +533,17 @@ async function evaluateSpendingLimit(
 function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
   const config = rule.config as unknown as ApprovedAddressesConfig;
   const base = { policyId: rule.id, type: rule.type } as const;
+
+  // Fail closed with a structured deny on malformed config instead of throwing
+  // on `.map` (SEC-105).
+  if (!Array.isArray(config.addresses)) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Approved addresses must be an array",
+    };
+  }
+
   const targetAddress = getApprovedAddressTarget(ctx.request);
   if (!targetAddress) {
     return {
@@ -688,6 +699,17 @@ function evaluateRateLimit(rule: PolicyRule, ctx: EvaluatorContext): PolicyResul
 function evaluateTimeWindow(rule: PolicyRule, _ctx: EvaluatorContext): PolicyResult {
   const config = rule.config as unknown as TimeWindowConfig;
   const base = { policyId: rule.id, type: rule.type } as const;
+
+  // Fail closed with a structured deny on malformed config instead of throwing
+  // on `.length` (SEC-105) — consistent with the other defensive evaluators.
+  if (!Array.isArray(config.allowedDays) || !Array.isArray(config.allowedHours)) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Time-window allowedDays and allowedHours must be arrays",
+    };
+  }
+
   const now = new Date();
   const hour = now.getUTCHours();
   const day = now.getUTCDay();
@@ -721,6 +743,16 @@ function evaluateAllowedChains(rule: PolicyRule, ctx: EvaluatorContext): PolicyR
   const config = rule.config as unknown as AllowedChainsConfig;
   const base = { policyId: rule.id, type: rule.type } as const;
   const chainId = ctx.request.chainId;
+
+  // Fail closed with a structured deny on malformed config instead of throwing
+  // on `.includes` (SEC-105).
+  if (!Array.isArray(config.chains)) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Allowed chains must be an array of CAIP-2 identifiers",
+    };
+  }
 
   if (!Number.isSafeInteger(chainId) || chainId <= 0) {
     return {

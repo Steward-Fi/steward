@@ -1804,3 +1804,38 @@ describe("PolicyEngine.evaluate()", () => {
     expect(result.results).toHaveLength(2);
   });
 });
+
+describe("Malformed evaluator config fails closed instead of throwing (SEC-105)", () => {
+  it("time-window with non-array allowedDays/allowedHours returns a structured deny", async () => {
+    for (const config of [
+      { allowedDays: undefined, allowedHours: [] },
+      { allowedDays: [], allowedHours: "9-17" },
+      {},
+    ]) {
+      const result = await evaluatePolicy(makeTimeWindowRule(config), makeContext());
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("must be arrays");
+    }
+  });
+
+  it("allowed-chains with a non-array chains config returns a structured deny", async () => {
+    const rule: PolicyRule = {
+      id: "chains-bad",
+      type: "allowed-chains",
+      enabled: true,
+      config: { chains: "eip155:8453" },
+    };
+    const result = await evaluatePolicy(rule, makeContext());
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("must be an array");
+  });
+
+  it("approved-addresses with a non-array addresses config returns a structured deny", async () => {
+    const result = await evaluatePolicy(
+      makeAddressRule({ addresses: "0x1234567890123456789012345678901234567890" }),
+      makeContext(),
+    );
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("must be an array");
+  });
+});
