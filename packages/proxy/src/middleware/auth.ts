@@ -8,7 +8,7 @@
 import { assertTokenNotRevoked, verifyToken } from "@stwd/auth";
 import { agents, and, eq, getDb } from "@stwd/db";
 import type { Context, Next } from "hono";
-import { isProxyDevMode, PROXY_SCOPE } from "../config";
+import { isProxyDevMode, PROXY_SCOPE, positiveIntegerEnv } from "../config";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -23,8 +23,9 @@ export interface AgentClaims {
 
 const SIGNATURE_PREFIX = "v1=";
 const MAX_SIGNATURE_AGE_MS = 5 * 60_000;
-const MAX_SIGNED_PROXY_BODY_BYTES = Number(
-  process.env.STEWARD_PROXY_SIGNED_BODY_BYTES ?? 2 * 1024 * 1024,
+const MAX_SIGNED_PROXY_BODY_BYTES = positiveIntegerEnv(
+  "STEWARD_PROXY_SIGNED_BODY_BYTES",
+  2 * 1024 * 1024,
 );
 
 function proxyRequestSignatureRequired(): boolean {

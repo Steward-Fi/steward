@@ -1,11 +1,13 @@
 import type { PendingProxyRequest, SecretRoute } from "@stwd/db";
 import { and, eq, getDb, pendingProxyRequests } from "@stwd/db";
 import { type EncryptedKey, KeyStore } from "@stwd/vault";
+import { positiveIntegerEnv } from "../config";
 
-const MAX_HELD_PROXY_BODY_BYTES = Number(
-  process.env.STEWARD_PROXY_APPROVAL_MAX_BODY_BYTES ?? 2 * 1024 * 1024,
+const MAX_HELD_PROXY_BODY_BYTES = positiveIntegerEnv(
+  "STEWARD_PROXY_APPROVAL_MAX_BODY_BYTES",
+  2 * 1024 * 1024,
 );
-const DEFAULT_APPROVAL_TTL_MS = Number(process.env.STEWARD_PROXY_APPROVAL_TTL_MS ?? 15 * 60 * 1000);
+const DEFAULT_APPROVAL_TTL_MS = positiveIntegerEnv("STEWARD_PROXY_APPROVAL_TTL_MS", 15 * 60 * 1000);
 
 const SENSITIVE_HEADER_NAMES = new Set([
   "authorization",

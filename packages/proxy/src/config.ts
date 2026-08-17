@@ -18,7 +18,19 @@ export const DEFAULT_ALIASES: Record<string, string> = {
 };
 
 /** Default port for the proxy server */
-export const PROXY_PORT = parseInt(process.env.STEWARD_PROXY_PORT || "8080", 10);
+export function positiveIntegerEnv(name: string, fallback: number, maximum?: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0 || (maximum !== undefined && value > maximum)) {
+    throw new Error(
+      `${name} must be a positive integer${maximum ? ` no greater than ${maximum}` : ""}`,
+    );
+  }
+  return value;
+}
+
+export const PROXY_PORT = positiveIntegerEnv("STEWARD_PROXY_PORT", 8080, 65535);
 
 /** Required JWT scope for proxy access */
 export const PROXY_SCOPE = "api:proxy";
@@ -32,5 +44,35 @@ export const PROXY_SCOPE = "api:proxy";
  * Local dev compose sets STEWARD_PROXY_DEV_MODE=true.
  */
 export function isProxyDevMode(): boolean {
-  return process.env.STEWARD_PROXY_DEV_MODE === "true";
+  return process.env.NODE_ENV !== "production" && process.env.STEWARD_PROXY_DEV_MODE === "true";
+}
+
+export function configuredProxyCorsOrigins(): string[] {
+  const values = (process.env.STEWARD_PROXY_CORS_ORIGINS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return values.map((value) => {
+    if (value === "*") throw new Error("STEWARD_PROXY_CORS_ORIGINS must not contain '*'");
+    let parsed: URL;
+    try {
+      parsed = new URL(value);
+    } catch {
+      throw new Error(`Invalid STEWARD_PROXY_CORS_ORIGINS origin: ${JSON.stringify(value)}`);
+    }
+    if (
+      (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+      parsed.username ||
+      parsed.password ||
+      parsed.pathname !== "/" ||
+      parsed.search ||
+      parsed.hash ||
+      parsed.origin !== value
+    ) {
+      throw new Error(
+        `STEWARD_PROXY_CORS_ORIGINS entries must be canonical HTTP(S) origins: ${JSON.stringify(value)}`,
+      );
+    }
+    return parsed.origin;
+  });
 }

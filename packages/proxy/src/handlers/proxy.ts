@@ -33,7 +33,7 @@ import {
 import { getRedis, type SpendReservation, settleReservedSpend } from "@stwd/redis";
 import { SecretVault } from "@stwd/vault";
 import type { Context } from "hono";
-import { isProxyDevMode } from "../config";
+import { isProxyDevMode, positiveIntegerEnv } from "../config";
 import { recordAudit, recordRequiredAudit } from "../middleware/audit";
 import {
   checkProxyRateLimit,
@@ -287,16 +287,19 @@ async function releaseProxySpendReservation(
 
 let checkProxySpendLimitForHandler = checkProxySpendLimit;
 let resolveProxyHostForHandler = dnsLookup;
-const MAX_LLM_SPEND_TRACKING_BODY_BYTES = Number(
-  process.env.STEWARD_PROXY_MAX_SPEND_BODY_BYTES ?? 1024 * 1024,
+const MAX_LLM_SPEND_TRACKING_BODY_BYTES = positiveIntegerEnv(
+  "STEWARD_PROXY_MAX_SPEND_BODY_BYTES",
+  1024 * 1024,
 );
-const PROXY_IDEMPOTENCY_TTL_MS = Number(
-  process.env.STEWARD_PROXY_IDEMPOTENCY_TTL_MS ?? 24 * 60 * 60 * 1000,
+const PROXY_IDEMPOTENCY_TTL_MS = positiveIntegerEnv(
+  "STEWARD_PROXY_IDEMPOTENCY_TTL_MS",
+  24 * 60 * 60 * 1000,
 );
-const MAX_PROXY_IDEMPOTENCY_BODY_BYTES = Number(
-  process.env.STEWARD_PROXY_IDEMPOTENCY_BODY_BYTES ?? 2 * 1024 * 1024,
+const MAX_PROXY_IDEMPOTENCY_BODY_BYTES = positiveIntegerEnv(
+  "STEWARD_PROXY_IDEMPOTENCY_BODY_BYTES",
+  2 * 1024 * 1024,
 );
-const PROXY_UPSTREAM_TIMEOUT_MS = Number(process.env.STEWARD_PROXY_UPSTREAM_TIMEOUT_MS ?? 30_000);
+const PROXY_UPSTREAM_TIMEOUT_MS = positiveIntegerEnv("STEWARD_PROXY_UPSTREAM_TIMEOUT_MS", 30_000);
 /**
  * SEC-100: proxy resource limits fail closed — they cannot be disabled. A `0`
  * (or garbage) env value previously meant "unlimited", silently removing the
@@ -304,31 +307,16 @@ const PROXY_UPSTREAM_TIMEOUT_MS = Number(process.env.STEWARD_PROXY_UPSTREAM_TIME
  * misconfiguration. Reject non-positive / non-integer values at startup
  * (module load) instead.
  */
-function positiveLimitFromEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw.trim() === "") return fallback;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(
-      `${name} must be a positive integer (got ${JSON.stringify(raw)}); ` +
-        "proxy resource limits fail closed and cannot be disabled",
-    );
-  }
-  return value;
-}
-const MAX_PROXY_RESPONSE_BYTES = positiveLimitFromEnv(
+const MAX_PROXY_RESPONSE_BYTES = positiveIntegerEnv(
   "STEWARD_PROXY_RESPONSE_BYTES",
   25 * 1024 * 1024,
 );
-const MAX_PROXY_STREAM_DURATION_MS = positiveLimitFromEnv(
+const MAX_PROXY_STREAM_DURATION_MS = positiveIntegerEnv(
   "STEWARD_PROXY_STREAM_DURATION_MS",
   5 * 60_000,
 );
-let MAX_PROXY_IN_FLIGHT_PER_AGENT = positiveLimitFromEnv(
-  "STEWARD_PROXY_MAX_IN_FLIGHT_PER_AGENT",
-  50,
-);
-let MAX_PROXY_IN_FLIGHT_PER_TENANT = positiveLimitFromEnv(
+let MAX_PROXY_IN_FLIGHT_PER_AGENT = positiveIntegerEnv("STEWARD_PROXY_MAX_IN_FLIGHT_PER_AGENT", 50);
+let MAX_PROXY_IN_FLIGHT_PER_TENANT = positiveIntegerEnv(
   "STEWARD_PROXY_MAX_IN_FLIGHT_PER_TENANT",
   250,
 );
@@ -1817,7 +1805,11 @@ export async function handleProxy(c: Context): Promise<Response> {
     );
   } catch (err) {
     const latencyMs = Date.now() - startTime;
-    console.error(`[proxy] Upstream request failed:`, err);
+    // Fetch errors can embed the full outbound URL. Query-injected credentials
+    // must never be copied from that error into application logs.
+    console.error("[proxy] Upstream request failed", {
+      errorName: err instanceof Error ? err.name : "UnknownError",
+    });
 
     // Audit the failure
     await recordAudit({

@@ -16,7 +16,7 @@ import { validateJwtSecretEnv } from "@stwd/auth";
 import { metricsTokenIsValid, renderSecurityMetrics, securityMetricsEnabled } from "@stwd/shared";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { PROXY_PORT } from "./config";
+import { configuredProxyCorsOrigins, PROXY_PORT } from "./config";
 import { getAliasNames } from "./handlers/alias";
 import { handleProxy } from "./handlers/proxy";
 import { handlePendingProxyRequest, listPendingProxyRequests } from "./handlers/release";
@@ -45,10 +45,7 @@ const app = new Hono();
 // leaked token cross-origin from browser JS). Set STEWARD_PROXY_CORS_ORIGINS
 // (comma-separated) only if a browser client genuinely needs cross-origin
 // access.
-const corsOrigins = (process.env.STEWARD_PROXY_CORS_ORIGINS ?? "")
-  .split(",")
-  .map((origin) => origin.trim())
-  .filter(Boolean);
+const corsOrigins = configuredProxyCorsOrigins();
 if (corsOrigins.length > 0) {
   app.use("*", cors({ origin: corsOrigins }));
 }

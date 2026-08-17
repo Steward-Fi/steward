@@ -22,7 +22,7 @@ import {
   settleReservedSpend,
 } from "@stwd/redis";
 import { and, eq } from "drizzle-orm";
-import { isProxyDevMode } from "../config";
+import { isProxyDevMode, positiveIntegerEnv } from "../config";
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -65,16 +65,6 @@ export async function shutdownProxyRedis(): Promise<void> {
 }
 
 // ─── Default rate limits for proxy (per-agent per-host) ──────────────────────
-
-function positiveIntegerEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw.trim() === "") return fallback;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`${name} must be a positive integer`);
-  }
-  return value;
-}
 
 const DEFAULT_PROXY_RATE_LIMIT_WINDOW_MS = positiveIntegerEnv(
   "STEWARD_PROXY_RATE_LIMIT_WINDOW_MS",
