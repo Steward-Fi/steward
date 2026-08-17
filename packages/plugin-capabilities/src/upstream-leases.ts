@@ -14,7 +14,9 @@ import { capabilities, capabilityGrants } from "./schema";
 
 export const GITHUB_APP_LEASE_ISSUER = "github-app-installation";
 export const MAX_UPSTREAM_LEASE_TTL_SECONDS = 3600;
-const MIN_UPSTREAM_LEASE_TTL_SECONDS = 60;
+export const GITHUB_INSTALLATION_TOKEN_TTL_SECONDS = 3600;
+const MIN_GITHUB_ISSUED_TTL_MS = 55 * 60 * 1000;
+const MAX_GITHUB_ISSUED_TTL_MS = (GITHUB_INSTALLATION_TOKEN_TTL_SECONDS + 30) * 1000;
 const REVOCATION_CLAIM_TIMEOUT_MS = 30_000;
 
 export interface GitHubLeaseResource {
@@ -38,7 +40,6 @@ export interface UpstreamTokenIssuer {
     installationId: string;
     privateKeyPem: string;
     resource: GitHubLeaseResource;
-    ttlSeconds: number;
   }): Promise<{ token: string; expiresAt: Date }>;
   revoke(token: string): Promise<void>;
 }
@@ -107,7 +108,7 @@ function leaseAuthorityDigest(secretId: string, config: GitHubAppLeaseConfig): s
       installationId: config.installationId,
       allowedRepositories: [...new Set(config.allowedRepositories)].sort(),
       allowedPermissions: Object.fromEntries(
-        Object.entries(config.allowedPermissions).sort(([a], [b]) => a.localeCompare(b)),
+        Object.entries(config.allowedPermissions).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
       ),
       maxTtlSeconds: config.maxTtlSeconds ?? MAX_UPSTREAM_LEASE_TTL_SECONDS,
     }),
@@ -135,18 +136,18 @@ export function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function canonicalResource(resource: GitHubLeaseResource): GitHubLeaseResource {
+export function canonicalGitHubLeaseResource(resource: GitHubLeaseResource): GitHubLeaseResource {
   const repositories = [...new Set(resource.repositories.map((value) => value.trim()))].sort();
   const permissions = Object.fromEntries(
     Object.entries(resource.permissions)
       .map(([key, value]) => [key.trim(), value] as const)
-      .sort(([a], [b]) => a.localeCompare(b)),
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
   );
   return { repositories, permissions };
 }
 
 function resourceHash(resource: GitHubLeaseResource): string {
-  return sha256(JSON.stringify(canonicalResource(resource)));
+  return sha256(JSON.stringify(canonicalGitHubLeaseResource(resource)));
 }
 
 export function parseGitHubLeaseConfig(constraints: unknown): GitHubAppLeaseConfig | null {
@@ -176,12 +177,7 @@ export function parseGitHubLeaseConfig(constraints: unknown): GitHubAppLeaseConf
     return null;
   }
   const maxTtlSeconds = value.maxTtlSeconds;
-  if (
-    maxTtlSeconds !== undefined &&
-    (!Number.isInteger(maxTtlSeconds) ||
-      (maxTtlSeconds as number) < MIN_UPSTREAM_LEASE_TTL_SECONDS ||
-      (maxTtlSeconds as number) > MAX_UPSTREAM_LEASE_TTL_SECONDS)
-  ) {
+  if (maxTtlSeconds !== undefined && maxTtlSeconds !== GITHUB_INSTALLATION_TOKEN_TTL_SECONDS) {
     return null;
   }
   return {
@@ -199,7 +195,7 @@ function validateResource(
   requested: GitHubLeaseResource,
   config: GitHubAppLeaseConfig,
 ): GitHubLeaseResource | null {
-  const normalized = canonicalResource(requested);
+  const normalized = canonicalGitHubLeaseResource(requested);
   if (
     normalized.repositories.length === 0 ||
     normalized.repositories.length > 500 ||
@@ -342,20 +338,12 @@ export async function issueUpstreamCredentialLease(input: {
       error: "upstream lease is not configured for this workspace",
     };
   }
-  const maxTtl = Math.min(
-    config.maxTtlSeconds ?? MAX_UPSTREAM_LEASE_TTL_SECONDS,
-    MAX_UPSTREAM_LEASE_TTL_SECONDS,
-  );
-  if (
-    !Number.isInteger(input.ttlSeconds) ||
-    input.ttlSeconds < MIN_UPSTREAM_LEASE_TTL_SECONDS ||
-    input.ttlSeconds > maxTtl
-  ) {
+  if (input.ttlSeconds !== GITHUB_INSTALLATION_TOKEN_TTL_SECONDS) {
     return {
       ok: false,
       status: 400,
       code: "ttl_out_of_range",
-      error: `ttlSeconds must be ${MIN_UPSTREAM_LEASE_TTL_SECONDS}-${maxTtl}`,
+      error: `GitHub App installation-token ttlSeconds must be ${GITHUB_INSTALLATION_TOKEN_TTL_SECONDS}`,
     };
   }
   if (input.idempotencyKey.length < 16 || input.idempotencyKey.length > 255) {
@@ -443,7 +431,6 @@ export async function issueUpstreamCredentialLease(input: {
           installationId: config.installationId,
           privateKeyPem,
           resource,
-          ttlSeconds: input.ttlSeconds,
         }),
     );
   } catch {
@@ -456,13 +443,15 @@ export async function issueUpstreamCredentialLease(input: {
     };
   }
 
-  // GitHub currently chooses installation-token expiry. Never pretend a locally
-  // requested shorter TTL constrains a credential that remains live upstream.
+  // GitHub chooses a one-hour installation-token expiry and does not accept a
+  // requested TTL. Validate the official response shape without pretending a
+  // shorter local lifetime can constrain a credential that remains live there.
+  const issuedLifetimeMs = issued.expiresAt.getTime() - now.getTime();
   if (
     !issued.token ||
     !Number.isFinite(issued.expiresAt.getTime()) ||
-    issued.expiresAt.getTime() <= now.getTime() ||
-    issued.expiresAt.getTime() > now.getTime() + input.ttlSeconds * 1000 + 30_000
+    issuedLifetimeMs < MIN_GITHUB_ISSUED_TTL_MS ||
+    issuedLifetimeMs > MAX_GITHUB_ISSUED_TTL_MS
   ) {
     const revoked = await input.issuer.revoke(issued.token).then(
       () => true,
@@ -472,7 +461,7 @@ export async function issueUpstreamCredentialLease(input: {
       input.db,
       claim.id,
       input.tenantId,
-      "upstream expiry exceeded requested ttl",
+      "upstream expiry did not match GitHub's one-hour installation-token contract",
       revoked ? "failed" : "needs_attention",
     );
     return {

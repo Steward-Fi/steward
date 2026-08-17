@@ -42,7 +42,10 @@ stored PAT. The configured allowlist and live capability grant constrain the
 requested repositories and permissions. Steward returns it once with
 `Cache-Control: no-store`; only its SHA-256 digest, status, expiry and immutable
 tenant/workspace/agent/grant/capability/resource binding are persisted. Reusing
-the idempotency key returns `409` and never replays the credential.
+the idempotency key returns `409` and never replays the credential. GitHub does
+not accept a caller-selected installation-token TTL, so this endpoint accepts
+exactly `ttlSeconds: 3600`; shorter values are rejected rather than presented as
+an upstream lifetime Steward cannot enforce.
 
 ### broker mode
 ```
@@ -60,9 +63,11 @@ only the scrubbed upstream response.
 
 ## Expiry, renewal & revocation
 
-- GitHub chooses installation-token expiry (currently about one hour). Steward
-  rejects a provider response whose expiry exceeds the requested/configured cap;
-  it does not pretend a shorter local timestamp shortens an upstream token.
+- GitHub chooses installation-token expiry (currently one hour). Steward sends
+  no fictitious TTL field to GitHub and accepts only the one-hour API contract.
+  It rejects and revokes a response whose expiry is not shaped like a newly
+  issued one-hour token; it does not pretend a shorter local timestamp shortens
+  an upstream token.
 - Renewal is a fresh issuance with a new idempotency key and a complete live
   grant/scope check. A token is never replayed.
 - `POST /capabilities/manifest/leases/:leaseId/revoke` requires the token as

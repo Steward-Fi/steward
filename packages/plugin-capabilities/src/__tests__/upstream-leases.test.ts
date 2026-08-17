@@ -3,6 +3,7 @@ import { eq, upstreamCredentialLeaseEvents, upstreamCredentialLeases } from "@st
 import { sql } from "drizzle-orm";
 import { capabilities, capabilityGrants } from "../schema";
 import {
+  canonicalGitHubLeaseResource,
   expireUpstreamCredentialLeases,
   GITHUB_APP_LEASE_ISSUER,
   issueUpstreamCredentialLease,
@@ -143,6 +144,33 @@ afterEach(async () => {
 });
 
 describe("upstream credential leases", () => {
+  test("only advertises GitHub's actual one-hour installation-token lifetime", async () => {
+    const issuer = new FakeIssuer();
+    for (const ttlSeconds of [60, 300, 900, 3599, 3601]) {
+      const result = await issueUpstreamCredentialLease({
+        ...issueArgs(issuer, `idempotency-unsupported-ttl-${ttlSeconds}`),
+        ttlSeconds,
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        status: 400,
+        code: "ttl_out_of_range",
+      });
+    }
+    expect(issuer.issueCalls).toBe(0);
+  });
+
+  test("canonical resource hashing uses deterministic code-unit ordering", () => {
+    expect(
+      Object.keys(
+        canonicalGitHubLeaseResource({
+          repositories: ["steward"],
+          permissions: { zeta: "read", Alpha: "write", beta: "read" },
+        }).permissions,
+      ),
+    ).toEqual(["Alpha", "beta", "zeta"]);
+  });
+
   test("concurrent issuance calls upstream once and never replays or persists plaintext", async () => {
     const issuer = new FakeIssuer();
     const results = await Promise.all(
@@ -445,5 +473,15 @@ describe("upstream credential leases", () => {
     const rows = await harness.db.select().from(upstreamCredentialLeases);
     expect(rows[0].status).toBe("needs_attention");
     expect(JSON.stringify(rows[0])).not.toContain(TOKEN);
+  });
+
+  test("a non-GitHub-shaped short upstream expiry is revoked and denied", async () => {
+    const issuer = new FakeIssuer();
+    issuer.expiryOffsetMs = 15 * 60_000;
+    const denied = await issueUpstreamCredentialLease(
+      issueArgs(issuer, "idempotency-short-provider-expiry"),
+    );
+    expect(denied).toMatchObject({ ok: false, code: "issuer_contract_violation" });
+    expect(issuer.revokeCalls).toBe(1);
   });
 });

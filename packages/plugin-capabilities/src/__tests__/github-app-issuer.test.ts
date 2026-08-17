@@ -11,7 +11,6 @@ const request = {
   installationId: "456",
   privateKeyPem,
   resource: { repositories: ["steward"], permissions: { contents: "read" as const } },
-  ttlSeconds: 3600,
 };
 
 describe("GitHub App upstream issuer transport", () => {
@@ -45,5 +44,22 @@ describe("GitHub App upstream issuer transport", () => {
     await expect(issuer.issue(request)).rejects.not.toThrow(canary);
     expect(signal).toBeInstanceOf(AbortSignal);
     expect(redirect).toBe("error");
+  });
+
+  test("sends GitHub's official installation-token request shape without a fictitious ttl", async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    const expiresAt = new Date(Date.now() + 60 * 60_000).toISOString();
+    const issuer = new GitHubAppInstallationTokenIssuer((async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Response.json({ token: "ghs_test", expires_at: expiresAt });
+    }) as typeof fetch);
+
+    const issued = await issuer.issue(request);
+    expect(requestBody).toEqual({
+      repositories: ["steward"],
+      permissions: { contents: "read" },
+    });
+    expect(requestBody).not.toHaveProperty("ttlSeconds");
+    expect(issued).toEqual({ token: "ghs_test", expiresAt: new Date(expiresAt) });
   });
 });
