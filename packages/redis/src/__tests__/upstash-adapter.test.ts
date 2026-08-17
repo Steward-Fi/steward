@@ -147,3 +147,35 @@ describe("upstash adapter — getdel (issue #100)", () => {
     );
   });
 });
+
+describe("upstash adapter — pipeline eval (SEC-168)", () => {
+  test("pipeline eval maps ioredis positional args to Upstash keys/args arrays", async () => {
+    // Minimal fake: record how the underlying Upstash pipeline is driven.
+    const calls: unknown[] = [];
+    const fakePipeline = {
+      eval(script: string, keys: string[], args: string[]) {
+        calls.push({ script, keys, args });
+        return fakePipeline;
+      },
+      async exec() {
+        return [42];
+      },
+    };
+    const client = {
+      multi() {
+        return fakePipeline;
+      },
+    } as unknown as UpstashRedis;
+
+    const adapter = createUpstashIoredisAdapter(client);
+    const pipeline = adapter.multi();
+    pipeline.eval("return 42", 1, "spend:agent:day:2026-01-01", "4000");
+    const results = await pipeline.exec();
+
+    expect(calls).toEqual([
+      { script: "return 42", keys: ["spend:agent:day:2026-01-01"], args: ["4000"] },
+    ]);
+    // ioredis-style [err, value] tuples.
+    expect(results).toEqual([[null, 42]]);
+  });
+});

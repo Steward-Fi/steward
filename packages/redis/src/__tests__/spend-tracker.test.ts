@@ -180,4 +180,30 @@ describeRedis("Spend Tracker", () => {
     expect(settled.reserved).toBe(0);
     expect(settled.remaining).toBeCloseTo(0.75, 4);
   });
+
+  test("a double-settle floors reserved at zero instead of freeing budget (SEC-168)", async () => {
+    const reservation = await reserveSpend(TEST_AGENT, TEST_TENANT, 0.4, { day: 1 });
+
+    // Settle twice: the second call is a caller bug, and it must NOT drive
+    // `reserved` negative — that would subtract from the effective spend and
+    // silently hand back budget the agent never had.
+    for (let i = 0; i < 2; i++) {
+      await settleReservedSpend(
+        TEST_AGENT,
+        TEST_TENANT,
+        reservation.reservedUsd,
+        0.25,
+        "api.openai.com",
+        reservation.periods,
+        reservation.buckets,
+      );
+    }
+
+    const snap = await checkSpendLimit(TEST_AGENT, 1, "day");
+    expect(snap.reserved).toBe(0);
+    // effectiveSpent = spent + reserved must not dip below the settled total.
+    expect(snap.effectiveSpent).toBeCloseTo(0.5, 4);
+    // And the limit gate must treat the agent as having spent, not gained.
+    expect(snap.remaining).toBeCloseTo(0.5, 4);
+  });
 });
