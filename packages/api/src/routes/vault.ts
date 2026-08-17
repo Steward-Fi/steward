@@ -3422,6 +3422,10 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
           transaction: signRequest.data,
           chainId: transfer.chainId,
           broadcast: transfer.broadcast,
+          // SEC-163: SPL token transfers carry no vault-layer envelope (the
+          // byte-level check only models native SOL transfers); the edge
+          // policy evaluation above approved this transfer.
+          allowBlindSign: true,
         });
         result = signed.signature;
       } else {
@@ -4185,8 +4189,11 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           transaction: transactionRow.data,
           chainId: transactionRow.chainId,
           broadcast: shouldBroadcast,
+          // SEC-163: token transfers have no vault-layer envelope — the
+          // approval-queue policy grant above stands in for it (allowBlindSign);
+          // native transfers keep the byte-level envelope assertion.
           ...(isSolanaTokenTransfer
-            ? {}
+            ? { allowBlindSign: true }
             : { expectedTo: transactionRow.toAddress, expectedValue: transactionRow.value }),
         });
         txHash = result.signature;
@@ -5984,6 +5991,9 @@ vaultRoutes.post("/:agentId/sign-bitcoin-psbt", async (c) => {
         walletScope,
         psbtBase64,
         finalize,
+        // SEC-163: the vault layer applies no PSBT fee/output policy; the
+        // inspect + aggregate policy evaluation above approved this PSBT.
+        allowBlindSign: true,
       });
       const transactionId = crypto.randomUUID();
       await db.insert(transactions).values({
@@ -8227,7 +8237,12 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         transaction: body.transaction,
         chainId,
         broadcast: body.broadcast,
-        ...(isSingleNativeTransfer ? { expectedTo: toAddress, expectedValue: txValue } : {}),
+        // SEC-163: non-single-transfer shapes carry no vault-layer envelope —
+        // the instruction-parser policy check above approved the effects, so
+        // the caller attests via allowBlindSign instead.
+        ...(isSingleNativeTransfer
+          ? { expectedTo: toAddress, expectedValue: txValue }
+          : { allowBlindSign: true }),
       });
       completedResult = { txId, ...result };
 
