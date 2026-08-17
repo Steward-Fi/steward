@@ -331,7 +331,7 @@ jobs:
           STEWARD_EMAIL_CODE_SECRET: "ci-email-code-secret-must-be-at-least-32-chars-long"
           STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "ci-audit-hmac-key-must-be-at-least-32-bytes-long"
-          SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
+          SIWE_ALLOWED_DOMAINS: "steward.fi,localhost,127.0.0.1:3200"
         run: |
           bun run start:local > /tmp/steward-fi-e2e.log 2>&1 &
           echo $! > /tmp/steward-fi-e2e.pid
@@ -405,7 +405,7 @@ jobs:
           # which are enforced only when NODE_ENV=production (covered by unit tests).
           NODE_ENV: "test"
           STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS: "true"
-          SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
+          SIWE_ALLOWED_DOMAINS: "steward.fi,localhost,127.0.0.1:3200"
           PORT: "3200"
           STEWARD_PROXY_PORT: "8080"
         run: |
