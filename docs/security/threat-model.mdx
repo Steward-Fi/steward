@@ -394,6 +394,11 @@ adversary defeats the entire architecture.
   Ed25519 checkpoints, and offline verifier detect modification relative to the public key carried in the bundle. Operators must separately
   match that key to an out-of-band trusted signing key or fingerprint. An operator controlling all
   relevant keys can still fabricate a self-consistent history.
+- **Optional checkpoint anchoring narrows, but does not remove, that limit.**
+  An RFC 3161 proof verified against an auditor-supplied TSA CA shows a signed
+  checkpoint existed no later than the TSA time. It does not make Steward
+  tamper-proof or operator-proof, cover post-anchor events, or prove export
+  completeness.
 - **No rate limiting on read endpoints.** Rate limits apply to
   signing and auth; general read traffic is not rate-capped beyond
   whatever the reverse proxy enforces.

@@ -484,6 +484,13 @@
       "when": 1784745600000,
       "tag": "0088_provider_agent_budgets",
       "breakpoints": true
+    },
+    {
+      "idx": 89,
+      "version": "7",
+      "when": 1784832000000,
+      "tag": "0089_rfc3161_checkpoint_proofs",
+      "breakpoints": true
     }
   ]
 }
