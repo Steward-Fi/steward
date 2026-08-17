@@ -40,6 +40,9 @@ const GH_SPEC = {
 function buildCtx(db: unknown): StewardAppContext {
   return {
     db,
+    getRedisClient() {
+      return null;
+    },
     async writeAuditEvent(ev: Record<string, unknown>) {
       // Reconstruct the structured event from the core-audit shape for assertion.
       const md = (ev.metadata ?? {}) as Record<string, unknown>;
