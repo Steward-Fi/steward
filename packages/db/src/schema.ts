@@ -2288,9 +2288,15 @@ export const providerActionReservationGenerations = pgTable(
       table.generation,
     ),
     dueIdx: index("provider_action_reservation_generations_due_idx").on(
-      table.state,
       table.nextRetryAt,
       table.createdAt,
+      table.id,
+    ),
+    tenantDueIdx: index("provider_action_reservation_generations_tenant_due_idx").on(
+      table.tenantId,
+      table.nextRetryAt,
+      table.createdAt,
+      table.id,
     ),
   }),
 );

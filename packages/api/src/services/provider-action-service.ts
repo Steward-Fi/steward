@@ -1279,11 +1279,13 @@ class ProviderActionService {
    */
   private async reserveCumulativeSpendForInvoke(input: {
     rules: ProviderPolicyRule[];
+    intentId: string;
     operationKey: string;
     agentId: string;
     grantId: string | null;
     spendDeclaration: { field: string; currency: string } | undefined;
     policyArgs: Record<string, unknown>;
+    reservationGeneration: number;
   }): Promise<{
     contextSums: Record<string, number> | undefined;
     reservations: CumulativeSpendReservationHandle[];
@@ -1401,6 +1403,15 @@ class ProviderActionService {
           stream,
           caps: caps.map((c) => ({ windowSeconds: c.windowSeconds, max: c.max })),
           amount: thisSpend,
+          reservationId: sha256HexPrefixed(
+            jcsStringify({
+              domain: "steward.provider-reservation.v1",
+              intentId: input.intentId,
+              generation: input.reservationGeneration,
+              kind: "cumulativeSpend",
+              stream,
+            }),
+          ),
         });
       } catch {
         // Redis/parse failure => deny for every cap on this stream (missing
@@ -1502,6 +1513,9 @@ class ProviderActionService {
     requestHash: string;
     actionDigest: string;
     grantId?: string | null;
+    /** Append-only reservation generation. Stable identities derived from this
+     * make an approval retry idempotent across the Redis-before-PG crash gap. */
+    reservationGeneration?: number;
   }): Promise<{
     doc: PersistedPolicyDecisionV1;
     evaluation: ProviderPolicyEvaluationV1;
@@ -1542,11 +1556,13 @@ class ProviderActionService {
     const spendDeclaration = extractSpendDeclaration(operation.requestProfile);
     const cumulative = await this.reserveCumulativeSpendForInvoke({
       rules,
+      intentId: args.intentId,
       operationKey: operation.operationKey,
       agentId: args.actorAgentId,
       grantId: args.grantId ?? null,
       spendDeclaration,
       policyArgs: build.policyArgs,
+      reservationGeneration: args.reservationGeneration ?? 1,
     });
 
     // #206 configurable count cap (maxCalls + callWindow): ATOMICALLY reserve one
@@ -1573,6 +1589,16 @@ class ProviderActionService {
         agentId: args.actorAgentId,
         operationKey: operation.operationKey,
         caps: govMaxCalls.map((c) => ({ windowSeconds: c.windowSeconds, max: c.max })),
+        reservationId: sha256HexPrefixed(
+          jcsStringify({
+            domain: "steward.provider-reservation.v1",
+            intentId: args.intentId,
+            generation: args.reservationGeneration ?? 1,
+            kind: "windowedInvoke",
+            agentId: args.actorAgentId,
+            operationKey: operation.operationKey,
+          }),
+        ),
       });
       govMaxCalls.forEach((cap, i) => {
         const bucketKey = windowedInvokeBucketKey({
@@ -1724,6 +1750,7 @@ class ProviderActionService {
       }
     | { ok: false; code: string; httpStatus: number }
   > {
+    const generation = args.priorGeneration + 1;
     const canonicalText = Buffer.from(args.canonicalActionBytes).toString("utf8");
     const action = JSON.parse(canonicalText) as Record<string, unknown>;
     const build = rebuildApprovedAction(args.operation.operationKey, action, args.safeSummary);
@@ -1745,13 +1772,14 @@ class ProviderActionService {
       requestHash: args.requestHash,
       actionDigest: args.actionDigest,
       grantId: args.matchedGrantIds[0] ?? null,
+      reservationGeneration: generation,
     });
     if (policy.doc.effect === "hard_deny") {
       await this.releasePolicyReservationHandles(
         persistedReservationHandles(
           policy.cumulativeSpendReservations,
           policy.windowedInvokeReservation,
-          1,
+          generation,
           "execution",
         ),
       );
@@ -1762,7 +1790,6 @@ class ProviderActionService {
       };
     }
 
-    const generation = args.priorGeneration + 1;
     return {
       ok: true,
       decision: policy.doc,
@@ -1876,43 +1903,42 @@ class ProviderActionService {
    * safely retried; unknown outcomes remain pending and are never released.
    */
   async reconcilePolicyReservations(tenantId?: string, intentId?: string): Promise<number> {
-    const candidates = await this.db()
-      .select()
-      .from(providerActionReservationGenerations)
-      .where(
-        and(
-          tenantId
-            ? eq(providerActionReservationGenerations.tenantId, tenantId)
-            : (sql`true` as unknown as ReturnType<typeof eq>),
-          sql`${providerActionReservationGenerations.state} IN ('pending','needs_attention')`,
-          sql`(${providerActionReservationGenerations.nextRetryAt} IS NULL OR ${providerActionReservationGenerations.nextRetryAt} <= now())`,
-          sql`(${providerActionReservationGenerations.claimedAt} IS NULL OR ${providerActionReservationGenerations.claimedAt} < now() - interval '60 seconds')`,
-          intentId
-            ? eq(providerActionReservationGenerations.intentId, intentId)
-            : (sql`true` as unknown as ReturnType<typeof eq>),
-        ),
-      )
-      .orderBy(
-        providerActionReservationGenerations.nextRetryAt,
-        providerActionReservationGenerations.createdAt,
-      )
-      .limit(50);
-    let reconciled = 0;
-    for (const candidate of candidates) {
-      const claimId = randomUUID();
-      const [row] = await this.db()
-        .update(providerActionReservationGenerations)
-        .set({ claimedBy: claimId, claimedAt: new Date() })
-        .where(
-          and(
-            eq(providerActionReservationGenerations.id, candidate.id),
-            eq(providerActionReservationGenerations.state, candidate.state),
-            eq(providerActionReservationGenerations.attempts, candidate.attempts),
-            sql`(${providerActionReservationGenerations.claimedAt} IS NULL OR ${providerActionReservationGenerations.claimedAt} < now() - interval '60 seconds')`,
-          ),
+    // Claim a bounded batch in one short transaction. SKIP LOCKED lets every
+    // replica make progress on a disjoint batch instead of selecting the same
+    // hot rows and losing N-1 follow-up CAS updates. A stale claim is a lease,
+    // not ownership: all Redis operations below are idempotent by reservation
+    // identity, so a worker death is safe to reclaim after 60 seconds.
+    const claimId = randomUUID();
+    const candidates = await this.db().transaction(async (tx) => {
+      const tenantFilter = tenantId ? sql`AND tenant_id = ${tenantId}` : sql``;
+      const intentFilter = intentId ? sql`AND intent_id = ${intentId}` : sql``;
+      await tx.execute(sql`
+        WITH due AS (
+          SELECT id
+          FROM provider_action_reservation_generations
+          WHERE (
+              (state = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= now()))
+              OR (state = 'needs_attention' AND next_retry_at IS NOT NULL AND next_retry_at <= now())
+            )
+            AND (claimed_at IS NULL OR claimed_at < now() - interval '60 seconds')
+            ${tenantFilter}
+            ${intentFilter}
+          ORDER BY COALESCE(next_retry_at, '-infinity'::timestamptz), created_at, id
+          LIMIT 50
+          FOR UPDATE SKIP LOCKED
         )
-        .returning();
-      if (!row) continue;
+        UPDATE provider_action_reservation_generations AS generation
+        SET claimed_by = ${claimId}::uuid, claimed_at = now()
+        FROM due
+        WHERE generation.id = due.id
+      `);
+      return tx
+        .select()
+        .from(providerActionReservationGenerations)
+        .where(eq(providerActionReservationGenerations.claimedBy, claimId));
+    });
+    let reconciled = 0;
+    for (const row of candidates) {
       const [binding] = await this.db()
         .select({ status: providerActionBindings.status })
         .from(providerActionBindings)
@@ -1922,15 +1948,11 @@ class ProviderActionService {
       if (!handles || handles.generation !== row.generation || handles.phase !== row.phase) {
         const message = "malformed immutable reservation generation";
         await this.recordReservationFailure(row, claimId, message, true);
-        await writeAuditEvent({
-          tenantId: row.tenantId,
-          actorType: "system",
-          action: "provider.reservation.needs_attention",
-          resourceType: "provider_action",
-          resourceId: row.intentId,
-          metadata: { generation: row.generation, reasonCode: "RESERVATION_GENERATION_MALFORMED" },
-        }).catch((error) =>
-          console.error("[provider-reservations] malformed-generation audit failed:", error),
+        // recordReservationFailure transactionally enqueues REQUIRED evidence.
+        // Draining is best effort here; a signer outage cannot erase the durable
+        // attention row or outbox event and normal C2 recovery will retry it.
+        await this.recoverUnsignedIntents(row.tenantId, row.intentId).catch((error) =>
+          console.error("[provider-reservations] malformed-generation audit drain failed:", error),
         );
         continue;
       }
@@ -1994,24 +2016,49 @@ class ProviderActionService {
   ): Promise<void> {
     const attempts = row.attempts + 1;
     const delaySeconds = Math.min(3600, 2 ** Math.min(attempts, 12));
-    await this.db()
-      .update(providerActionReservationGenerations)
-      .set({
-        state: malformed || attempts >= 20 ? "needs_attention" : "pending",
-        attempts,
-        lastError: message.slice(0, 1000),
-        nextRetryAt: new Date(Date.now() + delaySeconds * 1000),
-        claimedAt: null,
-        claimedBy: null,
-      })
-      .where(
-        and(
-          eq(providerActionReservationGenerations.id, row.id),
-          eq(providerActionReservationGenerations.state, row.state),
-          eq(providerActionReservationGenerations.attempts, row.attempts),
-          eq(providerActionReservationGenerations.claimedBy, claimId),
-        ),
-      );
+    const terminalAttention = malformed || attempts >= 20;
+    await this.db().transaction(async (tx) => {
+      const updated = await tx
+        .update(providerActionReservationGenerations)
+        .set({
+          state: terminalAttention ? "needs_attention" : "pending",
+          attempts,
+          lastError: message.slice(0, 1000),
+          // NULL on durable attention deliberately removes the immutable-bad or
+          // exhausted row from the hot sweep. An operator must explicitly reset
+          // it after remediation; normal transient failures use exponential
+          // backoff and remain eligible.
+          nextRetryAt: terminalAttention ? null : new Date(Date.now() + delaySeconds * 1000),
+          claimedAt: null,
+          claimedBy: null,
+        })
+        .where(
+          and(
+            eq(providerActionReservationGenerations.id, row.id),
+            eq(providerActionReservationGenerations.state, row.state),
+            eq(providerActionReservationGenerations.attempts, row.attempts),
+            eq(providerActionReservationGenerations.claimedBy, claimId),
+          ),
+        )
+        .returning({ id: providerActionReservationGenerations.id });
+      if (updated.length === 0 || !terminalAttention) return;
+      await tx.insert(providerActionAuditOutbox).values({
+        tenantId: row.tenantId,
+        intentId: row.intentId,
+        action: "provider.reservation.needs_attention",
+        resourceType: "provider_action",
+        resourceId: row.intentId,
+        metadata: {
+          schemaVersion: "steward.provider-reservation-attention.v1",
+          intentId: row.intentId,
+          generation: row.generation,
+          reasonCode: malformed
+            ? "RESERVATION_GENERATION_MALFORMED"
+            : "RESERVATION_RECONCILIATION_RETRIES_EXHAUSTED",
+          attempts,
+        },
+      });
+    });
   }
 
   private async applyPersistedReservationHandles(

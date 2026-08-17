@@ -32,8 +32,14 @@ CREATE TABLE "provider_action_reservation_generations" (
 );
 --> statement-breakpoint
 CREATE INDEX "provider_action_reservation_generations_due_idx"
-  ON "provider_action_reservation_generations" ("state","next_retry_at","created_at")
-  WHERE "state" IN ('pending','needs_attention');
+  ON "provider_action_reservation_generations"
+    (COALESCE("next_retry_at", '-infinity'::timestamptz), "created_at", "id")
+  WHERE "state" = 'pending' OR ("state" = 'needs_attention' AND "next_retry_at" IS NOT NULL);
+--> statement-breakpoint
+CREATE INDEX "provider_action_reservation_generations_tenant_due_idx"
+  ON "provider_action_reservation_generations"
+    ("tenant_id", COALESCE("next_retry_at", '-infinity'::timestamptz), "created_at", "id")
+  WHERE "state" = 'pending' OR ("state" = 'needs_attention' AND "next_retry_at" IS NOT NULL);
 --> statement-breakpoint
 CREATE OR REPLACE FUNCTION steward_provider_reservation_generation_guard()
 RETURNS trigger LANGUAGE plpgsql AS $fn$
@@ -55,4 +61,96 @@ END $fn$;
 CREATE TRIGGER "provider_action_reservation_generation_guard"
 BEFORE UPDATE ON "provider_action_reservation_generations"
 FOR EACH ROW EXECUTE FUNCTION steward_provider_reservation_generation_guard();
+--> statement-breakpoint
+
+-- #239: the current execute-time policy decision is immutable evidence written
+-- in the same transaction that consumes approval and mints authorization.
+ALTER TABLE "provider_action_bindings"
+  ADD COLUMN "execution_policy_decision_id" uuid,
+  ADD COLUMN "execution_policy_revision_hash" varchar(71),
+  ADD COLUMN "execution_policy_decision" jsonb,
+  ADD COLUMN "execution_policy_decision_hash" varchar(71),
+  ADD COLUMN "execution_policy_evaluated_at" timestamptz;
+--> statement-breakpoint
+ALTER TABLE "provider_action_bindings" ADD CONSTRAINT "provider_action_bindings_execution_policy_shape_chk" CHECK (
+  ("execution_policy_decision_id" IS NULL AND "execution_policy_revision_hash" IS NULL AND
+   "execution_policy_decision" IS NULL AND "execution_policy_decision_hash" IS NULL AND
+   "execution_policy_evaluated_at" IS NULL) OR
+  ("execution_policy_decision_id" IS NOT NULL AND "execution_policy_revision_hash" ~ '^sha256:[0-9a-f]{64}$' AND
+   "execution_policy_decision" IS NOT NULL AND "execution_policy_decision_hash" ~ '^sha256:[0-9a-f]{64}$' AND
+   "execution_policy_evaluated_at" IS NOT NULL)
+);
+--> statement-breakpoint
+
+-- Extend the existing frozen projection narrowly: execution-policy evidence may
+-- be populated exactly once, only on approved -> execution_ready. It remains
+-- frozen across every later dispatch/outcome transition.
+CREATE OR REPLACE FUNCTION steward_provider_action_binding_guard() RETURNS trigger LANGUAGE plpgsql AS $fn$
+DECLARE
+  frozen_old jsonb;
+  frozen_new jsonb;
+  mutable text[] := ARRAY[
+    'status','binding_revision','approval_actor_user_id','approval_queue_id',
+    'approval_commitment_hash','approved_at','denied_at','expired_at','stale_at',
+    'stale_reason_code','resume_actor','resume_attempt_id','resume_validated_at','updated_at',
+    'execution_policy_decision_id','execution_policy_revision_hash','execution_policy_decision',
+    'execution_policy_decision_hash','execution_policy_evaluated_at'
+  ];
+  col text;
+  execution_policy_changed boolean;
+BEGIN
+  frozen_old := to_jsonb(OLD);
+  frozen_new := to_jsonb(NEW);
+  FOREACH col IN ARRAY mutable LOOP
+    frozen_old := frozen_old - col;
+    frozen_new := frozen_new - col;
+  END LOOP;
+  IF frozen_old IS DISTINCT FROM frozen_new THEN
+    RAISE EXCEPTION 'provider_action_bindings frozen column mutated' USING ERRCODE = '23514';
+  END IF;
+
+  execution_policy_changed :=
+    OLD.execution_policy_decision_id IS DISTINCT FROM NEW.execution_policy_decision_id OR
+    OLD.execution_policy_revision_hash IS DISTINCT FROM NEW.execution_policy_revision_hash OR
+    OLD.execution_policy_decision IS DISTINCT FROM NEW.execution_policy_decision OR
+    OLD.execution_policy_decision_hash IS DISTINCT FROM NEW.execution_policy_decision_hash OR
+    OLD.execution_policy_evaluated_at IS DISTINCT FROM NEW.execution_policy_evaluated_at;
+  IF execution_policy_changed AND NOT (
+    OLD.status = 'approved' AND NEW.status = 'execution_ready' AND
+    OLD.execution_policy_decision_id IS NULL AND
+    NEW.execution_policy_decision_id IS NOT NULL AND
+    NEW.execution_policy_revision_hash IS NOT NULL AND
+    NEW.execution_policy_decision IS NOT NULL AND
+    NEW.execution_policy_decision_hash IS NOT NULL AND
+    NEW.execution_policy_evaluated_at IS NOT NULL
+  ) THEN
+    RAISE EXCEPTION 'illegal provider execution policy mutation' USING ERRCODE = '23514';
+  END IF;
+
+  IF OLD.status IS DISTINCT FROM NEW.status THEN
+    IF OLD.status = 'allowed_stub' AND NEW.status IN ('stub_succeeded','stub_failed') THEN
+      IF NEW.binding_revision IS DISTINCT FROM OLD.binding_revision THEN
+        RAISE EXCEPTION 'provider_action_bindings stub transition must not change binding_revision'
+          USING ERRCODE = '23514';
+      END IF;
+    ELSIF (
+      (OLD.status = 'pending_approval' AND NEW.status IN ('approved','approval_denied','approval_expired','approval_stale')) OR
+      (OLD.status = 'approved' AND NEW.status IN ('execution_ready','approval_expired','approval_stale')) OR
+      (OLD.status = 'execution_ready' AND NEW.status IN ('executing','failed')) OR
+      (OLD.status = 'executing' AND NEW.status IN ('succeeded','failed','outcome_unknown')) OR
+      (OLD.status = 'outcome_unknown' AND NEW.status IN ('succeeded','failed'))
+    ) THEN
+      IF NEW.binding_revision IS DISTINCT FROM OLD.binding_revision + 1 THEN
+        RAISE EXCEPTION 'provider_action_bindings binding_revision must increment by exactly one on transition'
+          USING ERRCODE = '23514';
+      END IF;
+    ELSE
+      RAISE EXCEPTION 'illegal provider_action_bindings status transition' USING ERRCODE = '23514';
+    END IF;
+  ELSIF NEW.binding_revision IS DISTINCT FROM OLD.binding_revision THEN
+    RAISE EXCEPTION 'provider_action_bindings binding_revision changed without a status transition'
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END $fn$;
 --> statement-breakpoint

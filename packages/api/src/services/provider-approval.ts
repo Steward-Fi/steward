@@ -1902,6 +1902,13 @@ class ProviderApprovalService {
     userAgent?: string | null;
     requestId?: string | null;
   }): Promise<ApprovalResult> {
+    // Cross-store pre-commit semantics are deliberately fail-closed. A normal PG
+    // rollback/exception is compensated below by releasing these Redis handles.
+    // If the process is killed after Redis admission but before PG commit, no
+    // execution authorization exists, so dispatch is impossible; a retry derives
+    // the same (intent,generation,stream) reservation identities and therefore
+    // does not double-debit. With no retry, Redis's bounded 30-day retention ages
+    // the orphan out. This can transiently deny, never permit an overspend.
     let executionHandlesToRelease: unknown = null;
     try {
       const result = await withTenantAuditedTransaction(
@@ -2100,9 +2107,9 @@ class ProviderApprovalService {
             .set({ status: "consumed", consumedAt: nowTs, consumedBy: RESUME_ACTOR })
             .where(and(eq(approvalQueue.id, queue.id), eq(approvalQueue.status, "approved")))
             .returning({ id: approvalQueue.id });
-          if (upd.length === 0) return fail("APPROVAL_STATE_CONFLICT", 409);
+          if (upd.length === 0) throw new ApprovalResumeStateConflictError();
 
-          await tx
+          const bindingUpdate = await tx
             .update(providerActionBindings)
             .set({
               status: "execution_ready",
@@ -2126,7 +2133,9 @@ class ProviderApprovalService {
                 eq(providerActionBindings.status, "approved"),
                 eq(providerActionBindings.bindingRevision, before),
               ),
-            );
+            )
+            .returning({ intentId: providerActionBindings.intentId });
+          if (bindingUpdate.length === 0) throw new ApprovalResumeStateConflictError();
           await tx
             .update(intents)
             .set({ executedBy: RESUME_ACTOR, updatedAt: nowTs })
@@ -2226,6 +2235,8 @@ class ProviderApprovalService {
       }
       if (e instanceof AuditUnavailableError)
         return fail("EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE", 503);
+      if (e instanceof ApprovalResumeStateConflictError)
+        return fail("APPROVAL_STATE_CONFLICT", 409);
       // v2 mint fail-closed: absent HMAC key rolls back the whole resume tx so
       // no execution_ready lands without a mintable authorization (X7, P49/F06).
       if (e instanceof ProviderExecutionMintError) {
@@ -2337,6 +2348,11 @@ class ProviderApprovalService {
 // ── module helpers ──
 
 class AuditUnavailableError extends Error {}
+
+/** Throwing (instead of returning) is required after Redis admission so the
+ * approval consumption, generation insert, evidence, and mint all roll back as
+ * one unit; the outer compensation then releases the pre-commit reservation. */
+class ApprovalResumeStateConflictError extends Error {}
 
 /**
  * #205: thrown from the quorum decide path AFTER the provider_action_approvals

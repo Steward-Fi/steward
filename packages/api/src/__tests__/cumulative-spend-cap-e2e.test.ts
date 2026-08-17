@@ -58,7 +58,12 @@ import {
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { PROVIDER_POLICY_REASON } from "@stwd/policy-engine";
 import { buildXAction } from "@stwd/provider-x";
-import { disconnectRedis, getCumulativeSpendSum, getRedis } from "@stwd/redis";
+import {
+  disconnectRedis,
+  getCumulativeSpendSum,
+  getRedis,
+  reserveCumulativeSpend,
+} from "@stwd/redis";
 import { eq } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import {
@@ -413,6 +418,7 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
   });
   beforeEach(async () => {
     __setReservationReconciliationFaultForTests(null);
+    providerApprovalService.faultHooks = {};
     await wipe();
     await cleanupRedis();
   });
@@ -517,6 +523,12 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     expect(JSON.stringify(crashed.handles)).not.toContain("settled-spend");
 
     __setReservationReconciliationFaultForTests(null);
+    // A scoped replay must honor persisted exponential backoff too. Make the
+    // crash row due before racing two workers; exactly one SKIP LOCKED claim wins.
+    await getDb()
+      .update(providerActionReservationGenerations)
+      .set({ nextRetryAt: new Date(0) })
+      .where(eq(providerActionReservationGenerations.intentId, out.intentId));
     const [a, b] = await Promise.all([
       providerActionService.reconcilePolicyReservations(CS.TENANT, out.intentId),
       providerActionService.reconcilePolicyReservations(CS.TENANT, out.intentId),
@@ -562,6 +574,10 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     ).toEqual({ sum: 13 });
 
     __setReservationReconciliationFaultForTests(null);
+    await getDb()
+      .update(providerActionReservationGenerations)
+      .set({ nextRetryAt: new Date(0) })
+      .where(eq(providerActionReservationGenerations.intentId, out.intentId));
     expect(await providerActionService.recoverUnsignedIntents(CS.TENANT, out.intentId)).toBe(0);
     expect(
       await getCumulativeSpendSum({
@@ -635,19 +651,18 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     });
     expect(approved.ok).toBe(true);
 
-    // Current policy no longer requires approval. A later immediate action uses
-    // 80/100 bytes while the queued action waits; its original decision-time
-    // reservation was released by #240.
-    await getDb()
-      .update(providerOperations)
-      .set({
-        requestProfile: {
-          policyRules: spendCapRules(OP_TWEET_KEY, 100),
-          spendDeclaration: { field: "textByteLength", currency: "BYTES" },
-        },
-      })
-      .where(eq(providerOperations.id, CS.OP_TWEET));
-    expect((await proposeTweet("x".repeat(80), "cs-239-later")).kind).toBe("allowed");
+    // Another operation for this agent consumes 80/100 from the same global
+    // agent stream while the queued action waits. Keep the approved operation's
+    // revision unchanged so dependency revalidation succeeds and the test reaches
+    // the execute-time cap gate rather than merely testing stale approval.
+    expect(
+      await reserveCumulativeSpend({
+        stream: { agentId: CS.AGENT, scope: "agent", scopeKey: "", currency: "BYTES" },
+        caps: [{ windowSeconds: 86_400, max: 100 }],
+        amount: 80,
+        reservationId: `concurrent-${RUN}`,
+      }),
+    ).toMatchObject({ ok: true });
 
     const denied = await providerApprovalService.resume({
       intentId: queued.intentId,
@@ -669,5 +684,89 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
       .from(approvalQueue)
       .where(eq(approvalQueue.intentId, queued.intentId));
     expect(queue.status).toBe("approved");
+  });
+
+  test("#239 execute reservation rollback is reclaimed and concurrent resumes create one generation", async () => {
+    process.env.STEWARD_EXECUTION_AUTH_SECRET =
+      "k1:issue-239-real-redis-test-secret-with-enough-entropy";
+    await seed({
+      maxBytes: 100,
+      requireApproval: true,
+      countCapMaxCalls: 2,
+      combineCountAndSpend: true,
+    });
+    const queued = await proposeTweet("approved", "cs-239-race");
+    expect(queued.kind).toBe("approval_required");
+    if (queued.kind !== "approval_required") throw new Error("expected approval");
+    expect(
+      (
+        await providerApprovalService.decide({
+          intentId: queued.intentId,
+          tenantId: CS.TENANT,
+          authenticatedUserId: CS.GRANTOR,
+          sessionMfaVerifiedAt: Date.now(),
+          decision: "approve",
+          expectedVersion: 1,
+          expectedRequestHash: queued.requestHash,
+          expectedActionDigest: queued.actionDigest,
+          reasonCode: null,
+          reason: null,
+          idempotencyKey: "cs-239-race-approve",
+        })
+      ).ok,
+    ).toBe(true);
+
+    // Throw after Redis admission but before the audited PG transaction commits.
+    // The outer compensation releases both spend and count handles, and no
+    // append-only execution generation may leak from the rolled-back tx.
+    providerApprovalService.faultHooks.afterPolicyReserve = () => {
+      throw new Error("injected crash after execute reserve");
+    };
+    expect(
+      await providerApprovalService.resume({ intentId: queued.intentId, tenantId: CS.TENANT }),
+    ).toEqual({ ok: false, code: "RESUME_PREPARATION_FAILED", httpStatus: 503 });
+    providerApprovalService.faultHooks = {};
+    expect(
+      await getCumulativeSpendSum({
+        agentId: CS.AGENT,
+        scope: "agent",
+        scopeKey: "",
+        currency: "BYTES",
+        windowSeconds: 86_400,
+      }),
+    ).toEqual({ sum: 0 });
+    expect(
+      (
+        await getDb()
+          .select()
+          .from(providerActionReservationGenerations)
+          .where(eq(providerActionReservationGenerations.intentId, queued.intentId))
+      ).map((row) => row.generation),
+    ).toEqual([1]);
+
+    const [first, second] = await Promise.all([
+      providerApprovalService.resume({ intentId: queued.intentId, tenantId: CS.TENANT }),
+      providerApprovalService.resume({ intentId: queued.intentId, tenantId: CS.TENANT }),
+    ]);
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    const generations = await getDb()
+      .select()
+      .from(providerActionReservationGenerations)
+      .where(eq(providerActionReservationGenerations.intentId, queued.intentId));
+    expect(generations.map((row) => [row.generation, row.phase])).toEqual([
+      [1, "decision"],
+      [2, "execution"],
+    ]);
+    expect(generations[1]?.state).toBe("pending");
+    expect(
+      await getCumulativeSpendSum({
+        agentId: CS.AGENT,
+        scope: "agent",
+        scopeKey: "",
+        currency: "BYTES",
+        windowSeconds: 86_400,
+      }),
+    ).toEqual({ sum: 8 });
   });
 });
