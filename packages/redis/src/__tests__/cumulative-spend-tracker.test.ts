@@ -113,6 +113,13 @@ describeRedis("reserveCumulativeSpendBatch - cross-stream atomicity", () => {
     currency: "__agent_budget_count__",
   };
 
+  test("every agent-budget stream shares the agent Redis Cluster hash slot", () => {
+    const globalKey = cumulativeSpendStreamKeyForTest(global);
+    const workspaceKey = cumulativeSpendStreamKeyForTest(workspace);
+    expect(globalKey).toContain(`{${encodeURIComponent(AGENT)}}`);
+    expect(workspaceKey).toContain(`{${encodeURIComponent(AGENT)}}`);
+  });
+
   test("a breach on one stream appends no member to any stream", async () => {
     await reserveCumulativeSpend({
       stream: workspace,

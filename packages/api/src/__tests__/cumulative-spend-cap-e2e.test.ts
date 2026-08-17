@@ -182,7 +182,9 @@ async function cleanupRedis() {
   const redis = getRedis();
   let cursor = "0";
   do {
-    const [next, keys] = await redis.scan(cursor, "MATCH", `cumspend:${CS.AGENT}*`, "COUNT", 100);
+    // Agent-budget streams use a Redis Cluster hash tag around the agent id;
+    // match both the legacy untagged policy streams and tagged budget streams.
+    const [next, keys] = await redis.scan(cursor, "MATCH", `cumspend:*${CS.AGENT}*`, "COUNT", 100);
     cursor = next;
     if (keys.length > 0) await redis.del(...keys);
   } while (cursor !== "0");
