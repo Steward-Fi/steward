@@ -4038,6 +4038,15 @@ describe("HTTP request building", () => {
     expect(replaced.txHash).toBe("0xreplacement");
   });
 
+  it("approveVaultTransaction uses the policy-revalidating vault execution route", async () => {
+    installMockFetch({ ok: true, data: { txId: "tx/1", txHash: "0xfeed" } });
+    const result = await makeClient().approveVaultTransaction("agent/1", "tx/1");
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.url).toBe("https://api.steward.example/vault/agent%2F1/approve/tx%2F1");
+    expect(lastCapture?.body).toEqual({});
+    expect(result).toEqual({ txId: "tx/1", txHash: "0xfeed" });
+  });
+
   it("signMessage → POST /vault/:id/sign-message", async () => {
     installMockFetch({ ok: true, data: { signature: "0xsig" } });
     await makeClient().signMessage("agent-1", "hello world", {

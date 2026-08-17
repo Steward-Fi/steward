@@ -1,23 +1,24 @@
 /**
  * Tests for useTransactions().
  *
- * SSR does not flush the polling effect, so state-driven pagination (page
- * advancing) is out of scope here and lives in the browser e2e suite. We
- * cover the deterministic surface:
- *   - initial return shape
- *   - refetch() builds the paginated-endpoint URL with the right query params
- *     (page, pageSize, status, chainId), all properly encoded
- *   - the getHistory() fallback path is taken when the paginated endpoint
- *     returns a non-ok / malformed response
+ * The hook exhausts the credentialed listTransactions endpoint and
+ * filters/paginates client-side (SEC-195 regression).
+ *
+ * The test runner has no jsdom and renderToString does not flush effects, so
+ * we assert on the mocked client calls and thrown errors via an SSR probe,
+ * and cover the status/chain filtering (filterTransactions) as a pure
+ * function.
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import * as React from "react";
 import { renderToString } from "react-dom/server";
 
-const getHistoryMock = mock(
-  async (_agentId: string) => [] as Array<{ value: string; timestamp: number }>,
-);
+const listTransactionsMock = mock(async (_agentId: string, _opts: unknown) => ({
+  transactions: [] as any[],
+  limit: 200,
+  offset: 0,
+}));
 
 // NOTE: bun's `mock.module` is process-global; this suite is run
 // one-file-per-process by the package's test script. Run individual files
@@ -25,10 +26,9 @@ const getHistoryMock = mock(
 mock.module("../provider.js", () => ({
   useStewardContext: () => ({
     client: {
-      getBaseUrl: () => "https://api.test",
-      getHistory: getHistoryMock,
+      listTransactions: listTransactionsMock,
     },
-    agentId: "agent/1", // slash to verify encoding
+    agentId: "agent/1",
     pollInterval: 30000,
     features: {},
     theme: {},
@@ -39,7 +39,7 @@ mock.module("../provider.js", () => ({
     React.createElement(React.Fragment, null, children),
 }));
 
-const { useTransactions } = await import("../hooks/useTransactions.js");
+const { useTransactions, filterTransactions } = await import("../hooks/useTransactions.js");
 
 type UseTxReturn = ReturnType<typeof useTransactions>;
 
@@ -54,18 +54,32 @@ function captureHook(opts?: Parameters<typeof useTransactions>[0]): UseTxReturn 
   return captured;
 }
 
+function txRecord(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "tx-1",
+    agentId: "agent/1",
+    status: "confirmed",
+    request: { agentId: "agent/1", tenantId: "t", to: "0xabc", value: "100", chainId: 8453 },
+    policyResults: [],
+    createdAt: new Date("2026-01-01T00:00:00Z"),
+    ...overrides,
+  } as any;
+}
+
 const originalFetch = globalThis.fetch;
 let fetchMock: ReturnType<typeof mock>;
 
 describe("useTransactions()", () => {
   beforeEach(() => {
-    getHistoryMock.mockClear();
-    getHistoryMock.mockImplementation(async () => []);
-    fetchMock = mock(async () => ({
-      ok: true,
-      status: 200,
-      json: async () => ({ ok: true, data: { transactions: [] } }),
+    listTransactionsMock.mockClear();
+    listTransactionsMock.mockImplementation(async () => ({
+      transactions: [],
+      limit: 200,
+      offset: 0,
     }));
+    fetchMock = mock(async () => {
+      throw new Error("raw fetch must not be used");
+    });
     globalThis.fetch = fetchMock as any;
   });
   afterEach(() => {
@@ -84,50 +98,66 @@ describe("useTransactions()", () => {
     expect(typeof api.refetch).toBe("function");
   });
 
-  test("refetch builds the paginated endpoint URL with default page/pageSize", async () => {
+  test("refetch loads history through the credentialed client only", async () => {
     const api = captureHook();
     await api.refetch();
-    const url = String(fetchMock.mock.calls[0][0]);
-    expect(url).toContain("https://api.test/agents/agent%2F1/transactions?");
-    expect(url).toContain("page=1");
-    expect(url).toContain("pageSize=20");
+    expect(listTransactionsMock).toHaveBeenCalledTimes(1);
+    expect(listTransactionsMock).toHaveBeenCalledWith("agent/1", { limit: 200, offset: 0 });
+    // SEC-195: no credential-less raw fetch on any path.
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  test("refetch includes status + chainId query params when provided", async () => {
-    const api = captureHook({
-      pageSize: 5,
-      status: ["pending", "confirmed"],
-      chainId: 8453,
+  test("client errors do not reject refetch (state updates are SSR-invisible)", async () => {
+    listTransactionsMock.mockImplementation(async () => {
+      throw new Error("history unavailable");
     });
-    await api.refetch();
-    const url = String(fetchMock.mock.calls[0][0]);
-    expect(url).toContain("pageSize=5");
-    // URLSearchParams encodes the comma in the joined status list.
-    expect(url).toContain("status=pending%2Cconfirmed");
-    expect(url).toContain("chainId=8453");
-  });
-
-  test("falls back to getHistory() when the paginated endpoint is not ok", async () => {
-    fetchMock = mock(async () => ({ ok: false, status: 404, json: async () => ({}) }));
-    globalThis.fetch = fetchMock as any;
-    getHistoryMock.mockImplementation(async () => [
-      { value: "1000000000000000000", timestamp: 1_700_000_000 },
-    ]);
-    const api = captureHook({ chainId: 56 });
-    await api.refetch();
-    expect(getHistoryMock).toHaveBeenCalledTimes(1);
-    expect(getHistoryMock.mock.calls[0][0]).toBe("agent/1");
-  });
-
-  test("falls back to getHistory() when the paginated payload lacks transactions", async () => {
-    fetchMock = mock(async () => ({
-      ok: true,
-      status: 200,
-      json: async () => ({ ok: true, data: {} }), // no transactions field
-    }));
-    globalThis.fetch = fetchMock as any;
     const api = captureHook();
+    // The hook catches client errors into its error state; SSR cannot observe
+    // the state write, but the call must resolve and never touch raw fetch.
     await api.refetch();
-    expect(getHistoryMock).toHaveBeenCalledTimes(1);
+    expect(listTransactionsMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("filterTransactions()", () => {
+  const records = [
+    txRecord({ id: "tx-ok", status: "confirmed" }),
+    txRecord({ id: "tx-pending", status: "pending" }),
+    txRecord({
+      id: "tx-other-chain",
+      status: "confirmed",
+      request: { chainId: 56, to: "0xdef", value: "1" },
+    }),
+  ];
+
+  test("no filters returns everything", () => {
+    expect(filterTransactions(records as any, {}).map((t) => t.id)).toEqual([
+      "tx-ok",
+      "tx-pending",
+      "tx-other-chain",
+    ]);
+  });
+
+  test("filters by status list", () => {
+    expect(filterTransactions(records as any, { status: ["confirmed"] }).map((t) => t.id)).toEqual([
+      "tx-ok",
+      "tx-other-chain",
+    ]);
+  });
+
+  test("filters by chainId", () => {
+    expect(filterTransactions(records as any, { chainId: 8453 }).map((t) => t.id)).toEqual([
+      "tx-ok",
+      "tx-pending",
+    ]);
+  });
+
+  test("combines status and chainId", () => {
+    expect(
+      filterTransactions(records as any, { status: ["pending", "confirmed"], chainId: 8453 }).map(
+        (t) => t.id,
+      ),
+    ).toEqual(["tx-ok", "tx-pending"]);
   });
 });

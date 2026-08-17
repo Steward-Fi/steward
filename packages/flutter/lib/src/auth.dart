@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
+import 'base_url.dart';
 import 'models.dart';
 import 'storage.dart';
 
@@ -18,19 +19,28 @@ class StewardAuthConfig {
     required this.baseUrl,
     required this.storage,
     this.tenantId,
+    this.allowInsecureBaseUrl = false,
     this.httpClient,
   });
 
   final String baseUrl;
   final StewardSessionStorage storage;
   final String? tenantId;
+
+  /// Permit a plaintext non-loopback baseUrl (warns at construction). HTTPS is
+  /// required by default so session credentials never travel cleartext
+  /// off-loopback (SEC-200).
+  final bool allowInsecureBaseUrl;
   final http.Client? httpClient;
 }
 
 class StewardAuth {
   StewardAuth(this.config)
       : _baseUrl = config.baseUrl.replaceFirst(RegExp(r'/+$'), ''),
-        _client = config.httpClient ?? http.Client();
+        _client = config.httpClient ?? http.Client() {
+    assertSecureBaseUrl(config.baseUrl,
+        allowInsecureBaseUrl: config.allowInsecureBaseUrl);
+  }
 
   final StewardAuthConfig config;
   final String _baseUrl;
@@ -250,6 +260,10 @@ class StewardAuth {
     throw StewardApiException('Expected object response from Steward API', 0, payload);
   }
 
+  /// Decodes the JWT payload client-side WITHOUT signature verification —
+  /// verification happens server-side on every authenticated request. The
+  /// resulting claims (userId/tenantId/email/expiresAt) are display and
+  /// expiry hints only; never use them for client-side authorization.
   static StewardSession _sessionFromToken(String token, {String? refreshToken}) {
     final parts = token.split('.');
     Map<String, Object?> claims = <String, Object?>{};

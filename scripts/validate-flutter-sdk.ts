@@ -9,7 +9,9 @@ const requiredFiles = [
   "packages/flutter/lib/src/auth.dart",
   "packages/flutter/lib/src/models.dart",
   "packages/flutter/lib/src/storage.dart",
+  "packages/flutter/lib/src/base_url.dart",
   "packages/flutter/test/steward_contract_test.dart",
+  "packages/flutter/example/secure_session_storage.dart",
 ];
 
 const requiredNeedles: Array<[string, string]> = [
@@ -26,8 +28,12 @@ const requiredNeedles: Array<[string, string]> = [
   ["packages/flutter/lib/src/auth.dart", "/auth/oauth/"],
   ["packages/flutter/lib/src/auth.dart", "OAuth state mismatch"],
   ["packages/flutter/lib/src/storage.dart", "abstract interface class StewardSessionStorage"],
+  ["packages/flutter/lib/src/base_url.dart", "void assertSecureBaseUrl("],
+  ["packages/flutter/lib/src/base_url.dart", "allowInsecureBaseUrl"],
   ["packages/flutter/test/steward_contract_test.dart", "NamespacedStewardSessionStorage"],
   ["packages/flutter/test/steward_contract_test.dart", "PushSubscriptionInput"],
+  ["packages/flutter/example/secure_session_storage.dart", "implements StewardSessionStorage"],
+  ["packages/flutter/example/secure_session_storage.dart", "encryptedSharedPreferences: true"],
 ];
 
 const failures: string[] = [];

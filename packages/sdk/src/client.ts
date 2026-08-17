@@ -1166,6 +1166,11 @@ export type TransactionListResult = {
   limit: number;
   offset: number;
 };
+export type VaultApprovalResult = {
+  txId: string;
+  txHash?: string;
+  signedTx?: string;
+};
 export type TransactionLifecycleEventType =
   | "transaction.broadcasted"
   | "transaction.confirmed"
@@ -4550,6 +4555,23 @@ export class StewardClient {
   }
 
   // ─── Approvals ────────────────────────────────────────────────
+
+  /**
+   * Execute an approved vault transaction through the policy-revalidating
+   * vault route. The generic approval endpoint deliberately cannot sign or
+   * broadcast vault transactions.
+   */
+  async approveVaultTransaction(agentId: string, txId: string): Promise<VaultApprovalResult> {
+    const response = await this.request<VaultApprovalResult, StewardErrorResponse>(
+      `/vault/${encodeURIComponent(agentId)}/approve/${encodeURIComponent(txId)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({}),
+      },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
 
   /** List approval queue entries for the tenant. */
   async listApprovals(opts?: {

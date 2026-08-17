@@ -16,6 +16,8 @@ namespace StewardTests
             await TestBearerPushSubscriptionHelper();
             await TestSensitiveMutationsAreSignedAndIdempotent();
             await TestApiErrorIncludesStatusAndPayload();
+            TestPlaintextNonLoopbackBaseUrlRejected();
+            TestAllowInsecureBaseUrlOptsOut();
             Console.WriteLine("Steward C# tests passed");
         }
 
@@ -123,6 +125,34 @@ namespace StewardTests
                 Assert(error.Message == "denied", "unexpected error message");
                 Assert(error.ResponseData!.Value.GetProperty("ok").GetBoolean() == false, "unexpected error payload");
             }
+        }
+
+        private static void TestPlaintextNonLoopbackBaseUrlRejected()
+        {
+            // SEC-200: credentials must never travel to a plaintext non-loopback
+            // endpoint unless the operator explicitly opts out.
+            foreach (var baseUrl in new[] { "http://api.example.test", "http://192.168.1.10:3200", "ftp://api.example.test", "not-a-url", "https://user:secret@api.example.test" })
+            {
+                try
+                {
+                    _ = new StewardClient(new StewardClientConfig { BaseUrl = baseUrl, ApiKey = "tenant-key" });
+                    throw new Exception("expected rejection for " + baseUrl);
+                }
+                catch (ArgumentException error)
+                {
+                    Assert(error.Message.Contains("HTTPS") || error.Message.Contains("absolute URL") || error.Message.Contains("credentials"), "unexpected message: " + error.Message);
+                }
+            }
+
+            foreach (var baseUrl in new[] { "https://api.example.test", "http://localhost:3200", "http://127.0.0.1:3200", "http://[::1]:3200" })
+            {
+                _ = new StewardClient(new StewardClientConfig { BaseUrl = baseUrl, ApiKey = "tenant-key" });
+            }
+        }
+
+        private static void TestAllowInsecureBaseUrlOptsOut()
+        {
+            _ = new StewardClient(new StewardClientConfig { BaseUrl = "http://api.example.test", ApiKey = "tenant-key", AllowInsecureBaseUrl = true });
         }
 
         private static void Assert(bool condition, string message)

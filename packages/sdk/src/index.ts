@@ -144,6 +144,7 @@ export type {
   UserSocialAccountLinkResult,
   UserSolanaWalletLinkNonce,
   UserSolanaWalletLinkResult,
+  VaultApprovalResult,
   WalletActionOptions,
   WalletBatchCreateResult,
   WalletBatchSpec,
