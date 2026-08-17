@@ -1850,18 +1850,7 @@ export async function handleProxy(c: Context): Promise<Response> {
 
   const latencyMs = Date.now() - startTime;
 
-  // 7. Audit log
-  await recordAudit({
-    agentId,
-    tenantId,
-    targetHost: target.host,
-    targetPath: target.path,
-    method,
-    statusCode: response.status,
-    latencyMs,
-  });
-
-  // 7.5. Spend tracking for LLM API responses
+  // 7. Inspect provider-specific response semantics before recording an outcome.
   //
   // For known LLM hosts, we need to read the response body to extract token
   // usage for cost estimation. We buffer the response body, parse it, track
@@ -1891,6 +1880,22 @@ export async function handleProxy(c: Context): Promise<Response> {
       slackSemanticFailure = "invalid_response";
     }
   }
+
+  // Slack can report failure in an HTTP 200 envelope. Do not persist a
+  // contradictory successful audit row before the semantic failure row below.
+  if (!slackSemanticFailure) {
+    await recordAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: response.status,
+      latencyMs,
+    });
+  }
+
+  // 7.5. Spend tracking for LLM API responses
   const isLLMHost =
     isProxyRedisAvailable() &&
     (target.host === "api.openai.com" || target.host === "api.anthropic.com");

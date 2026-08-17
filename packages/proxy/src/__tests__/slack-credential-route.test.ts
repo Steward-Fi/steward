@@ -110,5 +110,12 @@ describe("Slack narrow credential route", () => {
     const body = await response.text();
     expect(body).toContain("channel_not_found");
     expect(body).not.toContain(SLACK_TOKEN);
+    const audit = await getDb()
+      .select()
+      .from(proxyAuditLog)
+      .where(eq(proxyAuditLog.tenantId, tenantId));
+    expect(audit.map((row) => row.statusCode)).toEqual([102, 502]);
+    expect(audit.some((row) => row.statusCode === 200)).toBe(false);
+    expect(audit.at(-1)?.reason).toBe("slack-api-error:channel_not_found");
   });
 });
