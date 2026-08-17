@@ -73,6 +73,7 @@ import { tenantRoutes } from "./routes/tenants";
 import { userRoutes, userSessionAuth } from "./routes/user";
 import { vaultRoutes } from "./routes/vault";
 import { webhookRoutes } from "./routes/webhooks";
+import { MAX_ARCHIVE_CHUNK_BYTES } from "./services/audit-archive";
 import {
   API_VERSION,
   type ApiResponse,
@@ -122,7 +123,7 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
   app.use(
     "*",
     bodyLimit({
-      maxSize: 1024 * 1024,
+      maxSize: MAX_ARCHIVE_CHUNK_BYTES,
       onError: (c) =>
         c.json<ApiResponse>({ ok: false, error: "Request body too large (max 1MB)" }, 413),
     }),

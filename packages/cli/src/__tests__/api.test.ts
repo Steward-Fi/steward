@@ -108,6 +108,49 @@ describe("StewardApiClient", () => {
     expect(redirect).toBe("error");
   });
 
+  test("bounds archive downloads and never follows credential-bearing redirects", async () => {
+    let signal: AbortSignal | undefined;
+    let redirect: RequestRedirect | undefined;
+    const client = new StewardApiClient({
+      baseUrl: "https://api.example.test",
+      token: "secret-bearer",
+      fetchImpl: (async (_url, init) => {
+        signal = init?.signal as AbortSignal;
+        redirect = init?.redirect;
+        return new Response("small", { headers: { "content-length": "26214401" } });
+      }) as typeof fetch,
+    });
+    await expect(client.requestText("/audit/archives/id/chunks/0")).rejects.toThrow(
+      "26214400 byte limit",
+    );
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(redirect).toBe("error");
+  });
+
+  test("bounds archive upload responses and never follows redirects", async () => {
+    let signal: AbortSignal | undefined;
+    let redirect: RequestRedirect | undefined;
+    const client = new StewardApiClient({
+      baseUrl: "https://api.example.test",
+      tenantKey: "tenant-secret",
+      fetchImpl: (async (_url, init) => {
+        signal = init?.signal as AbortSignal;
+        redirect = init?.redirect;
+        return new Response("small", { headers: { "content-length": "1048577" } });
+      }) as typeof fetch,
+    });
+    await expect(
+      client.requestRaw(
+        "PUT",
+        "/audit/archives/id/restore/chunks/0",
+        "{}\n",
+        "application/x-ndjson",
+      ),
+    ).rejects.toThrow("1 MiB limit");
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(redirect).toBe("error");
+  });
+
   test("rejects credential-bearing and public plaintext API URLs", () => {
     expect(() => new StewardApiClient({ baseUrl: "http://api.example.test" })).toThrow(
       "must use HTTPS",

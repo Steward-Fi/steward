@@ -4,10 +4,9 @@
  * Deletes rows past their per-table TTL from high-volume operational tables.
  * Defaults are conservative; each table is independently overridable via env.
  *
- * SOC2 note on `audit_events`: tamper-evident audit log entries support
- * incident-response and compliance review. We do NOT delete them by default,
- * and we emit a warning every sweep when an explicit override drops retention
- * below one year. Operators must opt in deliberately.
+ * Audit-event retention is tenant-scoped and disabled by default. Enabled
+ * policies always archive a signed JSONL prefix and durably seal its receipt
+ * before a separate transaction advances the floor and removes source rows.
  *
  * All deletes use parameterized intervals (`make_interval(days := $n)`) so
  * untrusted env values can never be interpolated into SQL text.
@@ -16,6 +15,7 @@
 import { getDb } from "@stwd/db";
 import { sql } from "drizzle-orm";
 import { writeAuditEvent } from "./audit";
+import { runTenantAuditRetention } from "./audit-archive";
 
 const SYSTEM_TENANT_ID = "system";
 
@@ -23,7 +23,6 @@ const SYSTEM_TENANT_ID = "system";
 const DEFAULT_PROXY_AUDIT_DAYS = 90;
 const DEFAULT_REFRESH_TOKEN_GRACE_DAYS = 7;
 const DEFAULT_FAILED_TX_DAYS = 365;
-const DEFAULT_AUDIT_EVENTS_DAYS = 365;
 const MIN_DEACTIVATED_USERS_DAYS = 30;
 
 const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -39,6 +38,7 @@ export interface SweepResult {
    * we cannot roll back — we report).
    */
   auditFailed?: boolean;
+  failures?: Array<{ tenantId: string; error: string }>;
 }
 
 export interface RetentionSweepOptions {
@@ -156,80 +156,30 @@ async function sweepFailedTransactions(ctx: RetentionSweepContext): Promise<Swee
 }
 
 async function sweepAuditEvents(ctx: RetentionSweepContext): Promise<SweepResult | null> {
-  const override = readPositiveInt("STEWARD_RETENTION_AUDIT_EVENTS_DAYS");
-  if (override === undefined) {
-    // Default: audit events are immutable — never deleted.
-    return null;
-  }
-  // Sub-floor retention is a hard error, not a warning: silently keeping less
-  // than the SOC2 floor would erode the compliance guarantee unnoticed.
-  if (override < DEFAULT_AUDIT_EVENTS_DAYS) {
-    throw new Error(
-      `[retention] STEWARD_RETENTION_AUDIT_EVENTS_DAYS=${override} is below the ` +
-        `${DEFAULT_AUDIT_EVENTS_DAYS}-day SOC2 floor; refusing to delete audit events. ` +
-        "Set the retention >= 365 days (and STEWARD_RETENTION_AUDIT_ARCHIVE_CONFIRMED=true) to proceed.",
-    );
-  }
-  // Audit rows are part of a tamper-evident chain: a plain DELETE of the prefix
-  // would orphan the survivors from ZERO_HASH and make verification impossible.
-  // Require an explicit operator attestation that rows were archived first.
-  if (process.env.STEWARD_RETENTION_AUDIT_ARCHIVE_CONFIRMED !== "true") {
-    throw new Error(
-      "[retention] Deleting audit_events requires archiving first. Set " +
-        "STEWARD_RETENTION_AUDIT_ARCHIVE_CONFIRMED=true only after the chain prefix " +
-        "has been exported to durable storage; the sweep will then advance the " +
-        "verified floor anchor so post-sweep verification still succeeds.",
-    );
-  }
+  // Retention is now tenant-owned and disabled by default. A boolean env
+  // attestation is never sufficient authority to delete a chain prefix: each
+  // enabled tenant is first copied into signed, durable JSONL archive rows and
+  // only a sealed receipt can authorize the transactional floor+delete step.
+  const policies = rowsFromExecute<{ tenant_id: string }>(
+    await getDb().execute(sql`
+      SELECT tenant_id FROM audit_retention_policies WHERE enabled = true ORDER BY tenant_id
+    `),
+  );
+  if (policies.length === 0) return null;
   await writeRetentionAuthorization("audit_events", ctx);
-
-  const db = getDb();
   let deleted = 0;
-  // Per tenant: archive+drop the eligible prefix and advance the floor anchor
-  // (floor_seq + floor_hmac = the newest surviving-prefix row) so verifyAuditChain
-  // restarts the chain from the anchor instead of the public ZERO_HASH.
-  await db.transaction(async (tx) => {
-    const tenantRows = rowsFromExecute<{ tenant_id: string }>(
-      await tx.execute(sql`
-        SELECT DISTINCT tenant_id FROM audit_events
-        WHERE created_at < now() - make_interval(days => ${override})
-      `),
-    );
-    for (const { tenant_id } of tenantRows) {
-      // New floor = highest seq among rows being dropped for this tenant.
-      const anchorRows = rowsFromExecute<{ seq: number | string; hmac: unknown }>(
-        await tx.execute(sql`
-          SELECT seq, hmac FROM audit_events
-          WHERE tenant_id = ${tenant_id}
-            AND created_at < now() - make_interval(days => ${override})
-          ORDER BY seq DESC LIMIT 1
-        `),
-      );
-      const anchor = anchorRows[0];
-      if (!anchor) continue;
-      const floorSeq = Number(anchor.seq);
-      const floorHmac = anchor.hmac as Uint8Array;
-
-      const removed = await deleteRows(sql`
-        DELETE FROM audit_events
-        WHERE tenant_id = ${tenant_id}
-          AND created_at < now() - make_interval(days => ${override})
-      `);
-      deleted += removed;
-
-      // Persist the new verified floor. The head row already exists from append;
-      // if not (legacy data) we still record the floor so verify can anchor.
-      await tx.execute(sql`
-        INSERT INTO audit_chain_heads (tenant_id, expected_seq, expected_count, head_hmac, floor_seq, floor_hmac, updated_at)
-        VALUES (${tenant_id}, ${floorSeq}, 0, ${floorHmac}, ${floorSeq}, ${floorHmac}, now())
-        ON CONFLICT (tenant_id) DO UPDATE
-          SET floor_seq = ${floorSeq},
-              floor_hmac = ${floorHmac},
-              updated_at = now()
-      `);
+  const failures: Array<{ tenantId: string; error: string }> = [];
+  for (const policy of policies) {
+    try {
+      const result = await runTenantAuditRetention(policy.tenant_id);
+      deleted += result.deleted;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "unknown retention failure";
+      failures.push({ tenantId: policy.tenant_id, error: message });
+      console.error(`[retention] audit retention failed for tenant ${policy.tenant_id}:`, error);
     }
-  });
-  return { table: "audit_events", deleted };
+  }
+  return { table: "audit_events", deleted, ...(failures.length > 0 ? { failures } : {}) };
 }
 
 async function sweepAuthKvStore(ctx: RetentionSweepContext): Promise<SweepResult> {
@@ -308,7 +258,7 @@ function ttlForTable(table: string): number | undefined {
     case "transactions":
       return readPositiveInt("STEWARD_RETENTION_FAILED_TX_DAYS") ?? DEFAULT_FAILED_TX_DAYS;
     case "audit_events":
-      return readPositiveInt("STEWARD_RETENTION_AUDIT_EVENTS_DAYS");
+      return undefined; // per-tenant policy; no global destructive default
     case "auth_kv_store":
       return undefined; // per-row expiry
     case "users.deactivated":

@@ -1,7 +1,19 @@
 #!/usr/bin/env bun
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  closeSync,
+  existsSync,
+  constants as fsConstants,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
 import { StewardApiClient } from "./api";
 import { boolFlag, intFlag, parseArgs, parseJsonFlag, required, stringFlag } from "./args";
 import { runDoctor } from "./doctor";
@@ -13,6 +25,120 @@ type CommandContext = {
   flags: Record<string, string | boolean>;
   format: OutputFormat;
 };
+
+type ArchiveChunkReference = {
+  index: number;
+  file: string;
+  sha256?: string;
+  byteLength?: number;
+};
+
+const MAX_ARCHIVE_CHUNKS = 2_048;
+const MAX_ARCHIVE_MANIFEST_BYTES = 768 * 1024;
+const MAX_ARCHIVE_ENVELOPE_BYTES = 1024 * 1024;
+
+/** Read an untrusted archive file without following symlinks, blocking on
+ * special files, or allocating beyond its validated size. */
+export function readBoundedRegularFile(
+  path: string,
+  maxBytes: number,
+  expectedBytes?: number,
+): Buffer {
+  const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error(`Archive input is not a regular file: ${path}`);
+    if (!Number.isSafeInteger(stat.size) || stat.size < 1 || stat.size > maxBytes) {
+      throw new Error(`Archive input exceeds the ${maxBytes} byte limit: ${path}`);
+    }
+    if (expectedBytes !== undefined && stat.size !== expectedBytes) {
+      throw new Error(`Archive input size does not match the signed manifest: ${path}`);
+    }
+    const bytes = Buffer.alloc(stat.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (count === 0) break;
+      offset += count;
+    }
+    const extra = Buffer.alloc(1);
+    if (offset !== bytes.length || readSync(fd, extra, 0, 1, offset) !== 0) {
+      throw new Error(`Archive input changed while it was being read: ${path}`);
+    }
+    return bytes;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+export function assertSafeArchiveChunks(
+  chunks: unknown,
+  requireIntegrityFields = false,
+): asserts chunks is ArchiveChunkReference[] {
+  if (!Array.isArray(chunks) || chunks.length === 0 || chunks.length > MAX_ARCHIVE_CHUNKS) {
+    throw new Error("Archive manifest has an invalid chunk list");
+  }
+  for (let index = 0; index < chunks.length; index++) {
+    const chunk = chunks[index] as Partial<ArchiveChunkReference> | null;
+    const expectedFile = `chunk-${String(index).padStart(6, "0")}.jsonl`;
+    if (
+      !chunk ||
+      chunk.index !== index ||
+      chunk.file !== expectedFile ||
+      (requireIntegrityFields && (chunk.sha256 === undefined || chunk.byteLength === undefined)) ||
+      (chunk.sha256 !== undefined && !/^[0-9a-f]{64}$/.test(chunk.sha256)) ||
+      (chunk.byteLength !== undefined &&
+        (!Number.isSafeInteger(chunk.byteLength) ||
+          chunk.byteLength < 1 ||
+          chunk.byteLength > 1024 * 1024))
+    ) {
+      throw new Error(`Archive manifest chunk ${index} is invalid or unsafe`);
+    }
+  }
+}
+
+export function assertSafeArchiveManifestTransport(manifest: unknown): void {
+  const encoded = new TextEncoder().encode(JSON.stringify(manifest));
+  if (encoded.length > MAX_ARCHIVE_MANIFEST_BYTES) {
+    throw new Error("Archive manifest exceeds the safe API transport limit");
+  }
+}
+
+export type AuditArchiveVerificationMode = "none" | "trusted" | "integrity-only";
+
+/** A signature checked only against the key shipped in the same envelope
+ * proves self-consistency, not the identity of the signer. */
+export function auditArchiveVerificationMode(flags: Record<string, string | boolean>): {
+  mode: AuditArchiveVerificationMode;
+  fingerprint?: string;
+  keyId?: string;
+} {
+  const verifyTrusted = boolFlag(flags, "verify");
+  const integrityOnly = boolFlag(flags, "integrity-only");
+  const fingerprint = stringFlag(flags, "fp");
+  const keyId = stringFlag(flags, "key-id");
+  if (verifyTrusted && integrityOnly) {
+    throw new Error("--verify and --integrity-only are mutually exclusive");
+  }
+  if (verifyTrusted && !fingerprint) {
+    throw new Error("--verify requires --fp from an independent trusted channel");
+  }
+  if (integrityOnly && fingerprint) {
+    throw new Error("Use --verify with --fp for trusted verification");
+  }
+  if (!verifyTrusted && (fingerprint || keyId)) {
+    throw new Error("--fp and --key-id require --verify");
+  }
+  if (fingerprint && !/^[0-9a-f]{64}$/i.test(fingerprint)) {
+    throw new Error("--fp must be exactly 64 hexadecimal characters");
+  }
+  if (keyId && !/^[A-Za-z0-9_.:-]{1,64}$/.test(keyId)) {
+    throw new Error("--key-id is invalid");
+  }
+  if (verifyTrusted) return { mode: "trusted", fingerprint, keyId };
+  if (integrityOnly) return { mode: "integrity-only", keyId };
+  return { mode: "none" };
+}
 
 const HELP = `steward CLI
 
@@ -28,6 +154,11 @@ Usage:
   steward policy set --name NAME --rules '[...]' [--description TEXT] [--agent-id ID]
   steward approvals list|stats|approve|deny ...
   steward audit bundle [--from 1] [--to N] [--out bundle.json] [--verify]
+  steward audit export --from N --to N --out DIR [--chunk-size N] [--verify --fp HEX] [--key-id ID]
+                       [--integrity-only]
+  steward audit list [--limit N] [--before ISO_TIMESTAMP]
+  steward audit restore --in DIR
+  steward audit acknowledge --archive-id ID --file signed-ack.json
   steward provider-action create --workspace-id ID --account-id ID --operation KEY --arguments '{...}' --idempotency-key KEY
   steward provider-action get|approval|case --id ID
   steward provider-action approve|deny --id ID --reason TEXT [--idempotency-key KEY]
@@ -226,7 +357,155 @@ async function approvalsCommand(action: string | undefined, ctx: CommandContext)
 }
 
 async function auditCommand(action: string | undefined, ctx: CommandContext) {
-  if (action !== "bundle") throw new Error("Supported audit command: audit bundle");
+  if (action === "list") {
+    const params = new URLSearchParams();
+    if (stringFlag(ctx.flags, "limit")) params.set("limit", stringFlag(ctx.flags, "limit")!);
+    if (stringFlag(ctx.flags, "before")) params.set("before", stringFlag(ctx.flags, "before")!);
+    return ctx.api.request("GET", `/audit/archives${params.size ? `?${params}` : ""}`);
+  }
+  if (action === "acknowledge") {
+    const archiveId = required(stringFlag(ctx.flags, "archive-id"), "archive-id");
+    const file = required(stringFlag(ctx.flags, "file"), "file");
+    const acknowledgement = JSON.parse(readFileSync(file, "utf8")) as unknown;
+    return ctx.api.request(
+      "POST",
+      `/audit/archives/${encodeURIComponent(archiveId)}/durability-ack`,
+      acknowledgement,
+    );
+  }
+  if (action === "restore") {
+    const inputDirectory = required(stringFlag(ctx.flags, "in"), "in");
+    const archive = JSON.parse(
+      readBoundedRegularFile(
+        join(inputDirectory, "manifest.json"),
+        MAX_ARCHIVE_ENVELOPE_BYTES,
+      ).toString("utf8"),
+    ) as {
+      archiveId: string;
+      manifest: { archiveId: string; chunks: Array<{ index: number; file: string }> };
+      manifestSha256: string;
+      signature: string;
+    };
+    if (archive.archiveId !== archive.manifest.archiveId) {
+      throw new Error("Archive id does not match the signed manifest");
+    }
+    assertSafeArchiveChunks(archive.manifest.chunks, true);
+    assertSafeArchiveManifestTransport(archive.manifest);
+    const started = await ctx.api.request("POST", "/audit/archives/restore", {
+      manifest: archive.manifest,
+      manifestSha256: archive.manifestSha256,
+      signature: archive.signature,
+    });
+    for (const chunk of archive.manifest.chunks) {
+      const jsonl = readBoundedRegularFile(
+        join(inputDirectory, chunk.file),
+        1024 * 1024,
+        chunk.byteLength,
+      ).toString("utf8");
+      await ctx.api.requestRaw(
+        "PUT",
+        `/audit/archives/${encodeURIComponent(archive.archiveId)}/restore/chunks/${chunk.index}`,
+        jsonl,
+        "application/x-ndjson; charset=utf-8",
+      );
+    }
+    const completed = await ctx.api.request(
+      "POST",
+      `/audit/archives/${encodeURIComponent(archive.archiveId)}/restore/complete`,
+      {},
+    );
+    return { started, completed };
+  }
+  if (action === "export") {
+    // Validate the requested trust claim before creating an archive or writing
+    // any local files. A malformed verification request must have no effects.
+    const verification = auditArchiveVerificationMode(ctx.flags);
+    const fromSeq = intFlag(ctx.flags, "from");
+    const toSeq = intFlag(ctx.flags, "to");
+    if (fromSeq === undefined) throw new Error("--from is required");
+    if (toSeq === undefined) throw new Error("--to is required");
+    const out = required(stringFlag(ctx.flags, "out"), "out");
+    const chunkSize = intFlag(ctx.flags, "chunk-size");
+    const archive = await ctx.api.request<{
+      archiveId: string;
+      manifest: { chunks: ArchiveChunkReference[] };
+      manifestSha256: string;
+      signature: string;
+      publicKey: string;
+      status: string;
+      sealedAt: string;
+      prunedAt: string | null;
+    }>("POST", "/audit/archives", { fromSeq, toSeq, chunkSize });
+    assertSafeArchiveChunks(archive.manifest.chunks, true);
+    assertSafeArchiveManifestTransport(archive.manifest);
+    mkdirSync(out, { recursive: true, mode: 0o700 });
+    const manifestPath = join(out, "manifest.json");
+    if (existsSync(manifestPath)) {
+      const existing = JSON.parse(
+        readBoundedRegularFile(manifestPath, MAX_ARCHIVE_ENVELOPE_BYTES).toString("utf8"),
+      ) as { manifestSha256?: string };
+      if (existing.manifestSha256 !== archive.manifestSha256) {
+        throw new Error("Existing export manifest belongs to a different archive");
+      }
+    } else {
+      writeFileSync(manifestPath, `${JSON.stringify(archive, null, 2)}\n`, {
+        mode: 0o600,
+        flag: "wx",
+      });
+    }
+    for (const chunk of archive.manifest.chunks) {
+      const path = join(out, chunk.file);
+      if (existsSync(path)) {
+        const existing = readBoundedRegularFile(path, 1024 * 1024, chunk.byteLength);
+        if (createHash("sha256").update(existing).digest("hex") !== chunk.sha256) {
+          throw new Error(`Existing chunk ${chunk.file} does not match the signed manifest`);
+        }
+        continue;
+      }
+      const jsonl = await ctx.api.requestText(
+        `/audit/archives/${encodeURIComponent(archive.archiveId)}/chunks/${chunk.index}`,
+      );
+      const bytes = new TextEncoder().encode(jsonl);
+      if (
+        chunk.byteLength === undefined ||
+        bytes.length !== chunk.byteLength ||
+        chunk.sha256 === undefined ||
+        createHash("sha256").update(bytes).digest("hex") !== chunk.sha256
+      ) {
+        throw new Error(`Downloaded chunk ${chunk.file} does not match the signed manifest`);
+      }
+      writeFileSync(path, jsonl, { mode: 0o600, flag: "wx" });
+    }
+    if (verification.mode !== "none") {
+      const args = [
+        join(import.meta.dir, "../../../scripts/verify-audit-archive.mjs"),
+        manifestPath,
+        out,
+      ];
+      if (verification.fingerprint) {
+        args.push("--expected-key-fingerprint", verification.fingerprint);
+      }
+      if (verification.keyId) args.push("--expected-key-id", verification.keyId);
+      if (verification.mode === "integrity-only") {
+        args.push("--integrity-only");
+        console.error(
+          "INTEGRITY ONLY: the embedded signing key is not an independent trust anchor; " +
+            "this does not authenticate the archive signer.",
+        );
+      }
+      const result = spawnSync(process.execPath, args, { stdio: "inherit" });
+      if (result.status !== 0) throw new Error("Offline audit archive verification failed");
+    }
+    return {
+      archiveId: archive.archiveId,
+      wrote: out,
+      chunks: archive.manifest.chunks.length,
+      verification: verification.mode,
+    };
+  }
+  if (action !== "bundle") {
+    throw new Error("Supported audit commands: audit bundle|export|list|restore|acknowledge");
+  }
   const params = new URLSearchParams();
   params.set("from", String(intFlag(ctx.flags, "from") ?? 1));
   const to = intFlag(ctx.flags, "to");
