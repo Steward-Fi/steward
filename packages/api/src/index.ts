@@ -29,6 +29,12 @@ import {
 import { startProviderReservationReconciliationScheduler } from "./services/provider-reservation-reconciliation-scheduler";
 import { startRetentionScheduler } from "./services/retention";
 import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
+import {
+  InMemoryRateLimiter,
+  parseNonNegativeInt,
+  parsePositiveInt,
+  resolveClientIp,
+} from "./services/runtime-gate";
 import { configuredVaultStartupLogLine, getConfiguredVault } from "./services/vault-factory";
 import { startWebhookRetryScheduler } from "./services/webhook-retry-scheduler";
 
@@ -53,15 +59,25 @@ const app = await composeApp();
 //
 // NOT used by the Workers entry — Workers should rely on the Redis-backed
 // sliding-window rate limiter (or a Workers-native KV-backed alternative).
+//
+// SEC-014: the limiter keys on the socket peer unless the operator declares
+// STEWARD_TRUSTED_PROXY_HOPS > 0, in which case the client IP is derived from
+// the rightmost trusted XFF entries (client-supplied XFF prefixes are never
+// trusted). The key space is capped and fails closed when full.
 
-const requestLog = new Map<string, { count: number; resetAt: number }>();
+const trustedProxyHops = parseNonNegativeInt(process.env.STEWARD_TRUSTED_PROXY_HOPS, 0);
+const rateLimiter = new InMemoryRateLimiter(
+  RATE_LIMIT_MAX_REQUESTS,
+  RATE_LIMIT_WINDOW_MS,
+  parsePositiveInt(process.env.STEWARD_RATE_LIMIT_MAX_KEYS, 10_000),
+);
 let isShuttingDown = false;
 let cancelRetention: (() => void) | undefined;
 let cancelProviderReservationReconciliation: (() => void) | undefined;
 let cancelTransactionReceiptPolling: (() => void) | undefined;
 let cancelWebhookRetryScheduler: (() => void) | undefined;
 
-function runtimeGate(request: Request): Response | null {
+function runtimeGate(request: Request, peerAddress: string | null): Response | null {
   const url = new URL(request.url);
   if (url.pathname === "/health" || url.pathname === "/ready") return null;
 
@@ -71,35 +87,22 @@ function runtimeGate(request: Request): Response | null {
     });
   }
 
-  const forwardedFor = request.headers.get("x-forwarded-for");
-  const ip = forwardedFor?.split(",")[0]?.trim() || request.headers.get("x-real-ip") || "unknown";
-  const now = Date.now();
-  const current = requestLog.get(ip);
-
-  if (!current || current.resetAt <= now) {
-    requestLog.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
-    return null;
-  }
-
-  if (current.count >= RATE_LIMIT_MAX_REQUESTS) {
-    return Response.json({ ok: false, error: "Rate limit exceeded" } satisfies ApiResponse, {
-      status: 429,
-      headers: {
-        "Retry-After": Math.ceil((current.resetAt - now) / 1000).toString(),
+  const ip = resolveClientIp(request.headers, peerAddress, trustedProxyHops);
+  const verdict = rateLimiter.check(ip);
+  if (verdict.limited) {
+    return Response.json(
+      { ok: false, error: "Rate limit exceeded" } satisfies ApiResponse,
+      {
+        status: 429,
+        headers: { "Retry-After": verdict.retryAfterSeconds.toString() },
       },
-    });
+    );
   }
-
-  current.count += 1;
-  requestLog.set(ip, current);
   return null;
 }
 
 const requestLogCleanupTimer = setInterval(() => {
-  const now = Date.now();
-  for (const [ip, entry] of requestLog.entries()) {
-    if (entry.resetAt <= now) requestLog.delete(ip);
-  }
+  rateLimiter.sweep();
 }, RATE_LIMIT_WINDOW_MS);
 
 // ─── /ready — deep readiness probe ───────────────────────────────────────────
@@ -324,7 +327,8 @@ const BIND_HOST = process.env.STEWARD_BIND_HOST || "127.0.0.1";
 const serverOptions = {
   hostname: BIND_HOST,
   port: PORT,
-  fetch: (request: Request) => runtimeGate(request) ?? app.fetch(request),
+  fetch: (request: Request, server: { requestIP(req: Request): { address: string } | null }) =>
+    runtimeGate(request, server.requestIP(request)?.address ?? null) ?? app.fetch(request),
   idleTimeout: 30,
 } as Parameters<typeof Bun.serve>[0] & { hostname?: string };
 
@@ -342,7 +346,7 @@ const shutdown = async (signal: string) => {
   if (cancelProviderReservationReconciliation) cancelProviderReservationReconciliation();
   if (cancelTransactionReceiptPolling) cancelTransactionReceiptPolling();
   if (cancelWebhookRetryScheduler) cancelWebhookRetryScheduler();
-  requestLog.clear();
+  rateLimiter.clear();
 
   try {
     await Promise.all([closeDb(), shutdownRedis()]);
