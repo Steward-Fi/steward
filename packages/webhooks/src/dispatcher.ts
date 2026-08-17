@@ -178,6 +178,18 @@ function isNonPublicIpv6(address: string): boolean {
   );
 }
 
+/**
+ * Deterministic, non-transient rejection of a webhook delivery target (bad
+ * scheme, non-public host/address). Distinct from network failures so callers
+ * can classify it as non-retryable.
+ */
+export class WebhookValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WebhookValidationError";
+  }
+}
+
 function assertPublicWebhookHostname(hostname: string): void {
   if (!hostname) throw new Error("Webhook URL must include a host");
   if (
@@ -186,15 +198,15 @@ function assertPublicWebhookHostname(hostname: string): void {
     hostname.endsWith(".local") ||
     hostname.endsWith(".internal")
   ) {
-    throw new Error("Webhook host must resolve to a public address");
+    throw new WebhookValidationError("Webhook host must resolve to a public address");
   }
 
   const literalVersion = isIP(hostname);
   if (literalVersion === 4 && isNonPublicIpv4(hostname)) {
-    throw new Error("Webhook host must resolve to a public address");
+    throw new WebhookValidationError("Webhook host must resolve to a public address");
   }
   if (literalVersion === 6 && isNonPublicIpv6(hostname)) {
-    throw new Error("Webhook host must resolve to a public address");
+    throw new WebhookValidationError("Webhook host must resolve to a public address");
   }
 }
 
@@ -289,6 +301,12 @@ async function postWebhook(
     },
   };
   if (!init.allowPrivateNetwork) {
+    // Node's http/https client skips `options.lookup` entirely when the URL
+    // host is already an IP literal, so the guarded lookup alone never runs
+    // for `http://127.0.0.1/…`-style targets (WHATWG parsing canonicalizes
+    // decimal/hex/shorthand IPv4 forms to dotted-quad first). Check the
+    // literal hostname up front, before any socket is opened.
+    assertPublicWebhookHostname(parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase());
     options.lookup = createPublicLookup(init.lookup);
   } else if (init.lookup) {
     options.lookup = init.lookup;
