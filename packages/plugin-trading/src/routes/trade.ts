@@ -16,6 +16,7 @@
  * /trade + /v1/trade.
  */
 
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 import { agentPolicies, eq, getDb, proxyAuditLog } from "@stwd/db";
 import { evaluateTradeOrder } from "@stwd/policy-engine";
 import { checkRateLimit } from "@stwd/redis";
@@ -1384,21 +1385,83 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     | { ok: false; reason: "wallet-not-found" | "creds-not-provisioned" | "derive-failed" };
 
   // L2 CLOB creds are derived from the L1 delegate signer and cached. They are
-  // SECRET; cache them only in Redis with a TTL (never in the DB here). The same
-  // signer deterministically yields the same creds, so a cache miss safely
-  // re-derives. TTL bounds exposure + tolerates a CLOB key rotation.
-  const PM_CREDS_CACHE_TTL_SECONDS = 6 * 60 * 60; // 6h
+  // SECRET; cache them only in Redis, ENCRYPTED, with a TTL (never in the DB
+  // here). The same signer deterministically yields the same creds, so a cache
+  // miss safely re-derives. TTL bounds exposure + tolerates a CLOB key rotation.
+  const PM_CREDS_CACHE_TTL_SECONDS = 60 * 60; // 1h (SEC-108: was 6h)
+
+  // SEC-108: the cached L2 creds carry full trading authority on the venue as
+  // the agent (outside Steward's session caps and audit), so they never touch
+  // the shared Redis in plaintext. The cache value is AES-256-GCM encrypted
+  // with a key scrypt-derived from STEWARD_MASTER_PASSWORD under a
+  // domain-separated label (same idiom as the webhook secret codec + embedded
+  // JWT derivation), so a process or tenant with read access to Redis cannot
+  // lift them. If no master password is configured the cache is SKIPPED
+  // entirely (fail closed: never write plaintext; re-derive per order).
+  const PM_CREDS_CACHE_PREFIX = "stwd_pmclob_v1:";
+  let pmCredsDerivedKey: { source: string; key: Buffer } | null = null;
+
+  function pmCredsCacheEncryptionKey(): Buffer | null {
+    const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
+    if (!masterPassword) return null;
+    if (pmCredsDerivedKey?.source === masterPassword) return pmCredsDerivedKey.key;
+    const key = scryptSync(masterPassword, "steward-kdf:pm-clob-l2-cache:v1", 32) as Buffer;
+    pmCredsDerivedKey = { source: masterPassword, key };
+    return key;
+  }
+
+  function encryptPmCredsCacheValue(plaintext: string): string | null {
+    const key = pmCredsCacheEncryptionKey();
+    if (!key) return null;
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", key, iv);
+    let ciphertext = cipher.update(plaintext, "utf8", "hex");
+    ciphertext += cipher.final("hex");
+    return `${PM_CREDS_CACHE_PREFIX}${JSON.stringify({
+      ciphertext,
+      iv: iv.toString("hex"),
+      tag: cipher.getAuthTag().toString("hex"),
+    })}`;
+  }
+
+  // Returns null for anything that is not a valid envelope for THIS key —
+  // including legacy plaintext entries — so the caller treats it as a cache
+  // miss, re-derives, and overwrites with an encrypted value.
+  function decryptPmCredsCacheValue(stored: string): string | null {
+    if (!stored.startsWith(PM_CREDS_CACHE_PREFIX)) return null;
+    const key = pmCredsCacheEncryptionKey();
+    if (!key) return null;
+    try {
+      const payload = JSON.parse(stored.slice(PM_CREDS_CACHE_PREFIX.length)) as {
+        ciphertext: string;
+        iv: string;
+        tag: string;
+      };
+      const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(payload.iv, "hex"));
+      decipher.setAuthTag(Buffer.from(payload.tag, "hex"));
+      let plaintext = decipher.update(payload.ciphertext, "hex", "utf8");
+      plaintext += decipher.final("utf8");
+      return plaintext;
+    } catch {
+      return null;
+    }
+  }
 
   // Optional endpoint override for deterministic integration environments and
   // compatible CLOB gateways. It is deployment configuration, not a test-creds
   // bypass: the real clob-client still performs L1 derivation, EIP-712 signing,
   // L2 HMAC auth, and order serialization against the configured HTTP edge.
+  // SEC-111: in production the override must use https — a stray plain-http
+  // endpoint would send L1-signed derivations + L2 HMAC headers in cleartext.
   function configuredPolymarketClobUrl(): string | undefined {
     const raw = process.env.POLYMARKET_CLOB_API_URL?.trim();
     if (!raw) return undefined;
     const url = new URL(raw);
     if (url.protocol !== "http:" && url.protocol !== "https:") {
       throw new Error("POLYMARKET_CLOB_API_URL must use http or https");
+    }
+    if (process.env.NODE_ENV === "production" && url.protocol !== "https:") {
+      throw new Error("POLYMARKET_CLOB_API_URL must use https in production");
     }
     return url.toString().replace(/\/$/, "");
   }
@@ -1461,25 +1524,35 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     }
 
     // 2) L2 CLOB apiCredentials. Test-only deterministic seam first (inert in prod).
+    // SEC-111: hard-disabled in production (same force-off idiom as the
+    // unsigned-webhook escape hatch) so a stray env var can never swap in the
+    // hardcoded test creds on a live deployment.
     if (process.env.STEWARD_PM_TEST_CREDS === "1") {
-      return {
-        ok: true,
-        apiCredentials: { key: "test-key", secret: "test-secret", passphrase: "test-pass" },
-        funderAddress,
-        walletAddress,
-        signatureType,
-        ...(clobUrl ? { clobUrl } : {}),
-      };
+      if (process.env.NODE_ENV === "production") {
+        console.error(
+          "[trade] STEWARD_PM_TEST_CREDS is set but ignored in production; real L2 creds stay required.",
+        );
+      } else {
+        return {
+          ok: true,
+          apiCredentials: { key: "test-key", secret: "test-secret", passphrase: "test-pass" },
+          funderAddress,
+          walletAddress,
+          signatureType,
+          ...(clobUrl ? { clobUrl } : {}),
+        };
+      }
     }
 
-    // 2a) Redis cache.
+    // 2a) Redis cache (encrypted at rest — SEC-108).
     const redis = getRedisClient();
     const cacheKey = pmCredsCacheKey(tenantId, agentId, walletAddress, clobUrl);
     if (redis) {
       try {
         const cached = await redis.get(cacheKey);
-        if (cached) {
-          const parsed = clobApiCredentialsSchema.safeParse(JSON.parse(cached));
+        const cachedPlaintext = cached ? decryptPmCredsCacheValue(cached) : null;
+        if (cachedPlaintext) {
+          const parsed = clobApiCredentialsSchema.safeParse(JSON.parse(cachedPlaintext));
           if (parsed.success) {
             return {
               ok: true,
@@ -1505,9 +1578,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       return { ok: false, reason: "derive-failed" };
     }
     if (redis) {
-      await redis
-        .setex(cacheKey, PM_CREDS_CACHE_TTL_SECONDS, JSON.stringify(apiCredentials))
-        .catch(() => undefined);
+      // Fail closed: without cache encryption key material, skip the write and
+      // re-derive per order rather than ever storing the creds in plaintext.
+      const cacheValue = encryptPmCredsCacheValue(JSON.stringify(apiCredentials));
+      if (cacheValue) {
+        await redis.setex(cacheKey, PM_CREDS_CACHE_TTL_SECONDS, cacheValue).catch(() => undefined);
+      }
     }
 
     return {
