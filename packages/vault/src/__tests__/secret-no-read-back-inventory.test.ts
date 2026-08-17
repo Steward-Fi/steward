@@ -32,6 +32,9 @@ const PACKAGES_DIR = join(import.meta.dir, "..", "..", "..");
 const ALLOWED_DECRYPT_CALLERS = new Set([
   "vault/src/secret-vault.ts",
   "proxy/src/handlers/proxy.ts",
+  // Google OAuth refresh/disconnect consumes an already-locked credential row
+  // in-process; plaintext stays module-private and is never returned by routes.
+  "api/src/services/provider-google-connect.ts",
   "api/src/services/provider-x-connect.ts",
 ]);
 
