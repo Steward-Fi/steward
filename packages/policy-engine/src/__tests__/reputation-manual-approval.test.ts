@@ -151,12 +151,12 @@ describe("PolicyEngine — reputation-threshold fallbackAction (no score availab
     expect(res.requiresManualApproval).toBe(true);
   });
 
-  it("fallbackAction approve → approved", async () => {
+  it("fallbackAction approve with no score wired → hard deny (fail closed, SEC-040)", async () => {
     const engine = new PolicyEngine();
     const rule = makeReputationRule({ minScore: 50, fallbackAction: "approve" });
     const res = await engine.evaluate([rule], makePolicyContext({}));
 
-    expect(res.approved).toBe(true);
+    expect(res.approved).toBe(false);
     expect(res.requiresManualApproval).toBe(false);
   });
 });

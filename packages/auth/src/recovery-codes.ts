@@ -2,10 +2,12 @@
  * Recovery codes — single-use backup codes for account recovery.
  *
  * When a user enables passkey/2FA, we issue a small batch (default 10) of
- * recovery codes. Each is a 10-character base32 string (Crockford alphabet,
- * I/L/O removed to avoid 1/0 confusion). The plaintext is shown to the user
+ * recovery codes. Each is a 14-character base32 string (Crockford alphabet,
+ * I/L/O removed to avoid 1/0 confusion); legacy 10-character codes issued
+ * before the length bump still verify. The plaintext is shown to the user
  * exactly once; the server stores only a salted hash. Verification compares
- * by hash and marks the code as used so it cannot be replayed.
+ * by hash (constant-time) and marks the code as used so it cannot be
+ * replayed.
  *
  * Codes are formatted in groups of 5 ("ABCDE-FGHJK") for human readability
  * but stored without the separator. Verification is tolerant of casing and
@@ -16,12 +18,17 @@
  * and tracks which have been consumed.
  */
 
-import { randomInt } from "node:crypto";
+import { randomInt, timingSafeEqual } from "node:crypto";
 
 import { hashSha256Hex } from "./crypto";
 
 const ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // 31 chars, ambiguous removed
-const CODE_LEN = 10; // 31^10 ≈ 8.2e14 — well past brute-force with rate-limited verify
+// 14 chars ≈ 69 bits: a dumped/decrypted store no longer yields codes to
+// offline GPU cracking of a single salted SHA-256 (SEC-064). Legacy 10-char
+// codes (~49.5 bits) remain verifiable so existing printouts keep working;
+// rotating codes (regenerate) upgrades a user to the longer form.
+const CODE_LEN = 14;
+const LEGACY_CODE_LEN = 10;
 const DEFAULT_BATCH = 10;
 const SEPARATOR = "-";
 const GROUP_SIZE = 5;
@@ -57,7 +64,7 @@ function generateOne(): string {
 /** Pretty-print a raw code as "ABCDE-FGHJK" without changing its identity. */
 export function formatRecoveryCode(raw: string): string {
   const norm = normalize(raw);
-  if (norm.length !== CODE_LEN) return raw;
+  if (!isAcceptedCodeLength(norm.length)) return raw;
   const parts: string[] = [];
   for (let i = 0; i < norm.length; i += GROUP_SIZE) {
     parts.push(norm.slice(i, i + GROUP_SIZE));
@@ -86,6 +93,18 @@ function saltHex(): string {
 
 function digest(salt: string, normalized: string): string {
   return hashSha256Hex(`${salt}:${normalized}`);
+}
+
+function isAcceptedCodeLength(length: number): boolean {
+  return length === CODE_LEN || length === LEGACY_CODE_LEN;
+}
+
+/** Constant-time hex digest comparison (both sides are sha256 hex). */
+function digestEquals(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  const bufA = Buffer.from(a, "utf8");
+  const bufB = Buffer.from(b, "utf8");
+  return timingSafeEqual(bufA, bufB);
 }
 
 /**
@@ -125,12 +144,12 @@ export async function verifyRecoveryCode(
   supplied: string,
 ): Promise<{ valid: boolean }> {
   const normalized = normalize(supplied);
-  if (normalized.length !== CODE_LEN) return { valid: false };
+  if (!isAcceptedCodeLength(normalized.length)) return { valid: false };
 
   const stored = await store.listForUser(userId);
   for (const row of stored) {
     if (row.usedAt) continue;
-    if (digest(row.salt, normalized) === row.hash) {
+    if (digestEquals(digest(row.salt, normalized), row.hash)) {
       return { valid: await store.markUsed(row.id, new Date()) };
     }
   }

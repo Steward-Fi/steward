@@ -26,10 +26,14 @@ export interface AggregateResult {
   valid: boolean;
 }
 
-async function postJson(url: string, body: unknown): Promise<unknown> {
+async function postJson(url: string, body: unknown, authToken?: string): Promise<unknown> {
   const res = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      // SEC-025: the share sidecar requires a per-share bearer token.
+      ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
+    },
     body: JSON.stringify(body ?? {}),
   });
   const text = await res.text();
@@ -53,7 +57,10 @@ async function postJson(url: string, body: unknown): Promise<unknown> {
 
 /** A handle to one running share sidecar, addressed by localhost port. */
 export class ShareClient {
-  constructor(private readonly baseUrl: string) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly authToken?: string,
+  ) {}
 
   async health(): Promise<{ id: string }> {
     const res = await fetch(`${this.baseUrl}/health`);
@@ -64,7 +71,7 @@ export class ShareClient {
 
   /** Round 1: this share generates single-use nonces + public commitments. */
   async commit(): Promise<CommitResult> {
-    const j = (await postJson(`${this.baseUrl}/commit`, {})) as {
+    const j = (await postJson(`${this.baseUrl}/commit`, {}, this.authToken)) as {
       identifier_hex: string;
       nonce_id: string;
       commitments_hex: string;
@@ -81,28 +88,40 @@ export class ShareClient {
     commitments: Record<string, string>,
     messageHex: string,
   ): Promise<string> {
-    const j = (await postJson(`${this.baseUrl}/signing-package`, {
-      commitments,
-      message_hex: messageHex,
-    })) as { signing_package_hex: string };
+    const j = (await postJson(
+      `${this.baseUrl}/signing-package`,
+      {
+        commitments,
+        message_hex: messageHex,
+      },
+      this.authToken,
+    )) as { signing_package_hex: string };
     return j.signing_package_hex;
   }
 
   /** Round 2: this share produces its signature share for the signing package. */
   async sign(signingPackageHex: string, nonceId: string): Promise<SignShareResult> {
-    const j = (await postJson(`${this.baseUrl}/sign`, {
-      signing_package_hex: signingPackageHex,
-      nonce_id: nonceId,
-    })) as { identifier_hex: string; signature_share_hex: string };
+    const j = (await postJson(
+      `${this.baseUrl}/sign`,
+      {
+        signing_package_hex: signingPackageHex,
+        nonce_id: nonceId,
+      },
+      this.authToken,
+    )) as { identifier_hex: string; signature_share_hex: string };
     return { identifierHex: j.identifier_hex, signatureShareHex: j.signature_share_hex };
   }
 
   /** Genuinely verify a provided signature against this group's key (public op). */
   async verify(messageHex: string, signatureHex: string): Promise<boolean> {
-    const j = (await postJson(`${this.baseUrl}/verify`, {
-      message_hex: messageHex,
-      signature_hex: signatureHex,
-    })) as { valid: boolean };
+    const j = (await postJson(
+      `${this.baseUrl}/verify`,
+      {
+        message_hex: messageHex,
+        signature_hex: signatureHex,
+      },
+      this.authToken,
+    )) as { valid: boolean };
     return j.valid;
   }
 
@@ -111,10 +130,14 @@ export class ShareClient {
     signingPackageHex: string,
     signatureShares: Record<string, string>,
   ): Promise<AggregateResult> {
-    const j = (await postJson(`${this.baseUrl}/aggregate`, {
-      signing_package_hex: signingPackageHex,
-      signature_shares: signatureShares,
-    })) as { signature_hex: string; group_public_key_hex: string; valid: boolean };
+    const j = (await postJson(
+      `${this.baseUrl}/aggregate`,
+      {
+        signing_package_hex: signingPackageHex,
+        signature_shares: signatureShares,
+      },
+      this.authToken,
+    )) as { signature_hex: string; group_public_key_hex: string; valid: boolean };
     return {
       signatureHex: j.signature_hex,
       groupPublicKeyHex: j.group_public_key_hex,

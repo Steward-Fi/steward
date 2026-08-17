@@ -31,6 +31,7 @@
  */
 
 import { AgentKeypair } from "./agent-keypair.ts";
+import { assertSecureBaseUrl } from "./base-url.ts";
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -159,6 +160,12 @@ export interface AgentClientConfig {
    * modest client/server clock skew when scheduling renewal. Default 30s.
    */
   clockSkewToleranceSeconds?: number;
+  /**
+   * Permit a plaintext non-loopback baseUrl (warns at construction). HTTPS is
+   * required by default so enrollment proofs and agent tokens never travel
+   * cleartext off-loopback.
+   */
+  allowInsecureBaseUrl?: boolean;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -208,6 +215,7 @@ export class AgentClient {
     if (!(config.keypair instanceof AgentKeypair)) {
       throw new Error("keypair must be an AgentKeypair (the private key never leaves it)");
     }
+    assertSecureBaseUrl(config.baseUrl, config.allowInsecureBaseUrl);
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
     this.agentId = config.agentId;
     this.keypair = config.keypair;

@@ -62,9 +62,11 @@ describe("middleware security hardening", () => {
   });
 
   it("applies Bun runtime gates before Hono route dispatch", () => {
-    expect(indexSource).toContain("function runtimeGate(request: Request)");
     expect(indexSource).toContain(
-      "fetch: (request: Request) => runtimeGate(request) ?? app.fetch(request)",
+      "function runtimeGate(request: Request, peerAddress: string | null)",
+    );
+    expect(indexSource).toContain(
+      "runtimeGate(request, server.requestIP(request)?.address ?? null) ?? app.fetch(request)",
     );
     expect(indexSource).not.toContain('app.use("*", async (c, next) => {');
   });

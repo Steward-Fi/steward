@@ -110,6 +110,14 @@ mock.module("@stwd/webhooks", () => ({
   isEncryptedWebhookSecret,
 }));
 
+// SEC-017 delivery-time re-validation resolves the destination hostname via
+// node:dns/promises. Mock it to an instant public answer so the dispatch chain
+// stays microtask-only (a real DNS round-trip would outlive the tests'
+// setTimeout(0) flush) while still exercising the re-validation path.
+mock.module("node:dns/promises", () => ({
+  lookup: async () => [{ address: "93.184.216.34", family: 4 }],
+}));
+
 const { dispatchWebhook } = await import("../services/webhook-dispatch");
 const { webhookEventRegistry } = await import("../services/webhook-events");
 

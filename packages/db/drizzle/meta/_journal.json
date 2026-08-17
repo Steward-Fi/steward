@@ -491,6 +491,13 @@
       "when": 1784832000000,
       "tag": "0089_rfc3161_checkpoint_proofs",
       "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1784918400000,
+      "tag": "0090_provider_action_approval_evidence_write_once",
+      "breakpoints": true
     }
   ]
 }

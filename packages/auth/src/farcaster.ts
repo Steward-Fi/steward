@@ -25,11 +25,22 @@ export interface ParsedSiwfMessage {
   notBefore?: string;
   requestId?: string;
   resources: string[];
+  /** fid claimed by the message's farcaster:// resource — self-signed, NOT
+   * verified against a hub/IdRegistry (SEC-058). Unverified metadata only. */
   fid?: string;
 }
 
 export interface VerifiedFarcasterUser {
-  fid: string;
+  /**
+   * The fid CLAIMED by the self-signed SIWF message's `farcaster://fid/N`
+   * resource. NOT cryptographically bound to the signer (SEC-058): anyone can
+   * place any fid in their own signed message, so this is unverified metadata.
+   * Never key identity or authorization decisions on it — use
+   * `custodyAddress`, which IS signature-verified. A verified fid would
+   * require checking the fid→custody-address binding against a Farcaster
+   * hub / the IdRegistry contract.
+   */
+  claimedFid: string;
   custodyAddress: `0x${string}`;
   username?: string;
   displayName?: string;
@@ -44,6 +55,8 @@ export interface VerifyFarcasterLoginOptions {
   nowMs?: number;
   clockSkewMs?: number;
   maxMessageAgeMs?: number;
+  /** Require a fid CLAIM to be present in the signed message (default true).
+   * Note the claim is unverified metadata — see VerifiedFarcasterUser.claimedFid. */
   requireFid?: boolean;
 }
 
@@ -280,7 +293,7 @@ export async function verifyFarcasterLogin(
   if ((options.requireFid ?? true) && !fid) throw new Error("Farcaster fid is required");
 
   return {
-    fid: fid ?? "",
+    claimedFid: fid ?? "",
     custodyAddress: parsed.address,
     username: optionalString(payload.username),
     displayName: optionalString(payload.displayName),

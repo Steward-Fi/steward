@@ -101,4 +101,23 @@ describe("evaluateSiwePolicy", () => {
     void allowedChainIds;
     expect(evaluateSiwePolicy({ ...base, chainId: 999_999 }, rest)).toBeNull();
   });
+
+  test("rejects a message with no expirationTime once its issuedAt age exceeds maxLifetimeMs (SEC-065)", () => {
+    const { expirationTime, ...noExpiry } = base;
+    void expirationTime;
+    // issuedAt is 30s ago — within the 10-minute bound, still accepted.
+    expect(evaluateSiwePolicy(noExpiry, policy)).toBeNull();
+    // issuedAt is 20 minutes ago — rejected even though nothing "expired".
+    expect(evaluateSiwePolicy({ ...noExpiry, issuedAt: "2026-05-21T11:39:59Z" }, policy)).toBe(
+      "lifetime-too-long",
+    );
+  });
+
+  test("rejects a future-dated issuedAt beyond clock skew (SEC-065)", () => {
+    expect(evaluateSiwePolicy({ ...base, issuedAt: "2026-05-21T12:05:00Z" }, policy)).toBe(
+      "not-yet-valid",
+    );
+    // Within skew — tolerated.
+    expect(evaluateSiwePolicy({ ...base, issuedAt: "2026-05-21T12:00:15Z" }, policy)).toBeNull();
+  });
 });

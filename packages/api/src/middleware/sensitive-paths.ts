@@ -13,8 +13,10 @@
  *
  * The prefix set is the conservative UNION of what each copy historically
  * treated as sensitive (the two copies were already identical, so the union is
- * that same set). Adding a prefix here tightens BOTH guards together; never
- * narrow it without auditing both call sites.
+ * that same set), plus the money-/key-/auth-adjacent surfaces added in SEC-150
+ * (`/v1/kms`, `/v2/provider-actions`, `/dashboard`, `/agent-enroll`). Adding a
+ * prefix here tightens BOTH guards together; never narrow it without auditing
+ * both call sites.
  */
 
 /** Path prefixes whose mutating requests are treated as sensitive. */
@@ -51,6 +53,14 @@ export const SENSITIVE_PATH_PREFIXES: readonly string[] = [
   "/v2/provider-accounts",
   "/v2/provider-role-bindings",
   "/v2/provider-grants",
+  // Money-movement + key-material + auth-adjacent surfaces that must stay
+  // covered (SEC-150): KMS key ops, provider action execution/approval,
+  // dashboard session mutations, and agent enrollment.
+  "/v1/kms",
+  "/v2/provider-actions",
+  "/dashboard",
+  "/agent-enroll",
+  "/v1/agent-enroll",
 ];
 
 /**

@@ -38,7 +38,7 @@ type Client struct {
 	config  Config
 	http    *http.Client
 	now     func() time.Time
-	newID   func() string
+	newID   func() (string, error)
 }
 
 type APIError struct {
@@ -60,6 +60,9 @@ type apiEnvelope struct {
 	Error string          `json:"error,omitempty"`
 }
 
+// Keep in lockstep with the equivalent list in EVERY other SDK (sdk, java,
+// python, ruby, rust, swift, csharp, flutter): mutations under these prefixes
+// are HMAC-signed, and divergence silently downgrades integrity (SEC-049).
 var sensitivePrefixes = []string{
 	"/vault",
 	"/agents",
@@ -76,6 +79,34 @@ var sensitivePrefixes = []string{
 	"/condition-sets",
 	"/condition_sets",
 	"/v1/condition_sets",
+	"/global-wallet",
+	"/accounts",
+}
+
+var stewardCredentialHeaders = []string{
+	"Authorization",
+	"X-Steward-Key",
+	"X-Steward-Platform-Key",
+	"X-Steward-App-Id",
+	"X-Steward-Signature",
+	"X-Steward-Signing-Key-Id",
+	"X-Steward-Request-Timestamp",
+	"Idempotency-Key",
+}
+
+// stripStewardCredentialsOnCrossHostRedirect drops credential and signing
+// headers when a redirect targets a different host, so an open redirect or
+// hostile proxy cannot exfiltrate them (SEC-126).
+func stripStewardCredentialsOnCrossHostRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 {
+		return nil
+	}
+	if !strings.EqualFold(req.URL.Hostname(), via[0].URL.Hostname()) {
+		for _, header := range stewardCredentialHeaders {
+			req.Header.Del(header)
+		}
+	}
+	return nil
 }
 
 func NewClient(config Config) (*Client, error) {
@@ -88,14 +119,23 @@ func NewClient(config Config) (*Client, error) {
 	}
 	httpClient := config.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+		httpClient = &http.Client{
+			Timeout: 30 * time.Second,
+			// Never forward Steward credential headers to a different host on
+			// redirect: net/http strips only Authorization/Cookie and copies
+			// X-Steward-* headers to any host (SEC-126).
+			CheckRedirect: stripStewardCredentialsOnCrossHostRedirect,
+		}
 	}
 	now := config.Now
 	if now == nil {
 		now = time.Now
 	}
-	newID := config.NewID
-	if newID == nil {
+	newID := func() (string, error) { return "", nil }
+	if config.NewID != nil {
+		userNewID := config.NewID
+		newID = func() (string, error) { return userNewID(), nil }
+	} else {
 		newID = randomID
 	}
 	return &Client{baseURL: base, config: config, http: httpClient, now: now, newID: newID}, nil
@@ -135,7 +175,9 @@ func (c *Client) Request(ctx context.Context, method string, path string, body a
 	if err != nil {
 		return err
 	}
-	c.applyHeaders(req, method, canonicalPath, rawBody)
+	if err := c.applyHeaders(req, method, canonicalPath, rawBody); err != nil {
+		return err
+	}
 	res, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -148,7 +190,7 @@ func (c *Client) Request(ctx context.Context, method string, path string, body a
 	return decodeResponse(res.StatusCode, payload, out)
 }
 
-func (c *Client) applyHeaders(req *http.Request, method string, path string, body []byte) {
+func (c *Client) applyHeaders(req *http.Request, method string, path string, body []byte) error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	switch {
@@ -174,7 +216,11 @@ func (c *Client) applyHeaders(req *http.Request, method string, path string, bod
 		}
 		idempotencyKey := req.Header.Get("Idempotency-Key")
 		if idempotencyKey == "" {
-			idempotencyKey = c.newID()
+			generated, err := c.newID()
+			if err != nil {
+				return err
+			}
+			idempotencyKey = generated
 			req.Header.Set("Idempotency-Key", idempotencyKey)
 		}
 		if c.config.RequestSigningKeyID != "" && req.Header.Get("X-Steward-Signing-Key-Id") == "" {
@@ -187,6 +233,7 @@ func (c *Client) applyHeaders(req *http.Request, method string, path string, bod
 		mac.Write([]byte(canonical))
 		req.Header.Set("X-Steward-Signature", "v1="+hex.EncodeToString(mac.Sum(nil)))
 	}
+	return nil
 }
 
 func decodeResponse(status int, payload []byte, out any) error {
@@ -242,12 +289,14 @@ func isSensitiveMutation(path string, method string) bool {
 	return false
 }
 
-func randomID() string {
+func randomID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
+		// Fail closed: never fall back to a predictable (timestamp-derived)
+		// idempotency key (SEC-196).
+		return "", fmt.Errorf("crypto/rand unavailable for idempotency key: %w", err)
 	}
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }

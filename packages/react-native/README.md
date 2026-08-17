@@ -31,6 +31,30 @@ The SDK expects synchronous session storage, while React Native storage is
 async. `createStewardNativeAuth()` hydrates the async store first, then passes a
 synchronous cache into `StewardAuth`.
 
+> **Session-token storage:** `@react-native-async-storage/async-storage` is
+> unencrypted plaintext — readable on rooted/jailbroken devices and via Android
+> backups. The examples use it for brevity, but production apps should persist
+> `steward_session_token` / `steward_refresh_token` in a Keychain/Keystore-backed
+> store such as `expo-secure-store` or `react-native-keychain`, wrapped in the
+> same `AsyncKeyValueStorage` shape:
+>
+> ```tsx
+> import * as SecureStore from "expo-secure-store";
+> import { createStewardNativeAuth } from "@stwd/react-native";
+>
+> const secureStorage = {
+>   getItem: (key: string) => SecureStore.getItemAsync(key),
+>   setItem: (key: string, value: string) => SecureStore.setItemAsync(key, value),
+>   removeItem: (key: string) => SecureStore.deleteItemAsync(key),
+> };
+>
+> const auth = await createStewardNativeAuth({
+>   baseUrl: "https://api.steward.example",
+>   tenantId: "my-app",
+>   storage: secureStorage,
+> });
+> ```
+
 After a hydrated or newly-created session, native helpers call `/user/me` with
 the configured tenant context so tenant automatic embedded-wallet creation can
 run during login. Bootstrap errors are swallowed so auth results remain usable;

@@ -36,7 +36,7 @@ import {
   webhookConfigs,
 } from "../services/context";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
-import { validateWebhookUrl } from "../services/webhook-url";
+import { validateWebhookUrlResolved } from "../services/webhook-url";
 
 export const tenantRoutes = new Hono<{ Variables: AppVariables }>();
 const LEGACY_TENANT_WEBHOOK_DESCRIPTION = "legacy:tenant-webhook";
@@ -260,7 +260,7 @@ tenantRoutes.post("/", platformAuthMiddleware(), async (c) => {
   }
   if (body.webhookUrl !== undefined) {
     const urlError = isNonEmptyString(body.webhookUrl)
-      ? validateWebhookUrl(body.webhookUrl)
+      ? await validateWebhookUrlResolved(body.webhookUrl)
       : "webhookUrl must be a non-empty string";
     if (urlError) return c.json<ApiResponse>({ ok: false, error: urlError }, 400);
   }
@@ -387,7 +387,7 @@ tenantRoutes.put("/:id/webhook", requireTenantId, async (c) => {
 
   if (body.webhookUrl !== undefined) {
     const urlError = isNonEmptyString(body.webhookUrl)
-      ? validateWebhookUrl(body.webhookUrl)
+      ? await validateWebhookUrlResolved(body.webhookUrl)
       : "webhookUrl must be a non-empty string";
     if (urlError) return c.json<ApiResponse>({ ok: false, error: urlError }, 400);
   }

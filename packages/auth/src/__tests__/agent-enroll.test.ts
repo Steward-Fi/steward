@@ -220,4 +220,26 @@ describe("agent enrollment (keypair-only self-auth)", () => {
     const s = buildEnrollCanonicalString({ agentId: "a", nonce: "n", issuedAt: 42 });
     expect(s).toBe(`${AGENT_ENROLL_DOMAIN}\na\nn\n42`);
   });
+
+  test("agentId is length- and charset-capped before it reaches the store (SEC-051)", async () => {
+    const store = new ChallengeStore();
+    const oversized = "a".repeat(200);
+    const issued = await issueEnrollChallenge(store, oversized);
+    expect(issued.ok).toBe(false);
+    expect(store.size).toBe(0);
+
+    for (const bad of ["agent id", "agent/id", "agent\nid", "é".repeat(10)]) {
+      const res = await issueEnrollChallenge(store, bad);
+      expect(res.ok).toBe(false);
+    }
+    expect(store.size).toBe(0);
+
+    const verified = await verifyEnrollResponse(store, resolverFor({}), {
+      agentId: oversized,
+      nonce: "n",
+      signature: "s",
+    });
+    expect(verified).toEqual({ ok: false, error: "invalid agentId", code: "invalid_input" });
+    store.destroy();
+  });
 });

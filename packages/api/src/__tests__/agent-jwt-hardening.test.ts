@@ -42,11 +42,29 @@ describe("external agent JWT hardening", () => {
   it("does not treat api:proxy as implicit broad agent metadata scope", () => {
     expect(contextSource).not.toContain("new Set([AGENT_SCOPE])");
     expect(contextSource).toContain("if (!scopes || scopes.length === 0) return [AGENT_SCOPE]");
-    expect(contextSource).toContain(
-      'c.set("agentScopes", normalizeAgentTokenScopes(payload.scopes))',
-    );
+    expect(contextSource).toContain('c.set("agentScopes", agentTokenScopes)');
     expect(contextSource).toContain(
       'agentScope === c.req.param("agentId") && hasAgentTokenScope(c.get("agentScopes"))',
     );
+  });
+
+  it("refuses capability-scoped (cap:) tokens on the general tenant surface", () => {
+    // SEC-033: a token-mode capability token authorizes EXACTLY one capability.
+    // The tenant gate must reject any agent token carrying a `cap:` scope —
+    // even one that also stamps the broad `agent` scope — so it can never act
+    // as a general agent credential.
+    expect(contextSource).toContain('CAPABILITY_TOKEN_SCOPE_PREFIX = "cap:"');
+    expect(contextSource).toContain(
+      "agentTokenScopes.some((scope) => scope.startsWith(CAPABILITY_TOKEN_SCOPE_PREFIX))",
+    );
+    // The refusal happens BEFORE any agent lookup/context install (fail fast).
+    const refusal = contextSource.indexOf(
+      "agentTokenScopes.some((scope) => scope.startsWith(CAPABILITY_TOKEN_SCOPE_PREFIX))",
+    );
+    const agentLookup = contextSource.indexOf(
+      "const agent = await ensureAgentForTenant(payload.tenantId, payload.agentId as string);",
+    );
+    expect(refusal).toBeGreaterThanOrEqual(0);
+    expect(agentLookup).toBeGreaterThan(refusal);
   });
 });

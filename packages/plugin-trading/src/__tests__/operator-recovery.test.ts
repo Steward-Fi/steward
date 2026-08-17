@@ -259,7 +259,10 @@ describe("operator recovery usd-send", () => {
   it("submits usdSend through the platform-gated adapter path", async () => {
     const tenantId = `tenant-usdsend-ok-${Date.now()}`;
     const agentId = `agent-usdsend-ok-${Date.now()}`;
-    await seedAgent({ tenantId, agentId });
+    // SEC-004: usd-send is a withdrawal rail and now runs the same policy gate
+    // as /withdraw — the destination must be on the agent's approved list.
+    const destination = "0xABCDEF0123456789abcdef0123456789ABCDEF01";
+    await seedAgent({ tenantId, agentId, approvedAddresses: [destination] });
     usdSendCalls.length = 0;
 
     const app = await buildApp();

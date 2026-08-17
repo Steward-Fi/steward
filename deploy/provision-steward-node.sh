@@ -30,7 +30,16 @@ if [[ -z "${STEWARD_MASTER_PASSWORD:-}" ]]; then
   exit 1
 fi
 
-SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -i ${SSH_KEY}"
+# Host-key checking: TOFU (accept-new) at minimum — never "no" (SEC-019).
+# This channel streams the full secret .env; a MITM on an unverified first
+# connection would capture all of it. For production fleets pin host keys
+# instead: `ssh-keyscan -H <node> >> ~/.ssh/known_hosts` once, then run with
+# STRICT_HOST_KEY=yes below.
+if [[ "${STRICT_HOST_KEY:-}" == "yes" ]]; then
+  SSH_OPTS="-o StrictHostKeyChecking=yes -o ConnectTimeout=10 -i ${SSH_KEY}"
+else
+  SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -i ${SSH_KEY}"
+fi
 SSH_CMD="ssh ${SSH_OPTS} root@${NODE_IP}"
 SCP_CMD="scp ${SSH_OPTS}"
 REMOTE_DIR="/opt/steward"
@@ -172,8 +181,8 @@ echo ""
 echo "══════════════════════════════════════════════════════════════"
 echo "  ✅ Steward deployed successfully!"
 echo ""
-echo "  Steward URL:    http://${NODE_IP}:3200"
-echo "  Health check:   http://${NODE_IP}:3200/health"
+echo "  Steward URL:    http://localhost:3200 (loopback-only on the node)"
+echo "  Health check:   ssh ${SSH_OPTS} root@${NODE_IP} 'curl -sf http://localhost:3200/health'"
 echo "  Platform Key:   (written to ${REMOTE_DIR}/deploy/.env, mode 0600, on the node; retrieve it there, not printed here)"
 echo ""
 echo "  Agent config (add to container env):"
@@ -182,6 +191,9 @@ echo "    STEWARD_PROXY_REQUEST_SIGNING_SECRETS=(retrieve from ${REMOTE_DIR}/dep
 echo "    # Agents must use this shared secret to sign proxied requests; the node-side .env is mode 0600."
 echo "    (agents on milady-isolated network reach Steward by container name)"
 echo ""
-echo "  External access:"
-echo "    STEWARD_API_URL=http://${NODE_IP}:3200"
+echo "  External access (ports 3200/8080 are bound to 127.0.0.1 — no plain-HTTP exposure):"
+echo "    • TLS:    install deploy/nginx.conf + certbot on the node, then use https://<your-domain>"
+echo "    • Tunnel: ssh -L 3200:localhost:3200 root@${NODE_IP}  →  STEWARD_API_URL=http://localhost:3200"
+echo "    Do NOT access the API as http://${NODE_IP}:3200 — tenant keys, the platform key,"
+echo "    and agent JWTs would cross the network in cleartext."
 echo "══════════════════════════════════════════════════════════════"

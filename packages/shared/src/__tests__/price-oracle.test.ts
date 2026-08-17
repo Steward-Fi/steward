@@ -50,4 +50,77 @@ describe("price oracle", () => {
       oracle.getTokenUsdPrice(8453, "0x1111111111111111111111111111111111111111"),
     ).resolves.toBeNull();
   });
+
+  it("rejects malformed token addresses without fetching (SEC-118)", async () => {
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response(JSON.stringify({ pairs: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const oracle = createPriceOracle({ cacheTtlMs: 60_000 });
+
+    // Path/query injection attempts must never reach the URL.
+    await expect(oracle.getTokenUsdPrice(8453, "../admin?x=1")).resolves.toBeNull();
+    await expect(oracle.getTokenUsdPrice(8453, "0x1111#frag")).resolves.toBeNull();
+    // Wrong family: a base58-looking mint on an EVM chain.
+    await expect(
+      oracle.getTokenUsdPrice(8453, "So11111111111111111111111111111111111111112"),
+    ).resolves.toBeNull();
+    expect(fetchCalls).toBe(0);
+  });
+
+  it("usdToWei is exact beyond 2^53 and rounds to nearest (SEC-189)", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          pairs: [{ chainId: "base", priceUsd: "50", liquidity: { usd: 100 } }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+
+    const oracle = createPriceOracle({ cacheTtlMs: 0 });
+
+    // 100 USD at $50 = exactly 2e18 wei.
+    await expect(oracle.usdToWei(100, 8453)).resolves.toBe("2000000000000000000");
+    // 1 USD at $3 = 1e18/3 wei. The old double math (`tokenAmount * 10 ** 18`)
+    // collapses to 333333333333333312 (double rounding); exact rational math
+    // rounds to nearest: 333333333333333333.
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          pairs: [{ chainId: "base", priceUsd: "3", liquidity: { usd: 100 } }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+    await expect(createPriceOracle({ cacheTtlMs: 0 }).usdToWei(1, 8453)).resolves.toBe(
+      "333333333333333333",
+    );
+  });
+
+  it("fails closed for unknown chains/tokens instead of assuming 18 decimals (SEC-190)", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          pairs: [{ chainId: "base", priceUsd: "50", liquidity: { usd: 100 } }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+
+    const oracle = createPriceOracle({ cacheTtlMs: 0 });
+
+    // Unknown native chain id: no DexScreener mapping anyway, but the decimals
+    // path must also fail closed.
+    await expect(oracle.usdToWei(100, 999_999)).resolves.toBeNull();
+    // Unknown ERC-20 on a known chain: decimals unknown -> null, not 18.
+    await expect(
+      oracle.usdToWei(100, 8453, "0x2222222222222222222222222222222222222222"),
+    ).resolves.toBeNull();
+    await expect(
+      oracle.weiToUsd("1000000", 8453, "0x2222222222222222222222222222222222222222"),
+    ).resolves.toBeNull();
+  });
 });

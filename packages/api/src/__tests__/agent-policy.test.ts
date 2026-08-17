@@ -140,7 +140,9 @@ describe("agent trade policy", () => {
     expect(res.status).toBe(403);
     const body = (await res.json()) as { ok: boolean; error: string };
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Agent policy updates require agent JWT authentication");
+    expect(body.error).toContain(
+      "Agent policy updates require an agent token or an owner/admin session",
+    );
   });
 
   it("GET returns an existing policy row", async () => {
@@ -206,18 +208,68 @@ describe("agent trade policy", () => {
     expect(((await rejected.json()) as { error: string }).error).toContain(
       "allowBuilderPerps=true",
     );
+  });
 
-    const accepted = await putPolicy({
+  it("SEC-208: an agent token cannot widen allowedAssets or enable builder perps", async () => {
+    const widen = await putPolicy({
       allowedAssets: ["BTC", "xyz:SPCX"],
       allowBuilderPerps: true,
       reason: "explicitly allow Trade.xyz SPCX builder perp",
     });
-    expect(accepted.status).toBe(200);
-    const body = (await accepted.json()) as {
-      data: { policy: { allowedAssets: string[]; allowBuilderPerps: boolean } };
-    };
-    expect(body.data.policy.allowedAssets).toEqual(["BTC", "xyz:SPCX"]);
-    expect(body.data.policy.allowBuilderPerps).toBe(true);
+    expect(widen.status).toBe(403);
+    expect(((await widen.json()) as { error: string }).error).toContain(
+      "allowedAssets cannot be widened with an agent token",
+    );
+  });
+
+  it("SEC-208: an agent token cannot raise its own caps", async () => {
+    const raiseDaily = await putPolicy({ dailyCap: 10_000, reason: "raise my own daily cap" });
+    expect(raiseDaily.status).toBe(403);
+    expect(((await raiseDaily.json()) as { error: string }).error).toContain(
+      "dailyCap cannot be raised",
+    );
+
+    const raiseLeverage = await putPolicy({ leverageCap: 50, reason: "raise my own leverage" });
+    expect(raiseLeverage.status).toBe(403);
+    expect(((await raiseLeverage.json()) as { error: string }).error).toContain(
+      "leverageCap cannot be raised",
+    );
+
+    const enableBuilder = await putPolicy({
+      allowBuilderPerps: true,
+      reason: "flip builder perps on",
+    });
+    expect(enableBuilder.status).toBe(403);
+    expect(((await enableBuilder.json()) as { error: string }).error).toContain(
+      "allowBuilderPerps cannot be enabled with an agent token",
+    );
+  });
+
+  it("SEC-208: an agent token cannot create an initial policy looser than the defaults", async () => {
+    const res = await app.request(`/v1/agents/${missingAgentId}/policy`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${await signAgentToken({ agentId: missingAgentId, tenantId, sub: `agent:${missingAgentId}` } as never, "1h")}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ dailyCap: 100_000, reason: "maximal initial policy" }),
+    });
+    // 10_000 exceeds the Layer-1 platform ceiling AND the defaults; the
+    // platform-ceiling 400 fires before the tighten-only 403.
+    expect(res.status).toBe(400);
+
+    const justAboveDefaults = await app.request(`/v1/agents/${missingAgentId}/policy`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${await signAgentToken({ agentId: missingAgentId, tenantId, sub: `agent:${missingAgentId}` } as never, "1h")}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ dailyCap: 1_001, reason: "just above default" }),
+    });
+    expect(justAboveDefaults.status).toBe(403);
+    expect(((await justAboveDefaults.json()) as { error: string }).error).toContain(
+      "dailyCap cannot be raised above 1000",
+    );
   });
 
   it("emits an agent.policy.updated audit event with diff", async () => {
@@ -231,7 +283,7 @@ describe("agent trade policy", () => {
     expect(latest).toMatchObject({ tenantId, actorId: `agent:${agentId}`, resourceId: agentId });
     expect(latest?.metadata).toMatchObject({
       agentId,
-      reason: "explicitly allow Trade.xyz SPCX builder perp",
+      reason: "tighten risk",
     });
   });
 });

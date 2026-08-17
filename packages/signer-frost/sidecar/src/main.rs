@@ -9,12 +9,16 @@
 //!           Trusted-dealer keygen. Writes DIR/group.json (public) and
 //!           DIR/share-<id>.json (secret share per participant).
 //!
-//!   share   --share-file FILE --port P
+//!   share   --share-file FILE --port P [--auth-token TOKEN]
 //!           Runs an HTTP service holding ONE secret share. Endpoints:
 //!             GET  /health
 //!             POST /commit  { }                      -> round1 commitments (public)
 //!             POST /sign    { signing_package, nonces_id } -> round2 sig share
 //!           The share never leaves this process.
+//!           Every endpoint except GET /health requires
+//!           `Authorization: Bearer TOKEN` (flag or FROST_SHARE_AUTH_TOKEN);
+//!           the service refuses to start without one (SEC-025). Shares must
+//!           never share a network namespace with untrusted code.
 //!
 //!   aggregate (offline helper for tests) reads a signing package + shares from
 //!           stdin — not needed in the HTTP flow; aggregation is done by whoever
@@ -26,6 +30,7 @@
 //! prototype self-contained the share service ALSO exposes POST /aggregate.
 
 use std::collections::BTreeMap;
+use std::io::Read;
 
 use frost::{
     keys::{KeyPackage, PublicKeyPackage},
@@ -107,11 +112,16 @@ fn cmd_keygen(threshold: u16, participants: u16, out: &str, scheme: &str) {
             key_package_hex: hex::encode(key_package.serialize().expect("ser kp")),
             pubkey_package_hex: pubkey_package_hex.clone(),
         };
-        std::fs::write(
-            format!("{out}/share-{id_hex}.json"),
-            serde_json::to_vec_pretty(&sf).unwrap(),
-        )
-        .expect("write share file");
+        let share_path = format!("{out}/share-{id_hex}.json");
+        std::fs::write(&share_path, serde_json::to_vec_pretty(&sf).unwrap())
+            .expect("write share file");
+        // SEC-083: share files hold secret key material — owner-only.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&share_path, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod share file 0600");
+        }
     }
 
     // Emit machine-readable summary on stdout for the TS client.
@@ -129,6 +139,12 @@ fn cmd_keygen(threshold: u16, participants: u16, out: &str, scheme: &str) {
 
 // --------------------------- share HTTP service ----------------------------
 
+/// SEC-083: cap outstanding commit rounds so unbounded /commit calls cannot
+/// grow the nonce map without limit.
+const MAX_PENDING_NONCES: usize = 1024;
+/// SEC-083: bound request bodies read from the socket.
+const MAX_BODY_BYTES: u64 = 64 * 1024;
+
 struct ShareState {
     key_package: KeyPackage,
     pubkey_package: PublicKeyPackage,
@@ -136,6 +152,8 @@ struct ShareState {
     // Nonces are single-use and kept per commit round, keyed by nonce id.
     nonces: BTreeMap<String, frost::round1::SigningNonces>,
     next_nonce_id: u64,
+    // SEC-025: per-share bearer token authenticating the coordinator.
+    auth_token: String,
 }
 
 #[derive(Serialize)]
@@ -203,7 +221,7 @@ fn id_from_hex(s: &str) -> Identifier {
     Identifier::deserialize(&bytes).expect("id deser")
 }
 
-fn cmd_share(share_file: &str, port: u16) {
+fn cmd_share(share_file: &str, port: u16, auth_token: String) {
     let raw = std::fs::read(share_file).expect("read share file");
     let sf: ShareFile = serde_json::from_slice(&raw).expect("parse share file");
     let key_package =
@@ -219,6 +237,7 @@ fn cmd_share(share_file: &str, port: u16) {
         identifier,
         nonces: BTreeMap::new(),
         next_nonce_id: 0,
+        auth_token,
     };
 
     let server = tiny_http::Server::http(("127.0.0.1", port))
@@ -231,8 +250,37 @@ fn cmd_share(share_file: &str, port: u16) {
     for mut request in server.incoming_requests() {
         let url = request.url().to_string();
         let method = request.method().as_str().to_string();
+
+        // SEC-025: every endpoint except GET /health requires the per-share
+        // bearer token. Without it any local process could drive /commit +
+        // /sign and obtain signature shares over attacker-chosen messages.
+        let is_health = method == "GET" && url == "/health";
+        if !is_health {
+            let expected = format!("Bearer {}", state.auth_token);
+            let authorized = request
+                .headers()
+                .iter()
+                .any(|h| h.field.equiv("authorization") && h.value.as_str() == expected);
+            if !authorized {
+                let response =
+                    tiny_http::Response::from_string(err_json("unauthorized")).with_status_code(401);
+                let _ = request.respond(response);
+                continue;
+            }
+        }
+
+        // SEC-083: bound the request body read from the socket.
         let mut body = String::new();
-        let _ = request.as_reader().read_to_string(&mut body);
+        let _ = request
+            .as_reader()
+            .take(MAX_BODY_BYTES + 1)
+            .read_to_string(&mut body);
+        if body.len() as u64 > MAX_BODY_BYTES {
+            let response = tiny_http::Response::from_string(err_json("request body too large"))
+                .with_status_code(413);
+            let _ = request.respond(response);
+            continue;
+        }
 
         let (code, payload) = handle(&mut state, &method, &url, &body);
         let response = tiny_http::Response::from_string(payload).with_status_code(code);
@@ -248,6 +296,9 @@ fn handle(state: &mut ShareState, method: &str, url: &str, body: &str) -> (u16, 
                 .to_string(),
         ),
         ("POST", "/commit") => {
+            if state.nonces.len() >= MAX_PENDING_NONCES {
+                return (429, err_json("too many outstanding commit rounds"));
+            }
             let mut rng = OsRng;
             let (nonces, commitments) =
                 frost::round1::commit(state.key_package.signing_share(), &mut rng);
@@ -424,7 +475,18 @@ fn main() {
                 .expect("--port required")
                 .parse()
                 .expect("port");
-            cmd_share(&share_file, port);
+            // SEC-025: the share service refuses to run unauthenticated —
+            // require a per-share bearer token via flag or environment.
+            let auth_token = arg(&args, "--auth-token")
+                .or_else(|| std::env::var("FROST_SHARE_AUTH_TOKEN").ok())
+                .unwrap_or_else(|| {
+                    eprintln!(
+                        "--auth-token or FROST_SHARE_AUTH_TOKEN is required: \
+                         the share service refuses to run unauthenticated"
+                    );
+                    std::process::exit(2);
+                });
+            cmd_share(&share_file, port, auth_token);
         }
         _ => {
             eprintln!("usage: frost-signer <keygen|share> ...");

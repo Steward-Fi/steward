@@ -14,6 +14,9 @@ use url::form_urlencoded;
 
 type HmacSha256 = Hmac<Sha256>;
 
+// Keep in lockstep with the equivalent list in EVERY other SDK (sdk, go, java,
+// python, ruby, swift, csharp, flutter): mutations under these prefixes are
+// HMAC-signed, and divergence silently downgrades integrity (SEC-049).
 const SENSITIVE_SIGNED_PREFIXES: &[&str] = &[
     "/vault",
     "/agents",
@@ -30,6 +33,8 @@ const SENSITIVE_SIGNED_PREFIXES: &[&str] = &[
     "/condition-sets",
     "/condition_sets",
     "/v1/condition_sets",
+    "/global-wallet",
+    "/accounts",
 ];
 
 const MUTATING_METHODS: &[&str] = &["POST", "PUT", "PATCH", "DELETE"];

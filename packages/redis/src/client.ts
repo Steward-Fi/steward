@@ -13,7 +13,9 @@
  *                            auth `RedisLike` consumer rely on.
  *
  * Reading the connection URL:
- *   - ioredis : REDIS_URL (default redis://localhost:6379)
+ *   - ioredis : REDIS_URL (default redis://localhost:6379). In production the
+ *               URL must use rediss:// (TLS) unless it points at localhost or
+ *               STEWARD_ALLOW_INSECURE_REDIS=true is set (assertRedisUrlTls).
  *   - upstash : KV_REST_API_URL + KV_REST_API_TOKEN
  *               (or UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN)
  */
@@ -27,6 +29,55 @@ export type RedisDriver = "ioredis" | "upstash";
 let instance: IoredisLike | null = null;
 let shutdownRegistered = false;
 
+/**
+ * Refuse to start in production if REDIS_URL is not using TLS (rediss://).
+ * Redis carries spend-limit state, rate-limit state, policy cache, and auth KV
+ * (SIWE nonces), so a cleartext link lets a network-positioned attacker read
+ * and tamper with enforcement data. Localhost connections are exempt. Set
+ * STEWARD_ALLOW_INSECURE_REDIS=true to override for private-network
+ * deployments (logs a loud warning), matching the STEWARD_ALLOW_INSECURE_DB
+ * posture in @stwd/db.
+ */
+export function assertRedisUrlTls(url: string): void {
+  if (process.env.NODE_ENV !== "production") return;
+
+  const allowInsecure = process.env.STEWARD_ALLOW_INSECURE_REDIS === "true";
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    if (allowInsecure) {
+      console.warn(
+        "[steward:redis] WARNING: STEWARD_ALLOW_INSECURE_REDIS=true — REDIS_URL is not a valid URL, so TLS cannot be verified.",
+      );
+      return;
+    }
+    throw new Error("REDIS_URL must be a valid URL so TLS settings can be verified in production");
+  }
+
+  if (parsed.protocol === "rediss:") return;
+  if (parsed.protocol !== "redis:") {
+    throw new Error("REDIS_URL must use the redis:// or rediss:// scheme");
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  // URL.hostname keeps the brackets on IPv6 literals ([::1]).
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]") return;
+
+  if (allowInsecure) {
+    console.warn(
+      "[steward:redis] WARNING: STEWARD_ALLOW_INSECURE_REDIS=true — REDIS_URL is cleartext redis://. " +
+        "This is only safe on a private network. SOC2 CC6.7 requires encryption in transit.",
+    );
+    return;
+  }
+
+  throw new Error(
+    "REDIS_URL must use rediss:// (TLS) in production. " +
+      "Set STEWARD_ALLOW_INSECURE_REDIS=true to override for private-network deployments.",
+  );
+}
+
 export function getRedisDriver(): RedisDriver {
   const raw = process.env.REDIS_DRIVER?.trim().toLowerCase();
   if (raw === "upstash") return "upstash";
@@ -35,6 +86,7 @@ export function getRedisDriver(): RedisDriver {
 
 function buildIoredis(): Redis {
   const url = process.env.REDIS_URL || "redis://localhost:6379";
+  assertRedisUrlTls(url);
   const client = new Redis(url, {
     maxRetriesPerRequest: 3,
     retryStrategy(times: number) {

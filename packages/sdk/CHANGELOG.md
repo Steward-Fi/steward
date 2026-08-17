@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Security (BREAKING)
+- `StewardClient`, `StewardAuth`, and `AgentClient` constructors now REJECT a plaintext non-loopback `baseUrl` (fail closed, SEC-048). These clients transmit platform keys, app secrets, bearer tokens, and HMAC-signed credentials, which must never travel cleartext off-loopback — the CLI has always enforced this. `http://localhost`/`127.0.0.1`/`[::1]` stay allowed for local development; operators on trusted private networks can opt out with the new `allowInsecureBaseUrl: true` config (warns loudly at construction). Previously-working insecure configs must pass the flag or switch to HTTPS.
+- `/accounts` and `/global-wallet` mutations are now HMAC-signed when `requestSigningSecret` is configured, aligning the request-signing prefix list with all eight other SDKs (SEC-049). Servers that enforce signatures on these routes previously saw unsigned mutations from this SDK.
+
 ### Added
 - `StewardAuthConfig.authProxyUrl`: optional same-origin auth proxy prefix (e.g. `/api/auth`) that keeps the long-lived refresh token in an HttpOnly, SameSite=Strict cookie instead of JS-readable storage (SEC-018). When set, sign-in deposits the refresh token with the proxy (failing closed if the deposit cannot be completed), and refresh / revoke / tenant-switch calls go through the proxy — only the short-lived access token is kept in `storage`. Unset keeps the previous behavior unchanged.
 - Add shared magic-link + six-digit companion-code login helpers: `verifyEmailSignInCode()` and status-only `pollEmailSignInStatus()`. `signInWithEmail()` now returns opaque polling credentials.

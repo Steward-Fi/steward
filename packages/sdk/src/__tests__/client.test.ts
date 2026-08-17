@@ -1027,6 +1027,26 @@ describe("Request headers", () => {
     expect(lastCapture?.headers["x-steward-request-timestamp"]).toBeUndefined();
     expect(lastCapture?.headers["x-steward-signature"]).toBeUndefined();
   });
+
+  it("signs /accounts and /global-wallet mutations (SEC-049 cross-SDK alignment)", async () => {
+    // Wallet/account mutations are signed from Flutter but were sent unsigned
+    // from the other SDKs before the prefix lists were aligned in lockstep.
+    installMockFetch({ ok: true, data: { wallets: [] } });
+    const client = makeClient({
+      requestSigningSecret: "request-signing-secret-with-enough-entropy",
+    });
+
+    await client.accounts.create({ displayName: "ops" });
+    expect(lastCapture?.method).toBe("POST");
+    expect(new URL(lastCapture!.url).pathname).toBe("/accounts");
+    expect(lastCapture?.headers["x-steward-signature"]).toMatch(/^v1=[0-9a-f]{64}$/);
+
+    installMockFetch({ ok: true, data: {} });
+    await client.approveGlobalWalletConsent({ appId: "app-1" });
+    expect(lastCapture?.method).toBe("POST");
+    expect(new URL(lastCapture!.url).pathname).toBe("/global-wallet/consent/approve");
+    expect(lastCapture?.headers["x-steward-signature"]).toMatch(/^v1=[0-9a-f]{64}$/);
+  });
 });
 
 // ─── HTTP Request Building Tests ──────────────────────────────────────────

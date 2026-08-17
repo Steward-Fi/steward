@@ -30,7 +30,7 @@ import {
   isValidConfigurableWebhookEvent,
   listValidConfigurableWebhookEvents,
 } from "../services/webhook-events";
-import { validateWebhookUrl } from "../services/webhook-url";
+import { validateWebhookUrlResolved } from "../services/webhook-url";
 
 export const webhookRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -342,7 +342,11 @@ webhookRoutes.post("/", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   }
 
-  const urlError = isNonEmptyString(body.url) ? validateWebhookUrl(body.url) : "url is required";
+  // SEC-017: resolve DNS and reject non-public answers (string checks alone
+  // miss public-hostname-to-private-IP and rebinding).
+  const urlError = isNonEmptyString(body.url)
+    ? await validateWebhookUrlResolved(body.url)
+    : "url is required";
   if (urlError) {
     return c.json<ApiResponse>({ ok: false, error: urlError }, 400);
   }
@@ -532,7 +536,9 @@ webhookRoutes.put("/:id", async (c) => {
   }
 
   if (body.url !== undefined) {
-    const urlError = isNonEmptyString(body.url) ? validateWebhookUrl(body.url) : "url is required";
+    const urlError = isNonEmptyString(body.url)
+      ? await validateWebhookUrlResolved(body.url)
+      : "url is required";
     if (urlError) {
       return c.json<ApiResponse>({ ok: false, error: urlError }, 400);
     }

@@ -3,9 +3,12 @@
 node_modules
 dist
 coverage
-.env
-.env.*
-!.env.example
+# SEC-078: anchor .env patterns at every depth — bare `.env`/`.env.*` only
+# match the context root, so deploy/.env (written by provision-steward-node.sh)
+# and deploy/enterprise-reference/.env would be tarred into the build context.
+**/.env
+**/.env.*
+!**/.env.example
 README.md
 REDESIGN-BRIEF.md
 !web/

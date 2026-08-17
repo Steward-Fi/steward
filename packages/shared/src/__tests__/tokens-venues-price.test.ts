@@ -146,8 +146,10 @@ describe("createPriceOracle", () => {
   });
 
   it("keeps case-distinct Solana mint prices isolated in the cache", async () => {
+    const mintUpper = "AbCMint11111111111111111111111111111111111";
+    const mintLower = "abcmint11111111111111111111111111111111111";
     const fetchMock = mock(async (input: RequestInfo | URL) => {
-      const price = String(input).endsWith("/AbCMint") ? "10" : "20";
+      const price = String(input).endsWith(`/${mintUpper}`) ? "10" : "20";
       return new Response(JSON.stringify({ pairs: [{ chainId: "solana", priceUsd: price }] }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -156,8 +158,8 @@ describe("createPriceOracle", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
     const oracle = createPriceOracle({ cacheTtlMs: 60_000 });
 
-    await expect(oracle.getTokenUsdPrice(101, "AbCMint")).resolves.toBe(10);
-    await expect(oracle.getTokenUsdPrice(101, "abcmint")).resolves.toBe(20);
+    await expect(oracle.getTokenUsdPrice(101, mintUpper)).resolves.toBe(10);
+    await expect(oracle.getTokenUsdPrice(101, mintLower)).resolves.toBe(20);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 

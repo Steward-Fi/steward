@@ -344,6 +344,12 @@ export interface StewardAuthConfig {
    * Leave unset to keep refresh tokens in `storage` (default, unchanged).
    */
   authProxyUrl?: string;
+  /**
+   * Permit a plaintext non-loopback baseUrl (warns at construction). HTTPS is
+   * required by default so session credentials never travel cleartext
+   * off-loopback.
+   */
+  allowInsecureBaseUrl?: boolean;
 }
 
 /** Response shape from POST /auth/refresh */

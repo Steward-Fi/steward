@@ -14,7 +14,7 @@ const hyperliquidSource = readFileSync(
 );
 
 describe("trade session revocation fence", () => {
-  it("serializes revocation with the final order sign and submit phase", () => {
+  it("checks activity in the fence and re-checks between sign and submit (SEC-044)", () => {
     expect(tradeSessionSource).toContain("function sessionFenceKey");
     expect(tradeSessionSource).toContain("pg_advisory_xact_lock");
     expect(tradeSessionSource).toContain("withActiveSubmissionFence");

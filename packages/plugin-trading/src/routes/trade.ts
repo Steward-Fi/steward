@@ -32,6 +32,7 @@ import {
   clobApiCredentialsSchema,
   deriveApiCredentials,
   type EthersSignerLike,
+  getPrices,
   isPolymarketPostNotAttempted,
   isPolymarketUnauthorized,
   POLY_EOA_SIGNATURE_TYPE,
@@ -175,6 +176,23 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     { bodyHash: string; response: TradeIdempotencyResponse; expiresAt: number }
   >();
 
+  // The in-memory idempotency fallbacks are bounded (SEC-043): expired entries
+  // are swept on store and the oldest entries are evicted past the cap, so a
+  // caller minting unique keys cannot grow process memory without bound.
+  // (Mirrors evm-swap.ts's MAX_IDEMPOTENCY_ENTRIES.)
+  const MAX_MEMORY_IDEMPOTENCY_ENTRIES = 1_000;
+  function sweepMemoryIdempotency(
+    map: Map<string, { bodyHash: string; response: TradeIdempotencyResponse; expiresAt: number }>,
+    now: number,
+  ): void {
+    for (const [entryKey, entry] of map) {
+      if (entry.expiresAt <= now || map.size >= MAX_MEMORY_IDEMPOTENCY_ENTRIES) {
+        map.delete(entryKey);
+      }
+      if (map.size < MAX_MEMORY_IDEMPOTENCY_ENTRIES) break;
+    }
+  }
+
   function getSessionManager(): TradeSessionManager {
     return new TradeSessionManager({ redis: getRedisClient() });
   }
@@ -232,6 +250,24 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     return typeof body === "object" && body !== null && Object.hasOwn(body, key);
   }
 
+  /**
+   * Recent-MFA check for the human (session-jwt) trade-session gates. A session
+   * that completed MFA hours or days ago must NOT manage fund-moving trade
+   * sessions — presence of a historical verification is not recency. Mirrors
+   * the plugin-capabilities + core /secrets gate (5-minute default).
+   */
+  function hasRecentSessionMfa(
+    c: Context<{ Variables: AppVariables }>,
+    maxAgeMs = 5 * 60_000,
+  ): boolean {
+    const verifiedAt = c.get("sessionMfaVerifiedAt");
+    return (
+      typeof verifiedAt === "number" &&
+      Number.isFinite(verifiedAt) &&
+      Date.now() - verifiedAt <= maxAgeMs
+    );
+  }
+
   function policyViolation(message: string) {
     return { code: "policy-violation", message };
   }
@@ -243,6 +279,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       | "trade.session.created"
       | "trade.session.revoked"
       | "trade.order.submitted"
+      | "trade.order.submitted-after-revoke"
       | "trade.order.submit.authorized"
       | "trade.order.leverage.set"
       | "trade.order.leverage.failed"
@@ -327,6 +364,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     }
     return {
       store(response: TradeIdempotencyResponse) {
+        sweepMemoryIdempotency(memoryIdempotency, now);
         memoryIdempotency.set(mapKey, {
           bodyHash,
           response,
@@ -522,11 +560,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     // MFA recency is a human-session protection. The agent-self path has no human
     // session to MFA; its protection is the agent_policies cap clamp below + the
     // per-order policy evaluation on submission. Only enforce MFA on the human path.
-    if (
-      c.get("authType") === "session-jwt" &&
-      createByHumanAdmin &&
-      !c.get("sessionMfaVerifiedAt")
-    ) {
+    if (c.get("authType") === "session-jwt" && createByHumanAdmin && !hasRecentSessionMfa(c)) {
       return c.json<ApiResponse>(
         { ok: false, error: "Trade session management requires recent MFA verification" },
         403,
@@ -774,7 +808,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         403,
       );
     }
-    if (c.get("authType") === "session-jwt" && readByHumanAdmin && !c.get("sessionMfaVerifiedAt")) {
+    if (c.get("authType") === "session-jwt" && readByHumanAdmin && !hasRecentSessionMfa(c)) {
       return c.json<ApiResponse>(
         { ok: false, error: "Trade session management requires recent MFA verification" },
         403,
@@ -812,11 +846,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         403,
       );
     }
-    if (
-      c.get("authType") === "session-jwt" &&
-      revokeByHumanAdmin &&
-      !c.get("sessionMfaVerifiedAt")
-    ) {
+    if (c.get("authType") === "session-jwt" && revokeByHumanAdmin && !hasRecentSessionMfa(c)) {
       return c.json<ApiResponse>(
         { ok: false, error: "Trade session management requires recent MFA verification" },
         403,
@@ -1160,6 +1190,23 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           return envelope;
         }
 
+        // SEC-044: the submission fence no longer blocks revocation across
+        // venue I/O, so a revoke may have committed while the order was in
+        // flight. The order has landed regardless — detect + audit the race so
+        // operators can flatten manually.
+        const activeAfterSubmit = await getSessionManager().getActive(tenantId, session.id);
+        if (!activeAfterSubmit) {
+          await auditTradeEvent(tenantId, agentId, "trade.order.submitted-after-revoke", {
+            sessionId: session.id,
+            venue: "hyperliquid",
+            asset: parsedAsset.data,
+            leverage: effectiveLeverage,
+            size: body.size,
+            sizeUsd,
+            orderId: result.orderId ?? null,
+          });
+        }
+
         const response = {
           orderId: result.orderId ?? crypto.randomUUID(),
           status: result.status,
@@ -1244,6 +1291,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     }
     return {
       store(response: TradeIdempotencyResponse) {
+        sweepMemoryIdempotency(pmMemoryIdempotency, now);
         pmMemoryIdempotency.set(mapKey, {
           bodyHash,
           response,
@@ -1276,6 +1324,28 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   // is shares, so notional = shares * price. The policy gate caps on this value.
   function polymarketNotionalUsd(side: "buy" | "sell", amount: number, price: number): number {
     return side === "buy" ? amount : amount * price;
+  }
+
+  /**
+   * Notional USD for a Polymarket SELL, floored at the CLOB best bid. A FOK sell
+   * at limit 0.01 fills at the best bid (e.g. 0.90), so sizing caps on the
+   * caller's limit would understate the real notional and defeat
+   * perOrderCapUsd/dailyCapUsd (the HL path guards the same trick via
+   * resolveSizingPx). FAIL CLOSED: a sell whose market price cannot be verified
+   * is rejected, never sized on the caller's limit alone.
+   */
+  async function polymarketSellNotionalUsd(
+    amount: number,
+    price: number,
+    tokenId: string,
+    clobUrl?: string,
+  ): Promise<number> {
+    const [best] = await getPrices([{ tokenId, side: "sell" }], clobUrl ? { clobUrl } : undefined);
+    const bestBid = Number(best?.price);
+    if (!Number.isFinite(bestBid) || bestBid <= 0) {
+      throw new Error("unable to resolve CLOB best bid for sell notional sizing");
+    }
+    return amount * Math.max(price, bestBid);
   }
 
   // Map a structured checkOrderAllowed reason to its HTTP status. Allowlist/cap
@@ -1552,7 +1622,40 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         400,
       );
     }
-    const notionalUsd = polymarketNotionalUsd(body.side, amount, price);
+    // SEC-041: a SELL's notional must be floored at the live best bid — a FOK
+    // sell at an arbitrarily low limit fills at the bid, so sizing on the
+    // caller's price would understate notional and bypass the session caps.
+    // Fail closed (policy-violation, no spend) when the book can't be read.
+    let notionalUsd: number;
+    if (body.side === "sell") {
+      let clobUrl: string | undefined;
+      try {
+        clobUrl = configuredPolymarketClobUrl();
+      } catch {
+        clobUrl = undefined;
+      }
+      try {
+        notionalUsd = await polymarketSellNotionalUsd(amount, price, body.tokenId, clobUrl);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : "unable to size sell notional";
+        await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
+          venue: "polymarket",
+          tokenId: body.tokenId,
+          side: body.side,
+          amount,
+          price,
+          reason,
+        });
+        const envelope: TradeIdempotencyResponse = {
+          status: 400,
+          body: { code: "policy-violation", reason },
+        };
+        idempotency.store?.(envelope);
+        return c.json(envelope.body, envelope.status);
+      }
+    } else {
+      notionalUsd = polymarketNotionalUsd(body.side, amount, price);
+    }
 
     // Session fetch + ownership + venue check + the prediction-market policy gate,
     // all in one pass. checkActiveOrder loads the session and runs checkOrderAllowed
@@ -1680,9 +1783,11 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
 
     const manager = getSessionManager();
     // Fence reserve→submit against concurrent revocation (mirrors HL's
-    // withActiveSubmissionFence): the spend reservation and the venue submit run
-    // under an advisory lock that the revoke path also takes, so a revoke that
-    // commits before this block cannot interleave with an in-flight submit.
+    // withActiveSubmissionFence). After SEC-044 the fence's advisory lock covers
+    // ONLY the DB-level active check — it is released before this callback runs
+    // (never held across signing/venue I/O) — so revoke-vs-submit ordering here
+    // rests on the atomic reserveSpend re-check, the pre-submit activity
+    // re-check below, and the post-submit re-verification.
     const fenced = await manager.withActiveSubmissionFence(
       { tenantId, id: session.id },
       async () => {
@@ -1747,6 +1852,28 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           const envelope: TradeIdempotencyResponse = {
             status: 400,
             body: { ok: false, error: "Order could not be built; not submitted" },
+          };
+          idempotency.store?.(envelope);
+          return envelope;
+        }
+
+        // SEC-044: re-confirm the session is still active BEFORE submitting
+        // (the fence no longer holds the advisory lock across venue I/O). A
+        // revoke that landed during the build must abort the submit; the
+        // reserved spend is released because nothing reached the venue.
+        const activeAfterBuild = await getSessionManager().getActive(tenantId, session.id);
+        if (!activeAfterBuild) {
+          await getSessionManager().releaseSpend({
+            tenantId,
+            id: session.id,
+            amountUsd: notionalUsd,
+          });
+          const envelope: TradeIdempotencyResponse = {
+            status: 409,
+            body: {
+              ok: false,
+              error: "Trade session was revoked before order submission",
+            },
           };
           idempotency.store?.(envelope);
           return envelope;
@@ -1861,6 +1988,25 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           };
           idempotency.store?.(envelope);
           return envelope;
+        }
+
+        // SEC-044: the submission fence no longer blocks revocation across
+        // venue I/O, so a revoke may have committed while the order was in
+        // flight. The order has landed regardless — detect + audit the race so
+        // operators can flatten manually.
+        const activeAfterSubmit = await getSessionManager().getActive(tenantId, session.id);
+        if (!activeAfterSubmit) {
+          await auditTradeEvent(tenantId, agentId, "trade.order.submitted-after-revoke", {
+            sessionId: session.id,
+            venue: "polymarket",
+            tokenId: body.tokenId,
+            conditionId: body.conditionId ?? null,
+            side: body.side,
+            amount,
+            price,
+            notionalUsd,
+            orderId: result.orderId ?? null,
+          });
         }
 
         const response = {

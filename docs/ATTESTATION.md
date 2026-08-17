@@ -25,8 +25,8 @@ If `STEWARD_DSTACK_VERIFIER_URL` is not configured, `dstack-tdx` may generate ev
 
 ## Backend matrix
 
-- `dstack-tdx`: implemented. Quote generation uses dstack Guest Agent `/GetQuote` and `/Info`; verification uses dstack verifier `/verify`. Full Intel PCS/DCAP collateral handling lives in the verifier service, not in Steward's TypeScript process.
-- `noop-dev`: implemented for local development. It returns `verified: false` unless `STEWARD_ATTESTATION_NOOP_ALLOW=true`, and that explicit allow is rejected when `NODE_ENV=production`.
+- `dstack-tdx`: implemented. Quote generation uses dstack Guest Agent `/GetQuote` and `/Info`; verification uses dstack verifier `/verify`. Full Intel PCS/DCAP collateral handling lives in the verifier service, not in Steward's TypeScript process. The verifier verdict is the entire trust decision, so `STEWARD_DSTACK_VERIFIER_URL` must use TLS (or mTLS) — plain HTTP is only acceptable to loopback and triggers a startup warning otherwise.
+- `noop-dev`: implemented for local development. It returns `verified: false` unless `STEWARD_ATTESTATION_NOOP_ALLOW=true` **and** `STEWARD_ALLOW_DEV_SECRETS=true` (dual consent, same as every other dev escape hatch in this repo), and that explicit allow is always rejected when `NODE_ENV=production`.
 - `aws-nitro`: interface seam only. No implementation in this lane.
 - `amd-sev-snp`: interface seam only. No implementation in this lane.
 
@@ -39,7 +39,9 @@ Environment:
 - `STEWARD_ATTESTATION_PROVIDER=dstack-tdx|noop-dev` (default: `noop-dev`)
 - `DSTACK_SOCKET_PATH=/var/run/dstack.sock` (optional dstack override)
 - `STEWARD_DSTACK_VERIFIER_URL=http://verifier:8080` (required for real dstack verification)
-- `STEWARD_ATTESTATION_NOOP_ALLOW=true` (local development only)
+- `STEWARD_ATTESTATION_NOOP_ALLOW=true` (local development only; additionally requires `STEWARD_ALLOW_DEV_SECRETS=true`)
+
+`verifyQuote` requires a freshness nonce to report `verified: true`; nonce-less verification fails closed so captured quotes cannot be replayed. The `/quote` route is rate limited per client IP and strips `vm_config` from the response evidence.
 
 ## Measurement registry
 
@@ -74,7 +76,7 @@ The registry lives at `docs/attestation/measurements.json` and has this shape:
 }
 ```
 
-Registry signatures are over canonical JSON of `payload`. CI can require more than one valid signature with `STEWARD_REGISTRY_REQUIRED_SIGNATURES=2` and should pin trusted release keys with `STEWARD_REGISTRY_TRUSTED_KEY_IDS=release-key-1,release-key-2` plus public-key fingerprints in `STEWARD_REGISTRY_TRUSTED_KEY_SHA256=...`; this is the intended two-person-rule for production measurement changes. Any production measurement update must be an explicit PR that reviewers can compare against build/deploy evidence.
+Registry signatures are over canonical JSON of `payload`. CI **must** pin trusted release keys with `STEWARD_REGISTRY_TRUSTED_KEY_IDS=release-key-1,release-key-2` and/or public-key fingerprints in `STEWARD_REGISTRY_TRUSTED_KEY_SHA256=...` — unpinned verification fails closed (`STEWARD_REGISTRY_ALLOW_UNPINNED=true` exists for local development only). CI can require more than one valid signature with `STEWARD_REGISTRY_REQUIRED_SIGNATURES=2`; the count must be a positive integer and counts **distinct keys**, so this is the intended two-person-rule for production measurement changes. Any production measurement update must be an explicit PR that reviewers can compare against build/deploy evidence. Optionally pin `STEWARD_REGISTRY_ID` and `STEWARD_REGISTRY_MIN_UPDATED_AT` to bind the expected registry identity and reject registries older than the last-known-good update (replay/rollback protection).
 
 ## CI check
 

@@ -139,12 +139,22 @@ describe("reputation-threshold evaluator", () => {
     expect(result.reason).toContain("fallback");
   });
 
-  it("passes on fallback when fallbackAction is approve", () => {
+  it("fails closed on fallback when fallbackAction is approve and no score is wired (SEC-040)", () => {
     const rule = makeRule("reputation-threshold", {
       ...config,
       fallbackAction: "approve",
     });
     const result = evaluateReputationThreshold(rule, {});
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("fail closed");
+  });
+
+  it("still honors action: approve when a score IS wired but below minimum", () => {
+    const rule = makeRule("reputation-threshold", {
+      ...config,
+      action: "approve",
+    });
+    const result = evaluateReputationThreshold(rule, { reputationScore: 10 });
     expect(result.passed).toBe(true);
   });
 

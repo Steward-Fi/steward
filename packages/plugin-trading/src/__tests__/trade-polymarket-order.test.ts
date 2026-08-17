@@ -275,6 +275,88 @@ describe("POST /v1/trade/polymarket/order", () => {
     expect(await dailySpendOf(sessionId)).toBe(0);
   });
 
+  it("SEC-041: SELL notional is floored at the CLOB best bid (low-limit cap bypass fails)", async () => {
+    // perOrderCap 50. A FOK sell of 100 shares at limit 0.01 would fill at the
+    // best bid (0.90): real notional ~$90 must be capped, not the caller-stated
+    // $1. Pre-fix the route sized on the caller's price and passed the gate.
+    const { tenantId, agentId, sessionId } = await seedSession({
+      perOrderCapUsd: "50",
+    });
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async () =>
+        new Response(JSON.stringify({ [TOKEN_ID]: { SELL: "0.90" } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })) as typeof fetch,
+    );
+
+    try {
+      const res = await postOrder(app, sessionId, crypto.randomUUID(), {
+        side: "sell",
+        amount: 100,
+        price: 0.01,
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code?: string; reason?: string };
+      expect(body.code).toBe("policy-violation");
+      expect(body.reason).toBe("per-order-cap-exceeded");
+      expect(await dailySpendOf(sessionId)).toBe(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("SEC-041: SELL with bid BELOW the limit sizes on the limit (no over-denial)", async () => {
+    // best bid 0.40 < limit 0.50 -> notional 100 * 0.50 = 50, exactly the cap
+    // (cap is >-compared, so it passes). The order then fails closed at the
+    // creds gate (409), proving the cap gate let it through.
+    const { tenantId, agentId, sessionId } = await seedSession({
+      perOrderCapUsd: "50",
+    });
+    stubWallet(true);
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async () =>
+        new Response(JSON.stringify({ [TOKEN_ID]: { SELL: "0.40" } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })) as typeof fetch,
+    );
+
+    try {
+      const res = await postOrder(app, sessionId, crypto.randomUUID(), {
+        side: "sell",
+        amount: 100,
+        price: 0.5,
+      });
+      expect(res.status).toBe(409);
+      expect(await dailySpendOf(sessionId)).toBe(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("SEC-041: SELL fails closed when the best bid cannot be resolved", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({});
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    const fetchSpy = spyOn(globalThis, "fetch").mockRejectedValue(new Error("clob down"));
+
+    try {
+      const res = await postOrder(app, sessionId, crypto.randomUUID(), {
+        side: "sell",
+        amount: 10,
+        price: 0.5,
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code?: string; reason?: string };
+      expect(body.code).toBe("policy-violation");
+      expect(await dailySpendOf(sessionId)).toBe(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it("honors an exact pm:<tokenId> allowlist entry (passes the policy gate)", async () => {
     // The per-token entry IS the executable unit — it grants exactly this token.
     const { tenantId, agentId, sessionId } = await seedSession({
@@ -671,6 +753,14 @@ describe("POST /v1/trade/polymarket/order", () => {
 
     process.env.STEWARD_PM_TEST_CREDS = "1";
     stubWallet(true);
+    // SEC-041: sells now resolve the CLOB best bid for notional sizing first.
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async () =>
+        new Response(JSON.stringify({ [TOKEN_ID]: { SELL: "0.5" } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })) as typeof fetch,
+    );
     submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitSignedOrder").mockResolvedValue({
       venue: "polymarket" as const,
     } as Awaited<ReturnType<PolymarketExecutionAdapter["submitSignedOrder"]>>);
@@ -689,6 +779,7 @@ describe("POST /v1/trade/polymarket/order", () => {
       expect(await dailySpendOf(sessionId)).toBe(0);
       expect(await auditCount(tenantId, "trade.order.submitted")).toBe(0);
     } finally {
+      fetchSpy.mockRestore();
       delete process.env.STEWARD_PM_TEST_CREDS;
     }
   });

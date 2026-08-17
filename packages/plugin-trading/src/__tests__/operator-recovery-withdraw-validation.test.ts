@@ -80,9 +80,10 @@ async function seedAgent(opts: {
   tenantId: string;
   agentId: string;
   approvedAddresses?: string[];
-  // spending-limit config in canonical wei format, e.g. { maxPerTx: "50000000" }.
-  // The withdraw amount is fed to the policy engine as USDC 6-decimal base units,
-  // so 100 USDC == 100000000 base units.
+  // spending-limit config. After SEC-042 the withdraw gate denominates `value`
+  // in native wei (converted from USDC via the price oracle), so wei-style caps
+  // (maxPerTx/maxPerDay/maxPerWeek) compare against real wei and USD-style caps
+  // (maxPerTxUsd/...) see the real USD notional.
   spendingLimit?: Record<string, unknown>;
 }) {
   await getDb()
@@ -133,7 +134,7 @@ async function seedAgent(opts: {
   }
 }
 
-async function buildApp() {
+async function buildApp(ctxOverrides: Record<string, unknown> = {}) {
   const { isValidPlatformKey } = await import("@stwd/auth");
   const { createOperatorRecoveryRoutes } = await import("../routes/operator-recovery");
   const { testCtx } = await import("./_ctx");
@@ -151,9 +152,28 @@ async function buildApp() {
     c.set("authType", "platform");
     return next();
   });
-  app.route("/v1/trade", createOperatorRecoveryRoutes(testCtx()));
+  app.route("/v1/trade", createOperatorRecoveryRoutes({ ...testCtx(), ...ctxOverrides }));
   return app;
 }
+
+// Deterministic stub oracle (ETH = $4000) for the spend-cap tests: after
+// SEC-042 the gate converts USDC to native wei through the price oracle, so a
+// 100 USDC withdraw evaluates as 0.025 ETH = 2.5e16 wei.
+const STUB_ETH_USD = 4000;
+const stubPriceOracle = {
+  async getNativeUsdPrice() {
+    return STUB_ETH_USD;
+  },
+  async getTokenUsdPrice() {
+    return STUB_ETH_USD;
+  },
+  async weiToUsd(weiValue: string) {
+    return (Number(BigInt(weiValue)) / 1e18) * STUB_ETH_USD;
+  },
+  async usdToWei(usdValue: number) {
+    return BigInt(Math.floor((usdValue / STUB_ETH_USD) * 1e18)).toString();
+  },
+};
 
 async function postWithdraw(
   app: Awaited<ReturnType<typeof buildApp>>,
@@ -269,17 +289,18 @@ describe("operator recovery withdraw spend-cap enforcement (issue #109)", () => 
   it("rejects an in-bounds amount that exceeds the spend-cap, even to an approved destination", async () => {
     const tenantId = `tenant-wd-cap-${Date.now()}`;
     const agentId = `agent-wd-cap-${Date.now()}`;
-    // maxPerTx = 50 USDC in base units; a 100 USDC withdraw (100000000 base
-    // units) exceeds it. Before the fix the policy saw value:"0" and PASSED.
+    // maxPerTx = 0.01 ETH in wei; a 100 USDC withdraw (~0.025 ETH at the
+    // stubbed $4000) exceeds it. Before the fix the policy saw value:"0" and
+    // PASSED; with USDC-as-wei denomination it would still pass (1e8 < 1e16).
     await seedAgent({
       tenantId,
       agentId,
       approvedAddresses: [approved],
-      spendingLimit: { maxPerTx: "50000000" },
+      spendingLimit: { maxPerTx: "10000000000000000" },
     });
     signWithdrawCalls.length = 0;
 
-    const app = await buildApp();
+    const app = await buildApp({ priceOracle: stubPriceOracle });
     const res = await postWithdraw(app, tenantId, {
       agentId,
       amount: "100",
@@ -295,17 +316,18 @@ describe("operator recovery withdraw spend-cap enforcement (issue #109)", () => 
   it("signs a withdraw whose amount is within the spend-cap", async () => {
     const tenantId = `tenant-wd-cap-ok-${Date.now()}`;
     const agentId = `agent-wd-cap-ok-${Date.now()}`;
-    // maxPerTx = 200 USDC base units; a 100 USDC withdraw is within the cap.
+    // maxPerTx = 0.1 ETH in wei; a 100 USDC withdraw (~0.025 ETH at the stubbed
+    // $4000) is within the cap.
     await seedAgent({
       tenantId,
       agentId,
       approvedAddresses: [approved],
-      spendingLimit: { maxPerTx: "200000000" },
+      spendingLimit: { maxPerTx: "100000000000000000" },
     });
     signWithdrawCalls.length = 0;
     submitWithdrawCalls.length = 0;
 
-    const app = await buildApp();
+    const app = await buildApp({ priceOracle: stubPriceOracle });
     const res = await postWithdraw(app, tenantId, {
       agentId,
       amount: "100",

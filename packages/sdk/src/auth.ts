@@ -57,6 +57,7 @@ import type {
   StewardUser,
   StewardWhatsAppOtpResult,
 } from "./auth-types.ts";
+import { assertSecureBaseUrl } from "./base-url.ts";
 import { StewardApiError } from "./client.ts";
 
 // ─── Storage key ──────────────────────────────────────────────────────────────
@@ -319,7 +320,15 @@ export class StewardAuth {
   private readonly authProxyUrl: string | undefined;
   private readonly listeners: Array<(session: StewardSession | null) => void> = [];
 
-  constructor({ baseUrl, storage, onSessionChange, tenantId, authProxyUrl }: StewardAuthConfig) {
+  constructor({
+    baseUrl,
+    storage,
+    onSessionChange,
+    tenantId,
+    authProxyUrl,
+    allowInsecureBaseUrl,
+  }: StewardAuthConfig) {
+    assertSecureBaseUrl(baseUrl, allowInsecureBaseUrl);
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.tenantId = tenantId;
     this.authProxyUrl = authProxyUrl ? authProxyUrl.replace(/\/+$/, "") : undefined;

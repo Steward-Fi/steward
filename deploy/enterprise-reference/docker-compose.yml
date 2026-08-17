@@ -177,11 +177,22 @@ services:
     profiles: ["enterprise-reference", "backup"]
     image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     entrypoint: ["/bin/sh", "-ec"]
-    command: "pg_dump \"$${DATABASE_URL}\" > /backups/steward-$$(date -u +%Y%m%dT%H%M%SZ).sql"
-    environment:
-      DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/steward}"
+    # SEC-081:
+    #  - The DSN is sourced from the mounted env FILE, not container env, so
+    #    the DB password no longer appears in `docker inspect`.
+    #  - umask 077: dumps contain tenant PII, audit events, and encrypted key
+    #    blobs in PLAINTEXT — they are written mode 0600. Keep ./backups
+    #    mode 0700 on the host (or on encrypted storage), restrict it to the
+    #    operator account, and encrypt/prune dumps per your retention policy.
+    command:
+      - |
+        set -a; . /run/steward/env; set +a
+        umask 077
+        dsn="$${DATABASE_URL:-postgresql://steward:$${POSTGRES_PASSWORD:?}@postgres:5432/steward}"
+        pg_dump "$$dsn" > "/backups/steward-$$(date -u +%Y%m%dT%H%M%SZ).sql"
     volumes:
       - ./backups:/backups
+      - ./.env:/run/steward/env:ro
     depends_on:
       postgres:
         condition: service_healthy

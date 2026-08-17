@@ -1,3 +1,4 @@
+import { assertSecureBaseUrl } from "./base-url.ts";
 import type {
   AgentAccountSummary,
   AgentBalance,
@@ -194,6 +195,11 @@ export interface StewardClientConfig {
    * injected scripts can read request headers. Prefer bearerToken in browsers.
    */
   allowUnsafeBrowserSecrets?: boolean;
+  /**
+   * Permit a plaintext non-loopback baseUrl (warns at construction). HTTPS is
+   * required by default so credentials never travel cleartext off-loopback.
+   */
+  allowInsecureBaseUrl?: boolean;
 }
 
 export interface QuorumSignerCredential {
@@ -465,6 +471,9 @@ export interface TradeSessionState {
   revokedBy?: string | null;
 }
 
+// Keep in lockstep with the equivalent list in EVERY other SDK (go, java,
+// python, ruby, rust, swift, csharp, flutter): mutations under these prefixes
+// are HMAC-signed, and divergence silently downgrades integrity (SEC-049).
 const SENSITIVE_SIGNED_PATHS = [
   "/vault",
   "/agents",
@@ -481,6 +490,8 @@ const SENSITIVE_SIGNED_PATHS = [
   "/condition-sets",
   "/condition_sets",
   "/v1/condition_sets",
+  "/global-wallet",
+  "/accounts",
 ];
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
@@ -1374,6 +1385,7 @@ export class StewardClient {
     requestSigningSecret,
     requestSigningKeyId,
     allowUnsafeBrowserSecrets,
+    allowInsecureBaseUrl,
   }: StewardClientConfig) {
     if (
       isBrowserRuntime() &&
@@ -1385,6 +1397,7 @@ export class StewardClient {
         0,
       );
     }
+    assertSecureBaseUrl(baseUrl, allowInsecureBaseUrl);
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.apiKey = apiKey;
     this.appId = appId;

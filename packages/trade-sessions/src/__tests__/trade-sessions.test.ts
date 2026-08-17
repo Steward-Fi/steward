@@ -228,6 +228,59 @@ describe("TradeSessionManager", () => {
     expect(expired?.status).toBe("expired");
     expect(await manager.getActive(TENANT_ID, session.id)).toBeNull();
   });
+
+  test("SEC-044: the submission fence does not hold its transaction across the callback", async () => {
+    const manager = await freshManager();
+    const session = await manager.createSession(baseInput());
+
+    // A callback that issues its OWN base-connection DB reads/writes (exactly
+    // what the order routes do: reserveSpend, releaseSpend, audit writes)
+    // deadlocks against the fence's open transaction under a single-connection
+    // database. After SEC-044 the advisory lock + active check COMMIT before
+    // the callback runs, so these complete. Pre-fix this test would hang; the
+    // race turns the deadlock into a failure instead of a stuck suite.
+    const result = await Promise.race([
+      manager.withActiveSubmissionFence(
+        { tenantId: TENANT_ID, id: session.id },
+        async (fencedSession) => {
+          expect(fencedSession.id).toBe(session.id);
+          const fresh = await manager.getSession({ tenantId: TENANT_ID, id: session.id });
+          const reserved = await manager.reserveSpend({
+            tenantId: TENANT_ID,
+            id: session.id,
+            amountUsd: 10,
+          });
+          return { freshId: fresh?.id ?? null, reserved: reserved !== null };
+        },
+      ),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error("fence callback deadlocked inside the transaction")),
+          8000,
+        ),
+      ),
+    ]);
+
+    expect(result).toEqual({ freshId: session.id, reserved: true });
+  });
+
+  test("SEC-044: the submission fence returns null for a revoked session", async () => {
+    const manager = await freshManager();
+    const session = await manager.createSession(baseInput());
+    await manager.revokeSession({ tenantId: TENANT_ID, id: session.id });
+
+    let callbackRan = false;
+    const result = await manager.withActiveSubmissionFence(
+      { tenantId: TENANT_ID, id: session.id },
+      async () => {
+        callbackRan = true;
+        return "submitted";
+      },
+    );
+
+    expect(result).toBeNull();
+    expect(callbackRan).toBe(false);
+  });
 });
 
 describe("prediction-market allowlist (pure)", () => {

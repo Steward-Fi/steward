@@ -35,6 +35,13 @@ export interface EvaluatorContext {
   request: SignRequest;
   recentTxCount24h: number;
   recentTxCount1h: number;
+  /**
+   * Rolling spend sums in the base unit of `request.chainId` ONLY (wei for
+   * EVM, lamports for Solana, piconero for Monero...). Callers MUST scope
+   * these counters to the request's chain: a cross-chain sum mixes
+   * incomparable units, and the USD path re-prices it at this request's chain
+   * price — silently under- or over-enforcing the cap (SEC-039).
+   */
   spentToday: bigint;
   spentThisWeek: bigint;
   /** Optional price oracle for USD-based policy evaluation */
@@ -133,6 +140,16 @@ export async function evaluatePolicy(
   rule: PolicyRule,
   ctx: EvaluatorContext,
 ): Promise<PolicyResult & ManualApprovalSignal> {
+  // A non-boolean `enabled` is malformed config, not "disabled": fail closed
+  // rather than let a hand-authored rule silently pass as disabled (SEC-103).
+  if (typeof rule.enabled !== "boolean") {
+    return {
+      policyId: rule.id,
+      type: rule.type,
+      passed: false,
+      reason: "Policy enabled flag must be a boolean",
+    };
+  }
   if (!rule.enabled) {
     return {
       policyId: rule.id,
@@ -452,10 +469,21 @@ async function evaluateSpendingLimit(
       }
     }
 
-    return { ...base, passed: true };
+    // USD limits hold. Wei-denominated caps declared in the SAME config are
+    // conjunctive, not alternative: previously any USD field short-circuited
+    // the whole wei section, so an operator's per-tx wei cap silently went
+    // unenforced (SEC-037). Fall through to the wei evaluation — undeclared
+    // wei fields normalize to MAX_UINT256, so only explicit caps bite.
+    if (
+      rule.config.maxPerTx === undefined &&
+      rule.config.maxPerDay === undefined &&
+      rule.config.maxPerWeek === undefined
+    ) {
+      return { ...base, passed: true };
+    }
   }
 
-  // ── Wei-based evaluation (legacy / fallback) ────────────────────────────────
+  // ── Wei-based evaluation (legacy / fallback, and conjunctive with USD) ──────
   // ATOMICITY CONTRACT: this evaluator is pure — it compares the caller-supplied
   // spentToday/spentThisWeek counters and reserves/commits nothing. Concurrency
   // safety for the daily/weekly caps is the CALLER's responsibility: the spend
@@ -540,20 +568,12 @@ function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): Pol
 }
 
 function getApprovedAddressTarget(request: SignRequest): string | undefined {
-  const withdrawalRequest = request as SignRequest & {
-    destination?: unknown;
-    action?: { destination?: unknown };
-    withdraw?: { destination?: unknown };
-  };
-
-  if (typeof withdrawalRequest.destination === "string") return withdrawalRequest.destination;
-  if (typeof withdrawalRequest.action?.destination === "string") {
-    return withdrawalRequest.action.destination;
-  }
-  if (typeof withdrawalRequest.withdraw?.destination === "string") {
-    return withdrawalRequest.withdraw.destination;
-  }
-
+  // ONLY `request.to` is authoritative: it is the address the vault actually
+  // signs for. Envelope shadow fields (`destination`, `action.destination`,
+  // `withdraw.destination`) were once honored for a server-built withdraw flow
+  // that now passes `to` explicitly — keeping them lets a caller smuggle a
+  // whitelisted `destination` past the whitelist while signing to an arbitrary
+  // `to` (SEC-001).
   return request.to;
 }
 
@@ -1249,8 +1269,26 @@ function evaluateEvmSelectorConstraint(
 
       return { ...base, passed: true };
     }
-    default:
+    default: {
+      // `maxNativeValueWei` is selector-agnostic and was already enforced
+      // above. Any OTHER declared constraint requires decoding calldata for a
+      // selector this engine does not know — fail closed rather than let the
+      // operator believe a recipient/amount/tokenId gate is enforced when it
+      // is a silent no-op (SEC-038). Empty arrays are no-ops, matching the
+      // known-selector arms.
+      const hasUnenforceableConstraint = Object.entries(constraint).some(([key, value]) => {
+        if (key === "maxNativeValueWei" || value === undefined) return false;
+        return !(Array.isArray(value) && value.length === 0);
+      });
+      if (hasUnenforceableConstraint) {
+        return {
+          ...base,
+          passed: false,
+          reason: `Selector constraints cannot be enforced for unrecognized selector ${selector}`,
+        };
+      }
       return { ...base, passed: true };
+    }
   }
 }
 

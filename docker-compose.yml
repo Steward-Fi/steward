@@ -58,6 +58,11 @@ services:
       STEWARD_PLUGINS: "${STEWARD_PLUGINS:-}"
       WXMR_SOLANA_RPC_URL: "${WXMR_SOLANA_RPC_URL:-}"
       REDIS_URL: "redis://redis:6379"
+      # Cleartext redis:// on the private compose network requires an explicit
+      # opt-out in production (mirrors STEWARD_ALLOW_INSECURE_DB above). No
+      # default is injected here: set STEWARD_ALLOW_INSECURE_REDIS=true in .env
+      # for this stack, or point REDIS_URL at a rediss:// endpoint.
+      STEWARD_ALLOW_INSECURE_REDIS: "${STEWARD_ALLOW_INSECURE_REDIS:-}"
       # API-side invoke paths sign requests to steward-proxy with this shared
       # root. Keep it distinct from JWT/audit secrets; the proxy service below
       # verifies the same value.
@@ -151,6 +156,10 @@ services:
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
       STEWARD_PROXY_REQUEST_SIGNING_SECRET: "${STEWARD_PROXY_REQUEST_SIGNING_SECRET:?STEWARD_PROXY_REQUEST_SIGNING_SECRET is required - generate with: openssl rand -hex 32}"
       REDIS_URL: "redis://redis:6379"
+      # Cleartext redis:// on the private compose network requires an explicit
+      # opt-out in production (mirrors STEWARD_ALLOW_INSECURE_DB). Set
+      # STEWARD_ALLOW_INSECURE_REDIS=true in .env for this stack, or use rediss://.
+      STEWARD_ALLOW_INSECURE_REDIS: "${STEWARD_ALLOW_INSECURE_REDIS:-}"
     ports:
       - "127.0.0.1:${STEWARD_PROXY_PORT:-8080}:8080"
     healthcheck:

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -144,6 +146,68 @@ func TestSensitiveMutationsAreSignedAndIdempotent(t *testing.T) {
 	}
 }
 
+// SEC-049: every SDK's signing-prefix list must cover wallet/account mutations
+// in lockstep (Flutter already signed these).
+func TestAccountsAndGlobalWalletMutationsAreSigned(t *testing.T) {
+	var captured *http.Request
+	client, err := NewClient(Config{
+		BaseURL:              "https://api.example.test",
+		AppID:                "app-1",
+		AppSecret:            "secret-1",
+		RequestSigningSecret: "signing-secret",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			captured = req
+			return jsonResponse(200, `{"ok":true,"data":{"id":"ok"}}`), nil
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{"/accounts", "/global-wallet/consent/approve"} {
+		if err := client.Post(context.Background(), path, map[string]any{}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := captured.Header.Get("X-Steward-Signature"); !strings.HasPrefix(got, "v1=") || len(got) != 67 {
+			t.Fatalf("unsigned mutation %s: signature %q", path, got)
+		}
+	}
+}
+
+// SEC-126: the default HTTP client must not forward credential headers to a
+// different host when a redirect is followed.
+func TestCrossHostRedirectStripsCredentialHeaders(t *testing.T) {
+	var redirected *http.Request
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		redirected = req
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"data":{"id":"ok"}}`))
+	}))
+	defer target.Close()
+	// Redirect to the same listener under a DIFFERENT hostname (both names are
+	// loopback, but the host string differs) so the cross-host check engages.
+	crossHostURL := strings.Replace(target.URL, "127.0.0.1", "localhost", 1)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		http.Redirect(w, req, crossHostURL+"/harvest", http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	client, err := NewClient(Config{BaseURL: redirector.URL, APIKey: "tenant-key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := client.Get(context.Background(), "/accounts", nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	if redirected == nil {
+		t.Fatal("redirect was not followed")
+	}
+	if got := redirected.Header.Get("X-Steward-Key"); got != "" {
+		t.Fatalf("credential header leaked cross-host: X-Steward-Key=%q", got)
+	}
+}
+
 func TestAPIErrorIncludesStatusAndPayload(t *testing.T) {
 	client, err := NewClient(Config{
 		BaseURL: "https://api.example.test",
@@ -176,4 +240,24 @@ func asAPIError(err error, target **APIError) bool {
 	}
 	*target = apiErr
 	return true
+}
+
+// SEC-196: the default idempotency-key generator must return crypto-rand
+// UUIDs (or an error) — never a predictable timestamp-derived fallback.
+func TestRandomIDReturnsCryptoUUIDs(t *testing.T) {
+	first, err := randomID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := randomID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uuidShape := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	if !uuidShape.MatchString(first) {
+		t.Fatalf("randomID is not a UUID (timestamp fallback?): %q", first)
+	}
+	if first == second {
+		t.Fatal("randomID produced duplicate ids")
+	}
 }

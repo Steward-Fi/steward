@@ -140,12 +140,24 @@ export function auditArchiveVerificationMode(flags: Record<string, string | bool
   return { mode: "none" };
 }
 
+/**
+ * Absolute path to the offline evidence-bundle verifier SHIPPED WITH the CLI.
+ * Resolved against the CLI's own location (never the operator's CWD, which may
+ * be an attacker-writable directory containing a decoy
+ * `scripts/verify-evidence-bundle.mjs`) and executed via process.execPath so
+ * the runtime is the same one running the CLI.
+ */
+export function evidenceBundleVerifierScript(): string {
+  return join(import.meta.dir, "../../../scripts/verify-evidence-bundle.mjs");
+}
+
 const HELP = `steward CLI
 
 Usage:
   steward init [--env .env] [--force] [--migrate]
   steward doctor [--strict] [--json]
-  steward tenant create --id ID --name NAME --api-key KEY
+  steward tenant create --id ID --name NAME [--api-key-file F] [--api-key-env VAR]
+                        (key via stdin/--api-key-file/--api-key-env preferred; --api-key warns)
   steward agent create --name NAME [--id ID]
   steward agent token --agent-id ID [--expires-in 24h] [--scopes agent,api:proxy]
   steward secret add --name NAME [--file F] [--description TEXT]   (value via stdin or --file preferred; --value warns)
@@ -199,7 +211,7 @@ function createContext(flags: Record<string, string | boolean>): CommandContext 
 
 async function tenantCommand(action: string | undefined, ctx: CommandContext) {
   if (action !== "create") throw new Error("Supported tenant command: tenant create");
-  const apiKey = required(stringFlag(ctx.flags, "api-key"), "api-key");
+  const apiKey = readTenantApiKey(ctx.flags);
   const body = {
     id: required(stringFlag(ctx.flags, "id"), "id"),
     name: required(stringFlag(ctx.flags, "name"), "name"),
@@ -259,6 +271,43 @@ export function readSecretValue(flags: Record<string, string | boolean>): string
   }
   throw new Error(
     "secret value required: pipe it on stdin, pass --file <path>, or (discouraged) --value",
+  );
+}
+
+/**
+ * Read the tenant API key for `tenant create`. Preferred sources are
+ * --api-key-file, --api-key-env, or stdin so the plaintext credential never
+ * lands in shell history or `ps` output. --api-key remains for backward
+ * compatibility but warns loudly (same treatment as readSecretValue above).
+ */
+export function readTenantApiKey(flags: Record<string, string | boolean>): string {
+  const file = stringFlag(flags, "api-key-file");
+  if (file) {
+    // Strip a single trailing newline (editors add one) but keep interior bytes.
+    return readFileSync(file, "utf8").replace(/\n$/, "");
+  }
+  const envVar = stringFlag(flags, "api-key-env");
+  if (envVar) {
+    const value = process.env[envVar];
+    if (value) return value;
+    throw new Error(`--api-key-env: environment variable '${envVar}' is unset or empty`);
+  }
+  const flagValue = stringFlag(flags, "api-key");
+  if (flagValue !== undefined) {
+    console.error(
+      "[steward] WARNING: --api-key places the credential in shell history and process listings. " +
+        "Prefer --api-key-file <path>, --api-key-env <VAR>, or stdin: " +
+        'printf %s "$KEY" | steward tenant create --id ID --name NAME',
+    );
+    return flagValue;
+  }
+  if (!process.stdin.isTTY) {
+    const data = readFileSync(0, "utf8").replace(/\n$/, "");
+    if (data) return data;
+  }
+  throw new Error(
+    "tenant API key required: pipe it on stdin, pass --api-key-file <path>, " +
+      "--api-key-env <VAR>, or (discouraged) --api-key",
   );
 }
 
@@ -512,11 +561,10 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
   if (to !== undefined) params.set("to", String(to));
   const bundle = await ctx.api.request("GET", `/audit/bundle?${params}`);
   const out = stringFlag(ctx.flags, "out");
-  if (out) writeFileSync(out, JSON.stringify(bundle, null, 2));
+  if (out) writeFileSync(out, JSON.stringify(bundle, null, 2), { mode: 0o600 });
   if (boolFlag(ctx.flags, "verify")) {
     if (!out) throw new Error("--verify requires --out so the offline verifier has a file");
-    const result = spawnSync("node", ["scripts/verify-evidence-bundle.mjs", out], {
-      cwd: process.cwd(),
+    const result = spawnSync(process.execPath, [evidenceBundleVerifierScript(), out], {
       stdio: "inherit",
     });
     if (result.status !== 0) throw new Error("Offline audit bundle verification failed");
@@ -599,11 +647,11 @@ async function providerActionCommand(action: string | undefined, ctx: CommandCon
     // trusted key fingerprint (E7): --out bundle.json [--verify --fp <hex>].
     const bundle = await ctx.api.request("GET", `/v2/provider-actions/${id()}/evidence`);
     const out = stringFlag(ctx.flags, "out");
-    if (out) writeFileSync(out, JSON.stringify(bundle, null, 2));
+    if (out) writeFileSync(out, JSON.stringify(bundle, null, 2), { mode: 0o600 });
     if (boolFlag(ctx.flags, "verify")) {
       if (!out) throw new Error("--verify requires --out so the offline verifier has a file");
       const fp = stringFlag(ctx.flags, "fp") ?? stringFlag(ctx.flags, "expected-key-fingerprint");
-      const args = ["scripts/verify-evidence-bundle.mjs", out];
+      const args = [evidenceBundleVerifierScript(), out];
       // E7 / M09: bind trust to an out-of-band fingerprint. Warn loudly if absent
       // (verifying against the embedded key proves self-consistency ONLY).
       if (fp) args.push("--expected-key-fingerprint", fp);
@@ -612,7 +660,7 @@ async function providerActionCommand(action: string | undefined, ctx: CommandCon
           "WARNING: no --fp supplied; verifying against the EMBEDDED key proves " +
             "self-consistency only, NOT trust to a known signing root (PR5 E7).",
         );
-      const result = spawnSync("node", args, { cwd: process.cwd(), stdio: "inherit" });
+      const result = spawnSync(process.execPath, args, { stdio: "inherit" });
       if (result.status !== 0) throw new Error("Offline evidence bundle verification failed");
     }
     return out ? { wrote: out, verified: boolFlag(ctx.flags, "verify"), bundle } : bundle;

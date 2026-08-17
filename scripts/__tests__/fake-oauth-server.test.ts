@@ -1,15 +1,26 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
 import { OAuthClient } from "../../packages/auth/src/oauth";
 import { clearFakeOAuthState, setFakeOAuthUser, startFakeOAuthServer } from "../fake-oauth-server";
 
 describe("fake-oauth-server", () => {
   let server: ReturnType<typeof startFakeOAuthServer>;
+  let prevAllowInsecure: string | undefined;
 
   beforeAll(() => {
+    // OAuthClient rejects non-https provider URLs unless this opt-in is set
+    // (same flag web/e2e/global-setup.ts uses); the stub serves http://127.0.0.1.
+    prevAllowInsecure = process.env.STEWARD_ALLOW_INSECURE_OAUTH_PROVIDER_URLS;
+    process.env.STEWARD_ALLOW_INSECURE_OAUTH_PROVIDER_URLS = "true";
     server = startFakeOAuthServer(0);
   });
   afterAll(async () => {
     await server.stop();
+    if (prevAllowInsecure === undefined) {
+      delete process.env.STEWARD_ALLOW_INSECURE_OAUTH_PROVIDER_URLS;
+    } else {
+      process.env.STEWARD_ALLOW_INSECURE_OAUTH_PROVIDER_URLS = prevAllowInsecure;
+    }
   });
   afterEach(() => clearFakeOAuthState());
 
@@ -54,20 +65,29 @@ describe("fake-oauth-server", () => {
   });
 
   it("rejects redirect_uri mismatch at token exchange", async () => {
-    const client = new OAuthClient({
-      clientId: "x",
-      clientSecret: "y",
-      authorizationUrl: `${server.origin}/discord/authorize`,
-      tokenUrl: `${server.origin}/discord/token`,
-      userInfoUrl: `${server.origin}/discord/userinfo`,
-      scopes: ["identify", "email"],
-    });
-    const { url } = client.generateAuthUrl("st", "http://localhost:1/cb");
-    const authRes = await fetch(url, { redirect: "manual" });
-    const code = new URL(authRes.headers.get("location")!).searchParams.get("code")!;
-    await expect(client.exchangeCode(code, "http://localhost:1/different-cb")).rejects.toThrow(
-      /redirect_uri/,
+    const authRes = await fetch(
+      `${server.origin}/discord/authorize?redirect_uri=http://localhost:1/cb&state=s&client_id=x&response_type=code&scope=identify`,
+      { redirect: "manual" },
     );
+    const code = new URL(authRes.headers.get("location")!).searchParams.get("code")!;
+
+    // Exercise the stub directly: OAuthClient intentionally sanitizes
+    // provider error bodies ("Token exchange failed (400)"), so the
+    // redirect_uri enforcement is asserted at the server boundary.
+    const tokenRes = await fetch(`${server.origin}/discord/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: "x",
+        client_secret: "y",
+        code,
+        redirect_uri: "http://localhost:1/different-cb",
+      }).toString(),
+    });
+    expect(tokenRes.status).toBe(400);
+    const body = (await tokenRes.json()) as { error: string };
+    expect(body.error).toBe("redirect_uri mismatch");
   });
 
   it("login_hint mints a deterministic profile", async () => {
@@ -93,5 +113,12 @@ describe("fake-oauth-server", () => {
     });
     const profile = (await profileRes.json()) as { email: string };
     expect(profile.email).toBe("bob@example.com");
+  });
+
+  it("binds loopback only (SEC-128) — an auth-bypass stub must not listen on all interfaces", () => {
+    // Pre-fix: Bun.serve({ port }) defaults to 0.0.0.0, exposing the
+    // accept-any-credential / mint-any-identity provider to the network.
+    const source = readFileSync(new URL("../fake-oauth-server.ts", import.meta.url), "utf8");
+    expect(source).toContain('hostname: "127.0.0.1"');
   });
 });

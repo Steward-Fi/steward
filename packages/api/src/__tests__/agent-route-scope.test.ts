@@ -244,41 +244,55 @@ describeWithDatabase("agent route scope enforcement", () => {
     expect(ids).toContain(AGENT_B);
   });
 
-  it("lets the tenant root API key mint an agent token without session MFA", async () => {
-    const res = await app.request(`/agents/${AGENT_A}/token`, {
-      method: "POST",
-      headers: {
-        "X-Steward-Tenant": TENANT_ID,
-        "X-Steward-Key": apiKey,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({}),
-    });
+  it("rejects a bare tenant API key for agent-token minting unless explicitly opted in (SEC-209)", async () => {
+    const mintWithApiKey = () =>
+      app.request(`/agents/${AGENT_A}/token`, {
+        method: "POST",
+        headers: {
+          "X-Steward-Tenant": TENANT_ID,
+          "X-Steward-Key": apiKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      });
 
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      ok: boolean;
-      data: { token: string; agentId: string; tenantId: string; scope: string; scopes: string[] };
-    };
-    expect(body.ok).toBe(true);
-    expect(body.data.token).toBeDefined();
-    expect(body.data.agentId).toBe(AGENT_A);
-    expect(body.data.tenantId).toBe(TENANT_ID);
-    expect(body.data.scope).toBe("agent");
-    expect(body.data.scopes).toEqual(["agent"]);
+    // SEC-209: minting agent tokens is root-equivalent — a bare tenant API key
+    // is no longer sufficient by default (human admin session + recent MFA).
+    const rejected = await mintWithApiKey();
+    expect(rejected.status).toBe(403);
 
-    const [audit] = await getDb()
-      .select({ actorType: auditEvents.actorType, actorId: auditEvents.actorId })
-      .from(auditEvents)
-      .where(
-        and(
-          eq(auditEvents.tenantId, TENANT_ID),
-          eq(auditEvents.resourceId, AGENT_A),
-          eq(auditEvents.action, "agent.token.create.authorized"),
-        ),
-      )
-      .orderBy(desc(auditEvents.seq));
-    expect(audit).toEqual({ actorType: "api-key", actorId: TENANT_ID });
+    // The explicit STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS=true opt-in restores
+    // the legacy machine path (documented as fully-root).
+    process.env.STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS = "true";
+    try {
+      const res = await mintWithApiKey();
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        ok: boolean;
+        data: { token: string; agentId: string; tenantId: string; scope: string; scopes: string[] };
+      };
+      expect(body.ok).toBe(true);
+      expect(body.data.token).toBeDefined();
+      expect(body.data.agentId).toBe(AGENT_A);
+      expect(body.data.tenantId).toBe(TENANT_ID);
+      expect(body.data.scope).toBe("agent");
+      expect(body.data.scopes).toEqual(["agent"]);
+
+      const [audit] = await getDb()
+        .select({ actorType: auditEvents.actorType, actorId: auditEvents.actorId })
+        .from(auditEvents)
+        .where(
+          and(
+            eq(auditEvents.tenantId, TENANT_ID),
+            eq(auditEvents.resourceId, AGENT_A),
+            eq(auditEvents.action, "agent.token.create.authorized"),
+          ),
+        )
+        .orderBy(desc(auditEvents.seq));
+      expect(audit).toEqual({ actorType: "api-key", actorId: TENANT_ID });
+    } finally {
+      delete process.env.STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS;
+    }
   });
 
   it("keeps owner and admin sessions authorized to mint agent tokens", async () => {

@@ -57,6 +57,32 @@ interface DstackVerifierResponse {
 const DEFAULT_DSTACK_SOCKET = "/var/run/dstack.sock";
 const ZERO_MEASUREMENT: AttestationMeasurement = { imageDigest: "unknown", configHash: "unknown" };
 
+let warnedInsecureVerifier = false;
+
+/**
+ * SEC-165: the verifier verdict (`is_valid` etc.) is the entire trust
+ * decision, and it transits a plain fetch. Warn loudly when the channel is
+ * unauthenticated plain HTTP to anything but loopback — an on-path attacker
+ * can flip verdicts. Deployments must use TLS (or mTLS) for the verifier.
+ */
+function warnIfVerifierChannelInsecure(verifierUrl?: string): void {
+  if (!verifierUrl || warnedInsecureVerifier) return;
+  try {
+    const parsed = new URL(verifierUrl);
+    if (parsed.protocol !== "http:") return;
+    const host = parsed.hostname;
+    if (host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1") return;
+    warnedInsecureVerifier = true;
+    console.warn(
+      `⚠️ STEWARD_DSTACK_VERIFIER_URL uses unauthenticated plain HTTP (${parsed.origin}): ` +
+        "the attestation verdict channel is not integrity-protected. Use HTTPS (or mTLS) — " +
+        "the verifier response is the entire trust decision.",
+    );
+  } catch {
+    // Invalid URLs surface at verification time; nothing to warn about here.
+  }
+}
+
 export class DstackTdxAttestationProvider implements AttestationProvider {
   readonly id = "dstack-tdx" as const;
   private readonly socketPath: string;
@@ -69,6 +95,7 @@ export class DstackTdxAttestationProvider implements AttestationProvider {
     this.verifierUrl = options.verifierUrl ?? process.env.STEWARD_DSTACK_VERIFIER_URL;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.now = options.now ?? (() => new Date());
+    warnIfVerifierChannelInsecure(this.verifierUrl);
   }
 
   async generateQuote(request: AttestationQuoteRequest = {}): Promise<AttestationQuote> {
@@ -125,24 +152,43 @@ export class DstackTdxAttestationProvider implements AttestationProvider {
     }
 
     const verifier = await this.postVerifier(raw);
-    const reportDataMatches = options.nonce
+    // SEC-028: a nonce-less verification checked no freshness evidence, so it
+    // must never report verified:true — captured once-valid quotes would be
+    // replayable forever.
+    const freshnessChecked = options.nonce !== undefined;
+    const reportDataMatches = freshnessChecked
       ? verifier.details?.report_data === normalizeReportData(options.nonce)
-      : true;
+      : false;
+    // SEC-009: measurements must come from the authenticated verifier
+    // response (details.app_info), never from the unauthenticated raw quote
+    // info — a verifier that omits app_info cannot vouch for the measurement
+    // binding, so fail closed instead of trusting attacker-supplied strings.
+    const verifierMeasurement = measurementFromVerifier(verifier);
     const verified = Boolean(
       verifier.is_valid &&
         verifier.details?.quote_verified &&
         verifier.details?.event_log_verified &&
         verifier.details?.os_image_hash_verified &&
         verifier.details?.tee_variant?.startsWith("dstack-") &&
-        reportDataMatches,
+        reportDataMatches &&
+        verifierMeasurement,
     );
 
     return {
       provider: this.id,
-      measurement: measurementFromVerifier(verifier) ?? measurementFromRaw(raw),
+      measurement: verifierMeasurement ?? measurementFromRaw(raw),
       timestamp: (options.now ?? this.now()).toISOString(),
       verified,
-      raw: { quote: raw, verifier, stewardVerification: { verified, reportDataMatches } },
+      raw: {
+        quote: raw,
+        verifier,
+        stewardVerification: {
+          verified,
+          reportDataMatches,
+          freshnessChecked,
+          measurementBound: Boolean(verifierMeasurement),
+        },
+      },
     };
   }
 
