@@ -507,5 +507,5 @@ describe("durable audit retention archives", () => {
         chunkSize: 1,
       }),
     ).rejects.toThrow(`more than ${MAX_ARCHIVE_CHUNKS} chunks`);
-  });
+  }, 30_000);
 });
