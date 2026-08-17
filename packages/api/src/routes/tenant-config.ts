@@ -621,10 +621,12 @@ function buildTenantSecurityChecklist(
   requestSigningKeys: TenantRequestSigningKey[],
 ): TenantSecurityChecklist {
   const production = process.env.NODE_ENV === "production";
-  const requestExpiryRequired =
-    process.env.STEWARD_REQUIRE_REQUEST_EXPIRY === "true" ||
-    (production && process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS !== "true");
-  const authSignatureRequired = process.env.STEWARD_REQUIRE_AUTH_SIGNATURE === "true" || production;
+  // SEC-010: these mirror the ACTUAL enforcement posture of the mounted
+  // guards (app.ts). Freshness/signature headers are always verified when
+  // present; they are REQUIRED only via the explicit env opt-ins, so the
+  // checklist must not claim production enforcement that does not exist.
+  const requestExpiryRequired = process.env.STEWARD_REQUIRE_REQUEST_EXPIRY === "true";
+  const authSignatureRequired = process.env.STEWARD_REQUIRE_AUTH_SIGNATURE === "true";
   const signingSecrets = configuredRequestSigningSecrets();
   const appClientSigningSecrets = appClientSecrets.filter(
     (secret) =>
@@ -689,7 +691,7 @@ function buildTenantSecurityChecklist(
         : "Sensitive mutating requests validate freshness headers when present but do not require them.",
       remediation: requestExpiryRequired
         ? undefined
-        : "Set STEWARD_REQUIRE_REQUEST_EXPIRY=true or run production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true.",
+        : "Set STEWARD_REQUIRE_REQUEST_EXPIRY=true to require freshness headers on sensitive mutating requests.",
     },
     {
       id: "authorization-signatures",

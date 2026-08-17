@@ -39,8 +39,10 @@ import { platformAuthMiddleware } from "@stwd/auth";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { logger } from "hono/logger";
+import { authorizationSignature } from "./middleware/authorization-signature";
 import { correlationId } from "./middleware/correlation";
 import { idempotencyMiddleware } from "./middleware/idempotency";
+import { requestExpiry } from "./middleware/request-expiry";
 import { securityHeaders } from "./middleware/security-headers";
 import { tenantCors } from "./middleware/tenant-cors";
 import { getOpenApiSpec } from "./openapi";
@@ -127,6 +129,23 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
       onError: (c) =>
         c.json<ApiResponse>({ ok: false, error: "Request body too large (max 1MB)" }, 413),
     }),
+  );
+
+  // ─── Request freshness + signature guards (SEC-010) ────────────────────────
+  // Mounted globally so freshness headers and request signatures are actually
+  // verified on every sensitive mutating route (they were unmounted dead code
+  // while /openapi.json and the tenant security checklist claimed enforcement).
+  // Default posture is verify-when-present: a request carrying stale/invalid
+  // freshness or signature headers fails closed, but the headers are not
+  // required unless the operator opts in via STEWARD_REQUIRE_REQUEST_EXPIRY /
+  // STEWARD_REQUIRE_AUTH_SIGNATURE. The env opt-in (not NODE_ENV) drives the
+  // strict mode so browser/unsigned SDK clients keep working until an operator
+  // has rolled out signing clients. Mounted here (phase 1) so they always run
+  // BEFORE the idempotency middleware (phase 2).
+  app.use("*", requestExpiry({ required: process.env.STEWARD_REQUIRE_REQUEST_EXPIRY === "true" }));
+  app.use(
+    "*",
+    authorizationSignature({ required: process.env.STEWARD_REQUIRE_AUTH_SIGNATURE === "true" }),
   );
 
   // ─── Auth middleware per route group ────────────────────────────────────────
