@@ -124,10 +124,12 @@ services:
     image: steward:${STEWARD_IMAGE_TAG:-0.4.2}
     container_name: steward-proxy
     restart: unless-stopped
-    # Proxy only needs the API to be healthy (for JWT verification + DB access)
+    # The API's deep /ready check verifies proxy clock health, so waiting for API
+    # health here would deadlock both services. The proxy health endpoint does
+    # not require the API and can start as soon as the API container is running.
     depends_on:
       steward-api:
-        condition: service_healthy
+        condition: service_started
     command: ["bun", "run", "packages/proxy/src/index.ts"]
     environment:
       STEWARD_PROXY_PORT: "${STEWARD_PROXY_PORT:-8080}"
