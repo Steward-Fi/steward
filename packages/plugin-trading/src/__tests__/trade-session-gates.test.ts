@@ -89,8 +89,7 @@ async function makeApp(posture: Posture) {
     } else {
       c.set("authType", "session-jwt");
       if (posture === "session-with-mfa") c.set("sessionMfaVerifiedAt", Date.now());
-      if (posture === "session-stale-mfa")
-        c.set("sessionMfaVerifiedAt", Date.now() - 10 * 60_000);
+      if (posture === "session-stale-mfa") c.set("sessionMfaVerifiedAt", Date.now() - 10 * 60_000);
     }
     await next();
   });

@@ -952,7 +952,10 @@ export function createOperatorRecoveryRoutes(
     const rate = await enforceOperatorTransferRateLimit("usd-send", tenantId, agentId);
     if (!rate.allowed) {
       c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
-      return c.json<ApiResponse>({ ok: false, error: "Operator transfer rate limit exceeded" }, 429);
+      return c.json<ApiResponse>(
+        { ok: false, error: "Operator transfer rate limit exceeded" },
+        429,
+      );
     }
 
     const idempotency = getOperatorIdempotency(`${tenantId}:usd-send`, body.idempotencyKey, {
@@ -1501,7 +1504,10 @@ export function createOperatorRecoveryRoutes(
     const rate = await enforceOperatorTransferRateLimit("withdraw", tenantId, agentId);
     if (!rate.allowed) {
       c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
-      return c.json<ApiResponse>({ ok: false, error: "Operator transfer rate limit exceeded" }, 429);
+      return c.json<ApiResponse>(
+        { ok: false, error: "Operator transfer rate limit exceeded" },
+        429,
+      );
     }
 
     const policy = await evaluateOperatorTransferPolicy({

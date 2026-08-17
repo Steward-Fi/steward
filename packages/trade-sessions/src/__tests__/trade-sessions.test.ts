@@ -254,7 +254,10 @@ describe("TradeSessionManager", () => {
         },
       ),
       new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("fence callback deadlocked inside the transaction")), 8000),
+        setTimeout(
+          () => reject(new Error("fence callback deadlocked inside the transaction")),
+          8000,
+        ),
       ),
     ]);
 

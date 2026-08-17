@@ -560,11 +560,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     // MFA recency is a human-session protection. The agent-self path has no human
     // session to MFA; its protection is the agent_policies cap clamp below + the
     // per-order policy evaluation on submission. Only enforce MFA on the human path.
-    if (
-      c.get("authType") === "session-jwt" &&
-      createByHumanAdmin &&
-      !hasRecentSessionMfa(c)
-    ) {
+    if (c.get("authType") === "session-jwt" && createByHumanAdmin && !hasRecentSessionMfa(c)) {
       return c.json<ApiResponse>(
         { ok: false, error: "Trade session management requires recent MFA verification" },
         403,
@@ -850,11 +846,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         403,
       );
     }
-    if (
-      c.get("authType") === "session-jwt" &&
-      revokeByHumanAdmin &&
-      !hasRecentSessionMfa(c)
-    ) {
+    if (c.get("authType") === "session-jwt" && revokeByHumanAdmin && !hasRecentSessionMfa(c)) {
       return c.json<ApiResponse>(
         { ok: false, error: "Trade session management requires recent MFA verification" },
         403,
@@ -1348,10 +1340,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     tokenId: string,
     clobUrl?: string,
   ): Promise<number> {
-    const [best] = await getPrices(
-      [{ tokenId, side: "sell" }],
-      clobUrl ? { clobUrl } : undefined,
-    );
+    const [best] = await getPrices([{ tokenId, side: "sell" }], clobUrl ? { clobUrl } : undefined);
     const bestBid = Number(best?.price);
     if (!Number.isFinite(bestBid) || bestBid <= 0) {
       throw new Error("unable to resolve CLOB best bid for sell notional sizing");
