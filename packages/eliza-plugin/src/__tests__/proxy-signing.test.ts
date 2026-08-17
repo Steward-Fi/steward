@@ -122,6 +122,24 @@ describe("Eliza plugin proxy request signing", () => {
     expect(lastProxyRequest).toBeNull();
   });
 
+  it("signs whenever a secret is configured, even with enforcement disabled", async () => {
+    delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
+    try {
+      lastProxyRequest = null;
+      // configuredService() includes proxyRequestSigningSecret — dev-mode must
+      // not downgrade this deployment to unsigned proxy calls (SEC-171).
+      const result = await configuredService().callGovernedApi({
+        url: "https://api.example.com/v1/items",
+      });
+
+      expect(result.status).toBe(200);
+      expect(lastProxyRequest?.headers.get("x-steward-signature")).toMatch(/^v1=[0-9a-f]{64}$/);
+      expect(lastProxyRequest?.headers.get("x-steward-request-timestamp")).toMatch(/^\d+$/);
+    } finally {
+      process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
+    }
+  });
+
   it("keeps unsigned local/dev proxy operation available when enforcement is disabled", async () => {
     delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
     try {

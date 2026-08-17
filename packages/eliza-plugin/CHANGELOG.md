@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Security
+- submit-trade now applies the shared `assertSecureApiUrl` guard to `STEWARD_API_URL`, so a non-localhost plaintext `http://` URL can no longer send the agent JWT in cleartext (SEC-095). Loopback http stays allowed for local dev.
+- Proxy request HMAC signing is now mandatory whenever a signing secret is configured, regardless of `NODE_ENV` or the enforcement flag — a provisioned secret can never silently downgrade to unsigned proxy calls (SEC-171).
+
 ### Changed
 - Fail closed on non-JSON provider-action arguments, sanitize lifecycle failures, and keep concurrent polling results bound to their original action IDs.
 - Reject nested password, passphrase, auth, client-secret-value, and cookie-header fields through the shared credential-key classifier before provider submission.
