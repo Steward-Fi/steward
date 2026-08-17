@@ -20,6 +20,8 @@
  * total (display behaviour preserved).
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { agents, closeDb, getDb, tenants, transactions } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 
@@ -112,5 +114,23 @@ describe("getTransactionStats chain scoping (issue #110)", () => {
     expect(stats.spentThisWeek.toString()).toBe(combined);
     // Counts remain agent-wide (chain-agnostic) regardless of chain scoping.
     expect(stats.recentTxCount24h).toBe(2);
+  });
+});
+
+// SEC-039: the chain-scoping argument above is only effective if the
+// policy-enforcement call sites actually pass it. Guard the wiring: every
+// getTransactionStats call in the vault routes (all enforcement paths) must
+// pass a chainId, and the user-wallet sign route must scope its stats helper
+// too. Display-only callers (dashboard/agents) intentionally stay unscoped.
+describe("spend-cap enforcement call sites pass chainId (SEC-039)", () => {
+  const vaultRoutesSource = readFileSync(join(import.meta.dir, "..", "routes", "vault.ts"), "utf8");
+  const userRoutesSource = readFileSync(join(import.meta.dir, "..", "routes", "user.ts"), "utf8");
+
+  it("leaves no unscoped getTransactionStats call in the vault routes", () => {
+    expect(vaultRoutesSource).not.toMatch(/getTransactionStats\(agentId\)/);
+  });
+
+  it("scopes the user-wallet sign stats to the request chain", () => {
+    expect(userRoutesSource).toContain("getUserWalletTransactionStats(userId, chainId)");
   });
 });

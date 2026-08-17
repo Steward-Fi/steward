@@ -190,6 +190,60 @@ describe("Contract Allowlist Policy", () => {
     expect(result.reason).toContain("exceeds selector maxNativeValueWei 1");
   });
 
+  it("fails closed when a constraint is declared for a selector the engine cannot decode (SEC-038)", async () => {
+    // swapExactTokensForTokens(uint256,uint256,address[],address,uint256) —
+    // allowlisted, but not one of the 8 selectors with a constraint decoder.
+    const swapSelector = "0x38ed1739";
+    const swapRule = makeContractAllowlistRule({
+      contracts: [
+        {
+          address: contract,
+          selectors: [swapSelector],
+          constraints: { [swapSelector]: { maxAmount: "1000" } },
+        },
+      ],
+    });
+    const result = await evaluatePolicy(
+      swapRule,
+      makeContext({
+        request: {
+          ...makeContext().request,
+          to: contract,
+          data: `${swapSelector}${abiUint(500)}${abiUint(1)}`,
+        },
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("unrecognized selector");
+  });
+
+  it("still passes an unrecognized selector when only maxNativeValueWei is constrained", async () => {
+    const swapSelector = "0x38ed1739";
+    const swapRule = makeContractAllowlistRule({
+      contracts: [
+        {
+          address: contract,
+          selectors: [swapSelector],
+          constraints: { [swapSelector]: { maxNativeValueWei: "10", recipientAllowlist: [] } },
+        },
+      ],
+    });
+    const result = await evaluatePolicy(
+      swapRule,
+      makeContext({
+        request: {
+          ...makeContext().request,
+          to: contract,
+          value: "10",
+          data: `${swapSelector}00`,
+        },
+      }),
+    );
+
+    expect(result.passed).toBe(true);
+  });
+
   it("fails when selector is not allowed for the contract", async () => {
     const result = await evaluatePolicy(
       rule,
@@ -446,6 +500,47 @@ describe("Spending Limit Policy", () => {
 
     expect(result.passed).toBe(false);
     expect(result.reason).toContain("daily spending limit");
+  });
+
+  // ─── Mixed wei + USD limits are conjunctive (SEC-037) ────────────────────
+
+  const ethPriceOracle = {
+    getNativeUsdPrice: async () => 2000,
+    getTokenUsdPrice: async () => null,
+    weiToUsd: async (wei: string) => (Number(BigInt(wei)) / 1e18) * 2000,
+    usdToWei: async () => null,
+  };
+
+  it("enforces an explicit wei cap even when a USD limit is also configured", async () => {
+    const rule = makeSpendingRule({
+      maxPerTx: "10000000000000000", // 0.01 ETH
+      maxPerDayUsd: 5000, // USD daily cap the tx satisfies ($2000 < $5000)
+    });
+
+    const ctx = makeContext({
+      request: { ...makeContext().request, value: "1000000000000000000" }, // 1 ETH
+      priceOracle: ethPriceOracle,
+    });
+    const result = await evaluatePolicy(rule, ctx);
+
+    // Previously the USD branch returned early and the wei cap never fired.
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("per-tx limit");
+  });
+
+  it("passes a mixed wei+USD config only when both limits hold", async () => {
+    const rule = makeSpendingRule({
+      maxPerTx: "10000000000000000", // 0.01 ETH
+      maxPerDayUsd: 5000,
+    });
+
+    const ctx = makeContext({
+      request: { ...makeContext().request, value: "5000000000000000" }, // 0.005 ETH = $10
+      priceOracle: ethPriceOracle,
+    });
+    const result = await evaluatePolicy(rule, ctx);
+
+    expect(result.passed).toBe(true);
   });
 
   // ─── Per-tx boundary tests ─────────────────────────────────────────────
@@ -860,26 +955,30 @@ describe("Approved Addresses Policy", () => {
     expect(result.passed).toBe(true);
   });
 
-  it("passes withdrawal when destination is approved", async () => {
-    const destination = "0xfeed00000000000000000000000000000000beef";
+  it("ignores a smuggled destination field — request.to is authoritative (SEC-001)", async () => {
+    const whitelisted = "0xfeed00000000000000000000000000000000beef";
     const rule = makeAddressRule({
-      addresses: [destination],
+      addresses: [whitelisted],
       mode: "whitelist",
     });
 
+    // { to: <attacker>, destination: <whitelisted> } must NOT pass: the engine
+    // evaluates only the address actually signed (`to`), never envelope shadow
+    // fields.
     const ctx = makeContext({
       request: {
         ...makeContext().request,
         to: "0x0000000000000000000000000000000000000000",
-        destination,
+        destination: whitelisted,
       } as SignRequest & { destination: string },
     });
     const result = await evaluatePolicy(rule, ctx);
 
-    expect(result.passed).toBe(true);
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("not in whitelist");
   });
 
-  it("rejects withdrawal when destination is not approved", async () => {
+  it("passes when request.to is approved even if a shadow destination is not", async () => {
     const destination = "0xfeed00000000000000000000000000000000beef";
     const rule = makeAddressRule({
       addresses: ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
@@ -889,15 +988,19 @@ describe("Approved Addresses Policy", () => {
     const ctx = makeContext({
       request: {
         ...makeContext().request,
-        to: "0x0000000000000000000000000000000000000000",
+        to: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         destination,
-      } as SignRequest & { destination: string },
+        action: { destination },
+        withdraw: { destination },
+      } as SignRequest & {
+        destination: string;
+        action: { destination: string };
+        withdraw: { destination: string };
+      },
     });
     const result = await evaluatePolicy(rule, ctx);
 
-    expect(result.passed).toBe(false);
-    expect(result.reason).toContain("Destination address");
-    expect(result.reason).toContain("not in whitelist");
+    expect(result.passed).toBe(true);
   });
 });
 
@@ -1381,6 +1484,34 @@ describe("PolicyEngine.evaluate()", () => {
     expect(result.approved).toBe(false);
     expect(result.requiresManualApproval).toBe(false);
     expect(result.results).toHaveLength(0);
+  });
+
+  it("policies with falsy non-false `enabled` hit the deny-all branch (SEC-103)", async () => {
+    // Hand-authored rules carrying enabled: undefined/null bypass the API
+    // write validator's boolean check. They are "disabled" for pass purposes,
+    // so an all-such set must deny — never auto-approve.
+    const policies = [
+      { id: "p1", type: "spending-limit", enabled: undefined, config: {} },
+      { id: "p2", type: "rate-limit", enabled: null, config: {} },
+    ] as unknown as PolicyRule[];
+
+    const result = await engine.evaluate(policies, makeEngineCtx());
+
+    expect(result.approved).toBe(false);
+  });
+
+  it("a non-boolean `enabled` fails closed instead of evaluating (SEC-103)", async () => {
+    const rule = {
+      id: "p1",
+      type: "spending-limit",
+      enabled: "yes",
+      config: { maxPerTx: "1", maxPerDay: "1", maxPerWeek: "1" },
+    } as unknown as PolicyRule;
+
+    const result = await evaluatePolicy(rule, makeContext());
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("enabled");
   });
 
   it("all hard policies pass → approved", async () => {

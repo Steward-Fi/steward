@@ -237,6 +237,30 @@ describe("WebhookDispatcher HMAC signing", () => {
       await server.close();
     }
   });
+
+  it("treats an empty events array as subscribe-to-all and actually delivers", async () => {
+    const server = await withWebhookServer(() => ({ status: 200 }));
+
+    try {
+      const dispatcher = new WebhookDispatcher({
+        maxRetries: 0,
+        timeoutMs: 1_000,
+        allowPrivateNetwork: true,
+        allowInsecureHttp: true,
+      });
+      const result = await dispatcher.dispatch(makeEvent(), {
+        url: server.url,
+        secret: SECRET,
+        events: [],
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.attempts).toBe(1);
+      expect(server.requests).toHaveLength(1);
+    } finally {
+      await server.close();
+    }
+  });
 });
 
 describe("RetryQueue delivery invariants", () => {

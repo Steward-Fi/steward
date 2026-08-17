@@ -212,12 +212,37 @@ export class PersistentQueue {
         continue;
       }
 
-      const result = await this.dispatcher.dispatch(event, {
-        id: webhook.id,
-        url: delivery.url,
-        secret: decryptWebhookSecret(delivery.secret),
-        events: delivery.events ?? undefined,
-      });
+      // A poisoned row must not reject the whole batch: an undecryptable
+      // secret (e.g. after STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY rotation, or
+      // a malformed stwd_whsec_v1: payload) throws deterministically, and an
+      // un-wrapped throw would reclaim the row forever and block every later
+      // delivery in the batch. Dead-letter it (attempts incremented) and move
+      // on — the row never becomes deliverable again on its own.
+      let result: WebhookDeliveryResult;
+      try {
+        result = await this.dispatcher.dispatch(event, {
+          id: webhook.id,
+          url: delivery.url,
+          secret: decryptWebhookSecret(delivery.secret),
+          events: delivery.events ?? undefined,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unknown webhook delivery error";
+        await db
+          .update(webhookDeliveries)
+          .set({
+            status: "dead",
+            attempts: newAttempts,
+            lastError: `Webhook delivery failed deterministically: ${message}`,
+          })
+          .where(eq(webhookDeliveries.id, delivery.id));
+        results.push({
+          success: false,
+          attempts: newAttempts,
+          error: message,
+        });
+        continue;
+      }
 
       // dispatch() mutates `event` with a stable deliveryId + signedAt; persist it
       // so retries reuse the same id/timestamp/signature instead of re-signing fresh.

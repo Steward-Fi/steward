@@ -39,6 +39,12 @@ export interface PolicyEvaluationContext {
   request: SignRequest;
   recentTxCount24h: number;
   recentTxCount1h: number;
+  /**
+   * Rolling spend sums in the base unit of `request.chainId` ONLY. Callers
+   * MUST scope these counters to the request's chain — a cross-chain sum
+   * mixes incomparable units (wei/lamports/piconero) and corrupts both the
+   * wei caps and the USD-priced caps (SEC-039).
+   */
   spentToday: bigint;
   spentThisWeek: bigint;
   /** Optional price oracle for USD-based policy evaluation */
@@ -208,7 +214,10 @@ export class PolicyEngine {
       policies.map((policy) => evaluatePolicy(policy, evaluatorCtx)),
     );
 
-    if (policies.every((policy) => policy.enabled === false)) {
+    // Same falsy check as evaluatePolicy: a rule with `enabled: undefined`/
+    // null/0 is disabled for pass purposes, so an all-such policy set hits
+    // this deny-all branch instead of auto-approving everything (SEC-103).
+    if (policies.every((policy) => !policy.enabled)) {
       const evaluationResult = { approved: false, results, requiresManualApproval: false };
       await this.emitAuditEvent(ctx, results, evaluationResult);
       return evaluationResult;
