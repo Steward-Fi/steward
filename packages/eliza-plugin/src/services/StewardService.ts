@@ -386,15 +386,14 @@ export class StewardService extends Service {
     }
     assertSecureApiUrl(config.proxyUrl);
 
-    // Signing is mandatory in production, when the operator opted in via env,
-    // or whenever a signing secret is configured at all: a provisioned secret
-    // means this deployment intends signed proxy requests, so never fall back
-    // to unsigned calls regardless of NODE_ENV. Unsigned operation is reserved
-    // for local dev where NO secret exists and enforcement is off.
+    // StewardProxyClient signs whenever a signing secret is supplied; the
+    // regression suite pins that invariant even when explicit enforcement is
+    // off. This flag controls the separate fail-closed rule for deployments
+    // where a secret is mandatory but absent. Unsigned operation is reserved
+    // for local dev where no secret exists and enforcement is off.
     const signingRequired =
       process.env.NODE_ENV === "production" ||
-      process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE === "true" ||
-      Boolean(config.proxyRequestSigningSecret);
+      process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE === "true";
     if (signingRequired && !config.proxyRequestSigningSecret) {
       throw new Error(
         "STEWARD_PROXY_REQUEST_SIGNING_SECRET is required when proxy request signing is enforced",
