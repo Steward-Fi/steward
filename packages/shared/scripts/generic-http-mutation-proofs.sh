@@ -69,7 +69,7 @@ proof "M5 skip segment encoding" "space in a segment value is percent-encoded" \
 
 # M6: DROP STRING PATTERN ENFORCEMENT.
 proof "M6 drop string pattern enforcement" "rejects a query value failing its pattern" \
-  's/      if \(opts\.pattern \&\& !new RegExp\(opts\.pattern\)\.test\(v\)\)/      if (false)/'
+  's/      if \(opts\.pattern \&\& !matchesLinearSafePattern\(opts\.pattern, v\)\)/      if (false)/'
 
 # M7: DROP PROTO-POLLUTION ARG GUARD.
 proof "M7 drop proto-pollution arg guard" "rejects prototype-pollution keys in arguments" \
@@ -78,6 +78,17 @@ proof "M7 drop proto-pollution arg guard" "rejects prototype-pollution keys in a
 # M8: DROP UNKNOWN-ARG REJECTION.
 proof "M8 drop unknown-arg rejection" "rejects an unknown argument" \
   's/    if \(!consumed\.has\(k\)\)/    if (false)/'
+
+# M9: ALLOW MULTIPLE VARIABLE-WIDTH TOKENS. This reintroduces an ambiguous
+# grammar surface even though the custom matcher remains non-backtracking.
+proof "M9 allow ambiguous variable-width repetitions" "rejects ReDoS-capable operator regexes" \
+  's/      if \(variableIndex !== -1\) \{/      if (false) {/'
+
+# M10: BYPASS THE OPTIONAL-QUANTIFIER SYNTAX REJECTION. The adversarial corpus
+# must keep the historical `a?` backtracking payload outside the accepted
+# language; the runtime matcher itself still never invokes RegExp.
+proof "M10 admit optional-quantifier syntax" "rejects ReDoS-capable operator regexes" \
+  's/"\$\|\(\)\{\}\*\+\?\]"\.includes\(char\)/"\$|(){}*+]".includes(char)/'
 
 echo ""
 echo "==================================================="

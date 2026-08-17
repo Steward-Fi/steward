@@ -281,63 +281,226 @@ function assertExactKeys(
   if (unknown) descriptorFail(code, `${where}: unknown key '${unknown}'`);
 }
 
-/**
- * Operator regexes execute on request data, so accept only a deliberately
- * finite-time subset: anchored expressions, bounded repetition, no lookaround,
- * backreferences, unbounded quantifiers, top-level alternation, or quantified
- * groups. Grouped alternation remains useful; top-level `^a$|b$` is rejected
- * because the second branch is not anchored at the start.
- */
-function validateSafeRegex(
-  pattern: unknown,
+type LinearCharMatcher = (char: string) => boolean;
+
+interface LinearPatternToken {
+  matches: LinearCharMatcher;
+  min: number;
+  max: number;
+}
+
+type LinearPatternPlan =
+  | { kind: "alternatives"; values: ReadonlySet<string> }
+  | { kind: "tokens"; tokens: LinearPatternToken[]; variableIndex: number };
+
+function patternFail(code: GenericDescriptorErrorCode, where: string, detail: string): never {
+  descriptorFail(code, `${where}: ${detail}`);
+}
+
+function parseAlternativeLiteral(
+  branch: string,
   code: GenericDescriptorErrorCode,
   where: string,
 ): string {
+  if (branch.length === 0) patternFail(code, where, "empty alternation branch");
+  let out = "";
+  for (let i = 0; i < branch.length; i++) {
+    const char = branch[i];
+    if (char === "\\") {
+      const escaped = branch[++i];
+      if (!escaped || !"\\.^$|()[]{}*+?-".includes(escaped)) {
+        patternFail(code, where, "unsupported alternation escape");
+      }
+      out += escaped;
+    } else {
+      if (".^$|()[]{}*+?".includes(char)) {
+        patternFail(code, where, "alternation branches must be literals");
+      }
+      out += char;
+    }
+  }
+  return out;
+}
+
+function parseClassMatcher(
+  source: string,
+  start: number,
+  code: GenericDescriptorErrorCode,
+  where: string,
+): { matcher: LinearCharMatcher; next: number } {
+  let end = start + 1;
+  let escaped = false;
+  for (; end < source.length; end++) {
+    const char = source[end];
+    if (escaped) escaped = false;
+    else if (char === "\\") escaped = true;
+    else if (char === "]") break;
+  }
+  if (end >= source.length) patternFail(code, where, "unterminated character class");
+  const content = source.slice(start + 1, end);
+  if (content.length === 0 || content.startsWith("^")) {
+    patternFail(code, where, "empty or negated character class");
+  }
+
+  const points: number[] = [];
+  for (let i = 0; i < content.length; i++) {
+    let char = content[i];
+    if (char === "\\") {
+      char = content[++i];
+      if (!char || !"\\]-".includes(char)) {
+        patternFail(code, where, "unsupported character-class escape");
+      }
+    }
+    const point = char.codePointAt(0);
+    if (point === undefined || point > 0x7f) {
+      patternFail(code, where, "patterns must use ASCII syntax");
+    }
+    points.push(point);
+  }
+
+  const ranges: Array<[number, number]> = [];
+  for (let i = 0; i < points.length; i++) {
+    if (i + 2 < points.length && points[i + 1] === 0x2d) {
+      if (points[i] > points[i + 2]) patternFail(code, where, "reversed character range");
+      ranges.push([points[i], points[i + 2]]);
+      i += 2;
+    } else {
+      ranges.push([points[i], points[i]]);
+    }
+  }
+  return {
+    matcher: (char) => {
+      const point = char.codePointAt(0);
+      return point !== undefined && ranges.some(([low, high]) => point >= low && point <= high);
+    },
+    next: end + 1,
+  };
+}
+
+/**
+ * Parse the entire supported pattern language. This is intentionally not a
+ * JavaScript RegExp blacklist: accepted patterns are matched by the custom
+ * linear matcher below, so engine backtracking is impossible.
+ *
+ * Supported forms are anchored literal alternatives (`^(open|closed)$`) or an
+ * anchored sequence of literals, `.`, and positive character classes, with
+ * finite `{n}` / `{min,max}` repetition. At most one token may have a variable
+ * width; that makes its position derivable from the input length and keeps
+ * matching O(pattern + input). Lookaround, optional/unbounded quantifiers,
+ * nested groups, backreferences, and negated classes are outside the language.
+ */
+function parseLinearSafePattern(
+  pattern: unknown,
+  code: GenericDescriptorErrorCode,
+  where: string,
+): { source: string; plan: LinearPatternPlan } {
   if (typeof pattern !== "string" || pattern.length === 0 || pattern.length > 128)
     descriptorFail(code, `${where}: pattern must be a bounded string`);
   const p = pattern as string;
   if (!p.startsWith("^") || !p.endsWith("$"))
     descriptorFail(code, `${where}: pattern must be anchored ^...$`);
-  let depth = 0;
-  let inClass = false;
-  let escaped = false;
-  let topLevelAlternation = false;
-  for (const char of p.slice(1, -1)) {
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (char === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (char === "[") inClass = true;
-    else if (char === "]") inClass = false;
-    else if (!inClass && char === "(") depth++;
-    else if (!inClass && char === ")") depth--;
-    else if (!inClass && char === "|" && depth === 0) topLevelAlternation = true;
+  const body = p.slice(1, -1);
+
+  if (body.startsWith("(") && body.endsWith(")")) {
+    const inner = body.slice(1, -1);
+    const branches = inner.split("|");
+    if (branches.length < 2) patternFail(code, where, "groups are only allowed for alternatives");
+    const values = new Set(branches.map((b) => parseAlternativeLiteral(b, code, where)));
+    return { source: p, plan: { kind: "alternatives", values } };
   }
+
+  const tokens: LinearPatternToken[] = [];
+  let variableIndex = -1;
+  for (let i = 0; i < body.length; ) {
+    const char = body[i];
+    let matcher: LinearCharMatcher;
+    if (char === "[") {
+      const parsed = parseClassMatcher(body, i, code, where);
+      matcher = parsed.matcher;
+      i = parsed.next;
+    } else if (char === ".") {
+      matcher = (value) => !"\n\r\u2028\u2029".includes(value);
+      i++;
+    } else if (char === "\\") {
+      const escaped = body[i + 1];
+      if (!escaped || !"\\.^$|()[]{}*+?-".includes(escaped)) {
+        patternFail(code, where, "unsupported escape");
+      }
+      matcher = (value) => value === escaped;
+      i += 2;
+    } else {
+      if ("$|(){}*+?]".includes(char)) patternFail(code, where, "unsupported pattern construct");
+      if ((char.codePointAt(0) ?? 0x80) > 0x7f) {
+        patternFail(code, where, "patterns must use ASCII syntax");
+      }
+      matcher = (value) => value === char;
+      i++;
+    }
+
+    let min = 1;
+    let max = 1;
+    if (body[i] === "{") {
+      const end = body.indexOf("}", i + 1);
+      if (end === -1) patternFail(code, where, "unterminated repetition");
+      const repetition = /^(\d+)(?:,(\d+))?$/.exec(body.slice(i + 1, end));
+      if (!repetition) patternFail(code, where, "repetition must be finite");
+      min = Number(repetition[1]);
+      max = repetition[2] === undefined ? min : Number(repetition[2]);
+      if (!Number.isSafeInteger(min) || !Number.isSafeInteger(max) || min > max || max > 256) {
+        patternFail(code, where, "repetition must be finite and at most 256");
+      }
+      i = end + 1;
+    }
+    if (min !== max) {
+      if (variableIndex !== -1) {
+        patternFail(code, where, "only one variable-width repetition is allowed");
+      }
+      variableIndex = tokens.length;
+    }
+    tokens.push({ matches: matcher, min, max });
+  }
+  if (tokens.length === 0) patternFail(code, where, "empty patterns are not allowed");
+  return { source: p, plan: { kind: "tokens", tokens, variableIndex } };
+}
+
+function matchesLinearSafePattern(pattern: string, value: string): boolean {
+  const { plan } = parseLinearSafePattern(
+    pattern,
+    "CANON_DESCRIPTOR_BODY_SCHEMA_INVALID",
+    "stored pattern",
+  );
+  if (plan.kind === "alternatives") return plan.values.has(value);
+  const chars = Array.from(value);
+  const fixedLength = plan.tokens.reduce(
+    (sum, token, index) => sum + (index === plan.variableIndex ? 0 : token.min),
+    0,
+  );
+  const variableCount = chars.length - fixedLength;
   if (
-    /\(\?/.test(p) ||
-    /\\[1-9]/.test(p) ||
-    /[*+]/.test(p) ||
-    topLevelAlternation ||
-    /\)\s*(?:\?|\{)/.test(p)
-  )
-    descriptorFail(code, `${where}: unsafe regex construct`);
-  for (const match of p.matchAll(/\{(\d+)(?:,(\d*))?\}/g)) {
-    const min = Number(match[1]);
-    const max = match[2] === undefined ? min : match[2] === "" ? Number.NaN : Number(match[2]);
-    if (!Number.isSafeInteger(min) || !Number.isSafeInteger(max) || min > max || max > 256) {
-      descriptorFail(code, `${where}: repetition must be finite and at most 256`);
+    (plan.variableIndex === -1 && variableCount !== 0) ||
+    (plan.variableIndex !== -1 &&
+      (variableCount < plan.tokens[plan.variableIndex].min ||
+        variableCount > plan.tokens[plan.variableIndex].max))
+  ) {
+    return false;
+  }
+  let offset = 0;
+  for (let index = 0; index < plan.tokens.length; index++) {
+    const token = plan.tokens[index];
+    const count = index === plan.variableIndex ? variableCount : token.min;
+    for (let repetition = 0; repetition < count; repetition++) {
+      if (!token.matches(chars[offset++])) return false;
     }
   }
-  try {
-    new RegExp(p);
-  } catch {
-    descriptorFail(code, `${where}: pattern does not compile`);
-  }
-  return p;
+  return offset === chars.length;
+}
+
+function validateSafeRegex(
+  pattern: unknown,
+  code: GenericDescriptorErrorCode,
+  where: string,
+): string {
+  return parseLinearSafePattern(pattern, code, where).source;
 }
 
 /**
@@ -957,7 +1120,7 @@ function validateScalarValue(
           throw new CanonError("CANON_UNICODE_INVALID", `lone surrogate in '${name}'`);
         }
       }
-      if (opts.pattern && !new RegExp(opts.pattern).test(v))
+      if (opts.pattern && !matchesLinearSafePattern(opts.pattern, v))
         throw new CanonError("CANON_PATH_SEGMENT_INVALID", `'${name}' fails pattern`);
       return { stringForm: v, scalar: v };
     }

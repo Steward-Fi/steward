@@ -36,6 +36,7 @@ import {
 import {
   agents,
   approvalQueue,
+  auditEvents,
   closeDb,
   executionAuthorizationNonces,
   getDb,
@@ -528,6 +529,60 @@ describe("#201 generic-http governed provider-action E2E", () => {
 
     const bFinal = await bindingRow(out.intentId);
     expect(bFinal.status).toBe("execution_ready");
+  });
+
+  test("execute-time descriptor drift denies before mint and records the exact reason", async () => {
+    const out = await propose(
+      OP_CREATE_KEY,
+      "POST",
+      { title: "approved bytes", priority: 3 },
+      "ghdrift01",
+    );
+    expect(out.kind).toBe("approval_required");
+    if (out.kind !== "approval_required") throw new Error(`got ${out.kind}`);
+    const approved = await providerApprovalService.decide(
+      decideInput(out.intentId, out.requestHash, out.actionDigest, G.APPROVER, "gh-drift-decide"),
+    );
+    expect(approved.ok).toBe(true);
+
+    // Simulate out-of-band descriptor corruption after the human approved the
+    // old bytes. The current production builder must reconstruct from the
+    // current descriptor, compare exact JCS bytes, and stop before nonce mint.
+    await getDb()
+      .update(providerOperations)
+      .set({
+        requestProfile: {
+          profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+          operationDescriptor: { ...CREATE_DESCRIPTOR, origin: "https://changed.example.com" },
+          policyRules: approvalRules(OP_CREATE_KEY),
+        },
+      })
+      .where(eq(providerOperations.id, G.OP_CREATE));
+
+    const resumed = await providerApprovalService.resume({
+      intentId: out.intentId,
+      tenantId: G.TENANT,
+      caller: { agentId: G.AGENT },
+    });
+    expect(resumed).toMatchObject({
+      ok: false,
+      code: "APPROVAL_ACTION_INTEGRITY_FAILED",
+      httpStatus: 409,
+    });
+    expect(
+      await getDb()
+        .select()
+        .from(executionAuthorizationNonces)
+        .where(eq(executionAuthorizationNonces.intentId, out.intentId)),
+    ).toHaveLength(0);
+    const denialEvidence = await getDb()
+      .select({ action: auditEvents.action, metadata: auditEvents.metadata })
+      .from(auditEvents)
+      .where(eq(auditEvents.resourceId, out.intentId));
+    expect(denialEvidence).toContainEqual({
+      action: "provider.resume.policy_denied",
+      metadata: expect.objectContaining({ reasonCode: "APPROVAL_ACTION_INTEGRITY_FAILED" }),
+    });
   });
 
   test("operator path: register a validated generic operation, then invoke it", async () => {

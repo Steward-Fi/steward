@@ -233,6 +233,8 @@ describe("descriptor validation", () => {
       "^(a)\\1$",
       "^a{1,}$",
       "^admin$|user$",
+      `^${"a?".repeat(28)}a{28}$`,
+      "^a{0,64}a{0,64}z$",
     ]) {
       expect(
         descriptorDenies({
@@ -241,6 +243,22 @@ describe("descriptor validation", () => {
         }),
       ).toBe("CANON_DESCRIPTOR_SEGMENT_INVALID");
     }
+  });
+
+  it("matches the accepted pattern subset in bounded linear time", () => {
+    const descriptor = validateGenericHttpDescriptor({
+      ...GENERIC_GOLDEN_DESCRIPTOR_A,
+      pathTemplate: [{ param: { name: "x", type: "string", pattern: "^[a-z]{1,128}$" } }],
+      query: [],
+      projection: { policyArgs: ["x"], safeSummary: [] },
+    });
+    const started = performance.now();
+    for (let i = 0; i < 10_000; i++) {
+      expect(() =>
+        buildGenericHttpAction("linear.test", descriptor, "GET", { x: "a".repeat(128) }),
+      ).not.toThrow();
+    }
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
 
   it("rejects an IP-literal origin (SSRF-adjacent)", () => {
