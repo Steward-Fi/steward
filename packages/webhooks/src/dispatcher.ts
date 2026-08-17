@@ -31,6 +31,9 @@ const ALLOW_PRIVATE_WEBHOOK_NETWORKS =
   (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
     ?.STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS === "true";
 
+// Once-per-process latch for the SEC-102 escape-hatch warning below.
+let warnedPrivateWebhookNetworks = false;
+
 function toHex(buffer: ArrayBuffer): string {
   return Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -400,6 +403,16 @@ export class WebhookDispatcher {
     this.allowPrivateNetwork = options.allowPrivateNetwork ?? ALLOW_PRIVATE_WEBHOOK_NETWORKS;
     this.allowInsecureHttp = options.allowInsecureHttp ?? false;
     this.lookup = options.lookup;
+    // SEC-102: the SSRF escape hatch disables the private-network guard for
+    // every delivery this dispatcher makes (STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS
+    // does it process-wide at module load). Announce it loudly once per process
+    // instead of running unguarded in silence.
+    if (this.allowPrivateNetwork && !warnedPrivateWebhookNetworks) {
+      warnedPrivateWebhookNetworks = true;
+      console.warn(
+        "[steward] WARNING: webhook SSRF guard is DISABLED (allowPrivateNetwork / STEWARD_ALLOW_PRIVATE_WEBHOOK_NETWORKS=true). Loopback, link-local, and private-range webhook targets will be fetched. Use only for local development or trusted test harnesses.",
+      );
+    }
   }
 
   async dispatch(
