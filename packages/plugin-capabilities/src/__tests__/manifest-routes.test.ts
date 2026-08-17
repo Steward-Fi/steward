@@ -41,6 +41,7 @@ const GH_SPEC = {
 function buildCtx(db: unknown): StewardAppContext {
   return {
     db,
+    getRedisClient: () => null,
     async writeAuditEvent(ev: Record<string, unknown>) {
       // Reconstruct the structured event from the core-audit shape for assertion.
       const md = (ev.metadata ?? {}) as Record<string, unknown>;
@@ -142,10 +143,13 @@ describe("manifest routes", () => {
     expect(body.data.mode).toBe("token");
     expect(body.data.ttlSeconds).toBe(90);
     expect(body.data.scopes).toContain("cap:github:app:org");
+    // SEC-033: never the broad `agent` scope on a capability token.
+    expect(body.data.scopes).not.toContain("agent");
 
     const payload = await verifyToken(body.data.token);
     expect(payload.agentId).toBe(agentId);
     expect((payload.scopes as string[]) ?? []).toContain("cap:github:app:org");
+    expect((payload.scopes as string[]) ?? []).not.toContain("agent");
 
     // audit: exactly one issue/allow/token event.
     expect(

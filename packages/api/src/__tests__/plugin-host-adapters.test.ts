@@ -122,6 +122,44 @@ describe("PluginHost — adapter contributions (Phase 2d)", () => {
     await expect(host.register(app, ctx, plugin)).rejects.toThrow(PluginHostError);
   });
 
+  it("FAILS CLOSED on a collision across SEPARATE register() passes on one host", async () => {
+    // SEC-093: the guard must be durable — a plugin registered in a LATER host
+    // pass must not silently overwrite a pair an earlier pass registered (the
+    // registry's own register() is a silent Map.set-overwrite).
+    const registry = new AdapterRegistry({ env: {} });
+    const ctx = ctxWith(registry);
+
+    const a = adapterPlugin("plugin-a", [
+      { category: "swap", provider: "dup", adapter: fakeSwapAdapter("a") },
+    ]);
+    const b = adapterPlugin("plugin-b", [
+      { category: "swap", provider: "dup", adapter: fakeSwapAdapter("b") },
+    ]);
+
+    const host = new PluginHost<typeof ctx>();
+    await host.register(app, ctx, a);
+    await expect(host.register(app, ctx, b)).rejects.toThrow(PluginHostError);
+    // and the original adapter is still the registered one (no clobber).
+    expect(registry.swap().provider).toBe("a");
+  });
+
+  it("FAILS CLOSED on a collision with an adapter registered OUTSIDE the host", async () => {
+    // SEC-093: core code (or a previous host) may have registered the pair
+    // directly on the shared registry — a plugin contribution for the same
+    // (category, provider) must refuse to overwrite it.
+    const registry = new AdapterRegistry({ env: {} });
+    registry.register("swap", "core-swap", fakeSwapAdapter("core-swap"));
+    const ctx = ctxWith(registry);
+
+    const plugin = adapterPlugin("trading", [
+      { category: "swap", provider: "core-swap", adapter: fakeSwapAdapter("plugin") },
+    ]);
+
+    const host = new PluginHost<typeof ctx>();
+    await expect(host.register(app, ctx, plugin)).rejects.toThrow(PluginHostError);
+    expect(registry.swap().provider).toBe("core-swap");
+  });
+
   it("FAILS CLOSED on an unknown adapter category", async () => {
     const registry = new AdapterRegistry({ env: {} });
     const ctx = ctxWith(registry);

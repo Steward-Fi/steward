@@ -130,8 +130,11 @@ describe("issueCapability", () => {
     expect(res.token).toBe("tok.ttl=60");
     expect(res.ttlSeconds).toBe(60);
     expect(res.jti).toBe("jti-123");
-    expect(res.scopes).toContain("agent");
-    expect(res.scopes).toContain(capabilityTokenScope("github:app:org"));
+    // Least privilege (SEC-033): the token carries ONLY the capability scope.
+    // Stamping the broad `agent` scope would make it a general agent credential
+    // for the whole tenant surface.
+    expect(res.scopes).toEqual([capabilityTokenScope("github:app:org")]);
+    expect(res.scopes).not.toContain("agent");
     expect(events[0]).toMatchObject({
       action: "capability.issue",
       mode: "token",

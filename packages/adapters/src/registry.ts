@@ -145,6 +145,16 @@ export class AdapterRegistry {
     this.resolved.delete(category);
   }
 
+  /**
+   * True when an adapter is already registered under `(category, providerName)`.
+   * Read-only introspection for callers (e.g. the plugin host) that must refuse
+   * to SILENTLY overwrite a live adapter: `register` itself is a plain
+   * `Map.set`, so the collision check has to happen before calling it.
+   */
+  has(category: AdapterCategory, providerName: string): boolean {
+    return this.registered.get(category)?.has(providerName) ?? false;
+  }
+
   private resolve<C extends AdapterCategory>(category: C): CategoryToAdapter[C] {
     const cached = this.resolved.get(category);
     if (cached) return cached as CategoryToAdapter[C];
