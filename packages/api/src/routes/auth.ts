@@ -146,6 +146,7 @@ import {
   verifyCaptchaToken,
 } from "../services/auth-abuse";
 import { verifyEip1271 } from "../services/eip1271";
+import { isAllowedOidcClientSecretEnv } from "../services/oidc-provider-config";
 import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
 import { lockUserSession } from "../services/session-lock";
 import { testAccountOtpMatches } from "../services/test-account-credentials";
@@ -10298,6 +10299,11 @@ async function exchangeOidcAuthorizationCode(opts: {
     code_verifier: codeVerifier,
   });
   if (provider.clientSecretEnv) {
+    // Defense in depth: legacy rows may predate the config-time allowlist, so
+    // re-enforce the dedicated env namespace before reading any secret.
+    if (!isAllowedOidcClientSecretEnv(provider.clientSecretEnv)) {
+      throw new Error("OIDC client secret env is outside the allowed tenant namespace");
+    }
     const secret = process.env[provider.clientSecretEnv];
     if (!secret) throw new Error(`OIDC client secret env ${provider.clientSecretEnv} is not set`);
     body.set("client_secret", secret);
