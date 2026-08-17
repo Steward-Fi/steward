@@ -68,7 +68,7 @@ const OPERATION_FIXTURES = {
   [X_PROVIDER_ACTION_PROFILE]: [
     {
       operationKey: "x.tweet.create",
-      args: { text: "hello world", summoned: false },
+      args: { text: "hello world", replyToTweetId: "42", summoned: false },
     },
     {
       operationKey: "x.tweet.delete",
@@ -442,6 +442,49 @@ describe("#220 executable provider profile conformance", () => {
           selectedHeaders: [["content-type", "application/json"]],
         }),
       ).toThrow("credential-body-field");
+    }
+  });
+
+  it("reconstructs every adapter-fixed operation exactly and rejects all target-surface substitutions", () => {
+    for (const spec of PRODUCTION_PROVIDER_PROFILE_SPECS) {
+      if (spec.kind !== "adapter-fixed") continue;
+      for (const fixture of OPERATION_FIXTURES[spec.profile]) {
+        const built = buildFromProductionSpec(spec, { ...fixture.args }, fixture);
+        const operation = {
+          operationKey: fixture.operationKey,
+          requestProfile: { profile: spec.profile },
+        };
+        const parse = (action: typeof built.action) =>
+          parseGovernedCanonicalActionForDispatch(
+            new TextEncoder().encode(jcsStringify(action)),
+            spec.profile,
+            allowedOriginsFromProductionSpec(spec),
+            operation,
+          );
+        expect(parse(built.action)).toEqual(built.action);
+        const mutations = [
+          { ...built.action, method: built.action.method === "GET" ? "POST" : "GET" },
+          { ...built.action, normalizedPath: `${built.action.normalizedPath}/attacker` },
+          {
+            ...built.action,
+            orderedQueryPairs: [...built.action.orderedQueryPairs, ["attacker", "1"]] as Array<
+              [string, string]
+            >,
+          },
+          { ...built.action, selectedHeaders: [] },
+          {
+            ...built.action,
+            canonicalBody:
+              built.action.canonicalBody === null
+                ? { attacker: true }
+                : { ...(built.action.canonicalBody as Record<string, unknown>), attacker: true },
+          },
+        ].filter((mutation) => jcsStringify(mutation) !== jcsStringify(built.action));
+        expect(mutations.length).toBeGreaterThanOrEqual(4);
+        for (const mutation of mutations) {
+          expect(() => parse(mutation as typeof built.action)).toThrow("operation-action-mismatch");
+        }
+      }
     }
   });
 
