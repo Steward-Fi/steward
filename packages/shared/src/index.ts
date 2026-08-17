@@ -15,6 +15,7 @@ export * from "./provider-approval.js";
 export * from "./provider-authority.js";
 export * from "./provider-case.js";
 export * from "./provider-execution-auth.js";
+export * from "./provider-profile-conformance.js";
 export * from "./provider-profile-registry.js";
 // ─── Non-throwing description of an arbitrary thrown value (fail-closed catches) ───
 export { describeThrown, UNPRINTABLE_THROWN_VALUE } from "./safe-error.js";
