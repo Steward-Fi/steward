@@ -137,6 +137,9 @@ jobs:
           fi
         env:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
+          # Proxy fixtures deliberately run without request-signing or a shared
+          # Redis connection. NODE_ENV=production still overrides this flag.
+          STEWARD_PROXY_DEV_MODE: "true"
           # bunfig.toml [test] preloads only load from bun's cwd, and this job
           # runs `bun test` from the repo root — so per-package preloads (e.g.
           # plugin-trading's, which supplies this key) never run. 64-char dummy
@@ -281,6 +284,9 @@ jobs:
           STEWARD_EMAIL_CODE_SECRET: "ci-email-code-secret-must-be-at-least-32-chars-long"
           STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "ci-audit-hmac-key-must-be-at-least-32-bytes-long"
+          # Isolated API fixtures import an in-process proxy without calling
+          # initProxyRedis or signing requests.
+          STEWARD_PROXY_DEV_MODE: "true"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost,127.0.0.1:3200"
 
       - name: Stop API test server
@@ -405,6 +411,7 @@ jobs:
           # script doesn't sign request-expiry / authorization-signature headers,
           # which are enforced only when NODE_ENV=production (covered by unit tests).
           NODE_ENV: "test"
+          STEWARD_PROXY_DEV_MODE: "true"
           STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS: "true"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost,127.0.0.1:3200"
           PORT: "3200"
