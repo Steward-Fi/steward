@@ -312,13 +312,6 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
     }
 
     try {
-      if (
-        patch.enabled === false ||
-        patch.constraints !== undefined ||
-        patch.secretId !== undefined
-      ) {
-        await revokeBoundLeases(tenantId, { capabilityId: id });
-      }
       const updated = await store.updateCapability(
         tenantId,
         id,
@@ -344,6 +337,16 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
             : null,
       );
       if (!updated) return c.json<ApiResponse>({ ok: false, error: "capability not found" }, 404);
+      if (
+        patch.enabled === false ||
+        patch.constraints !== undefined ||
+        patch.secretId !== undefined
+      ) {
+        // Mutate authority first. Any in-flight issuer finalization now observes
+        // the tombstoned/changed authority and self-revokes; the subsequent scan
+        // catches every lease that finalized before this commit.
+        await revokeBoundLeases(tenantId, { capabilityId: id });
+      }
       return c.json<ApiResponse>({ ok: true, data: toCapabilityView(updated) });
     } catch (e) {
       if (e instanceof SecretRouteAuthorityConflict) {
@@ -360,7 +363,6 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
     const tenantId = c.get("tenantId");
     const id = c.req.param("id");
     try {
-      await revokeBoundLeases(tenantId, { capabilityId: id });
       const removed = await store.deleteCapability(tenantId, id, (result) =>
         result
           ? auditEvent(c, {
@@ -371,6 +373,9 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
             })
           : null,
       );
+      // Always sweep after the tombstone, including a retry after a prior
+      // mutation committed but provider revocation returned 503.
+      await revokeBoundLeases(tenantId, { capabilityId: id });
       if (!removed) return c.json<ApiResponse>({ ok: false, error: "capability not found" }, 404);
       return c.json<ApiResponse>({ ok: true, data: { id } });
     } catch (e) {
@@ -450,7 +455,6 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
     const tenantId = c.get("tenantId");
     const grantId = c.req.param("grantId");
     try {
-      await revokeBoundLeases(tenantId, { grantId });
       const revoked = await store.revokeGrant(tenantId, grantId, (result) =>
         result
           ? auditEvent(c, {
@@ -462,6 +466,7 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
           : null,
       );
       if (!revoked) return c.json<ApiResponse>({ ok: false, error: "grant not found" }, 404);
+      await revokeBoundLeases(tenantId, { grantId });
       return c.json<ApiResponse>({ ok: true, data: { id: grantId } });
     } catch (e) {
       return errorResponse(c, e);

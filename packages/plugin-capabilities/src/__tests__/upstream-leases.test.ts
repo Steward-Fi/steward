@@ -379,6 +379,40 @@ describe("upstream credential leases", () => {
     ).toEqual(["lease.delivery_pending:allow", "lease.issue:allow", "lease.revoke:allow"]);
   });
 
+  test("acknowledgement audit is staged honestly before the atomic active transition", async () => {
+    const issuer = new FakeIssuer();
+    const issued = await issueUpstreamCredentialLease(
+      issueArgs(issuer, "idempotency-ack-ordering"),
+    );
+    if (!issued.ok) throw new Error("expected issuance");
+    let observedStatus = "";
+    let observedAction = "";
+    const result = await acknowledgeUpstreamCredentialLease({
+      db: harness.db,
+      tenantId: TENANT,
+      agentId: AGENT,
+      leaseId: issued.leaseId,
+      token: issued.token,
+      now: NOW,
+      audit: async (event) => {
+        observedAction = event.action;
+        const [row] = await harness.db
+          .select({ status: upstreamCredentialLeases.status })
+          .from(upstreamCredentialLeases)
+          .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+        observedStatus = row.status;
+      },
+    });
+    expect(result).toEqual({ ok: true });
+    expect(observedAction).toBe("upstream_credential_lease.activation_authorized");
+    expect(observedStatus).toBe("acknowledging");
+    const [active] = await harness.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+    expect(active.status).toBe("active");
+  });
+
   test("issuer and revoker failures fail closed with durable status and evidence", async () => {
     const issuer = new FakeIssuer();
     issuer.failIssue = true;
@@ -408,7 +442,8 @@ describe("upstream credential leases", () => {
       .select()
       .from(upstreamCredentialLeases)
       .where(eq(upstreamCredentialLeases.id, issued.leaseId));
-    expect(rows[0].status).toBe("active");
+    expect(rows[0].status).toBe("needs_attention");
+    expect(rows[0].lastError).toContain("outcome unknown");
     const events = await harness.db
       .select()
       .from(upstreamCredentialLeaseEvents)
@@ -419,6 +454,18 @@ describe("upstream credential leases", () => {
           event.action === "lease.revoke" && event.decision === "deny",
       ),
     ).toBe(true);
+    issuer.failRevoke = false;
+    expect(
+      await revokeUpstreamCredentialLease({
+        db: harness.db,
+        tenantId: TENANT,
+        agentId: AGENT,
+        leaseId: issued.leaseId,
+        token: TOKEN,
+        issuer,
+        now: new Date(NOW.getTime() + 1_000),
+      }),
+    ).toEqual({ ok: true });
   });
 
   test("a stale revocation claim is safely retried after a post-revoke process crash", async () => {
@@ -528,6 +575,12 @@ describe("upstream credential leases", () => {
       audit: async (event) => auditEvents.push(event),
     });
     if (!issued.ok) throw new Error("expected issuance");
+    const sibling = await issueUpstreamCredentialLease({
+      ...issueArgs(issuer, "idempotency-delivery-sibling"),
+      audit: async (event) => auditEvents.push(event),
+    });
+    if (!sibling.ok) throw new Error("expected sibling issuance");
+    expect(await acknowledge(sibling)).toEqual({ ok: true });
     let [row] = await harness.db
       .select()
       .from(upstreamCredentialLeases)
@@ -551,6 +604,40 @@ describe("upstream credential leases", () => {
     });
     expect(recovered).toEqual({ unknown: 0, revoked: 1, attention: 0 });
     [row] = await harness.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+    expect(row.status).toBe("revoked");
+    const [siblingRow] = await harness.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(eq(upstreamCredentialLeases.id, sibling.leaseId));
+    expect(siblingRow.status).toBe("active");
+    expect(issuer.revokeCalls).toBe(1);
+  });
+
+  test("stale exact-token revocation claims are idempotently reconciled", async () => {
+    const issuer = new FakeIssuer();
+    const issued = await issueUpstreamCredentialLease(
+      issueArgs(issuer, "idempotency-stale-revocation"),
+    );
+    if (!issued.ok) throw new Error("expected issuance");
+    expect(await acknowledge(issued)).toEqual({ ok: true });
+    await harness.db
+      .update(upstreamCredentialLeases)
+      .set({ status: "revoking", updatedAt: new Date(NOW.getTime() - 31_000) })
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+
+    const recovered = await recoverInterruptedUpstreamCredentialLeases({
+      db: harness.db,
+      tenantId: TENANT,
+      issuer,
+      exerciseToken,
+      audit,
+      now: NOW,
+    });
+    expect(recovered).toEqual({ unknown: 0, revoked: 1, attention: 0 });
+    const [row] = await harness.db
       .select()
       .from(upstreamCredentialLeases)
       .where(eq(upstreamCredentialLeases.id, issued.leaseId));
