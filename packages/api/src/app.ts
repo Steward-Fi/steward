@@ -40,6 +40,7 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { authorizationSignature } from "./middleware/authorization-signature";
 import { correlationId } from "./middleware/correlation";
+import { workersGlobalRateLimit } from "./middleware/global-rate-limit";
 import { idempotencyMiddleware } from "./middleware/idempotency";
 import { requestExpiry } from "./middleware/request-expiry";
 import { requestLogger } from "./middleware/request-logger";
@@ -81,6 +82,7 @@ import {
   type ApiResponse,
   type AppVariables,
   dashboardAuthMiddleware,
+  isWorkersRuntime,
   tenantAuth,
 } from "./services/context";
 
@@ -116,6 +118,15 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
   );
 
   // ─── Global middleware ──────────────────────────────────────────────────────
+
+  // SEC-068: the Bun entry enforces a global in-memory IP rate limit
+  // pre-dispatch (index.ts runtimeGate), which is impossible on Workers (no
+  // cross-isolate state). Mount the shared Redis-backed sliding-window limiter
+  // across all routes for the Workers runtime only, so non-auth endpoints
+  // there are no longer unthrottled.
+  if (isWorkersRuntime) {
+    app.use("*", workersGlobalRateLimit);
+  }
 
   app.use("*", securityHeaders);
   app.use("*", tenantCors);

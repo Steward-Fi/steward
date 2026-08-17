@@ -57,8 +57,9 @@ const app = await composeApp();
 
 // ─── In-memory rate-limit log + shutdown guard ───────────────────────────────
 //
-// NOT used by the Workers entry — Workers should rely on the Redis-backed
-// sliding-window rate limiter (or a Workers-native KV-backed alternative).
+// NOT used by the Workers entry — the Workers runtime mounts the shared
+// Redis-backed sliding-window limiter across all routes instead (SEC-068,
+// see middleware/global-rate-limit.ts, gated on isWorkersRuntime in app.ts).
 //
 // SEC-014: the limiter keys on the socket peer unless the operator declares
 // STEWARD_TRUSTED_PROXY_HOPS > 0, in which case the client IP is derived from

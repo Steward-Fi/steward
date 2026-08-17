@@ -15,6 +15,11 @@ const securityHeadersSource = readFileSync(
   "utf8",
 );
 const tenantCorsSource = readFileSync(join(apiRoot, "middleware", "tenant-cors.ts"), "utf8");
+const globalRateLimitSource = readFileSync(
+  join(apiRoot, "middleware", "global-rate-limit.ts"),
+  "utf8",
+);
+const appSource = readFileSync(join(apiRoot, "app.ts"), "utf8");
 const contextSource = readFileSync(join(apiRoot, "services", "context.ts"), "utf8");
 const indexSource = readFileSync(join(apiRoot, "index.ts"), "utf8");
 const webRoot = join(import.meta.dir, "..", "..", "..", "..", "web", "src");
@@ -76,6 +81,14 @@ describe("middleware security hardening", () => {
       "runtimeGate(request, server.requestIP(request)?.address ?? null) ?? app.fetch(request)",
     );
     expect(indexSource).not.toContain('app.use("*", async (c, next) => {');
+  });
+
+  it("mounts the shared Redis-backed global limiter on the Workers runtime (SEC-068)", () => {
+    expect(appSource).toContain("if (isWorkersRuntime) {");
+    expect(appSource).toContain('app.use("*", workersGlobalRateLimit)');
+    expect(globalRateLimitSource).toContain("checkAuthRateLimit(");
+    expect(globalRateLimitSource).toContain('c.req.path === "/health"');
+    expect(globalRateLimitSource).toContain('"Rate limit exceeded"');
   });
 
   it("documents production security headers and dashboard CSP checks in source", () => {
