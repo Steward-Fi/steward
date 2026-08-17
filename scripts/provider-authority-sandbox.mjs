@@ -39,15 +39,21 @@ function fail(message) {
 }
 
 async function stewardRaw(env, path, token, options = {}) {
-  return requestJson(`${env.STEWARD_API_URL.replace(/\/$/, "")}${path}`, {
-    ...options,
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      "x-steward-tenant": env.STEWARD_TENANT_ID,
-      ...(options.headers ?? {}),
+  const base = env.STEWARD_API_URL.replace(/\/$/, "");
+  return requestJson(
+    `${base}${path}`,
+    {
+      ...options,
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "x-steward-tenant": env.STEWARD_TENANT_ID,
+        ...(options.headers ?? {}),
+      },
     },
-  });
+    fetch,
+    { expectedOrigin: base },
+  );
 }
 
 async function steward(env, path, token, options = {}) {

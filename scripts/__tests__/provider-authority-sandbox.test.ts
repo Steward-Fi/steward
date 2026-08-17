@@ -150,6 +150,51 @@ describe("provider authority sandbox operator primitives", () => {
     expect(redirectMode).toBe("error");
   });
 
+  it("rejects an actual redirect without contacting its destination", async () => {
+    let destinationCalls = 0;
+    const base = await fakeServer((request, response) => {
+      if (request.url === "/destination") destinationCalls++;
+      if (request.url === "/redirect") {
+        response.writeHead(302, { location: `${base}/destination` });
+        response.end();
+        return;
+      }
+      response.end("{}");
+    });
+    await expect(
+      requestJson(`${base}/redirect`, {}, fetch, { expectedOrigin: base }),
+    ).rejects.toThrow();
+    expect(destinationCalls).toBe(0);
+  });
+
+  it("enforces its own deadline even when the caller supplies a non-aborting signal", async () => {
+    const base = await fakeServer((_request, _response) => {
+      // Intentionally never respond; requestJson's deadline must abort this.
+    });
+    await expect(
+      requestJson(`${base}/slow`, { signal: new AbortController().signal }, fetch, {
+        expectedOrigin: base,
+        timeoutMs: 20,
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("pins the request origin before sending credentials", async () => {
+    let calls = 0;
+    await expect(
+      requestJson(
+        "https://attacker.example/token",
+        { headers: { authorization: "Bearer canary" } },
+        (async () => {
+          calls++;
+          return new Response("{}");
+        }) as typeof fetch,
+        { expectedOrigin: "https://api.github.com" },
+      ),
+    ).rejects.toThrow("origin mismatch");
+    expect(calls).toBe(0);
+  });
+
   it("fails closed with the exact build prerequisite command", () => {
     const root = mkdtempSync(join(tmpdir(), "steward-sandbox-build-"));
     expect(() => validateBuildPrerequisites(root)).toThrow(

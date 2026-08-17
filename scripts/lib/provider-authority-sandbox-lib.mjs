@@ -51,6 +51,17 @@ export function validateServiceUrl(name, value) {
   return url.toString().replace(/\/$/, "");
 }
 
+function validateGithubApiBase(value) {
+  const validated = validateServiceUrl("GITHUB_API_URL", value);
+  const url = new URL(validated);
+  const loopback =
+    url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+  if (url.origin !== GITHUB_API_BASE && !loopback) {
+    throw new Error("GITHUB_API_URL must be https://api.github.com");
+  }
+  return validated;
+}
+
 export function validateBuildPrerequisites(root) {
   const missing = REQUIRED_BUILD_OUTPUTS.filter((path) => !existsSync(join(root, path)));
   if (missing.length) {
@@ -155,12 +166,31 @@ export function mintGithubAppJwt(appId, privateKey, now = Math.floor(Date.now() 
   return `${unsigned}.${signer.sign(privateKey).toString("base64url")}`;
 }
 
-export async function requestJson(url, options, fetchImpl = fetch) {
-  const response = await fetchImpl(url, {
+export async function requestJson(
+  url,
+  options = {},
+  fetchImpl = fetch,
+  { expectedOrigin, timeoutMs = REQUEST_TIMEOUT_MS } = {},
+) {
+  const validatedUrl = validateServiceUrl("HTTP request URL", url);
+  const requestOrigin = new URL(validatedUrl).origin;
+  if (expectedOrigin) {
+    const pinnedOrigin = new URL(validateServiceUrl("expected request origin", expectedOrigin))
+      .origin;
+    if (requestOrigin !== pinnedOrigin) {
+      throw new Error(`HTTP request origin mismatch (expected ${pinnedOrigin})`);
+    }
+  }
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > REQUEST_TIMEOUT_MS) {
+    throw new Error(`HTTP request timeout must be between 1 and ${REQUEST_TIMEOUT_MS} ms`);
+  }
+  const deadline = AbortSignal.timeout(timeoutMs);
+  const signal = options.signal ? AbortSignal.any([deadline, options.signal]) : deadline;
+  const response = await fetchImpl(validatedUrl, {
     ...options,
     // Never forward an authorization header across an unexpected redirect.
-    redirect: options?.redirect ?? "error",
-    signal: options?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    redirect: "error",
+    signal,
   });
   const declared = response.headers.get("content-length");
   if (declared !== null) {
@@ -204,7 +234,7 @@ export async function requestJson(url, options, fetchImpl = fetch) {
 
 export async function mintInstallationCredential(env, fetchImpl = fetch) {
   const jwt = mintGithubAppJwt(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY);
-  const base = validateServiceUrl("GITHUB_API_URL", env.GITHUB_API_URL ?? "https://api.github.com");
+  const base = validateGithubApiBase(env.GITHUB_API_URL ?? GITHUB_API_BASE);
   const { response, body } = await requestJson(
     `${base}/app/installations/${encodeURIComponent(env.GITHUB_APP_INSTALLATION_ID)}/access_tokens`,
     {
@@ -217,6 +247,7 @@ export async function mintInstallationCredential(env, fetchImpl = fetch) {
       },
     },
     fetchImpl,
+    { expectedOrigin: base },
   );
   if (!response.ok || typeof body?.token !== "string") {
     throw new Error(`GitHub installation token mint failed (${response.status})`);
@@ -242,6 +273,7 @@ export async function verifyInstallationScope(
   { token, permissions, repositorySelection },
   { owner, repo, apiBase = GITHUB_API_BASE, fetchImpl = fetch },
 ) {
+  const validatedApiBase = validateGithubApiBase(apiBase);
   const expectedPermissions = { issues: "write", metadata: "read" };
   if (
     repositorySelection !== "selected" ||
@@ -253,7 +285,7 @@ export async function verifyInstallationScope(
     );
   }
   const { response, body } = await requestJson(
-    `${apiBase.replace(/\/$/, "")}/installation/repositories?per_page=100`,
+    `${validatedApiBase}/installation/repositories?per_page=100`,
     {
       headers: {
         accept: "application/vnd.github+json",
@@ -263,6 +295,7 @@ export async function verifyInstallationScope(
       },
     },
     fetchImpl,
+    { expectedOrigin: validatedApiBase },
   );
   const expected = `${owner}/${repo}`.toLowerCase();
   if (
@@ -277,17 +310,20 @@ export async function verifyInstallationScope(
 }
 
 export async function revokeInstallationToken(token, fetchImpl = fetch) {
-  const response = await fetchImpl(`${GITHUB_API_BASE}/installation/token`, {
-    method: "DELETE",
-    redirect: "error",
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    headers: {
-      accept: "application/vnd.github+json",
-      authorization: `Bearer ${token}`,
-      "user-agent": "steward-gate-d-sandbox",
-      "x-github-api-version": "2022-11-28",
+  const { response } = await requestJson(
+    `${GITHUB_API_BASE}/installation/token`,
+    {
+      method: "DELETE",
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${token}`,
+        "user-agent": "steward-gate-d-sandbox",
+        "x-github-api-version": "2022-11-28",
+      },
     },
-  });
+    fetchImpl,
+    { expectedOrigin: GITHUB_API_BASE },
+  );
   if (response.status !== 204) {
     throw new Error(`GitHub installation token revocation failed (${response.status})`);
   }
@@ -334,7 +370,7 @@ export async function reconcileGithubMarker({
   fetchImpl = fetch,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
-  const validatedApiBase = validateServiceUrl("GITHUB_API_URL", apiBase);
+  const validatedApiBase = validateGithubApiBase(apiBase);
   let requests = 0;
   let rateLimited = false;
   const observations = [];
@@ -354,6 +390,7 @@ export async function reconcileGithubMarker({
           },
         },
         fetchImpl,
+        { expectedOrigin: validatedApiBase },
       );
       const classification = classifyGithubResponse(response.status, response.headers);
       observations.push({
