@@ -390,9 +390,13 @@ export function verifyRfc3161TimestampResponse(input: {
   }
 }
 
-async function readTimestampResponse(response: Response): Promise<Uint8Array> {
+async function readTimestampResponse(
+  response: Response,
+  signal: AbortSignal,
+  deadline: Promise<never>,
+): Promise<Uint8Array> {
   if (!response.body) {
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    const bytes = new Uint8Array(await Promise.race([response.arrayBuffer(), deadline]));
     if (bytes.length > MAX_TIMESTAMP_RESPONSE_BYTES) {
       throw new AuditCheckpointAnchorError("RFC 3161 response exceeds 1 MiB");
     }
@@ -401,21 +405,31 @@ async function readTimestampResponse(response: Response): Promise<Uint8Array> {
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
+  const cancel = () => {
+    void Promise.resolve(reader.cancel()).catch(() => undefined);
+  };
+  signal.addEventListener("abort", cancel, { once: true });
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await Promise.race([reader.read(), deadline]);
       if (done) break;
       const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
       total += chunk.length;
       if (total > MAX_TIMESTAMP_RESPONSE_BYTES) {
-        await reader.cancel();
+        cancel();
         throw new AuditCheckpointAnchorError("RFC 3161 response exceeds 1 MiB");
       }
       chunks.push(chunk);
     }
     return concatBytes(...chunks);
   } finally {
-    reader.releaseLock();
+    signal.removeEventListener("abort", cancel);
+    try {
+      reader.releaseLock();
+    } catch {
+      // A hostile or already-cancelled stream must not replace the sanitized
+      // transport error or extend the acquisition deadline.
+    }
   }
 }
 
@@ -465,21 +479,30 @@ export class Rfc3161TimestampSink implements AuditCheckpointAnchorSink {
     const query = createRfc3161TimestampQuery(checkpointDigest, nonceBytes);
     const requestStartedAt = Date.now();
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new AuditCheckpointAnchorError("RFC 3161 timestamp request timed out"));
+        controller.abort();
+      }, this.timeoutMs);
+    });
     try {
-      const response = await this.fetchImpl(this.url, {
-        method: "POST",
-        headers: {
-          Accept: "application/timestamp-reply",
-          "Content-Type": "application/timestamp-query",
-        },
-        // Both Node/Bun and Workers accept Uint8Array bodies. workers-types in
-        // this package narrows BodyInit incompatibly, so preserve the runtime
-        // value while widening only the compile-time view.
-        body: query as unknown as string,
-        redirect: "error",
-        signal: controller.signal,
-      });
+      const response = await Promise.race([
+        this.fetchImpl(this.url, {
+          method: "POST",
+          headers: {
+            Accept: "application/timestamp-reply",
+            "Content-Type": "application/timestamp-query",
+          },
+          // Both Node/Bun and Workers accept Uint8Array bodies. workers-types in
+          // this package narrows BodyInit incompatibly, so preserve the runtime
+          // value while widening only the compile-time view.
+          body: query as unknown as string,
+          redirect: "error",
+          signal: controller.signal,
+        }),
+        deadline,
+      ]);
       if (!response.ok) {
         throw new AuditCheckpointAnchorError(`RFC 3161 TSA returned HTTP ${response.status}`);
       }
@@ -497,7 +520,7 @@ export class Rfc3161TimestampSink implements AuditCheckpointAnchorSink {
       ) {
         throw new AuditCheckpointAnchorError("RFC 3161 response exceeds 1 MiB");
       }
-      const bytes = await readTimestampResponse(response);
+      const bytes = await readTimestampResponse(response, controller.signal, deadline);
       assertGrantedRfc3161Response(bytes);
       const verifiedAt = Date.now();
       const verified = verifyRfc3161TimestampResponse({
@@ -532,7 +555,7 @@ export class Rfc3161TimestampSink implements AuditCheckpointAnchorSink {
         cause: error,
       });
     } finally {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
     }
   }
 }

@@ -122,6 +122,46 @@ describe("audit checkpoint anchoring", () => {
     expect(() => assertGrantedRfc3161Response(new Uint8Array(1024 * 1024 + 1))).toThrow("size");
   });
 
+  it("applies the deadline to a transport that never returns headers", async () => {
+    let signal: AbortSignal | undefined;
+    const sink = new Rfc3161TimestampSink({
+      url: "https://tsa.example.test/v1",
+      caFile: "/unused-before-response.pem",
+      timeoutMs: 100,
+      fetch: (_url, init) => {
+        signal = init?.signal as AbortSignal;
+        return new Promise(() => {});
+      },
+    });
+    await expect(sink.anchor(checkpoint())).rejects.toThrow("timestamp request timed out");
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it("applies the deadline after headers and cancels a stalled body", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull() {
+        return new Promise(() => {});
+      },
+      cancel() {
+        cancelled = true;
+        return Promise.reject(new Error("provider-controlled secret"));
+      },
+    });
+    const sink = new Rfc3161TimestampSink({
+      url: "https://tsa.example.test/v1",
+      caFile: "/unused-before-response.pem",
+      timeoutMs: 100,
+      fetch: async () =>
+        new Response(body, {
+          status: 200,
+          headers: { "content-type": "application/timestamp-reply" },
+        }),
+    });
+    await expect(sink.anchor(checkpoint())).rejects.toThrow("timestamp request timed out");
+    expect(cancelled).toBe(true);
+  });
+
   it("fails closed in required mode and degrades only when explicitly best-effort", async () => {
     const failingSink = {
       id: "failure",
