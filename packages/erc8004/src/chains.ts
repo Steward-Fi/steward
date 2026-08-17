@@ -45,6 +45,15 @@ function registryConfig(
 }
 
 export const REGISTRY_CONFIGS: Record<number, RegistryConfig> = {
+  // SECURITY (SEC-112): the baked-in rpcUrl values are single, public,
+  // third-party endpoints. getRegistration/getReputation flag results
+  // `verified: true` based solely on whatever that ONE endpoint returns — a
+  // compromised or MitM'd public RPC can forge "verified" registration and
+  // reputation data. These defaults exist so dev/testnet integrations work
+  // out of the box. Production deployments MUST pass their own RegistryConfig
+  // with an operator-controlled rpcUrl (or an injected `publicClient`),
+  // ideally backed by redundant providers; there is no quorum or
+  // second-source comparison in this client.
   8453: registryConfig({
     chainId: 8453,
     name: "Base",
