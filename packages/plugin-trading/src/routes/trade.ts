@@ -32,6 +32,7 @@ import {
   clobApiCredentialsSchema,
   deriveApiCredentials,
   type EthersSignerLike,
+  getPrices,
   isPolymarketPostNotAttempted,
   isPolymarketUnauthorized,
   POLY_EOA_SIGNATURE_TYPE,
@@ -1296,6 +1297,31 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     return side === "buy" ? amount : amount * price;
   }
 
+  /**
+   * Notional USD for a Polymarket SELL, floored at the CLOB best bid. A FOK sell
+   * at limit 0.01 fills at the best bid (e.g. 0.90), so sizing caps on the
+   * caller's limit would understate the real notional and defeat
+   * perOrderCapUsd/dailyCapUsd (the HL path guards the same trick via
+   * resolveSizingPx). FAIL CLOSED: a sell whose market price cannot be verified
+   * is rejected, never sized on the caller's limit alone.
+   */
+  async function polymarketSellNotionalUsd(
+    amount: number,
+    price: number,
+    tokenId: string,
+    clobUrl?: string,
+  ): Promise<number> {
+    const [best] = await getPrices(
+      [{ tokenId, side: "sell" }],
+      clobUrl ? { clobUrl } : undefined,
+    );
+    const bestBid = Number(best?.price);
+    if (!Number.isFinite(bestBid) || bestBid <= 0) {
+      throw new Error("unable to resolve CLOB best bid for sell notional sizing");
+    }
+    return amount * Math.max(price, bestBid);
+  }
+
   // Map a structured checkOrderAllowed reason to its HTTP status. Allowlist/cap
   // rejections are client errors (400); a non-active session is a 403 (mirrors the
   // HL "Active session required" 403).
@@ -1570,7 +1596,40 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         400,
       );
     }
-    const notionalUsd = polymarketNotionalUsd(body.side, amount, price);
+    // SEC-041: a SELL's notional must be floored at the live best bid — a FOK
+    // sell at an arbitrarily low limit fills at the bid, so sizing on the
+    // caller's price would understate notional and bypass the session caps.
+    // Fail closed (policy-violation, no spend) when the book can't be read.
+    let notionalUsd: number;
+    if (body.side === "sell") {
+      let clobUrl: string | undefined;
+      try {
+        clobUrl = configuredPolymarketClobUrl();
+      } catch {
+        clobUrl = undefined;
+      }
+      try {
+        notionalUsd = await polymarketSellNotionalUsd(amount, price, body.tokenId, clobUrl);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : "unable to size sell notional";
+        await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
+          venue: "polymarket",
+          tokenId: body.tokenId,
+          side: body.side,
+          amount,
+          price,
+          reason,
+        });
+        const envelope: TradeIdempotencyResponse = {
+          status: 400,
+          body: { code: "policy-violation", reason },
+        };
+        idempotency.store?.(envelope);
+        return c.json(envelope.body, envelope.status);
+      }
+    } else {
+      notionalUsd = polymarketNotionalUsd(body.side, amount, price);
+    }
 
     // Session fetch + ownership + venue check + the prediction-market policy gate,
     // all in one pass. checkActiveOrder loads the session and runs checkOrderAllowed

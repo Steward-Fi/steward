@@ -193,7 +193,8 @@ export async function getPrices(
 ): Promise<PolymarketBestPrice[]> {
   if (requests.length === 0) return [];
   const doFetch = opts?.fetch ?? fetch;
-  const response = await doFetch(`${POLYMARKET_CLOB_API_BASE}/prices`, {
+  const clobBase = opts?.clobUrl ?? POLYMARKET_CLOB_API_BASE;
+  const response = await doFetch(`${clobBase}/prices`, {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
     body: JSON.stringify(
