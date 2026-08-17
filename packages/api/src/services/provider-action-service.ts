@@ -597,6 +597,15 @@ function rebuildApprovedAction(
   throw new Error(`unsupported provider operation '${operationKey}'`);
 }
 
+/** Test-only seam for approval-time adapter reconstruction invariants. */
+export function __rebuildApprovedActionForTests(
+  operationKey: string,
+  action: Record<string, unknown>,
+  safeSummary: Record<string, unknown>,
+): ProviderActionBuild {
+  return rebuildApprovedAction(operationKey, action, safeSummary);
+}
+
 // ─── Public result envelope ───────────────────────────────────────────────────
 
 export type ProviderActionOutcome =
