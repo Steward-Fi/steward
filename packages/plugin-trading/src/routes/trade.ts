@@ -1051,6 +1051,28 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       return rejectPolicy(policy.reason ?? "order violates trading policy", sizeUsd, policyLimitPx);
     }
 
+    const order: HyperliquidOrder = {
+      asset: parsedAsset.data,
+      side: body.side,
+      size: body.size,
+      limitPx: policyLimitPx,
+      leverage: effectiveLeverage,
+      reduceOnly: body.reduceOnly,
+      ...(body.orderType ? { orderType: body.orderType } : {}),
+    };
+    // SEC-184: enforce the adapter contract check (the result was previously
+    // discarded) BEFORE reserving spend or signing. Every field is already
+    // validated upstream, so a failure here is an internal inconsistency —
+    // fail closed.
+    const parsedOrder = hyperliquidOrderSchema.safeParse(order);
+    if (!parsedOrder.success) {
+      return rejectPolicy(
+        `order-schema: ${parsedOrder.error.issues[0]?.message ?? "invalid order"}`,
+        sizeUsd,
+        policyLimitPx,
+      );
+    }
+
     const walletAddress = session.walletId;
     const manager = getSessionManager();
     const fenced = await manager.withActiveSubmissionFence(
@@ -1100,16 +1122,6 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             vault.signTypedData({ ...input, tenantId, venue: "hyperliquid" }),
         };
         const adapter = new HyperliquidAdapter(vaultClient, agentId, walletAddress);
-        const order: HyperliquidOrder = {
-          asset: parsedAsset.data,
-          side: body.side,
-          size: body.size,
-          limitPx: policyLimitPx,
-          leverage: effectiveLeverage,
-          reduceOnly: body.reduceOnly,
-          ...(body.orderType ? { orderType: body.orderType } : {}),
-        };
-        hyperliquidOrderSchema.safeParse(order);
         if (builderPerp) {
           try {
             await adapter.updateLeverage({
