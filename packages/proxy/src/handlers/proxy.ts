@@ -33,6 +33,7 @@ import {
 import { getRedis, type SpendReservation, settleReservedSpend } from "@stwd/redis";
 import { SecretVault } from "@stwd/vault";
 import type { Context } from "hono";
+import { isProxyDevMode } from "../config";
 import { recordAudit, recordRequiredAudit } from "../middleware/audit";
 import {
   checkProxyRateLimit,
@@ -428,11 +429,14 @@ function releaseWhenBodyCloses(
 }
 
 function requireSharedProxyReplayStore(): boolean {
-  return (
-    process.env.REDIS_REQUIRED === "true" ||
-    (process.env.NODE_ENV === "production" &&
-      process.env.STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL !== "true")
-  );
+  if (process.env.REDIS_REQUIRED === "true") return true;
+  if (process.env.STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL === "true") return false;
+  // SEC-175: default-deny — the per-process replay store is a dev-only
+  // fallback and now needs the explicit dev-mode opt-in; an unset NODE_ENV
+  // no longer selects it silently, and a production NODE_ENV overrides a
+  // stray dev-mode flag.
+  if (process.env.NODE_ENV === "production") return true;
+  return !isProxyDevMode();
 }
 
 /** Test hook for overriding spend-limit enforcement without module mocks. */

@@ -46,6 +46,9 @@ beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "proxy-x-route-jwt-secret-with-enough-bytes-here-ok";
+  // Soft development posture (unsigned requests, in-process replay store) —
+  // explicit opt-in since SEC-175.
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   // api.x.com ships in the default allowlists (secret-route + proxy alias) as of
   // workstream C, so no STEWARD_*_ALLOWED_HOSTS env is needed for the happy path.
 
@@ -92,6 +95,7 @@ afterAll(async () => {
   delete process.env.STEWARD_PGLITE_MEMORY;
   delete process.env.STEWARD_MASTER_PASSWORD;
   delete process.env.STEWARD_JWT_SECRET;
+  delete process.env.STEWARD_PROXY_DEV_MODE;
 });
 
 function buildApp() {

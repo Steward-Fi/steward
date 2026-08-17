@@ -8,7 +8,7 @@
 import { assertTokenNotRevoked, verifyToken } from "@stwd/auth";
 import { agents, and, eq, getDb } from "@stwd/db";
 import type { Context, Next } from "hono";
-import { PROXY_SCOPE } from "../config";
+import { isProxyDevMode, PROXY_SCOPE } from "../config";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -28,10 +28,13 @@ const MAX_SIGNED_PROXY_BODY_BYTES = Number(
 );
 
 function proxyRequestSignatureRequired(): boolean {
-  return (
-    process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE === "true" ||
-    process.env.NODE_ENV === "production"
-  );
+  if (process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE === "true") return true;
+  // SEC-175: default-deny. Unsigned requests are allowed only with an
+  // explicit dev-mode opt-in — never silently because NODE_ENV is unset.
+  // An explicit production NODE_ENV overrides even the opt-in, so a stray
+  // STEWARD_PROXY_DEV_MODE can never weaken a production deployment.
+  if (process.env.NODE_ENV === "production") return true;
+  return !isProxyDevMode();
 }
 
 function configuredProxySigningSecrets(): string[] {

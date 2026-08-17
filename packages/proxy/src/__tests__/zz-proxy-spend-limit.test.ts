@@ -220,11 +220,16 @@ describe("proxy spend-limit enforcement", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
     delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
+    delete process.env.STEWARD_PROXY_DEV_MODE;
   });
 
   beforeEach(() => {
     process.env.STEWARD_MASTER_PASSWORD = "test-master-password";
     process.env.STEWARD_PROXY_ALLOWED_HOSTS = "example.com";
+    // These tests exercise handler logic under the soft development posture
+    // (in-process replay store, no Redis). SEC-175 made that posture an
+    // explicit opt-in, so set the flag here.
+    process.env.STEWARD_PROXY_DEV_MODE = "true";
     route.injectAs = "header";
     route.injectKey = "x-api-key";
     route.injectFormat = "Bearer {value}";
