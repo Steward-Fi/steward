@@ -62,4 +62,20 @@ describe("passkey MFA hardening", () => {
     expect(loginGuard).toBeGreaterThan(loginStart);
     expect(loginGuard).toBeLessThan(loginCounterUpdate);
   });
+
+  it("atomically claims non-zero passkey counters to reject concurrent clones", () => {
+    const compareAndSwap = "eq(authenticators.counter, cred.counter)";
+
+    const mfaStart = authSource.indexOf("const completePasskeyMfaHandler");
+    const mfaCas = authSource.indexOf(compareAndSwap, mfaStart);
+    const mfaFailure = authSource.indexOf("updatedMfaCounter.length === 0", mfaCas);
+    expect(mfaCas).toBeGreaterThan(mfaStart);
+    expect(mfaFailure).toBeGreaterThan(mfaCas);
+
+    const loginStart = authSource.indexOf('auth.post("/passkey/login/verify"');
+    const loginCas = authSource.indexOf(compareAndSwap, loginStart);
+    const loginFailure = authSource.indexOf("updatedCounter.length === 0", loginCas);
+    expect(loginCas).toBeGreaterThan(loginStart);
+    expect(loginFailure).toBeGreaterThan(loginCas);
+  });
 });

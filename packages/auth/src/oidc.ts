@@ -132,12 +132,29 @@ function embeddedTransitionIpv4(address: string): string | null {
   if (!words) return null;
   const fromWords = (high: number, low: number) =>
     [high >> 8, high & 0xff, low >> 8, low & 0xff].join(".");
-  const isNat64 =
+  const isWellKnownNat64 =
     words[0] === 0x64 &&
     words[1] === 0xff9b &&
-    ((words[2] === 0 && words[3] === 0 && words[4] === 0 && words[5] === 0) ||
-      (words[2] === 1 && words[3] === 0));
-  if (isNat64) return fromWords(words[6], words[7]);
+    words[2] === 0 &&
+    words[3] === 0 &&
+    words[4] === 0 &&
+    words[5] === 0;
+  if (isWellKnownNat64) return fromWords(words[6], words[7]);
+
+  // RFC 6052's /48 layout is prefix(48) | IPv4-high(16) | u(8) |
+  // IPv4-low(16) | suffix(40). It is not a /96 address with extra prefix
+  // words, so the IPv4 bits must be reconstructed across words 3–5.
+  const isLocalUseNat64 =
+    words[0] === 0x64 &&
+    words[1] === 0xff9b &&
+    words[2] === 1 &&
+    (words[4] & 0xff00) === 0 &&
+    (words[5] & 0x00ff) === 0 &&
+    words[6] === 0 &&
+    words[7] === 0;
+  if (isLocalUseNat64) {
+    return fromWords(words[3], ((words[4] & 0xff) << 8) | (words[5] >> 8));
+  }
   if (words[0] === 0x2002) return fromWords(words[1], words[2]);
   return null;
 }

@@ -15,9 +15,10 @@ describe("assertPublicJwksDestination SSRF guard", () => {
     await expect(
       assertPublicJwksDestination("https://[64:ff9b::a9fe:a9fe]/jwks"),
     ).rejects.toThrow();
-    // 64:ff9b:1::/48 local-use prefix — 192.168.1.1 embedded.
+    // 64:ff9b:1::/48 local-use prefix — 192.168.1.1 embedded using
+    // RFC 6052's /48 placement around the reserved u octet.
     await expect(
-      assertPublicJwksDestination("https://[64:ff9b:1::c0a8:101]/jwks"),
+      assertPublicJwksDestination("https://[64:ff9b:1:c0a8:1:100::]/jwks"),
     ).rejects.toThrow();
   });
 
@@ -37,6 +38,9 @@ describe("assertPublicJwksDestination SSRF guard", () => {
     // NAT64/6to4 embeddings of 8.8.8.8 are public and must not be blocked.
     await expect(
       assertPublicJwksDestination("https://[64:ff9b::808:808]/jwks"),
+    ).resolves.toBeUndefined();
+    await expect(
+      assertPublicJwksDestination("https://[64:ff9b:1:808:8:800::]/jwks"),
     ).resolves.toBeUndefined();
     await expect(
       assertPublicJwksDestination("https://[2002:808:808::]/jwks"),
