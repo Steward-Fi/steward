@@ -163,7 +163,9 @@ function injectCredential(
       throw new Error("Body credential injection is not supported");
 
     default:
-      console.warn(`[proxy] Unknown inject_as: ${route.injectAs}`);
+      // SEC-176: fail closed. Forwarding with no credential in a state the
+      // operator never configured is worse than rejecting the request.
+      throw new Error(`Unknown credential injection mode: ${String(route.injectAs)}`);
   }
 
   return { headers, url, body };
@@ -172,9 +174,14 @@ function injectCredential(
 function stripHopByHopHeaders(headers: Headers): Set<string> {
   const blocked = new Set([
     "authorization",
+    // SEC-097: alternate client-IP headers trusted by some providers/CDNs for
+    // IP attribution or geo-gating. An authenticated agent must not be able to
+    // relay spoofed values to the credential-injected upstream.
+    "cf-connecting-ip",
     "connection",
     "content-length",
     "cookie",
+    "fastly-client-ip",
     "forwarded",
     "host",
     "idempotency-key",
@@ -184,7 +191,10 @@ function stripHopByHopHeaders(headers: Headers): Set<string> {
     "te",
     "trailer",
     "transfer-encoding",
+    "true-client-ip",
     "upgrade",
+    "x-client-ip",
+    "x-cluster-client-ip",
     "x-forwarded-for",
     "x-forwarded-host",
     "x-forwarded-port",
@@ -193,11 +203,16 @@ function stripHopByHopHeaders(headers: Headers): Set<string> {
     "x-http-method",
     "x-http-method-override",
     "x-method-override",
+    "x-original-forwarded-for",
     "x-original-url",
     "x-real-ip",
     "x-rewrite-url",
     "x-steward-key",
     "x-steward-platform-key",
+    // SEC-099: the proxy's request-signing window metadata is internal; do not
+    // disclose it to upstream providers.
+    "x-steward-request-expires-at",
+    "x-steward-request-timestamp",
     "x-steward-signature",
   ]);
   const connection = headers.get("connection");
@@ -281,15 +296,40 @@ const MAX_PROXY_IDEMPOTENCY_BODY_BYTES = Number(
   process.env.STEWARD_PROXY_IDEMPOTENCY_BODY_BYTES ?? 2 * 1024 * 1024,
 );
 const PROXY_UPSTREAM_TIMEOUT_MS = Number(process.env.STEWARD_PROXY_UPSTREAM_TIMEOUT_MS ?? 30_000);
-const MAX_PROXY_RESPONSE_BYTES = Number(
-  process.env.STEWARD_PROXY_RESPONSE_BYTES ?? 25 * 1024 * 1024,
+/**
+ * SEC-100: proxy resource limits fail closed — they cannot be disabled. A `0`
+ * (or garbage) env value previously meant "unlimited", silently removing the
+ * response-size, stream-duration, and concurrency caps on operator
+ * misconfiguration. Reject non-positive / non-integer values at startup
+ * (module load) instead.
+ */
+function positiveLimitFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(
+      `${name} must be a positive integer (got ${JSON.stringify(raw)}); ` +
+        "proxy resource limits fail closed and cannot be disabled",
+    );
+  }
+  return value;
+}
+const MAX_PROXY_RESPONSE_BYTES = positiveLimitFromEnv(
+  "STEWARD_PROXY_RESPONSE_BYTES",
+  25 * 1024 * 1024,
 );
-const MAX_PROXY_STREAM_DURATION_MS = Number(
-  process.env.STEWARD_PROXY_STREAM_DURATION_MS ?? 5 * 60_000,
+const MAX_PROXY_STREAM_DURATION_MS = positiveLimitFromEnv(
+  "STEWARD_PROXY_STREAM_DURATION_MS",
+  5 * 60_000,
 );
-let MAX_PROXY_IN_FLIGHT_PER_AGENT = Number(process.env.STEWARD_PROXY_MAX_IN_FLIGHT_PER_AGENT ?? 50);
-let MAX_PROXY_IN_FLIGHT_PER_TENANT = Number(
-  process.env.STEWARD_PROXY_MAX_IN_FLIGHT_PER_TENANT ?? 250,
+let MAX_PROXY_IN_FLIGHT_PER_AGENT = positiveLimitFromEnv(
+  "STEWARD_PROXY_MAX_IN_FLIGHT_PER_AGENT",
+  50,
+);
+let MAX_PROXY_IN_FLIGHT_PER_TENANT = positiveLimitFromEnv(
+  "STEWARD_PROXY_MAX_IN_FLIGHT_PER_TENANT",
+  250,
 );
 const IDEMPOTENCY_KEY_RE = /^[\x21-\x7e]{8,255}$/;
 const SAFE_PROXY_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
@@ -2026,6 +2066,10 @@ export async function handleProxy(c: Context): Promise<Response> {
   const skipResponseHeaders = new Set([
     "connection",
     "keep-alive",
+    // SEC-098: never relay upstream session cookies to the agent — a
+    // credential-derived session token would let it replay directly against
+    // the provider, bypassing proxy policy and audit.
+    "set-cookie",
     "transfer-encoding",
     "te",
     "trailer",
