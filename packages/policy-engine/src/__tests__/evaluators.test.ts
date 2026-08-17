@@ -1073,7 +1073,7 @@ describe("Rate Limit Policy", () => {
 // ─── Time Window Tests ────────────────────────────────────────────────────
 
 describe("Time Window Policy", () => {
-  it("passes when no hour or day restrictions are set (always open)", async () => {
+  it("fails closed when no hour or day restrictions are set (SEC-180: empty rule is a misconfigured no-op)", async () => {
     const rule = makeTimeWindowRule({
       allowedHours: [],
       allowedDays: [],
@@ -1082,7 +1082,8 @@ describe("Time Window Policy", () => {
     const ctx = makeContext();
     const result = await evaluatePolicy(rule, ctx);
 
-    expect(result.passed).toBe(true);
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("no allowed days or hours");
   });
 
   it("passes when window covers all 24 hours and all 7 days", async () => {

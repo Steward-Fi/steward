@@ -165,6 +165,11 @@ function validatePolicyConfig(policy: PolicyRule): string | null {
       ) {
         return "time-window.allowedDays must contain weekdays 0-6";
       }
+      // An enabled rule with no windows at all is a fail-open no-op in the
+      // engine (SEC-180); reject it at write time.
+      if (config.allowedHours.length === 0 && config.allowedDays.length === 0) {
+        return "time-window requires at least one allowed hour window or allowed day";
+      }
       return null;
 
     case "rate-limit":

@@ -710,6 +710,18 @@ function evaluateTimeWindow(rule: PolicyRule, _ctx: EvaluatorContext): PolicyRes
     };
   }
 
+  // An enabled time-window rule with NO windows at all is a misconfigured
+  // no-op that would pass everything — fail closed instead (SEC-180),
+  // consistent with venue-allowlist's empty-config deny. An empty array on
+  // exactly ONE dimension still means "unconstrained on that dimension".
+  if (config.allowedDays.length === 0 && config.allowedHours.length === 0) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Time-window rule has no allowed days or hours configured",
+    };
+  }
+
   const now = new Date();
   const hour = now.getUTCHours();
   const day = now.getUTCDay();
