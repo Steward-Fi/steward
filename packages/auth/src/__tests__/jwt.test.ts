@@ -64,3 +64,66 @@ describe("getJwtSecret embedded-mode master password fallback (SEC-013)", () => 
     expect(getJwtSecret({ warn: null })).toBe("explicit-jwt-secret-with-32-characters!!");
   });
 });
+
+describe("JWT secret strength policy (SEC-053, SEC-054)", () => {
+  it("hard-fails short configured secrets in production regardless of source", async () => {
+    const { checkJwtSecretStrength } = await import("../jwt");
+    expect(() =>
+      checkJwtSecretStrength("abc123", "STEWARD_JWT_SECRET", { nodeEnv: "production" }),
+    ).toThrow("must be at least 32 characters in production");
+  });
+
+  it("warns (does not throw) on short configured secrets outside production", async () => {
+    // Fresh module instance so the warn-once flag starts clean.
+    const { checkJwtSecretStrength } = await import(`../jwt?sec053=${Date.now()}`);
+    const warnings: string[] = [];
+    checkJwtSecretStrength("abc123", "STEWARD_JWT_SECRET", {
+      nodeEnv: "staging",
+      warn: (m) => warnings.push(m),
+    });
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain("shorter than 32 characters");
+  });
+
+  it("accepts 32+ character secrets silently", async () => {
+    const { checkJwtSecretStrength } = await import(`../jwt?sec053b=${Date.now()}`);
+    const warnings: string[] = [];
+    checkJwtSecretStrength("a".repeat(32), "STEWARD_JWT_SECRET", {
+      nodeEnv: "staging",
+      warn: (m) => warnings.push(m),
+    });
+    expect(warnings.length).toBe(0);
+  });
+
+  it("getJwtSecret warns on a short configured secret in staging", async () => {
+    const { getJwtSecret: freshGetJwtSecret } = await import(`../jwt?sec053c=${Date.now()}`);
+    const savedSecret = process.env.STEWARD_JWT_SECRET;
+    const savedEnv = process.env.NODE_ENV;
+    process.env.STEWARD_JWT_SECRET = "abc123";
+    process.env.NODE_ENV = "staging";
+    try {
+      const warnings: string[] = [];
+      expect(freshGetJwtSecret({ warn: (m) => warnings.push(m) })).toBe("abc123");
+      expect(warnings.some((m) => m.includes("shorter than 32 characters"))).toBe(true);
+    } finally {
+      if (savedSecret === undefined) delete process.env.STEWARD_JWT_SECRET;
+      else process.env.STEWARD_JWT_SECRET = savedSecret;
+      if (savedEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = savedEnv;
+    }
+  });
+
+  it("SessionManager rejects an explicit short secret in production (SEC-054)", async () => {
+    const { SessionManager } = await import(`../session?sec054=${Date.now()}`);
+    const savedEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    try {
+      expect(() => new SessionManager({ secret: "sixteen-chars-xx" })).toThrow(
+        "must be at least 32 characters in production",
+      );
+    } finally {
+      if (savedEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = savedEnv;
+    }
+  });
+});

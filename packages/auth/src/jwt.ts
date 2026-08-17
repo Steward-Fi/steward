@@ -67,6 +67,7 @@ export interface IdentityJwtConfig {
 let warnedDeprecatedSessionSecret = false;
 let warnedEmbeddedMasterFallback = false;
 let warnedDevSecret = false;
+let warnedShortSecret = false;
 
 /**
  * Embedded-mode JWT secret derivation cache. Deriving via scrypt costs ~50ms,
@@ -152,6 +153,34 @@ function warnOnce(kind: "session" | "master" | "dev", warn: ((message: string) =
 }
 
 /**
+ * Length policy for any CONFIGURED JWT secret (SEC-053): production hard-fails
+ * below 32 characters; other environments still accept shorter values (tests
+ * and local dev rely on them) but warn loudly once, so a staging/preview
+ * deploy with a weak secret is visible in logs instead of silently issuing
+ * brute-forceable tokens. The explicit dev-secret fallback is not routed here.
+ */
+export function checkJwtSecretStrength(
+  secret: string,
+  sourceName: string,
+  options: { nodeEnv?: string; warn?: ((message: string) => void) | null } = {},
+): void {
+  if (secret.length >= 32) return;
+  const nodeEnv = options.nodeEnv ?? process.env.NODE_ENV;
+  if (nodeEnv === "production") {
+    throw new Error(
+      `⛔ ${sourceName} must be at least 32 characters in production (canonical env var: STEWARD_JWT_SECRET).`,
+    );
+  }
+  const warn = options.warn === undefined ? console.warn : options.warn;
+  if (!warn || warnedShortSecret) return;
+  warnedShortSecret = true;
+  warn(
+    `⚠️ ${sourceName} is shorter than 32 characters; HS256 tokens are cheap to brute-force offline. ` +
+      "Use a long random secret anywhere outside local tests.",
+  );
+}
+
+/**
  * Resolve Steward's canonical JWT secret.
  *
  * Canonical env var: STEWARD_JWT_SECRET.
@@ -193,11 +222,9 @@ export function getJwtSecret(options: JwtSecretOptions = {}): string {
         "⛔ STEWARD_JWT_SECRET is required in production (minimum 32 characters). STEWARD_SESSION_SECRET is temporarily accepted for migration but deprecated.",
       );
     }
-    if (secret.length < 32) {
-      throw new Error(
-        `⛔ ${sourceName} must be at least 32 characters in production (canonical env var: STEWARD_JWT_SECRET).`,
-      );
-    }
+    checkJwtSecretStrength(secret, sourceName, { nodeEnv, warn });
+  } else if (secret) {
+    checkJwtSecretStrength(secret, sourceName, { nodeEnv, warn });
   }
 
   if (!secret) {
