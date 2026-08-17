@@ -1502,6 +1502,18 @@ export interface ProviderPolicyContext {
     readonly accumulatedSpendMicros?: number;
     /** authoritative current minute-of-day UTC, 0..1439 (used by quietHours). */
     readonly nowMinuteUtc?: number;
+    /** adapter-derived "the post is a reply" signal (replyPolicy). PREFERRED
+     *  over the same-named `args` entry, which is caller-influenced (SEC-182). */
+    readonly isReply?: boolean;
+    /** adapter-derived "the user summoned the agent" signal (replyPolicy
+     *  summoned-only). PREFERRED over `args` (SEC-182). */
+    readonly summoned?: boolean;
+    /** adapter-derived "the post body contains a URL" signal (allowUrls /
+     *  spend / escalation policies). PREFERRED over `args` (SEC-182). */
+    readonly hasUrl?: boolean;
+    /** adapter-counted code-point length of the post text (maxLength).
+     *  PREFERRED over `args` (SEC-182). */
+    readonly textCodePointLength?: number;
   };
   /**
    * The operation's DECLARED spend field (#206). The operation - not the caller
@@ -1938,6 +1950,23 @@ function readBool(args: Record<string, unknown>, key: string): boolean | undefin
 }
 
 /**
+ * Read an X security signal, PREFERRING the typed, adapter-populated `ctx.x`
+ * channel over the caller-influenced `args` bag (SEC-182). The engine cannot
+ * distinguish adapter-derived values from pass-through caller args inside
+ * `args`; the typed channel is populated server-side from the adapter's
+ * validated build. The args read remains as the legacy fallback for adapters
+ * that do not wire the typed fields yet — the fail-closed contract (missing =>
+ * POLICY_INPUT_UNAVAILABLE) is unchanged either way.
+ */
+function xBoolSignal(
+  ctx: ProviderPolicyContext,
+  key: "isReply" | "summoned" | "hasUrl",
+): boolean | undefined {
+  const typed = ctx.x?.[key];
+  return typeof typed === "boolean" ? typed : readBool(ctx.args, key);
+}
+
+/**
  * Evaluate the permissioned-X constraint sub-block against the provider-policy
  * context. Returns:
  *   - { kind: "deny", reasonCode }  on the FIRST hard failure (deny wins),
@@ -1967,7 +1996,7 @@ export function evaluateXConstraints(
   // closed (an operation whose build doesn't carry isReply must NOT slip a reply
   // gate). `summoned` is only required when we actually reach the summoned check.
   if (x.replyPolicy) {
-    const isReply = readBool(args, "isReply");
+    const isReply = xBoolSignal(ctx, "isReply");
     if (isReply === undefined) {
       return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
     }
@@ -1976,7 +2005,7 @@ export function evaluateXConstraints(
         return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.X_REPLY_FORBIDDEN };
       }
       if (x.replyPolicy.mode === "summoned-only") {
-        const summoned = readBool(args, "summoned");
+        const summoned = xBoolSignal(ctx, "summoned");
         if (summoned === undefined) {
           return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
         }
@@ -1996,7 +2025,7 @@ export function evaluateXConstraints(
   if (x.contentPolicy) {
     // allowUrls DEPENDS on the `hasUrl` signal; absent/non-boolean => fail closed.
     if (x.contentPolicy.allowUrls === false) {
-      const hasUrl = readBool(args, "hasUrl");
+      const hasUrl = xBoolSignal(ctx, "hasUrl");
       if (hasUrl === undefined) {
         return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
       }
@@ -2005,7 +2034,9 @@ export function evaluateXConstraints(
       }
     }
     if (x.contentPolicy.maxLength !== undefined) {
-      const len = args.textCodePointLength;
+      // SEC-182: prefer the typed, adapter-populated length signal over the
+      // caller-influenced `args` bag (same fallback contract as xBoolSignal).
+      const len = ctx.x?.textCodePointLength ?? args.textCodePointLength;
       // A content-length policy REQUIRES the length signal. Absent => fail closed.
       if (typeof len !== "number" || !Number.isInteger(len)) {
         return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
@@ -2080,7 +2111,7 @@ export function evaluateXConstraints(
     x.escalation?.urlPostRequiresApproval === true;
   let hasUrl: boolean | undefined;
   if (needsHasUrl) {
-    hasUrl = readBool(args, "hasUrl");
+    hasUrl = xBoolSignal(ctx, "hasUrl");
     if (hasUrl === undefined) {
       return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
     }

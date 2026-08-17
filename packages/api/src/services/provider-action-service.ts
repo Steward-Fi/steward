@@ -314,6 +314,30 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+/**
+ * SEC-182: lift the adapter-derived X security signals from the validated
+ * `policyArgs` onto the composer's typed `ctx.x` channel, so the reply/URL/
+ * length gates no longer depend solely on the caller-influenced args bag.
+ * Only correctly-shaped values are lifted; anything else stays unwired and a
+ * dependent rule fails closed (POLICY_INPUT_UNAVAILABLE).
+ */
+function xPolicySignalsFrom(args: Record<string, unknown>): {
+  isReply?: boolean;
+  summoned?: boolean;
+  hasUrl?: boolean;
+  textCodePointLength?: number;
+} {
+  return {
+    ...(typeof args.isReply === "boolean" ? { isReply: args.isReply } : {}),
+    ...(typeof args.summoned === "boolean" ? { summoned: args.summoned } : {}),
+    ...(typeof args.hasUrl === "boolean" ? { hasUrl: args.hasUrl } : {}),
+    ...(typeof args.textCodePointLength === "number" &&
+    Number.isInteger(args.textCodePointLength)
+      ? { textCodePointLength: args.textCodePointLength }
+      : {}),
+  };
+}
+
 function genericScalarFromCanonicalText(value: string, type: GenericSegmentType): unknown {
   if (type !== "int") return value;
   const parsed = Number(value);
@@ -2250,7 +2274,11 @@ class ProviderActionService {
         // fails closed (POLICY_INPUT_UNAVAILABLE) until the trailing-window
         // accumulator lands. Content/reply/URL rules need no external input and are
         // fully live now.
-        x: undefined,
+        // SEC-182: the adapter-derived content signals (isReply / summoned /
+        // hasUrl / textCodePointLength) ARE wired — lifted from the adapter's
+        // validated policyArgs onto the typed channel the composer prefers over
+        // the caller-influenced args bag.
+        x: xPolicySignalsFrom(build.policyArgs),
       };
 
       const ruleEvaluation = composeProviderActionPolicyDecision(rules, context);
