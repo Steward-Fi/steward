@@ -80,7 +80,7 @@ export function evaluateReputationThreshold(
         ...base,
         passed: false,
         reason:
-          "No reputation score available; fallbackAction \"approve\" is not permitted without a wired score (fail closed)",
+          'No reputation score available; fallbackAction "approve" is not permitted without a wired score (fail closed)',
       };
     }
     return resultForUnmetThreshold(
