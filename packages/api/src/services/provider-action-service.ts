@@ -331,8 +331,7 @@ function xPolicySignalsFrom(args: Record<string, unknown>): {
     ...(typeof args.isReply === "boolean" ? { isReply: args.isReply } : {}),
     ...(typeof args.summoned === "boolean" ? { summoned: args.summoned } : {}),
     ...(typeof args.hasUrl === "boolean" ? { hasUrl: args.hasUrl } : {}),
-    ...(typeof args.textCodePointLength === "number" &&
-    Number.isInteger(args.textCodePointLength)
+    ...(typeof args.textCodePointLength === "number" && Number.isInteger(args.textCodePointLength)
       ? { textCodePointLength: args.textCodePointLength }
       : {}),
   };

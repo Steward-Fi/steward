@@ -159,10 +159,7 @@ function resolveWindowSeconds(config: AggregationConditionConfig): number | null
     // on a plain object returns Object.prototype — an object, not null — which
     // would escape the "unknown window → deny" contract below. hasOwn restricts
     // to own keys and the finite check guarantees the number|null return type.
-    if (
-      typeof window.named !== "string" ||
-      !Object.hasOwn(NAMED_WINDOW_SECONDS, window.named)
-    ) {
+    if (typeof window.named !== "string" || !Object.hasOwn(NAMED_WINDOW_SECONDS, window.named)) {
       return null;
     }
     const seconds = NAMED_WINDOW_SECONDS[window.named];
