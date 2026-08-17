@@ -214,7 +214,10 @@ export class PolicyEngine {
       policies.map((policy) => evaluatePolicy(policy, evaluatorCtx)),
     );
 
-    if (policies.every((policy) => policy.enabled === false)) {
+    // Same falsy check as evaluatePolicy: a rule with `enabled: undefined`/
+    // null/0 is disabled for pass purposes, so an all-such policy set hits
+    // this deny-all branch instead of auto-approving everything (SEC-103).
+    if (policies.every((policy) => !policy.enabled)) {
       const evaluationResult = { approved: false, results, requiresManualApproval: false };
       await this.emitAuditEvent(ctx, results, evaluationResult);
       return evaluationResult;

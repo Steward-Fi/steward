@@ -1486,6 +1486,34 @@ describe("PolicyEngine.evaluate()", () => {
     expect(result.results).toHaveLength(0);
   });
 
+  it("policies with falsy non-false `enabled` hit the deny-all branch (SEC-103)", async () => {
+    // Hand-authored rules carrying enabled: undefined/null bypass the API
+    // write validator's boolean check. They are "disabled" for pass purposes,
+    // so an all-such set must deny — never auto-approve.
+    const policies = [
+      { id: "p1", type: "spending-limit", enabled: undefined, config: {} },
+      { id: "p2", type: "rate-limit", enabled: null, config: {} },
+    ] as unknown as PolicyRule[];
+
+    const result = await engine.evaluate(policies, makeEngineCtx());
+
+    expect(result.approved).toBe(false);
+  });
+
+  it("a non-boolean `enabled` fails closed instead of evaluating (SEC-103)", async () => {
+    const rule = {
+      id: "p1",
+      type: "spending-limit",
+      enabled: "yes",
+      config: { maxPerTx: "1", maxPerDay: "1", maxPerWeek: "1" },
+    } as unknown as PolicyRule;
+
+    const result = await evaluatePolicy(rule, makeContext());
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("enabled");
+  });
+
   it("all hard policies pass → approved", async () => {
     const policies: PolicyRule[] = [
       makeSpendingRule({

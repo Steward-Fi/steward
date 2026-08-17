@@ -140,6 +140,16 @@ export async function evaluatePolicy(
   rule: PolicyRule,
   ctx: EvaluatorContext,
 ): Promise<PolicyResult & ManualApprovalSignal> {
+  // A non-boolean `enabled` is malformed config, not "disabled": fail closed
+  // rather than let a hand-authored rule silently pass as disabled (SEC-103).
+  if (typeof rule.enabled !== "boolean") {
+    return {
+      policyId: rule.id,
+      type: rule.type,
+      passed: false,
+      reason: "Policy enabled flag must be a boolean",
+    };
+  }
   if (!rule.enabled) {
     return {
       policyId: rule.id,
