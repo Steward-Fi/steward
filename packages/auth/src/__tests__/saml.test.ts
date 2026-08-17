@@ -210,7 +210,7 @@ describe("SAML ACS verifier hardening", () => {
     expect(source).toContain("callbackUrl: input.acsUrl");
     expect(source).toContain("idpIssuer: input.idpEntityId");
     expect(source).toContain("ValidateInResponseTo.always");
-    expect(source).toContain("cacheProvider: new SingleUseInResponseToCache");
+    expect(source).toContain("cacheProvider: new ExpectedRequestIdEchoCache");
     expect(source).toContain('signatureAlgorithm: "sha256"');
     expect(source).toContain('digestAlgorithm: "sha256"');
     expect(source).toContain("SAML assertion ID is required for replay protection");
