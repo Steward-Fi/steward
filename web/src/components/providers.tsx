@@ -11,24 +11,22 @@ import "@simplewebauthn/browser";
 const API_URL = STEWARD_API_URL;
 
 /**
- * SECURITY (XSS risk — tracked hardening): this wires the Steward auth tokens
- * (including the long-lived REFRESH token, key `steward_refresh_token`) into
- * `window.sessionStorage`. sessionStorage is readable by any JavaScript running
- * in this origin, so a successful XSS would be able to exfiltrate the refresh
- * token and mint new access tokens.
+ * SECURITY (SEC-018): the long-lived Steward REFRESH token is no longer kept
+ * in JS-readable storage. The SDK's auth client is configured with
+ * `authProxyUrl: "/api/auth"`, so:
+ *   - sign-in deposits the refresh token with the same-origin route handlers
+ *     in `app/api/auth/`, which store it in an HttpOnly, SameSite=Strict
+ *     cookie (`steward_rt`) that page JavaScript cannot read;
+ *   - session refresh / revoke / tenant-switch go through those routes, which
+ *     inject the cookie-held token before forwarding to the Steward API and
+ *     return only the short-lived access token to the browser;
+ *   - a successful XSS can ride the live session (as it can with any design)
+ *     but can no longer exfiltrate a refresh token to mint sessions offline.
  *
- * Mitigations in place:
- *   1. PRIMARY: a strict Content-Security-Policy (script-src 'self' only — see
- *      web/next.config.ts `headers()` and web/vercel.json) drastically reduces
- *      the attack surface for injecting hostile script in the first place.
- *   2. sessionStorage (not localStorage) scopes the token to the tab session,
- *      so it is cleared when the tab closes rather than persisting on disk.
- *
- * RECOMMENDED FUTURE HARDENING: move the refresh token to a Secure, HttpOnly,
- * SameSite=Strict cookie issued by a server route so it is unreadable from JS.
- * That is a larger architectural change (server-side cookie issuance +
- * CSRF protection on refresh) and is intentionally NOT done here — do it as a
- * dedicated, fully-tested change rather than a partial swap.
+ * Only the short-lived ACCESS token (and transient OAuth PKCE state) uses the
+ * storage shim below. Defense in depth remains the strict nonce-based CSP in
+ * `web/src/middleware.ts` (script-src 'self' + nonce), and sessionStorage (not
+ * localStorage) scopes the access token to the tab session.
  */
 const authStorage = {
   getItem(key: string): string | null {
@@ -44,6 +42,17 @@ const authStorage = {
     window.sessionStorage.removeItem(key);
   },
 };
+
+/**
+ * One-time cleanup: sessions established before the SEC-018 cookie custody
+ * change left `steward_refresh_token` in sessionStorage. The SDK no longer
+ * reads that key (the HttpOnly cookie is authoritative), so remove it to keep
+ * the long-lived token out of JS-readable storage for upgraded sessions too.
+ */
+function removeLegacyRefreshToken(): void {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.removeItem("steward_refresh_token");
+}
 
 /**
  * Syncs the Steward auth JWT into the legacy API client once.
@@ -122,7 +131,14 @@ function WalletProviderTree({ children }: { children: ReactNode }) {
 }
 
 export function Providers({ children }: { children: ReactNode }) {
-  const stewardAuthConfig = useMemo(() => ({ baseUrl: API_URL, storage: authStorage }), []);
+  const stewardAuthConfig = useMemo(
+    () => ({ baseUrl: API_URL, storage: authStorage, authProxyUrl: "/api/auth" }),
+    [],
+  );
+
+  useEffect(() => {
+    removeLegacyRefreshToken();
+  }, []);
 
   return createElement(
     StewardProvider as any,

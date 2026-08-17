@@ -19,4 +19,13 @@ describe("AuthTokenSync security invariants", () => {
     expect(apiSource).toContain("export function clearAuthToken()");
     expect(providersSource).toContain("clearAuthToken()");
   });
+
+  test("SEC-018: refresh token custody is the same-origin HttpOnly cookie proxy", () => {
+    // The SDK is configured to deposit/refresh via the BFF routes, so the
+    // long-lived refresh token never lands in JS-readable storage.
+    expect(providersSource).toContain('authProxyUrl: "/api/auth"');
+    expect(providersSource).toContain("removeLegacyRefreshToken");
+    // The old "deferred hardening" comment must not come back.
+    expect(providersSource).not.toContain("RECOMMENDED FUTURE HARDENING");
+  });
 });

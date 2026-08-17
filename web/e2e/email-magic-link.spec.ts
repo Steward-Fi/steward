@@ -68,7 +68,7 @@ test.describe("Email magic-link — mock inbox round-trip", () => {
     expect(body.token).toMatch(/^[a-f0-9]{64}$/);
   });
 
-  test("browser callback redeems, stores only in sessionStorage, scrubs URL, and redirects", async ({
+  test("browser callback redeems, keeps the refresh token out of JS storage, scrubs URL, and redirects", async ({
     page,
   }) => {
     const email = `callback-${Date.now()}@example.test`;
@@ -100,9 +100,16 @@ test.describe("Email magic-link — mock inbox round-trip", () => {
     expect(storageState.href).not.toContain("token=");
     expect(storageState.href).not.toContain("email=");
     expect(storageState.sessionToken?.split(".")).toHaveLength(3);
-    expect(storageState.refreshToken).toBeTruthy();
+    // SEC-018: the long-lived refresh token lives only in an HttpOnly cookie.
+    expect(storageState.refreshToken).toBeNull();
     expect(storageState.localToken).toBeNull();
     expect(storageState.localRefreshToken).toBeNull();
+    const cookies = await page.context().cookies(WEB);
+    const refreshCookie = cookies.find((cookie) => cookie.name === "steward_rt");
+    expect(refreshCookie).toBeDefined();
+    expect(refreshCookie?.httpOnly).toBe(true);
+    expect(refreshCookie?.sameSite).toBe("Strict");
+    expect(refreshCookie?.value).toBeTruthy();
     expect(verifyRequests).toBe(1);
   });
 
