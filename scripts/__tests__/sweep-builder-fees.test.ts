@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { decodeFunctionData } from "viem";
 import {
   ARBITRUM_CHAIN_ID,
@@ -9,10 +12,13 @@ import {
   formatUsdcBaseUnits,
   PLATFORM_SAFE,
   parseUsdcToBaseUnits,
+  readBuilderPrivateKey,
   runSweep,
   type SweepConfig,
   type SweepDeps,
 } from "../sweep-builder-fees";
+
+const TEST_KEY = `0x${"1".repeat(64)}` as const;
 
 const erc20TransferAbi = [
   {
@@ -91,6 +97,32 @@ describe("config safety", () => {
     expect(configFromEnvAndArgs({}, ["--execute"]).dryRun).toBe(false);
     expect(() => configFromEnvAndArgs({}, ["--dry-run", "--execute"])).toThrow("use only one");
   });
+});
+
+describe("builder key file permissions (SEC-202)", () => {
+  test.skipIf(process.platform === "win32")(
+    "loads a 0600 key file and rejects group/world-accessible ones",
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), "sweep-key-"));
+      const keyPath = join(dir, "hl-builder-eoa.json");
+      const symlinkPath = join(dir, "hl-builder-eoa-link.json");
+      try {
+        await writeFile(keyPath, JSON.stringify({ privateKey: TEST_KEY }), { mode: 0o600 });
+        await expect(readBuilderPrivateKey(keyPath)).resolves.toBe(TEST_KEY);
+
+        await symlink(keyPath, symlinkPath);
+        await expect(readBuilderPrivateKey(symlinkPath)).rejects.toThrow();
+
+        await chmod(keyPath, 0o640);
+        await expect(readBuilderPrivateKey(keyPath)).rejects.toThrow(/group\/world-accessible/);
+
+        await chmod(keyPath, 0o604);
+        await expect(readBuilderPrivateKey(keyPath)).rejects.toThrow(/chmod 600/);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe("builder fee sweep planning", () => {

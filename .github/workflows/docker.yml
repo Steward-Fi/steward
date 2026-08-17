@@ -82,7 +82,10 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Write cache entries only from trusted push builds. PR builds still
+          # read the cache (cache-from) but cannot populate mode=max entries,
+          # closing the residual cross-branch cache-pollution risk class.
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max' || '' }}
           # Attach verifiable build metadata and an SPDX software bill of
           # materials to published images. Both remain local on PR dry-runs.
           provenance: mode=max
