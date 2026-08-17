@@ -386,6 +386,17 @@ describe("governed EVM swap prepare", () => {
     expect(smuggled.status).toBe(400);
   });
 
+  it("SEC-185: rejects slippageBps at or above the 5000 bps doctrine", async () => {
+    const { app } = await buildApp({ simulator: { ok: true } });
+    for (const slippageBps of [5_000, 10_000]) {
+      const res = await postPrepare(app, { ...requestBody(), slippageBps });
+      expect(res.status).toBe(400);
+    }
+    // The doctrine boundary is exclusive; the highest sane value still passes.
+    const ok = await postPrepare(app, { ...requestBody(), slippageBps: 4_999 });
+    expect(ok.status).toBe(200);
+  });
+
   it("denies chain, target, selector, and native value outside EVM policy", async () => {
     const cases: Array<[string, Partial<FakeSwapAdapter>, Parameters<typeof seedPolicy>[0]]> = [
       ["chain", {}, { chainId: 1 }],

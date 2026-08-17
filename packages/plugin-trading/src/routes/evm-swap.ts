@@ -59,7 +59,9 @@ const prepareSwapSchema = z
     fromToken: tokenRefSchema,
     toToken: tokenRefSchema,
     amount: z.string().regex(/^\d+$/, "amount must be a decimal base-unit string").max(80),
-    slippageBps: z.number().int().min(0).max(10_000).optional(),
+    // SEC-185: clamp to the agent-trader MAX_SLIPPAGE_BPS doctrine ([0, 5000)) —
+    // a 100%-slippage quote yields minAmountOut ≈ 0 and is fully sandwichable.
+    slippageBps: z.number().int().min(0).lt(5_000).optional(),
   })
   .strict();
 
