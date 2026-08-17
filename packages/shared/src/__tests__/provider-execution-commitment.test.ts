@@ -4,9 +4,12 @@ import {
   computeGrantDependencyHash,
   computeProviderExecutionCommitmentHash,
   type GithubCanonicalActionV1,
+  jcsStringify,
   type ProviderExecutionCommitmentBuildInput,
   providerExecutionCommitmentBytes,
   serializeCanonicalOutboundQuery,
+  sha256HexPrefixed,
+  verifyProviderExecutionPolicyEvidence,
 } from "../provider-action.js";
 
 // A minimal, valid canonical action (pinned github origin) reused across cases.
@@ -177,5 +180,69 @@ describe("provider execution v2 commitment builder", () => {
     expect(
       computeProviderExecutionCommitmentHash(buildProviderExecutionCommitmentV2(drift)),
     ).not.toBe(baseHash);
+  });
+});
+
+describe("execute-time policy evidence verifier", () => {
+  const decidedAt = "2026-07-14T20:00:00.000Z";
+  const expected = {
+    decisionId: "55555555-5555-4555-8555-555555555555",
+    intentId: "intent-1",
+    requestHash: `sha256:${"a".repeat(64)}`,
+    actionDigest: `sha256:${"b".repeat(64)}`,
+    operationId: "44444444-4444-4444-8444-444444444444",
+    operationKey: "github.issue.create",
+    policyRevisionHash: `sha256:${"d".repeat(64)}`,
+    decidedAt,
+  };
+  const decision = {
+    schemaVersion: "steward.provider-policy-decision.v1",
+    ...expected,
+    effect: "approval_required",
+    reasonCodes: ["APPROVAL_REQUIRED"],
+    policyResults: [],
+    evaluatorVersion: "provider-action.v1",
+  };
+
+  test("accepts a complete decision bound to every denormalized identity field", () => {
+    expect(
+      verifyProviderExecutionPolicyEvidence(
+        decision,
+        sha256HexPrefixed(jcsStringify(decision)),
+        expected,
+      ),
+    ).toBe(true);
+  });
+
+  test("rejects recomputed evidence with a substituted operation key or evaluated time", () => {
+    for (const changed of [
+      { ...decision, operationKey: "github.issue.delete" },
+      { ...decision, decidedAt: "2026-07-14T20:01:00.000Z" },
+    ]) {
+      expect(
+        verifyProviderExecutionPolicyEvidence(
+          changed,
+          sha256HexPrefixed(jcsStringify(changed)),
+          expected,
+        ),
+      ).toBe(false);
+    }
+  });
+
+  test("rejects incomplete or denying policy documents even when their hash matches", () => {
+    for (const changed of [
+      { ...decision, evaluatorVersion: "" },
+      { ...decision, reasonCodes: null },
+      { ...decision, policyResults: null },
+      { ...decision, effect: "hard_deny" },
+    ]) {
+      expect(
+        verifyProviderExecutionPolicyEvidence(
+          changed,
+          sha256HexPrefixed(jcsStringify(changed)),
+          expected,
+        ),
+      ).toBe(false);
+    }
   });
 });

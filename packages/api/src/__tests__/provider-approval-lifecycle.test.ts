@@ -48,6 +48,8 @@ import {
 
 setDefaultTimeout(120_000);
 
+let priorExecutionAuthSecret: string | undefined;
+
 async function wipe() {
   const db = getDb();
   await db.delete(providerActionAuditOutbox);
@@ -92,12 +94,19 @@ describe("PR3 approval lifecycle", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY ||= "0".repeat(64);
+    priorExecutionAuthSecret = process.env.STEWARD_EXECUTION_AUTH_SECRET;
+    process.env.STEWARD_EXECUTION_AUTH_SECRET = "1".repeat(64);
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => client.close());
   });
   afterAll(async () => {
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
+    if (priorExecutionAuthSecret === undefined) {
+      delete process.env.STEWARD_EXECUTION_AUTH_SECRET;
+    } else {
+      process.env.STEWARD_EXECUTION_AUTH_SECRET = priorExecutionAuthSecret;
+    }
   });
   beforeEach(async () => {
     await wipe();

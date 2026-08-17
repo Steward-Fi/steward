@@ -321,7 +321,9 @@ export async function dispatchGovernedExecution(
       requestHash: loaded.requestHash,
       actionDigest: loaded.actionDigest,
       operationId: loaded.operationId,
+      operationKey: loaded.approvalCommitment.operation.key,
       policyRevisionHash: loaded.executionPolicyRevisionHash,
+      decidedAt: loaded.executionPolicyEvaluatedAt,
     })
   ) {
     return deny("EXEC_AUTH_POLICY_EVIDENCE_MISSING", 409, intentId, {

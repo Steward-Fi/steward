@@ -1957,7 +1957,11 @@ class ProviderApprovalService {
                   requestHash: binding.requestHash,
                   actionDigest: binding.actionDigest,
                   operationId: binding.operationId,
+                  operationKey: (
+                    queue.approvalCommitment as unknown as ProviderApprovalCommitmentV1
+                  ).operation.key,
                   policyRevisionHash: binding.executionPolicyRevisionHash,
+                  decidedAt: binding.executionPolicyEvaluatedAt.toISOString(),
                 },
               )
             ) {

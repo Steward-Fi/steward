@@ -848,7 +848,9 @@ export interface ProviderExecutionPolicyEvidenceExpectation {
   requestHash: string;
   actionDigest: string;
   operationId: string;
+  operationKey: string;
   policyRevisionHash: string;
+  decidedAt: string;
 }
 
 /**
@@ -872,7 +874,14 @@ export function verifyProviderExecutionPolicyEvidence(
     doc.requestHash !== expected.requestHash ||
     doc.actionDigest !== expected.actionDigest ||
     doc.operationId !== expected.operationId ||
+    doc.operationKey !== expected.operationKey ||
     doc.policyRevisionHash !== expected.policyRevisionHash ||
+    doc.decidedAt !== expected.decidedAt ||
+    typeof doc.evaluatorVersion !== "string" ||
+    doc.evaluatorVersion.length === 0 ||
+    !Array.isArray(doc.reasonCodes) ||
+    doc.reasonCodes.some((code) => typeof code !== "string") ||
+    !Array.isArray(doc.policyResults) ||
     (doc.effect !== "allow" && doc.effect !== "approval_required")
   ) {
     return false;
