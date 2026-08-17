@@ -17,12 +17,7 @@ const source = readFileSync(SCRIPT, "utf8");
 function redact(input: string): string {
   return execFileSync(
     "bash",
-    [
-      "-c",
-      `eval "$(sed -n '/^redact_secrets()/,/^}/p' "$1")"; redact_secrets`,
-      "bash",
-      SCRIPT,
-    ],
+    ["-c", `eval "$(sed -n '/^redact_secrets()/,/^}/p' "$1")"; redact_secrets`, "bash", SCRIPT],
     { input, encoding: "utf8" },
   );
 }
@@ -32,7 +27,7 @@ describe("SEC-129 railway-deploy.sh fails closed by default", () => {
     // Pre-fix: LOGS_EMPTY=1 exited 0 unless RAILWAY_STRICT=true — CI went
     // green on a deploy that never happened.
     expect(source).not.toContain("RAILWAY_STRICT");
-    expect(source).toContain('RAILWAY_ALLOW_REJECTED_DEPLOY:-false');
+    expect(source).toContain("RAILWAY_ALLOW_REJECTED_DEPLOY:-false");
     // finish_failure must exit 1 on the default path.
     const finish = source.match(/finish_failure\(\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
     expect(finish).toContain("exit 0");
