@@ -155,6 +155,9 @@ services:
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?STEWARD_AUDIT_HMAC_KEY is required - generate with: openssl rand -hex 32}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
       STEWARD_PROXY_REQUEST_SIGNING_SECRET: "${STEWARD_PROXY_REQUEST_SIGNING_SECRET:?STEWARD_PROXY_REQUEST_SIGNING_SECRET is required - generate with: openssl rand -hex 32}"
+      # Explicit soft posture for functional dev/test stacks. Empty by default;
+      # NODE_ENV=production always overrides it in proxy security guards.
+      STEWARD_PROXY_DEV_MODE: "${STEWARD_PROXY_DEV_MODE:-}"
       REDIS_URL: "redis://redis:6379"
       # Cleartext redis:// on the private compose network requires an explicit
       # opt-out in production (mirrors STEWARD_ALLOW_INSECURE_DB). Set
