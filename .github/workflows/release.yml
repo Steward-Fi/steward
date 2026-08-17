@@ -9,11 +9,10 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # contents:write is required to create GitHub Releases
-    # packages:write for GHCR (docker workflow handles this separately, but good to have)
+    # contents:write is required to create GitHub Releases. npm publishing uses
+    # NPM_TOKEN, while GHCR publishing is isolated to the Docker workflow.
     permissions:
       contents: write
-      packages: write
 
     steps:
       # Checkout the full repo
