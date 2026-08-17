@@ -51,19 +51,33 @@ export function evaluateReputationScaling(
   rule: PolicyRule,
   ctx: ReputationScalingContext,
 ): PolicyResult {
-  const config = rule.config as unknown as ReputationScalingConfig;
+  const rawConfig: unknown = rule.config;
   const base = { policyId: rule.id, type: rule.type } as const;
 
-  // Fail closed with a structured deny on malformed config instead of throwing
-  // inside `BigInt(...)` (SEC-105) — consistent with the other defensive
-  // evaluators.
-  if (!/^\d+$/.test(config.baseMaxPerTx) || !/^\d+$/.test(config.maxMaxPerTx)) {
+  // Mirror the complete write-time contract at runtime. A hand-edited row must
+  // not throw, silently select the linear curve, or invert base/max limits.
+  if (
+    typeof rawConfig !== "object" ||
+    rawConfig === null ||
+    Array.isArray(rawConfig) ||
+    !("baseMaxPerTx" in rawConfig) ||
+    typeof rawConfig.baseMaxPerTx !== "string" ||
+    !/^\d+$/.test(rawConfig.baseMaxPerTx) ||
+    !("maxMaxPerTx" in rawConfig) ||
+    typeof rawConfig.maxMaxPerTx !== "string" ||
+    !/^\d+$/.test(rawConfig.maxMaxPerTx) ||
+    BigInt(rawConfig.maxMaxPerTx) < BigInt(rawConfig.baseMaxPerTx) ||
+    !("curve" in rawConfig) ||
+    (rawConfig.curve !== "linear" && rawConfig.curve !== "logarithmic")
+  ) {
     return {
       ...base,
       passed: false,
-      reason: "Reputation-scaling limits must be base-10 wei strings",
+      reason:
+        "Reputation-scaling config is malformed; limits must be base-10 wei strings with max >= base and a supported curve",
     };
   }
+  const config = rawConfig as ReputationScalingConfig;
 
   // Default to score 0 (lowest limit) when no score available
   const score = ctx.reputationScore ?? 0;

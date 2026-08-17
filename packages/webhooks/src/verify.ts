@@ -43,13 +43,19 @@ export function verifyWebhookSignature(input: VerifyWebhookSignatureInput): bool
     const tolerance = input.toleranceSeconds ?? 300;
     const now = input.nowSeconds ?? Math.floor(Date.now() / 1000);
 
+    // Only canonical non-negative integer unix seconds are emitted. Reject
+    // decimals/exponents and invalid verifier options so NaN/Infinity cannot
+    // turn the freshness comparison into a silent pass.
+    if (!/^(?:0|[1-9]\d*)$/.test(input.sentAt)) return false;
     const sentAtSeconds = Number(input.sentAt);
-    if (!Number.isFinite(sentAtSeconds)) return false;
+    if (!Number.isSafeInteger(sentAtSeconds)) return false;
+    if (!Number.isFinite(tolerance) || tolerance < 0) return false;
+    if (!Number.isSafeInteger(now) || now < 0) return false;
     if (Math.abs(now - sentAtSeconds) > tolerance) return false;
 
     // The signed material is only meaningful with real field values; an empty
     // delivery id or event type would verify an attacker-shaped payload.
-    if (!input.deliveryId || !input.eventType) return false;
+    if (!input.deliveryId || !input.eventType || !input.secret) return false;
 
     if (!input.signature.startsWith("v2=")) return false;
     const providedHex = input.signature.slice(3);

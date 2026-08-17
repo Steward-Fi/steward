@@ -108,6 +108,8 @@ describe("WebhookDispatcher SSRF guard for IP-literal URLs", () => {
       "http://[::ffff:0:a00:1]/hook", // translated, embeds 10.0.0.1
       "http://[::ffff:0:ac10:1]/hook", // translated, embeds 172.16.0.1
       "http://[::ffff:7f00:1]/hook", // IPv4-mapped hex form of 127.0.0.1
+      "http://[::7f00:1]/hook", // deprecated IPv4-compatible ::/96 form
+      "http://[64:ff9b:1:beef::808:808]/hook", // RFC 8215 local-use /48, public IPv4 payload
       "http://[100::5]/hook", // 100::/64 discard-only (RFC 6666)
       "http://[2001:2::1]/hook", // 2001:2::/48 benchmarking (RFC 5180)
     ]) {

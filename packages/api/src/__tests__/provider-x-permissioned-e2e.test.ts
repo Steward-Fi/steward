@@ -355,7 +355,7 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
     expect(b.status).not.toBe("stub_succeeded");
   });
 
-  test("replyPolicy summoned-only: a summoned reply is allowed (guard is load-bearing)", async () => {
+  test("replyPolicy summoned-only: a caller-asserted summon fails closed without attestation", async () => {
     await seed([
       allowRule("11111111-1111-4111-8111-1111111111b2", { replyPolicy: { mode: "summoned-only" } }),
     ]);
@@ -363,9 +363,11 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
       { text: "thanks for the mention!", replyToTweetId: "1750000000000000000", summoned: true },
       "summon001",
     );
-    expect(out.kind).toBe("allowed");
-    if (out.kind !== "allowed") throw new Error(`got ${out.kind}`);
-    expect(out.stub.status).toBe("stub_succeeded");
+    expect(out.kind).toBe("policy_denied");
+    if (out.kind !== "policy_denied") throw new Error(`got ${out.kind}`);
+    expect(out.code).toBe("POLICY_INPUT_UNAVAILABLE");
+    const b = await bindingRow(out.intentId);
+    expect(b.status).not.toBe("stub_succeeded");
   });
 
   test("policy-input replay identity: exact summoned replay returns the original outcome", async () => {
@@ -378,12 +380,12 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
       summoned: true,
     };
     const first = await propose(args, "summon-idem-exact");
-    expect(first.kind).toBe("allowed");
-    if (first.kind !== "allowed") throw new Error(`got ${first.kind}`);
+    expect(first.kind).toBe("policy_denied");
+    if (first.kind !== "policy_denied") throw new Error(`got ${first.kind}`);
 
     const replay = await propose(args, "summon-idem-exact");
-    expect(replay.kind).toBe("allowed");
-    if (replay.kind !== "allowed") throw new Error(`got ${replay.kind}`);
+    expect(replay.kind).toBe("policy_denied");
+    if (replay.kind !== "policy_denied") throw new Error(`got ${replay.kind}`);
     expect(replay.intentId).toBe(first.intentId);
 
     const binding = await bindingRow(first.intentId);
@@ -425,7 +427,7 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
     );
 
     const first = await propose({ ...base, summoned: firstSummoned }, key);
-    expect(first.kind).toBe(firstSummoned ? "allowed" : "policy_denied");
+    expect(first.kind).toBe("policy_denied");
     const replay = await propose({ ...base, summoned: replaySummoned }, key);
     expect(replay).toEqual({
       kind: "replay_conflict",

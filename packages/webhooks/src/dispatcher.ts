@@ -178,11 +178,21 @@ function embeddedIpv4FromIpv6(address: string): string | null {
 
 function isNonPublicIpv6(address: string): boolean {
   const normalized = address.toLowerCase();
+  const words = expandIpv6Words(normalized);
+  // RFC 8215's 64:ff9b:1::/48 is explicitly a local-use translation prefix.
+  // Block the whole prefix: allowing an address merely because its embedded
+  // IPv4 happens to be public still lets a webhook traverse an operator-local
+  // translator and defeats the public-destination boundary.
+  if (words?.[0] === 0x0064 && words[1] === 0xff9b && words[2] === 0x0001) return true;
+  // Deprecated IPv4-compatible ::/96 space is special-use, not a public IPv6
+  // webhook destination. This also closes parser-dependent forms such as
+  // `[::127.0.0.1]` / `[::7f00:1]`.
+  if (words && words.slice(0, 6).every((word) => word === 0) && (words[6] !== 0 || words[7] !== 0))
+    return true;
   const ipv4Mapped = mappedIpv4FromIpv6(normalized);
   if (ipv4Mapped) return isNonPublicIpv4(ipv4Mapped);
   const ipv4Embedded = embeddedIpv4FromIpv6(normalized);
   if (ipv4Embedded) return isNonPublicIpv4(ipv4Embedded);
-  const words = expandIpv6Words(normalized);
   if (words?.[0] === 0x2001 && (words[1] === 0 || words[1] === 0xdb8)) return true;
   // 2001:2::/48 benchmarking (RFC 5180) — documentation/special-use, never a
   // public webhook target (SEC-178).

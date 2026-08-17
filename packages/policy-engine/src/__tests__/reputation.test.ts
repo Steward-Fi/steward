@@ -295,4 +295,19 @@ describe("reputation-scaling malformed input (SEC-105)", () => {
     });
     expect(result.passed).toBe(true); // exactly at the score-0 base limit
   });
+
+  it("rejects the complete malformed runtime shape instead of silently choosing a curve", () => {
+    for (const config of [
+      { ...linearConfig, curve: "surprise" },
+      { ...linearConfig, baseMaxPerTx: "100", maxMaxPerTx: "10" },
+      null,
+    ]) {
+      const result = evaluateReputationScaling(makeRule("reputation-scaling", config as never), {
+        reputationScore: 50,
+        txValue: 1n,
+      });
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("malformed");
+    }
+  });
 });

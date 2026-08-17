@@ -84,4 +84,24 @@ describe("verifyWebhookSignature (SEC-177)", () => {
       false,
     );
   });
+
+  it("rejects non-canonical timestamps and invalid verifier clocks/tolerances", () => {
+    for (const sentAt of [`${NOW}.5`, `${NOW}e0`, `0${NOW}`, "-1"]) {
+      const candidate = { ...baseInput, sentAt };
+      expect(verifyWebhookSignature({ ...candidate, signature: sign(candidate) })).toBe(false);
+    }
+    const signature = sign(baseInput);
+    expect(verifyWebhookSignature({ ...baseInput, signature, toleranceSeconds: Number.NaN })).toBe(
+      false,
+    );
+    expect(
+      verifyWebhookSignature({
+        ...baseInput,
+        signature,
+        toleranceSeconds: Number.POSITIVE_INFINITY,
+      }),
+    ).toBe(false);
+    expect(verifyWebhookSignature({ ...baseInput, signature, nowSeconds: Number.NaN })).toBe(false);
+    expect(verifyWebhookSignature({ ...baseInput, signature, secret: "" })).toBe(false);
+  });
 });

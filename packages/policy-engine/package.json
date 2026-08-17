@@ -10,7 +10,8 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@stwd/shared": "workspace:*"
+    "@stwd/shared": "workspace:*",
+    "re2-wasm": "1.0.2"
   },
   "description": "Composable policy evaluation engine — spending limits, address filters, rate limits, time windows"
 }

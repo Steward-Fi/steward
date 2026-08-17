@@ -31,6 +31,10 @@ const MAX_UINT256_DECIMAL =
   "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 const MAX_UINT256_DECIMAL_DIGITS = 78;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export interface EvaluatorContext {
   request: SignRequest;
   recentTxCount24h: number;
@@ -597,18 +601,27 @@ async function evaluateSpendingLimit(
 }
 
 function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
-  const config = rule.config as unknown as ApprovedAddressesConfig;
+  const rawConfig: unknown = rule.config;
   const base = { policyId: rule.id, type: rule.type } as const;
 
-  // Fail closed with a structured deny on malformed config instead of throwing
-  // on `.map` (SEC-105).
-  if (!Array.isArray(config.addresses)) {
+  // Validate the complete runtime shape, not just the outer array: a hand-edited
+  // row containing `null`/numbers used to throw in `.toLowerCase()`, while an
+  // unknown mode silently fell into blacklist semantics and could pass.
+  if (
+    !isRecord(rawConfig) ||
+    !Array.isArray(rawConfig.addresses) ||
+    !rawConfig.addresses.every((address) => typeof address === "string") ||
+    (rawConfig.mode !== undefined &&
+      rawConfig.mode !== "whitelist" &&
+      rawConfig.mode !== "blacklist")
+  ) {
     return {
       ...base,
       passed: false,
-      reason: "Approved addresses must be an array",
+      reason: "Approved addresses must be an array of strings with a valid mode",
     };
   }
+  const config = rawConfig as unknown as ApprovedAddressesConfig;
 
   const targetAddress = getApprovedAddressTarget(ctx.request);
   if (!targetAddress) {
@@ -763,18 +776,39 @@ function evaluateRateLimit(rule: PolicyRule, ctx: EvaluatorContext): PolicyResul
 }
 
 function evaluateTimeWindow(rule: PolicyRule, _ctx: EvaluatorContext): PolicyResult {
-  const config = rule.config as unknown as TimeWindowConfig;
+  const rawConfig: unknown = rule.config;
   const base = { policyId: rule.id, type: rule.type } as const;
 
-  // Fail closed with a structured deny on malformed config instead of throwing
-  // on `.length` (SEC-105) — consistent with the other defensive evaluators.
-  if (!Array.isArray(config.allowedDays) || !Array.isArray(config.allowedHours)) {
+  // Validate the nested runtime shape as well as the arrays. Otherwise a
+  // hand-edited `allowedHours: [null]` throws inside `.some()` and bypasses the
+  // structured-deny contract.
+  if (
+    !isRecord(rawConfig) ||
+    !Array.isArray(rawConfig.allowedDays) ||
+    !rawConfig.allowedDays.every(
+      (day) => typeof day === "number" && Number.isInteger(day) && day >= 0 && day <= 6,
+    ) ||
+    !Array.isArray(rawConfig.allowedHours) ||
+    !rawConfig.allowedHours.every(
+      (window) =>
+        isRecord(window) &&
+        typeof window.start === "number" &&
+        Number.isInteger(window.start) &&
+        window.start >= 0 &&
+        window.start <= 23 &&
+        typeof window.end === "number" &&
+        Number.isInteger(window.end) &&
+        window.end >= 0 &&
+        window.end <= 24,
+    )
+  ) {
     return {
       ...base,
       passed: false,
-      reason: "Time-window allowedDays and allowedHours must be arrays",
+      reason: "Time-window allowedDays and allowedHours must be arrays of valid windows",
     };
   }
+  const config = rawConfig as unknown as TimeWindowConfig;
 
   // An enabled time-window rule with NO windows at all is a misconfigured
   // no-op that would pass everything — fail closed instead (SEC-180),
@@ -818,19 +852,22 @@ function evaluateTimeWindow(rule: PolicyRule, _ctx: EvaluatorContext): PolicyRes
  * Allowed-chains policy: restricts transactions to a set of permitted CAIP-2 chain identifiers.
  */
 function evaluateAllowedChains(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
-  const config = rule.config as unknown as AllowedChainsConfig;
+  const rawConfig: unknown = rule.config;
   const base = { policyId: rule.id, type: rule.type } as const;
   const chainId = ctx.request.chainId;
 
-  // Fail closed with a structured deny on malformed config instead of throwing
-  // on `.includes` (SEC-105).
-  if (!Array.isArray(config.chains)) {
+  if (
+    !isRecord(rawConfig) ||
+    !Array.isArray(rawConfig.chains) ||
+    !rawConfig.chains.every((chain) => typeof chain === "string" && chain.length > 0)
+  ) {
     return {
       ...base,
       passed: false,
       reason: "Allowed chains must be an array of CAIP-2 identifiers",
     };
   }
+  const config = rawConfig as unknown as AllowedChainsConfig;
 
   if (!Number.isSafeInteger(chainId) || chainId <= 0) {
     return {
