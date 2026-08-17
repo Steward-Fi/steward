@@ -16,6 +16,7 @@ import {
   webhookEventRegistry,
 } from "./webhook-events";
 import { redactWebhookSecrets } from "./webhook-redaction";
+import { validateWebhookUrlResolved } from "./webhook-url";
 
 const INLINE_DELIVERY_VISIBILITY_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -250,6 +251,24 @@ async function dispatchConfiguredWebhook(
 
   if (!delivery) {
     throw new Error("Failed to create webhook delivery record");
+  }
+
+  // SEC-017: re-validate the destination at delivery time with FRESH DNS
+  // answers — registration-time validation cannot see DNS rebinding (public A
+  // record at config time, private at fetch time). Fail closed: no fetch.
+  const deliveryUrlError = await validateWebhookUrlResolved(config.url);
+  if (deliveryUrlError) {
+    const [rejected] = await db
+      .update(webhookDeliveries)
+      .set({
+        status: "failed",
+        attempts: 0,
+        lastError: `delivery blocked: ${deliveryUrlError}`,
+        payload: eventWithDelivery as unknown as Record<string, unknown>,
+      })
+      .where(eq(webhookDeliveries.id, delivery.id))
+      .returning();
+    return rejected ?? delivery;
   }
 
   const dispatcher = new WebhookDispatcher({

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { validateWebhookUrl } from "../services/webhook-url";
+import { validateWebhookUrl, validateWebhookUrlResolved } from "../services/webhook-url";
 
 describe("webhook URL validation", () => {
   it("rejects IPv4-mapped IPv6 private addresses in dotted and hex forms", () => {
@@ -72,5 +72,62 @@ describe("webhook URL validation", () => {
     ]) {
       expect(validateWebhookUrl(url)).toBe("url host must be public");
     }
+  });
+});
+
+describe("validateWebhookUrlResolved (SEC-017)", () => {
+  const publicAnswer = [{ address: "93.184.216.34", family: 4 }];
+
+  it("rejects a public hostname that resolves to a private address (nip.io style)", async () => {
+    const result = await validateWebhookUrlResolved("https://169.254.169.254.nip.io/hook", async () => [
+      { address: "169.254.169.254", family: 4 },
+    ]);
+    expect(result).toBe("url host must resolve to a public address");
+  });
+
+  it("rejects when ANY DNS answer is non-public (rebinding hedge)", async () => {
+    const result = await validateWebhookUrlResolved("https://hooks.example.com/hook", async () => [
+      { address: "93.184.216.34", family: 4 },
+      { address: "10.0.0.7", family: 4 },
+    ]);
+    expect(result).toBe("url host must resolve to a public address");
+  });
+
+  it("rejects IPv6 answers that embed private IPv4 targets", async () => {
+    const result = await validateWebhookUrlResolved("https://hooks.example.com/hook", async () => [
+      { address: "::ffff:127.0.0.1", family: 6 },
+    ]);
+    expect(result).toBe("url host must resolve to a public address");
+  });
+
+  it("fails closed when the hostname cannot be resolved", async () => {
+    const result = await validateWebhookUrlResolved("https://gone.example.com/hook", async () => {
+      throw new Error("ENOTFOUND");
+    });
+    expect(result).toBe("url host could not be resolved");
+
+    const empty = await validateWebhookUrlResolved("https://gone.example.com/hook", async () => []);
+    expect(empty).toBe("url host could not be resolved");
+  });
+
+  it("accepts a public hostname with only public answers", async () => {
+    const result = await validateWebhookUrlResolved(
+      "https://hooks.example.com/hook",
+      async () => publicAnswer,
+    );
+    expect(result).toBeNull();
+  });
+
+  it("keeps string-level rejections and skips DNS for IP literals", async () => {
+    expect(await validateWebhookUrlResolved("https://10.0.0.1/hook")).toBe(
+      "url host must be public",
+    );
+    let called = false;
+    const literal = await validateWebhookUrlResolved("https://93.184.216.34/hook", async () => {
+      called = true;
+      return [];
+    });
+    expect(literal).toBeNull();
+    expect(called).toBe(false);
   });
 });

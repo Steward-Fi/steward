@@ -21,7 +21,7 @@ import {
   hasAgentTokenScope,
   requireTenantLevel,
 } from "../services/context";
-import { validateWebhookUrl } from "../services/webhook-url";
+import { validateWebhookUrlResolved } from "../services/webhook-url";
 
 export const erc8004Routes = new Hono<{ Variables: AppVariables }>();
 type AgentRegistrationRow = typeof agentRegistrations.$inferSelect;
@@ -84,9 +84,9 @@ function signedFeedbackWritesEnabled(): boolean {
   return false;
 }
 
-function validateAgentCardApiUrl(apiUrl: string): string | null {
+async function validateAgentCardApiUrl(apiUrl: string): Promise<string | null> {
   if (!apiUrl) return null;
-  const destinationError = validateWebhookUrl(apiUrl);
+  const destinationError = await validateWebhookUrlResolved(apiUrl);
   if (destinationError) return `apiUrl ${destinationError}`;
   if (new URL(apiUrl).protocol !== "https:") return "apiUrl must use https";
   return null;
@@ -185,7 +185,7 @@ erc8004Routes.post("/:id/register-onchain", async (c) => {
   }
 
   const { chainId, apiUrl, capabilities, services } = parsed.data;
-  const apiUrlError = validateAgentCardApiUrl(apiUrl);
+  const apiUrlError = await validateAgentCardApiUrl(apiUrl);
   if (apiUrlError) {
     return c.json<ApiResponse>({ ok: false, error: apiUrlError }, 400);
   }
