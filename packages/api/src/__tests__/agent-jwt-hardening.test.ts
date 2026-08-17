@@ -42,7 +42,7 @@ describe("external agent JWT hardening", () => {
   it("does not treat api:proxy as implicit broad agent metadata scope", () => {
     expect(contextSource).not.toContain("new Set([AGENT_SCOPE])");
     expect(contextSource).toContain("if (!scopes || scopes.length === 0) return [AGENT_SCOPE]");
-    expect(contextSource).toContain("c.set(\"agentScopes\", agentTokenScopes)");
+    expect(contextSource).toContain('c.set("agentScopes", agentTokenScopes)');
     expect(contextSource).toContain(
       'agentScope === c.req.param("agentId") && hasAgentTokenScope(c.get("agentScopes"))',
     );

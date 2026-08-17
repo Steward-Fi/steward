@@ -50,9 +50,7 @@ beforeAll(async () => {
   process.env.STEWARD_MASTER_PASSWORD ||= "capability-gate-test-master-password";
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => client.close());
-  await getDb()
-    .insert(tenants)
-    .values({ id: TENANT, name: "Cap Gate Tenant", apiKeyHash: "hash" });
+  await getDb().insert(tenants).values({ id: TENANT, name: "Cap Gate Tenant", apiKeyHash: "hash" });
   await getDb()
     .insert(agents)
     .values({ id: AGENT, tenantId: TENANT, name: AGENT, walletAddress: "0x4" });
@@ -70,8 +68,9 @@ beforeAll(async () => {
   const port = typeof address === "object" && address ? address.port : 0;
   process.env.ELIZA_CLOUD_JWKS_URL = `http://127.0.0.1:${port}/jwks`;
 
-  const { clearAgentJwksCacheForTests, requireAgentJwt, requireCapabilityAgentJwt } =
-    await import("../middleware/agent-jwt");
+  const { clearAgentJwksCacheForTests, requireAgentJwt, requireCapabilityAgentJwt } = await import(
+    "../middleware/agent-jwt"
+  );
   clearAgentJwksCacheForTests();
 
   app = new Hono<{ Variables: AppVariables }>();
