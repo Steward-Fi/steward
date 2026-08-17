@@ -32,8 +32,8 @@ import { stewardPlugin } from "@stwd/eliza-plugin";
 // {
 //   name: "@stwd/eliza-plugin",
 //   services: [StewardService],
-//   actions: [signTransactionAction, transferAction],
-//   providers: [walletStatusProvider, balanceProvider],
+//   actions: [signTransactionAction, transferAction, providerAction],
+//   providers: [walletStatusProvider, balanceProvider, providerActionsProvider],
 //   evaluators: [approvalRequiredEvaluator],
 // }
 ```
@@ -50,6 +50,7 @@ export { StewardService } from "@stwd/eliza-plugin";
 export type { StewardPluginConfig } from "@stwd/eliza-plugin";
 export { signTransactionAction } from "@stwd/eliza-plugin";
 export { transferAction } from "@stwd/eliza-plugin";
+export { providerAction, providerActionsProvider } from "@stwd/eliza-plugin";
 export { walletStatusProvider } from "@stwd/eliza-plugin";
 export { balanceProvider } from "@stwd/eliza-plugin";
 export { approvalRequiredEvaluator } from "@stwd/eliza-plugin";
@@ -71,10 +72,11 @@ class StewardService extends Service {
 |----------|----------|-------------|
 | `STEWARD_API_URL` | Yes | Steward API base URL |
 | `STEWARD_API_KEY` | No* | Tenant API key |
-| `STEWARD_AGENT_TOKEN` | No* | Agent JWT (preferred) |
+| `STEWARD_JWT` | No* | Agent JWT (required for provider actions) |
 | `STEWARD_AGENT_ID` | Yes | Agent ID in Steward |
 
-*At least one of `STEWARD_API_KEY` or `STEWARD_AGENT_TOKEN` is required.
+*At least one of `STEWARD_API_KEY` or `STEWARD_JWT` is required. Use the
+agent JWT for first-class provider actions.
 
 **Accessing from runtime:**
 
@@ -126,6 +128,30 @@ Agent: Sending 0.05 ETH to 0x742d35Cc...
        ✅ Sent! TX: 0xa1b2c3...
 ```
 
+### providerAction
+
+Invokes the v2 workspace-scoped provider authority flow. This is distinct from
+the legacy capability proxy: the action is bound to a registered workspace,
+provider account, operation, exact request digest, and case id.
+
+```typescript
+// Action parameters supplied by the runtime/agent
+{
+  workspaceId: "workspace_123",
+  providerAccountId: "provider_account_123",
+  operationKey: "github.issue.list",
+  arguments: { owner: "Steward-Fi", repo: "steward" },
+  idempotencyKey: "stable-retry-key"
+}
+```
+
+When policy requires approval, the action reports `blocked: true` and explicitly
+says it has not executed. A policy/access denial is also surfaced as a persisted
+action id rather than mislabeled as an unsubmitted request. If `idempotencyKey`
+is omitted, the plugin derives a stable retry key from the Eliza message id and
+canonical public parameters; without either stable identity it fails closed.
+It never accepts provider credentials as parameters.
+
 ## Providers
 
 ### walletStatusProvider
@@ -148,6 +174,13 @@ Injects current balance into the agent's prompt:
 Current Balance:
 - ETH (Base): 1.05 ETH
 ```
+
+### providerActionsProvider
+
+Polls the agent-scoped status API for actions invoked during the current runtime
+and injects their status and case id into agent state. It does not call the
+protected approval, case-manifest, or evidence routes; those retain their human
+session and recent-MFA gates.
 
 ## Evaluators
 

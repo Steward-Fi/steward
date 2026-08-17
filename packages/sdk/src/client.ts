@@ -81,6 +81,14 @@ import type {
   PolicyTemplateUpdate,
   PregeneratedUserWalletClaimResult,
   PregeneratedUserWalletCreateResult,
+  ProviderActionApprovalDecisionInput,
+  ProviderActionApprovalDetail,
+  ProviderActionInvokeInput,
+  ProviderActionInvokeResult,
+  ProviderActionStatus,
+  ProviderActionTransitionResult,
+  ProviderCaseEvidence,
+  ProviderCaseManifest,
   RouteRecord,
   RpcResponse,
   SecretRecord,
@@ -1440,6 +1448,90 @@ export class StewardClient {
         return response.data;
       },
     },
+  };
+
+  /**
+   * Governed workspace-provider action lifecycle.
+   *
+   * Invoke and get are agent-JWT surfaces. Approval reads/decisions and case
+   * evidence retain the API human-session + MFA gates; the SDK only types those
+   * routes and never substitutes credentials or actors. Execute is authorized
+   * by the API against the persisted action owner/approval state.
+   */
+  readonly providerActions = {
+    invoke: async (input: ProviderActionInvokeInput): Promise<ProviderActionInvokeResult> => {
+      try {
+        return await this.requestRawJson<ProviderActionInvokeResult>("/v2/provider-actions", {
+          method: "POST",
+          body: JSON.stringify(input),
+        });
+      } catch (error) {
+        if (error instanceof StewardApiError && error.status === 403) {
+          const envelope = error.data as {
+            error?: string;
+            data?: { id?: string; status?: string; requestHash?: string; actionDigest?: string };
+          };
+          const denial = envelope?.data;
+          if (
+            denial?.id &&
+            (denial.status === "denied_access" || denial.status === "denied_policy") &&
+            denial.requestHash &&
+            denial.actionDigest
+          ) {
+            return {
+              id: denial.id,
+              status: denial.status,
+              reasonCode: envelope.error ?? error.message,
+              requestHash: denial.requestHash,
+              actionDigest: denial.actionDigest,
+              persisted: true,
+            };
+          }
+        }
+        throw error;
+      }
+    },
+
+    get: async (actionId: string): Promise<ProviderActionStatus> => {
+      const response = await this.request<ProviderActionStatus, StewardErrorResponse>(
+        `/v2/provider-actions/${encodeURIComponent(actionId)}`,
+      );
+      if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+      return response.data;
+    },
+
+    getApproval: async (actionId: string): Promise<ProviderActionApprovalDetail> => {
+      const response = await this.requestRawJson<{
+        ok: true;
+        data: ProviderActionApprovalDetail;
+      }>(`/v2/provider-actions/${encodeURIComponent(actionId)}/approval`);
+      return response.data;
+    },
+
+    decideApproval: async (
+      actionId: string,
+      input: ProviderActionApprovalDecisionInput,
+    ): Promise<ProviderActionTransitionResult> =>
+      this.requestRawJson<ProviderActionTransitionResult>(
+        `/v2/provider-actions/${encodeURIComponent(actionId)}/approval`,
+        { method: "POST", body: JSON.stringify(input) },
+      ),
+
+    execute: async (actionId: string): Promise<ProviderActionTransitionResult> =>
+      this.requestRawJson<ProviderActionTransitionResult>(
+        `/v2/provider-actions/${encodeURIComponent(actionId)}/execute`,
+        { method: "POST" },
+      ),
+
+    getCase: async (actionId: string): Promise<ProviderCaseManifest> =>
+      this.requestRawJson<ProviderCaseManifest>(
+        `/v2/provider-actions/${encodeURIComponent(actionId)}/case`,
+      ),
+
+    getEvidence: async (actionId: string): Promise<ProviderCaseEvidence> =>
+      this.requestRawJson<ProviderCaseEvidence>(
+        `/v2/provider-actions/${encodeURIComponent(actionId)}/evidence`,
+      ),
   };
 
   getBaseUrl(): string {
@@ -5568,6 +5660,40 @@ export class StewardClient {
       status: response.status,
       data: payload.data as TSuccess,
     };
+  }
+
+  /** Handle lifecycle endpoints whose successful response is intentionally raw. */
+  private async requestRawJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}${path}`, {
+        ...init,
+        headers: await this.buildRequestHeaders(path, init),
+      });
+    } catch (error) {
+      throw new StewardApiError(
+        error instanceof Error ? error.message : "Network request failed",
+        0,
+      );
+    }
+
+    const payload = await this.parseJson<unknown>(response);
+    if (!response.ok) {
+      let message = `Request failed with status ${response.status}`;
+      if (payload && typeof payload === "object") {
+        const candidate = payload as {
+          error?: string | { code?: string; message?: string };
+          code?: string;
+          message?: string;
+        };
+        if (typeof candidate.error === "string") message = candidate.error;
+        else if (candidate.error && typeof candidate.error === "object") {
+          message = candidate.error.code ?? candidate.error.message ?? message;
+        } else message = candidate.code ?? candidate.message ?? message;
+      }
+      throw new StewardApiError(message, response.status, payload);
+    }
+    return payload as T;
   }
 
   private buildHeaders(headers?: HeadersInit): Headers {

@@ -1569,7 +1569,225 @@ export type IntentType =
   | "policy_rule_delete"
   | "policy_rule_update"
   | "quorum_update"
-  | "wallet_action";
+  | "wallet_action"
+  | "provider-action";
+
+export interface ProviderActionInvokeInput {
+  workspaceId: string;
+  providerAccountId: string;
+  operationKey: string;
+  /** Adapter-defined public arguments. Credentials are resolved only by Steward. */
+  arguments: Record<string, unknown>;
+  idempotencyKey: string;
+}
+
+export interface ProviderActionInvokeSuccessResult {
+  id: string;
+  status: "pending_approval" | "stub_succeeded" | "stub_failed";
+  requestHash: string;
+  actionDigest: string;
+  result?: {
+    ok: boolean;
+    status: "stub_succeeded" | "stub_failed";
+    echo: { operationId: string; actionDigest: string };
+  };
+}
+
+/** A policy/access denial is a durable lifecycle record, not a failed submission. */
+export interface ProviderActionInvokeDeniedResult {
+  id: string;
+  status: "denied_access" | "denied_policy";
+  reasonCode: string;
+  requestHash: string;
+  actionDigest: string;
+  persisted: true;
+}
+
+export type ProviderActionInvokeResult =
+  | ProviderActionInvokeSuccessResult
+  | ProviderActionInvokeDeniedResult;
+
+/** Authoritative values persisted in `provider_action_bindings.status`. */
+export type ProviderActionBindingStatus =
+  | "denied"
+  | "pending_approval"
+  | "allowed_stub"
+  | "stub_succeeded"
+  | "stub_failed"
+  | "approved"
+  | "execution_ready"
+  | "approval_denied"
+  | "approval_expired"
+  | "approval_stale"
+  | "executing"
+  | "succeeded"
+  | "failed"
+  | "outcome_unknown";
+
+/** Scalar-only agent view of the persisted provider-action binding. */
+export interface ProviderActionStatus {
+  id: string;
+  status: ProviderActionBindingStatus;
+  version: number;
+  workspaceId: string;
+  providerAccountId: string;
+  operationId: string;
+  operationRevision: number;
+  actionDigest: string;
+  requestHash: string;
+  expiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProviderActionApprovalDetail {
+  id: string;
+  status: ProviderActionBindingStatus;
+  version: number;
+  requestHash: string;
+  actionDigest: string;
+  expiresAt: string | null;
+  safeSummary: Record<string, unknown> | null;
+  operationId: string;
+  providerAccountId: string;
+  workspaceId: string;
+}
+
+export interface ProviderActionApprovalDecisionInput {
+  decision: "approve" | "deny";
+  expectedVersion: number;
+  expectedRequestHash: string;
+  expectedActionDigest: string;
+  reasonCode?: ProviderApprovalReasonCode;
+  reason?: string;
+  idempotencyKey: string;
+}
+
+export type ProviderApprovalReasonCode =
+  | "approver_manual_approve"
+  | "approver_manual_deny"
+  | "approver_risk_deny"
+  | "approver_scope_deny"
+  | "approver_duplicate_deny"
+  | "approver_other";
+
+export interface ProviderActionTransitionResult {
+  id: string;
+  status: ProviderActionBindingStatus;
+  version: number;
+  requestHash: string;
+  actionDigest: string;
+  replayed?: true;
+  resumeAttemptId?: string;
+}
+
+export type ProviderCaseTerminalState =
+  | "denied_access"
+  | "denied_policy"
+  | "pending_approval"
+  | "approval_denied"
+  | "approval_expired"
+  | "approval_staled"
+  | "execution_ready"
+  | "executing"
+  | "succeeded"
+  | "failed"
+  | "outcome_unknown"
+  | "unknown";
+
+export type ProviderCaseEventRole =
+  | "genesis"
+  | "access_decided"
+  | "policy_decided"
+  | "approval_requested"
+  | "approval_decided"
+  | "approval_terminal"
+  | "resume_ready"
+  | "exec_authorized"
+  | "exec_claimed"
+  | "exec_denied_at_boundary"
+  | "exec_dispatched"
+  | "exec_terminal"
+  | "exec_reconciled"
+  | "unclassified";
+
+export type ProviderCaseDispatchState =
+  | "none"
+  | "claimed"
+  | "dispatched"
+  | "succeeded"
+  | "failed"
+  | "outcome_unknown";
+
+export interface ProviderCaseManifest {
+  schemaVersion: "steward.provider-case-manifest.v1";
+  caseId: string;
+  tenantId: string;
+  workspaceId: string;
+  requestActor: { type: "agent"; id: string; revision: number };
+  approvalActor: { type: "user"; id: string } | null;
+  resumeActor: "steward-system" | null;
+  providerAccount: { id: string; revision: number };
+  operation: {
+    id: string;
+    key: string;
+    revision: number;
+    canonicalProfile: string;
+    riskClass: string;
+  };
+  actionDigest: string;
+  requestHash: string;
+  idempotencyKeyHash: string;
+  accessDecision: { id: string; hash: string; effect: "allow" | "deny" };
+  policyDecision: { id: string | null; hash: string | null; effect: string };
+  approvalCommitmentHash: string | null;
+  execution: {
+    authorizationId: string | null;
+    dispatchState: ProviderCaseDispatchState;
+    providerIdempotencyKeyHash: string | null;
+    upstreamStatusCode: number | null;
+    reconciled: boolean;
+  } | null;
+  dependencyRevisions: {
+    actor: number;
+    workspace: number;
+    providerAccount: number;
+    operation: number;
+    matchedGrants: Array<{ id: string; revision: number }>;
+    matchedBindings: Array<{ id: string; revision: number }>;
+    route: { id: string; revision: number } | null;
+    secret: { id: string; version: number } | null;
+    policyRevisionHash: string | null;
+  };
+  events: Array<{ seq: number; action: string; role: ProviderCaseEventRole; hmac: string }>;
+  eventSeqRange: { from: number; to: number } | null;
+  terminalState: ProviderCaseTerminalState;
+  completeness: "complete" | "incomplete" | "unknown";
+  missingRequiredRoles: ProviderCaseEventRole[];
+  incompletenessReasons: string[];
+  safeSummary: Record<string, unknown> | null;
+  genesisAt: string | null;
+  terminalAt: string | null;
+  assembledAt: string;
+}
+
+export interface ProviderCaseEvidence {
+  version: 1;
+  tenantId: string;
+  caseId: string;
+  manifest: ProviderCaseManifest;
+  bundle: {
+    version: 1;
+    tenantId: string;
+    range: { from: number; to: number; includesHead: boolean };
+    canonicalizationSpec: string;
+    events: unknown[];
+    checkpoint: { payload: unknown; signature: string; publicKey: string };
+    generatedAt: string;
+  };
+  completeness: "complete" | "incomplete" | "unknown";
+  generatedAt: string;
+}
 
 export interface Intent {
   id: string;
