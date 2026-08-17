@@ -17,8 +17,6 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { getDb, intents, providerActionBindings } from "@stwd/db";
-import { buildGithubAction, isGithubOperationKey } from "@stwd/provider-github";
-import { buildXAction, isXOperationKey } from "@stwd/provider-x";
 import { CanonError, decodeUtf8Strict, isCanonError, strictParseJson } from "@stwd/shared";
 import { and, eq } from "drizzle-orm";
 import type { Context } from "hono";
@@ -27,6 +25,7 @@ import { requireProviderAgentJwt } from "../middleware/agent-jwt";
 import { resolveProviderPrincipal } from "../middleware/provider-principal";
 import { type ApiResponse, type AppVariables, setNoStoreHeaders } from "../services/context";
 import { toProviderActionStatusResponse } from "../services/intent-response";
+import { buildAdapterFixedProviderAction } from "../services/provider-action-profile-specs";
 import {
   type ProviderActionOutcome,
   providerActionService,
@@ -272,12 +271,9 @@ async function handleCreateProviderAction(c: RouteContext) {
   // key belonging to no registered adapter is an unsupported profile. ──
   let build: import("../services/provider-action-service").ProviderActionBuild;
   try {
-    if (isGithubOperationKey(operationKey)) {
-      if (method !== undefined) return deny(c, "CANON_UNKNOWN_FIELD", 400);
-      build = buildGithubAction(operationKey, args);
-    } else if (isXOperationKey(operationKey)) {
-      if (method !== undefined) return deny(c, "CANON_UNKNOWN_FIELD", 400);
-      build = buildXAction(operationKey, args);
+    const adapterBuild = buildAdapterFixedProviderAction(operationKey, args, method);
+    if (adapterBuild) {
+      build = adapterBuild;
     } else {
       // #201: any operation key not owned by an adapter-fixed profile is a
       // candidate config-driven (generic-http) operation. We cannot build it

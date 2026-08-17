@@ -57,7 +57,6 @@ import {
 import { buildXAction, type XActionBuild, type XOperationKey } from "@stwd/provider-x";
 import {
   assertRegisteredProfile,
-  buildGenericHttpAction,
   CanonError,
   computeProviderPolicyInputDigest,
   GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
@@ -129,6 +128,7 @@ import {
 import { and, eq, sql } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import { appendAuditEvent, withTenantAuditQueue, writeAuditEvent } from "./audit";
+import { getGenericHttpProductionSpec } from "./provider-action-profile-specs";
 import { ApprovalArmError, buildApprovalArm } from "./provider-approval";
 
 const EVALUATOR_VERSION = "provider-action.v1";
@@ -382,7 +382,7 @@ function rebuildGenericApprovedAction(
     }
   }
 
-  return buildGenericHttpAction(operationKey, descriptor, action.method, recovered);
+  return getGenericHttpProductionSpec().build(operationKey, recovered, action.method, descriptor);
 }
 
 /** Reconstruct through the adapter so policy inputs are re-derived, not trusted. */
@@ -1279,11 +1279,11 @@ class ProviderActionService {
     if (rawDescriptor === undefined)
       throw new CanonError("CANON_PROFILE_UNSUPPORTED", "missing generic-http descriptor");
     const descriptor = validateGenericHttpDescriptor(rawDescriptor);
-    const built = buildGenericHttpAction(
+    const built = getGenericHttpProductionSpec().build(
       deferred.operationKey,
-      descriptor,
-      deferred.method,
       deferred.args,
+      deferred.method,
+      descriptor,
     );
     // Fail-closed: the built profile must be registered (enforced at every
     // consumption site; asserted here at build time too).
