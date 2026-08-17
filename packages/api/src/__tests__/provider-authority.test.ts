@@ -772,6 +772,52 @@ describe("provider authority foundation", () => {
     expect(after).toHaveLength(before.length);
   });
 
+  test("a budget mutation revalidates locked authority after its optimistic preflight", async () => {
+    const [workspaceAdmin] = await getDb()
+      .select()
+      .from(providerRoleBindings)
+      .where(
+        and(
+          eq(providerRoleBindings.workspaceId, WORKSPACE_A),
+          eq(providerRoleBindings.principalId, OTHER),
+          eq(providerRoleBindings.roleKey, "workspace_admin"),
+        ),
+      );
+    if (!workspaceAdmin) throw new Error("expected workspace-admin fixture");
+    await getDb()
+      .update(providerRoleBindings)
+      .set({ status: "active", expiresAt: null })
+      .where(eq(providerRoleBindings.id, workspaceAdmin.id));
+    const before = await getDb().select().from(providerAgentBudgets);
+    store.faultHooks.afterBudgetPreflight = async () => {
+      await getDb()
+        .update(providerRoleBindings)
+        .set({ status: "revoked" })
+        .where(eq(providerRoleBindings.id, workspaceAdmin.id));
+    };
+    try {
+      await expect(
+        store.createAgentBudget(
+          mutation({ actorUserId: OTHER, tenantRole: "member", expectedRevision: 0 }),
+          {
+            agentId: "agent-x",
+            workspaceId: WORKSPACE_A,
+            dimension: "count",
+            windowSeconds: 43_210,
+            max: 3,
+          },
+        ),
+      ).rejects.toMatchObject({ code: "not_found", status: 404 });
+      expect(await getDb().select().from(providerAgentBudgets)).toHaveLength(before.length);
+    } finally {
+      store.faultHooks = {};
+      await getDb()
+        .update(providerRoleBindings)
+        .set({ status: "active" })
+        .where(eq(providerRoleBindings.id, workspaceAdmin.id));
+    }
+  });
+
   test("a concurrent budget revision race commits exactly one mutation and one audit", async () => {
     const created = await store.createAgentBudget(
       mutation({

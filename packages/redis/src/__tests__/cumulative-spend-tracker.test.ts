@@ -39,12 +39,14 @@ const STREAM = { agentId: AGENT, scope: "agent" as const, scopeKey: "", currency
 
 async function cleanup() {
   const redis = getRedis();
-  let cursor = "0";
-  do {
-    const [next, keys] = await redis.scan(cursor, "MATCH", `cumspend:*${AGENT}*`, "COUNT", 100);
-    cursor = next;
-    if (keys.length > 0) await redis.del(...keys);
-  } while (cursor !== "0");
+  for (const pattern of [`cumspend:${AGENT}*`, `cumspend:v2:*${AGENT}*`]) {
+    let cursor = "0";
+    do {
+      const [next, keys] = await redis.scan(cursor, "MATCH", pattern, "COUNT", 100);
+      cursor = next;
+      if (keys.length > 0) await redis.del(...keys);
+    } while (cursor !== "0");
+  }
 }
 
 beforeEach(async () => {
@@ -99,74 +101,94 @@ describeRedis("reserveCumulativeSpend - REAL concurrency single-winner", () => {
   });
 });
 
-describeRedis("reserveCumulativeSpendBatch - cross-stream atomicity", () => {
-  const global = {
-    agentId: AGENT,
-    scope: "agent" as const,
-    scopeKey: "budget:global:count",
-    currency: "__agent_budget_count__",
-  };
-  const workspace = {
-    agentId: AGENT,
-    scope: "agent" as const,
-    scopeKey: "budget:workspace:w1:count",
-    currency: "__agent_budget_count__",
-  };
-
-  test("every agent-budget stream shares the agent Redis Cluster hash slot", () => {
-    const globalKey = cumulativeSpendStreamKeyForTest(global);
-    const workspaceKey = cumulativeSpendStreamKeyForTest(workspace);
-    expect(globalKey).toContain(`{${encodeURIComponent(AGENT)}}`);
-    expect(workspaceKey).toContain(`{${encodeURIComponent(AGENT)}}`);
+describeRedis("tenant-bound atomic reservation batches", () => {
+  test("the same agent id in two tenants has independent history", async () => {
+    const common = { agentId: AGENT, scope: "agent" as const, scopeKey: "", currency: "USD" };
+    await reserveCumulativeSpend({
+      stream: { ...common, tenantId: "tenant-a" },
+      caps: [{ windowSeconds: 3600, max: 10 }],
+      amount: 10,
+    });
+    expect(
+      await reserveCumulativeSpend({
+        stream: { ...common, tenantId: "tenant-b" },
+        caps: [{ windowSeconds: 3600, max: 10 }],
+        amount: 10,
+      }),
+    ).toMatchObject({ ok: true, priorSums: [0] });
   });
 
-  test("a breach on one stream appends no member to any stream", async () => {
+  test("a denied workspace stream cannot leave a provisional global debit", async () => {
+    const tenantId = "tenant-atomic";
+    const global = {
+      tenantId,
+      agentId: AGENT,
+      scope: "agent" as const,
+      scopeKey: "budget:global:count",
+      currency: "__agent_budget_count__",
+    };
+    const workspace = {
+      ...global,
+      scopeKey: "budget:workspace:w1:count",
+    };
     await reserveCumulativeSpend({
       stream: workspace,
       caps: [{ windowSeconds: 3600, max: 1 }],
       amount: 1,
+      reservationId: "workspace-full",
     });
-    const denied = await reserveCumulativeSpendBatch([
-      {
-        stream: global,
-        caps: [{ windowSeconds: 3600, max: 10 }],
-        amount: 1,
-        reservationId: "batch-global-denied",
-      },
-      {
-        stream: workspace,
-        caps: [{ windowSeconds: 3600, max: 1 }],
-        amount: 1,
-        reservationId: "batch-workspace-denied",
-      },
-    ]);
+    const denied = await reserveCumulativeSpendBatch({
+      groups: [
+        {
+          stream: global,
+          caps: [{ windowSeconds: 3600, max: 10 }],
+          amount: 1,
+          reservationId: "atomic-global",
+        },
+        {
+          stream: workspace,
+          caps: [{ windowSeconds: 3600, max: 1 }],
+          amount: 1,
+          reservationId: "atomic-workspace",
+        },
+      ],
+    });
     expect(denied.ok).toBe(false);
     expect(await getCumulativeSpendSum({ ...global, windowSeconds: 3600 })).toEqual({ sum: 0 });
     expect(await getCumulativeSpendSum({ ...workspace, windowSeconds: 3600 })).toEqual({ sum: 1 });
   });
 
-  test("parallel batches admit the same exact winners on every stream", async () => {
-    const outcomes = await Promise.all(
-      Array.from({ length: 10 }, (_, index) =>
-        reserveCumulativeSpendBatch([
-          {
-            stream: global,
-            caps: [{ windowSeconds: 3600, max: 3 }],
-            amount: 1,
-            reservationId: `batch-global-${index}`,
-          },
-          {
-            stream: workspace,
-            caps: [{ windowSeconds: 3600, max: 3 }],
-            amount: 1,
-            reservationId: `batch-workspace-${index}`,
-          },
-        ]),
-      ),
-    );
-    expect(outcomes.filter((outcome) => outcome.ok)).toHaveLength(3);
-    expect(await getCumulativeSpendSum({ ...global, windowSeconds: 3600 })).toEqual({ sum: 3 });
-    expect(await getCumulativeSpendSum({ ...workspace, windowSeconds: 3600 })).toEqual({ sum: 3 });
+  test("a crash retry reuses every member in the batch exactly once", async () => {
+    const tenantId = "tenant-retry";
+    const t0 = Date.now();
+    const groups = ["global", "workspace"].map((scope) => ({
+      stream: {
+        tenantId,
+        agentId: AGENT,
+        scope: "agent" as const,
+        scopeKey: `budget:${scope}:count`,
+        currency: "__agent_budget_count__",
+      },
+      caps: [{ windowSeconds: 3600, max: 5 }],
+      amount: 1,
+      reservationId: `stable-${scope}`,
+    }));
+    expect(await reserveCumulativeSpendBatch({ groups, now: t0 })).toMatchObject({ ok: true });
+    expect(await reserveCumulativeSpendBatch({ groups, now: t0 + 1_000 })).toMatchObject({
+      ok: true,
+      priorSums: [[0], [0]],
+    });
+    for (const group of groups) {
+      expect(
+        await getCumulativeSpendSum({
+          ...group.stream,
+          windowSeconds: 3600,
+          // The original pre-crash score has just aged out. The adopted retry
+          // remains, proving ZADD refreshed one member rather than adding two.
+          now: t0 + 3_600_500,
+        }),
+      ).toEqual({ sum: 1 });
+    }
   });
 });
 

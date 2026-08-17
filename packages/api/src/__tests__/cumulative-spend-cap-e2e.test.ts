@@ -70,6 +70,7 @@ import {
 import { and, eq } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import {
+  __setDecisionReservationCrashForTests,
   __setReservationReconciliationFaultForTests,
   providerActionService,
 } from "../services/provider-action-service";
@@ -180,14 +181,14 @@ function countCapRules(opKey: string, maxCalls: number, callWindow = "PT24H") {
 
 async function cleanupRedis() {
   const redis = getRedis();
-  let cursor = "0";
-  do {
-    // Agent-budget streams use a Redis Cluster hash tag around the agent id;
-    // match both the legacy untagged policy streams and tagged budget streams.
-    const [next, keys] = await redis.scan(cursor, "MATCH", `cumspend:*${CS.AGENT}*`, "COUNT", 100);
-    cursor = next;
-    if (keys.length > 0) await redis.del(...keys);
-  } while (cursor !== "0");
+  for (const pattern of [`cumspend:${CS.AGENT}*`, `cumspend:v2:*${CS.AGENT}*`]) {
+    let cursor = "0";
+    do {
+      const [next, keys] = await redis.scan(cursor, "MATCH", pattern, "COUNT", 100);
+      cursor = next;
+      if (keys.length > 0) await redis.del(...keys);
+    } while (cursor !== "0");
+  }
 }
 
 async function wipe() {
@@ -424,6 +425,7 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     delete process.env.STEWARD_PGLITE_MEMORY;
   });
   beforeEach(async () => {
+    __setDecisionReservationCrashForTests(false);
     __setReservationReconciliationFaultForTests(null);
     providerApprovalService.faultHooks = {};
     await wipe();
@@ -576,6 +578,39 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     expect((await proposeTweet("1234", "cs-208-notional-c")).kind).toBe("allowed");
   });
 
+  test("#208 direct retry adopts a Redis-before-PG orphan without double debit", async () => {
+    await seed({ maxBytes: 1_000_000 });
+    await getDb().insert(providerAgentBudgets).values({
+      tenantId: CS.TENANT,
+      agentId: CS.AGENT,
+      dimension: "count",
+      windowSeconds: 86_400,
+      max: 1,
+    });
+    __setDecisionReservationCrashForTests(true);
+    const crashed = await proposeTweet("direct-crash", "cs-208-direct-crash");
+    expect(crashed).toMatchObject({
+      kind: "evidence_failure",
+      code: "EVIDENCE_DECISION_PERSIST_FAILED",
+    });
+    expect(await getDb().select().from(providerActionBindings)).toHaveLength(0);
+    __setDecisionReservationCrashForTests(false);
+
+    const retried = await proposeTweet("direct-crash", "cs-208-direct-crash");
+    expect(retried.kind).toBe("allowed");
+    expect(
+      await getCumulativeSpendSum({
+        tenantId: CS.TENANT,
+        agentId: CS.AGENT,
+        scope: "agent",
+        scopeKey: "budget:global:count",
+        currency: "__agent_budget_count__",
+        windowSeconds: 86_400,
+      }),
+    ).toEqual({ sum: 1 });
+    expect(await getDb().select().from(providerActionBindings)).toHaveLength(1);
+  });
+
   test("#208 approval resume re-debits the current budget before consumption", async () => {
     process.env.STEWARD_EXECUTION_AUTH_SECRET =
       "k1:issue-208-real-redis-test-secret-with-enough-entropy";
@@ -613,6 +648,7 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     expect(
       await reserveCumulativeSpend({
         stream: {
+          tenantId: CS.TENANT,
           agentId: CS.AGENT,
           scope: "agent",
           scopeKey: "budget:global:count",
@@ -657,6 +693,67 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     });
   });
 
+  test("#208 approval retry adopts an execution Redis orphan without double debit", async () => {
+    process.env.STEWARD_EXECUTION_AUTH_SECRET =
+      "k1:issue-208-crash-retry-test-secret-with-enough-entropy";
+    await seed({ maxBytes: 1_000_000, requireApproval: true });
+    await getDb().insert(providerAgentBudgets).values({
+      tenantId: CS.TENANT,
+      agentId: CS.AGENT,
+      dimension: "count",
+      windowSeconds: 86_400,
+      max: 1,
+    });
+    const queued = await proposeTweet("approval-crash", "cs-208-approval-crash");
+    if (queued.kind !== "approval_required") throw new Error("expected approval");
+    const approved = await providerApprovalService.decide({
+      intentId: queued.intentId,
+      tenantId: CS.TENANT,
+      authenticatedUserId: CS.GRANTOR,
+      sessionMfaVerifiedAt: Date.now(),
+      decision: "approve",
+      expectedVersion: 1,
+      expectedRequestHash: queued.requestHash,
+      expectedActionDigest: queued.actionDigest,
+      reasonCode: null,
+      reason: null,
+      idempotencyKey: "cs-208-approval-crash-approve",
+    });
+    expect(approved.ok).toBe(true);
+
+    providerApprovalService.faultHooks.afterPolicyReserveCrash = () => {
+      throw new Error("simulated process death after execution reserve");
+    };
+    expect(
+      await providerApprovalService.resume({ intentId: queued.intentId, tenantId: CS.TENANT }),
+    ).toEqual({ ok: false, code: "RESUME_PREPARATION_FAILED", httpStatus: 503 });
+    providerApprovalService.faultHooks = {};
+    expect(
+      await getCumulativeSpendSum({
+        tenantId: CS.TENANT,
+        agentId: CS.AGENT,
+        scope: "agent",
+        scopeKey: "budget:global:count",
+        currency: "__agent_budget_count__",
+        windowSeconds: 86_400,
+      }),
+    ).toEqual({ sum: 1 });
+
+    expect(
+      await providerApprovalService.resume({ intentId: queued.intentId, tenantId: CS.TENANT }),
+    ).toMatchObject({ ok: true, status: "execution_ready" });
+    expect(
+      await getCumulativeSpendSum({
+        tenantId: CS.TENANT,
+        agentId: CS.AGENT,
+        scope: "agent",
+        scopeKey: "budget:global:count",
+        currency: "__agent_budget_count__",
+        windowSeconds: 86_400,
+      }),
+    ).toEqual({ sum: 1 });
+  });
+
   test("#240 crash after terminal commit: C2 settles persisted handles exactly once under a worker race", async () => {
     await seed({ maxBytes: 250 });
     __setReservationReconciliationFaultForTests("before_apply");
@@ -677,7 +774,7 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     expect(crashed.lastError).toContain("injected crash");
     expect(crashed.nextRetryAt).not.toBeNull();
     expect(crashed.handles).toMatchObject({
-      schemaVersion: "steward.provider-policy-reservations.v1",
+      schemaVersion: "steward.provider-policy-reservations.v2",
       generation: 1,
       phase: "decision",
       cumulativeSpend: [{ amount: 13 }],
@@ -727,6 +824,7 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     });
     expect(
       await getCumulativeSpendSum({
+        tenantId: CS.TENANT,
         agentId: CS.AGENT,
         scope: "agent",
         scopeKey: "",
@@ -743,6 +841,7 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     expect(await providerActionService.recoverUnsignedIntents(CS.TENANT, out.intentId)).toBe(0);
     expect(
       await getCumulativeSpendSum({
+        tenantId: CS.TENANT,
         agentId: CS.AGENT,
         scope: "agent",
         scopeKey: "",
@@ -770,6 +869,7 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     expect(crashed.state).toBe("pending");
     expect(
       await getCumulativeSpendSum({
+        tenantId: CS.TENANT,
         agentId: CS.AGENT,
         scope: "agent",
         scopeKey: "",
@@ -819,7 +919,13 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     // the execute-time cap gate rather than merely testing stale approval.
     expect(
       await reserveCumulativeSpend({
-        stream: { agentId: CS.AGENT, scope: "agent", scopeKey: "", currency: "BYTES" },
+        stream: {
+          tenantId: CS.TENANT,
+          agentId: CS.AGENT,
+          scope: "agent",
+          scopeKey: "",
+          currency: "BYTES",
+        },
         caps: [{ windowSeconds: 86_400, max: 100 }],
         amount: 80,
         reservationId: `concurrent-${RUN}`,
@@ -890,6 +996,7 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     providerApprovalService.faultHooks = {};
     expect(
       await getCumulativeSpendSum({
+        tenantId: CS.TENANT,
         agentId: CS.AGENT,
         scope: "agent",
         scopeKey: "",
@@ -923,6 +1030,7 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
     expect(generations[1]?.state).toBe("pending");
     expect(
       await getCumulativeSpendSum({
+        tenantId: CS.TENANT,
         agentId: CS.AGENT,
         scope: "agent",
         scopeKey: "",

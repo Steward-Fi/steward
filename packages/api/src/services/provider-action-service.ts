@@ -123,7 +123,6 @@ import {
   type CumulativeSpendScope,
   releaseCumulativeSpend,
   releaseWindowedInvoke,
-  reserveCumulativeSpend,
   reserveCumulativeSpendBatch,
   reserveWindowedInvoke,
   settleCumulativeSpend,
@@ -157,6 +156,7 @@ export interface CumulativeSpendReservationHandle {
   /** the spend-STREAM identity (scope+scopeKey+currency); NOT the cap threshold
    *  (cap edits must not orphan a reservation). */
   stream: {
+    tenantId?: string;
     agentId: string;
     scope: CumulativeSpendScope;
     scopeKey: string;
@@ -168,13 +168,16 @@ export interface CumulativeSpendReservationHandle {
 
 /** A handle to an atomic windowed-invoke (maxCalls) reservation (#206). */
 export interface WindowedInvokeReservationHandle {
+  tenantId?: string;
   agentId: string;
   operationKey: string;
   reservationId: string;
 }
 
 export interface PersistedPolicyReservationHandlesV1 {
-  schemaVersion: "steward.provider-policy-reservations.v1";
+  schemaVersion:
+    | "steward.provider-policy-reservations.v1"
+    | "steward.provider-policy-reservations.v2";
   generation: number;
   phase: "decision" | "execution";
   cumulativeSpend: CumulativeSpendReservationHandle[];
@@ -185,6 +188,9 @@ type ReservationReconciliationTarget = "settled" | "released";
 
 let reservationReconciliationFaultForTests: "before_apply" | "after_apply" | null = null;
 let providerPolicyClockForTests: (() => Date) | null = null;
+let decisionReservationCrashForTests = false;
+
+class SimulatedDecisionReservationCrash extends Error {}
 
 /** Test-only crash injection at the external-effect / DB-CAS boundary. */
 export function __setReservationReconciliationFaultForTests(
@@ -199,6 +205,12 @@ export function __setProviderPolicyClockForTests(clock: (() => Date) | null): vo
   providerPolicyClockForTests = clock;
 }
 
+/** Test-only ungraceful-death injection after Redis admission but before the
+ * create transaction can persist its intent/generation. */
+export function __setDecisionReservationCrashForTests(enabled: boolean): void {
+  decisionReservationCrashForTests = enabled;
+}
+
 function persistedReservationHandles(
   cumulativeSpend: CumulativeSpendReservationHandle[],
   windowedInvoke: WindowedInvokeReservationHandle | undefined,
@@ -207,7 +219,10 @@ function persistedReservationHandles(
 ): PersistedPolicyReservationHandlesV1 | null {
   if (cumulativeSpend.length === 0 && windowedInvoke === undefined) return null;
   return {
-    schemaVersion: "steward.provider-policy-reservations.v1",
+    // v2 makes the tenant namespace an immutable part of every Redis handle.
+    // The parser retains v1 solely so pre-rollout generations remain
+    // reconcilable during a rolling deployment.
+    schemaVersion: "steward.provider-policy-reservations.v2",
     generation,
     phase,
     cumulativeSpend,
@@ -220,7 +235,12 @@ function parsePersistedReservationHandles(
 ): PersistedPolicyReservationHandlesV1 | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const v = value as Record<string, unknown>;
-  if (v.schemaVersion !== "steward.provider-policy-reservations.v1") return null;
+  if (
+    v.schemaVersion !== "steward.provider-policy-reservations.v1" &&
+    v.schemaVersion !== "steward.provider-policy-reservations.v2"
+  )
+    return null;
+  const tenantBound = v.schemaVersion === "steward.provider-policy-reservations.v2";
   if (!Number.isSafeInteger(v.generation) || (v.generation as number) <= 0) return null;
   if (v.phase !== "decision" && v.phase !== "execution") return null;
   if (!Array.isArray(v.cumulativeSpend)) return null;
@@ -232,6 +252,7 @@ function parsePersistedReservationHandles(
     const stream = r.stream as Record<string, unknown>;
     if (
       typeof stream.agentId !== "string" ||
+      (tenantBound && typeof stream.tenantId !== "string") ||
       !["operation", "agent", "grant"].includes(String(stream.scope)) ||
       typeof stream.scopeKey !== "string" ||
       typeof stream.currency !== "string" ||
@@ -242,6 +263,7 @@ function parsePersistedReservationHandles(
       return null;
     cumulativeSpend.push({
       stream: {
+        ...(typeof stream.tenantId === "string" ? { tenantId: stream.tenantId } : {}),
         agentId: stream.agentId,
         scope: stream.scope as CumulativeSpendScope,
         scopeKey: stream.scopeKey,
@@ -261,12 +283,15 @@ function parsePersistedReservationHandles(
       return null;
     const r = v.windowedInvoke as Record<string, unknown>;
     if (
+      (r.tenantId !== undefined && typeof r.tenantId !== "string") ||
+      (tenantBound && typeof r.tenantId !== "string") ||
       typeof r.agentId !== "string" ||
       typeof r.operationKey !== "string" ||
       typeof r.reservationId !== "string"
     )
       return null;
     windowedInvoke = {
+      ...(typeof r.tenantId === "string" ? { tenantId: r.tenantId } : {}),
       agentId: r.agentId,
       operationKey: r.operationKey,
       reservationId: r.reservationId,
@@ -274,7 +299,7 @@ function parsePersistedReservationHandles(
   }
   if (cumulativeSpend.length === 0 && windowedInvoke === null) return null;
   return {
-    schemaVersion: "steward.provider-policy-reservations.v1",
+    schemaVersion: v.schemaVersion,
     generation: v.generation as number,
     phase: v.phase,
     cumulativeSpend,
@@ -856,7 +881,20 @@ class ProviderActionService {
       return await this.outcomeFromBinding(priorBinding);
     }
 
-    const intentId = `pa_${randomUUID()}`;
+    // Reservation identity must survive a process death after Redis admission
+    // but before PostgreSQL commit. Derive the intent from the already-scoped
+    // idempotency identity; the transaction advisory lock below serializes
+    // concurrent copies, while an actual crash releases the lock and lets the
+    // retry reuse (rather than double-debit) each stable Redis member.
+    const createIdentity = jcsStringify({
+      domain: "steward.provider-action-create.v2",
+      tenantId,
+      workspaceId: input.workspaceId,
+      actorAgentId,
+      operationId: operation.id,
+      idempotencyKeyHash: input.idempotencyKeyHash,
+    });
+    const intentId = `pa_${sha256HexPrefixed(createIdentity).slice("sha256:".length, 68)}`;
 
     // ── Step 2: single transaction — reload the account + operation, evaluate
     // access + policy against that fresh tx snapshot, and persist intent + binding
@@ -873,6 +911,7 @@ class ProviderActionService {
     let cumulativeSpendReservations: CumulativeSpendReservationHandle[] = [];
     let windowedInvokeReservation: WindowedInvokeReservationHandle | undefined;
     let requestHash = "";
+    let transactionReplay: typeof providerActionBindings.$inferSelect | null = null;
     const effects: {
       access: "allow" | "deny";
       policy: "not_evaluated" | "hard_deny" | "approval_required" | "allow";
@@ -881,6 +920,34 @@ class ProviderActionService {
 
     try {
       await this.db().transaction(async (tx) => {
+        // PGLite is a single-connection test harness and has no advisory-lock
+        // function. Production Postgres must serialize this identity before the
+        // locked replay check below.
+        if (process.env.STEWARD_PGLITE_MEMORY !== "true") {
+          await tx.execute(
+            sql`SELECT pg_advisory_xact_lock(hashtextextended(${`provider-action-create:${createIdentity}`}, 0))`,
+          );
+        }
+        // The optimistic lookup above may race another replica. Re-read only
+        // after taking the identity lock; if the other request committed, this
+        // invocation is a replay and must not touch Redis at all.
+        const [lockedPrior] = await tx
+          .select()
+          .from(providerActionBindings)
+          .where(
+            and(
+              eq(providerActionBindings.tenantId, tenantId),
+              eq(providerActionBindings.workspaceId, input.workspaceId),
+              eq(providerActionBindings.actorAgentId, actorAgentId),
+              eq(providerActionBindings.operationId, operation.id),
+              eq(providerActionBindings.idempotencyKeyHash, input.idempotencyKeyHash),
+            ),
+          )
+          .limit(1);
+        if (lockedPrior) {
+          transactionReplay = lockedPrior;
+          return;
+        }
         // Reload the account + operation by identity INSIDE the tx so access,
         // policy, and the persisted operation revision all read the SAME snapshot.
         // If either was concurrently deleted, the tx-scoped scope is gone: deny as
@@ -957,6 +1024,14 @@ class ProviderActionService {
             : null;
         cumulativeSpendReservations = policy?.cumulativeSpendReservations ?? [];
         windowedInvokeReservation = policy?.windowedInvokeReservation;
+        if (
+          decisionReservationCrashForTests &&
+          (cumulativeSpendReservations.length > 0 || windowedInvokeReservation !== undefined)
+        ) {
+          throw new SimulatedDecisionReservationCrash(
+            "simulated process death after Redis reserve",
+          );
+        }
 
         effects.access = access.effect;
         effects.policy =
@@ -1145,8 +1220,10 @@ class ProviderActionService {
       // reservations taken during eval so a persistence failure does not leak
       // budget. This is a KNOWN non-execution (distinct from the stub-threw
       // outcome_unknown), so release is correct + fail-closed on the deny side.
-      await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
-      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
+      if (!(e instanceof SimulatedDecisionReservationCrash)) {
+        await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
+        await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
+      }
       // A missing PR1 execution dependency (route/credential) fails approval
       // creation CLOSED (spec §5.2) — surfaced as an evidence failure so no
       // partial approval arm is ever visible.
@@ -1176,6 +1253,24 @@ class ProviderActionService {
         code: "EVIDENCE_DECISION_PERSIST_FAILED",
         httpStatus: 503,
       };
+    }
+
+    if (transactionReplay) {
+      const replay = transactionReplay as typeof providerActionBindings.$inferSelect;
+      const persistedPolicyInputDigest = (replay.requestEnvelope as Record<string, unknown>)
+        .policyInputDigest;
+      if (
+        replay.actionDigest !== actionDigest ||
+        (persistedPolicyInputDigest !== undefined &&
+          persistedPolicyInputDigest !== policyInputDigest)
+      ) {
+        return {
+          kind: "replay_conflict",
+          code: "REPLAY_IDEMPOTENCY_CONFLICT",
+          httpStatus: 409,
+        };
+      }
+      return await this.outcomeFromBinding(replay);
     }
 
     // ── Step 3: drain the required-audit outbox before the stub can run. ──
@@ -1630,6 +1725,7 @@ class ProviderActionService {
    * invoke never leaks budget.
    */
   private async reserveCumulativeSpendForInvoke(input: {
+    tenantId: string;
     rules: ProviderPolicyRule[];
     intentId: string;
     operationKey: string;
@@ -1716,6 +1812,7 @@ class ProviderActionService {
       string,
       {
         stream: {
+          tenantId: string;
           agentId: string;
           scope: "operation" | "agent" | "grant";
           scopeKey: string;
@@ -1731,6 +1828,7 @@ class ProviderActionService {
       if (!entry) {
         entry = {
           stream: {
+            tenantId: input.tenantId,
             agentId: input.agentId,
             scope: g.aggregateOver,
             scopeKey,
@@ -1747,66 +1845,45 @@ class ProviderActionService {
       }
     }
 
-    let anyDeny = false;
-    for (const { stream, caps } of streams.values()) {
-      let reserved: Awaited<ReturnType<typeof reserveCumulativeSpend>>;
-      try {
-        reserved = await reserveCumulativeSpend({
+    const entries = [...streams.values()];
+    let reserved: Awaited<ReturnType<typeof reserveCumulativeSpendBatch>>;
+    try {
+      reserved = await reserveCumulativeSpendBatch({
+        groups: entries.map(({ stream, caps }) => ({
           stream,
           caps: caps.map((c) => ({ windowSeconds: c.windowSeconds, max: c.max })),
           amount: thisSpend,
           reservationId: sha256HexPrefixed(
             jcsStringify({
-              domain: "steward.provider-reservation.v1",
+              domain: "steward.provider-reservation.v2",
+              tenantId: input.tenantId,
               intentId: input.intentId,
               generation: input.reservationGeneration,
               kind: "cumulativeSpend",
               stream,
             }),
           ),
-        });
-      } catch {
-        // Redis/parse failure => deny for every cap on this stream (missing
-        // signal). Feed cap+1 so the composer denies with CAP_EXCEEDED.
-        for (const c of caps) sums[c.bucketKey] = c.max + 1;
-        anyDeny = true;
-        continue;
-      }
-      // Map each cap's prior sum back to its bucket key.
-      caps.forEach((c, i) => {
-        sums[c.bucketKey] = reserved.priorSums[i] ?? c.max + 1;
+        })),
+      });
+    } catch {
+      // Redis/parse failure is a hard missing signal for every applicable cap.
+      for (const { caps } of entries) for (const cap of caps) sums[cap.bucketKey] = cap.max + 1;
+      return { contextSums: sums, reservations: [] };
+    }
+    entries.forEach(({ stream, caps }, groupIndex) => {
+      caps.forEach((cap, capIndex) => {
+        const prior = reserved.priorSums[groupIndex]?.[capIndex] ?? cap.max + 1;
+        sums[cap.bucketKey] = !reserved.ok && prior + thisSpend > cap.max ? cap.max + 1 : prior;
       });
       if (reserved.ok) {
         reservations.push({
           stream,
-          reservationId: reserved.reservationId as string,
+          reservationId: reserved.reservationIds?.[groupIndex] as string,
           amount: thisSpend,
         });
-      } else {
-        // Rejected: at least one cap on this stream breached. Force those buckets
-        // over their cap so the composer denies.
-        caps.forEach((c, i) => {
-          const prior = reserved.priorSums[i] ?? c.max + 1;
-          if (prior + thisSpend > c.max) sums[c.bucketKey] = c.max + 1;
-        });
-        anyDeny = true;
       }
-    }
-
-    // If ANY stream denied, release the reservations we DID take so a denied
-    // invoke never leaks budget.
-    if (anyDeny && reservations.length > 0) {
-      await Promise.all(
-        reservations.map((r) =>
-          releaseCumulativeSpend({
-            stream: r.stream,
-            reservationId: r.reservationId,
-            amount: r.amount,
-          }).catch(() => undefined),
-        ),
-      );
-      return { contextSums: sums, reservations: [] };
-    }
+    });
+    if (!reserved.ok) return { contextSums: sums, reservations: [] };
 
     return { contextSums: sums, reservations };
   }
@@ -1848,6 +1925,7 @@ class ProviderActionService {
     if (!reservation) return;
     if (outcome === "success") return; // keep the slot counted for its windows
     await releaseWindowedInvoke({
+      ...(reservation.tenantId ? { tenantId: reservation.tenantId } : {}),
       agentId: reservation.agentId,
       operationKey: reservation.operationKey,
       reservationId: reservation.reservationId,
@@ -1981,6 +2059,7 @@ class ProviderActionService {
       if (!group) {
         group = {
           stream: {
+            tenantId: input.tenantId,
             agentId: input.agentId,
             scope: "agent",
             scopeKey: `budget:${scope}:${row.dimension}`,
@@ -1998,63 +2077,39 @@ class ProviderActionService {
     const results: AgentBudgetResult[] = [];
     const exhausted: AgentBudgetResult[] = [];
     let unavailable = false;
-    const grouped = [...groups.entries()];
-    if (grouped.length === 0) {
-      return { reservations, results, exhausted, unavailable, autoFreeze: false, snapshots };
-    }
-    let reserved: Awaited<ReturnType<typeof reserveCumulativeSpendBatch>>;
+    const entries = [...groups.entries()];
+    let reserved: Awaited<ReturnType<typeof reserveCumulativeSpendBatch>> | null = null;
     try {
-      reserved = await reserveCumulativeSpendBatch(
-        grouped.map(([groupKey, group]) => ({
-          stream: group.stream,
-          caps: group.budgets.map((budget) => ({
-            windowSeconds: budget.windowSeconds,
-            max: budget.max,
+      if (entries.length > 0)
+        reserved = await reserveCumulativeSpendBatch({
+          groups: entries.map(([groupKey, group]) => ({
+            stream: { ...group.stream, tenantId: input.tenantId },
+            caps: group.budgets.map((budget) => ({
+              windowSeconds: budget.windowSeconds,
+              max: budget.max,
+            })),
+            amount: group.amount,
+            reservationId: sha256HexPrefixed(
+              jcsStringify({
+                domain: "steward.provider-agent-budget.v2",
+                tenantId: input.tenantId,
+                intentId: input.intentId,
+                generation: input.generation,
+                groupKey,
+              }),
+            ),
           })),
-          amount: group.amount,
-          reservationId: sha256HexPrefixed(
-            jcsStringify({
-              domain: "steward.provider-agent-budget.v1",
-              intentId: input.intentId,
-              generation: input.generation,
-              groupKey,
-            }),
-          ),
-        })),
-      );
+        });
     } catch {
       unavailable = true;
-      for (const [, group] of grouped) {
-        for (const budget of group.budgets) {
-          results.push({
-            budgetId: budget.id,
-            revision: budget.revision,
-            dimension: budget.dimension as "count" | "notional",
-            workspaceId: budget.workspaceId,
-            windowSeconds: budget.windowSeconds,
-            max: budget.max,
-            currency: budget.currency,
-            amount: group.amount,
-            outcome: "unavailable",
-            prior: null,
-          });
-        }
-      }
-      return {
-        reservations,
-        results,
-        exhausted,
-        unavailable,
-        autoFreeze: false,
-        snapshots,
-      };
     }
-    grouped.forEach(([, group], groupIndex) => {
-      const groupPriors = reserved.priorSums[groupIndex] ?? [];
+    entries.forEach(([groupKey, group], groupIndex) => {
       group.budgets.forEach((budget, index) => {
-        const prior = groupPriors[index];
+        const prior = reserved?.priorSums[groupIndex]?.[index];
         const breached =
-          !reserved.ok && (typeof prior !== "number" || prior + group.amount > budget.max);
+          reserved !== null &&
+          !reserved.ok &&
+          (typeof prior !== "number" || prior + group.amount > budget.max);
         const result: AgentBudgetResult = {
           budgetId: budget.id,
           revision: budget.revision,
@@ -2064,16 +2119,24 @@ class ProviderActionService {
           max: budget.max,
           currency: budget.currency,
           amount: group.amount,
-          outcome: breached ? "exhausted" : "pass",
+          outcome: unavailable ? "unavailable" : breached ? "exhausted" : "pass",
           prior: typeof prior === "number" ? prior : null,
         };
         results.push(result);
         if (breached) exhausted.push(result);
       });
-      if (reserved.ok) {
+      if (reserved?.ok) {
         reservations.push({
-          stream: group.stream,
-          reservationId: reserved.reservationIds?.[groupIndex] as string,
+          stream: { ...group.stream, tenantId: input.tenantId },
+          reservationId: sha256HexPrefixed(
+            jcsStringify({
+              domain: "steward.provider-agent-budget.v2",
+              tenantId: input.tenantId,
+              intentId: input.intentId,
+              generation: input.generation,
+              groupKey,
+            }),
+          ),
           amount: group.amount,
         });
       }
@@ -2186,6 +2249,7 @@ class ProviderActionService {
           .onConflictDoNothing();
       }
       cumulative = await this.reserveCumulativeSpendForInvoke({
+        tenantId: args.tenantId,
         rules,
         intentId: args.intentId,
         operationKey: operation.operationKey,
@@ -2195,7 +2259,6 @@ class ProviderActionService {
         policyArgs: build.policyArgs,
         reservationGeneration: args.reservationGeneration ?? 1,
       });
-
       // #206 configurable count cap (maxCalls + callWindow): ATOMICALLY reserve one
       // invoke slot against the trailing-window count so concurrent invokes cannot
       // collectively exceed maxCalls (single-winner, like the spend path; codex P2).
@@ -2216,6 +2279,7 @@ class ProviderActionService {
         const counts: Record<string, number> = {};
         windowedInvokeCounts = counts;
         const wr = await reserveWindowedInvoke({
+          tenantId: args.tenantId,
           agentId: args.actorAgentId,
           operationKey: operation.operationKey,
           caps: govMaxCalls.map((c) => ({ windowSeconds: c.windowSeconds, max: c.max })),
@@ -2242,6 +2306,7 @@ class ProviderActionService {
         });
         if (wr.ok && wr.reservationId !== undefined) {
           windowedInvokeReservation = {
+            tenantId: args.tenantId,
             agentId: args.actorAgentId,
             operationKey: operation.operationKey,
             reservationId: wr.reservationId,

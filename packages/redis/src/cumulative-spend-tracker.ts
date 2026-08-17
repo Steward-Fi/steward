@@ -78,6 +78,9 @@ const RETENTION_MS = MAX_WINDOW_SECONDS * 1000;
 /** The spend-stream identity. Editing a cap does NOT change this key, so history
  *  persists across cap edits (codex P1). */
 export interface CumulativeSpendStream {
+  /** Tenant namespace. New governed callers MUST supply it; omitted only for
+   * legacy streams that predate tenant-bound keys. */
+  tenantId?: string;
   agentId: string;
   scope: CumulativeSpendScope;
   /** operationKey for "operation" scope, grantId for "grant" scope, "" for "agent". */
@@ -118,18 +121,6 @@ export interface ReserveCumulativeSpendResult {
   reservationId?: string;
 }
 
-/** One independently-keyed stream participating in an all-or-nothing reserve. */
-export interface CumulativeSpendBatchEntry extends ReserveCumulativeSpendInput {}
-
-export interface ReserveCumulativeSpendBatchResult {
-  /** true only when every cap on every stream admits the reservation. */
-  ok: boolean;
-  /** Per-entry prior sums, in the same entry/cap order supplied by the caller. */
-  priorSums: number[][];
-  /** Stable reservation ids, present only when the whole batch is admitted. */
-  reservationIds?: string[];
-}
-
 /** Read-only trailing-window sum snapshot (advisory; enforcement is reserve). */
 export interface CumulativeSpendSnapshot {
   /** committed+reserved sum over the trailing window, integer minor units. */
@@ -141,14 +132,91 @@ function streamKey(s: CumulativeSpendStream): string {
   // delimiter-safe. Deliberately NO window/max in the key (codex P1): the stream
   // identity is the spend history, not the current cap threshold.
   const enc = (v: string) => encodeURIComponent(v);
-  // First-class agent budgets reserve several scope/dimension streams in one
-  // Lua call. Keep those keys in one Redis Cluster hash slot while preserving
-  // the established key shape (and history) for every pre-existing stream.
-  if (s.scope === "agent" && s.scopeKey.startsWith("budget:")) {
-    return `cumspend:{${enc(s.agentId)}}:${s.scope}:${enc(s.scopeKey)}:${enc(s.currency)}`;
+  if (s.tenantId) {
+    // The hash tag keeps every stream for one tenant+agent in the same Redis
+    // Cluster slot, permitting an atomic multi-stream Lua reservation.
+    return `cumspend:v2:{${enc(`${s.tenantId}|${s.agentId}`)}}:${s.scope}:${enc(s.scopeKey)}:${enc(s.currency)}`;
   }
+  // Preserve the exact legacy namespace for already-deployed callers. New
+  // governed flows always pass tenantId and therefore use v2 above.
   return `cumspend:${enc(s.agentId)}:${s.scope}:${enc(s.scopeKey)}:${enc(s.currency)}`;
 }
+
+export interface CumulativeSpendBatchGroup {
+  stream: CumulativeSpendStream & { tenantId: string };
+  caps: CumulativeSpendCap[];
+  amount: number;
+  reservationId: string;
+}
+
+export interface CumulativeSpendBatchResult {
+  ok: boolean;
+  priorSums: number[][];
+  reservationIds?: string[];
+}
+
+// Atomically checks every cap on every applicable stream, and only writes when
+// ALL streams admit. This prevents provisional holds on one stream from causing
+// a concurrent false exhaustion/freeze when another stream later denies.
+const RESERVE_BATCH_LUA = `
+local now = tonumber(ARGV[1])
+local retentionCutoff = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+local nGroups = tonumber(ARGV[4])
+local cursor = 5
+local out = {1}
+local outCursor = 2
+local parsed = {}
+for g = 1, nGroups do
+  local amount = tonumber(ARGV[cursor]); cursor = cursor + 1
+  local member = ARGV[cursor]; cursor = cursor + 1
+  local memberBar = string.find(member, '|', 1, true)
+  local reservationId = string.sub(member, 1, memberBar - 1)
+  local nCaps = tonumber(ARGV[cursor]); cursor = cursor + 1
+  redis.call('ZREMRANGEBYSCORE', KEYS[g], 0, retentionCutoff)
+  parsed[g] = {amount=amount, member=member, reservationId=reservationId}
+  for c = 1, nCaps do
+    local windowStart = tonumber(ARGV[cursor]); cursor = cursor + 1
+    local maxv = tonumber(ARGV[cursor]); cursor = cursor + 1
+    local members = redis.call('ZRANGEBYSCORE', KEYS[g], '(' .. windowStart, now)
+    local sum = 0
+    for i = 1, #members do
+      local m = members[i]
+      local firstBar = string.find(m, '|', 1, true)
+      if not firstBar then return {-1} end
+      if string.sub(m, 1, firstBar - 1) ~= reservationId then
+        local rest = string.sub(m, firstBar + 1)
+        local secondBar = string.find(rest, '|', 1, true)
+        local amtStr = secondBar and string.sub(rest, 1, secondBar - 1) or rest
+        local amt = tonumber(amtStr)
+        if amt == nil then return {-1} end
+        sum = sum + amt
+      end
+    end
+    out[outCursor] = sum; outCursor = outCursor + 1
+    if (sum + amount) > maxv then out[1] = 0 end
+  end
+end
+for g = 1, nGroups do
+  local p = parsed[g]
+  -- Remove any pre-crash member with this reservation identity, including an
+  -- older amount. This makes a changed retry replace rather than double-debit.
+  local live = redis.call('ZRANGEBYSCORE', KEYS[g], retentionCutoff, now)
+  for i = 1, #live do
+    local bar = string.find(live[i], '|', 1, true)
+    if bar and string.sub(live[i], 1, bar - 1) == p.reservationId then
+      redis.call('ZREM', KEYS[g], live[i])
+    end
+  end
+  if out[1] == 1 then
+    -- A retry adopts the orphan at the current admission time. Keeping the
+    -- pre-crash score could make a freshly committed action age out early.
+    redis.call('ZADD', KEYS[g], now, p.member)
+    redis.call('PEXPIRE', KEYS[g], ttl)
+  end
+end
+return out
+`;
 
 // ATOMIC multi-cap reserve over a rolling stream.
 //   KEYS[1] = stream key
@@ -163,9 +231,10 @@ local retentionCutoff = tonumber(ARGV[2])
 local amount = tonumber(ARGV[3])
 local ttl = tonumber(ARGV[4])
 local member = ARGV[5]
+local memberBar = string.find(member, '|', 1, true)
+local reservationId = string.sub(member, 1, memberBar - 1)
 local nCaps = tonumber(ARGV[6])
 redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, retentionCutoff)
-local existingScore = redis.call('ZSCORE', KEYS[1], member)
 local out = {1}
 local base = 6
 for c = 1, nCaps do
@@ -175,23 +244,20 @@ for c = 1, nCaps do
   local sum = 0
   for i = 1, #members do
     local m = members[i]
-    -- A retry with a stable reservation identity evaluates the projected total
-    -- exactly once: exclude its already-present member from the prior sum, then
-    -- add the requested amount below just like the first attempt.
-    if m == member then
-      -- no-op
-    else
     local firstBar = string.find(m, '|', 1, true)
     if firstBar then
-      local rest = string.sub(m, firstBar + 1)
-      local secondBar = string.find(rest, '|', 1, true)
-      local amtStr = secondBar and string.sub(rest, 1, secondBar - 1) or rest
-      local amt = tonumber(amtStr)
-      if amt == nil then return {-1} end
-      sum = sum + amt
+      -- A retry may carry a newly canonicalized amount. Exclude any member with
+      -- the same reservation identity, not only the byte-identical member.
+      if string.sub(m, 1, firstBar - 1) ~= reservationId then
+        local rest = string.sub(m, firstBar + 1)
+        local secondBar = string.find(rest, '|', 1, true)
+        local amtStr = secondBar and string.sub(rest, 1, secondBar - 1) or rest
+        local amt = tonumber(amtStr)
+        if amt == nil then return {-1} end
+        sum = sum + amt
+      end
     else
       return {-1}
-    end
     end
   end
   out[c + 1] = sum
@@ -199,13 +265,17 @@ for c = 1, nCaps do
     out[1] = 0
   end
 end
-if out[1] == 1 and not existingScore then
+local live = redis.call('ZRANGEBYSCORE', KEYS[1], retentionCutoff, now)
+for i = 1, #live do
+  local bar = string.find(live[i], '|', 1, true)
+  if bar and string.sub(live[i], 1, bar - 1) == reservationId then
+    redis.call('ZREM', KEYS[1], live[i])
+  end
+end
+if out[1] == 1 then
+  -- Refresh an adopted orphan to the authoritative retry time.
   redis.call('ZADD', KEYS[1], now, member)
   redis.call('PEXPIRE', KEYS[1], ttl)
-elseif out[1] == 0 and existingScore then
-  -- A current-policy retry no longer admits this previously orphaned member.
-  -- Remove it atomically with the denial so it cannot pin phantom budget.
-  redis.call('ZREM', KEYS[1], member)
 end
 return out
 `;
@@ -397,82 +467,53 @@ export async function reserveCumulativeSpend(
   return { ok: false, priorSums };
 }
 
-/**
- * Atomically reserve several distinct cumulative-spend streams. Redis executes
- * the Lua script as one operation: either every entry is appended or none is.
- * This is intended for one logical policy gate spanning several scopes or
- * dimensions. Callers must supply keys in one Redis Cluster hash slot (agent
- * budget keys do so automatically); duplicate stream keys are rejected because
- * caps for one stream belong in one entry.
- */
-export async function reserveCumulativeSpendBatch(
-  entries: CumulativeSpendBatchEntry[],
-): Promise<ReserveCumulativeSpendBatchResult> {
-  if (!Array.isArray(entries) || entries.length === 0) {
-    throw new Error("cumulative spend batch requires at least one entry");
-  }
-  const now = entries[0]?.now ?? Date.now();
+export async function reserveCumulativeSpendBatch(input: {
+  groups: CumulativeSpendBatchGroup[];
+  now?: number;
+}): Promise<CumulativeSpendBatchResult> {
+  if (!Array.isArray(input.groups) || input.groups.length === 0)
+    throw new Error("cumulative spend batch requires at least one group");
+  const now = input.now ?? Date.now();
   const keys: string[] = [];
   const args: string[] = [
     String(now),
     String(now - RETENTION_MS),
     String(RETENTION_MS),
-    String(entries.length),
+    String(input.groups.length),
   ];
-  const reservationIds: string[] = [];
-  const seenKeys = new Set<string>();
-  for (const entry of entries) {
-    if (entry.now !== undefined && entry.now !== now) {
-      throw new Error("cumulative spend batch entries must share one evaluation time");
+  for (const group of input.groups) {
+    if (!group.stream.tenantId) throw new Error("batch stream requires tenantId");
+    if (!isNonNegInt(group.amount)) throw new Error("invalid cumulative spend batch amount");
+    if (!group.caps.length) throw new Error("batch group requires caps");
+    if (
+      !group.reservationId ||
+      group.reservationId.length > 180 ||
+      group.reservationId.includes("|")
+    )
+      throw new Error("invalid cumulative spend batch reservationId");
+    for (const cap of group.caps) {
+      if (!isNonNegInt(cap.max) || !isValidWindow(cap.windowSeconds))
+        throw new Error("invalid cumulative spend batch cap");
     }
-    if (!isNonNegInt(entry.amount)) {
-      throw new Error(`invalid cumulative spend amount: ${entry.amount}`);
-    }
-    if (!Array.isArray(entry.caps) || entry.caps.length === 0) {
-      throw new Error("cumulative spend reserve requires at least one cap");
-    }
-    for (const cap of entry.caps) {
-      if (!isNonNegInt(cap.max)) throw new Error(`invalid cumulative spend max: ${cap.max}`);
-      if (!isValidWindow(cap.windowSeconds)) {
-        throw new Error(`invalid cumulative spend window: ${cap.windowSeconds}`);
-      }
-    }
-    if (typeof entry.stream.agentId !== "string" || entry.stream.agentId.length === 0) {
-      throw new Error("cumulative spend reserve requires agentId");
-    }
-    if (typeof entry.stream.currency !== "string" || entry.stream.currency.length === 0) {
-      throw new Error("cumulative spend reserve requires currency");
-    }
-    const key = streamKey(entry.stream);
-    if (seenKeys.has(key)) throw new Error("cumulative spend batch contains a duplicate stream");
-    seenKeys.add(key);
-    keys.push(key);
-    const reservationId = entry.reservationId ?? `${now}:${nextSeq()}`;
-    if (reservationId.length === 0 || reservationId.length > 200 || reservationId.includes("|")) {
-      throw new Error("invalid cumulative spend reservationId");
-    }
-    reservationIds.push(reservationId);
-    args.push(
-      String(entry.amount),
-      `${reservationId}|${entry.amount}|reserved`,
-      String(entry.caps.length),
-    );
-    for (const cap of entry.caps) {
+    keys.push(streamKey(group.stream));
+    const member = `${group.reservationId}|${group.amount}|reserved`;
+    args.push(String(group.amount), member, String(group.caps.length));
+    for (const cap of group.caps) {
       args.push(String(now - cap.windowSeconds * 1000), String(cap.max));
     }
   }
-
   const redis = getRedis();
   const raw = (await redis.eval(RESERVE_BATCH_LUA, keys.length, ...keys, ...args)) as number[];
   if (raw[0] === -1) throw new Error("cumulative spend stream contained a corrupt member");
-  let offset = 1;
-  const priorSums = entries.map((entry) => {
-    const sums = raw.slice(offset, offset + entry.caps.length);
-    offset += entry.caps.length;
-    return sums;
+  let cursor = 1;
+  const priorSums = input.groups.map((group) => {
+    const values = raw.slice(cursor, cursor + group.caps.length);
+    cursor += group.caps.length;
+    return values;
   });
-  if (raw[0] === 1) return { ok: true, priorSums, reservationIds };
-  return { ok: false, priorSums };
+  return raw[0] === 1
+    ? { ok: true, priorSums, reservationIds: input.groups.map((g) => g.reservationId) }
+    : { ok: false, priorSums };
 }
 
 /**
@@ -549,6 +590,7 @@ export async function getCumulativeSpendSum(
  * { ok:false } on a Redis error (fail closed).
  */
 export async function reserveWindowedInvoke(input: {
+  tenantId?: string;
   agentId: string;
   operationKey: string;
   caps: CumulativeSpendCap[];
@@ -565,6 +607,7 @@ export async function reserveWindowedInvoke(input: {
   try {
     const res = await reserveCumulativeSpend({
       stream: {
+        ...(input.tenantId ? { tenantId: input.tenantId } : {}),
         agentId: input.agentId,
         scope: "operation",
         scopeKey: input.operationKey,
@@ -589,12 +632,14 @@ export async function reserveWindowedInvoke(input: {
  * Release a windowed-invoke reservation slot (KNOWN-FAILURE outcome only).
  */
 export async function releaseWindowedInvoke(input: {
+  tenantId?: string;
   agentId: string;
   operationKey: string;
   reservationId: string;
 }): Promise<void> {
   await releaseCumulativeSpend({
     stream: {
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
       agentId: input.agentId,
       scope: "operation",
       scopeKey: input.operationKey,
@@ -610,12 +655,14 @@ export async function releaseWindowedInvoke(input: {
  * Enforcement is reserveWindowedInvoke (atomic). Returns null on failure.
  */
 export async function getWindowedInvokeCount(input: {
+  tenantId?: string;
   agentId: string;
   operationKey: string;
   windowSeconds: number;
   now?: number;
 }): Promise<number | null> {
   const snap = await getCumulativeSpendSum({
+    ...(input.tenantId ? { tenantId: input.tenantId } : {}),
     agentId: input.agentId,
     scope: "operation",
     scopeKey: input.operationKey,
