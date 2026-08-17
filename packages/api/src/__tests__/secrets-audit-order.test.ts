@@ -40,8 +40,8 @@ describe("secret route audit ordering", () => {
     expect(routeSource).toContain("Unknown secret route field");
     expect(updateRoute).toContain("const parsedUpdate = parseSecretRouteUpdate(body)");
     expect(updateRoute).toContain("const update = parsedUpdate.value");
-    expect(updateRoute).toContain("sv.updateRoute(tenantId, routeId, update)");
-    expect(updateRoute).not.toContain("sv.updateRoute(tenantId, routeId, body)");
+    expect(updateRoute).toContain("sv.updateRouteWithinTx(tx, tenantId, routeId, update)");
+    expect(updateRoute).not.toContain("sv.updateRouteWithinTx(tx, tenantId, routeId, body)");
   });
 
   it("rolls back reversible secret mutations when final audit writes fail", () => {

@@ -62,7 +62,7 @@ export interface CreateSecretOptions {
  * *WithinTx helpers so a caller can rotate a secret inside its OWN transaction
  * without a nested `db.transaction` (which deadlocks single-connection PGLite).
  */
-type SecretTxExecutor = DbBase | Parameters<Parameters<DbBase["transaction"]>[0]>[0];
+export type SecretTxExecutor = DbBase | Parameters<Parameters<DbBase["transaction"]>[0]>[0];
 type DbBase = ReturnType<typeof getDb>;
 
 export class SecretVault {
@@ -438,7 +438,28 @@ export class SecretVault {
       approvalConfig?: Record<string, unknown>;
     },
   ): Promise<SecretRoute> {
-    const db = getDb();
+    return this.createRouteWithinTx(getDb(), tenantId, secretId, config);
+  }
+
+  /** Create a route inside a caller-owned transaction. */
+  async createRouteWithinTx(
+    db: SecretTxExecutor,
+    tenantId: string,
+    secretId: string,
+    config: {
+      agentId: string;
+      hostPattern: string;
+      pathPattern?: string;
+      method?: string;
+      injectAs: string;
+      injectKey: string;
+      injectFormat?: string;
+      priority?: number;
+      enabled?: boolean;
+      requiresApproval?: boolean;
+      approvalConfig?: Record<string, unknown>;
+    },
+  ): Promise<SecretRoute> {
     const normalizedConfig = {
       ...config,
       hostPattern: config.hostPattern.trim().toLowerCase(),
@@ -452,7 +473,13 @@ export class SecretVault {
     if (validationError) throw new Error(validationError);
 
     // Verify secret exists and belongs to tenant
-    const secret = await this.getSecretById(tenantId, secretId);
+    const [secret] = await db
+      .select()
+      .from(secrets)
+      .where(
+        and(eq(secrets.id, secretId), eq(secrets.tenantId, tenantId), isNull(secrets.deletedAt)),
+      )
+      .limit(1);
     if (!secret) {
       throw new Error(`Secret ${secretId} not found for tenant ${tenantId}`);
     }
@@ -525,7 +552,28 @@ export class SecretVault {
       approvalConfig: Record<string, unknown>;
     }>,
   ): Promise<SecretRoute | null> {
-    const db = getDb();
+    return this.updateRouteWithinTx(getDb(), tenantId, routeId, updates);
+  }
+
+  /** Update a route inside a caller-owned transaction. */
+  async updateRouteWithinTx(
+    db: SecretTxExecutor,
+    tenantId: string,
+    routeId: string,
+    updates: Partial<{
+      hostPattern: string;
+      agentId: string;
+      pathPattern: string;
+      method: string;
+      injectAs: string;
+      injectKey: string;
+      injectFormat: string;
+      priority: number;
+      enabled: boolean;
+      requiresApproval: boolean;
+      approvalConfig: Record<string, unknown>;
+    }>,
+  ): Promise<SecretRoute | null> {
     const allowedUpdates: typeof updates = {};
     for (const key of [
       "hostPattern",
@@ -543,7 +591,12 @@ export class SecretVault {
       if (updates[key] !== undefined) allowedUpdates[key] = updates[key] as never;
     }
     if (Object.keys(allowedUpdates).length === 0) {
-      return this.getRoute(tenantId, routeId);
+      const [unchanged] = await db
+        .select()
+        .from(secretRoutes)
+        .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)))
+        .limit(1);
+      return unchanged ?? null;
     }
     // Partial-patch validation: skip per-host strictness here (the patch may not
     // carry method/path). The merged pass below enforces strict-host rules.
@@ -560,7 +613,11 @@ export class SecretVault {
     // moot — and blocking it would prevent an admin from disabling a legacy
     // strict-host route that predates these rules (a safety-REDUCING action must
     // never be blocked by a stricter narrowness rule).
-    const current = await this.getRoute(tenantId, routeId);
+    const [current] = await db
+      .select()
+      .from(secretRoutes)
+      .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)))
+      .limit(1);
     const willBeEnabled = allowedUpdates.enabled ?? current?.enabled ?? true;
     if (current && willBeEnabled) {
       const mergedValidationError = validateSecretRouteConfig({

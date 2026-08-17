@@ -31,6 +31,12 @@ import {
   sanitizeErrorMessage,
   setNoStoreHeaders,
 } from "../services/context";
+import {
+  assertGovernedRouteUpdateIsSafe,
+  assertNoOppositeAuthorityOverlap,
+  lockSecretRouteNamespaces,
+  SecretRouteAuthorityConflict,
+} from "../services/secret-route-authority";
 
 export const secretsRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -470,18 +476,26 @@ secretsRoutes.post("/routes", async (c) => {
         approvalConfig: routeInput.approvalConfig ?? {},
       },
     });
-    const route = await sv.createRoute(tenantId, routeInput.secretId, {
-      agentId: routeInput.agentId,
-      hostPattern: routeInput.hostPattern,
-      pathPattern: routeInput.pathPattern,
-      method: routeInput.method,
-      injectAs: routeInput.injectAs,
-      injectKey: routeInput.injectKey,
-      injectFormat: routeInput.injectFormat,
-      priority: routeInput.priority,
-      enabled: routeInput.enabled,
-      requiresApproval: routeInput.requiresApproval,
-      approvalConfig: routeInput.approvalConfig,
+    const route = await getVaultDb().transaction(async (tx) => {
+      await lockSecretRouteNamespaces(tx, tenantId, [routeInput.agentId]);
+      const created = await sv.createRouteWithinTx(tx, tenantId, routeInput.secretId, {
+        agentId: routeInput.agentId,
+        hostPattern: routeInput.hostPattern,
+        pathPattern: routeInput.pathPattern,
+        method: routeInput.method,
+        injectAs: routeInput.injectAs,
+        injectKey: routeInput.injectKey,
+        injectFormat: routeInput.injectFormat,
+        priority: routeInput.priority,
+        enabled: routeInput.enabled,
+        requiresApproval: routeInput.requiresApproval,
+        approvalConfig: routeInput.approvalConfig,
+      });
+      await assertNoOppositeAuthorityOverlap(tx, {
+        ...created,
+        agentId: routeInput.agentId,
+      });
+      return created;
     });
     try {
       await writeSecretsAudit(c, {
@@ -512,6 +526,9 @@ secretsRoutes.post("/routes", async (c) => {
     return c.json<ApiResponse>({ ok: true, data: route }, 201);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Unknown error";
+    if (e instanceof SecretRouteAuthorityConflict) {
+      return c.json<ApiResponse>({ ok: false, error: msg }, 409);
+    }
     if (msg.includes("not found")) {
       return c.json<ApiResponse>({ ok: false, error: msg }, 404);
     }
@@ -573,6 +590,12 @@ secretsRoutes.put("/routes/:id", async (c) => {
   if (!existing) {
     return c.json<ApiResponse>({ ok: false, error: "Route not found" }, 404);
   }
+  try {
+    assertGovernedRouteUpdateIsSafe(existing, update);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Route update conflicts with governed authority";
+    return c.json<ApiResponse>({ ok: false, error: msg }, 409);
+  }
   // Fail-closed re-validation against the MERGED config. A partial update (e.g.
   // changing only pathPattern or method) is validated in isolation above and so
   // would not trigger per-host strictness for a route that already targets a
@@ -607,7 +630,47 @@ secretsRoutes.put("/routes/:id", async (c) => {
     resourceId: routeId,
     metadata: { before: existing, updates: update },
   });
-  const updated = await sv.updateRoute(tenantId, routeId, update);
+  let updated: Awaited<ReturnType<typeof sv.updateRoute>>;
+  try {
+    updated = await getVaultDb().transaction(async (tx) => {
+      const [currentBeforeLock] = await tx
+        .select()
+        .from(secretRouteRows)
+        .where(and(eq(secretRouteRows.id, routeId), eq(secretRouteRows.tenantId, tenantId)))
+        .limit(1);
+      if (!currentBeforeLock) return null;
+      if (!currentBeforeLock.agentId) {
+        throw new SecretRouteAuthorityConflict("route has no agent namespace");
+      }
+      const destinationAgentId = update.agentId ?? currentBeforeLock.agentId;
+      await lockSecretRouteNamespaces(tx, tenantId, [
+        currentBeforeLock.agentId,
+        destinationAgentId,
+      ]);
+      const [current] = await tx
+        .select()
+        .from(secretRouteRows)
+        .where(and(eq(secretRouteRows.id, routeId), eq(secretRouteRows.tenantId, tenantId)))
+        .limit(1);
+      if (!current || current.agentId !== currentBeforeLock.agentId) {
+        throw new SecretRouteAuthorityConflict("route changed during update");
+      }
+      assertGovernedRouteUpdateIsSafe(current, update);
+      const changed = await sv.updateRouteWithinTx(tx, tenantId, routeId, update);
+      if (changed) {
+        await assertNoOppositeAuthorityOverlap(tx, {
+          ...changed,
+          agentId: destinationAgentId,
+        });
+      }
+      return changed;
+    });
+  } catch (e) {
+    if (e instanceof SecretRouteAuthorityConflict) {
+      return c.json<ApiResponse>({ ok: false, error: e.message }, 409);
+    }
+    throw e;
+  }
 
   if (!updated) {
     return c.json<ApiResponse>({ ok: false, error: "Route not found" }, 404);

@@ -23,9 +23,17 @@ import {
   type ProviderEnvironment,
   type ProviderPrincipalType,
   type ProviderRiskClass,
+  secretRouteHostPatternsOverlap,
+  secretRouteMethodPatternsOverlap,
+  secretRoutePathPatternsOverlap,
   validateGenericHttpDescriptor,
 } from "@stwd/shared";
 import { and, eq, inArray, sql } from "drizzle-orm";
+import {
+  assertNoOppositeAuthorityOverlap,
+  lockSecretRouteNamespaces,
+  SecretRouteAuthorityConflict,
+} from "./secret-route-authority";
 
 const RECENT_MFA_MS = 5 * 60_000;
 const OPERATION_KEY = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_]*)+$/;
@@ -147,24 +155,6 @@ function operationIncluded(keys: string[], operationKey: string): boolean {
 function subset(candidate: string[], allowed: string[]): boolean {
   const set = new Set(allowed);
   return candidate.every((key) => set.has(key));
-}
-
-function routePatternsOverlap(a: string, b: string, kind: "host" | "path"): boolean {
-  if (a === b || a === "*" || b === "*") return true;
-  if (kind === "host") {
-    const suffixA = a.startsWith("*.") ? a.slice(1) : null;
-    const suffixB = b.startsWith("*.") ? b.slice(1) : null;
-    if (suffixA && suffixB) return suffixA.endsWith(suffixB) || suffixB.endsWith(suffixA);
-    if (suffixA) return b.endsWith(suffixA) && b.length > suffixA.length;
-    if (suffixB) return a.endsWith(suffixB) && a.length > suffixB.length;
-    return false;
-  }
-  const prefixA = a === "/*" ? "/" : a.endsWith("/*") ? a.slice(0, -1) : null;
-  const prefixB = b === "/*" ? "/" : b.endsWith("/*") ? b.slice(0, -1) : null;
-  if (prefixA && prefixB) return prefixA.startsWith(prefixB) || prefixB.startsWith(prefixA);
-  if (prefixA) return b.startsWith(prefixA);
-  if (prefixB) return a.startsWith(prefixB);
-  return false;
 }
 
 export class ProviderAuthorityStore {
@@ -688,6 +678,8 @@ export class ProviderAuthorityStore {
       const promotedPath = genericDescriptor
         ? genericDescriptorGovernedRoutePattern(genericDescriptor)
         : route.pathPattern;
+      // This early overlap check is only a fast rejection. The transaction below
+      // repeats it after locking the agent's route namespace.
       const siblings = await this.db()
         .select()
         .from(secretRoutes)
@@ -698,17 +690,15 @@ export class ProviderAuthorityStore {
             eq(secretRoutes.enabled, true),
           ),
         );
-      const ambiguous = siblings.some((candidate) => {
-        if (candidate.id === route.id) return false;
-        const leftMethod = (candidate.method ?? "*").toUpperCase();
-        const rightMethod = (route.method ?? "*").toUpperCase();
-        return (
-          (leftMethod === "*" || rightMethod === "*" || leftMethod === rightMethod) &&
-          routePatternsOverlap(candidate.hostPattern, route.hostPattern, "host") &&
-          routePatternsOverlap(candidate.pathPattern ?? "/*", promotedPath ?? "/*", "path")
-        );
-      });
-      if (ambiguous) {
+      if (
+        siblings.some(
+          (candidate) =>
+            candidate.id !== route.id &&
+            secretRouteMethodPatternsOverlap(candidate.method, route.method) &&
+            secretRouteHostPatternsOverlap(candidate.hostPattern, route.hostPattern) &&
+            secretRoutePathPatternsOverlap(candidate.pathPattern ?? "/*", promotedPath ?? "/*"),
+        )
+      ) {
         throw new ProviderAuthorityError(
           "credential route overlaps another enabled route for this agent",
           "forbidden",
@@ -730,6 +720,82 @@ export class ProviderAuthorityStore {
       },
     });
     return this.db().transaction(async (tx) => {
+      if (input.secretRouteId) {
+        const [routeBeforeLock] = await tx
+          .select()
+          .from(secretRoutes)
+          .where(
+            and(
+              eq(secretRoutes.tenantId, ctx.tenantId),
+              eq(secretRoutes.id, input.secretRouteId),
+              eq(secretRoutes.enabled, true),
+            ),
+          )
+          .limit(1);
+        if (!routeBeforeLock?.agentId) {
+          throw new ProviderAuthorityError(
+            "credential route changed during operation registration",
+            "revision_conflict",
+            409,
+          );
+        }
+        await lockSecretRouteNamespaces(tx, ctx.tenantId, [routeBeforeLock.agentId]);
+        const [route] = await tx
+          .select()
+          .from(secretRoutes)
+          .where(
+            and(
+              eq(secretRoutes.tenantId, ctx.tenantId),
+              eq(secretRoutes.id, input.secretRouteId),
+              eq(secretRoutes.enabled, true),
+            ),
+          )
+          .limit(1);
+        const credentialSecretId = account.credentialSecretId;
+        const expectedHost = genericDescriptor
+          ? new URL(genericDescriptor.origin).hostname
+          : PROVIDER_HOST_ALLOWLIST[account.adapterKey];
+        const method = route?.method?.toUpperCase();
+        const pathAllowed = genericDescriptor
+          ? Boolean(
+              route?.pathPattern &&
+                genericDescriptorAllowsExactPath(genericDescriptor, route.pathPattern),
+            )
+          : Boolean(route?.pathPattern && !route.pathPattern.includes("*"));
+        if (
+          !credentialSecretId ||
+          !route ||
+          route.agentId !== routeBeforeLock.agentId ||
+          route.secretId !== credentialSecretId ||
+          route.authorityMode !== "legacy" ||
+          route.providerOperationId !== null ||
+          route.hostPattern !== expectedHost ||
+          !method ||
+          !allowedMethods.includes(method) ||
+          !pathAllowed
+        ) {
+          throw new ProviderAuthorityError(
+            "credential route changed during operation registration",
+            "revision_conflict",
+            409,
+          );
+        }
+        try {
+          await assertNoOppositeAuthorityOverlap(tx, {
+            ...route,
+            agentId: routeBeforeLock.agentId,
+            authorityMode: "governed_v2",
+            pathPattern: genericDescriptor
+              ? genericDescriptorGovernedRoutePattern(genericDescriptor)
+              : route.pathPattern,
+          });
+        } catch (error) {
+          if (error instanceof SecretRouteAuthorityConflict) {
+            throw new ProviderAuthorityError(error.message, "forbidden", 403);
+          }
+          throw error;
+        }
+      }
       const [cas] = await tx
         .update(providerAccounts)
         .set({ revision: account.revision + 1, updatedAt: new Date() })
