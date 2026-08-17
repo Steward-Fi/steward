@@ -106,7 +106,23 @@ services:
     restart: unless-stopped
     networks:
       - milady-isolated
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    # AOF persistence + bounded memory: this Redis holds the spend-limit and
+    # rate-limit enforcement counters. Without persistence any restart
+    # (redeploy, OOM, crash) silently zeroes them and agent financial policies
+    # go unenforced until counters rebuild (SEC-021). Mirrors the root
+    # docker-compose.yml settings.
+    command:
+      - "redis-server"
+      - "--appendonly"
+      - "yes"
+      - "--appendfsync"
+      - "everysec"
+      - "--maxmemory"
+      - "256mb"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+    volumes:
+      - steward-redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -138,6 +154,8 @@ volumes:
   steward-data:
     driver: local
   steward-pgdata:
+    driver: local
+  steward-redis-data:
     driver: local
 
 # ── Networks ─────────────────────────────────────────────────────────────────

@@ -101,6 +101,29 @@ describe("#101 deploy/DEPLOYMENT.md docs reconciled with fail-closed code", () =
   });
 });
 
+describe("SEC-021 deploy/docker-compose.yml redis persists enforcement counters", () => {
+  const compose = read("docker-compose.yml");
+
+  test("redis runs with AOF persistence and a bounded memory policy", () => {
+    // Redis holds spend-limit / rate-limit counters. Pre-fix it ran
+    // `--save "" --appendonly no` with no maxmemory: any restart silently
+    // zeroed daily-spend and rate-limit counters while the proxy kept
+    // serving, leaving financial policies unenforced.
+    expect(compose).not.toContain('"--appendonly", "no"');
+    expect(compose).toContain('"--appendonly"');
+    expect(compose).toContain('"yes"');
+    expect(compose).toContain('"--appendfsync"');
+    expect(compose).toContain('"everysec"');
+    expect(compose).toContain('"--maxmemory"');
+    expect(compose).toContain('"--maxmemory-policy"');
+  });
+
+  test("redis AOF data dir is on a named volume", () => {
+    expect(/steward-redis-data:\s*\/data/.test(compose)).toBe(true);
+    expect(/^\s{2}steward-redis-data:\s*$/m.test(compose)).toBe(true);
+  });
+});
+
 describe("SEC-020 deploy/migrate-agent-keys.sh keeps the platform key off every argv", () => {
   const script = read("migrate-agent-keys.sh");
 
