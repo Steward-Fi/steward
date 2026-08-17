@@ -53,25 +53,21 @@ describe("secret route audit ordering", () => {
 
     const createRoute = routeBody('secretsRoutes.post("/routes"', "/** GET /secrets/routes");
     expect(createRoute).toContain('action: "secret_route.create"');
-    expect(createRoute).toContain("sv.deleteRoute(tenantId, route.id)");
+    expect(createRoute).toContain("compensateCreatedSecretRoute(getVaultDb(), route)");
 
     const updateRoute = routeBody(
       'secretsRoutes.put("/routes/:id"',
       "/** DELETE /secrets/routes/:id",
     );
     expect(updateRoute).toContain('action: "secret_route.update"');
-    expect(updateRoute).toContain(".update(secretRouteRows)");
-    expect(updateRoute).toContain("hostPattern: existing.hostPattern");
-    expect(updateRoute).toContain("injectFormat: existing.injectFormat");
+    expect(updateRoute).toContain("compensateUpdatedSecretRoute(getVaultDb(), existing, updated)");
 
     const deleteRoute = routeBody(
       'secretsRoutes.delete("/routes/:id"',
       "// ─── Secret CRUD (by ID)",
     );
     expect(deleteRoute).toContain('action: "secret_route.delete"');
-    expect(deleteRoute).toContain(".insert(secretRouteRows).values");
-    expect(deleteRoute).toContain("id: existing.id");
-    expect(deleteRoute).toContain("secretId: existing.secretId");
+    expect(deleteRoute).toContain("compensateDeletedSecretRoute(getVaultDb(), existing)");
 
     for (const marker of ['secretsRoutes.put("/:id"', 'secretsRoutes.post("/:id/rotate"']) {
       const rotateRoute = routeSource.slice(routeSource.indexOf(marker));

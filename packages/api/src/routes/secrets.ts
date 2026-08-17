@@ -34,6 +34,9 @@ import {
 import {
   assertGovernedRouteUpdateIsSafe,
   assertNoOppositeAuthorityOverlap,
+  compensateCreatedSecretRoute,
+  compensateDeletedSecretRoute,
+  compensateUpdatedSecretRoute,
   lockSecretRouteNamespaces,
   SecretRouteAuthorityConflict,
 } from "../services/secret-route-authority";
@@ -520,7 +523,7 @@ secretsRoutes.post("/routes", async (c) => {
         },
       });
     } catch (err) {
-      await sv.deleteRoute(tenantId, route.id);
+      await compensateCreatedSecretRoute(getVaultDb(), route);
       throw err;
     }
     return c.json<ApiResponse>({ ok: true, data: route }, 201);
@@ -687,25 +690,7 @@ secretsRoutes.put("/routes/:id", async (c) => {
       metadata: { before: existing, after: updated },
     });
   } catch (err) {
-    await getVaultDb()
-      .update(secretRouteRows)
-      .set({
-        tenantId: existing.tenantId,
-        agentId: existing.agentId,
-        secretId: existing.secretId,
-        hostPattern: existing.hostPattern,
-        pathPattern: existing.pathPattern,
-        method: existing.method,
-        injectAs: existing.injectAs,
-        injectKey: existing.injectKey,
-        injectFormat: existing.injectFormat,
-        priority: existing.priority,
-        enabled: existing.enabled,
-        requiresApproval: existing.requiresApproval,
-        approvalConfig: existing.approvalConfig,
-        createdAt: existing.createdAt,
-      })
-      .where(and(eq(secretRouteRows.id, routeId), eq(secretRouteRows.tenantId, tenantId)));
+    await compensateUpdatedSecretRoute(getVaultDb(), existing, updated);
     throw err;
   }
 
@@ -750,21 +735,7 @@ secretsRoutes.delete("/routes/:id", async (c) => {
       metadata: { deleted: existing },
     });
   } catch (err) {
-    await getVaultDb().insert(secretRouteRows).values({
-      id: existing.id,
-      tenantId: existing.tenantId,
-      agentId: existing.agentId,
-      secretId: existing.secretId,
-      hostPattern: existing.hostPattern,
-      pathPattern: existing.pathPattern,
-      method: existing.method,
-      injectAs: existing.injectAs,
-      injectKey: existing.injectKey,
-      injectFormat: existing.injectFormat,
-      priority: existing.priority,
-      enabled: existing.enabled,
-      createdAt: existing.createdAt,
-    });
+    await compensateDeletedSecretRoute(getVaultDb(), existing);
     throw err;
   }
 
