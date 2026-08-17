@@ -603,11 +603,15 @@ function rebuildApprovedAction(
   }
   if (operationKey === "google.gmail.messages.send") {
     const raw = typeof body?.raw === "string" ? body.raw : "";
-    const padded = raw.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(raw.length / 4) * 4, "=");
+    const padded = raw
+      .replace(/-/g, "+")
+      .replace(/_/g, "/")
+      .padEnd(Math.ceil(raw.length / 4) * 4, "=");
     const message = Buffer.from(padded, "base64").toString("utf8");
-    const match = /^To: ([^\r\n]+)\r\nSubject: ([^\r\n]+)\r\nContent-Type: text\/plain; charset=utf-8\r\nMIME-Version: 1\.0\r\n\r\n([\s\S]+)$/.exec(
-      message,
-    );
+    const match =
+      /^To: ([^\r\n]+)\r\nSubject: ([^\r\n]+)\r\nContent-Type: text\/plain; charset=utf-8\r\nMIME-Version: 1\.0\r\n\r\n([\s\S]+)$/.exec(
+        message,
+      );
     return buildGoogleAction(operationKey as GoogleOperationKey, {
       to: match?.[1]?.split(", "),
       subject: match?.[2],
