@@ -310,7 +310,17 @@ export async function appendAuditEventWithinTx(
   // postgres-js does not auto-stringify Date objects in raw sql template
   // params. Convert to ISO and cast on the SQL side instead. See dcf772e.
   const createdAtIso = createdAt.toISOString();
-  const metadata = redactWebhookSecrets(ev.metadata ?? {});
+  // SEC-089: normalize metadata through the SAME canonicalization that feeds
+  // the HMAC preimage. canonicalJsonValue maps undefined → null (key kept)
+  // while JSON.stringify drops undefined-valued keys, so persisting the
+  // un-normalized form stored a row that could never re-canonicalize to its
+  // written HMAC — verification failed from that seq onward, indistinguishable
+  // from tampering. Persisting the canonicalized form makes HMAC and INSERT
+  // commit to identical bytes.
+  const metadata = canonicalJsonValue(redactWebhookSecrets(ev.metadata ?? {})) as Record<
+    string,
+    unknown
+  >;
   const canonical = canonicalize({
     tenant_id: ev.tenantId,
     seq,
