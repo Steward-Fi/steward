@@ -603,6 +603,11 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
 
     const retried = await proposeTweet("direct-crash", "cs-208-direct-crash");
     expect(retried.kind).toBe("allowed");
+    if (retried.kind === "allowed") {
+      expect(retried.intentId).toMatch(
+        /^pa_[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+    }
     expect(
       await getCumulativeSpendSum({
         tenantId: CS.TENANT,

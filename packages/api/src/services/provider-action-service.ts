@@ -153,6 +153,23 @@ function primaryPolicyDenialReason(doc: PersistedPolicyDecisionV1): string {
 }
 
 /**
+ * Turn a stable creation identity into the provider-action id shape exposed by
+ * every public status/case/evidence route. UUIDv8 is the RFC 9562 custom UUID
+ * space: the digest supplies 122 collision-resistant bits while the version
+ * and variant nibbles keep the identifier compatible with the established
+ * `pa_<uuid>` contract. This preserves crash-stable Redis reservation members
+ * without creating an id that the public readers must reject.
+ */
+function stableProviderActionId(createIdentity: string): string {
+  const digest = sha256HexPrefixed(createIdentity).slice("sha256:".length);
+  const custom = `${digest.slice(0, 12)}8${digest.slice(13, 16)}${(
+    8 | (Number.parseInt(digest[16], 16) & 3)
+  ).toString(16)}${digest.slice(17, 32)}`;
+  const uuid = `${custom.slice(0, 8)}-${custom.slice(8, 12)}-${custom.slice(12, 16)}-${custom.slice(16, 20)}-${custom.slice(20, 32)}`;
+  return `pa_${uuid}`;
+}
+
+/**
  * A handle to an atomic cumulative-spend reservation (#206). #240 persists this
  * exact identity on the binding so a known outcome can be reconciled after a
  * process crash. On outcome_unknown the sweeper deliberately does NEITHER - the
@@ -903,7 +920,7 @@ class ProviderActionService {
       operationId: operation.id,
       idempotencyKeyHash: input.idempotencyKeyHash,
     });
-    const intentId = `pa_${sha256HexPrefixed(createIdentity).slice("sha256:".length, 68)}`;
+    const intentId = stableProviderActionId(createIdentity);
 
     // ── Step 2: single transaction — reload the account + operation, evaluate
     // access + policy against that fresh tx snapshot, and persist intent + binding
