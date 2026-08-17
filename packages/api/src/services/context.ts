@@ -268,7 +268,9 @@ export async function safeJsonParse<T>(c: Context): Promise<T | null> {
 
 export function sanitizeErrorMessage(error: unknown): string {
   if (error instanceof Error) {
-    const safe = ["already exists", "not found", "Unsupported chain"];
+    // Client-safe messages deliberately thrown for the caller (SEC-210): keep
+    // this list tight — everything else collapses to a generic 500 message.
+    const safe = ["already exists", "not found", "Unsupported chain", "not mnemonic-recoverable"];
     if (safe.some((s) => error.message.includes(s))) return error.message;
   }
   return "Internal server error";

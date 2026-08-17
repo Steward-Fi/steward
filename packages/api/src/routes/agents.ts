@@ -1012,8 +1012,10 @@ agentRoutes.post("/", async (c) => {
     }
     return c.json<ApiResponse<AgentIdentity>>({ ok: true, data: identity });
   } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "Unknown error";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+    // SEC-210: never return raw internal error text (DB constraint names, RPC
+    // endpoint details); sanitizeErrorMessage passes through only known-safe
+    // client-facing messages.
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 400);
   }
 });
 
@@ -1163,10 +1165,7 @@ agentRoutes.post("/pregenerated", async (c) => {
     return c.json<ApiResponse>(
       {
         ok: false,
-        error:
-          error instanceof Error
-            ? `Failed to create pregenerated wallets: ${error.message}`
-            : "Failed to create pregenerated wallets",
+        error: `Failed to create pregenerated wallets: ${sanitizeErrorMessage(error)}`,
       },
       500,
     );
@@ -1616,8 +1615,10 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
       }>
     >({ ok: true, data: { ...wallet, metadata: redactWalletMetadataSecrets(wallet.metadata) } });
   } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "Unknown error";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+    // SEC-210: never return raw internal error text (DB constraint names, RPC
+    // endpoint details); sanitizeErrorMessage passes through only known-safe
+    // client-facing messages.
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 400);
   }
 });
 
@@ -2017,8 +2018,10 @@ agentRoutes.get("/:agentId/balance", async (c) => {
       },
     });
   } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "Unknown error";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+    // SEC-210: never return raw internal error text (DB constraint names, RPC
+    // endpoint details); sanitizeErrorMessage passes through only known-safe
+    // client-facing messages.
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 400);
   }
 });
 
@@ -2074,8 +2077,10 @@ agentRoutes.get("/:agentId/tokens", async (c) => {
       },
     });
   } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "Unknown error";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+    // SEC-210: never return raw internal error text (DB constraint names, RPC
+    // endpoint details); sanitizeErrorMessage passes through only known-safe
+    // client-facing messages.
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 400);
   }
 });
 
