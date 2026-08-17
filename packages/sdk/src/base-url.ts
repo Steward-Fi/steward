@@ -26,6 +26,9 @@ export function assertSecureBaseUrl(baseUrl: string, allowInsecureBaseUrl?: bool
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error("baseUrl must use HTTPS or HTTP");
   }
+  if (url.username || url.password) {
+    throw new Error("baseUrl must not embed credentials");
+  }
   if (url.protocol === "https:" || (url.protocol === "http:" && isLoopbackHostname(url.hostname))) {
     return;
   }

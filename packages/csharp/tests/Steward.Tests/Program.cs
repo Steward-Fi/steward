@@ -131,7 +131,7 @@ namespace StewardTests
         {
             // SEC-200: credentials must never travel to a plaintext non-loopback
             // endpoint unless the operator explicitly opts out.
-            foreach (var baseUrl in new[] { "http://api.example.test", "http://192.168.1.10:3200", "ftp://api.example.test", "not-a-url" })
+            foreach (var baseUrl in new[] { "http://api.example.test", "http://192.168.1.10:3200", "ftp://api.example.test", "not-a-url", "https://user:secret@api.example.test" })
             {
                 try
                 {
@@ -140,7 +140,7 @@ namespace StewardTests
                 }
                 catch (ArgumentException error)
                 {
-                    Assert(error.Message.Contains("HTTPS") || error.Message.Contains("absolute URL"), "unexpected message: " + error.Message);
+                    Assert(error.Message.Contains("HTTPS") || error.Message.Contains("absolute URL") || error.Message.Contains("credentials"), "unexpected message: " + error.Message);
                 }
             }
 

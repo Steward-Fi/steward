@@ -19,6 +19,9 @@ void assertSecureBaseUrl(String baseUrl, {bool allowInsecureBaseUrl = false}) {
   if (scheme != 'http' && scheme != 'https') {
     throw ArgumentError('baseUrl must use HTTP or HTTPS');
   }
+  if (uri.userInfo.isNotEmpty) {
+    throw ArgumentError('baseUrl must not embed credentials');
+  }
   if (scheme == 'https' ||
       (scheme == 'http' && _isLoopbackHost(uri.host.toLowerCase()))) {
     return;
@@ -28,7 +31,7 @@ void assertSecureBaseUrl(String baseUrl, {bool allowInsecureBaseUrl = false}) {
     // loud-warning channel here.
     // ignore: avoid_print
     print(
-      "[steward-sdk] WARNING: baseUrl '$baseUrl' is not HTTPS; credentials "
+      '[steward-sdk] WARNING: baseUrl is not HTTPS; credentials '
       'travel in cleartext. Use allowInsecureBaseUrl only on trusted private '
       'networks.',
     );

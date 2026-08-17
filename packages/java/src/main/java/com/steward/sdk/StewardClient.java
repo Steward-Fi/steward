@@ -298,12 +298,15 @@ public final class StewardClient {
         if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
             throw new IllegalArgumentException("baseUrl must use HTTP or HTTPS");
         }
+        if (uri.getUserInfo() != null) {
+            throw new IllegalArgumentException("baseUrl must not embed credentials");
+        }
         if ("https".equalsIgnoreCase(scheme)
                 || ("http".equalsIgnoreCase(scheme) && isLoopbackHost(uri.getHost()))) {
             return;
         }
         if (allowInsecureBaseUrl) {
-            System.err.println("[steward-sdk] WARNING: baseUrl '" + baseUrl + "' is not HTTPS; credentials travel in "
+            System.err.println("[steward-sdk] WARNING: baseUrl is not HTTPS; credentials travel in "
                     + "cleartext. Use allowInsecureBaseUrl only on trusted private networks.");
             return;
         }

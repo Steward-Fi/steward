@@ -106,12 +106,12 @@ final class StewardClientTests: XCTestCase {
     func testPlaintextNonLoopbackBaseURLRejected() throws {
         // SEC-200: credentials must never travel to a plaintext non-loopback
         // endpoint unless the operator explicitly opts out.
-        for baseURL in ["http://api.example.test", "http://192.168.1.10:3200", "ftp://api.example.test", "not-a-url"] {
+        for baseURL in ["http://api.example.test", "http://192.168.1.10:3200", "ftp://api.example.test", "not-a-url", "https://user:secret@api.example.test"] {
             XCTAssertThrowsError(try StewardClient(config: StewardConfig(baseURL: baseURL, apiKey: "tenant-key")), baseURL) { error in
                 guard let apiError = error as? StewardAPIError else {
                     return XCTFail("expected StewardAPIError, got \(error)")
                 }
-                XCTAssertTrue(apiError.message.contains("HTTPS") || apiError.message.contains("absolute URL"), apiError.message)
+                XCTAssertTrue(apiError.message.contains("HTTPS") || apiError.message.contains("absolute URL") || apiError.message.contains("credentials"), apiError.message)
             }
         }
 
@@ -128,4 +128,3 @@ final class StewardClientTests: XCTestCase {
         )))
     }
 }
-

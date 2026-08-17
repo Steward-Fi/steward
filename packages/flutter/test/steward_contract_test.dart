@@ -211,6 +211,21 @@ void baseUrlEnforcementTests() {
     }
   });
 
+  test('URL-embedded credentials are rejected even over HTTPS', () {
+    expect(
+      () => StewardClient(
+        StewardConfig(baseUrl: 'https://user:secret@api.example.test'),
+      ),
+      throwsArgumentError,
+    );
+    expect(
+      () => StewardAuth(
+        StewardAuthConfig(baseUrl: 'https://user:secret@api.example.test'),
+      ),
+      throwsArgumentError,
+    );
+  });
+
   test('allowInsecureBaseUrl opts out', () {
     StewardClient(StewardClientConfig(
       baseUrl: 'http://api.example.test',

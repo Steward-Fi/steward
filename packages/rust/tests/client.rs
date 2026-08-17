@@ -252,6 +252,7 @@ fn plaintext_non_loopback_base_url_rejected() {
         "http://api.example.test",
         "http://192.168.1.10:3200",
         "ftp://api.example.test",
+        "https://user:secret@api.example.test",
     ] {
         match Client::new(Config {
             base_url: base_url.to_string(),
@@ -259,7 +260,10 @@ fn plaintext_non_loopback_base_url_rejected() {
             ..Config::default()
         }) {
             Err(Error::Config(message)) => {
-                assert!(message.contains("HTTPS"), "unexpected: {message}")
+                assert!(
+                    message.contains("HTTPS") || message.contains("credentials"),
+                    "unexpected: {message}"
+                )
             }
             _ => panic!("expected config error for {base_url}"),
         }

@@ -108,6 +108,9 @@ func isLoopbackHost(hostname string) bool {
 // keys, bearer tokens, and HMAC-signed credentials, none of which may travel
 // to a plaintext non-loopback endpoint (SEC-200, mirroring SEC-048).
 func assertSecureBaseURL(base *url.URL, allowInsecure bool) error {
+	if base.User != nil {
+		return errors.New("base URL must not embed credentials")
+	}
 	if base.Scheme != "http" && base.Scheme != "https" {
 		return errors.New("base URL must use HTTP or HTTPS")
 	}
@@ -115,7 +118,7 @@ func assertSecureBaseURL(base *url.URL, allowInsecure bool) error {
 		return nil
 	}
 	if allowInsecure {
-		log.Printf("[steward-sdk] WARNING: base URL %q is not HTTPS; credentials travel in cleartext. Use AllowInsecureBaseURL only on trusted private networks.", base)
+		log.Printf("[steward-sdk] WARNING: base URL is not HTTPS; credentials travel in cleartext. Use AllowInsecureBaseURL only on trusted private networks.")
 		return nil
 	}
 	return errors.New("base URL must use HTTPS unless it targets loopback (http://localhost, http://127.0.0.1, http://[::1]); set AllowInsecureBaseURL to override on trusted private networks")

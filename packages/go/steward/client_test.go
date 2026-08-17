@@ -281,10 +281,10 @@ func TestRandomIDReturnsCryptoUUIDs(t *testing.T) {
 // SEC-200: the client must refuse to send credentials to a plaintext
 // non-loopback endpoint unless the operator explicitly opts out.
 func TestNewClientRejectsPlaintextNonLoopbackBaseURL(t *testing.T) {
-	for _, base := range []string{"http://api.example.test", "http://192.168.1.10:3200", "ftp://api.example.test"} {
+	for _, base := range []string{"http://api.example.test", "http://192.168.1.10:3200", "ftp://api.example.test", "https://user:secret@api.example.test"} {
 		if _, err := NewClient(Config{BaseURL: base}); err == nil {
 			t.Fatalf("expected error for plaintext non-loopback base URL %s", base)
-		} else if !strings.Contains(err.Error(), "HTTPS") {
+		} else if !strings.Contains(err.Error(), "HTTPS") && !strings.Contains(err.Error(), "credentials") {
 			t.Fatalf("unexpected error for %s: %v", base, err)
 		}
 	}

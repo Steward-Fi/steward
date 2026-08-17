@@ -198,6 +198,9 @@ fn assert_secure_base_url(parsed: &url::Url, allow_insecure_base_url: bool) -> R
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err(Error::Config("base URL must use HTTP or HTTPS".to_string()));
     }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(Error::Config("base URL must not embed credentials".to_string()));
+    }
     if parsed.scheme() == "https"
         || (parsed.scheme() == "http" && parsed.host_str().is_some_and(is_loopback_host))
     {
@@ -205,9 +208,8 @@ fn assert_secure_base_url(parsed: &url::Url, allow_insecure_base_url: bool) -> R
     }
     if allow_insecure_base_url {
         eprintln!(
-            "[steward-sdk] WARNING: base URL '{}' is not HTTPS; credentials travel in cleartext. \
-             Use allow_insecure_base_url only on trusted private networks.",
-            parsed.as_str().trim_end_matches('/')
+            "[steward-sdk] WARNING: base URL is not HTTPS; credentials travel in cleartext. \
+             Use allow_insecure_base_url only on trusted private networks."
         );
         return Ok(());
     }

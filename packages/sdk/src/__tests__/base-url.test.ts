@@ -31,6 +31,12 @@ describe("assertSecureBaseUrl", () => {
     expect(() => assertSecureBaseUrl("not-a-url")).toThrow(/valid absolute URL/);
   });
 
+  test("rejects URL-embedded credentials even over HTTPS", () => {
+    expect(() => assertSecureBaseUrl("https://user:secret@api.example.test")).toThrow(
+      "must not embed credentials",
+    );
+  });
+
   test("allowInsecureBaseUrl opts out but warns loudly", () => {
     const warn = spyOn(console, "warn").mockImplementation(() => {});
     try {

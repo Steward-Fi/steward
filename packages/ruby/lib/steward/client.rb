@@ -56,10 +56,11 @@ module Steward
       uri = URI.parse(base_url)
       raise ArgumentError, "base_url must be a valid absolute URL" if uri.scheme.to_s.empty? || uri.host.to_s.empty?
       raise ArgumentError, "base_url must use HTTP or HTTPS" unless %w[http https].include?(uri.scheme.downcase)
+      raise ArgumentError, "base_url must not embed credentials" if uri.user || uri.password
       return if uri.scheme == "https" || (uri.scheme == "http" && LOOPBACK_HOSTS.include?(uri.hostname))
 
       if allow_insecure_base_url
-        warn "[steward-sdk] WARNING: base_url '#{base_url}' is not HTTPS; credentials travel in " \
+        warn "[steward-sdk] WARNING: base_url is not HTTPS; credentials travel in " \
              "cleartext. Use allow_insecure_base_url only on trusted private networks."
         return
       end

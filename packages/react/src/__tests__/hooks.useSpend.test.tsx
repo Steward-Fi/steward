@@ -160,6 +160,14 @@ describe("computeSpendStats()", () => {
     expect(computeSpendStats("30d", [old, recent], NOW).txCount).toBe(2);
   });
 
+  test("does not count signed-only value and conservatively counts unknown broadcast outcomes", () => {
+    const signedOnly = txRecord({ id: "signed", status: "signed" });
+    const unknown = txRecord({ id: "unknown", status: "outcome_unknown" });
+    const stats = computeSpendStats("all", [signedOnly, unknown], NOW);
+    expect(stats.txCount).toBe(1);
+    expect(stats.totalSpent).toBe(ETH.toString());
+  });
+
   test("empty history yields zeroed stats", () => {
     const stats = computeSpendStats("7d", [], NOW);
     expect(stats.txCount).toBe(0);

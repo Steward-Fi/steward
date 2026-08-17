@@ -167,7 +167,7 @@ class StewardClientTests(unittest.TestCase):
     def test_plaintext_non_loopback_base_url_rejected(self):
         # SEC-200: credentials must never travel to a plaintext non-loopback
         # endpoint unless the operator explicitly opts out.
-        for base_url in ("http://api.example.test", "http://192.168.1.10:3200", "ftp://api.example.test", "not-a-url"):
+        for base_url in ("http://api.example.test", "http://192.168.1.10:3200", "ftp://api.example.test", "not-a-url", "https://user:secret@api.example.test"):
             with self.assertRaises(ValueError, msg=base_url):
                 StewardClient(base_url=base_url, api_key="tenant-key")
 

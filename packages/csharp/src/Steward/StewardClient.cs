@@ -145,6 +145,10 @@ namespace Steward
             {
                 throw new ArgumentException("BaseUrl must use HTTP or HTTPS", nameof(baseUrl));
             }
+            if (!string.IsNullOrEmpty(uri.UserInfo))
+            {
+                throw new ArgumentException("BaseUrl must not embed credentials", nameof(baseUrl));
+            }
 
             if (uri.Scheme == Uri.UriSchemeHttps
                 || (uri.Scheme == Uri.UriSchemeHttp && IsLoopbackHost(uri.Host)))
@@ -153,7 +157,7 @@ namespace Steward
             }
             if (allowInsecureBaseUrl)
             {
-                Console.Error.WriteLine("[steward-sdk] WARNING: BaseUrl '" + baseUrl + "' is not HTTPS; credentials travel in cleartext. Use AllowInsecureBaseUrl only on trusted private networks.");
+                Console.Error.WriteLine("[steward-sdk] WARNING: BaseUrl is not HTTPS; credentials travel in cleartext. Use AllowInsecureBaseUrl only on trusted private networks.");
                 return;
             }
             throw new ArgumentException("BaseUrl must use HTTPS unless it targets loopback (http://localhost, http://127.0.0.1, http://[::1]). Set AllowInsecureBaseUrl to override on trusted private networks.", nameof(baseUrl));

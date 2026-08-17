@@ -134,12 +134,12 @@ public final class StewardClientTest {
     private static void testPlaintextNonLoopbackBaseUrlRejected() {
         // SEC-200: credentials must never travel to a plaintext non-loopback
         // endpoint unless the operator explicitly opts out.
-        for (String baseUrl : List.of("http://api.example.test", "http://192.168.1.10:3200", "ftp://api.example.test")) {
+        for (String baseUrl : List.of("http://api.example.test", "http://192.168.1.10:3200", "ftp://api.example.test", "https://user:secret@api.example.test")) {
             try {
                 new StewardClient(StewardClient.config(baseUrl).apiKey("tenant-key").build());
                 throw new AssertionError("expected rejection for " + baseUrl);
             } catch (IllegalArgumentException error) {
-                assertTrue(error.getMessage().contains("HTTPS"), "unexpected message: " + error.getMessage());
+                assertTrue(error.getMessage().contains("HTTPS") || error.getMessage().contains("credentials"), "unexpected message: " + error.getMessage());
             }
         }
         for (String baseUrl : List.of("https://api.example.test", "http://localhost:3200", "http://127.0.0.1:3200", "http://[::1]:3200")) {

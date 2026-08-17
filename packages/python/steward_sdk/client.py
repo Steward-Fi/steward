@@ -157,11 +157,13 @@ def _assert_secure_base_url(base_url: str, allow_insecure_base_url: bool) -> Non
         raise ValueError("base_url must be a valid absolute URL")
     if parsed.scheme not in ("http", "https"):
         raise ValueError("base_url must use HTTP or HTTPS")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("base_url must not embed credentials")
     if parsed.scheme == "https" or (parsed.scheme == "http" and _is_loopback_host(parsed.hostname)):
         return
     if allow_insecure_base_url:
         warnings.warn(
-            f"[steward-sdk] WARNING: base_url {base_url!r} is not HTTPS; credentials travel in "
+            "[steward-sdk] WARNING: base_url is not HTTPS; credentials travel in "
             "cleartext. Use allow_insecure_base_url only on trusted private networks.",
             stacklevel=3,
         )

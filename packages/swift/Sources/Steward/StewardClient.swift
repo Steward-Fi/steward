@@ -112,11 +112,14 @@ public final class StewardClient {
         guard scheme == "http" || scheme == "https" else {
             throw StewardAPIError(status: 0, message: "baseURL must use HTTP or HTTPS", data: nil)
         }
+        guard components.user == nil, components.password == nil else {
+            throw StewardAPIError(status: 0, message: "baseURL must not embed credentials", data: nil)
+        }
         if scheme == "https" || (scheme == "http" && isLoopbackHost(host)) {
             return
         }
         if allowInsecureBaseURL {
-            let warning = "[steward-sdk] WARNING: baseURL '\(baseURL)' is not HTTPS; credentials travel in cleartext. Use allowInsecureBaseURL only on trusted private networks.\n"
+            let warning = "[steward-sdk] WARNING: baseURL is not HTTPS; credentials travel in cleartext. Use allowInsecureBaseURL only on trusted private networks.\n"
             FileHandle.standardError.write(Data(warning.utf8))
             return
         }
