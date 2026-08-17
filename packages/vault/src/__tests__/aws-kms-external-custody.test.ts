@@ -168,6 +168,7 @@ function signRequest(
     nonce: 7,
     broadcast: false,
     rpcUrl: "https://rpc.example.test",
+    onPreparedBroadcast: async () => {},
     ...overrides,
   };
 }
@@ -558,6 +559,11 @@ describe("AWS KMS asymmetric external custody", () => {
     expect((error as ExternalBroadcastOutcomeUnknownError).transactionHash).toBe(
       keccak256(dishonestRpc.broadcasts[0]),
     );
+    await expect(
+      providerFor(new MockKms(privateKey), dishonestRpc).signTransaction(
+        signRequest(privateKey, { broadcast: true, onPreparedBroadcast: undefined }),
+      ),
+    ).rejects.toThrow("durable pre-broadcast checkpoint");
     expect(dishonestRpc.broadcasts).toHaveLength(1);
   });
 
@@ -580,6 +586,41 @@ describe("AWS KMS asymmetric external custody", () => {
     expect(rpc.broadcasts).toHaveLength(1);
     expect(reconciled).toEqual([keccak256(rpc.broadcasts[0])]);
     expect(result).toEqual({ result: reconciled[0], broadcast: true });
+  });
+
+  test("durably checkpoints the deterministic hash before the first broadcast attempt", async () => {
+    const privateKey = secp256k1.utils.randomPrivateKey();
+    const rpc = new MockRpc();
+    const events: string[] = [];
+    rpc.broadcast = async (serializedTransaction: Hex) => {
+      events.push("broadcast");
+      rpc.broadcasts.push(serializedTransaction);
+      return keccak256(serializedTransaction);
+    };
+
+    await providerFor(new MockKms(privateKey), rpc).signTransaction(
+      signRequest(privateKey, {
+        broadcast: true,
+        onPreparedBroadcast: async (hash) => {
+          events.push(`checkpoint:${hash}`);
+        },
+      }),
+    );
+    expect(events[0]).toBe(`checkpoint:${keccak256(rpc.broadcasts[0])}`);
+    expect(events[1]).toBe("broadcast");
+
+    rpc.broadcasts.length = 0;
+    await expect(
+      providerFor(new MockKms(privateKey), rpc).signTransaction(
+        signRequest(privateKey, {
+          broadcast: true,
+          onPreparedBroadcast: async () => {
+            throw new Error("checkpoint unavailable");
+          },
+        }),
+      ),
+    ).rejects.toThrow("checkpoint unavailable");
+    expect(rpc.broadcasts).toHaveLength(0);
   });
 
   test("returns a deterministic outcome_unknown after an unreconciled broadcast without retry", async () => {

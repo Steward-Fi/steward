@@ -32,7 +32,7 @@ function receipt(status: "success" | "reverted" = "success"): TransactionReceipt
   };
 }
 
-async function seedUnknown(id: string) {
+async function seedUnknown(id: string, txHash: `0x${string}` = HASH, createdAt?: Date) {
   await getDb()
     .insert(transactions)
     .values({
@@ -42,9 +42,10 @@ async function seedUnknown(id: string) {
       toAddress: "0x0000000000000000000000000000000000000002",
       value: "1",
       chainId: 8453,
-      txHash: HASH,
+      txHash,
       actionType: "transfer",
       actionPayload: { type: "transfer", broadcast: true },
+      ...(createdAt ? { createdAt } : {}),
     });
 }
 
@@ -160,6 +161,26 @@ describe("outcome_unknown receipt reconciliation", () => {
       .from(transactions)
       .where(eq(transactions.id, "unknown-mismatched-receipt"));
     expect(row?.status).toBe("outcome_unknown");
+  });
+
+  it("rotates a missing oldest receipt out of a bounded batch", async () => {
+    const firstHash = `0x${"11".repeat(32)}` as const;
+    const secondHash = `0x${"22".repeat(32)}` as const;
+    await seedUnknown("unknown-oldest", firstHash, new Date("2026-01-01T00:00:00Z"));
+    await seedUnknown("unknown-newer", secondHash, new Date("2026-01-02T00:00:00Z"));
+    const requested: string[] = [];
+    const client: TransactionReceiptClient = {
+      async getTransactionReceipt({ hash }) {
+        requested.push(hash);
+        throw new Error("transaction not found");
+      },
+      async getBlockNumber() {
+        throw new Error("must not read the head without a receipt");
+      },
+    };
+    await pollBroadcastTransactionReceipts({ batchSize: 1, clientFactory: () => client });
+    await pollBroadcastTransactionReceipts({ batchSize: 1, clientFactory: () => client });
+    expect(requested).toEqual([firstHash, secondHash]);
   });
 
   it("promotes a proven but under-confirmed receipt only to broadcast", async () => {

@@ -28,11 +28,19 @@ describe("transaction receipt poller", () => {
     );
     expect(pollerSource).toContain("isNotNull(transactions.txHash)");
     expect(pollerSource).toContain("isHexHash(row.txHash)");
+    expect(pollerSource).toContain(
+      "receipt.transactionHash.toLowerCase() !== row.txHash.toLowerCase()",
+    );
     expect(pollerSource).toContain('eq(transactions.status, "outcome_unknown")');
     expect(pollerSource).toContain('action: "transaction.broadcast.reconciled"');
     expect(pollerSource).toContain("withTenantAuditedTransaction(");
     expect(pollerSource).not.toContain("sendRawTransaction");
     expect(pollerSource).not.toContain("writeContract");
+  });
+
+  it("rotates durable polling batches instead of pinning the oldest missing receipt", () => {
+    expect(pollerSource).toContain("receiptPolledAt: now");
+    expect(pollerSource).toContain("receiptPolledAt} ASC NULLS FIRST");
   });
 
   it("never converts receipt absence into failure or a repost", () => {

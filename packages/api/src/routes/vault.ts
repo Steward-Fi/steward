@@ -144,6 +144,20 @@ async function writeVaultAudit(
     requestId: c.get("requestId") ?? null,
   });
 }
+
+async function writeOutcomeUnknownAudit(
+  c: Context<{ Variables: AppVariables }>,
+  event: Omit<AuditEventInput, "ipAddress" | "userAgent" | "requestId">,
+): Promise<void> {
+  try {
+    await writeVaultAudit(c, event);
+  } catch (error) {
+    // The deterministic hash and outcome_unknown row are already durable. An
+    // audit sink failure must never replace the non-retryable 202 response with
+    // a generic 500 that could induce a fresh broadcast.
+    console.error("[vault] Failed to append outcome_unknown audit:", error);
+  }
+}
 // ─── Unsafe-signing opt-in flags (read LIVE, not captured at module-init) ──────
 //
 // Each accessor reads its env var on every call instead of freezing the value
@@ -2513,7 +2527,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
         } catch (err) {
           console.error("[vault] Failed to record ambiguous aggregation event:", err);
         }
-        await writeVaultAudit(c, {
+        await writeOutcomeUnknownAudit(c, {
           tenantId,
           actorType: "agent",
           actorId: agentId,
@@ -4355,7 +4369,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         } catch (err) {
           console.error("[vault] Failed to record ambiguous approved aggregation event:", err);
         }
-        await writeVaultAudit(c, {
+        await writeOutcomeUnknownAudit(c, {
           tenantId,
           actorType: "user",
           actorId,

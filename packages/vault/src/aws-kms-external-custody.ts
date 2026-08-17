@@ -566,6 +566,10 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
     const expectedTransactionHash = keccak256(serialized);
     let result: Hex = serialized;
     if (request.broadcast) {
+      if (!request.onPreparedBroadcast) {
+        throw new Error("AWS KMS broadcasts require a durable pre-broadcast checkpoint");
+      }
+      await request.onPreparedBroadcast(expectedTransactionHash);
       try {
         result = await this.withDeadline(rpc.broadcast(serialized), "RPC broadcast");
       } catch (cause) {
@@ -590,7 +594,9 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
         // Submission may already have succeeded even if the RPC response is
         // dishonest or corrupt. Preserve the ambiguous outcome so callers
         // cannot safely retry the signed bytes.
-        throw new ExternalBroadcastOutcomeUnknownError(expectedTransactionHash);
+        throw new ExternalBroadcastOutcomeUnknownError(expectedTransactionHash, {
+          cause: new Error("AWS KMS RPC returned a mismatched transaction hash"),
+        });
       }
     }
     return { result, broadcast: request.broadcast };

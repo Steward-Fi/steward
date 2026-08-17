@@ -46,6 +46,11 @@ export interface ExternalKeySignTransactionRequest {
   nonce?: number;
   broadcast: boolean;
   rpcUrl?: string;
+  /**
+   * Durable pre-broadcast checkpoint. Providers that can derive the final
+   * transaction hash MUST await this before the first mutating RPC call.
+   */
+  onPreparedBroadcast?: (transactionHash: string) => Promise<void>;
 }
 
 export interface ExternalKeySignTransactionResult {

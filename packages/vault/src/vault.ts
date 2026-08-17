@@ -1465,6 +1465,16 @@ export class Vault {
             nonce: request.nonce,
             broadcast: shouldBroadcast,
             rpcUrl,
+            ...(shouldBroadcast
+              ? {
+                  onPreparedBroadcast: async (transactionHash: string) => {
+                    await this.recordSignedTransaction(request, chainId, true, transactionHash, {
+                      ...options,
+                      status: "outcome_unknown",
+                    });
+                  },
+                }
+              : {}),
           });
         } catch (error) {
           if (error instanceof ExternalBroadcastOutcomeUnknownError) {

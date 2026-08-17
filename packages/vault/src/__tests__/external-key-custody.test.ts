@@ -406,7 +406,16 @@ describe("external key custody seam", () => {
 
   test("persists deterministic outcome_unknown before surfacing an ambiguous provider broadcast", async () => {
     const txHash = `0x${"ab".repeat(32)}`;
-    const provider = new TestExternalKeyProvider("provider-signing", async () => {
+    let checkpointObserved = false;
+    const provider = new TestExternalKeyProvider("provider-signing", async (request) => {
+      expect(request.onPreparedBroadcast).toBeFunction();
+      await request.onPreparedBroadcast?.(txHash);
+      const [checkpoint] = await getDb()
+        .select({ status: transactions.status, txHash: transactions.txHash })
+        .from(transactions)
+        .where(eq(transactions.id, "external-outcome-unknown"));
+      expect(checkpoint).toEqual({ status: "outcome_unknown", txHash });
+      checkpointObserved = true;
       throw new ExternalBroadcastOutcomeUnknownError(txHash);
     });
     vault = await freshVault(provider);
@@ -454,6 +463,7 @@ describe("external key custody seam", () => {
       identity: target.backendIdentityDigest,
     });
     expect(provider.signCalls).toHaveLength(1);
+    expect(checkpointObserved).toBe(true);
   });
 
   // ── ROUND 3 / ITEM 3: backend-resolution TOCTOU (fail closed at sign) ────

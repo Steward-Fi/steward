@@ -408,12 +408,25 @@ async function pollOneTransaction(
   row: PollableTransaction,
   options: ResolvedTransactionReceiptPollerOptions,
 ): Promise<"confirmed" | "reverted" | "pending" | "skipped"> {
+  const now = new Date();
+  // Advance a durable fairness cursor before validation or I/O. A malformed
+  // hash, unsupported chain, or permanently absent receipt must not monopolize
+  // the oldest fixed-size batch across scheduler ticks.
+  await db
+    .update(transactions)
+    .set({ receiptPolledAt: now })
+    .where(
+      and(
+        eq(transactions.id, row.id),
+        eq(transactions.agentId, row.agentId),
+        eq(transactions.status, row.status),
+      ),
+    );
   if (!isHexHash(row.txHash)) return "skipped";
   const rpcUrl = resolveEvmReceiptRpcUrl(row.chainId);
   if (!rpcUrl) return "skipped";
 
   const client = options.clientFactory(rpcUrl);
-  const now = new Date();
   let receipt: TransactionReceipt | null = null;
   try {
     receipt = await client.getTransactionReceipt({ hash: row.txHash });
@@ -440,6 +453,11 @@ async function pollOneTransaction(
       await markStillPending(row, now);
       return "pending";
     }
+    return "skipped";
+  }
+
+  if (receipt.transactionHash.toLowerCase() !== row.txHash.toLowerCase()) {
+    console.warn(`[tx-poller] Receipt hash mismatch for ${row.id}; refusing reconciliation`);
     return "skipped";
   }
 
@@ -511,6 +529,7 @@ export async function pollBroadcastTransactionReceipts(
       createdAt: transactions.createdAt,
       signedAt: transactions.signedAt,
       confirmedAt: transactions.confirmedAt,
+      receiptPolledAt: transactions.receiptPolledAt,
     })
     .from(transactions)
     .innerJoin(agents, eq(transactions.agentId, agents.id))
@@ -520,7 +539,7 @@ export async function pollBroadcastTransactionReceipts(
         isNotNull(transactions.txHash),
       ),
     )
-    .orderBy(asc(transactions.createdAt))
+    .orderBy(sql`${transactions.receiptPolledAt} ASC NULLS FIRST`, asc(transactions.createdAt))
     .limit(resolvedOptions.batchSize);
 
   const summary = { checked: rows.length, confirmed: 0, reverted: 0, pending: 0, skipped: 0 };

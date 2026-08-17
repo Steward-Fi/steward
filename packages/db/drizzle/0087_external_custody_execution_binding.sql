@@ -1,7 +1,4 @@
 -- Bind governed EVM execution and approval snapshots to external custody identity.
-ALTER TYPE "public"."transaction_status" ADD VALUE IF NOT EXISTS 'outcome_unknown';
---> statement-breakpoint
-
 ALTER TABLE "transactions"
   ADD COLUMN IF NOT EXISTS "execution_backend" varchar(32),
   ADD COLUMN IF NOT EXISTS "execution_backend_identity_digest" varchar(64);
