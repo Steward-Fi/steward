@@ -240,7 +240,7 @@ describe("PR3 approval lifecycle", () => {
             },
           }
         : rule,
-    );
+    ).reverse();
     await getDb()
       .update(providerOperations)
       .set({ requestProfile: { policyRules: windowedRules } })
@@ -277,6 +277,25 @@ describe("PR3 approval lifecycle", () => {
           .where(eq(providerActionReservationGenerations.intentId, intentId))
       ).length,
     ).toBe(0);
+    const deniedEvents = (await correlatedAudit(intentId)).filter(
+      (event) => event.action === "provider.resume.policy_denied",
+    );
+    expect(deniedEvents.length).toBe(1);
+    const auditResult = await getDb().execute(
+      sql`SELECT metadata FROM audit_events
+          WHERE tenant_id = ${F.TENANT}
+            AND resource_id = ${intentId}
+            AND action = 'provider.resume.policy_denied'`,
+    );
+    const auditRows = Array.isArray(auditResult)
+      ? auditResult
+      : ((auditResult as { rows?: unknown[] }).rows ?? []);
+    const denialMetadata = (auditRows[0] as { metadata: Record<string, unknown> }).metadata;
+    expect(denialMetadata.requestHash).toBe(requestHash);
+    expect(denialMetadata.actionDigest).toBe(actionDigest);
+    expect(denialMetadata.executionPolicyDecisionId).toBeString();
+    expect(denialMetadata.executionPolicyDecisionHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(denialMetadata.executionPolicyRevisionHash).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
   test("resume idempotent path re-ensures v2 authorization only for an evidence-bound execution_ready row", async () => {

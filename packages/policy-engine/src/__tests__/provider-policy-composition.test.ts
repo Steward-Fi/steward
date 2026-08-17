@@ -252,6 +252,9 @@ describe("composeProviderActionPolicyDecision precedence", () => {
 
     for (const timeWindow of [
       { timezone: "Not/A_Zone", allow: [{ days: ["mon"], from: "09:00", to: "17:00" }] },
+      // ECMA-402 accepts ISO offset identifiers in some runtimes, but the
+      // Steward schema deliberately requires an IANA time-zone identifier.
+      { timezone: "+01:00", allow: [{ days: ["mon"], from: "09:00", to: "17:00" }] },
       { timezone: "UTC", allow: [] },
       { timezone: "UTC", allow: [{ days: ["MON"], from: "09:00", to: "17:00" }] },
       { timezone: "UTC", allow: [{ days: ["mon"], from: "09:00", to: "09:00" }] },

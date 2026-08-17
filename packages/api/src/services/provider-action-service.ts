@@ -91,6 +91,16 @@ import { ApprovalArmError, buildApprovalArm } from "./provider-approval";
 const EVALUATOR_VERSION = "provider-action.v1";
 const POLICY_TYPE = "capability-intent" as const;
 
+/** Select an externally returned reason that agrees with the composed effect.
+ * Rule order is not precedence: an approval rule listed before a failed hard
+ * constraint must never make a hard denial look resumable. */
+function primaryPolicyDenialReason(doc: PersistedPolicyDecisionV1): string {
+  return (
+    doc.reasonCodes.find((code) => code !== "APPROVAL_REQUIRED" && code !== "POLICY_ALLOW") ??
+    "POLICY_HARD_DENY"
+  );
+}
+
 /**
  * A handle to an atomic cumulative-spend reservation (#206). #240 persists this
  * exact identity on the binding so a known outcome can be reconciled after a
@@ -971,7 +981,8 @@ class ProviderActionService {
       // covers a deny for a DIFFERENT reason where a cumulativeSpend rule had
       // passed and reserved - the action will not execute, so free its budget.
       await this.reconcilePolicyReservations(tenantId, intentId);
-      const code = (policy as PolicyResult | null)?.doc.reasonCodes[0] ?? "POLICY_HARD_DENY";
+      const policyDoc = (policy as PolicyResult | null)?.doc;
+      const code = policyDoc ? primaryPolicyDenialReason(policyDoc) : "POLICY_HARD_DENY";
       return {
         kind: "policy_denied",
         code,
@@ -1817,7 +1828,7 @@ class ProviderActionService {
       );
       return {
         ok: false,
-        code: policy.doc.reasonCodes[0] ?? "POLICY_HARD_DENY",
+        code: primaryPolicyDenialReason(policy.doc),
         httpStatus: 403,
         decision: policy.doc,
         decisionHash: sha256HexPrefixed(jcsStringify(policy.doc)),

@@ -384,6 +384,7 @@ const CUMULATIVE_SPEND_SCOPES: ReadonlySet<string> = new Set(["operation", "agen
 const WEEKDAYS: readonly CapabilityWeekday[] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 const WEEKDAY_SET: ReadonlySet<string> = new Set(WEEKDAYS);
 const HH_MM = /^([01][0-9]|2[0-3]):([0-5][0-9])$/;
+const ISO_FIXED_OFFSET_TIMEZONE = /^[+-]/;
 
 function minuteOfDay(value: string): number | null {
   const match = HH_MM.exec(value);
@@ -398,7 +399,12 @@ function parseTimeWindow(raw: unknown): CapabilityTimeWindow | { error: string }
     return {
       error: `capability-intent: unknown constraints.timeWindow key(s): ${unknown.join(", ")}`,
     };
-  if (typeof raw.timezone !== "string" || !raw.timezone || raw.timezone.length > 128) {
+  if (
+    typeof raw.timezone !== "string" ||
+    !raw.timezone ||
+    raw.timezone.length > 128 ||
+    ISO_FIXED_OFFSET_TIMEZONE.test(raw.timezone)
+  ) {
     return { error: "capability-intent: `timeWindow.timezone` must be an IANA timezone" };
   }
   try {
