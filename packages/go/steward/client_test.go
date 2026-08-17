@@ -261,3 +261,29 @@ func TestRandomIDReturnsCryptoUUIDs(t *testing.T) {
 		t.Fatal("randomID produced duplicate ids")
 	}
 }
+
+// SEC-200: the client must refuse to send credentials to a plaintext
+// non-loopback endpoint unless the operator explicitly opts out.
+func TestNewClientRejectsPlaintextNonLoopbackBaseURL(t *testing.T) {
+	for _, base := range []string{"http://api.example.test", "http://192.168.1.10:3200", "ftp://api.example.test"} {
+		if _, err := NewClient(Config{BaseURL: base}); err == nil {
+			t.Fatalf("expected error for plaintext non-loopback base URL %s", base)
+		} else if !strings.Contains(err.Error(), "HTTPS") {
+			t.Fatalf("unexpected error for %s: %v", base, err)
+		}
+	}
+}
+
+func TestNewClientAllowsHTTPSAndLoopbackBaseURL(t *testing.T) {
+	for _, base := range []string{"https://api.example.test", "http://localhost:3200", "http://127.0.0.1:3200", "http://[::1]:3200"} {
+		if _, err := NewClient(Config{BaseURL: base}); err != nil {
+			t.Fatalf("unexpected error for %s: %v", base, err)
+		}
+	}
+}
+
+func TestNewClientAllowInsecureBaseURLOptsOut(t *testing.T) {
+	if _, err := NewClient(Config{BaseURL: "http://api.example.test", AllowInsecureBaseURL: true}); err != nil {
+		t.Fatalf("unexpected error with AllowInsecureBaseURL: %v", err)
+	}
+}

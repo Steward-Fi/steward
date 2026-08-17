@@ -6,6 +6,7 @@ import hmac
 import json
 import time
 import uuid
+import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
@@ -42,6 +43,10 @@ class StewardClientConfig:
     tenant_id: str | None = None
     request_signing_secret: str | None = None
     request_signing_key_id: str | None = None
+    # Permit a plaintext non-loopback base_url (warns at construction). HTTPS
+    # is required by default so credentials never travel cleartext
+    # off-loopback (SEC-200).
+    allow_insecure_base_url: bool = False
     timeout: float = 30.0
     transport: Transport | None = None
 
@@ -137,6 +142,33 @@ def _is_sensitive_mutation(path: str, method: str) -> bool:
     return method.upper() in MUTATING_METHODS and any(path.startswith(prefix) for prefix in SENSITIVE_SIGNED_PREFIXES)
 
 
+def _is_loopback_host(hostname: str) -> bool:
+    return hostname in ("localhost", "127.0.0.1", "::1")
+
+
+# Keep in lockstep with the equivalent check in EVERY other SDK (sdk, go,
+# java, ruby, rust, swift, csharp, flutter): these clients transmit API keys,
+# bearer tokens, and HMAC-signed credentials, none of which may travel to a
+# plaintext non-loopback endpoint (SEC-200, mirroring SEC-048).
+def _assert_secure_base_url(base_url: str, allow_insecure_base_url: bool) -> None:
+    parsed = urlparse(base_url)
+    if not parsed.scheme or not parsed.hostname:
+        raise ValueError("base_url must be a valid absolute URL")
+    if parsed.scheme == "https" or (parsed.scheme == "http" and _is_loopback_host(parsed.hostname)):
+        return
+    if allow_insecure_base_url:
+        warnings.warn(
+            f"[steward-sdk] WARNING: base_url {base_url!r} is not HTTPS; credentials travel in "
+            "cleartext. Use allow_insecure_base_url only on trusted private networks.",
+            stacklevel=3,
+        )
+        return
+    raise ValueError(
+        "base_url must use HTTPS unless it targets loopback (http://localhost, http://127.0.0.1, "
+        "http://[::1]). Set allow_insecure_base_url=True to override on trusted private networks."
+    )
+
+
 class StewardClient:
     def __init__(self, config: StewardClientConfig | None = None, **kwargs: Any):
         if config is None:
@@ -145,6 +177,7 @@ class StewardClient:
             raise TypeError("Pass either StewardClientConfig or keyword arguments, not both")
         self.config = config
         self.base_url = config.base_url.rstrip("/")
+        _assert_secure_base_url(self.base_url, config.allow_insecure_base_url)
         self._transport = config.transport or _default_transport
 
     def request(

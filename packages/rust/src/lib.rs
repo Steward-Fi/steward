@@ -62,6 +62,10 @@ pub struct Config {
     pub tenant_id: Option<String>,
     pub request_signing_secret: Option<String>,
     pub request_signing_key_id: Option<String>,
+    /// Permit a plaintext non-loopback base_url (warns at construction). HTTPS
+    /// is required by default so credentials never travel cleartext
+    /// off-loopback (SEC-200).
+    pub allow_insecure_base_url: bool,
     pub timeout: Option<Duration>,
     pub transport: Option<Arc<dyn Transport>>,
     pub now: Option<Arc<dyn Fn() -> SystemTime + Send + Sync>>,
@@ -180,6 +184,35 @@ struct ApiEnvelope {
 
 struct UreqTransport;
 
+fn is_loopback_host(host: &str) -> bool {
+    host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
+}
+
+// Keep in lockstep with the equivalent check in EVERY other SDK (sdk, go,
+// java, python, ruby, swift, csharp, flutter): these clients transmit API
+// keys, bearer tokens, and HMAC-signed credentials, none of which may travel
+// to a plaintext non-loopback endpoint (SEC-200, mirroring SEC-048).
+fn assert_secure_base_url(parsed: &url::Url, allow_insecure_base_url: bool) -> Result<(), Error> {
+    if parsed.scheme() == "https"
+        || (parsed.scheme() == "http" && parsed.host_str().is_some_and(is_loopback_host))
+    {
+        return Ok(());
+    }
+    if allow_insecure_base_url {
+        eprintln!(
+            "[steward-sdk] WARNING: base URL '{}' is not HTTPS; credentials travel in cleartext. \
+             Use allow_insecure_base_url only on trusted private networks.",
+            parsed.as_str().trim_end_matches('/')
+        );
+        return Ok(());
+    }
+    Err(Error::Config(
+        "base URL must use HTTPS unless it targets loopback (http://localhost, http://127.0.0.1, \
+         http://[::1]); set allow_insecure_base_url to override on trusted private networks"
+            .to_string(),
+    ))
+}
+
 impl Client {
     pub fn new(config: Config) -> Result<Self, Error> {
         if config.base_url.trim().is_empty() {
@@ -187,9 +220,7 @@ impl Client {
         }
         let parsed = url::Url::parse(&config.base_url)
             .map_err(|err| Error::Config(format!("invalid base URL: {err}")))?;
-        if parsed.scheme() != "http" && parsed.scheme() != "https" {
-            return Err(Error::Config("base URL must use http or https".to_string()));
-        }
+        assert_secure_base_url(&parsed, config.allow_insecure_base_url)?;
         let base_url = config.base_url.trim_end_matches('/').to_string();
         let transport = config
             .transport

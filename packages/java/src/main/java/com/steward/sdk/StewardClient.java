@@ -57,6 +57,7 @@ public final class StewardClient {
         }
         this.config = config;
         this.baseUrl = trimRight(config.baseUrl, "/");
+        assertSecureBaseUrl(this.baseUrl, config.allowInsecureBaseUrl);
         this.transport = config.transport == null ? new DefaultTransport(config.httpClient) : config.transport;
     }
 
@@ -282,6 +283,35 @@ public final class StewardClient {
         return Config.builder(baseUrl);
     }
 
+    // Keep in lockstep with the equivalent check in EVERY other SDK (sdk, go,
+    // python, ruby, rust, swift, csharp, flutter): these clients transmit API
+    // keys, bearer tokens, and HMAC-signed credentials, none of which may
+    // travel to a plaintext non-loopback endpoint (SEC-200, mirroring SEC-048).
+    private static void assertSecureBaseUrl(String baseUrl, boolean allowInsecureBaseUrl) {
+        URI uri;
+        try {
+            uri = URI.create(baseUrl);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("baseUrl must be a valid absolute URL", e);
+        }
+        String scheme = uri.getScheme();
+        if ("https".equalsIgnoreCase(scheme)
+                || ("http".equalsIgnoreCase(scheme) && isLoopbackHost(uri.getHost()))) {
+            return;
+        }
+        if (allowInsecureBaseUrl) {
+            System.err.println("[steward-sdk] WARNING: baseUrl '" + baseUrl + "' is not HTTPS; credentials travel in "
+                    + "cleartext. Use allowInsecureBaseUrl only on trusted private networks.");
+            return;
+        }
+        throw new IllegalArgumentException("baseUrl must use HTTPS unless it targets loopback (http://localhost, "
+                + "http://127.0.0.1, http://[::1]). Set allowInsecureBaseUrl to override on trusted private networks.");
+    }
+
+    private static boolean isLoopbackHost(String host) {
+        return "localhost".equalsIgnoreCase(host) || "127.0.0.1".equals(host) || "::1".equals(host) || "[::1]".equals(host);
+    }
+
     public static final class Config {
         private final String baseUrl;
         private final String apiKey;
@@ -292,6 +322,7 @@ public final class StewardClient {
         private final String tenantId;
         private final String requestSigningSecret;
         private final String requestSigningKeyId;
+        private final boolean allowInsecureBaseUrl;
         private final Duration timeout;
         private final StewardTransport transport;
         private final HttpClient httpClient;
@@ -308,6 +339,7 @@ public final class StewardClient {
             this.tenantId = builder.tenantId;
             this.requestSigningSecret = builder.requestSigningSecret;
             this.requestSigningKeyId = builder.requestSigningKeyId;
+            this.allowInsecureBaseUrl = builder.allowInsecureBaseUrl;
             this.timeout = builder.timeout;
             this.transport = builder.transport;
             this.httpClient = builder.httpClient;
@@ -329,6 +361,7 @@ public final class StewardClient {
             private String tenantId;
             private String requestSigningSecret;
             private String requestSigningKeyId;
+            private boolean allowInsecureBaseUrl;
             private Duration timeout = Duration.ofSeconds(30);
             private StewardTransport transport;
             private HttpClient httpClient;
@@ -372,6 +405,13 @@ public final class StewardClient {
 
             public Builder requestSigningKeyId(String requestSigningKeyId) {
                 this.requestSigningKeyId = requestSigningKeyId;
+                return this;
+            }
+
+            /** Permit a plaintext non-loopback baseUrl (warns at construction). HTTPS is
+             * required by default so credentials never travel cleartext off-loopback (SEC-200). */
+            public Builder allowInsecureBaseUrl(boolean allowInsecureBaseUrl) {
+                this.allowInsecureBaseUrl = allowInsecureBaseUrl;
                 return this;
             }
 

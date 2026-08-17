@@ -159,6 +159,24 @@ class StewardClientTests(unittest.TestCase):
             "https://api.example.test/user/me/push-subscriptions/sub%2F1",
         )
 
+    def test_plaintext_non_loopback_base_url_rejected(self):
+        # SEC-200: credentials must never travel to a plaintext non-loopback
+        # endpoint unless the operator explicitly opts out.
+        for base_url in ("http://api.example.test", "http://192.168.1.10:3200", "ftp://api.example.test", "not-a-url"):
+            with self.assertRaises(ValueError, msg=base_url):
+                StewardClient(base_url=base_url, api_key="tenant-key")
+
+        for base_url in ("https://api.example.test", "http://localhost:3200", "http://127.0.0.1:3200", "http://[::1]:3200"):
+            StewardClient(base_url=base_url, api_key="tenant-key")
+
+    def test_allow_insecure_base_url_opts_out_with_warning(self):
+        with self.assertWarns(UserWarning):
+            StewardClient(
+                base_url="http://api.example.test",
+                api_key="tenant-key",
+                allow_insecure_base_url=True,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

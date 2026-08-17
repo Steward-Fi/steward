@@ -241,3 +241,44 @@ fn accounts_and_global_wallet_mutations_are_signed() {
         assert_eq!(signature.len(), 67);
     }
 }
+
+// SEC-200: the client must refuse to send credentials to a plaintext
+// non-loopback endpoint unless the operator explicitly opts out.
+#[test]
+fn plaintext_non_loopback_base_url_rejected() {
+    for base_url in ["http://api.example.test", "http://192.168.1.10:3200", "ftp://api.example.test"] {
+        match Client::new(Config {
+            base_url: base_url.to_string(),
+            api_key: Some("tenant-key".to_string()),
+            ..Config::default()
+        }) {
+            Err(Error::Config(message)) => assert!(message.contains("HTTPS"), "unexpected: {message}"),
+            _ => panic!("expected config error for {base_url}"),
+        }
+    }
+
+    for base_url in [
+        "https://api.example.test",
+        "http://localhost:3200",
+        "http://127.0.0.1:3200",
+        "http://[::1]:3200",
+    ] {
+        Client::new(Config {
+            base_url: base_url.to_string(),
+            api_key: Some("tenant-key".to_string()),
+            ..Config::default()
+        })
+        .unwrap_or_else(|err| panic!("unexpected error for {base_url}: {err:?}"));
+    }
+}
+
+#[test]
+fn allow_insecure_base_url_opts_out() {
+    Client::new(Config {
+        base_url: "http://api.example.test".to_string(),
+        api_key: Some("tenant-key".to_string()),
+        allow_insecure_base_url: true,
+        ..Config::default()
+    })
+    .expect("allow_insecure_base_url should permit plaintext non-loopback");
+}

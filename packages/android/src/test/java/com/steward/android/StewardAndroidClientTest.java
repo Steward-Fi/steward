@@ -11,6 +11,7 @@ public final class StewardAndroidClientTest {
     public static void main(String[] args) {
         registersFcmPushTokenWithBearerAuth();
         rejectsMissingDeviceToken();
+        rejectsPlaintextNonLoopbackBaseUrl();
         System.out.println("StewardAndroidClientTest passed");
     }
 
@@ -57,6 +58,18 @@ public final class StewardAndroidClientTest {
         } catch (IllegalArgumentException expected) {
             assertContains(expected.getMessage(), "token is required");
         }
+    }
+
+    private static void rejectsPlaintextNonLoopbackBaseUrl() {
+        // SEC-200: the wrapper inherits the SDK's HTTPS-unless-loopback rule.
+        try {
+            StewardAndroidClient.withBearerToken("http://api.example.test", "user-token");
+            throw new AssertionError("expected plaintext non-loopback rejection");
+        } catch (IllegalArgumentException expected) {
+            assertContains(expected.getMessage(), "HTTPS");
+        }
+        StewardAndroidClient.withBearerToken("http://localhost:3200", "user-token");
+        StewardAndroidClient.withBearerToken("http://api.example.test", "user-token", true);
     }
 
     private static void assertEquals(Object expected, Object actual, String label) {

@@ -99,5 +99,27 @@ class StewardClientTest < Minitest::Test
     assert_equal 403, error.status
     assert_equal false, error.data["ok"]
   end
+
+  def test_plaintext_non_loopback_base_url_rejected
+    # SEC-200: credentials must never travel to a plaintext non-loopback
+    # endpoint unless the operator explicitly opts out.
+    ["http://api.example.test", "http://192.168.1.10:3200", "ftp://api.example.test", "not-a-url"].each do |base_url|
+      error = assert_raises(ArgumentError) do
+        Steward::Client.new(base_url: base_url, api_key: "tenant-key")
+      end
+      assert_kind_of String, error.message
+    end
+
+    ["https://api.example.test", "http://localhost:3200", "http://127.0.0.1:3200", "http://[::1]:3200"].each do |base_url|
+      Steward::Client.new(base_url: base_url, api_key: "tenant-key")
+    end
+  end
+
+  def test_allow_insecure_base_url_opts_out_with_warning
+    _out, err = capture_io do
+      Steward::Client.new(base_url: "http://api.example.test", api_key: "tenant-key", allow_insecure_base_url: true)
+    end
+    assert_includes err, "not HTTPS"
+  end
 end
 

@@ -168,4 +168,59 @@ void main() {
       },
     );
   });
+
+  baseUrlEnforcementTests();
+}
+
+// SEC-200: clients must refuse to send credentials to a plaintext
+// non-loopback endpoint unless the operator explicitly opts out.
+void baseUrlEnforcementTests() {
+  test('plaintext non-loopback baseUrl is rejected', () {
+    for (final baseUrl in [
+      'http://api.example.test',
+      'http://192.168.1.10:3200',
+      'ftp://api.example.test',
+      'not-a-url',
+    ]) {
+      expect(
+        () => StewardClient(StewardClientConfig(baseUrl: baseUrl, apiKey: 'tenant-key')),
+        throwsArgumentError,
+        reason: baseUrl,
+      );
+      expect(
+        () => StewardAuth(StewardAuthConfig(
+          baseUrl: baseUrl,
+          storage: MemoryStewardSessionStorage(),
+        )),
+        throwsArgumentError,
+        reason: baseUrl,
+      );
+    }
+
+    for (final baseUrl in [
+      'https://api.example.test',
+      'http://localhost:3200',
+      'http://127.0.0.1:3200',
+      'http://[::1]:3200',
+    ]) {
+      StewardClient(StewardClientConfig(baseUrl: baseUrl, apiKey: 'tenant-key'));
+      StewardAuth(StewardAuthConfig(
+        baseUrl: baseUrl,
+        storage: MemoryStewardSessionStorage(),
+      ));
+    }
+  });
+
+  test('allowInsecureBaseUrl opts out', () {
+    StewardClient(StewardClientConfig(
+      baseUrl: 'http://api.example.test',
+      apiKey: 'tenant-key',
+      allowInsecureBaseUrl: true,
+    ));
+    StewardAuth(StewardAuthConfig(
+      baseUrl: 'http://api.example.test',
+      storage: MemoryStewardSessionStorage(),
+      allowInsecureBaseUrl: true,
+    ));
+  });
 }

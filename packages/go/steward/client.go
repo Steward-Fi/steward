@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -28,6 +29,10 @@ type Config struct {
 	TenantID             string
 	RequestSigningSecret string
 	RequestSigningKeyID  string
+	// AllowInsecureBaseURL permits a plaintext non-loopback BaseURL (warns at
+	// construction). HTTPS is required by default so credentials never travel
+	// cleartext off-loopback (SEC-200).
+	AllowInsecureBaseURL bool
 	HTTPClient           *http.Client
 	Now                  func() time.Time
 	NewID                func() string
@@ -94,6 +99,25 @@ var stewardCredentialHeaders = []string{
 	"Idempotency-Key",
 }
 
+func isLoopbackHost(hostname string) bool {
+	return hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1"
+}
+
+// Keep in lockstep with the equivalent check in EVERY other SDK (sdk, java,
+// python, ruby, rust, swift, csharp, flutter): these clients transmit API
+// keys, bearer tokens, and HMAC-signed credentials, none of which may travel
+// to a plaintext non-loopback endpoint (SEC-200, mirroring SEC-048).
+func assertSecureBaseURL(base *url.URL, allowInsecure bool) error {
+	if base.Scheme == "https" || (base.Scheme == "http" && isLoopbackHost(base.Hostname())) {
+		return nil
+	}
+	if allowInsecure {
+		log.Printf("[steward-sdk] WARNING: base URL %q is not HTTPS; credentials travel in cleartext. Use AllowInsecureBaseURL only on trusted private networks.", base)
+		return nil
+	}
+	return errors.New("base URL must use HTTPS unless it targets loopback (http://localhost, http://127.0.0.1, http://[::1]); set AllowInsecureBaseURL to override on trusted private networks")
+}
+
 // stripStewardCredentialsOnCrossHostRedirect drops credential and signing
 // headers when a redirect targets a different host, so an open redirect or
 // hostile proxy cannot exfiltrate them (SEC-126).
@@ -114,8 +138,12 @@ func NewClient(config Config) (*Client, error) {
 		return nil, errors.New("base URL is required")
 	}
 	base := strings.TrimRight(config.BaseURL, "/")
-	if _, err := url.ParseRequestURI(base); err != nil {
+	parsed, err := url.ParseRequestURI(base)
+	if err != nil {
 		return nil, fmt.Errorf("invalid base URL: %w", err)
+	}
+	if err := assertSecureBaseURL(parsed, config.AllowInsecureBaseURL); err != nil {
+		return nil, err
 	}
 	httpClient := config.HTTPClient
 	if httpClient == nil {

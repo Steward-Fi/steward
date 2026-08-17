@@ -23,6 +23,9 @@ namespace Steward
         public string? TenantId { get; set; }
         public string? RequestSigningSecret { get; set; }
         public string? RequestSigningKeyId { get; set; }
+        /// <summary>Permit a plaintext non-loopback BaseUrl (warns at construction). HTTPS is
+        /// required by default so credentials never travel cleartext off-loopback (SEC-200).</summary>
+        public bool AllowInsecureBaseUrl { get; set; }
         public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(30);
         public StewardTransport? Transport { get; set; }
         public Func<DateTimeOffset> Now { get; set; } = () => DateTimeOffset.UtcNow;
@@ -118,7 +121,45 @@ namespace Steward
 
             _config = config;
             BaseUrl = config.BaseUrl.TrimEnd('/');
+            AssertSecureBaseUrl(BaseUrl, config.AllowInsecureBaseUrl);
             _transport = config.Transport ?? DefaultTransportAsync;
+        }
+
+        // Keep in lockstep with the equivalent check in EVERY other SDK (sdk, go,
+        // java, python, ruby, rust, swift, flutter): these clients transmit API
+        // keys, bearer tokens, and HMAC-signed credentials, none of which may
+        // travel to a plaintext non-loopback endpoint (SEC-200, mirroring SEC-048).
+        private static void AssertSecureBaseUrl(string baseUrl, bool allowInsecureBaseUrl)
+        {
+            Uri uri;
+            try
+            {
+                uri = new Uri(baseUrl, UriKind.Absolute);
+            }
+            catch (UriFormatException e)
+            {
+                throw new ArgumentException("BaseUrl must be a valid absolute URL", nameof(baseUrl), e);
+            }
+
+            if (uri.Scheme == Uri.UriSchemeHttps
+                || (uri.Scheme == Uri.UriSchemeHttp && IsLoopbackHost(uri.Host)))
+            {
+                return;
+            }
+            if (allowInsecureBaseUrl)
+            {
+                Console.Error.WriteLine("[steward-sdk] WARNING: BaseUrl '" + baseUrl + "' is not HTTPS; credentials travel in cleartext. Use AllowInsecureBaseUrl only on trusted private networks.");
+                return;
+            }
+            throw new ArgumentException("BaseUrl must use HTTPS unless it targets loopback (http://localhost, http://127.0.0.1, http://[::1]). Set AllowInsecureBaseUrl to override on trusted private networks.", nameof(baseUrl));
+        }
+
+        private static bool IsLoopbackHost(string host)
+        {
+            return string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)
+                || host == "127.0.0.1"
+                || host == "::1"
+                || host == "[::1]";
         }
 
         public Task<JsonElement?> GetAsync(string path, Dictionary<string, string?>? query = null, Dictionary<string, string>? headers = null, CancellationToken cancellationToken = default)
