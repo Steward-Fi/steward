@@ -1,0 +1,31 @@
+# Dependabot configuration (SEC-160)
+#
+# Scope is deliberately narrow: the repo's runtime dependencies are managed
+# through bun.lock plus the documented CVE-pin `overrides` list in the root
+# package.json, so bun gets security-update PRs only (version-update PRs are
+# disabled via open-pull-requests-limit: 0). The ecosystems the audit flagged
+# — SHA-pinned GitHub Actions and digest-pinned Docker base images — get full
+# weekly version updates.
+version: 2
+updates:
+  # Keep SHA-pinned actions in .github/workflows current.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  # Keep digest-pinned base images in the root Dockerfile current.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  # bun workspaces (root package.json + packages/* + web/): security updates
+  # only. Routine version bumps stay a deliberate, lockfile-reviewed process.
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0

@@ -7,7 +7,11 @@ packages/auth/ @0xSolace
 packages/vault/ @0xSolace
 packages/db/ @0xSolace
 
-# CI/CD
-.github/ @0xSolace
-Dockerfile @0xSolace
-docker-compose*.yml @0xSolace
+# CI/CD — sensitive paths get a second owner so review load and repo knowledge
+# are not concentrated in a single account (SEC-160). NOTE: GitHub satisfies
+# CODEOWNERS review when ANY listed owner approves; requiring two approvals is
+# a branch-protection setting ("require N approving reviews"), not expressible
+# in this file.
+.github/ @0xSolace @lalalune
+Dockerfile @0xSolace @lalalune
+docker-compose*.yml @0xSolace @lalalune
