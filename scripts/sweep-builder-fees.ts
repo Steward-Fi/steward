@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import {
@@ -138,7 +138,19 @@ export function buildUsdcTransferData(to: Address, amount: bigint): Hex {
 }
 
 export async function readBuilderPrivateKey(path: string): Promise<Hex> {
-  const raw = await readFile(expandHome(path), "utf8");
+  const resolved = expandHome(path);
+  // SEC-202: the file holds a raw hex private key unencrypted at rest. Refuse
+  // group/world-accessible permissions instead of silently loading it (POSIX
+  // mode bits are meaningless on Windows, where this check is skipped).
+  if (process.platform !== "win32") {
+    const { mode } = await stat(resolved);
+    if (mode & 0o077) {
+      throw new Error(
+        `builder EOA key file at ${path} is group/world-accessible (mode ${(mode & 0o777).toString(8).padStart(3, "0")}); lock it down with: chmod 600 ${path}`,
+      );
+    }
+  }
+  const raw = await readFile(resolved, "utf8");
   const parsed = JSON.parse(raw) as unknown;
   const candidate =
     typeof parsed === "string"
