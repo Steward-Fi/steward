@@ -23,16 +23,33 @@ function containsCredentialKey(value: unknown, depth = 0): boolean {
 }
 
 function canonicalize(value: unknown, ancestors = new Set<object>()): unknown {
-  if (!value || typeof value !== "object") return value;
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new TypeError("non-finite provider action number");
+    return value;
+  }
+  if (typeof value !== "object") throw new TypeError("non-JSON provider action value");
   if (ancestors.has(value)) throw new TypeError("cyclic provider action arguments");
   ancestors.add(value);
   try {
+    if (Object.hasOwn(value, "toJSON")) {
+      throw new TypeError("provider action arguments must not define toJSON");
+    }
+    for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+      if (descriptor.enumerable && !("value" in descriptor)) {
+        throw new TypeError("provider action arguments must not contain accessors");
+      }
+    }
     if (Array.isArray(value)) {
       return value.map((item) => canonicalize(item, ancestors));
     }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new TypeError("provider action arguments must contain only plain records");
+    }
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
-        .sort(([a], [b]) => a.localeCompare(b))
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
         .map(([key, nested]) => [key, canonicalize(nested, ancestors)]),
     );
   } finally {
@@ -129,6 +146,15 @@ export const providerAction: Action = {
         success: false,
         error: "provider credentials must not be supplied in action arguments",
         text: "Provider credentials stay in Steward and cannot be passed by the agent.",
+      };
+    }
+    try {
+      canonicalize(params.arguments);
+    } catch {
+      return {
+        success: false,
+        error: "provider action arguments must be finite, plain JSON values",
+        text: "Provider action was not submitted because its public arguments were not plain JSON values.",
       };
     }
 

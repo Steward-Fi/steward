@@ -1607,10 +1607,27 @@ export type ProviderActionInvokeResult =
   | ProviderActionInvokeSuccessResult
   | ProviderActionInvokeDeniedResult;
 
+/** Authoritative values persisted in `provider_action_bindings.status`. */
+export type ProviderActionBindingStatus =
+  | "denied"
+  | "pending_approval"
+  | "allowed_stub"
+  | "stub_succeeded"
+  | "stub_failed"
+  | "approved"
+  | "execution_ready"
+  | "approval_denied"
+  | "approval_expired"
+  | "approval_stale"
+  | "executing"
+  | "succeeded"
+  | "failed"
+  | "outcome_unknown";
+
 /** Scalar-only agent view of the persisted provider-action binding. */
 export interface ProviderActionStatus {
   id: string;
-  status: string;
+  status: ProviderActionBindingStatus;
   version: number;
   workspaceId: string;
   providerAccountId: string;
@@ -1625,7 +1642,7 @@ export interface ProviderActionStatus {
 
 export interface ProviderActionApprovalDetail {
   id: string;
-  status: string;
+  status: ProviderActionBindingStatus;
   version: number;
   requestHash: string;
   actionDigest: string;
@@ -1656,7 +1673,7 @@ export type ProviderApprovalReasonCode =
 
 export interface ProviderActionTransitionResult {
   id: string;
-  status: string;
+  status: ProviderActionBindingStatus;
   version: number;
   requestHash: string;
   actionDigest: string;

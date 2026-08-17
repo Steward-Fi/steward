@@ -158,7 +158,31 @@ describe("STEWARD_PROVIDER_ACTION", () => {
       },
     );
     expect(result.success).toBe(false);
-    expect(result.error).toContain("stable message id");
+    expect(result.error).toContain("plain JSON");
+    expect(invokeProviderAction).not.toHaveBeenCalled();
+
+    for (const unsupportedRuntimeValue of [
+      new Date("2026-01-01T00:00:00.000Z"),
+      { toJSON: () => "different-wire-value" },
+      Number.POSITIVE_INFINITY,
+    ]) {
+      const explicitRetry = await providerAction.handler(
+        runtime({ isConnected: () => true, invokeProviderAction }),
+        { id: "message-non-json" } as any,
+        undefined,
+        {
+          parameters: {
+            workspaceId: "workspace-a",
+            providerAccountId: "account-a",
+            operationKey: "github.issue.list",
+            arguments: { unsupportedRuntimeValue },
+            idempotencyKey: "explicit-retry-key",
+          },
+        },
+      );
+      expect(explicitRetry.success).toBe(false);
+      expect(explicitRetry.error).toContain("plain JSON");
+    }
     expect(invokeProviderAction).not.toHaveBeenCalled();
   });
 });

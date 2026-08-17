@@ -120,6 +120,26 @@ const providerActionInvokeSchema: JsonSchema = {
     idempotencyKey: { type: "string", minLength: 8, maxLength: 255 },
   },
 };
+const providerActionBindingStatuses = [
+  "denied",
+  "pending_approval",
+  "allowed_stub",
+  "stub_succeeded",
+  "stub_failed",
+  "approved",
+  "execution_ready",
+  "approval_denied",
+  "approval_expired",
+  "approval_stale",
+  "executing",
+  "succeeded",
+  "failed",
+  "outcome_unknown",
+];
+const providerActionBindingStatusSchema: JsonSchema = {
+  type: "string",
+  enum: providerActionBindingStatuses,
+};
 const providerActionResultSchema: JsonSchema = {
   type: "object",
   required: ["id", "status", "requestHash", "actionDigest"],
@@ -136,6 +156,7 @@ const providerActionResultSchema: JsonSchema = {
 };
 const providerActionDenialSchema: JsonSchema = {
   type: "object",
+  additionalProperties: false,
   required: ["ok", "error", "data"],
   properties: {
     ok: { type: "boolean", const: false },
@@ -169,7 +190,7 @@ const providerApprovalDetailSchema: JsonSchema = {
   ],
   properties: {
     id: stringSchema,
-    status: stringSchema,
+    status: providerActionBindingStatusSchema,
     version: { type: "integer" },
     requestHash: stringSchema,
     actionDigest: stringSchema,
@@ -215,7 +236,7 @@ const providerTransitionSchema: JsonSchema = {
   required: ["id", "status", "version", "requestHash", "actionDigest"],
   properties: {
     id: stringSchema,
-    status: stringSchema,
+    status: providerActionBindingStatusSchema,
     version: { type: "integer" },
     requestHash: stringSchema,
     actionDigest: stringSchema,
@@ -380,7 +401,7 @@ const providerActionStatusSchema: JsonSchema = {
   ],
   properties: {
     id: stringSchema,
-    status: stringSchema,
+    status: providerActionBindingStatusSchema,
     version: { type: "integer", minimum: 1 },
     workspaceId: stringSchema,
     providerAccountId: stringSchema,
@@ -537,7 +558,12 @@ function providerAuthorityPaths(): Record<string, OpenApiPathItem> {
           "200": jsonResponse(providerActionResultSchema),
           "202": jsonResponse(providerActionResultSchema),
           ...errorResponses(),
-          "403": jsonResponse(providerActionDenialSchema),
+          "403": jsonResponse({
+            oneOf: [
+              { ...errorResponse(), additionalProperties: false },
+              providerActionDenialSchema,
+            ],
+          }),
         },
       },
     },

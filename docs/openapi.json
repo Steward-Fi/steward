@@ -5411,49 +5411,71 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "required": [
-                    "ok",
-                    "error",
-                    "data"
-                  ],
-                  "properties": {
-                    "ok": {
-                      "type": "boolean",
-                      "const": false
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "required": [
+                        "ok",
+                        "error"
+                      ],
+                      "properties": {
+                        "ok": {
+                          "type": "boolean",
+                          "const": false
+                        },
+                        "error": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
                     },
-                    "error": {
-                      "type": "string"
-                    },
-                    "data": {
+                    {
                       "type": "object",
                       "additionalProperties": false,
                       "required": [
-                        "id",
-                        "status",
-                        "requestHash",
-                        "actionDigest"
+                        "ok",
+                        "error",
+                        "data"
                       ],
                       "properties": {
-                        "id": {
+                        "ok": {
+                          "type": "boolean",
+                          "const": false
+                        },
+                        "error": {
                           "type": "string"
                         },
-                        "status": {
-                          "type": "string",
-                          "enum": [
-                            "denied_access",
-                            "denied_policy"
-                          ]
-                        },
-                        "requestHash": {
-                          "type": "string"
-                        },
-                        "actionDigest": {
-                          "type": "string"
+                        "data": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "id",
+                            "status",
+                            "requestHash",
+                            "actionDigest"
+                          ],
+                          "properties": {
+                            "id": {
+                              "type": "string"
+                            },
+                            "status": {
+                              "type": "string",
+                              "enum": [
+                                "denied_access",
+                                "denied_policy"
+                              ]
+                            },
+                            "requestHash": {
+                              "type": "string"
+                            },
+                            "actionDigest": {
+                              "type": "string"
+                            }
+                          }
                         }
                       }
                     }
-                  }
+                  ]
                 }
               }
             }
@@ -9291,7 +9313,23 @@
                           "type": "string"
                         },
                         "status": {
-                          "type": "string"
+                          "type": "string",
+                          "enum": [
+                            "denied",
+                            "pending_approval",
+                            "allowed_stub",
+                            "stub_succeeded",
+                            "stub_failed",
+                            "approved",
+                            "execution_ready",
+                            "approval_denied",
+                            "approval_expired",
+                            "approval_stale",
+                            "executing",
+                            "succeeded",
+                            "failed",
+                            "outcome_unknown"
+                          ]
                         },
                         "version": {
                           "type": "integer",
@@ -9467,7 +9505,23 @@
                           "type": "string"
                         },
                         "status": {
-                          "type": "string"
+                          "type": "string",
+                          "enum": [
+                            "denied",
+                            "pending_approval",
+                            "allowed_stub",
+                            "stub_succeeded",
+                            "stub_failed",
+                            "approved",
+                            "execution_ready",
+                            "approval_denied",
+                            "approval_expired",
+                            "approval_stale",
+                            "executing",
+                            "succeeded",
+                            "failed",
+                            "outcome_unknown"
+                          ]
                         },
                         "version": {
                           "type": "integer"
@@ -9711,7 +9765,23 @@
                       "type": "string"
                     },
                     "status": {
-                      "type": "string"
+                      "type": "string",
+                      "enum": [
+                        "denied",
+                        "pending_approval",
+                        "allowed_stub",
+                        "stub_succeeded",
+                        "stub_failed",
+                        "approved",
+                        "execution_ready",
+                        "approval_denied",
+                        "approval_expired",
+                        "approval_stale",
+                        "executing",
+                        "succeeded",
+                        "failed",
+                        "outcome_unknown"
+                      ]
                     },
                     "version": {
                       "type": "integer"
@@ -9892,7 +9962,23 @@
                       "type": "string"
                     },
                     "status": {
-                      "type": "string"
+                      "type": "string",
+                      "enum": [
+                        "denied",
+                        "pending_approval",
+                        "allowed_stub",
+                        "stub_succeeded",
+                        "stub_failed",
+                        "approved",
+                        "execution_ready",
+                        "approval_denied",
+                        "approval_expired",
+                        "approval_stale",
+                        "executing",
+                        "succeeded",
+                        "failed",
+                        "outcome_unknown"
+                      ]
                     },
                     "version": {
                       "type": "integer"

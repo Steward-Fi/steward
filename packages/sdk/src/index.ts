@@ -253,6 +253,7 @@ export type {
   PolicyType,
   ProviderActionApprovalDecisionInput,
   ProviderActionApprovalDetail,
+  ProviderActionBindingStatus,
   ProviderActionInvokeDeniedResult,
   ProviderActionInvokeInput,
   ProviderActionInvokeResult,
