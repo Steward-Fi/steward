@@ -1,8 +1,16 @@
+/**
+ * tenantAuthMiddleware — X-Steward-Tenant + X-Steward-Key authentication.
+ *
+ * Mount this ONLY on the API router it is meant to protect (e.g. /v1/*),
+ * never globally over an app that serves content at `/`: exact GET `/` and
+ * GET `/health` requests bypass authentication for liveness probes.
+ */
+
 import { getDb, type Tenant } from "@stwd/db";
 import type { ApiResponse } from "@stwd/shared";
 import { createMiddleware } from "hono/factory";
 
-import { validateApiKey } from "./api-keys";
+import { hashApiKey, validateApiKey } from "./api-keys";
 import type { AuthVariables } from "./types";
 
 const HEALTHCHECK_PATHS = new Set(["/", "/health"]);
@@ -17,6 +25,11 @@ async function findTenantById(tenantId: string): Promise<Tenant | undefined> {
     where: (tenant, { eq }) => eq(tenant.id, tenantId),
   });
 }
+
+// Compared against the presented key when the tenant id is unknown, so the
+// failure path has the same shape (hash + timingSafeEqual) whether or not the
+// tenant exists — response timing must not reveal valid tenant ids.
+const UNKNOWN_TENANT_DUMMY_HASH = hashApiKey("steward-unknown-tenant-dummy-key");
 
 export function tenantAuthMiddleware() {
   return createMiddleware<{ Variables: AuthVariables }>(async (c, next) => {
@@ -34,7 +47,9 @@ export function tenantAuthMiddleware() {
 
     const tenant = await findTenantById(tenantId);
 
-    if (!tenant || !validateApiKey(apiKey, tenant.apiKeyHash)) {
+    // Always run the hash comparison, even for unknown tenant ids.
+    const keyValid = validateApiKey(apiKey, tenant?.apiKeyHash ?? UNKNOWN_TENANT_DUMMY_HASH);
+    if (!tenant || !keyValid) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid API key" }, 403);
     }
 

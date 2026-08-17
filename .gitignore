@@ -10,6 +10,11 @@ out/
 .next/
 .turbo/
 *.tsbuildinfo
+.build/
+bin/
+obj/
+__pycache__/
+*.pyc
 
 # ─── Environment ───────────────────────────────────────────────────────────────
 .env

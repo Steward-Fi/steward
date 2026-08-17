@@ -61,7 +61,14 @@ const DEFAULT_PUBLIC_RPCS: Record<number, string> = {
  *
  * Override priority:
  * 1. `SIWE_RPC_<CHAIN_ID>` env var (for production: private RPC URLs)
- * 2. `DEFAULT_PUBLIC_RPCS` fallback for major chains
+ * 2. `DEFAULT_PUBLIC_RPCS` fallback for major chains — non-production only
+ *
+ * SEC-140: the hardcoded public RPCs are a single point of compromise for the
+ * EIP-1271 `isValidSignature` decision — a compromised or MITM'd public RPC
+ * can forge the magic value and log in as any contract wallet on that chain.
+ * Production therefore fails closed (null → "no_rpc") unless the operator
+ * configures `SIWE_RPC_<CHAIN_ID>`; the public fallback remains for
+ * development convenience.
  *
  * Returns null if no RPC is available for this chain.
  */
@@ -70,6 +77,7 @@ export function resolveRpcUrl(chainId: number): string | null {
   if (envOverride && envOverride.trim().length > 0) {
     return envOverride.trim();
   }
+  if (process.env.NODE_ENV === "production") return null;
   return DEFAULT_PUBLIC_RPCS[chainId] ?? null;
 }
 

@@ -75,7 +75,7 @@ API_VERSION=0.2.0
 STEWARD_BIND_HOST=0.0.0.0
 
 # Database (shared Neon Postgres — steward schema)
-DATABASE_URL=postgresql://neondb_owner:<password>@<neon-host>/neondb?sslmode=require&options=-c search_path=steward,public
+DATABASE_URL=postgresql://neondb_owner:<password>@<neon-host>/neondb?sslmode=verify-full&options=-c search_path=steward,public
 
 # Vault encryption
 STEWARD_MASTER_PASSWORD=<256-bit-hex-secret>

@@ -47,6 +47,7 @@ export {
   assertExternalKeyCustodyProviderV1,
   assertNoExternalPrivateKeyMaterial,
   EXTERNAL_KEY_CUSTODY_CONTRACT_VERSION,
+  ExternalBroadcastOutcomeUnknownError,
   externalKeyCustodyUnavailableError,
   externalKeyPrivateExportUnavailableError,
   externalKeySigningUnavailableError,
@@ -136,7 +137,11 @@ export {
   STRICT_HOSTS,
   validateSecretRouteConfig,
 } from "./secret-route-validator";
-export type { CreateSecretOptions, SecretMetadata } from "./secret-vault";
+export type {
+  CreateSecretOptions,
+  LegacyRootSecretMigration,
+  SecretMetadata,
+} from "./secret-vault";
 export { SecretVault } from "./secret-vault";
 export type {
   SignerBackend,

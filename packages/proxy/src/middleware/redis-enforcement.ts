@@ -22,6 +22,7 @@ import {
   settleReservedSpend,
 } from "@stwd/redis";
 import { and, eq } from "drizzle-orm";
+import { boundedPositiveIntegerEnv, isProxyDevMode } from "../config";
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -65,8 +66,16 @@ export async function shutdownProxyRedis(): Promise<void> {
 
 // ─── Default rate limits for proxy (per-agent per-host) ──────────────────────
 
-const DEFAULT_PROXY_RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
-const DEFAULT_PROXY_RATE_LIMIT_MAX = 60; // 60 requests/minute per agent per host
+const DEFAULT_PROXY_RATE_LIMIT_WINDOW_MS = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_RATE_LIMIT_WINDOW_MS",
+  60_000,
+  24 * 60 * 60 * 1000,
+);
+const DEFAULT_PROXY_RATE_LIMIT_MAX = boundedPositiveIntegerEnv(
+  "STEWARD_PROXY_RATE_LIMIT_MAX",
+  60,
+  1_000_000,
+);
 
 const PERMISSIVE: RateLimitResult = {
   allowed: true,
@@ -75,11 +84,17 @@ const PERMISSIVE: RateLimitResult = {
 };
 
 function isRedisRequired(): boolean {
-  return (
-    process.env.REDIS_REQUIRED === "true" ||
-    (process.env.NODE_ENV === "production" &&
-      process.env.STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL !== "true")
-  );
+  if (process.env.REDIS_REQUIRED === "true") return true;
+  // Explicit operator opt-out, honored in every environment (as before
+  // SEC-175) — but an explicit production NODE_ENV still overrides a stray
+  // STEWARD_PROXY_DEV_MODE below.
+  if (process.env.STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL === "true") return false;
+  // SEC-175: default-deny — Redis enforcement is required in every
+  // environment unless the operator explicitly opts into the soft
+  // development posture. NODE_ENV alone no longer unlocks it, and a
+  // production NODE_ENV overrides the dev-mode flag.
+  if (process.env.NODE_ENV === "production") return true;
+  return !isProxyDevMode();
 }
 
 /**

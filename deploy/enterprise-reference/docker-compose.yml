@@ -20,14 +20,22 @@ services:
     environment:
       DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/steward}"
       # Explicit acknowledgement is required because this allows plaintext DB
-      # transport. The bundled Postgres is isolated on steward-backend, but an
-      # operator-supplied external DATABASE_URL must never inherit this silently.
+      # transport. The bundled Postgres is isolated on the internal steward-data
+      # network, but an operator-supplied external DATABASE_URL must never
+      # inherit this silently.
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:?required for the internal plaintext Postgres profile}"
+      STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
     depends_on:
       postgres:
         condition: service_healthy
     networks:
-      - steward-backend
+      # Dual-homed: reaches the bundled postgres via steward-data, and an
+      # operator-supplied external DATABASE_URL via steward-backend egress.
+      steward-backend:
+        # Compose does not define a default gateway for equal priorities. Pin
+        # the egress-capable network explicitly (Compose >= 2.33.1).
+        gw_priority: 1
+      steward-data: {}
     restart: "no"
 
   steward-api:
@@ -71,6 +79,7 @@ services:
       PASSKEY_ORIGIN: "${PASSKEY_ORIGIN:-https://steward.localhost}"
       SKIP_MIGRATIONS: "true"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:?required for the internal plaintext Postgres profile}"
+      STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
     depends_on:
       steward-migrate:
         condition: service_completed_successfully
@@ -83,7 +92,9 @@ services:
       start_period: 30s
       retries: 8
     networks:
-      - steward-backend
+      steward-backend:
+        gw_priority: 1
+      steward-data: {}
 
   steward-proxy:
     profiles: ["enterprise-reference"]
@@ -108,6 +119,7 @@ services:
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?required}"
       STEWARD_PROXY_REQUEST_SIGNING_SECRETS: "${STEWARD_PROXY_REQUEST_SIGNING_SECRETS:?required}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:?required for the internal plaintext Postgres profile}"
+      STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
     depends_on:
       steward-api:
         condition: service_healthy
@@ -118,7 +130,9 @@ services:
       start_period: 15s
       retries: 5
     networks:
-      - steward-backend
+      steward-backend:
+        gw_priority: 1
+      steward-data: {}
 
   caddy:
     profiles: ["enterprise-reference"]
@@ -157,7 +171,7 @@ services:
       timeout: 5s
       retries: 6
     networks:
-      - steward-backend
+      - steward-data
 
   redis:
     profiles: ["enterprise-reference"]
@@ -171,7 +185,7 @@ services:
       timeout: 5s
       retries: 6
     networks:
-      - steward-backend
+      - steward-data
 
   backup:
     profiles: ["enterprise-reference", "backup"]
@@ -197,7 +211,11 @@ services:
       postgres:
         condition: service_healthy
     networks:
-      - steward-backend
+      # Dual-homed like steward-migrate: bundled postgres via steward-data,
+      # external DATABASE_URL (if overridden) via steward-backend egress.
+      steward-backend:
+        gw_priority: 1
+      steward-data: {}
     restart: "no"
 
 volumes:
@@ -207,5 +225,13 @@ volumes:
   caddy-config:
 
 networks:
+  # Egress-capable: steward-api (chain RPCs), steward-proxy (LLM upstreams),
+  # and caddy (ACME) need outbound access, so this bridge is not internal.
   steward-backend:
     driver: bridge
+  # Data plane (SEC-161): postgres/redis publish no ports and need no egress,
+  # so they sit on an internal-only network (mirrors the root compose's
+  # `backend` network). steward-api/steward-proxy are dual-homed to reach it.
+  steward-data:
+    driver: bridge
+    internal: true

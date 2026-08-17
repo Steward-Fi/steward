@@ -198,6 +198,7 @@ describe("SecretVault no-read-back: get is impossible", () => {
       "getSecretById",
       "listRoutes",
       "listSecrets",
+      "migrateLegacyRootSecrets",
       "rotateSecret",
       "rotateSecretWithinTx",
       "toMetadata",
@@ -207,7 +208,9 @@ describe("SecretVault no-read-back: get is impossible", () => {
 
     // The plaintext-capable subset is exactly these two direct-return methods
     // plus the use-only exerciseSecret/exerciseSecretRow closures. Everything else
-    // returns metadata/routes.
+    // returns metadata/routes. (migrateLegacyRootSecrets handles plaintext
+    // internally but returns row COUNTS only — like rotateSecret, it never
+    // surfaces a value to its caller.)
     const plaintextCapable = [
       "decryptSecret",
       "decryptSecretRow",

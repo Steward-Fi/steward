@@ -19,6 +19,11 @@ export interface ERC8183Addresses {
 export interface ERC8183ChainConfig {
   chainId: number;
   name: string;
+  /**
+   * Single RPC endpoint all chain reads for this deployment trust (same
+   * single-source caveat as ERC-8004's RegistryConfig.rpcUrl, SEC-112): use
+   * operator-controlled, ideally redundant infrastructure for production.
+   */
   rpcUrl: string;
   addresses: ERC8183Addresses;
 }

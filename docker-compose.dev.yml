@@ -77,6 +77,10 @@ services:
     environment:
       NODE_ENV: "development"
       STEWARD_PROXY_PORT: "8080"
+      # SEC-175: the proxy fails closed by default (request signing, shared
+      # replay store, Redis rate limiting). Dev has no Redis/signing secrets,
+      # so opt into the soft posture explicitly.
+      STEWARD_PROXY_DEV_MODE: "true"
       # Proxy also uses PGLite in dev
       STEWARD_DB_MODE: "pglite"
       STEWARD_PGLITE_PATH: "/app/.pglite"

@@ -78,16 +78,25 @@ const SENSITIVE_WEBHOOK_FIELDS = [
   "signature",
 ];
 
+function redactWebhookValue(value: unknown): unknown {
+  // SEC-110: recurse into arrays too — batch-shaped payloads carry objects
+  // inside arrays (e.g. `items: [{ apiKey: ... }]`) and must get the same
+  // redaction as object-nested values.
+  if (Array.isArray(value)) return value.map(redactWebhookValue);
+  if (value && typeof value === "object") {
+    return redactWebhookData(value as Record<string, unknown>);
+  }
+  return value;
+}
+
 function redactWebhookData(data: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(data)) {
     const normalized = key.toLowerCase().replace(/[_-]/g, "");
     if (SENSITIVE_WEBHOOK_FIELDS.some((f) => normalized.includes(f))) {
       out[key] = "[redacted]";
-    } else if (value && typeof value === "object" && !Array.isArray(value)) {
-      out[key] = redactWebhookData(value as Record<string, unknown>);
     } else {
-      out[key] = value;
+      out[key] = redactWebhookValue(value);
     }
   }
   return out;

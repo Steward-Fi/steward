@@ -91,6 +91,7 @@ services:
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?STEWARD_AUDIT_HMAC_KEY is required - generate with: openssl rand -hex 32}"
       SIWE_ALLOWED_DOMAINS: "${SIWE_ALLOWED_DOMAINS:-}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
+      STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
       # ── Monero (optional; empty = Monero endpoints fail closed with 503) ──
       # Enable the monero-wallet-rpc sidecar with: COMPOSE_PROFILES=monero
       # and set STEWARD_MONERO_WALLET_RPC_URL to the sidecar's endpoint below.
@@ -154,7 +155,13 @@ services:
       # fail closed with a 5xx in production.
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?STEWARD_AUDIT_HMAC_KEY is required - generate with: openssl rand -hex 32}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
+      STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
       STEWARD_PROXY_REQUEST_SIGNING_SECRET: "${STEWARD_PROXY_REQUEST_SIGNING_SECRET:?STEWARD_PROXY_REQUEST_SIGNING_SECRET is required - generate with: openssl rand -hex 32}"
+      # Explicit soft posture for functional dev/test stacks. Empty by default;
+      # NODE_ENV=production always overrides it in proxy security guards.
+      STEWARD_PROXY_DEV_MODE: "${STEWARD_PROXY_DEV_MODE:-}"
+      STEWARD_PROXY_RATE_LIMIT_MAX: "${STEWARD_PROXY_RATE_LIMIT_MAX:-60}"
+      STEWARD_PROXY_RATE_LIMIT_WINDOW_MS: "${STEWARD_PROXY_RATE_LIMIT_WINDOW_MS:-60000}"
       REDIS_URL: "redis://redis:6379"
       # Cleartext redis:// on the private compose network requires an explicit
       # opt-out in production (mirrors STEWARD_ALLOW_INSECURE_DB). Set

@@ -91,6 +91,28 @@ export const builderFeeSchema = z.object({
 });
 export type HyperliquidBuilderFee = z.infer<typeof builderFeeSchema>;
 
+/**
+ * SEC-186: validate the HL builder-fee env config at startup (the trading
+ * plugin calls this from `register`) so a malformed HL_BUILDER_ADDRESS /
+ * HL_BUILDER_FEE_TENTHS_BP fails fast at boot instead of throwing from
+ * `configuredBuilderFee()` at order time. Unset (or partially set — treated
+ * as "not configured", same as `configuredBuilderFee`) is a no-op.
+ */
+export function validateBuilderFeeEnv(): void {
+  const address = process.env.HL_BUILDER_ADDRESS;
+  const rawFee = process.env.HL_BUILDER_FEE_TENTHS_BP;
+  if (!address || rawFee === undefined || rawFee === "") return;
+  const result = builderFeeSchema.safeParse({ address, feeTenthsBps: Number(rawFee) });
+  if (!result.success) {
+    throw new Error(
+      `Invalid HL builder fee configuration (HL_BUILDER_ADDRESS / HL_BUILDER_FEE_TENTHS_BP): ${
+        result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") ??
+        "malformed"
+      }`,
+    );
+  }
+}
+
 export const hyperliquidOrderSchema = z.object({
   coin: hyperliquidAssetSchema.optional(),
   asset: hyperliquidAssetSchema.optional(),
@@ -106,6 +128,12 @@ export const hyperliquidOrderSchema = z.object({
   reduceOnly: z.boolean().default(false),
   leverage: z.number().positive().max(50).optional(),
   nonce: z.number().int().positive().optional(),
+  // SEC-186 precedence: an order-supplied builder OVERRIDES the
+  // HL_BUILDER_ADDRESS / HL_BUILDER_FEE_TENTHS_BP env config (see
+  // exchangeActionFromNormalized). The hosted trade route never forwards a
+  // caller-supplied builder, so over the API the env config always wins;
+  // direct library consumers should pass `builder` only for their own
+  // (operator-approved, <=10 bps) fee recipient.
   builder: builderFeeSchema.optional(),
 });
 export type HyperliquidOrder = z.input<typeof hyperliquidOrderSchema>;
@@ -559,6 +587,8 @@ function normalizedAddIsolatedMargin(input: AddIsolatedMarginInput) {
 function exchangeActionFromNormalized(
   o: ReturnType<typeof normalized>,
   asset: AssetResolution,
+  // SEC-186 precedence: the order's own builder fee (first) wins over the
+  // env-configured builder fee. See hyperliquidOrderSchema.builder.
   builder = o.builder ?? configuredBuilderFee(),
 ): Record<string, unknown> {
   const action: Record<string, unknown> = {
@@ -946,15 +976,23 @@ export function toWithdrawAction(params: WithdrawParams): Record<string, unknown
 
 export async function submitWithdraw(
   signed: SignedWithdraw,
-  options: { transport?: HyperliquidTransport; baseUrl?: string } = {},
+  options: { transport?: HyperliquidTransport; baseUrl?: string; signal?: AbortSignal } = {},
 ) {
   const transport = options.transport ?? { fetch };
   const baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
-  const r = await transport.fetch(`${baseUrl}/exchange`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(signedWithdrawSchema.parse(signed)),
-  });
+  // SEC-113: every other venue call goes through withTimeoutSignal; a stalled
+  // HL endpoint must not hang the operator withdraw request (or extend the
+  // submission-fence advisory-lock hold for fenced callers). A caller-provided
+  // signal always takes precedence over the default timeout.
+  const r = await transport.fetch(
+    `${baseUrl}/exchange`,
+    withTimeoutSignal({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(signedWithdrawSchema.parse(signed)),
+      signal: options.signal,
+    }),
+  );
   const j = await r.json().catch(() => null);
   if (!r.ok) throw new Error(`Hyperliquid exchange returned ${r.status}: ${JSON.stringify(j)}`);
   return j;
@@ -1516,8 +1554,15 @@ export class HyperliquidAdapter {
       signature: { r: s.r, s: s.s, v: Number(s.v) },
     });
   }
-  submitWithdraw(signed: SignedWithdraw) {
-    return submitWithdraw(signed, { transport: this.transport, baseUrl: this.baseUrl });
+  submitWithdraw(
+    signed: SignedWithdraw,
+    options: { transport?: HyperliquidTransport; baseUrl?: string; signal?: AbortSignal } = {},
+  ) {
+    return submitWithdraw(signed, {
+      transport: options.transport ?? this.transport,
+      baseUrl: options.baseUrl ?? this.baseUrl,
+      signal: options.signal,
+    });
   }
   // Build a reduce-only market order on the OPPOSITE side of the open position
   // (long => sell, short => buy), sized abs(szi), then sign + submit it.

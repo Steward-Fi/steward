@@ -97,12 +97,23 @@ describe("wallet nonce binding hardening", () => {
       nonceRouteStart,
     );
     expect(
-      authSource.indexOf("allowedDomains: getAllowedSiweDomains(c)", nonceRouteStart),
+      authSource.indexOf("allowedDomains: getAllowedSiweDomains()", nonceRouteStart),
     ).toBeGreaterThan(nonceRouteStart);
     expect(authSource.indexOf("originHost,", nonceRouteStart)).toBeGreaterThan(nonceRouteStart);
     expect(authSource.indexOf("tenantId: tenantId || undefined", nonceRouteStart)).toBeGreaterThan(
       nonceRouteStart,
     );
+  });
+
+  it("never derives allowed SIWE domains from the request Host header (SEC-144)", () => {
+    const helperStart = authSource.indexOf("function getAllowedSiweDomains");
+    expect(helperStart).toBeGreaterThanOrEqual(0);
+    const helperEnd = authSource.indexOf("\nfunction ", helperStart + 1);
+    const helper = authSource.slice(helperStart, helperEnd === -1 ? undefined : helperEnd);
+    expect(helper).not.toContain('req.header("host")');
+    expect(helper).not.toContain('req.header("Host")');
+    // Misconfiguration (no SIWE_ALLOWED_DOMAINS, invalid APP_URL) fails closed.
+    expect(helper).toContain("return []");
   });
 
   it("validates consumed nonce bindings before wallet sessions are minted", () => {

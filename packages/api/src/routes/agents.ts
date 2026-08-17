@@ -1565,6 +1565,9 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
     });
     const wallet = await vault.createWallet({
       agentId,
+      // SEC-162: vault-layer tenant verification (defense-in-depth on top of
+      // ensureAgentForTenant above).
+      tenantId,
       venue: body.venue,
       scope: body.scope,
       chainType: body.chainType,

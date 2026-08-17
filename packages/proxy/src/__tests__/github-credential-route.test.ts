@@ -32,6 +32,10 @@ beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "proxy-github-route-jwt-secret-with-enough-bytes-here";
+  // These integration tests run the proxy in the soft development posture
+  // (unsigned agent requests, in-process replay store) — an explicit opt-in
+  // since SEC-175.
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   // api.github.com ships in the default allowlists (secret-route + proxy alias),
   // so no STEWARD_*_ALLOWED_HOSTS env is needed for the happy path.
 
@@ -65,6 +69,7 @@ afterAll(async () => {
   delete process.env.STEWARD_PGLITE_MEMORY;
   delete process.env.STEWARD_MASTER_PASSWORD;
   delete process.env.STEWARD_JWT_SECRET;
+  delete process.env.STEWARD_PROXY_DEV_MODE;
 });
 
 function buildApp() {

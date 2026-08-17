@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
+  isStewardBroadcastOutcomeUnknown,
   isStewardMfaRequiredError,
   type SignTransactionInput,
   type SignUserOperationInput,
@@ -1363,6 +1364,25 @@ describe("HTTP request building", () => {
 
     expect(lastCapture?.method).toBe("GET");
     expect(lastCapture?.url).toBe("https://api.steward.example/vault/agent-1/actions/action-1");
+  });
+
+  it("preserves outcome_unknown transfer action status", async () => {
+    installMockFetch({
+      ok: true,
+      data: {
+        id: "action-unknown",
+        type: "transfer",
+        status: "outcome_unknown",
+        chainId: 8453,
+        to: "0x1234567890123456789012345678901234567890",
+        value: "1000",
+        token: "native",
+        txHash: `0x${"ab".repeat(32)}`,
+      },
+    });
+
+    const result = await makeClient().getTransferAction("agent-1", "action-unknown");
+    expect(result.status).toBe("outcome_unknown");
   });
 
   it("user linked account helpers use /user/me/accounts", async () => {
@@ -4018,6 +4038,15 @@ describe("HTTP request building", () => {
     expect(replaced.txHash).toBe("0xreplacement");
   });
 
+  it("approveVaultTransaction uses the policy-revalidating vault execution route", async () => {
+    installMockFetch({ ok: true, data: { txId: "tx/1", txHash: "0xfeed" } });
+    const result = await makeClient().approveVaultTransaction("agent/1", "tx/1");
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.url).toBe("https://api.steward.example/vault/agent%2F1/approve/tx%2F1");
+    expect(lastCapture?.body).toEqual({});
+    expect(result).toEqual({ txId: "tx/1", txHash: "0xfeed" });
+  });
+
   it("signMessage → POST /vault/:id/sign-message", async () => {
     installMockFetch({ ok: true, data: { signature: "0xsig" } });
     await makeClient().signMessage("agent-1", "hello world", {
@@ -4759,6 +4788,37 @@ describe("Response parsing", () => {
       value: "5000000000000000000",
     });
     expect((result as { status: string }).status).toBe("pending_approval");
+  });
+
+  it("signTransaction returns a typed outcome_unknown result when status is 202", async () => {
+    const txHash = `0x${"ab".repeat(32)}`;
+    installMockFetch(
+      {
+        ok: false,
+        error: "Broadcast outcome is unknown; reconcile the transaction hash before retrying",
+        data: {
+          code: "external_broadcast_outcome_unknown",
+          txId: "tx-outcome-unknown",
+          txHash,
+          reconciliationRequired: true,
+        },
+      },
+      202,
+    );
+
+    const result = await makeClient().signTransaction("agent-1", {
+      to: "0x1234567890123456789012345678901234567890",
+      value: "1",
+    });
+
+    expect(isStewardBroadcastOutcomeUnknown(result)).toBe(true);
+    if (!isStewardBroadcastOutcomeUnknown(result)) throw new Error("expected outcome_unknown");
+    expect(result).toEqual({
+      code: "external_broadcast_outcome_unknown",
+      txId: "tx-outcome-unknown",
+      txHash,
+      reconciliationRequired: true,
+    });
   });
 
   it("signMessage returns signature string", async () => {

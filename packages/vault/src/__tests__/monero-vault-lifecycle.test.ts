@@ -149,7 +149,11 @@ describe("Monero wallet lifecycle (DB-backed)", () => {
   test("createWallet stores an AAD-bound canonical payload and public-only metadata", async () => {
     const { vault, keyStore, backend } = await freshVault();
 
-    const wallet = await vault.createWallet({ agentId: AGENT_ID, chainType: "monero" });
+    const wallet = await vault.createWallet({
+      tenantId: TENANT_ID,
+      agentId: AGENT_ID,
+      chainType: "monero",
+    });
     expect(wallet.venue).toBe(SCOPE);
     expect(wallet.address.startsWith("4")).toBe(true);
     expect(backend.calls).toContain("getDaemonHeight");
@@ -201,9 +205,9 @@ describe("Monero wallet lifecycle (DB-backed)", () => {
 
   test("createWallet fails closed without a configured backend", async () => {
     const { vault } = await freshVault({ backend: null });
-    await expect(vault.createWallet({ agentId: AGENT_ID, chainType: "monero" })).rejects.toThrow(
-      MoneroNotConfiguredError,
-    );
+    await expect(
+      vault.createWallet({ tenantId: TENANT_ID, agentId: AGENT_ID, chainType: "monero" }),
+    ).rejects.toThrow(MoneroNotConfiguredError);
     const rows = await getDb()
       .select()
       .from(agentWallets)
@@ -216,18 +220,24 @@ describe("Monero wallet lifecycle (DB-backed)", () => {
     await expect(
       vault.createWallet({
         agentId: AGENT_ID,
+        tenantId: TENANT_ID,
         chainType: "monero",
         monero: { network: "stagenet" },
       }),
     ).rejects.toThrow(/operates on mainnet/);
     await expect(
-      vault.createWallet({ agentId: AGENT_ID, chainType: "monero", monero: { account: 1 } }),
+      vault.createWallet({
+        tenantId: TENANT_ID,
+        agentId: AGENT_ID,
+        chainType: "monero",
+        monero: { account: 1 },
+      }),
     ).rejects.toThrow(/account 0/);
   });
 
   test("getMoneroBalance round-trips through the backend with the decrypted payload", async () => {
     const { vault } = await freshVault();
-    await vault.createWallet({ agentId: AGENT_ID, chainType: "monero" });
+    await vault.createWallet({ tenantId: TENANT_ID, agentId: AGENT_ID, chainType: "monero" });
 
     const balance = await vault.getMoneroBalance({
       tenantId: TENANT_ID,
@@ -253,7 +263,7 @@ describe("Monero wallet lifecycle (DB-backed)", () => {
 
   test("prepareMoneroTransfer validates amounts/destinations and relays only prepared metadata", async () => {
     const { vault, backend } = await freshVault();
-    await vault.createWallet({ agentId: AGENT_ID, chainType: "monero" });
+    await vault.createWallet({ tenantId: TENANT_ID, agentId: AGENT_ID, chainType: "monero" });
     // Any valid mainnet address works as a destination.
     const destinationAddress =
       "45AmZ2FRjuqZts5NGzb7ZXSNRuwS9MUqEeakpyEeSHsB5mywLwBzzq2cTsbJzTVUuLSHxtbfgKyZJVBqPffpP8fm79sjAcK";
@@ -305,7 +315,7 @@ describe("Monero wallet lifecycle (DB-backed)", () => {
 
   test("signing freeze blocks prepare and relay (but not balance reads)", async () => {
     const { vault } = await freshVault();
-    await vault.createWallet({ agentId: AGENT_ID, chainType: "monero" });
+    await vault.createWallet({ tenantId: TENANT_ID, agentId: AGENT_ID, chainType: "monero" });
     await getDb().insert(vaultSigningFreezes).values({
       tenantId: TENANT_ID,
       scopeType: "agent",
@@ -351,7 +361,11 @@ describe("Monero wallet lifecycle (DB-backed)", () => {
 
   test("break-glass export returns spend/view keys and restore height", async () => {
     const { vault } = await freshVault();
-    const wallet = await vault.createWallet({ agentId: AGENT_ID, chainType: "monero" });
+    const wallet = await vault.createWallet({
+      tenantId: TENANT_ID,
+      agentId: AGENT_ID,
+      chainType: "monero",
+    });
 
     await expect(vault.exportPrivateKey(TENANT_ID, AGENT_ID)).rejects.toThrow(/break-glass/);
 

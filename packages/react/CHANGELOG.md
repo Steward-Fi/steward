@@ -4,6 +4,9 @@ All notable changes to `@stwd/react` are documented here.
 
 ## Unreleased
 
+### Changed
+- Route approval, transaction-history, and spend-stat requests through the credentialed `StewardClient`; remove unauthenticated raw-fetch paths and derive pagination and spend aggregates from authenticated history (SEC-195).
+
 ### Added
 - `StewardAuthConfig.authProxyUrl` on `StewardProvider`: forwarded to the SDK so the long-lived refresh token can be held by a same-origin HttpOnly-cookie proxy instead of JS-readable storage (SEC-018). Optional; previous behavior is unchanged when unset.
 

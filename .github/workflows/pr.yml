@@ -230,6 +230,10 @@ jobs:
           fi
         env:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
+          # Unit tests intentionally exercise local proxy transports without a
+          # shared replay/rate-limit service. Production-posture tests set
+          # NODE_ENV=production, which overrides this explicit test posture.
+          STEWARD_PROXY_DEV_MODE: "true"
           # bunfig.toml [test] preloads only load from bun's cwd, and this job
           # runs `bun test` from the repo root — so per-package preloads (e.g.
           # plugin-trading's, which supplies this key) never run. 64-char dummy
@@ -378,6 +382,12 @@ jobs:
           STEWARD_EXECUTION_AUTH_SECRET: "v2-ci-1:ci-execution-auth-secret-must-be-at-least-32-bytes-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           STEWARD_REDIS_TESTS: "1"
+          # Isolated files share one Redis service and reuse deterministic
+          # agent/host fixtures, so retain enforcement with a high bounded
+          # ceiling for this test-only flood. The dev flag permits in-process
+          # proxy fixtures that do not sign; strict tests set production mode.
+          STEWARD_PROXY_RATE_LIMIT_MAX: "1000000"
+          STEWARD_PROXY_DEV_MODE: "true"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost,127.0.0.1:3200"
 
       - name: Stop API test server
@@ -496,6 +506,8 @@ jobs:
           # Dummy HMAC root so the required compose var interpolates; production
           # supplies a real value. Does not weaken fail-closed behavior.
           STEWARD_PROXY_REQUEST_SIGNING_SECRET: "ci-proxy-signing-secret-must-be-at-least-32-bytes"
+          STEWARD_PROXY_DEV_MODE: "true"
+          STEWARD_PROXY_RATE_LIMIT_MAX: "1000000"
           STEWARD_KDF_SALT: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
           STEWARD_ALLOW_INSECURE_DB: "true"
           # Run the stack in non-prod mode for the functional e2e flow: the e2e

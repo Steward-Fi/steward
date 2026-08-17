@@ -46,6 +46,7 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { StewardAppContext } from "../context";
+import { DurableIdempotencyStore } from "./idempotency";
 
 const closeAllSchema = z.object({
   agentId: z.string().min(1),
@@ -210,66 +211,38 @@ export function createOperatorRecoveryRoutes(
 
   const operatorRecoveryRoutes = new Hono<{ Variables: AppVariables }>();
 
-  // ── Idempotency (mirrors trade.ts in-memory helper) ───────────────────────────
+  // ── Idempotency (mirrors trade.ts store) ─────────────────────────────────────
   // Entries are stored for BOTH successful responses and ambiguous-outcome 502s
   // (a submit that may have landed at the venue), so a retry with the same key
   // REPLAYS the recorded outcome instead of re-executing a possibly-completed
-  // fund movement. The map is bounded: expired entries are swept on store and
-  // the oldest entries are evicted past MAX_OPERATOR_IDEMPOTENCY_ENTRIES so a
-  // caller cannot grow process memory without bound (SEC-043).
-  const MAX_OPERATOR_IDEMPOTENCY_ENTRIES = 1_000;
-  const operatorIdempotency = new Map<
-    string,
-    { bodyHash: string; status: 200 | 502; body: unknown; expiresAt: number }
-  >();
+  // fund movement. SEC-043: records are Redis-backed when a client is available
+  // (multi-replica dedup survives restarts); without Redis the store falls back
+  // to a bounded (1_000 entries, expired-sweep + oldest-evict) process-local map.
+  type OperatorIdempotencyRecord = { status: 200 | 502; body: unknown };
+  const operatorIdempotencyStore = new DurableIdempotencyStore<OperatorIdempotencyRecord>({
+    namespace: "trade:operator",
+    getRedisClient,
+  });
 
-  function sweepOperatorIdempotency(now: number): void {
-    for (const [entryKey, entry] of operatorIdempotency) {
-      if (entry.expiresAt <= now || operatorIdempotency.size >= MAX_OPERATOR_IDEMPOTENCY_ENTRIES) {
-        operatorIdempotency.delete(entryKey);
-      }
-      if (operatorIdempotency.size < MAX_OPERATOR_IDEMPOTENCY_ENTRIES) break;
-    }
-  }
-
-  function getOperatorIdempotency(
+  async function getOperatorIdempotency(
     scope: string,
     key: string | undefined,
     body: unknown,
-  ): {
+  ): Promise<{
     conflict?: boolean;
-    entry?: { status: 200 | 502; body: unknown };
-    store?: (response: unknown) => void;
-    storeFailure?: (errorBody: unknown) => void;
-  } {
-    if (!key) return {};
-    const now = Date.now();
-    const mapKey = `${scope}:${key}`;
-    const bodyHash = JSON.stringify(body);
-    const existing = operatorIdempotency.get(mapKey);
-    if (existing && existing.expiresAt > now) {
-      if (existing.bodyHash !== bodyHash) return { conflict: true };
-      return { entry: { status: existing.status, body: existing.body } };
+    entry?: OperatorIdempotencyRecord;
+    store?: (response: unknown) => Promise<void>;
+    storeFailure?: (errorBody: unknown) => Promise<void>;
+  }> {
+    const check = await operatorIdempotencyStore.check(scope, key, JSON.stringify(body));
+    if (check.conflict || check.record) {
+      return { conflict: check.conflict, entry: check.record };
     }
+    if (!check.store) return {};
+    const persist = check.store;
     return {
-      store(response: unknown) {
-        sweepOperatorIdempotency(now);
-        operatorIdempotency.set(mapKey, {
-          bodyHash,
-          status: 200,
-          body: { ok: true, data: response },
-          expiresAt: now + 24 * 60 * 60 * 1000,
-        });
-      },
-      storeFailure(errorBody: unknown) {
-        sweepOperatorIdempotency(now);
-        operatorIdempotency.set(mapKey, {
-          bodyHash,
-          status: 502,
-          body: errorBody,
-          expiresAt: now + 24 * 60 * 60 * 1000,
-        });
-      },
+      store: (response: unknown) => persist({ status: 200, body: { ok: true, data: response } }),
+      storeFailure: (errorBody: unknown) => persist({ status: 502, body: errorBody }),
     };
   }
 
@@ -591,7 +564,7 @@ export function createOperatorRecoveryRoutes(
 
     // Idempotency keyed on (agent, amount). Computed BEFORE broadcast so a retried
     // deposit with the same key returns the original result instead of double-sending.
-    const idempotency = getOperatorIdempotency(`${tenantId}:deposit`, body.idempotencyKey, {
+    const idempotency = await getOperatorIdempotency(`${tenantId}:deposit`, body.idempotencyKey, {
       agentId,
       venue,
       amount: amountBaseUnits.toString(),
@@ -633,7 +606,7 @@ export function createOperatorRecoveryRoutes(
       // The broadcast may have landed — record the ambiguous outcome so a retry
       // replays this 502 instead of double-broadcasting the ERC-20 transfer.
       const errorBody = { ok: false as const, error: "Failed to submit deposit" };
-      idempotency.storeFailure?.(errorBody);
+      await idempotency.storeFailure?.(errorBody);
       return c.json<ApiResponse>(errorBody, 502);
     }
 
@@ -653,7 +626,7 @@ export function createOperatorRecoveryRoutes(
       amountBaseUnits: amountBaseUnits.toString(),
       txHash,
     };
-    idempotency.store?.(response);
+    await idempotency.store?.(response);
     return c.json<ApiResponse>({ ok: true, data: response });
   });
 
@@ -687,7 +660,7 @@ export function createOperatorRecoveryRoutes(
     const effectiveLeverage = builderPerp ? Math.min(body.leverage, 3) : body.leverage;
     const isCross = builderPerp ? false : (body.isCross ?? false);
 
-    const idempotency = getOperatorIdempotency(`${tenantId}:leverage`, body.idempotencyKey, {
+    const idempotency = await getOperatorIdempotency(`${tenantId}:leverage`, body.idempotencyKey, {
       agentId,
       venue,
       coin,
@@ -745,7 +718,7 @@ export function createOperatorRecoveryRoutes(
       // The venue call may have landed — record the ambiguous outcome so a
       // retry replays this 502 instead of re-executing the leverage update.
       const errorBody = { ok: false as const, error: "Failed to update leverage" };
-      idempotency.storeFailure?.(errorBody);
+      await idempotency.storeFailure?.(errorBody);
       return c.json<ApiResponse>(errorBody, 502);
     }
 
@@ -769,7 +742,7 @@ export function createOperatorRecoveryRoutes(
       builderPerp,
       result,
     };
-    idempotency.store?.(response);
+    await idempotency.store?.(response);
     return c.json<ApiResponse>({ ok: true, data: response });
   });
 
@@ -824,12 +797,16 @@ export function createOperatorRecoveryRoutes(
       );
     }
 
-    const idempotency = getOperatorIdempotency(`${tenantId}:add-margin`, body.idempotencyKey, {
-      agentId,
-      venue,
-      coin,
-      amount: amountBaseUnits.toString(),
-    });
+    const idempotency = await getOperatorIdempotency(
+      `${tenantId}:add-margin`,
+      body.idempotencyKey,
+      {
+        agentId,
+        venue,
+        coin,
+        amount: amountBaseUnits.toString(),
+      },
+    );
     if (idempotency.conflict) {
       return c.json<ApiResponse>(
         { ok: false, error: "Idempotency key reused with a different body" },
@@ -876,7 +853,7 @@ export function createOperatorRecoveryRoutes(
       // The venue call may have landed — record the ambiguous outcome so a
       // retry replays this 502 instead of moving margin a second time.
       const errorBody = { ok: false as const, error: "Failed to add isolated margin" };
-      idempotency.storeFailure?.(errorBody);
+      await idempotency.storeFailure?.(errorBody);
       return c.json<ApiResponse>(errorBody, 502);
     }
 
@@ -896,7 +873,7 @@ export function createOperatorRecoveryRoutes(
       amountBaseUnits: amountBaseUnits.toString(),
       result,
     };
-    idempotency.store?.(response);
+    await idempotency.store?.(response);
     return c.json<ApiResponse>({ ok: true, data: response });
   });
 
@@ -958,7 +935,7 @@ export function createOperatorRecoveryRoutes(
       );
     }
 
-    const idempotency = getOperatorIdempotency(`${tenantId}:usd-send`, body.idempotencyKey, {
+    const idempotency = await getOperatorIdempotency(`${tenantId}:usd-send`, body.idempotencyKey, {
       agentId,
       venue,
       destination,
@@ -1031,7 +1008,7 @@ export function createOperatorRecoveryRoutes(
       // the transfer may have landed. Record the outcome so a retry replays
       // this 502 instead of double-sending USDC.
       const errorBody = { ok: false as const, error: "Failed to submit usdSend" };
-      idempotency.storeFailure?.(errorBody);
+      await idempotency.storeFailure?.(errorBody);
       return c.json<ApiResponse>(errorBody, 502);
     }
 
@@ -1043,7 +1020,7 @@ export function createOperatorRecoveryRoutes(
     });
 
     const response = { venue, walletAddress, destination, amount, result };
-    idempotency.store?.(response);
+    await idempotency.store?.(response);
     return c.json<ApiResponse>({ ok: true, data: response });
   });
 
@@ -1075,12 +1052,16 @@ export function createOperatorRecoveryRoutes(
     };
     const { agentId, builder, maxFeeRate } = body;
 
-    const idempotency = getOperatorIdempotency(`${tenantId}:approve-builder`, body.idempotencyKey, {
-      agentId,
-      venue,
-      builder,
-      maxFeeRate,
-    });
+    const idempotency = await getOperatorIdempotency(
+      `${tenantId}:approve-builder`,
+      body.idempotencyKey,
+      {
+        agentId,
+        venue,
+        builder,
+        maxFeeRate,
+      },
+    );
     if (idempotency.conflict) {
       return c.json<ApiResponse>(
         { ok: false, error: "Idempotency key reused with a different body" },
@@ -1125,7 +1106,7 @@ export function createOperatorRecoveryRoutes(
       // The venue call may have landed — record the ambiguous outcome so a
       // retry replays this 502 instead of re-submitting the approval.
       const errorBody = { ok: false as const, error: "Failed to approve builder fee" };
-      idempotency.storeFailure?.(errorBody);
+      await idempotency.storeFailure?.(errorBody);
       return c.json<ApiResponse>(errorBody, 502);
     }
 
@@ -1137,7 +1118,7 @@ export function createOperatorRecoveryRoutes(
     });
 
     const response = { venue, walletAddress, builder, maxFeeRate, result };
-    idempotency.store?.(response);
+    await idempotency.store?.(response);
     return c.json<ApiResponse>({ ok: true, data: response });
   });
 
@@ -1196,7 +1177,7 @@ export function createOperatorRecoveryRoutes(
       );
     }
 
-    const idempotency = getOperatorIdempotency(`${tenantId}:transfer`, body.idempotencyKey, {
+    const idempotency = await getOperatorIdempotency(`${tenantId}:transfer`, body.idempotencyKey, {
       agentId,
       venue,
       sourceDex,
@@ -1274,7 +1255,7 @@ export function createOperatorRecoveryRoutes(
         error: err instanceof Error ? err.message : String(err),
       });
       const errorBody = { ok: false as const, error: "Failed to submit collateral transfer" };
-      idempotency.storeFailure?.(errorBody);
+      await idempotency.storeFailure?.(errorBody);
       return c.json<ApiResponse>(errorBody, 502);
     }
 
@@ -1296,7 +1277,7 @@ export function createOperatorRecoveryRoutes(
       amountUsdc: String(body.amountUsdc),
       result,
     };
-    idempotency.store?.(response);
+    await idempotency.store?.(response);
     return c.json<ApiResponse>({ ok: true, data: response });
   });
 
@@ -1319,7 +1300,7 @@ export function createOperatorRecoveryRoutes(
     };
     const { agentId } = body;
 
-    const idempotency = getOperatorIdempotency(`${tenantId}:close-all`, body.idempotencyKey, {
+    const idempotency = await getOperatorIdempotency(`${tenantId}:close-all`, body.idempotencyKey, {
       agentId,
       venue,
     });
@@ -1358,7 +1339,7 @@ export function createOperatorRecoveryRoutes(
       // Positions may have been partially closed — record the ambiguous outcome
       // so a retry replays this 502 instead of firing another close batch.
       const errorBody = { ok: false as const, error: "Failed to close positions" };
-      idempotency.storeFailure?.(errorBody);
+      await idempotency.storeFailure?.(errorBody);
       return c.json<ApiResponse>(errorBody, 502);
     }
 
@@ -1374,7 +1355,7 @@ export function createOperatorRecoveryRoutes(
     }
 
     const response = { venue, walletAddress, closed: results };
-    idempotency.store?.(response);
+    await idempotency.store?.(response);
     return c.json<ApiResponse>({ ok: true, data: response });
   });
 
@@ -1442,7 +1423,7 @@ export function createOperatorRecoveryRoutes(
 
     const explicitIdempotencyAmount =
       explicitAmountBaseUnits !== null ? explicitAmountBaseUnits.toString() : null;
-    const idempotency = getOperatorIdempotency(`${tenantId}:withdraw`, body.idempotencyKey, {
+    const idempotency = await getOperatorIdempotency(`${tenantId}:withdraw`, body.idempotencyKey, {
       agentId,
       venue,
       destination,
@@ -1558,7 +1539,7 @@ export function createOperatorRecoveryRoutes(
         error: err instanceof Error ? err.message : String(err),
       });
       const errorBody = { ok: false as const, error: "Failed to submit withdraw" };
-      idempotency.storeFailure?.(errorBody);
+      await idempotency.storeFailure?.(errorBody);
       return c.json<ApiResponse>(errorBody, 502);
     }
 
@@ -1570,7 +1551,7 @@ export function createOperatorRecoveryRoutes(
     });
 
     const response = { venue, walletAddress, destination, amount, result };
-    idempotency.store?.(response);
+    await idempotency.store?.(response);
     return c.json<ApiResponse>({ ok: true, data: response });
   });
 

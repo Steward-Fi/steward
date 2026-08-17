@@ -35,6 +35,35 @@ import {
   varchar,
 } from "drizzle-orm/pg-core";
 
+// ─── Tenant isolation posture (SEC-169) ──────────────────────────────────────
+//
+// Tenant isolation is enforced ENTIRELY at the application layer: every query
+// filters `tenant_id` in code, and the API/proxy resolve the tenant from an
+// authenticated credential — never from caller-supplied input. No Postgres
+// Row-Level Security is enabled on any table (`isRLSEnabled: false`
+// throughout drizzle/meta). Consequence: a single app-layer query bug that
+// drops the tenant predicate is a cross-tenant data leak; the database would
+// not catch it.
+//
+// RLS as defense-in-depth for the highest-value tables (`secrets`,
+// `encrypted_keys`, `accounts`) is a deliberate DEFERRED decision, not an
+// oversight. Enabling it safely requires all of the following, and shipping
+// half of it is worse than none:
+//   1. a per-request `SET LOCAL app.tenant_id` inside EVERY transaction (the
+//      pooled postgres-js role is shared by all tenants, so the GUC must be
+//      set on the checked-out connection for exactly the unit of work);
+//   2. `ENABLE` + `FORCE ROW LEVEL SECURITY` so the table-owning app role is
+//      also subject to policy, plus a break-glass role for migrations and
+//      cross-tenant jobs (audit archival, billing rollups);
+//   3. a policy matrix review for tables with legitimate cross-tenant reads
+//      (e.g. `tenants` lookup by API-key hash at auth time — before any
+//      tenant context exists);
+//   4. PGLite/Workers parity: the embedded and neon-http runtimes must honor
+//      the same GUC discipline, or dev/prod behavior diverges.
+// Until that lands as one coherent migration, the app-layer predicates ARE
+// the isolation boundary — treat any change that relaxes a `tenant_id`
+// predicate as a security review trigger.
+
 // Postgres BYTEA column. Typed as Uint8Array to avoid the Node `Buffer` vs
 // Cloudflare workers-types Buffer conflict that bites when both type packs
 // are in scope. The runtime value is whatever the driver returns; callers
@@ -125,6 +154,7 @@ export const transactionStatusEnum = pgEnum("transaction_status", [
   "broadcast",
   "confirmed",
   "failed",
+  "outcome_unknown",
 ]);
 
 export const approvalQueueStatusEnum = pgEnum("approval_queue_status", [
@@ -915,6 +945,7 @@ export const transactions = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     signedAt: timestamp("signed_at", { withTimezone: true }),
     confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
+    receiptPolledAt: timestamp("receipt_polled_at", { withTimezone: true }),
   },
   (table) => ({
     agentIdIdx: index("transactions_agent_id_idx").on(table.agentId),

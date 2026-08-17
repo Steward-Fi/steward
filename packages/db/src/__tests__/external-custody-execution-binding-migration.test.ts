@@ -28,6 +28,36 @@ async function expectRejected(client: PGlite, sql: string) {
 }
 
 describe("0087 external custody execution binding migration", () => {
+  test("adds outcome_unknown only through the post-0087 upgrade migration", async () => {
+    const client = new PGlite("memory://");
+    const files = (await readdir(migrations))
+      .filter((file) => /^\d{4}.*\.sql$/.test(file) && file < "0091")
+      .sort();
+    for (const file of files) {
+      const sql = await readFile(join(migrations, file), "utf8");
+      for (const statement of sql.split("--> statement-breakpoint")) {
+        if (statement.trim()) await client.exec(statement);
+      }
+    }
+    const before = await client.query<{ enumlabel: string }>(`
+      SELECT enumlabel FROM pg_enum
+      JOIN pg_type ON pg_type.oid = pg_enum.enumtypid
+      WHERE pg_type.typname = 'transaction_status' AND enumlabel = 'outcome_unknown'
+    `);
+    expect(before.rows).toHaveLength(0);
+
+    await client.exec(
+      await readFile(join(migrations, "0091_external_custody_outcome_reconciliation.sql"), "utf8"),
+    );
+    const after = await client.query<{ enumlabel: string }>(`
+      SELECT enumlabel FROM pg_enum
+      JOIN pg_type ON pg_type.oid = pg_enum.enumtypid
+      WHERE pg_type.typname = 'transaction_status' AND enumlabel = 'outcome_unknown'
+    `);
+    expect(after.rows.map((row) => row.enumlabel)).toEqual(["outcome_unknown"]);
+    await client.close();
+  });
+
   test("enforces exact backend and identity pairings", async () => {
     const client = new PGlite("memory://");
     await applyAll(client);
@@ -48,6 +78,12 @@ describe("0087 external custody execution binding migration", () => {
     await client.exec(transaction("tx-local", "'local-vault'", "NULL"));
     await client.exec(transaction("tx-external", "'external-custody'", `'${IDENTITY}'`));
     await client.exec(transaction("tx-legacy", "NULL", "NULL"));
+    await client.exec(
+      transaction("tx-unknown-outcome", "'external-custody'", `'${IDENTITY}'`).replace(
+        "'pending'",
+        "'outcome_unknown'",
+      ),
+    );
     await expectRejected(client, transaction("tx-null-smuggle", "NULL", `'${IDENTITY}'`));
     await expectRejected(client, transaction("tx-unknown", "'unknown'", "NULL"));
     await expectRejected(client, transaction("tx-external-null", "'external-custody'", "NULL"));
