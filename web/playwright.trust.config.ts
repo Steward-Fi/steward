@@ -28,7 +28,7 @@ export default defineConfig({
     timeout: 120_000,
     env: {
       NEXT_PUBLIC_STEWARD_API_URL: "http://127.0.0.1:3299",
-      STEWARD_ALLOW_INSECURE_HTTP: "true",
+      E2E_ALLOW_INSECURE_HTTP: "true",
       NEXT_TELEMETRY_DISABLED: "1",
       HOSTNAME: "127.0.0.1",
       PORT: "3499",

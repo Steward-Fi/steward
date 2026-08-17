@@ -253,7 +253,7 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       ["next", "dev", "--port", String(ports.web)],
       {
         NEXT_PUBLIC_STEWARD_API_URL: apiOrigin,
-        STEWARD_ALLOW_INSECURE_HTTP: "true",
+        E2E_ALLOW_INSECURE_HTTP: "true",
       },
       join(REPO_ROOT, "web"),
     );
@@ -270,7 +270,7 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       ["run", "build"],
       {
         NEXT_PUBLIC_STEWARD_API_URL: apiOrigin,
-        STEWARD_ALLOW_INSECURE_HTTP: "true",
+        E2E_ALLOW_INSECURE_HTTP: "true",
       },
       join(REPO_ROOT, "web"),
     );
@@ -281,7 +281,7 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       {
         PORT: String(ports.web),
         NEXT_PUBLIC_STEWARD_API_URL: apiOrigin,
-        STEWARD_ALLOW_INSECURE_HTTP: "true",
+        E2E_ALLOW_INSECURE_HTTP: "true",
       },
       join(REPO_ROOT, "web"),
     );

@@ -18,8 +18,10 @@ const SECURITY_HEADERS = [
 // same-origin http://localhost asset requests to https:// (which the http-only
 // dev server cannot answer). The local e2e harness sets this flag — an explicit,
 // secure-by-default opt-OUT — to omit both; absent the flag, full enforcement
-// applies, so production is never weakened.
-const ALLOW_INSECURE_HTTP = process.env.STEWARD_ALLOW_INSECURE_HTTP === "true";
+// applies, so production is never weakened. The E2E_ prefix marks it test-only:
+// the production deploy pipeline (cf:build/cf:deploy) refuses to run with it
+// set (see scripts/assert-production-deploy-env.mjs).
+const ALLOW_INSECURE_HTTP = process.env.E2E_ALLOW_INSECURE_HTTP === "true";
 
 function makeNonce(): string {
   const bytes = new Uint8Array(16);

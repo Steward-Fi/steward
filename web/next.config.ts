@@ -9,8 +9,10 @@ const configDir = path.dirname(fileURLToPath(import.meta.url));
 // WebKit honors HSTS and upgrades same-origin asset requests to https:// — which
 // the http-only dev server cannot answer, blanking the page. This flag is an
 // explicit, secure-by-default opt-OUT set ONLY by that harness; absent the flag,
-// full enforcement applies, so production is never weakened.
-const ALLOW_INSECURE_HTTP = process.env.STEWARD_ALLOW_INSECURE_HTTP === "true";
+// full enforcement applies, so production is never weakened. The E2E_ prefix
+// marks it test-only: cf:build/cf:deploy refuse to run with it set (see
+// scripts/assert-production-deploy-env.mjs).
+const ALLOW_INSECURE_HTTP = process.env.E2E_ALLOW_INSECURE_HTTP === "true";
 
 /** Security headers applied to static assets. Page CSP is nonce-based in middleware. */
 const SECURITY_HEADERS = [

@@ -8,11 +8,11 @@
     "start": "next start --port ${PORT:-3202}",
     "e2e": "playwright test",
     "e2e:chromium": "playwright test --project=chromium",
-    "e2e:trust-ux": "NEXT_PUBLIC_STEWARD_API_URL=http://127.0.0.1:3299 STEWARD_ALLOW_INSECURE_HTTP=true bun run build && playwright test --config=playwright.trust.config.ts",
+    "e2e:trust-ux": "NEXT_PUBLIC_STEWARD_API_URL=http://127.0.0.1:3299 E2E_ALLOW_INSECURE_HTTP=true bun run build && playwright test --config=playwright.trust.config.ts",
     "e2e:install": "playwright install chromium firefox webkit",
-    "cf:build": "opennextjs-cloudflare build",
-    "cf:preview": "opennextjs-cloudflare preview",
-    "cf:deploy": "opennextjs-cloudflare build && wrangler deploy"
+    "cf:build": "node scripts/assert-production-deploy-env.mjs && opennextjs-cloudflare build",
+    "cf:preview": "node scripts/assert-production-deploy-env.mjs && opennextjs-cloudflare preview",
+    "cf:deploy": "node scripts/assert-production-deploy-env.mjs && opennextjs-cloudflare build && wrangler deploy"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "^2.2.10",
