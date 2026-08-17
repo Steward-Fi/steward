@@ -80,6 +80,15 @@ export type LeaseAuditWriter = (event: {
 
 type Db = any;
 
+let beforeRecoveryClaimForTests: ((leaseId: string) => Promise<void>) | undefined;
+
+/** Deterministic interleaving hook for the recovery CAS tests only. */
+export function __setBeforeUpstreamLeaseRecoveryClaimForTests(
+  hook?: (leaseId: string) => Promise<void>,
+): void {
+  beforeRecoveryClaimForTests = hook;
+}
+
 async function readLiveLeaseAuthority(
   db: Db,
   input: {
@@ -266,6 +275,53 @@ async function recordFailure(
   });
 }
 
+async function recordRecoverableSealedFailure(input: {
+  db: Db;
+  leaseId: string;
+  tenantId: string;
+  token: string;
+  sealed: SealedLeaseToken;
+  expiresAt: Date;
+  error: string;
+  now: Date;
+}): Promise<void> {
+  await input.db.transaction(async (tx: Db) => {
+    const persisted = await tx
+      .update(upstreamCredentialLeases)
+      .set({
+        tokenHash: sha256(input.token),
+        tokenCiphertext: input.sealed.ciphertext,
+        tokenIv: input.sealed.iv,
+        tokenAuthTag: input.sealed.tag,
+        tokenSalt: input.sealed.salt,
+        expiresAt: input.expiresAt,
+        status: "needs_attention",
+        lastError: input.error.slice(0, 500),
+        updatedAt: input.now,
+      })
+      .where(
+        and(
+          eq(upstreamCredentialLeases.id, input.leaseId),
+          eq(upstreamCredentialLeases.tenantId, input.tenantId),
+          or(
+            eq(upstreamCredentialLeases.status, "issuing"),
+            eq(upstreamCredentialLeases.status, "delivery_pending"),
+            eq(upstreamCredentialLeases.status, "needs_attention"),
+          ),
+        ),
+      )
+      .returning({ id: upstreamCredentialLeases.id });
+    if (persisted.length !== 1) throw new Error("lease recovery handle could not be persisted");
+    await tx.insert(upstreamCredentialLeaseEvents).values({
+      leaseId: input.leaseId,
+      tenantId: input.tenantId,
+      action: "lease.issue",
+      decision: "deny",
+      metadata: { reason: input.error.slice(0, 200), recoverableRevocationHandle: true },
+    });
+  });
+}
+
 /** Bounded durable expiry sweep. Issuance invokes it opportunistically; a host
  * may also schedule it directly when no new leases are being requested. */
 export async function expireUpstreamCredentialLeases(input: {
@@ -396,6 +452,7 @@ export async function recoverInterruptedUpstreamCredentialLeases(input: {
       });
       continue;
     }
+    await beforeRecoveryClaimForTests?.(lease.id);
     const result = await revokeExactSealedLease({
       db: input.db,
       tenantId: input.tenantId,
@@ -404,6 +461,8 @@ export async function recoverInterruptedUpstreamCredentialLeases(input: {
       exerciseToken: input.exerciseToken,
       audit: input.audit,
       now,
+      mode: "stale_recovery",
+      staleCutoff: cutoff,
     });
     if (result.ok) revoked += result.revoked;
     else attention += 1;
@@ -683,13 +742,26 @@ export async function issueUpstreamCredentialLease(input: {
         () => true,
         () => false,
       );
-      await recordFailure(
-        input.db,
-        claim.id,
-        input.tenantId,
-        "lease authority changed during upstream issuance",
-        revoked ? "failed" : "needs_attention",
-      );
+      if (revoked) {
+        await recordFailure(
+          input.db,
+          claim.id,
+          input.tenantId,
+          "lease authority changed during upstream issuance",
+          "failed",
+        );
+      } else {
+        await recordRecoverableSealedFailure({
+          db: input.db,
+          leaseId: claim.id,
+          tenantId: input.tenantId,
+          token: issued.token,
+          sealed,
+          expiresAt: issued.expiresAt,
+          error: "lease authority changed during upstream issuance; revocation outcome unknown",
+          now: new Date(),
+        });
+      }
       return {
         ok: false,
         status: 409,
@@ -719,15 +791,26 @@ export async function issueUpstreamCredentialLease(input: {
       () => true,
       () => false,
     );
-    await input.db
-      .update(upstreamCredentialLeases)
-      .set({
-        status: revoked ? "failed" : "needs_attention",
-        lastError: "durable finalization failed",
-        updatedAt: new Date(),
-      })
-      .where(eq(upstreamCredentialLeases.id, claim.id))
-      .catch(() => {});
+    if (revoked) {
+      await recordFailure(
+        input.db,
+        claim.id,
+        input.tenantId,
+        "durable finalization failed",
+        "failed",
+      ).catch(() => {});
+    } else {
+      await recordRecoverableSealedFailure({
+        db: input.db,
+        leaseId: claim.id,
+        tenantId: input.tenantId,
+        token: issued.token,
+        sealed,
+        expiresAt: issued.expiresAt,
+        error: "durable finalization failed; revocation outcome unknown",
+        now: new Date(),
+      }).catch(() => {});
+    }
     return {
       ok: false,
       status: 503,
@@ -995,6 +1078,8 @@ async function revokeExactSealedLease(input: {
   exerciseToken: ExerciseLeaseToken;
   audit: LeaseAuditWriter;
   now: Date;
+  mode?: "authority_teardown" | "stale_recovery";
+  staleCutoff?: Date;
 }): Promise<{ ok: true; revoked: number } | { ok: false; error: string }> {
   const sealed = sealedTokenFromLease(input.lease);
   if (!sealed) {
@@ -1010,6 +1095,20 @@ async function revokeExactSealedLease(input: {
   }
   const claimable = ["active", "delivery_pending", "acknowledging", "needs_attention"];
   const claimCutoff = new Date(input.now.getTime() - REVOCATION_CLAIM_TIMEOUT_MS);
+  const claimPredicate =
+    input.mode === "stale_recovery"
+      ? and(
+          eq(upstreamCredentialLeases.status, input.lease.status),
+          eq(upstreamCredentialLeases.updatedAt, input.lease.updatedAt),
+          lte(upstreamCredentialLeases.updatedAt, input.staleCutoff ?? claimCutoff),
+        )
+      : or(
+          ...claimable.map((status) => eq(upstreamCredentialLeases.status, status)),
+          and(
+            eq(upstreamCredentialLeases.status, "revoking"),
+            lte(upstreamCredentialLeases.updatedAt, claimCutoff),
+          ),
+        );
   const [claimed] = await input.db
     .update(upstreamCredentialLeases)
     .set({ status: "revoking", updatedAt: input.now })
@@ -1017,17 +1116,15 @@ async function revokeExactSealedLease(input: {
       and(
         eq(upstreamCredentialLeases.id, input.lease.id),
         eq(upstreamCredentialLeases.tenantId, input.tenantId),
-        or(
-          ...claimable.map((status) => eq(upstreamCredentialLeases.status, status)),
-          and(
-            eq(upstreamCredentialLeases.status, "revoking"),
-            lte(upstreamCredentialLeases.updatedAt, claimCutoff),
-          ),
-        ),
+        claimPredicate,
       ),
     )
     .returning({ id: upstreamCredentialLeases.id });
-  if (!claimed) return { ok: false, error: "upstream credential revocation raced" };
+  if (!claimed) {
+    return input.mode === "stale_recovery"
+      ? { ok: true, revoked: 0 }
+      : { ok: false, error: "upstream credential revocation raced" };
+  }
   try {
     await input.exerciseToken(input.tenantId, input.lease.id, sealed, (token) =>
       input.issuer.revoke(token),
@@ -1145,7 +1242,12 @@ export async function revokeUpstreamLeasesForAuthority(input: {
   let revoked = 0;
   for (const lease of leases) {
     const now = input.now ?? new Date();
-    const result = await revokeExactSealedLease({ ...input, lease, now });
+    const result = await revokeExactSealedLease({
+      ...input,
+      lease,
+      now,
+      mode: "authority_teardown",
+    });
     if (!result.ok) return result;
     revoked += result.revoked;
   }

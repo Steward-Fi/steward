@@ -3,6 +3,7 @@ import { eq, upstreamCredentialLeaseEvents, upstreamCredentialLeases } from "@st
 import { sql } from "drizzle-orm";
 import { capabilities, capabilityGrants } from "../schema";
 import {
+  __setBeforeUpstreamLeaseRecoveryClaimForTests,
   acknowledgeUpstreamCredentialLease,
   canonicalGitHubLeaseResource,
   expireUpstreamCredentialLeases,
@@ -170,6 +171,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  __setBeforeUpstreamLeaseRecoveryClaimForTests();
   await harness.close();
 });
 
@@ -643,6 +645,134 @@ describe("upstream credential leases", () => {
       .where(eq(upstreamCredentialLeases.id, issued.leaseId));
     expect(row.status).toBe("revoked");
     expect(issuer.revokeCalls).toBe(1);
+  });
+
+  test("stale recovery cannot revoke a lease acknowledged after its scan", async () => {
+    const issuer = new FakeIssuer();
+    const issued = await issueUpstreamCredentialLease(
+      issueArgs(issuer, "idempotency-stale-ack-race"),
+    );
+    if (!issued.ok) throw new Error("expected issuance");
+    const staleAt = new Date(NOW.getTime() - 31_000);
+    await harness.db
+      .update(upstreamCredentialLeases)
+      .set({ updatedAt: staleAt })
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+
+    let interleaved = false;
+    __setBeforeUpstreamLeaseRecoveryClaimForTests(async (leaseId) => {
+      if (leaseId !== issued.leaseId || interleaved) return;
+      interleaved = true;
+      expect(await acknowledge(issued)).toEqual({ ok: true });
+    });
+    const recovered = await recoverInterruptedUpstreamCredentialLeases({
+      db: harness.db,
+      tenantId: TENANT,
+      issuer,
+      exerciseToken,
+      audit,
+      now: NOW,
+    });
+
+    expect(interleaved).toBe(true);
+    expect(recovered).toEqual({ unknown: 0, revoked: 0, attention: 0 });
+    expect(issuer.revokeCalls).toBe(0);
+    const [row] = await harness.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+    expect(row.status).toBe("active");
+  });
+
+  test("authority-change revoker failure retains the exact sealed recovery handle", async () => {
+    const issuer = new FakeIssuer();
+    issuer.failRevoke = true;
+    let releaseIssue!: () => void;
+    issuer.issueBarrier = new Promise<void>((resolve) => {
+      releaseIssue = resolve;
+    });
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    issuer.issueStarted = markStarted;
+    const pending = issueUpstreamCredentialLease(
+      issueArgs(issuer, "idempotency-authority-revoke-recovery"),
+    );
+    await started;
+    await harness.db
+      .update(capabilityGrants)
+      .set({ status: "revoked" })
+      .where(eq(capabilityGrants.id, GRANT));
+    releaseIssue();
+    const denied = await pending;
+    expect(denied).toMatchObject({ ok: false, code: "lease_authority_changed" });
+
+    let [row] = await harness.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(
+        eq(
+          upstreamCredentialLeases.idempotencyKeyHash,
+          sha256("idempotency-authority-revoke-recovery"),
+        ),
+      );
+    expect(row).toMatchObject({
+      status: "needs_attention",
+      tokenHash: sha256(TOKEN),
+      expiresAt: new Date(NOW.getTime() + issuer.expiryOffsetMs),
+    });
+    expect(row.tokenCiphertext).toBe(Buffer.from(TOKEN).toString("base64"));
+    expect(JSON.stringify(row)).not.toContain(TOKEN);
+
+    issuer.failRevoke = false;
+    await harness.db
+      .update(upstreamCredentialLeases)
+      .set({ updatedAt: new Date(NOW.getTime() - 31_000) })
+      .where(eq(upstreamCredentialLeases.id, row.id));
+    expect(
+      await recoverInterruptedUpstreamCredentialLeases({
+        db: harness.db,
+        tenantId: TENANT,
+        issuer,
+        exerciseToken,
+        audit,
+        now: NOW,
+      }),
+    ).toEqual({ unknown: 0, revoked: 1, attention: 0 });
+    [row] = await harness.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(eq(upstreamCredentialLeases.id, row.id));
+    expect(row.status).toBe("revoked");
+  });
+
+  test("generic finalization revoker failure retains the exact sealed recovery handle", async () => {
+    const issuer = new FakeIssuer();
+    issuer.failRevoke = true;
+    const denied = await issueUpstreamCredentialLease({
+      ...issueArgs(issuer, "idempotency-finalization-revoke-recovery"),
+      audit: async () => {
+        throw new Error("durable audit unavailable");
+      },
+    });
+    expect(denied).toMatchObject({ ok: false, code: "lease_finalization_failed" });
+    const [row] = await harness.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(
+        eq(
+          upstreamCredentialLeases.idempotencyKeyHash,
+          sha256("idempotency-finalization-revoke-recovery"),
+        ),
+      );
+    expect(row).toMatchObject({
+      status: "needs_attention",
+      tokenHash: sha256(TOKEN),
+      expiresAt: new Date(NOW.getTime() + issuer.expiryOffsetMs),
+    });
+    expect(row.tokenCiphertext).toBe(Buffer.from(TOKEN).toString("base64"));
+    expect(JSON.stringify(row)).not.toContain(TOKEN);
   });
 
   test("stale issuance is truthfully escalated because provider outcome is unknowable", async () => {
