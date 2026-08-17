@@ -33,13 +33,15 @@
  * signWithdraw, submitWithdraw) — no signing is reimplemented here.
  */
 
-import { proxyAuditLog } from "@stwd/db";
+import { proxyAuditLog, transactions } from "@stwd/db";
+import { checkRateLimit } from "@stwd/redis";
 import type { ApiResponse, AppVariables } from "@stwd/shared";
 import {
   HyperliquidAdapter,
   hyperliquidAssetSchema,
   isBuilderPerpSymbol,
 } from "@stwd/venue-hyperliquid";
+import { and, eq, gte, sql } from "drizzle-orm";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -203,21 +205,43 @@ export function createOperatorRecoveryRoutes(
     priceOracle,
     safeJsonParse,
     writeAuditEvent,
+    getRedisClient,
   } = ctx;
 
   const operatorRecoveryRoutes = new Hono<{ Variables: AppVariables }>();
 
   // ── Idempotency (mirrors trade.ts in-memory helper) ───────────────────────────
+  // Entries are stored for BOTH successful responses and ambiguous-outcome 502s
+  // (a submit that may have landed at the venue), so a retry with the same key
+  // REPLAYS the recorded outcome instead of re-executing a possibly-completed
+  // fund movement. The map is bounded: expired entries are swept on store and
+  // the oldest entries are evicted past MAX_OPERATOR_IDEMPOTENCY_ENTRIES so a
+  // caller cannot grow process memory without bound (SEC-043).
+  const MAX_OPERATOR_IDEMPOTENCY_ENTRIES = 1_000;
   const operatorIdempotency = new Map<
     string,
-    { bodyHash: string; response: unknown; expiresAt: number }
+    { bodyHash: string; status: 200 | 502; body: unknown; expiresAt: number }
   >();
+
+  function sweepOperatorIdempotency(now: number): void {
+    for (const [entryKey, entry] of operatorIdempotency) {
+      if (entry.expiresAt <= now || operatorIdempotency.size >= MAX_OPERATOR_IDEMPOTENCY_ENTRIES) {
+        operatorIdempotency.delete(entryKey);
+      }
+      if (operatorIdempotency.size < MAX_OPERATOR_IDEMPOTENCY_ENTRIES) break;
+    }
+  }
 
   function getOperatorIdempotency(
     scope: string,
     key: string | undefined,
     body: unknown,
-  ): { conflict?: boolean; response?: unknown; store?: (response: unknown) => void } {
+  ): {
+    conflict?: boolean;
+    entry?: { status: 200 | 502; body: unknown };
+    store?: (response: unknown) => void;
+    storeFailure?: (errorBody: unknown) => void;
+  } {
     if (!key) return {};
     const now = Date.now();
     const mapKey = `${scope}:${key}`;
@@ -225,16 +249,198 @@ export function createOperatorRecoveryRoutes(
     const existing = operatorIdempotency.get(mapKey);
     if (existing && existing.expiresAt > now) {
       if (existing.bodyHash !== bodyHash) return { conflict: true };
-      return { response: existing.response };
+      return { entry: { status: existing.status, body: existing.body } };
     }
     return {
       store(response: unknown) {
+        sweepOperatorIdempotency(now);
         operatorIdempotency.set(mapKey, {
           bodyHash,
-          response,
+          status: 200,
+          body: { ok: true, data: response },
           expiresAt: now + 24 * 60 * 60 * 1000,
         });
       },
+      storeFailure(errorBody: unknown) {
+        sweepOperatorIdempotency(now);
+        operatorIdempotency.set(mapKey, {
+          bodyHash,
+          status: 502,
+          body: errorBody,
+          expiresAt: now + 24 * 60 * 60 * 1000,
+        });
+      },
+    };
+  }
+
+  // ── Operator transfer rate limit (withdraw + usd-send) ────────────────────────
+  // The per-call USDC cap bounds one call; this bounds the LOOP. A compromised
+  // operator credential cannot drain an arbitrarily large balance by repeating
+  // capped calls. Mirrors trade.ts's order rate limit (Redis when available,
+  // process-local fallback otherwise).
+  const OPERATOR_TRANSFER_RATE_WINDOW_MS = 60_000;
+  const OPERATOR_TRANSFER_MAX_CALLS = 10;
+  const operatorTransferRateLimit = new Map<string, { count: number; resetAt: number }>();
+
+  async function enforceOperatorTransferRateLimit(
+    rail: "withdraw" | "usd-send",
+    tenantId: string,
+    agentId: string,
+  ): Promise<{ allowed: boolean; resetMs: number }> {
+    const redis = getRedisClient();
+    if (redis) {
+      const result = await checkRateLimit(
+        `ratelimit:trade:operator:${rail}:${tenantId}:${agentId}:${OPERATOR_TRANSFER_RATE_WINDOW_MS}`,
+        OPERATOR_TRANSFER_RATE_WINDOW_MS,
+        OPERATOR_TRANSFER_MAX_CALLS,
+      );
+      return { allowed: result.allowed, resetMs: result.resetMs };
+    }
+
+    const now = Date.now();
+    const key = `${rail}:${tenantId}:${agentId}`;
+    const current = operatorTransferRateLimit.get(key);
+    if (!current || current.resetAt <= now) {
+      if (operatorTransferRateLimit.size >= 1_000) {
+        for (const [k, v] of operatorTransferRateLimit) {
+          if (v.resetAt <= now) operatorTransferRateLimit.delete(k);
+          if (operatorTransferRateLimit.size < 1_000) break;
+        }
+      }
+      operatorTransferRateLimit.set(key, {
+        count: 1,
+        resetAt: now + OPERATOR_TRANSFER_RATE_WINDOW_MS,
+      });
+      return { allowed: true, resetMs: OPERATOR_TRANSFER_RATE_WINDOW_MS };
+    }
+    if (current.count >= OPERATOR_TRANSFER_MAX_CALLS) {
+      return { allowed: false, resetMs: current.resetAt - now };
+    }
+    current.count += 1;
+    return { allowed: true, resetMs: current.resetAt - now };
+  }
+
+  /**
+   * Real spend/tx counters for the operator transfer rails, mirroring the API's
+   * getTransactionStats(agentId, chainId): the recent-tx counts feed rate-limit
+   * rules, and the spend sums — scoped to Arbitrum so they stay in the same
+   * native-wei unit the policy gate denominates `value` in — feed daily/weekly
+   * spending-limit rules. Previously both routes hardcoded zeroes here, which
+   * made every rate-limit and daily/weekly spend rule structurally inert.
+   */
+  async function getOperatorSpendStats(agentId: string): Promise<{
+    recentTxCount1h: number;
+    recentTxCount24h: number;
+    spentToday: bigint;
+    spentThisWeek: bigint;
+  }> {
+    const now = new Date();
+    const oneHourAgo = new Date(now.getTime() - 3600_000).toISOString();
+    const oneDayAgo = new Date(now.getTime() - 86400_000).toISOString();
+    const oneWeekAgo = new Date(now.getTime() - 604800_000);
+    const chainFilter = sql` and ${transactions.chainId} = ${ARBITRUM_CHAIN_ID}`;
+
+    const [stats] = await db
+      .select({
+        recentTxCount1h: sql<number>`count(*) filter (where ${transactions.createdAt} >= ${oneHourAgo}::timestamptz)`,
+        recentTxCount24h: sql<number>`count(*) filter (where ${transactions.createdAt} >= ${oneDayAgo}::timestamptz)`,
+        spentToday: sql<string>`
+          coalesce(
+            sum(
+              case
+                when ${transactions.createdAt} >= ${oneDayAgo}::timestamptz${chainFilter} then (${transactions.value})::numeric
+                else 0
+              end
+            ),
+            0
+          )::text
+        `,
+        spentThisWeek: sql<string>`coalesce(sum((${transactions.value})::numeric) filter (where true${chainFilter}), 0)::text`,
+      })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.agentId, agentId),
+          gte(transactions.createdAt, oneWeekAgo),
+          sql`${transactions.status} in ('signed', 'broadcast', 'confirmed')`,
+        ),
+      );
+
+    return {
+      recentTxCount1h: Number(stats?.recentTxCount1h ?? 0),
+      recentTxCount24h: Number(stats?.recentTxCount24h ?? 0),
+      spentToday: BigInt(stats?.spentToday ?? "0"),
+      spentThisWeek: BigInt(stats?.spentThisWeek ?? "0"),
+    };
+  }
+
+  /**
+   * Shared policy gate for the operator TRANSFER rails (withdraw + usd-send).
+   * Both move USDC value OUT of the venue to a destination address — one is an
+   * HL withdraw to Arbitrum, the other an HL-internal USDC transfer — so both
+   * run the same evaluation POST /vault/sign runs: approved-addresses reads
+   * `request.to`, spending-limit reads `request.value`, rate-limit reads the
+   * recent-tx counters, and daily/weekly caps read the spent counters.
+   *
+   * Denomination invariant: `request.value` is converted from USDC to the
+   * evaluation chain's NATIVE base units (wei on Arbitrum) via the price
+   * oracle, because the spending-limit evaluator prices `value` as native wei
+   * — passing 6-decimal USDC base units would understate the notional by
+   * ~1e12 and silently disable every USD-denominated cap. The conversion is
+   * skipped (the oracle never consulted) when the policy set has no enabled
+   * spending-limit rule, since no other rule consumes `value` here; when a
+   * spending-limit rule IS configured and the oracle cannot quote, the gate
+   * FAILS CLOSED. An empty policy set approves nothing (engine default-deny),
+   * so a policy-less agent cannot use either rail — set an approved-addresses
+   * policy first, exactly as the withdraw route already required.
+   */
+  async function evaluateOperatorTransferPolicy(input: {
+    tenantId: string;
+    agentId: string;
+    destination: string;
+    amountBaseUnits: bigint;
+  }): Promise<{ approved: true } | { approved: false; reason: string }> {
+    const policySet = await getPolicySet(input.tenantId, input.agentId);
+    const hasSpendingLimit = policySet.some(
+      (rule) => rule.type === "spending-limit" && rule.enabled,
+    );
+    let value = input.amountBaseUnits.toString();
+    if (hasSpendingLimit) {
+      const amountUsdc = Number(input.amountBaseUnits) / 10 ** USDC_DECIMALS;
+      const valueWei = await priceOracle.usdToWei(amountUsdc, ARBITRUM_CHAIN_ID);
+      if (valueWei === null) {
+        return {
+          approved: false,
+          reason:
+            "spending-limit policy cannot be evaluated: no USD price available for the destination chain",
+        };
+      }
+      value = valueWei;
+    }
+    const stats = await getOperatorSpendStats(input.agentId);
+    const evaluation = await policyEngine.evaluate(policySet, {
+      request: {
+        agentId: input.agentId,
+        tenantId: input.tenantId,
+        to: input.destination,
+        value,
+        chainId: ARBITRUM_CHAIN_ID, // Arbitrum HL withdraw destination chain
+      },
+      // `venue` must be top-level on the evaluation context: the engine reads
+      // `ctx.venue` (engine.ts) for the venue-allowlist evaluator. Nesting it
+      // inside `request` leaves ctx.venue undefined → venue-allowlist fails closed.
+      venue: "hyperliquid" as const,
+      recentTxCount1h: stats.recentTxCount1h,
+      recentTxCount24h: stats.recentTxCount24h,
+      spentToday: stats.spentToday,
+      spentThisWeek: stats.spentThisWeek,
+      priceOracle,
+    });
+    if (evaluation.approved) return { approved: true };
+    const failed = evaluation.results.find((r) => !r.passed);
+    return {
+      approved: false,
+      reason: failed?.reason ?? "transfer destination violates policy",
     };
   }
 
@@ -396,8 +602,8 @@ export function createOperatorRecoveryRoutes(
         409,
       );
     }
-    if (idempotency.response) {
-      return c.json<ApiResponse>({ ok: true, data: idempotency.response });
+    if (idempotency.entry) {
+      return c.json(idempotency.entry.body, idempotency.entry.status);
     }
 
     // Build the ERC-20 transfer(bridge, amount) calldata and have the vault sign +
@@ -424,7 +630,11 @@ export function createOperatorRecoveryRoutes(
         amount: amountBaseUnits.toString(),
         error: err instanceof Error ? err.message : String(err),
       });
-      return c.json<ApiResponse>({ ok: false, error: "Failed to submit deposit" }, 502);
+      // The broadcast may have landed — record the ambiguous outcome so a retry
+      // replays this 502 instead of double-broadcasting the ERC-20 transfer.
+      const errorBody = { ok: false as const, error: "Failed to submit deposit" };
+      idempotency.storeFailure?.(errorBody);
+      return c.json<ApiResponse>(errorBody, 502);
     }
 
     await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.deposit.submitted", {
@@ -491,8 +701,8 @@ export function createOperatorRecoveryRoutes(
         409,
       );
     }
-    if (idempotency.response) {
-      return c.json<ApiResponse>({ ok: true, data: idempotency.response });
+    if (idempotency.entry) {
+      return c.json(idempotency.entry.body, idempotency.entry.status);
     }
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
@@ -532,7 +742,11 @@ export function createOperatorRecoveryRoutes(
         builderPerp,
         error: err instanceof Error ? err.message : String(err),
       });
-      return c.json<ApiResponse>({ ok: false, error: "Failed to update leverage" }, 502);
+      // The venue call may have landed — record the ambiguous outcome so a
+      // retry replays this 502 instead of re-executing the leverage update.
+      const errorBody = { ok: false as const, error: "Failed to update leverage" };
+      idempotency.storeFailure?.(errorBody);
+      return c.json<ApiResponse>(errorBody, 502);
     }
 
     await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.leverage.submitted", {
@@ -622,8 +836,8 @@ export function createOperatorRecoveryRoutes(
         409,
       );
     }
-    if (idempotency.response) {
-      return c.json<ApiResponse>({ ok: true, data: idempotency.response });
+    if (idempotency.entry) {
+      return c.json(idempotency.entry.body, idempotency.entry.status);
     }
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
@@ -659,7 +873,11 @@ export function createOperatorRecoveryRoutes(
         amountBaseUnits: amountBaseUnits.toString(),
         error: err instanceof Error ? err.message : String(err),
       });
-      return c.json<ApiResponse>({ ok: false, error: "Failed to add isolated margin" }, 502);
+      // The venue call may have landed — record the ambiguous outcome so a
+      // retry replays this 502 instead of moving margin a second time.
+      const errorBody = { ok: false as const, error: "Failed to add isolated margin" };
+      idempotency.storeFailure?.(errorBody);
+      return c.json<ApiResponse>(errorBody, 502);
     }
 
     await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.add-margin.submitted", {
@@ -707,6 +925,36 @@ export function createOperatorRecoveryRoutes(
     };
     const { agentId, destination, amount } = body;
 
+    // Validate the USDC amount exactly like /withdraw: reject over-precision the
+    // 6-decimal conversion can't represent, and enforce the per-call safety
+    // ceiling so a compromised operator client cannot move the whole venue
+    // balance in one call (previously this rail had NO cap at all).
+    if (hasTooManyUsdcDecimals(amount)) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "amount has more than 6 decimal places" },
+        400,
+      );
+    }
+    const amountBaseUnits = parseUsdcBaseUnits(amount);
+    if (amountBaseUnits === null || amountBaseUnits <= 0n) {
+      return c.json<ApiResponse>({ ok: false, error: "amount must be a positive number" }, 400);
+    }
+    if (amountBaseUnits > HL_MAX_WITHDRAW_BASE_UNITS) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: `amount exceeds the per-usd-send maximum of ${HL_MAX_WITHDRAW_USDC} USDC; split into smaller transfers`,
+        },
+        400,
+      );
+    }
+
+    const rate = await enforceOperatorTransferRateLimit("usd-send", tenantId, agentId);
+    if (!rate.allowed) {
+      c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
+      return c.json<ApiResponse>({ ok: false, error: "Operator transfer rate limit exceeded" }, 429);
+    }
+
     const idempotency = getOperatorIdempotency(`${tenantId}:usd-send`, body.idempotencyKey, {
       agentId,
       venue,
@@ -719,8 +967,8 @@ export function createOperatorRecoveryRoutes(
         409,
       );
     }
-    if (idempotency.response) {
-      return c.json<ApiResponse>({ ok: true, data: idempotency.response });
+    if (idempotency.entry) {
+      return c.json(idempotency.entry.body, idempotency.entry.status);
     }
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
@@ -732,6 +980,28 @@ export function createOperatorRecoveryRoutes(
         { ok: false, error: "Hyperliquid venue wallet not found for agent" },
         404,
       );
+    }
+
+    // ── Policy gate (BEFORE signing) ─────────────────────────────────────────────
+    // usdSend moves USDC to an ARBITRARY Hyperliquid account — functionally a
+    // withdrawal rail. It must satisfy the same policy evaluation as /withdraw
+    // (approved-addresses + spend/rate caps); before this gate a leaked platform
+    // key could drain the full HL balance to any destination in one call.
+    const policy = await evaluateOperatorTransferPolicy({
+      tenantId,
+      agentId,
+      destination,
+      amountBaseUnits,
+    });
+    if (!policy.approved) {
+      await auditRecoveryEvent(c, tenantId, agentId, "trade.usdsend.policy-rejected", {
+        venue,
+        walletAddress,
+        destination,
+        amount,
+        reason: policy.reason,
+      });
+      return c.json({ code: "policy-violation", reason: policy.reason }, 400);
     }
 
     const adapter = buildAdapter(tenantId, agentId, walletAddress);
@@ -754,7 +1024,12 @@ export function createOperatorRecoveryRoutes(
         amount,
         error: err instanceof Error ? err.message : String(err),
       });
-      return c.json<ApiResponse>({ ok: false, error: "Failed to submit usdSend" }, 502);
+      // usdSend signs + submits in one adapter call, so a throw is ambiguous:
+      // the transfer may have landed. Record the outcome so a retry replays
+      // this 502 instead of double-sending USDC.
+      const errorBody = { ok: false as const, error: "Failed to submit usdSend" };
+      idempotency.storeFailure?.(errorBody);
+      return c.json<ApiResponse>(errorBody, 502);
     }
 
     await auditRecoveryEvent(c, tenantId, agentId, "trade.usdsend.completed", {
@@ -809,8 +1084,8 @@ export function createOperatorRecoveryRoutes(
         409,
       );
     }
-    if (idempotency.response) {
-      return c.json<ApiResponse>({ ok: true, data: idempotency.response });
+    if (idempotency.entry) {
+      return c.json(idempotency.entry.body, idempotency.entry.status);
     }
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
@@ -844,7 +1119,11 @@ export function createOperatorRecoveryRoutes(
         maxFeeRate,
         error: err instanceof Error ? err.message : String(err),
       });
-      return c.json<ApiResponse>({ ok: false, error: "Failed to approve builder fee" }, 502);
+      // The venue call may have landed — record the ambiguous outcome so a
+      // retry replays this 502 instead of re-submitting the approval.
+      const errorBody = { ok: false as const, error: "Failed to approve builder fee" };
+      idempotency.storeFailure?.(errorBody);
+      return c.json<ApiResponse>(errorBody, 502);
     }
 
     await auditRecoveryEvent(c, tenantId, agentId, "trade.builder.approved", {
@@ -928,8 +1207,8 @@ export function createOperatorRecoveryRoutes(
         409,
       );
     }
-    if (idempotency.response) {
-      return c.json<ApiResponse>({ ok: true, data: idempotency.response });
+    if (idempotency.entry) {
+      return c.json(idempotency.entry.body, idempotency.entry.status);
     }
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
@@ -954,17 +1233,33 @@ export function createOperatorRecoveryRoutes(
       amountBaseUnits: amountBaseUnits.toString(),
     });
 
-    let result: unknown;
-    let action: unknown;
+    // Signing is local (nothing reaches the venue), so a sign failure is safe to
+    // retry and is NOT stored; a submit failure means the transfer may have
+    // landed, so the ambiguous outcome IS stored and retries replay it.
+    let signed: Awaited<ReturnType<HyperliquidAdapter["signSendAsset"]>>;
     try {
-      const signed = await adapter.signSendAsset({
+      signed = await adapter.signSendAsset({
         destination: walletAddress,
         sourceDex,
         destinationDex,
         token: body.token,
         amount: body.amountUsdc,
       });
-      action = signed.action;
+    } catch (err) {
+      await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.transfer.failed", {
+        venue,
+        walletAddress,
+        sourceDex,
+        destinationDex,
+        amountUsdc: String(body.amountUsdc),
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return c.json<ApiResponse>({ ok: false, error: "Failed to sign collateral transfer" }, 502);
+    }
+
+    let result: unknown;
+    const action: unknown = signed.action;
+    try {
       result = await adapter.submitSendAsset(signed);
     } catch (err) {
       await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.transfer.failed", {
@@ -975,7 +1270,9 @@ export function createOperatorRecoveryRoutes(
         amountUsdc: String(body.amountUsdc),
         error: err instanceof Error ? err.message : String(err),
       });
-      return c.json<ApiResponse>({ ok: false, error: "Failed to submit collateral transfer" }, 502);
+      const errorBody = { ok: false as const, error: "Failed to submit collateral transfer" };
+      idempotency.storeFailure?.(errorBody);
+      return c.json<ApiResponse>(errorBody, 502);
     }
 
     await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.transfer.submitted", {
@@ -1029,8 +1326,8 @@ export function createOperatorRecoveryRoutes(
         409,
       );
     }
-    if (idempotency.response) {
-      return c.json<ApiResponse>({ ok: true, data: idempotency.response });
+    if (idempotency.entry) {
+      return c.json(idempotency.entry.body, idempotency.entry.status);
     }
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
@@ -1055,7 +1352,11 @@ export function createOperatorRecoveryRoutes(
         walletAddress,
         error: err instanceof Error ? err.message : String(err),
       });
-      return c.json<ApiResponse>({ ok: false, error: "Failed to close positions" }, 502);
+      // Positions may have been partially closed — record the ambiguous outcome
+      // so a retry replays this 502 instead of firing another close batch.
+      const errorBody = { ok: false as const, error: "Failed to close positions" };
+      idempotency.storeFailure?.(errorBody);
+      return c.json<ApiResponse>(errorBody, 502);
     }
 
     // Audit every per-coin close so the recovery action is fully traceable.
@@ -1150,15 +1451,15 @@ export function createOperatorRecoveryRoutes(
         409,
       );
     }
-    if (idempotency.response) {
-      return c.json<ApiResponse>({ ok: true, data: idempotency.response });
+    if (idempotency.entry) {
+      return c.json(idempotency.entry.body, idempotency.entry.status);
     }
 
     // Resolve amount after the idempotency cache lookup, so a retry for a
     // previous full-balance withdraw returns the cached success before reading a
     // changed live balance.
     // `amount` stays human-readable for signing; `amountBaseUnits` (USDC 6-decimal
-    // base units, a uint256 integer string) is what the policy spend-cap sees.
+    // base units) is what the policy gate converts to native wei for the spend-cap.
     let amount = body.amount;
     let amountBaseUnits = explicitAmountBaseUnits;
     if (amount === undefined) {
@@ -1191,47 +1492,43 @@ export function createOperatorRecoveryRoutes(
 
     // ── Policy gate (BEFORE signing) ─────────────────────────────────────────────
     // The withdraw destination must be on the agent's approved list AND the amount
-    // must satisfy the spend-cap. We evaluate the full policy set the same way POST
-    // /vault/sign does; the approved-addresses evaluator reads `request.to`, and the
-    // spending-limit evaluator reads `request.value` (the real USDC base-unit
-    // notional, NOT the previous hardcoded "0" which bypassed the spend-cap).
-    const policySet = await getPolicySet(tenantId, agentId);
-    const evaluation = await policyEngine.evaluate(policySet, {
-      request: {
-        agentId,
-        tenantId,
-        to: destination,
-        value: amountBaseUnits.toString(),
-        chainId: 42161, // Arbitrum HL withdraw destination chain
-      },
-      // `venue` must be top-level on the evaluation context: the engine reads
-      // `ctx.venue` (engine.ts) for the venue-allowlist evaluator. Nesting it
-      // inside `request` leaves ctx.venue undefined → venue-allowlist fails closed.
-      venue: "hyperliquid" as const,
-      recentTxCount1h: 0,
-      recentTxCount24h: 0,
-      spentToday: 0n,
-      spentThisWeek: 0n,
-      priceOracle,
+    // must satisfy the spend/rate caps. The shared operator-transfer gate
+    // denominates `value` in native wei (so USD spending limits see the REAL
+    // notional, not 6-decimal USDC misread as wei) and feeds the evaluator the
+    // agent's REAL recent-tx counts + chain-scoped spend counters (the previous
+    // hardcoded zeroes made rate-limit and daily/weekly rules structurally
+    // inert, and the misdenominated `value` disabled even per-tx USD caps).
+    const rate = await enforceOperatorTransferRateLimit("withdraw", tenantId, agentId);
+    if (!rate.allowed) {
+      c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
+      return c.json<ApiResponse>({ ok: false, error: "Operator transfer rate limit exceeded" }, 429);
+    }
+
+    const policy = await evaluateOperatorTransferPolicy({
+      tenantId,
+      agentId,
+      destination,
+      amountBaseUnits,
     });
-    if (!evaluation.approved) {
-      const failed = evaluation.results.find((r) => !r.passed);
-      const reason = failed?.reason ?? "withdraw destination violates policy";
+    if (!policy.approved) {
       await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.withdraw.policy-rejected", {
         venue,
         walletAddress,
         destination,
-        reason,
+        reason: policy.reason,
       });
-      return c.json({ code: "policy-violation", reason }, 400);
+      return c.json({ code: "policy-violation", reason: policy.reason }, 400);
     }
 
     const adapter = buildAdapter(tenantId, agentId, walletAddress);
 
-    let result: unknown;
+    // Signing is local (nothing reaches the venue), so a sign failure is safe to
+    // retry and is NOT stored; a submit failure means the withdraw may have
+    // landed, so the ambiguous outcome IS stored and retries replay it (mirrors
+    // the HL order route's 502 "status unknown" envelope).
+    let signedWithdraw: Awaited<ReturnType<HyperliquidAdapter["signWithdraw"]>>;
     try {
-      const signed = await adapter.signWithdraw({ amount, destination });
-      result = await adapter.submitWithdraw(signed);
+      signedWithdraw = await adapter.signWithdraw({ amount, destination });
     } catch (err) {
       await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.withdraw.failed", {
         venue,
@@ -1240,7 +1537,23 @@ export function createOperatorRecoveryRoutes(
         amount,
         error: err instanceof Error ? err.message : String(err),
       });
-      return c.json<ApiResponse>({ ok: false, error: "Failed to submit withdraw" }, 502);
+      return c.json<ApiResponse>({ ok: false, error: "Failed to sign withdraw" }, 502);
+    }
+
+    let result: unknown;
+    try {
+      result = await adapter.submitWithdraw(signedWithdraw);
+    } catch (err) {
+      await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.withdraw.failed", {
+        venue,
+        walletAddress,
+        destination,
+        amount,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      const errorBody = { ok: false as const, error: "Failed to submit withdraw" };
+      idempotency.storeFailure?.(errorBody);
+      return c.json<ApiResponse>(errorBody, 502);
     }
 
     await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.withdraw.submitted", {
