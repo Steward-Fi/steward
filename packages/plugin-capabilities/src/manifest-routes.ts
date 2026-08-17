@@ -45,6 +45,13 @@ import {
   revokeUpstreamCredentialLease,
 } from "./upstream-leases";
 
+export function upstreamLeaseIssuanceAvailableInRuntime(): boolean {
+  // The Workers entry has no timer/queue/scheduled handler that can honor the
+  // 30-second delivery recovery contract. Do not expose live provider tokens
+  // from a runtime that cannot autonomously revoke abandoned delivery.
+  return process.env.STEWARD_RUNTIME !== "workers";
+}
+
 const denyInternalTokenMint: ShortLivedTokenMinter = async () => {
   throw new Error("provider token mode requires an upstream issuer");
 };
@@ -187,6 +194,12 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
       );
 
       if (resolved?.provider === "github") {
+        if (!upstreamLeaseIssuanceAvailableInRuntime()) {
+          return c.json<ApiResponse>(
+            { ok: false, error: "upstream credential leases require autonomous recovery" },
+            503,
+          );
+        }
         const leaseBody = parseLeaseBody(body);
         const idempotencyKey = c.req.header("Idempotency-Key") ?? "";
         if (!leaseBody) {

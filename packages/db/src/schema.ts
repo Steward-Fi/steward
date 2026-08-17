@@ -2364,6 +2364,7 @@ export const upstreamCredentialLeases = pgTable(
     issuer: varchar("issuer", { length: 64 }).notNull(),
     resource: jsonb("resource").$type<Record<string, unknown>>().notNull(),
     resourceHash: varchar("resource_hash", { length: 64 }).notNull(),
+    authorityDigest: varchar("authority_digest", { length: 64 }).notNull(),
     idempotencyKeyHash: varchar("idempotency_key_hash", { length: 64 }).notNull(),
     tokenHash: varchar("token_hash", { length: 64 }),
     tokenCiphertext: text("token_ciphertext"),
@@ -2374,6 +2375,9 @@ export const upstreamCredentialLeases = pgTable(
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    authorityCheckedAt: timestamp("authority_checked_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
     lastError: text("last_error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

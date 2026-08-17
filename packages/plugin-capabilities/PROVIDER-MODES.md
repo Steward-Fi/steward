@@ -66,6 +66,8 @@ graceful shutdown waits for an in-flight sweep before closing the database.
 Every terminal or `needs_attention` transition and its core audit record commit
 atomically; an audit failure leaves the prior recoverable state for a later
 exact-CAS retry rather than creating an unaudited terminal outcome.
+The shipped Cloudflare Workers profile has no scheduled/queue recovery handler,
+so token-mode issuance fails closed there; broker mode remains available.
 
 ### broker mode
 ```

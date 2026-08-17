@@ -139,6 +139,26 @@ describe("manifest routes", () => {
     expect(res.status).toBe(400);
   });
 
+  test("the shipped Workers profile fails lease issuance closed without scheduled recovery", async () => {
+    await seedManifestCapability("gh-comment", "github:app:org");
+    const previousRuntime = process.env.STEWARD_RUNTIME;
+    process.env.STEWARD_RUNTIME = "workers";
+    try {
+      const app = buildApp(harness!.db, { agent: true });
+      const res = await app.request("/capabilities/manifest/github:app:org/issue", {
+        method: "POST",
+      });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({
+        ok: false,
+        error: "upstream credential leases require autonomous recovery",
+      });
+    } finally {
+      if (previousRuntime === undefined) delete process.env.STEWARD_RUNTIME;
+      else process.env.STEWARD_RUNTIME = previousRuntime;
+    }
+  });
+
   test("broker mode: discord issue returns a delegation, no token", async () => {
     await seedManifestCapability("discord-send", "discord:bot-token:soliza");
     const app = buildApp(harness!.db, { agent: true });
