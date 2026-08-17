@@ -30,7 +30,16 @@ if [[ -z "${STEWARD_MASTER_PASSWORD:-}" ]]; then
   exit 1
 fi
 
-SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -i ${SSH_KEY}"
+# Host-key checking: TOFU (accept-new) at minimum — never "no" (SEC-019).
+# This channel streams the full secret .env; a MITM on an unverified first
+# connection would capture all of it. For production fleets pin host keys
+# instead: `ssh-keyscan -H <node> >> ~/.ssh/known_hosts` once, then run with
+# STRICT_HOST_KEY=yes below.
+if [[ "${STRICT_HOST_KEY:-}" == "yes" ]]; then
+  SSH_OPTS="-o StrictHostKeyChecking=yes -o ConnectTimeout=10 -i ${SSH_KEY}"
+else
+  SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -i ${SSH_KEY}"
+fi
 SSH_CMD="ssh ${SSH_OPTS} root@${NODE_IP}"
 SCP_CMD="scp ${SSH_OPTS}"
 REMOTE_DIR="/opt/steward"

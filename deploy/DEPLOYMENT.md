@@ -55,7 +55,7 @@ NODE_IP="<node-ip>"
 rsync -az --delete \
   --exclude='.git' --exclude='node_modules' --exclude='.next' \
   --exclude='web' --exclude='.turbo' \
-  -e "ssh -o StrictHostKeyChecking=no" \
+  -e "ssh -o StrictHostKeyChecking=accept-new" \
   /home/shad0w/projects/steward-fi/ root@${NODE_IP}:/opt/steward/
 ```
 
@@ -224,7 +224,7 @@ NODE_IP="88.99.66.168"  # milady-core-1
 rsync -az --delete \
   --exclude='.git' --exclude='node_modules' --exclude='.next' \
   --exclude='web' --exclude='.turbo' \
-  -e "ssh -o StrictHostKeyChecking=no" \
+  -e "ssh -o StrictHostKeyChecking=accept-new" \
   /home/shad0w/projects/steward-fi/ root@${NODE_IP}:/opt/steward/
 
 # 2. Install any new dependencies
@@ -247,11 +247,11 @@ for NODE in $NODES; do
   rsync -az --delete \
     --exclude='.git' --exclude='node_modules' --exclude='.next' \
     --exclude='web' --exclude='.turbo' \
-    -e "ssh -o StrictHostKeyChecking=no" \
+    -e "ssh -o StrictHostKeyChecking=accept-new" \
     /home/shad0w/projects/steward-fi/ root@${NODE}:/opt/steward/
-  ssh -o StrictHostKeyChecking=no root@${NODE} "cd /opt/steward && bun install && systemctl restart steward"
+  ssh -o StrictHostKeyChecking=accept-new root@${NODE} "cd /opt/steward && bun install && systemctl restart steward"
   sleep 2
-  ssh -o StrictHostKeyChecking=no root@${NODE} "curl -sf http://localhost:3200/health"
+  ssh -o StrictHostKeyChecking=accept-new root@${NODE} "curl -sf http://localhost:3200/health"
   echo ""
 done
 ```

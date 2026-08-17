@@ -101,6 +101,25 @@ describe("#101 deploy/DEPLOYMENT.md docs reconciled with fail-closed code", () =
   });
 });
 
+describe("SEC-019 no deploy/provision SSH runs with host-key verification disabled", () => {
+  const SCRIPTS_DIR = join(DEPLOY_DIR, "..", "scripts");
+  const artifacts: Array<[string, string]> = [
+    ["deploy/provision-steward-node.sh", read("provision-steward-node.sh")],
+    ["deploy/migrate-agent-keys.sh", read("migrate-agent-keys.sh")],
+    ["deploy/DEPLOYMENT.md", read("DEPLOYMENT.md")],
+    ["scripts/deploy.sh", readFileSync(join(SCRIPTS_DIR, "deploy.sh"), "utf8")],
+    ["scripts/deploy-all.sh", readFileSync(join(SCRIPTS_DIR, "deploy-all.sh"), "utf8")],
+  ];
+
+  for (const [name, content] of artifacts) {
+    test(`${name} never disables SSH host-key checking`, () => {
+      // Provisioning streams the full secret .env over this channel; with
+      // StrictHostKeyChecking=no a first-connection MITM captures everything.
+      expect(content).not.toContain("StrictHostKeyChecking=no");
+    });
+  }
+});
+
 describe("SEC-011 deploy/docker-compose.yml publishes no port on all interfaces", () => {
   const compose = read("docker-compose.yml");
 

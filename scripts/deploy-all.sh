@@ -19,6 +19,15 @@ RESET='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_SCRIPT="$SCRIPT_DIR/deploy.sh"
 
+# Host-key checking for the inline version-poll ssh calls below: TOFU
+# (accept-new) at minimum — never "no" (SEC-019). STRICT_HOST_KEY=yes
+# requires a pre-pinned known_hosts entry instead.
+if [[ "${STRICT_HOST_KEY:-}" == "yes" ]]; then
+  SSH_OPTS="-o StrictHostKeyChecking=yes -o ConnectTimeout=10"
+else
+  SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
+fi
+
 # ---------------------------------------------------------------------------
 # Nodes: milady (canary) first, then agents
 # ---------------------------------------------------------------------------
@@ -85,7 +94,7 @@ CANARY_FLAGS=("${EXTRA_FLAGS[@]}")
 if "$DEPLOY_SCRIPT" "$CANARY_IP" "${CANARY_FLAGS[@]+"${CANARY_FLAGS[@]}"}"; then
   RESULTS[$CANARY]="OK"
   # Grab version from health
-  VERSIONS[$CANARY]=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@${CANARY_IP}" \
+  VERSIONS[$CANARY]=$(ssh $SSH_OPTS "root@${CANARY_IP}" \
     "curl -sf http://localhost:3200/health" 2>/dev/null \
     | grep -o '"version":"[^"]*"' | cut -d'"' -f4 || echo "unknown")
   echo ""
@@ -120,7 +129,7 @@ for node in "${NODE_ORDER[@]}"; do
 
   if "$DEPLOY_SCRIPT" "$node_ip" "${AGENT_FLAGS[@]+"${AGENT_FLAGS[@]}"}"; then
     RESULTS[$node]="OK"
-    VERSIONS[$node]=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@${node_ip}" \
+    VERSIONS[$node]=$(ssh $SSH_OPTS "root@${node_ip}" \
       "curl -sf http://localhost:3200/health" 2>/dev/null \
       | grep -o '"version":"[^"]*"' | cut -d'"' -f4 || echo "unknown")
   else

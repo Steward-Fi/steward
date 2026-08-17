@@ -32,7 +32,13 @@ fi
 
 # ── Config ───────────────────────────────────────────────────────────────────
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
-SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -i ${SSH_KEY}"
+# Host-key checking: TOFU (accept-new) at minimum — never "no" (SEC-019).
+# Set STRICT_HOST_KEY=yes to require a pre-pinned known_hosts entry instead.
+if [[ "${STRICT_HOST_KEY:-}" == "yes" ]]; then
+  SSH_OPTS="-o StrictHostKeyChecking=yes -o ConnectTimeout=10 -i ${SSH_KEY}"
+else
+  SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -i ${SSH_KEY}"
+fi
 SSH_CMD="ssh ${SSH_OPTS} root@${NODE_IP}"
 STEWARD_URL="${STEWARD_URL:-http://localhost:3200}"
 TENANT_ID="${TENANT_ID:-milady-cloud}"
