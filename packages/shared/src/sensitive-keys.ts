@@ -12,6 +12,20 @@ const SENSITIVE_CREDENTIAL_KEYS = new Set([
   "passphrase",
   "clientsecret",
   "clientsecretvalue",
+  "accesskeyid",
+  "secretaccesskey",
+  "sessionid",
+  "sessioncookie",
+  "clientcertificate",
+  "clientcert",
+  "signingkey",
+  "encryptionkey",
+  "mnemonic",
+  "seedphrase",
+  "recoveryphrase",
+  "jwt",
+  "pat",
+  "bearer",
 ]);
 
 const SENSITIVE_CREDENTIAL_KEY_SUFFIXES = [
@@ -28,6 +42,18 @@ const SENSITIVE_CREDENTIAL_KEY_SUFFIXES = [
   "passphrase",
   "clientsecret",
   "clientsecretvalue",
+  "accesskeyid",
+  "secretaccesskey",
+  "sessionid",
+  "sessioncookie",
+  "clientcertificate",
+  "clientcert",
+  "signingkey",
+  "encryptionkey",
+  "mnemonic",
+  "seedphrase",
+  "recoveryphrase",
+  "jwt",
 ];
 
 const SENSITIVE_CREDENTIAL_KEY_DECORATORS = ["header", "value"];

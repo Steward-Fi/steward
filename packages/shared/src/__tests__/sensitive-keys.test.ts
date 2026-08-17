@@ -22,6 +22,19 @@ describe("sensitive credential keys", () => {
       "accessToken",
       "api_key",
       "privateKey",
+      "aws_access_key_id",
+      "secretAccessKey",
+      "session_id",
+      "clientCertificate",
+      "signing_key",
+      "walletMnemonic",
+      "seed_phrase",
+      "recoveryPhrase",
+      "serviceJwt",
+      "pat",
+      "bearer",
+      "accessTokenValue",
+      "credential_value",
     ]) {
       expect(isSensitiveCredentialKey(key), key).toBe(true);
     }
