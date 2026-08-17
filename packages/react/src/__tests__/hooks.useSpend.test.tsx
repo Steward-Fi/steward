@@ -1,22 +1,30 @@
 /**
  * Tests for useSpend().
  *
- * Covers the deterministic surface: initial return shape and the refetch()
- * URL construction (encoded agentId + range query param). The mount-time
- * polling fetch is effect-driven and covered by the browser e2e suite.
+ * Stats are derived from the credentialed client.getTransactionHistory —
+ * the old raw-fetch /agents/:id/spend-stats endpoint never existed on the
+ * API and sent no credentials (SEC-195 regression).
+ *
+ * The test runner has no jsdom and renderToString does not flush effects, so
+ * we assert on the mocked client calls via an SSR probe, and cover the stats
+ * computation (computeSpendStats) as a pure function.
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import * as React from "react";
 import { renderToString } from "react-dom/server";
 
+const getTransactionHistoryMock = mock(async (_agentId: string) => [] as any[]);
+
 // NOTE: bun's `mock.module` is process-global; this suite is run
 // one-file-per-process by the package's test script. Run individual files
 // (or `bun run test`), not a single `bun test <glob>`.
 mock.module("../provider.js", () => ({
   useStewardContext: () => ({
-    client: { getBaseUrl: () => "https://api.test" },
-    agentId: "a b", // space to verify encoding
+    client: {
+      getTransactionHistory: getTransactionHistoryMock,
+    },
+    agentId: "a b",
     pollInterval: 30000,
     features: {},
     theme: {},
@@ -27,7 +35,7 @@ mock.module("../provider.js", () => ({
     React.createElement(React.Fragment, null, children),
 }));
 
-const { useSpend } = await import("../hooks/useSpend.js");
+const { useSpend, computeSpendStats } = await import("../hooks/useSpend.js");
 
 type UseSpendReturn = ReturnType<typeof useSpend>;
 
@@ -42,16 +50,32 @@ function captureHook(range?: Parameters<typeof useSpend>[0]): UseSpendReturn {
   return captured;
 }
 
+const ETH = 10n ** 18n;
+const NOW = Date.parse("2026-06-15T12:00:00Z");
+
+function txRecord(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "tx-1",
+    agentId: "a b",
+    status: "confirmed",
+    request: { agentId: "a b", tenantId: "t", to: "0xabc", value: ETH.toString(), chainId: 8453 },
+    txHash: "0xhash",
+    policyResults: [],
+    createdAt: new Date("2026-06-15T00:00:00Z"),
+    ...overrides,
+  } as any;
+}
+
 const originalFetch = globalThis.fetch;
 let fetchMock: ReturnType<typeof mock>;
 
 describe("useSpend()", () => {
   beforeEach(() => {
-    fetchMock = mock(async () => ({
-      ok: true,
-      status: 200,
-      json: async () => ({ ok: true, data: { range: "7d" } }),
-    }));
+    getTransactionHistoryMock.mockClear();
+    getTransactionHistoryMock.mockImplementation(async () => []);
+    fetchMock = mock(async () => {
+      throw new Error("raw fetch must not be used");
+    });
     globalThis.fetch = fetchMock as any;
   });
   afterEach(() => {
@@ -66,17 +90,74 @@ describe("useSpend()", () => {
     expect(typeof api.refetch).toBe("function");
   });
 
-  test("refetch hits the spend-stats endpoint with the default 7d range", async () => {
+  test("refetch derives stats from the credentialed history only", async () => {
     const api = captureHook();
     await api.refetch();
-    const url = String(fetchMock.mock.calls[0][0]);
-    expect(url).toBe("https://api.test/agents/a%20b/spend-stats?range=7d");
+    expect(getTransactionHistoryMock).toHaveBeenCalledTimes(1);
+    expect(getTransactionHistoryMock.mock.calls[0]?.[0]).toBe("a b");
+    // SEC-195: no credential-less raw fetch on any path.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("computeSpendStats()", () => {
+  test("aggregates totals, averages, largest, daily, and destinations", () => {
+    const stats = computeSpendStats(
+      "7d",
+      [
+        txRecord({ id: "tx-1" }),
+        txRecord({
+          id: "tx-2",
+          request: { to: "0xdef", value: (ETH * 2n).toString() },
+          txHash: "0xhash2",
+        }),
+        txRecord({ id: "tx-failed", status: "failed" }), // not counted
+      ],
+      NOW,
+    );
+    expect(stats.range).toBe("7d");
+    expect(stats.txCount).toBe(2);
+    expect(stats.totalSpent).toBe((ETH * 3n).toString());
+    expect(stats.totalSpentFormatted).toBe("3.0000");
+    expect(stats.avgTxValueFormatted).toBe("1.5000");
+    expect(stats.largestTx).toEqual({
+      value: (ETH * 2n).toString(),
+      txHash: "0xhash2",
+      timestamp: "2026-06-15T00:00:00.000Z",
+    });
+    expect(stats.daily).toEqual([
+      {
+        date: "2026-06-15",
+        spent: (ETH * 3n).toString(),
+        spentFormatted: "3.0000",
+        txCount: 2,
+      },
+    ]);
+    expect(stats.topDestinations[0]).toEqual({
+      address: "0xdef",
+      totalSent: (ETH * 2n).toString(),
+      txCount: 1,
+    });
+    expect(stats.budgetUsage).toBeUndefined();
   });
 
-  test("refetch honors a custom range", async () => {
-    const api = captureHook("30d");
-    await api.refetch();
-    const url = String(fetchMock.mock.calls[0][0]);
-    expect(url).toContain("range=30d");
+  test("range=24h excludes older transactions; range=all includes them", () => {
+    const old = txRecord({ id: "tx-old", createdAt: new Date("2026-06-01T00:00:00Z") });
+    const recent = txRecord({ id: "tx-recent" });
+    expect(computeSpendStats("24h", [old, recent], NOW).txCount).toBe(1);
+    expect(computeSpendStats("all", [old, recent], NOW).txCount).toBe(2);
+    // 10 days old: inside 30d, outside 7d
+    expect(computeSpendStats("7d", [old, recent], NOW).txCount).toBe(1);
+    expect(computeSpendStats("30d", [old, recent], NOW).txCount).toBe(2);
+  });
+
+  test("empty history yields zeroed stats", () => {
+    const stats = computeSpendStats("7d", [], NOW);
+    expect(stats.txCount).toBe(0);
+    expect(stats.totalSpent).toBe("0");
+    expect(stats.avgTxValue).toBe("0");
+    expect(stats.largestTx).toEqual({ value: "0", txHash: "", timestamp: "" });
+    expect(stats.daily).toEqual([]);
+    expect(stats.topDestinations).toEqual([]);
   });
 });
