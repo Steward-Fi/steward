@@ -602,8 +602,9 @@ export function __rebuildApprovedActionForTests(
   operationKey: string,
   action: Record<string, unknown>,
   safeSummary: Record<string, unknown>,
+  requestProfile: Record<string, unknown> = {},
 ): ProviderActionBuild {
-  return rebuildApprovedAction(operationKey, action, safeSummary);
+  return rebuildApprovedAction(operationKey, action, safeSummary, requestProfile);
 }
 
 // ─── Public result envelope ───────────────────────────────────────────────────
