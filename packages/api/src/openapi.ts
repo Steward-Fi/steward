@@ -1482,7 +1482,7 @@ const walletActionSponsorshipSchema: JsonSchema = {
   },
 };
 
-const signTransactionInputSchema: JsonSchema = {
+const vaultSignInputSchema: JsonSchema = {
   type: "object",
   additionalProperties: false,
   required: ["to", "value"],
@@ -1499,7 +1499,7 @@ const signTransactionInputSchema: JsonSchema = {
   },
 };
 
-const signTransactionSuccessSchema: JsonSchema = {
+const vaultSignSuccessSchema: JsonSchema = {
   type: "object",
   required: ["txId"],
   properties: {
@@ -1510,7 +1510,7 @@ const signTransactionSuccessSchema: JsonSchema = {
   oneOf: [{ required: ["txHash"] }, { required: ["signedTx"] }],
 };
 
-const signTransactionPendingSchema: JsonSchema = {
+const vaultSignPendingSchema: JsonSchema = {
   type: "object",
   additionalProperties: false,
   required: ["ok", "error", "data"],
@@ -1529,7 +1529,7 @@ const signTransactionPendingSchema: JsonSchema = {
   },
 };
 
-const signTransactionOutcomeUnknownSchema: JsonSchema = {
+const vaultSignOutcomeUnknownSchema: JsonSchema = {
   type: "object",
   additionalProperties: false,
   required: ["ok", "error", "data"],
@@ -6734,11 +6734,11 @@ export function getOpenApiSpec() {
           description:
             "Evaluates current agent policy and signs a transaction. Broadcast requests require an Idempotency-Key. HTTP 202 may mean either pending_approval or outcome_unknown; outcome_unknown includes the deterministic transaction hash and requires receipt reconciliation before any retry.",
           security: [{ tenantApiKey: [] }, { bearerAuth: [] }],
-          requestBody: jsonRequestBody(signTransactionInputSchema),
+          requestBody: jsonRequestBody(vaultSignInputSchema),
           responses: {
-            "200": jsonResponse(apiResponse(signTransactionSuccessSchema)),
+            "200": jsonResponse(apiResponse(vaultSignSuccessSchema)),
             "202": jsonResponse({
-              oneOf: [signTransactionPendingSchema, signTransactionOutcomeUnknownSchema],
+              oneOf: [vaultSignPendingSchema, vaultSignOutcomeUnknownSchema],
             }),
             "428": jsonResponse(errorResponse()),
             "500": jsonResponse(errorResponse()),
