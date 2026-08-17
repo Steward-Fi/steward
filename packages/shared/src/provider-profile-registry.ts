@@ -23,6 +23,7 @@
 
 import { GENERIC_HTTP_PROVIDER_ACTION_PROFILE } from "./generic-http-provider-action.js";
 import { GITHUB_PROVIDER_ACTION_PROFILE } from "./provider-action.js";
+import { SLACK_PROVIDER_ACTION_PROFILE } from "./slack-provider-action.js";
 import { X_PROVIDER_ACTION_PROFILE } from "./x-provider-action.js";
 
 /** Whether a profile's operation shape is fixed by an adapter or authored by config. */
@@ -67,6 +68,14 @@ const REGISTRY: ReadonlyMap<string, ProviderProfileDescriptor> = new Map([
       kind: "adapter-fixed",
       label: "X",
       allowedOrigins: Object.freeze(["https://api.x.com"]),
+    }),
+  ],
+  [
+    SLACK_PROVIDER_ACTION_PROFILE,
+    Object.freeze<ProviderProfileDescriptor>({
+      profile: SLACK_PROVIDER_ACTION_PROFILE,
+      kind: "adapter-fixed",
+      label: "Slack",
     }),
   ],
   [

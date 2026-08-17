@@ -56,6 +56,11 @@ import {
   type GithubActionBuild,
   type GithubOperationKey,
 } from "@stwd/provider-github";
+import {
+  buildSlackAction,
+  type SlackActionBuild,
+  type SlackOperationKey,
+} from "@stwd/provider-slack";
 import { buildXAction, type XActionBuild, type XOperationKey } from "@stwd/provider-x";
 import {
   assertRegisteredProfile,
@@ -72,6 +77,7 @@ import {
   isGenericDescriptorError,
   jcsStringify,
   type ProviderRequestEnvelopeV1,
+  type SlackCanonicalActionV1,
   sha256HexPrefixed,
   UnregisteredProfileError,
   validateGenericHttpDescriptor,
@@ -93,7 +99,11 @@ import {
  * pipeline reads (action.profile/method/origin/path/query/headers/body,
  * policyArgs, safeSummary), so the pipeline consumes them uniformly.
  */
-export type ConcreteProviderActionBuild = GithubActionBuild | XActionBuild | GenericHttpActionBuild;
+export type ConcreteProviderActionBuild =
+  | GithubActionBuild
+  | XActionBuild
+  | SlackActionBuild
+  | GenericHttpActionBuild;
 
 /**
  * #201: a DEFERRED build for a config-driven (generic-http) operation. The route
@@ -114,6 +124,7 @@ export type ProviderActionBuild = ConcreteProviderActionBuild | DeferredGenericB
 type AnyCanonicalActionV1 =
   | GithubCanonicalActionV1
   | XCanonicalActionV1
+  | SlackCanonicalActionV1
   | GenericHttpCanonicalActionV1;
 
 function isDeferredGenericBuild(b: ProviderActionBuild): b is DeferredGenericBuild {
@@ -553,6 +564,35 @@ function rebuildApprovedAction(
       pullNumber: Number(match?.[3]),
       body: body?.body,
     });
+  }
+  if (operationKey === "slack.chat.postMessage") {
+    return buildSlackAction(operationKey as SlackOperationKey, {
+      channel: body?.channel,
+      ...(body?.text !== undefined ? { text: body.text } : {}),
+      ...(body?.blocks !== undefined ? { blocks: body.blocks } : {}),
+      ...(body?.thread_ts !== undefined ? { thread_ts: body.thread_ts } : {}),
+    });
+  }
+  if (operationKey === "slack.conversations.list") {
+    const query = Array.isArray(action.orderedQueryPairs) ? action.orderedQueryPairs : [];
+    const q = new Map<string, unknown>();
+    for (const pair of query) {
+      if (Array.isArray(pair) && pair.length === 2 && typeof pair[0] === "string") {
+        q.set(pair[0], pair[1]);
+      }
+    }
+    return buildSlackAction(operationKey as SlackOperationKey, {
+      ...(q.has("types") ? { types: String(q.get("types")).split(",") } : {}),
+      ...(q.has("limit") ? { limit: Number(q.get("limit")) } : {}),
+      ...(q.has("cursor") ? { cursor: q.get("cursor") } : {}),
+    });
+  }
+  if (operationKey === "slack.users.info") {
+    const query = Array.isArray(action.orderedQueryPairs) ? action.orderedQueryPairs : [];
+    const user = query.find(
+      (pair) => Array.isArray(pair) && pair.length === 2 && pair[0] === "user",
+    )?.[1];
+    return buildSlackAction(operationKey as SlackOperationKey, { user });
   }
   throw new Error(`unsupported provider operation '${operationKey}'`);
 }

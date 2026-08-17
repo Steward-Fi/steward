@@ -1871,6 +1871,26 @@ export async function handleProxy(c: Context): Promise<Response> {
   let responseBody: ReadableStream<Uint8Array> | ArrayBuffer | null = response.body;
   const contentType = response.headers.get("content-type") || "";
   const isJsonResponse = contentType.includes("application/json");
+  let slackSemanticFailure: string | null = null;
+
+  // Slack Web API encodes operation failures as HTTP 200 + {ok:false}. Treat
+  // that envelope as a failed dispatch, while retaining the buffered bytes for
+  // credential-reflection scanning below. A malformed/non-JSON 2xx response is
+  // also fail-closed: it cannot prove that the requested action succeeded.
+  if (target.host === "slack.com" && response.status >= 200 && response.status < 300) {
+    try {
+      const length = Number(response.headers.get("content-length") ?? "0");
+      if (Number.isFinite(length) && length > MAX_PROXY_RESPONSE_BYTES) {
+        throw new Error("Slack response too large");
+      }
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength > MAX_PROXY_RESPONSE_BYTES) throw new Error("Slack response too large");
+      responseBody = buffer;
+      slackSemanticFailure = classifySlackWebApiPayload(new TextDecoder().decode(buffer));
+    } catch {
+      slackSemanticFailure = "invalid_response";
+    }
+  }
   const isLLMHost =
     isProxyRedisAvailable() &&
     (target.host === "api.openai.com" || target.host === "api.anthropic.com");
@@ -2069,6 +2089,29 @@ export async function handleProxy(c: Context): Promise<Response> {
       return c.json({ ok: false, error: "Upstream response reflected injected credential" }, 502);
     }
   }
+  if (slackSemanticFailure) {
+    await recordAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: 502,
+      latencyMs: Date.now() - startTime,
+      reason: `slack-api-error:${slackSemanticFailure}`,
+    });
+    injectedCredentialValue = null;
+    sensitiveCredentialValues = [];
+    proxySlot.release();
+    return c.json(
+      {
+        ok: false,
+        error: "Slack upstream operation failed",
+        data: { providerError: slackSemanticFailure },
+      },
+      502,
+    );
+  }
   injectedCredentialValue = null;
   sensitiveCredentialValues = [];
 
@@ -2113,6 +2156,19 @@ export async function handleProxy(c: Context): Promise<Response> {
     statusText: response.statusText,
     headers: responseHeaders,
   });
+}
+
+/** Null means Slack explicitly attested success; any string is a safe failure code. */
+export function classifySlackWebApiPayload(bodyText: string): string | null {
+  try {
+    const parsed = JSON.parse(bodyText) as { ok?: unknown; error?: unknown };
+    if (parsed.ok === true) return null;
+    return typeof parsed.error === "string" && /^[a-z0-9_]{1,128}$/i.test(parsed.error)
+      ? parsed.error
+      : "invalid_response";
+  } catch {
+    return "invalid_response";
+  }
 }
 
 // ─── Exports for testing ─────────────────────────────────────────────────────

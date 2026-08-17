@@ -15,6 +15,7 @@ export const DEFAULT_ALIASES: Record<string, string> = {
   helius: "api.helius.xyz",
   github: "api.github.com",
   x: "api.x.com",
+  slack: "slack.com",
 };
 
 /** Parse a bounded integer setting at module load so malformed resource limits fail closed. */

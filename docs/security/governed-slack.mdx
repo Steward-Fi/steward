@@ -1,0 +1,38 @@
+---
+title: "Governed Slack actions"
+description: "Slack Web API operations with channel policy scope and server-held bot credentials."
+---
+
+# Governed Slack actions
+
+The `slack.provider-action.v1` profile pins requests to `https://slack.com/api/*`
+and currently supports:
+
+- `slack.chat.postMessage` (write)
+- `slack.conversations.list` (read)
+- `slack.users.info` (read)
+
+Bot tokens remain encrypted in Steward. A narrow secret route injects
+`Authorization: Bearer ...` only for the exact Slack method and path; the agent
+request, action status, safe summary, response, and audit record never contain
+the token.
+
+Channel authorization is a `capability-intent` argument constraint, not a broad
+credential grant:
+
+```json
+{
+  "type": "capability-intent",
+  "enabled": true,
+  "config": {
+    "capabilities": ["slack.chat.postMessage"],
+    "effect": "allow",
+    "constraints": { "argEquals": { "channel": "C12345678" } }
+  }
+}
+```
+
+Slack reports application errors as HTTP 200 with `{ "ok": false }`. Steward
+requires explicit `ok: true`; `ok: false`, malformed JSON, or a missing `ok`
+field is recorded and returned as a failed dispatch. Provider error codes are
+restricted to a safe token format before they enter audit or response data.

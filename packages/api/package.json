@@ -36,6 +36,7 @@
     "@stwd/plugin-wxmr": "workspace:*",
     "@stwd/policy-engine": "workspace:*",
     "@stwd/provider-github": "workspace:*",
+    "@stwd/provider-slack": "workspace:*",
     "@stwd/provider-x": "workspace:*",
     "@stwd/redis": "workspace:*",
     "@stwd/shared": "workspace:*",

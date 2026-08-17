@@ -1,0 +1,15 @@
+{
+  "name": "@stwd/provider-slack",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@stwd/shared": "workspace:*"
+  },
+  "description": "Slack governed provider-action adapter"
+}
