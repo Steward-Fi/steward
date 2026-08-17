@@ -2163,6 +2163,20 @@ export const providerActionBindings = pgTable(
     policyDecision: jsonb("policy_decision").$type<Record<string, unknown>>(),
     policyDecisionHash: varchar("policy_decision_hash", { length: 71 }),
 
+    // #239: authoritative execute-time policy evidence. Unlike the approval-time
+    // decision above, this snapshot is derived from current rules immediately
+    // before approval consumption and authorization mint.
+    executionPolicyDecisionId: uuid("execution_policy_decision_id"),
+    executionPolicyRevisionHash: varchar("execution_policy_revision_hash", { length: 71 }),
+    executionPolicyDecision: jsonb("execution_policy_decision").$type<Record<string, unknown>>(),
+    executionPolicyDecisionHash: varchar("execution_policy_decision_hash", { length: 71 }),
+    executionPolicyEvaluatedAt: timestamp("execution_policy_evaluated_at", { withTimezone: true }),
+    // 0084 also installs the raw-SQL NOT VALID rollout fence
+    // provider_action_bindings_execution_policy_ready_chk. It is intentionally
+    // not modeled here because Drizzle cannot express NOT VALID: PostgreSQL
+    // enforces it for every new execution_ready/executing row while tolerating
+    // historical in-flight executions whose outcome may already be unknown.
+
     status: varchar("status", { length: 32 }).notNull(),
     // ── PR3 approval lifecycle columns (0081) ──
     // Mutable only via the PR3 transition trigger; binding_revision increments by
@@ -2247,6 +2261,50 @@ export const providerActionBindings = pgTable(
 );
 
 export type ProviderActionBinding = typeof providerActionBindings.$inferSelect;
+
+/** Append-only reservation identities. Mutable reconciliation metadata is
+ * isolated from the immutable generation payload and claimed with SKIP LOCKED. */
+export const providerActionReservationGenerations = pgTable(
+  "provider_action_reservation_generations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    intentId: varchar("intent_id", { length: 64 }).notNull(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    generation: integer("generation").notNull(),
+    phase: varchar("phase", { length: 16 }).notNull(),
+    handles: jsonb("handles").$type<Record<string, unknown>>().notNull(),
+    state: varchar("state", { length: 24 }).notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    claimedBy: uuid("claimed_by"),
+    reconciledAt: timestamp("reconciled_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    intentFk: foreignKey({
+      columns: [table.tenantId, table.intentId],
+      foreignColumns: [intents.tenantId, intents.id],
+      name: "provider_action_reservation_generations_intent_fk",
+    }).onDelete("cascade"),
+    generationUnique: uniqueIndex("provider_action_reservation_generations_intent_gen_uniq").on(
+      table.intentId,
+      table.generation,
+    ),
+    dueIdx: index("provider_action_reservation_generations_due_idx").on(
+      table.nextRetryAt,
+      table.createdAt,
+      table.id,
+    ),
+    tenantDueIdx: index("provider_action_reservation_generations_tenant_due_idx").on(
+      table.tenantId,
+      table.nextRetryAt,
+      table.createdAt,
+      table.id,
+    ),
+  }),
+);
 
 // Transactional required-audit outbox (spec §6.4). A provider-action decision
 // inserts its REQUIRED audit intent here in the SAME transaction as the binding;

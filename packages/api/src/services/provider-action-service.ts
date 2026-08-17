@@ -33,6 +33,7 @@ import {
   providerAccounts,
   providerActionAuditOutbox,
   providerActionBindings,
+  providerActionReservationGenerations,
   providerGrants,
   providerOperations,
   providerRoleBindings,
@@ -47,8 +48,12 @@ import {
   type ProviderPolicyRule,
   windowedInvokeBucketKey,
 } from "@stwd/policy-engine";
-import type { GithubActionBuild } from "@stwd/provider-github";
-import type { XActionBuild } from "@stwd/provider-x";
+import {
+  buildGithubAction,
+  type GithubActionBuild,
+  type GithubOperationKey,
+} from "@stwd/provider-github";
+import { buildXAction, type XActionBuild, type XOperationKey } from "@stwd/provider-x";
 import {
   computeProviderPolicyInputDigest,
   type GithubCanonicalActionV1,
@@ -87,11 +92,10 @@ const EVALUATOR_VERSION = "provider-action.v1";
 const POLICY_TYPE = "capability-intent" as const;
 
 /**
- * A handle to an atomic cumulative-spend reservation (#206) so the pipeline can
- * SETTLE it (known-success) or RELEASE it (known-failure/deny). On
- * outcome_unknown the pipeline deliberately does NEITHER - the reservation ages
- * out at the window edge (fail closed for a money cap: never free budget that
- * may have really spent).
+ * A handle to an atomic cumulative-spend reservation (#206). #240 persists this
+ * exact identity on the binding so a known outcome can be reconciled after a
+ * process crash. On outcome_unknown the sweeper deliberately does NEITHER - the
+ * reservation ages out at the window edge (fail closed for a money cap).
  */
 export interface CumulativeSpendReservationHandle {
   /** the spend-STREAM identity (scope+scopeKey+currency); NOT the cap threshold
@@ -111,6 +115,197 @@ export interface WindowedInvokeReservationHandle {
   agentId: string;
   operationKey: string;
   reservationId: string;
+}
+
+export interface PersistedPolicyReservationHandlesV1 {
+  schemaVersion: "steward.provider-policy-reservations.v1";
+  generation: number;
+  phase: "decision" | "execution";
+  cumulativeSpend: CumulativeSpendReservationHandle[];
+  windowedInvoke: WindowedInvokeReservationHandle | null;
+}
+
+type ReservationReconciliationTarget = "settled" | "released";
+
+let reservationReconciliationFaultForTests: "before_apply" | "after_apply" | null = null;
+
+/** Test-only crash injection at the external-effect / DB-CAS boundary. */
+export function __setReservationReconciliationFaultForTests(
+  fault: "before_apply" | "after_apply" | null,
+): void {
+  reservationReconciliationFaultForTests = fault;
+}
+
+function persistedReservationHandles(
+  cumulativeSpend: CumulativeSpendReservationHandle[],
+  windowedInvoke: WindowedInvokeReservationHandle | undefined,
+  generation = 1,
+  phase: PersistedPolicyReservationHandlesV1["phase"] = "decision",
+): PersistedPolicyReservationHandlesV1 | null {
+  if (cumulativeSpend.length === 0 && windowedInvoke === undefined) return null;
+  return {
+    schemaVersion: "steward.provider-policy-reservations.v1",
+    generation,
+    phase,
+    cumulativeSpend,
+    windowedInvoke: windowedInvoke ?? null,
+  };
+}
+
+function parsePersistedReservationHandles(
+  value: unknown,
+): PersistedPolicyReservationHandlesV1 | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  if (v.schemaVersion !== "steward.provider-policy-reservations.v1") return null;
+  if (!Number.isSafeInteger(v.generation) || (v.generation as number) <= 0) return null;
+  if (v.phase !== "decision" && v.phase !== "execution") return null;
+  if (!Array.isArray(v.cumulativeSpend)) return null;
+  const cumulativeSpend: CumulativeSpendReservationHandle[] = [];
+  for (const raw of v.cumulativeSpend) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const r = raw as Record<string, unknown>;
+    if (!r.stream || typeof r.stream !== "object" || Array.isArray(r.stream)) return null;
+    const stream = r.stream as Record<string, unknown>;
+    if (
+      typeof stream.agentId !== "string" ||
+      !["operation", "agent", "grant"].includes(String(stream.scope)) ||
+      typeof stream.scopeKey !== "string" ||
+      typeof stream.currency !== "string" ||
+      typeof r.reservationId !== "string" ||
+      !Number.isSafeInteger(r.amount) ||
+      (r.amount as number) < 0
+    )
+      return null;
+    cumulativeSpend.push({
+      stream: {
+        agentId: stream.agentId,
+        scope: stream.scope as CumulativeSpendScope,
+        scopeKey: stream.scopeKey,
+        currency: stream.currency,
+      },
+      reservationId: r.reservationId,
+      amount: r.amount as number,
+    });
+  }
+  let windowedInvoke: WindowedInvokeReservationHandle | null = null;
+  if (v.windowedInvoke !== null) {
+    if (
+      !v.windowedInvoke ||
+      typeof v.windowedInvoke !== "object" ||
+      Array.isArray(v.windowedInvoke)
+    )
+      return null;
+    const r = v.windowedInvoke as Record<string, unknown>;
+    if (
+      typeof r.agentId !== "string" ||
+      typeof r.operationKey !== "string" ||
+      typeof r.reservationId !== "string"
+    )
+      return null;
+    windowedInvoke = {
+      agentId: r.agentId,
+      operationKey: r.operationKey,
+      reservationId: r.reservationId,
+    };
+  }
+  if (cumulativeSpend.length === 0 && windowedInvoke === null) return null;
+  return {
+    schemaVersion: "steward.provider-policy-reservations.v1",
+    generation: v.generation as number,
+    phase: v.phase,
+    cumulativeSpend,
+    windowedInvoke,
+  };
+}
+
+function reconciliationTargetForStatus(
+  status: string,
+  phase: PersistedPolicyReservationHandlesV1["phase"],
+): ReservationReconciliationTarget | null {
+  if (status === "stub_succeeded" || status === "succeeded") return "settled";
+  // Decision-time reservations for approval-gated actions are never carried
+  // across the human lifecycle; execution takes a fresh authoritative reserve.
+  if (
+    phase === "decision" &&
+    [
+      "pending_approval",
+      "approved",
+      "execution_ready",
+      "approval_denied",
+      "approval_expired",
+      "approval_stale",
+    ].includes(status)
+  )
+    return "released";
+  if (status === "denied" || status === "stub_failed" || status === "failed") return "released";
+  // allowed_stub / approved / execution_ready / executing / outcome_unknown:
+  // never free maybe-consumed budget before the action has a known outcome.
+  return null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("canonical provider action must be an object");
+  }
+  return value as Record<string, unknown>;
+}
+
+/** Reconstruct through the adapter so policy inputs are re-derived, not trusted. */
+function rebuildApprovedAction(
+  operationKey: string,
+  action: Record<string, unknown>,
+  safeSummary: Record<string, unknown>,
+): ProviderActionBuild {
+  const body = action.canonicalBody === null ? undefined : asRecord(action.canonicalBody);
+  if (operationKey === "x.tweet.create") {
+    const reply = body?.reply === undefined ? undefined : asRecord(body.reply);
+    return buildXAction(operationKey as XOperationKey, {
+      text: body?.text,
+      ...(reply?.in_reply_to_tweet_id !== undefined
+        ? { replyToTweetId: reply.in_reply_to_tweet_id }
+        : {}),
+      summoned: safeSummary.summoned === true,
+    });
+  }
+  if (operationKey === "x.tweet.delete") {
+    const match = /^\/2\/tweets\/([0-9]{1,25})$/.exec(String(action.normalizedPath));
+    return buildXAction(operationKey as XOperationKey, { tweetId: match?.[1] });
+  }
+  if (operationKey === "x.user.me.read") {
+    return buildXAction(operationKey as XOperationKey, {});
+  }
+  if (operationKey === "github.issue.list") {
+    const match = /^\/repos\/([^/]+)\/([^/]+)\/issues$/.exec(String(action.normalizedPath));
+    const query = Array.isArray(action.orderedQueryPairs) ? action.orderedQueryPairs : [];
+    const q = new Map<string, unknown>();
+    for (const pair of query) {
+      if (Array.isArray(pair) && pair.length === 2 && typeof pair[0] === "string") {
+        q.set(pair[0], pair[1]);
+      }
+    }
+    return buildGithubAction(operationKey as GithubOperationKey, {
+      owner: match?.[1],
+      repo: match?.[2],
+      ...(q.has("state") ? { state: q.get("state") } : {}),
+      ...(q.has("sort") ? { sort: q.get("sort") } : {}),
+      ...(q.has("direction") ? { direction: q.get("direction") } : {}),
+      ...(q.has("per_page") ? { perPage: Number(q.get("per_page")) } : {}),
+      ...(q.has("page") ? { page: Number(q.get("page")) } : {}),
+    });
+  }
+  if (operationKey === "github.pr.comment.create") {
+    const match = /^\/repos\/([^/]+)\/([^/]+)\/issues\/([0-9]+)\/comments$/.exec(
+      String(action.normalizedPath),
+    );
+    return buildGithubAction(operationKey as GithubOperationKey, {
+      owner: match?.[1],
+      repo: match?.[2],
+      pullNumber: Number(match?.[3]),
+      body: body?.body,
+    });
+  }
+  throw new Error(`unsupported provider operation '${operationKey}'`);
 }
 
 // ─── Public result envelope ───────────────────────────────────────────────────
@@ -636,6 +831,20 @@ class ProviderActionService {
           status: effects.status,
         });
 
+        const decisionHandles = persistedReservationHandles(
+          cumulativeSpendReservations,
+          windowedInvokeReservation,
+        );
+        if (decisionHandles) {
+          await tx.insert(providerActionReservationGenerations).values({
+            intentId,
+            tenantId,
+            generation: decisionHandles.generation,
+            phase: decisionHandles.phase,
+            handles: decisionHandles as unknown as Record<string, unknown>,
+          });
+        }
+
         // Required audit intent -> transactional outbox (drained post-commit).
         // PR5 C1: correlated lifecycle events set resource_type='provider_action'
         // and resource_id=intents.id (not the operation id) so PR5 can correlate
@@ -725,8 +934,7 @@ class ProviderActionService {
       // never run on replay, so we DO reclaim. `effects.status === "allowed_stub"`
       // is exactly the replayable-execute case.
       if (effects.status !== "allowed_stub") {
-        await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
-        await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
+        await this.reconcilePolicyReservations(tenantId, intentId);
       }
       return {
         kind: "evidence_failure",
@@ -740,8 +948,7 @@ class ProviderActionService {
     if (effects.access === "deny") {
       // Access denied => policy never ran => no reservations to release, but be
       // defensive in case a future path reserves before access resolves.
-      await this.finalizeCumulativeSpend(cumulativeSpendReservations, "failure");
-      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
+      await this.reconcilePolicyReservations(tenantId, intentId);
       return {
         kind: "access_denied",
         code: access.doc.reasonCode,
@@ -756,11 +963,7 @@ class ProviderActionService {
       // spend-cap breach already released its own reservations during eval; this
       // covers a deny for a DIFFERENT reason where a cumulativeSpend rule had
       // passed and reserved - the action will not execute, so free its budget.
-      await this.finalizeCumulativeSpend(
-        (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [],
-        "failure",
-      );
-      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
+      await this.reconcilePolicyReservations(tenantId, intentId);
       const code = (policy as PolicyResult | null)?.doc.reasonCodes[0] ?? "POLICY_HARD_DENY";
       return {
         kind: "policy_denied",
@@ -791,11 +994,7 @@ class ProviderActionService {
       // Correct enforcement requires the approval-execute path to re-reserve at
       // EXECUTION time; that is a documented follow-up filed against the approval
       // plane (provider-approval.ts). See the PR honest-gaps section.
-      await this.finalizeCumulativeSpend(
-        (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [],
-        "failure",
-      );
-      await this.finalizeWindowedInvoke(windowedInvokeReservation, "failure");
+      await this.reconcilePolicyReservations(tenantId, intentId);
       return {
         kind: "approval_required",
         code: "APPROVAL_REQUIRED",
@@ -807,7 +1006,6 @@ class ProviderActionService {
     }
 
     // ── Step 4: allow — call the in-process stub, then record the transition. ──
-    const csReservations = (policy as PolicyResult | null)?.cumulativeSpendReservations ?? [];
     let stub: ProviderActionStubResult;
     try {
       stub = await executeProviderActionStub(intentId);
@@ -826,25 +1024,37 @@ class ProviderActionService {
         actionDigest,
       };
     }
-    // #206: known outcome. stub_succeeded => settle (keep counted); stub_failed
-    // => release (reclaim spend budget + the maxCalls slot, the action did not
-    // consume one).
-    const outcome = stub.ok ? "success" : "failure";
-    await this.finalizeCumulativeSpend(csReservations, outcome);
-    await this.finalizeWindowedInvoke(
-      (policy as PolicyResult | null)?.windowedInvokeReservation,
-      outcome,
-    );
     // Record the narrow allowed_stub -> stub_succeeded|stub_failed transition.
-    await this.db()
-      .update(providerActionBindings)
-      .set({ status: stub.status, updatedAt: new Date() })
-      .where(
-        and(
-          eq(providerActionBindings.intentId, intentId),
-          eq(providerActionBindings.status, "allowed_stub"),
-        ),
-      );
+    // A pre-terminal C2 sweep can defer this reservation for 15 seconds because
+    // allowed_stub has no safe settle/release target. Make an unclaimed pending
+    // generation immediately due in the same transaction as the terminal state
+    // change so this request's scoped reconciliation cannot miss it.
+    await this.db().transaction(async (tx) => {
+      const transitioned = await tx
+        .update(providerActionBindings)
+        .set({ status: stub.status, updatedAt: new Date() })
+        .where(
+          and(
+            eq(providerActionBindings.intentId, intentId),
+            eq(providerActionBindings.status, "allowed_stub"),
+          ),
+        )
+        .returning({ intentId: providerActionBindings.intentId });
+      if (transitioned.length === 0) return;
+      await tx
+        .update(providerActionReservationGenerations)
+        .set({ nextRetryAt: null })
+        .where(
+          and(
+            eq(providerActionReservationGenerations.intentId, intentId),
+            eq(providerActionReservationGenerations.state, "pending"),
+            sql`${providerActionReservationGenerations.claimedBy} IS NULL`,
+          ),
+        );
+    });
+    // #240: status is the durable outcome source. Reconcile only AFTER the
+    // terminal transition so a crash at any instruction boundary is retryable.
+    await this.reconcilePolicyReservations(tenantId, intentId);
 
     return {
       kind: "allowed",
@@ -1087,11 +1297,13 @@ class ProviderActionService {
    */
   private async reserveCumulativeSpendForInvoke(input: {
     rules: ProviderPolicyRule[];
+    intentId: string;
     operationKey: string;
     agentId: string;
     grantId: string | null;
     spendDeclaration: { field: string; currency: string } | undefined;
     policyArgs: Record<string, unknown>;
+    reservationGeneration: number;
   }): Promise<{
     contextSums: Record<string, number> | undefined;
     reservations: CumulativeSpendReservationHandle[];
@@ -1114,7 +1326,7 @@ class ProviderActionService {
     const spendValid =
       decl !== undefined &&
       typeof rawSpend === "number" &&
-      Number.isInteger(rawSpend) &&
+      Number.isSafeInteger(rawSpend) &&
       rawSpend >= 0;
     const thisSpend = spendValid ? (rawSpend as number) : undefined;
 
@@ -1209,6 +1421,15 @@ class ProviderActionService {
           stream,
           caps: caps.map((c) => ({ windowSeconds: c.windowSeconds, max: c.max })),
           amount: thisSpend,
+          reservationId: sha256HexPrefixed(
+            jcsStringify({
+              domain: "steward.provider-reservation.v1",
+              intentId: input.intentId,
+              generation: input.reservationGeneration,
+              kind: "cumulativeSpend",
+              stream,
+            }),
+          ),
         });
       } catch {
         // Redis/parse failure => deny for every cap on this stream (missing
@@ -1310,6 +1531,9 @@ class ProviderActionService {
     requestHash: string;
     actionDigest: string;
     grantId?: string | null;
+    /** Append-only reservation generation. Stable identities derived from this
+     * make an approval retry idempotent across the Redis-before-PG crash gap. */
+    reservationGeneration?: number;
   }): Promise<{
     doc: PersistedPolicyDecisionV1;
     evaluation: ProviderPolicyEvaluationV1;
@@ -1350,11 +1574,13 @@ class ProviderActionService {
     const spendDeclaration = extractSpendDeclaration(operation.requestProfile);
     const cumulative = await this.reserveCumulativeSpendForInvoke({
       rules,
+      intentId: args.intentId,
       operationKey: operation.operationKey,
       agentId: args.actorAgentId,
       grantId: args.grantId ?? null,
       spendDeclaration,
       policyArgs: build.policyArgs,
+      reservationGeneration: args.reservationGeneration ?? 1,
     });
 
     // #206 configurable count cap (maxCalls + callWindow): ATOMICALLY reserve one
@@ -1381,6 +1607,16 @@ class ProviderActionService {
         agentId: args.actorAgentId,
         operationKey: operation.operationKey,
         caps: govMaxCalls.map((c) => ({ windowSeconds: c.windowSeconds, max: c.max })),
+        reservationId: sha256HexPrefixed(
+          jcsStringify({
+            domain: "steward.provider-reservation.v1",
+            intentId: args.intentId,
+            generation: args.reservationGeneration ?? 1,
+            kind: "windowedInvoke",
+            agentId: args.actorAgentId,
+            operationKey: operation.operationKey,
+          }),
+        ),
       });
       govMaxCalls.forEach((cap, i) => {
         const bucketKey = windowedInvokeBucketKey({
@@ -1507,6 +1743,92 @@ class ProviderActionService {
   }
 
   /**
+   * Rebuild the immutable canonical action and authoritatively evaluate the
+   * operation's CURRENT policy immediately before approval consumption. Raw
+   * text exists only in this stack frame and is never returned or persisted.
+   */
+  async evaluateApprovedExecution(args: {
+    tenantId: string;
+    workspaceId: string;
+    actorAgentId: string;
+    operation: typeof providerOperations.$inferSelect;
+    intentId: string;
+    requestHash: string;
+    actionDigest: string;
+    canonicalActionBytes: Uint8Array;
+    safeSummary: Record<string, unknown>;
+    matchedGrantIds: string[];
+    priorGeneration: number;
+  }): Promise<
+    | {
+        ok: true;
+        decision: PersistedPolicyDecisionV1;
+        decisionHash: string;
+        handles: PersistedPolicyReservationHandlesV1 | null;
+      }
+    | { ok: false; code: string; httpStatus: number }
+  > {
+    const generation = args.priorGeneration + 1;
+    const canonicalText = Buffer.from(args.canonicalActionBytes).toString("utf8");
+    const action = JSON.parse(canonicalText) as Record<string, unknown>;
+    const build = rebuildApprovedAction(args.operation.operationKey, action, args.safeSummary);
+    if (jcsStringify(build.action) !== canonicalText) {
+      return { ok: false, code: "APPROVAL_ACTION_INTEGRITY_FAILED", httpStatus: 409 };
+    }
+    const digest = sha256HexPrefixed(canonicalText);
+    if (digest !== args.actionDigest) {
+      return { ok: false, code: "APPROVAL_ACTION_INTEGRITY_FAILED", httpStatus: 409 };
+    }
+
+    const policy = await this.evaluatePolicy({
+      tenantId: args.tenantId,
+      workspaceId: args.workspaceId,
+      actorAgentId: args.actorAgentId,
+      operation: args.operation,
+      build,
+      intentId: args.intentId,
+      requestHash: args.requestHash,
+      actionDigest: args.actionDigest,
+      grantId: args.matchedGrantIds[0] ?? null,
+      reservationGeneration: generation,
+    });
+    if (policy.doc.effect === "hard_deny") {
+      await this.releasePolicyReservationHandles(
+        persistedReservationHandles(
+          policy.cumulativeSpendReservations,
+          policy.windowedInvokeReservation,
+          generation,
+          "execution",
+        ),
+      );
+      return {
+        ok: false,
+        code: policy.doc.reasonCodes[0] ?? "POLICY_HARD_DENY",
+        httpStatus: 403,
+      };
+    }
+
+    return {
+      ok: true,
+      decision: policy.doc,
+      decisionHash: sha256HexPrefixed(jcsStringify(policy.doc)),
+      handles: persistedReservationHandles(
+        policy.cumulativeSpendReservations,
+        policy.windowedInvokeReservation,
+        generation,
+        "execution",
+      ),
+    };
+  }
+
+  async releasePolicyReservationHandles(handles: unknown): Promise<void> {
+    if (handles === null) return;
+    const parsed = parsePersistedReservationHandles(handles);
+    if (!parsed) throw new Error("invalid persisted policy reservation handles");
+    await this.applyPersistedReservationHandles(parsed, "released");
+  }
+
+  /**
    * C2 crash-recovery sweeper (spec §7.3). The required-audit outbox row commits
    * IN-TX with the intent/binding, but its drain into the signed chain happens
    * post-commit. A crash between commit and drain leaves an intent with an
@@ -1584,7 +1906,197 @@ class ProviderActionService {
         .returning({ id: providerActionAuditOutbox.id });
       if (marked.length > 0 && signedNow) delivered += 1;
     }
+    // #240 extends the same C2 pass to durable policy reservations. Audit and
+    // reservation recovery are independently idempotent; a Redis outage leaves
+    // the reservation pending and fail-closed for the next sweep.
+    await this.reconcilePolicyReservations(tenantId, intentId);
     return delivered;
+  }
+
+  /**
+   * Reconcile terminal provider bindings with their immutable Redis reservation
+   * handles. Redis settle/release operations are idempotent, so workers may race:
+   * they perform the external operation first, then exactly one worker wins the
+   * DB CAS from pending to settled/released. A crash before or after Redis is
+   * safely retried; unknown outcomes remain pending and are never released.
+   */
+  async reconcilePolicyReservations(tenantId?: string, intentId?: string): Promise<number> {
+    // Claim a bounded batch in one short transaction. SKIP LOCKED lets every
+    // replica make progress on a disjoint batch instead of selecting the same
+    // hot rows and losing N-1 follow-up CAS updates. A stale claim is a lease,
+    // not ownership: all Redis operations below are idempotent by reservation
+    // identity, so a worker death is safe to reclaim after 60 seconds.
+    const claimId = randomUUID();
+    const candidates = await this.db().transaction(async (tx) => {
+      const tenantFilter = tenantId ? sql`AND tenant_id = ${tenantId}` : sql``;
+      const intentFilter = intentId ? sql`AND intent_id = ${intentId}` : sql``;
+      await tx.execute(sql`
+        WITH due AS (
+          SELECT id
+          FROM provider_action_reservation_generations
+          WHERE (
+              (state = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= now()))
+              OR (state = 'needs_attention' AND next_retry_at IS NOT NULL AND next_retry_at <= now())
+            )
+            AND (claimed_at IS NULL OR claimed_at < now() - interval '60 seconds')
+            ${tenantFilter}
+            ${intentFilter}
+          ORDER BY COALESCE(next_retry_at, '-infinity'::timestamptz), created_at, id
+          LIMIT 50
+          FOR UPDATE SKIP LOCKED
+        )
+        UPDATE provider_action_reservation_generations AS generation
+        SET claimed_by = ${claimId}::uuid, claimed_at = now()
+        FROM due
+        WHERE generation.id = due.id
+      `);
+      return tx
+        .select()
+        .from(providerActionReservationGenerations)
+        .where(eq(providerActionReservationGenerations.claimedBy, claimId));
+    });
+    let reconciled = 0;
+    for (const row of candidates) {
+      const [binding] = await this.db()
+        .select({ status: providerActionBindings.status })
+        .from(providerActionBindings)
+        .where(eq(providerActionBindings.intentId, row.intentId))
+        .limit(1);
+      const handles = parsePersistedReservationHandles(row.handles);
+      if (!handles || handles.generation !== row.generation || handles.phase !== row.phase) {
+        const message = "malformed immutable reservation generation";
+        await this.recordReservationFailure(row, claimId, message, true);
+        // recordReservationFailure transactionally enqueues REQUIRED evidence.
+        // Draining is best effort here; a signer outage cannot erase the durable
+        // attention row or outbox event and normal C2 recovery will retry it.
+        await this.recoverUnsignedIntents(row.tenantId, row.intentId).catch((error) =>
+          console.error("[provider-reservations] malformed-generation audit drain failed:", error),
+        );
+        continue;
+      }
+      const target = binding ? reconciliationTargetForStatus(binding.status, handles.phase) : null;
+      if (!target) {
+        await this.db()
+          .update(providerActionReservationGenerations)
+          .set({ claimedAt: null, claimedBy: null, nextRetryAt: new Date(Date.now() + 15_000) })
+          .where(
+            and(
+              eq(providerActionReservationGenerations.id, row.id),
+              eq(providerActionReservationGenerations.claimedBy, claimId),
+            ),
+          );
+        continue;
+      }
+      try {
+        if (reservationReconciliationFaultForTests === "before_apply")
+          throw new Error("injected crash before reservation reconciliation");
+        await this.applyPersistedReservationHandles(handles, target);
+        if (reservationReconciliationFaultForTests === "after_apply")
+          throw new Error("injected crash after reservation reconciliation");
+      } catch (error) {
+        const message = (error instanceof Error ? error.message : String(error)).slice(0, 1000);
+        await this.recordReservationFailure(row, claimId, message, false);
+        console.error(
+          `[provider-reservations] reconciliation failed intent=${row.intentId} generation=${handles.generation}: ${message}`,
+        );
+        continue;
+      }
+      const updated = await this.db()
+        .update(providerActionReservationGenerations)
+        .set({
+          state: target,
+          reconciledAt: new Date(),
+          nextRetryAt: null,
+          lastError: null,
+          claimedAt: null,
+          claimedBy: null,
+        })
+        .where(
+          and(
+            eq(providerActionReservationGenerations.id, row.id),
+            eq(providerActionReservationGenerations.generation, row.generation),
+            eq(providerActionReservationGenerations.state, row.state),
+            eq(providerActionReservationGenerations.attempts, row.attempts),
+            eq(providerActionReservationGenerations.claimedBy, claimId),
+          ),
+        )
+        .returning({ intentId: providerActionReservationGenerations.intentId });
+      if (updated.length > 0) reconciled += 1;
+    }
+    return reconciled;
+  }
+
+  private async recordReservationFailure(
+    row: typeof providerActionReservationGenerations.$inferSelect,
+    claimId: string,
+    message: string,
+    malformed: boolean,
+  ): Promise<void> {
+    const attempts = row.attempts + 1;
+    const delaySeconds = Math.min(3600, 2 ** Math.min(attempts, 12));
+    const terminalAttention = malformed || attempts >= 20;
+    await this.db().transaction(async (tx) => {
+      const updated = await tx
+        .update(providerActionReservationGenerations)
+        .set({
+          state: terminalAttention ? "needs_attention" : "pending",
+          attempts,
+          lastError: message.slice(0, 1000),
+          // NULL on durable attention deliberately removes the immutable-bad or
+          // exhausted row from the hot sweep. An operator must explicitly reset
+          // it after remediation; normal transient failures use exponential
+          // backoff and remain eligible.
+          nextRetryAt: terminalAttention ? null : new Date(Date.now() + delaySeconds * 1000),
+          claimedAt: null,
+          claimedBy: null,
+        })
+        .where(
+          and(
+            eq(providerActionReservationGenerations.id, row.id),
+            eq(providerActionReservationGenerations.state, row.state),
+            eq(providerActionReservationGenerations.attempts, row.attempts),
+            eq(providerActionReservationGenerations.claimedBy, claimId),
+          ),
+        )
+        .returning({ id: providerActionReservationGenerations.id });
+      if (updated.length === 0 || !terminalAttention) return;
+      await tx.insert(providerActionAuditOutbox).values({
+        tenantId: row.tenantId,
+        intentId: row.intentId,
+        action: "provider.reservation.needs_attention",
+        resourceType: "provider_action",
+        resourceId: row.intentId,
+        metadata: {
+          schemaVersion: "steward.provider-reservation-attention.v1",
+          intentId: row.intentId,
+          generation: row.generation,
+          reasonCode: malformed
+            ? "RESERVATION_GENERATION_MALFORMED"
+            : "RESERVATION_RECONCILIATION_RETRIES_EXHAUSTED",
+          attempts,
+        },
+      });
+    });
+  }
+
+  private async applyPersistedReservationHandles(
+    handles: PersistedPolicyReservationHandlesV1,
+    target: ReservationReconciliationTarget,
+  ): Promise<void> {
+    await Promise.all(
+      handles.cumulativeSpend.map((r) =>
+        target === "settled"
+          ? settleCumulativeSpend({ stream: r.stream, reservationId: r.reservationId })
+          : releaseCumulativeSpend({
+              stream: r.stream,
+              reservationId: r.reservationId,
+              amount: r.amount,
+            }),
+      ),
+    );
+    if (target === "released" && handles.windowedInvoke) {
+      await releaseWindowedInvoke(handles.windowedInvoke);
+    }
   }
 
   // ── Required-audit outbox drain (post-commit, pre-stub) ──
@@ -1677,26 +2189,12 @@ class ProviderActionService {
     return envelope;
   }
 
-  /**
-   * Idempotent replay path: reconstruct the outcome from an existing binding.
-   *
-   * #206 RESERVATION REPLAY CAVEAT (codex P2, honest gap): cumulative-spend
-   * reservation handles are in-memory to the ORIGINAL create call and are NOT
-   * persisted on the binding. A replay here (or a crash between the binding
-   * commit and the original finalize) therefore has no handle to settle/release.
-   * This is deliberately FAIL-CLOSED, not a silent leak: on the original call a
-   * crash after commit leaves the reservation as `outcome_unknown` (documented:
-   * it ages out at the window edge, never freeing maybe-spent budget). A replay
-   * that resolves to stub_succeeded is a real spend and SHOULD stay counted, so
-   * not releasing is correct. A replay that resolves to stub_failed is the only
-   * case where budget could be transiently over-counted for one window; that is
-   * a bounded DENY-side error (safe), never an allow-side one. Crash-durable
-   * reservation handles (persisted per binding + reconciled by the C2 sweeper)
-   * are the follow-up; this lane does not add a migration for it.
-   */
+  /** Idempotent replay path: reconstruct the outcome from an existing binding. */
   private async outcomeFromBinding(
     b: typeof providerActionBindings.$inferSelect,
   ): Promise<ProviderActionOutcome> {
+    // Opportunistically finish any terminal reservation left pending by a crash.
+    await this.reconcilePolicyReservations(b.tenantId, b.intentId);
     if (b.status === "denied") {
       if (b.accessEffect === "deny")
         return {
@@ -1780,6 +2278,7 @@ class ProviderActionService {
             eq(providerActionBindings.status, "allowed_stub"),
           ),
         );
+      await this.reconcilePolicyReservations(b.tenantId, b.intentId);
       return {
         kind: "allowed",
         code: "POLICY_ALLOW",

@@ -98,6 +98,34 @@ describeRedis("reserveCumulativeSpend - REAL concurrency single-winner", () => {
   });
 });
 
+describeRedis("stable reservation identity - crash retry semantics", () => {
+  test("parallel retries debit once and a now-denied orphan is atomically reclaimed", async () => {
+    const stable = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const input = {
+      stream: STREAM,
+      caps: [{ windowSeconds: 3600, max: 10 }],
+      amount: 4,
+      reservationId: stable,
+    };
+    const [a, b] = await Promise.all([
+      reserveCumulativeSpend(input),
+      reserveCumulativeSpend(input),
+    ]);
+    expect(a).toMatchObject({ ok: true, priorSums: [0], reservationId: stable });
+    expect(b).toMatchObject({ ok: true, priorSums: [0], reservationId: stable });
+    expect(await getCumulativeSpendSum({ ...STREAM, windowSeconds: 3600 })).toEqual({ sum: 4 });
+
+    // If current authoritative policy no longer admits the pre-commit orphan,
+    // retry denies and removes that exact member in the same Lua operation.
+    const denied = await reserveCumulativeSpend({
+      ...input,
+      caps: [{ windowSeconds: 3600, max: 3 }],
+    });
+    expect(denied).toMatchObject({ ok: false, priorSums: [0] });
+    expect(await getCumulativeSpendSum({ ...STREAM, windowSeconds: 3600 })).toEqual({ sum: 0 });
+  });
+});
+
 describeRedis("multi-cap on one stream (codex P2: counted once, any breach rejects)", () => {
   test("an invoke governed by a 1h AND 24h cap is counted once; a 1h breach rejects", async () => {
     // Fill the 1h window to 90 while the 24h window has plenty of room.
@@ -232,6 +260,9 @@ describeRedis("fail closed", () => {
     const caps = [{ windowSeconds: 3600, max: 5_000_000 }];
     await expect(reserveCumulativeSpend({ stream: STREAM, caps, amount: -1 })).rejects.toThrow();
     await expect(reserveCumulativeSpend({ stream: STREAM, caps, amount: 1.5 })).rejects.toThrow();
+    await expect(
+      reserveCumulativeSpend({ stream: STREAM, caps, amount: Number.MAX_SAFE_INTEGER + 1 }),
+    ).rejects.toThrow();
     await expect(reserveCumulativeSpend({ stream: STREAM, caps: [], amount: 1 })).rejects.toThrow();
     await expect(
       reserveCumulativeSpend({

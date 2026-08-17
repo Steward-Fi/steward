@@ -102,6 +102,10 @@ export interface ReserveCumulativeSpendInput {
   amount: number;
   /** evaluation time in ms; injectable for tests. */
   now?: number;
+  /** Optional caller-stable identity. This makes a durable workflow retry the
+   * same reservation instead of double-debiting after a process death between
+   * Redis admission and its database commit. Must be opaque and delimiter-safe. */
+  reservationId?: string;
 }
 
 export interface ReserveCumulativeSpendResult {
@@ -143,6 +147,7 @@ local ttl = tonumber(ARGV[4])
 local member = ARGV[5]
 local nCaps = tonumber(ARGV[6])
 redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, retentionCutoff)
+local existingScore = redis.call('ZSCORE', KEYS[1], member)
 local out = {1}
 local base = 6
 for c = 1, nCaps do
@@ -152,6 +157,12 @@ for c = 1, nCaps do
   local sum = 0
   for i = 1, #members do
     local m = members[i]
+    -- A retry with a stable reservation identity evaluates the projected total
+    -- exactly once: exclude its already-present member from the prior sum, then
+    -- add the requested amount below just like the first attempt.
+    if m == member then
+      -- no-op
+    else
     local firstBar = string.find(m, '|', 1, true)
     if firstBar then
       local rest = string.sub(m, firstBar + 1)
@@ -163,15 +174,20 @@ for c = 1, nCaps do
     else
       return {-1}
     end
+    end
   end
   out[c + 1] = sum
   if (sum + amount) > maxv then
     out[1] = 0
   end
 end
-if out[1] == 1 then
+if out[1] == 1 and not existingScore then
   redis.call('ZADD', KEYS[1], now, member)
   redis.call('PEXPIRE', KEYS[1], ttl)
+elseif out[1] == 0 and existingScore then
+  -- A current-policy retry no longer admits this previously orphaned member.
+  -- Remove it atomically with the denial so it cannot pin phantom budget.
+  redis.call('ZREM', KEYS[1], member)
 end
 return out
 `;
@@ -202,7 +218,11 @@ return {sum}
 `;
 
 function isNonNegInt(v: number): boolean {
-  return typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 0;
+  // Redis Lua numbers are IEEE-754 doubles. Values above MAX_SAFE_INTEGER may
+  // stringify/round differently between JS and Lua, which would make a durable
+  // reservation impossible to identify and release exactly. Reject them before
+  // touching Redis.
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 }
 
 function isValidWindow(w: number): boolean {
@@ -250,7 +270,15 @@ export async function reserveCumulativeSpend(
 
   const now = input.now ?? Date.now();
   const retentionCutoff = now - RETENTION_MS;
-  const reservationId = `${now}:${nextSeq()}`;
+  if (
+    input.reservationId !== undefined &&
+    (input.reservationId.length === 0 ||
+      input.reservationId.length > 200 ||
+      input.reservationId.includes("|"))
+  ) {
+    throw new Error("invalid cumulative spend reservationId");
+  }
+  const reservationId = input.reservationId ?? `${now}:${nextSeq()}`;
   const member = `${reservationId}|${input.amount}|reserved`;
   const key = streamKey(stream);
 
@@ -362,6 +390,7 @@ export async function reserveWindowedInvoke(input: {
   operationKey: string;
   caps: CumulativeSpendCap[];
   now?: number;
+  reservationId?: string;
 }): Promise<{ ok: boolean; priorCounts: number[]; reservationId?: string }> {
   if (
     !Array.isArray(input.caps) ||
@@ -381,6 +410,7 @@ export async function reserveWindowedInvoke(input: {
       caps: input.caps,
       amount: 1,
       now: input.now,
+      reservationId: input.reservationId,
     });
     return {
       ok: res.ok,
@@ -409,7 +439,7 @@ export async function releaseWindowedInvoke(input: {
     },
     reservationId: input.reservationId,
     amount: 1,
-  }).catch(() => undefined);
+  });
 }
 
 /**

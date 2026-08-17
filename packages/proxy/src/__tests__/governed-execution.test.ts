@@ -284,6 +284,22 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
     expiresAt: expiresAt.toISOString(),
   };
   const approvalCommitmentHash = computeApprovalCommitmentHash(approvalCommitment);
+  const executionPolicyDecision = {
+    schemaVersion: "steward.provider-policy-decision.v1",
+    decisionId: randomUUID(),
+    intentId,
+    requestHash,
+    actionDigest,
+    operationId: IDS.operation,
+    operationKey: "issues.list",
+    effect: "approval_required",
+    reasonCodes: ["APPROVAL_REQUIRED"],
+    policyResults: [],
+    policyRevisionHash,
+    evaluatorVersion: "provider-action.v1",
+    decidedAt: now.toISOString(),
+  };
+  const executionPolicyDecisionHash = sha256HexPrefixed(jcsStringify(executionPolicyDecision));
 
   const commitment = buildProviderExecutionCommitmentV2({
     approval: approvalCommitment,
@@ -350,6 +366,11 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
     resumeActor: "steward-system",
     resumeAttemptId: randomUUID(),
     resumeValidatedAt: now,
+    executionPolicyDecisionId: executionPolicyDecision.decisionId,
+    executionPolicyRevisionHash: policyRevisionHash,
+    executionPolicyDecision,
+    executionPolicyDecisionHash,
+    executionPolicyEvaluatedAt: now,
   });
   await db.insert(approvalQueue).values({
     id: approvalId,
@@ -650,6 +671,82 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(res.ok).toBe(false);
     expect(res.code).toBe("EXEC_AUTH_NOT_READY");
     expect(res.httpStatus).toBe(409);
+  });
+
+  it("#239 rollout: a signed legacy nonce cannot dispatch without execute-time policy evidence", async () => {
+    const { intentId, authorizationId } = await seedExecutionReady();
+    const db = getDb();
+    // Simulate a pre-0084 row. The live schema prevents creating this shape, so
+    // temporarily remove only the two rollout guards, mutate it, then restore
+    // both before calling the production boundary.
+    await db.execute(
+      sql`ALTER TABLE provider_action_bindings DROP CONSTRAINT provider_action_bindings_execution_policy_ready_chk`,
+    );
+    await db.execute(
+      sql`DROP TRIGGER provider_action_bindings_immutable ON provider_action_bindings`,
+    );
+    await db
+      .update(providerActionBindings)
+      .set({
+        executionPolicyDecisionId: null,
+        executionPolicyRevisionHash: null,
+        executionPolicyDecision: null,
+        executionPolicyDecisionHash: null,
+        executionPolicyEvaluatedAt: null,
+      })
+      .where(eq(providerActionBindings.intentId, intentId));
+    await db.execute(sql`
+      CREATE TRIGGER provider_action_bindings_immutable
+      BEFORE UPDATE ON provider_action_bindings
+      FOR EACH ROW EXECUTE FUNCTION steward_provider_action_binding_guard()
+    `);
+    await db.execute(sql`
+      ALTER TABLE provider_action_bindings
+      ADD CONSTRAINT provider_action_bindings_execution_policy_ready_chk CHECK (
+        status NOT IN ('execution_ready','executing') OR execution_policy_decision_id IS NOT NULL
+      ) NOT VALID
+    `);
+
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res).toMatchObject({
+      ok: false,
+      code: "EXEC_AUTH_POLICY_EVIDENCE_MISSING",
+      httpStatus: 409,
+    });
+    const [nonce] = await db
+      .select({ status: executionAuthorizationNonces.status })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(nonce.status).toBe("active");
+  });
+
+  it("#239 rollout: corrupt execute-time policy evidence never claims or dispatches", async () => {
+    const { intentId, authorizationId } = await seedExecutionReady();
+    const db = getDb();
+    await db.execute(
+      sql`DROP TRIGGER provider_action_bindings_immutable ON provider_action_bindings`,
+    );
+    await db
+      .update(providerActionBindings)
+      .set({ executionPolicyDecisionHash: `sha256:${"0".repeat(64)}` })
+      .where(eq(providerActionBindings.intentId, intentId));
+    await db.execute(sql`
+      CREATE TRIGGER provider_action_bindings_immutable
+      BEFORE UPDATE ON provider_action_bindings
+      FOR EACH ROW EXECUTE FUNCTION steward_provider_action_binding_guard()
+    `);
+
+    expect(await dispatchGovernedExecution(intentId, IDS.tenant)).toMatchObject({
+      ok: false,
+      code: "EXEC_AUTH_POLICY_EVIDENCE_MISSING",
+      httpStatus: 409,
+    });
+    const [nonce] = await db
+      .select({ status: executionAuthorizationNonces.status })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(nonce.status).toBe("active");
+    expect(captured).toBeNull();
   });
 
   it("happy path: gate permits, claim consumes exactly once, one dispatch", async () => {

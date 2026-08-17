@@ -27,6 +27,11 @@ async function applyAll(client: PGlite) {
   for (const file of files) await applyFile(client, file);
 }
 
+async function applyThrough(client: PGlite, last: string) {
+  const files = (await readdir(migrations)).filter((f) => f.endsWith(".sql") && f <= last).sort();
+  for (const file of files) await applyFile(client, file);
+}
+
 const IDS = {
   wsA: "00000000-0000-4000-8000-000000000101",
   wsB: "00000000-0000-4000-8000-000000000102",
@@ -77,16 +82,14 @@ function bindingInsert(overrides: Partial<Record<string, string>> = {}): string 
       action_digest, request_envelope, request_hash, idempotency_key_hash, safe_summary,
       access_decision_id, access_effect, access_reason_code, dependency_revisions,
       access_decision, access_decision_hash,
-      policy_decision_id, policy_effect, policy_revision_hash, policy_decision, policy_decision_hash,
-      status
+      policy_decision_id, policy_effect, policy_revision_hash, policy_decision, policy_decision_hash, status
     ) VALUES (
       '${v.intentId}','ta','${IDS.wsA}','agent-a','${IDS.acctA}',
       '${IDS.opA}',7,'github.provider-action.v1', decode('7b7d','hex'),
       '${DIGEST}','{}'::jsonb,'${REQHASH}','${IDEMHASH}','{}'::jsonb,
       '${IDS.accessDecision}','${v.accessEffect}','provider_access_allowed','{}'::jsonb,
       '{}'::jsonb,'${ACCESSHASH}',
-      ${v.policyId},'${v.policyEffect}',${v.policyRevHash},${v.policyDecision},${v.policyDecisionHash},
-      '${v.status}'
+      ${v.policyId},'${v.policyEffect}',${v.policyRevHash},${v.policyDecision},${v.policyDecisionHash},'${v.status}'
     );
   `;
 }
@@ -217,6 +220,142 @@ describe("0080 provider_action_bindings migration", () => {
       threw = true;
     }
     expect(threw).toBe(true);
+    await client.close();
+  });
+
+  test("0084 uses append-only generations and permits only pending -> terminal reconciliation CAS", async () => {
+    const client = new PGlite("memory://");
+    await applyAll(client);
+    await seed(client);
+    const handles = `'{"schemaVersion":"steward.provider-policy-reservations.v1","generation":1,"phase":"decision","cumulativeSpend":[{"stream":{"agentId":"agent-a","scope":"agent","scopeKey":"","currency":"USD"},"reservationId":"r1","amount":7}],"windowedInvoke":null}'::jsonb`;
+    await client.exec(bindingInsert());
+    await client.exec(`INSERT INTO provider_action_reservation_generations
+      (intent_id,tenant_id,generation,phase,handles) VALUES ('intent-1','ta',1,'decision',${handles})`);
+
+    await expect(
+      client.exec(
+        `UPDATE provider_action_reservation_generations
+         SET handles = jsonb_set(handles, '{cumulativeSpend,0,amount}', '8') WHERE intent_id='intent-1'`,
+      ),
+    ).rejects.toBeDefined();
+    await client.exec(
+      `UPDATE provider_action_reservation_generations SET state='settled', reconciled_at=now()
+       WHERE intent_id='intent-1' AND state='pending'`,
+    );
+    const row = await client.query<{
+      state: string;
+      reconciled_at: Date | null;
+    }>(
+      `SELECT state,reconciled_at FROM provider_action_reservation_generations WHERE intent_id='intent-1'`,
+    );
+    expect(row.rows[0].state).toBe("settled");
+    expect(row.rows[0].reconciled_at).not.toBeNull();
+    await expect(
+      client.exec(
+        `UPDATE provider_action_reservation_generations SET state='released' WHERE intent_id='intent-1'`,
+      ),
+    ).rejects.toBeDefined();
+    await client.close();
+  });
+
+  test("0084 rejects terminal reconciliation without a timestamp", async () => {
+    const client = new PGlite("memory://");
+    await applyAll(client);
+    await seed(client);
+    const handles = `'{"schemaVersion":"steward.provider-policy-reservations.v1","generation":2,"phase":"execution","cumulativeSpend":[],"windowedInvoke":{"agentId":"agent-a","operationKey":"github.issue.list","reservationId":"r2"}}'::jsonb`;
+    await client.exec(bindingInsert());
+    await expect(
+      client.exec(`INSERT INTO provider_action_reservation_generations
+      (intent_id,tenant_id,generation,phase,handles,state)
+      VALUES ('intent-1','ta',2,'execution',${handles},'released')`),
+    ).rejects.toBeDefined();
+    await client.close();
+  });
+
+  test("0084 fail-closes a legacy execution_ready row and enqueues rollout evidence", async () => {
+    const client = new PGlite("memory://");
+    await applyThrough(client, "0083_provider_approval_quorum.sql");
+    await seed(client);
+    for (const statement of [
+      `INSERT INTO secrets(id,tenant_id,name,ciphertext,iv,auth_tag,salt,version)
+       VALUES ('00000000-0000-4000-8000-000000000601','ta','legacy','x','x','x','x',1)`,
+      `INSERT INTO secret_routes(id,tenant_id,secret_id,host_pattern,inject_as,inject_key)
+       VALUES ('00000000-0000-4000-8000-000000000602','ta',
+       '00000000-0000-4000-8000-000000000601','api.github.com','header','authorization')`,
+      `UPDATE provider_accounts SET credential_secret_id='00000000-0000-4000-8000-000000000601',
+       credential_version=1 WHERE id='${IDS.acctA}'`,
+      `UPDATE provider_operations SET secret_route_id='00000000-0000-4000-8000-000000000602'
+       WHERE id='${IDS.opA}'`,
+      `UPDATE secret_routes SET authority_mode='governed_v2', provider_operation_id='${IDS.opA}'
+       WHERE id='00000000-0000-4000-8000-000000000602'`,
+    ]) {
+      await client.exec(statement);
+    }
+    await client.exec(`UPDATE intents SET status='authorized' WHERE id='intent-1'`);
+    await client.exec(`
+      INSERT INTO provider_action_bindings(
+        intent_id,tenant_id,workspace_id,actor_agent_id,provider_account_id,
+        operation_id,operation_revision,canonical_profile,canonical_action_bytes,
+        action_digest,request_envelope,request_hash,idempotency_key_hash,safe_summary,
+        access_decision_id,access_effect,access_reason_code,dependency_revisions,
+        access_decision,access_decision_hash,policy_decision_id,policy_effect,
+        policy_revision_hash,policy_decision,policy_decision_hash,status,binding_revision,
+        approval_queue_id,approval_commitment_hash,approval_actor_user_id,approved_at,
+        resume_actor,resume_attempt_id,resume_validated_at
+      ) VALUES (
+        'intent-1','ta','${IDS.wsA}','agent-a','${IDS.acctA}','${IDS.opA}',1,
+        'github.provider-action.v1',decode('7b7d','hex'),'${DIGEST}','{}'::jsonb,
+        '${REQHASH}','${IDEMHASH}','{}'::jsonb,'${IDS.accessDecision}','allow',
+        'provider_access_allowed','{}'::jsonb,'{}'::jsonb,'${ACCESSHASH}',
+        '${IDS.policyDecision}','approval_required','${ACCESSHASH}','{}'::jsonb,
+        '${ACCESSHASH}','execution_ready',2,'00000000-0000-4000-8000-000000000501',
+        '${ACCESSHASH}','${IDS.owner}',now(),'steward-system',
+        '00000000-0000-4000-8000-000000000502',now()
+      )
+    `);
+    await client.exec(`
+      INSERT INTO execution_authorization_nonces(
+        authorization_id,request_id,tenant_id,agent_id,capability,backend,payload_digest,
+        policy_revision_hash,approval_id,nonce,signature,idempotency_key,status,issued_at,
+        expires_at,version,execution_id,intent_id,workspace_id,provider_account_id,
+        operation_id,operation_revision,request_hash,action_digest,grant_dependency_hash,
+        route_id,route_revision,secret_id,secret_version,provider_idempotency_key,
+        commitment_hash,key_id,dispatch_state
+      ) VALUES (
+        'legacy-auth','intent-1','ta','agent-a','credential.inject_http','credential-proxy',
+        '${DIGEST.slice(7)}','${ACCESSHASH.slice(7)}','00000000-0000-4000-8000-000000000501',
+        'legacy-nonce','legacy-signature','legacy-provider-idem','active',now(),now()+interval '5 minutes',
+        2,'legacy-execution','intent-1','${IDS.wsA}','${IDS.acctA}','${IDS.opA}',1,
+        '${REQHASH}','${DIGEST}','${ACCESSHASH}','00000000-0000-4000-8000-000000000602',
+        2,'00000000-0000-4000-8000-000000000601',1,'legacy-provider-idem',
+        '${ACCESSHASH}','v2-1','none'
+      )
+    `);
+    await applyFile(client, "0084_provider_action_reservation_reconciliation.sql");
+
+    const binding = await client.query<{ status: string; binding_revision: number }>(
+      `SELECT status,binding_revision FROM provider_action_bindings WHERE intent_id='intent-1'`,
+    );
+    expect(binding.rows[0]).toMatchObject({ status: "failed", binding_revision: 3 });
+    const intent = await client.query<{ status: string }>(
+      `SELECT status FROM intents WHERE id='intent-1'`,
+    );
+    expect(intent.rows[0].status).toBe("failed");
+    const nonce = await client.query<{ status: string }>(
+      `SELECT status FROM execution_authorization_nonces WHERE intent_id='intent-1'`,
+    );
+    expect(nonce.rows[0].status).toBe("revoked");
+    const evidence = await client.query<{ action: string }>(
+      `SELECT action FROM provider_action_audit_outbox WHERE intent_id='intent-1'`,
+    );
+    expect(evidence.rows.map((row) => row.action)).toContain(
+      "provider.execution.legacy_policy_evidence_rejected",
+    );
+    const fence = await client.query<{ convalidated: boolean }>(
+      `SELECT convalidated FROM pg_constraint
+       WHERE conname='provider_action_bindings_execution_policy_ready_chk'`,
+    );
+    expect(fence.rows).toEqual([{ convalidated: false }]);
     await client.close();
   });
 
