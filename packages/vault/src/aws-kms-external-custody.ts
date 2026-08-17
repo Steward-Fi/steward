@@ -359,8 +359,8 @@ function defaultRpcFactory(rpcUrl: string, timeoutMs: number): AwsKmsEvmRpc {
     },
     async hasTransaction(transactionHash) {
       try {
-        await client.getTransaction({ hash: transactionHash });
-        return true;
+        const transaction = await client.getTransaction({ hash: transactionHash });
+        return transaction.hash.toLowerCase() === transactionHash.toLowerCase();
       } catch {
         return false;
       }
@@ -583,8 +583,14 @@ export class AwsKmsExternalKeyCustodyProvider implements ExternalKeyCustodyProvi
           throw new ExternalBroadcastOutcomeUnknownError(expectedTransactionHash, { cause });
         }
       }
-      if (result.toLowerCase() !== expectedTransactionHash.toLowerCase()) {
-        throw new Error("AWS KMS RPC returned a transaction hash that does not match signed bytes");
+      if (
+        typeof result !== "string" ||
+        result.toLowerCase() !== expectedTransactionHash.toLowerCase()
+      ) {
+        // Submission may already have succeeded even if the RPC response is
+        // dishonest or corrupt. Preserve the ambiguous outcome so callers
+        // cannot safely retry the signed bytes.
+        throw new ExternalBroadcastOutcomeUnknownError(expectedTransactionHash);
       }
     }
     return { result, broadcast: request.broadcast };

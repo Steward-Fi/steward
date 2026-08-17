@@ -530,7 +530,7 @@ describe("AWS KMS asymmetric external custody", () => {
     ).rejects.toThrow("canonical KMS key ARN in the configured region");
   });
 
-  test("rejects wrong-chain RPCs and dishonest broadcast hashes", async () => {
+  test("rejects wrong-chain RPCs and treats dishonest broadcast hashes as outcome_unknown", async () => {
     const privateKey = secp256k1.utils.randomPrivateKey();
     const wrongChainRpc = new MockRpc();
     wrongChainRpc.chainId = 1;
@@ -546,11 +546,19 @@ describe("AWS KMS asymmetric external custody", () => {
       dishonestRpc.broadcasts.push(serializedTransaction);
       return "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     };
-    await expect(
-      providerFor(new MockKms(privateKey), dishonestRpc).signTransaction(
+    let error: unknown;
+    try {
+      await providerFor(new MockKms(privateKey), dishonestRpc).signTransaction(
         signRequest(privateKey, { broadcast: true }),
-      ),
-    ).rejects.toThrow("does not match signed bytes");
+      );
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(ExternalBroadcastOutcomeUnknownError);
+    expect((error as ExternalBroadcastOutcomeUnknownError).transactionHash).toBe(
+      keccak256(dishonestRpc.broadcasts[0]),
+    );
+    expect(dishonestRpc.broadcasts).toHaveLength(1);
   });
 
   test("reconciles an accepted broadcast after its response is lost without reposting", async () => {

@@ -2498,6 +2498,21 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       if (authorizationError) return authorizationError;
       const outcomeUnknown = externalBroadcastOutcomeUnknownResponse(c, e, executionTxId);
       if (outcomeUnknown) {
+        // A lost response may still represent real spend. Account for it
+        // conservatively before releasing the per-agent spend lock.
+        recordVaultSpend(agentId, tenantId, signRequest.value, resolvedChainId).catch((err) =>
+          console.error("[vault] Failed to record ambiguous spend:", err),
+        );
+        try {
+          await recordAggregationEvent({
+            agentId,
+            valueRaw: signRequest.value,
+            to: signRequest.to,
+            chainId: resolvedChainId,
+          });
+        } catch (err) {
+          console.error("[vault] Failed to record ambiguous aggregation event:", err);
+        }
         await writeVaultAudit(c, {
           tenantId,
           actorType: "agent",
@@ -4327,6 +4342,19 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
 
       const outcomeUnknown = externalBroadcastOutcomeUnknownResponse(c, e, txId);
       if (outcomeUnknown) {
+        recordVaultSpend(agentId, tenantId, transactionRow.value, transactionRow.chainId).catch(
+          (err) => console.error("[vault] Failed to record ambiguous approved spend:", err),
+        );
+        try {
+          await recordAggregationEvent({
+            agentId,
+            valueRaw: transactionRow.value,
+            to: transactionRow.toAddress,
+            chainId: transactionRow.chainId,
+          });
+        } catch (err) {
+          console.error("[vault] Failed to record ambiguous approved aggregation event:", err);
+        }
         await writeVaultAudit(c, {
           tenantId,
           actorType: "user",

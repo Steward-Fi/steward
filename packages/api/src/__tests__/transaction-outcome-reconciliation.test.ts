@@ -9,6 +9,7 @@ const TENANT_ID = "receipt-reconcile-tenant";
 const AGENT_ID = "receipt-reconcile-agent";
 const HASH = `0x${"ab".repeat(32)}` as const;
 let pollBroadcastTransactionReceipts: typeof import("../services/transaction-receipt-poller")["pollBroadcastTransactionReceipts"];
+let getTransactionStats: typeof import("../services/context")["getTransactionStats"];
 
 setDefaultTimeout(120_000);
 
@@ -57,6 +58,7 @@ describe("outcome_unknown receipt reconciliation", () => {
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => client.close());
     ({ pollBroadcastTransactionReceipts } = await import("../services/transaction-receipt-poller"));
+    ({ getTransactionStats } = await import("../services/context"));
     await getDb().insert(tenants).values({
       id: TENANT_ID,
       name: "Receipt Reconciliation",
@@ -131,6 +133,32 @@ describe("outcome_unknown receipt reconciliation", () => {
       .select({ status: transactions.status })
       .from(transactions)
       .where(eq(transactions.id, "unknown-absent"));
+    expect(row?.status).toBe("outcome_unknown");
+  });
+
+  it("counts outcome_unknown conservatively for cumulative spend policy", async () => {
+    await seedUnknown("unknown-spend-policy");
+    const stats = await getTransactionStats(AGENT_ID, 8453);
+    expect(stats.spentToday).toBe(1n);
+    expect(stats.spentThisWeek).toBe(1n);
+  });
+
+  it("rejects a mismatched receipt hash from an untrusted RPC", async () => {
+    await seedUnknown("unknown-mismatched-receipt");
+    const client: TransactionReceiptClient = {
+      async getTransactionReceipt() {
+        return { ...receipt(), transactionHash: `0x${"ef".repeat(32)}` };
+      },
+      async getBlockNumber() {
+        throw new Error("must not read the head for a mismatched receipt");
+      },
+    };
+    const summary = await pollBroadcastTransactionReceipts({ clientFactory: () => client });
+    expect(summary).toMatchObject({ checked: 1, skipped: 1, confirmed: 0, reverted: 0 });
+    const [row] = await getDb()
+      .select({ status: transactions.status })
+      .from(transactions)
+      .where(eq(transactions.id, "unknown-mismatched-receipt"));
     expect(row?.status).toBe("outcome_unknown");
   });
 

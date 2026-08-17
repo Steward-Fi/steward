@@ -424,6 +424,12 @@ async function pollOneTransaction(
     }
   }
 
+  // Bind the provider-controlled response back to the exact deterministic
+  // hash requested. A malicious RPC must not reconcile using another receipt.
+  if (receipt && receipt.transactionHash.toLowerCase() !== row.txHash.toLowerCase()) {
+    receipt = null;
+  }
+
   if (!receipt) {
     // Absence of a receipt cannot prove that an ambiguous submission failed.
     // Keep outcome_unknown terminal and, critically, never call a broadcast API.

@@ -637,7 +637,9 @@ export async function getTransactionStats(agentId: string, chainId?: number) {
       and(
         eq(transactions.agentId, agentId),
         gte(transactions.createdAt, oneWeekAgo),
-        sql`${transactions.status} in ('signed', 'broadcast', 'confirmed')`,
+        // An ambiguous broadcast may already have spent funds. Count it until
+        // receipt reconciliation proves the final chain outcome.
+        sql`${transactions.status} in ('signed', 'broadcast', 'confirmed', 'outcome_unknown')`,
       ),
     );
 
