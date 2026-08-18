@@ -8,6 +8,8 @@ const describeWithPostgres = process.env.DATABASE_URL ? describe : describe.skip
 setDefaultTimeout(30_000);
 const schemaName = `rls_test_${randomUUID().replaceAll("-", "")}`;
 const tableName = `${schemaName}.records`;
+const roleName = `rls_role_${randomUUID().replaceAll("-", "")}`;
+const rolePassword = randomUUID().replaceAll("-", "");
 
 function rowsOf(value: unknown): Array<Record<string, unknown>> {
   return Array.isArray(value) ? value : ((value as { rows?: [] } | null)?.rows ?? []);
@@ -27,15 +29,36 @@ async function expectRlsRejected(operation: Promise<unknown>): Promise<void> {
 
 describeWithPostgres("SEC-169 transaction context on a real Postgres pool", () => {
   let handle: ReturnType<typeof createDb>;
+  let adminHandle: ReturnType<typeof createDb> | undefined;
 
   beforeAll(async () => {
-    handle = createDb(process.env.DATABASE_URL as string);
+    const initialHandle = createDb(process.env.DATABASE_URL as string);
+    const initialRoleRows = await initialHandle.client`
+      SELECT rolbypassrls, rolsuper FROM pg_roles WHERE rolname = current_user
+    `;
+    if (initialRoleRows[0]?.rolbypassrls || initialRoleRows[0]?.rolsuper) {
+      // GitHub's Postgres service user is the bootstrap superuser. Create the
+      // role whose production properties we actually need to prove, then run
+      // every RLS assertion through its independent login/pool.
+      adminHandle = initialHandle;
+      await adminHandle.client.unsafe(
+        `CREATE ROLE ${roleName} LOGIN PASSWORD '${rolePassword}' ` +
+          "NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS",
+      );
+      await adminHandle.client.unsafe(`CREATE SCHEMA ${schemaName} AUTHORIZATION ${roleName}`);
+      const restrictedUrl = new URL(process.env.DATABASE_URL as string);
+      restrictedUrl.username = roleName;
+      restrictedUrl.password = rolePassword;
+      handle = createDb(restrictedUrl.toString());
+    } else {
+      handle = initialHandle;
+      await handle.client.unsafe(`CREATE SCHEMA ${schemaName}`);
+    }
     const roleRows = await handle.client`
       SELECT rolbypassrls, rolsuper FROM pg_roles WHERE rolname = current_user
     `;
     expect(roleRows[0]?.rolbypassrls).toBe(false);
     expect(roleRows[0]?.rolsuper).toBe(false);
-    await handle.client.unsafe(`CREATE SCHEMA ${schemaName}`);
     await handle.client.unsafe(`
       CREATE TABLE ${tableName} (
         id text PRIMARY KEY,
@@ -54,6 +77,10 @@ describeWithPostgres("SEC-169 transaction context on a real Postgres pool", () =
   afterAll(async () => {
     await handle.client.unsafe(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`);
     await handle.client.end();
+    if (adminHandle) {
+      await adminHandle.client.unsafe(`DROP ROLE IF EXISTS ${roleName}`);
+      await adminHandle.client.end();
+    }
   });
 
   test("missing context denies reads and writes", async () => {
