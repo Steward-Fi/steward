@@ -46,6 +46,7 @@ interface CapturedRequest {
   headers: Record<string, string>;
   rawBody: string | undefined;
   body: unknown;
+  redirect: RequestRedirect | undefined;
 }
 
 let lastCapture: CapturedRequest | null = null;
@@ -71,6 +72,7 @@ function installMockFetch(responseBody: object, status = 200): void {
       headers,
       rawBody: init?.body as string | undefined,
       body: init?.body ? JSON.parse(init.body as string) : undefined,
+      redirect: init?.redirect,
     };
     return new Response(JSON.stringify(responseBody), {
       status,
@@ -100,6 +102,7 @@ function installTextMockFetch(responseBody: string, status = 200): void {
       headers,
       rawBody: init?.body as string | undefined,
       body: init?.body ? JSON.parse(init.body as string) : undefined,
+      redirect: init?.redirect,
     };
     return new Response(responseBody, {
       status,
@@ -1068,6 +1071,12 @@ describe("Request headers", () => {
 // ─── HTTP Request Building Tests ──────────────────────────────────────────
 
 describe("HTTP request building", () => {
+  it("refuses redirects so Steward credentials cannot be replayed", async () => {
+    installMockFetch({ ok: true, data: [mockAgent] });
+    await makeClient({ apiKey: "tenant-key" }).listAgents();
+    expect(lastCapture?.redirect).toBe("error");
+  });
+
   it("listAgents → GET /agents", async () => {
     installMockFetch({ ok: true, data: [mockAgent] });
     await makeClient().listAgents();

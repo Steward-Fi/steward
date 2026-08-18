@@ -9,6 +9,8 @@ import {
 
 const MAX_REGISTRY_FILE_BYTES = 4 * 1024 * 1024;
 
+class RegistryFileLimitError extends Error {}
+
 async function readBoundedRegistry(path: string): Promise<MeasurementRegistryFile> {
   const handle = await open(path, "r");
   try {
@@ -20,9 +22,12 @@ async function readBoundedRegistry(path: string): Promise<MeasurementRegistryFil
       offset += bytesRead;
     }
     if (offset > MAX_REGISTRY_FILE_BYTES) {
-      throw new Error("measurement registry file exceeded the 4 MiB ingestion limit");
+      throw new RegistryFileLimitError(
+        "measurement registry file exceeded the 4 MiB ingestion limit",
+      );
     }
-    return JSON.parse(bytes.subarray(0, offset).toString("utf8")) as MeasurementRegistryFile;
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, offset));
+    return JSON.parse(text) as MeasurementRegistryFile;
   } finally {
     await handle.close();
   }
@@ -79,9 +84,13 @@ let registry: MeasurementRegistryFile;
 try {
   registry = await readBoundedRegistry(registryPath);
 } catch (error) {
-  console.error(
-    error instanceof Error ? error.message : `failed to read registry: ${registryPath}`,
-  );
+  if (error instanceof RegistryFileLimitError) {
+    console.error(error.message);
+  } else if (error instanceof SyntaxError || error instanceof TypeError) {
+    console.error(`measurement registry is not valid UTF-8 JSON: ${registryPath}`);
+  } else {
+    console.error(`measurement registry could not be read: ${registryPath}`);
+  }
   process.exit(2);
 }
 const registryOk = verifyRegistrySignatures(

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"regexp"
 	"strings"
 	"testing"
@@ -174,9 +175,9 @@ func TestAccountsAndGlobalWalletMutationsAreSigned(t *testing.T) {
 	}
 }
 
-// SEC-126: the default HTTP client must not forward credential headers to a
-// different host when a redirect is followed.
-func TestCrossHostRedirectStripsCredentialHeaders(t *testing.T) {
+// SEC-126: a port change is cross-origin and must not be followed at all. Header
+// stripping alone would still make a server-side SDK caller an SSRF primitive.
+func TestCrossOriginRedirectIsRefused(t *testing.T) {
 	var redirected *http.Request
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		redirected = req
@@ -184,11 +185,8 @@ func TestCrossHostRedirectStripsCredentialHeaders(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":true,"data":{"id":"ok"}}`))
 	}))
 	defer target.Close()
-	// Redirect to the same listener under a DIFFERENT hostname (both names are
-	// loopback, but the host string differs) so the cross-host check engages.
-	crossHostURL := strings.Replace(target.URL, "127.0.0.1", "localhost", 1)
 	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		http.Redirect(w, req, crossHostURL+"/harvest", http.StatusFound)
+		http.Redirect(w, req, target.URL+"/harvest", http.StatusFound)
 	}))
 	defer redirector.Close()
 
@@ -197,30 +195,75 @@ func TestCrossHostRedirectStripsCredentialHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out map[string]any
-	if err := client.Get(context.Background(), "/accounts", nil, &out); err != nil {
-		t.Fatal(err)
+	if err := client.Get(context.Background(), "/accounts", nil, &out); err == nil || !strings.Contains(err.Error(), "refusing cross-origin") {
+		t.Fatalf("expected cross-origin redirect refusal, got %v", err)
 	}
-	if redirected == nil {
-		t.Fatal("redirect was not followed")
-	}
-	if got := redirected.Header.Get("X-Steward-Key"); got != "" {
-		t.Fatalf("credential header leaked cross-host: X-Steward-Key=%q", got)
+	if redirected != nil {
+		t.Fatal("cross-origin redirect target was contacted")
 	}
 }
 
-func TestSameHostHTTPSDowngradeStripsCredentialHeaders(t *testing.T) {
+func TestRedirectPolicyRejectsDowngradeCredentialsAndExcessiveChains(t *testing.T) {
 	original, _ := http.NewRequest(http.MethodGet, "https://api.example.test/accounts", nil)
 	downgrade, _ := http.NewRequest(http.MethodGet, "http://api.example.test/harvest", nil)
 	downgrade.Header.Set("Authorization", "Bearer user-token")
 	downgrade.Header.Set("X-Steward-Key", "tenant-key")
 	downgrade.Header.Set("X-Steward-Signature", "v1=deadbeef")
-	if err := stripStewardCredentialsOnCrossHostRedirect(downgrade, []*http.Request{original}); err != nil {
+	if err := stewardRedirectPolicy(downgrade, []*http.Request{original}); err == nil {
+		t.Fatal("HTTPS downgrade was accepted")
+	}
+	credentialURL, _ := url.Parse("https://user:password@api.example.test/other")
+	credentialRedirect := &http.Request{URL: credentialURL}
+	if err := stewardRedirectPolicy(credentialRedirect, []*http.Request{original}); err == nil {
+		t.Fatal("credential-bearing redirect was accepted")
+	}
+	via := make([]*http.Request, 10)
+	for i := range via {
+		via[i] = original
+	}
+	sameOriginURL, _ := url.Parse("https://api.example.test/other")
+	if err := stewardRedirectPolicy(&http.Request{URL: sameOriginURL}, via); err == nil {
+		t.Fatal("excessive redirect chain was accepted")
+	}
+}
+
+func TestCustomHTTPClientCannotDisableRedirectBoundary(t *testing.T) {
+	customCalled := false
+	custom := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		customCalled = true
+		return nil
+	}}
+	client, err := NewClient(Config{BaseURL: "https://api.example.test", HTTPClient: custom})
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"Authorization", "X-Steward-Key", "X-Steward-Signature"} {
-		if got := downgrade.Header.Get(name); got != "" {
-			t.Fatalf("credential header leaked on HTTPS downgrade: %s=%q", name, got)
+	original, _ := http.NewRequest(http.MethodGet, "https://api.example.test/accounts", nil)
+	cross, _ := http.NewRequest(http.MethodGet, "https://evil.example/harvest", nil)
+	if err := client.http.CheckRedirect(cross, []*http.Request{original}); err == nil {
+		t.Fatal("custom client disabled mandatory cross-origin refusal")
+	}
+	if customCalled {
+		t.Fatal("custom redirect callback ran before mandatory boundary")
+	}
+}
+
+func TestCustomRedirectPolicyCannotMutatePastRedirectBoundary(t *testing.T) {
+	custom := &http.Client{CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+		mutated, err := url.Parse("http://127.0.0.1:1/internal-metadata")
+		if err != nil {
+			t.Fatal(err)
 		}
+		req.URL = mutated
+		return nil
+	}}
+	client, err := NewClient(Config{BaseURL: "https://api.example.test", HTTPClient: custom})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, _ := http.NewRequest(http.MethodGet, "https://api.example.test/accounts", nil)
+	redirect, _ := http.NewRequest(http.MethodGet, "https://api.example.test/other", nil)
+	if err := client.http.CheckRedirect(redirect, []*http.Request{original}); err == nil || !strings.Contains(err.Error(), "refusing cross-origin") {
+		t.Fatalf("caller mutation bypassed redirect boundary: %v", err)
 	}
 }
 

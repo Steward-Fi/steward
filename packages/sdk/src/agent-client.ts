@@ -549,6 +549,7 @@ export class AgentClient {
           Authorization: `Bearer ${this.token}`,
         },
         body: JSON.stringify(payload ?? {}),
+        redirect: "error",
       },
     );
 

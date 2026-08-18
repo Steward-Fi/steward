@@ -516,6 +516,57 @@ describe("measurement registry", () => {
         registryFingerprints(registry),
       ).ok,
     ).toBe(false);
+
+    const accessorEnvelope = Object.defineProperties(
+      {},
+      {
+        payload: { enumerable: true, get: () => registry.payload },
+        signatures: { enumerable: true, value: registry.signatures },
+      },
+    );
+    expect(
+      verifyRegistrySignatures(
+        accessorEnvelope as MeasurementRegistryFile,
+        1,
+        undefined,
+        registryFingerprints(registry),
+      ).ok,
+    ).toBe(false);
+
+    const throwingEnvelope = new Proxy(registry, {
+      getPrototypeOf() {
+        throw new Error("hostile proxy");
+      },
+    });
+    expect(() =>
+      verifyRegistrySignatures(throwingEnvelope, 1, undefined, registryFingerprints(registry)),
+    ).not.toThrow();
+
+    let mutableReads = 0;
+    const mutableReadEnvelope = new Proxy(registry, {
+      get() {
+        mutableReads += 1;
+        throw new Error("mutable proxy read");
+      },
+    });
+    expect(
+      verifyRegistrySignatures(mutableReadEnvelope, 1, undefined, registryFingerprints(registry))
+        .ok,
+    ).toBe(true);
+    expect(
+      verifyQuoteAgainstRegistry(
+        {
+          provider: "dstack-tdx",
+          measurement: { imageDigest: "sha256:img", configHash: "compose" },
+          timestamp: new Date().toISOString(),
+          verified: true,
+          raw: {},
+        },
+        mutableReadEnvelope,
+        "prod",
+      ).ok,
+    ).toBe(true);
+    expect(mutableReads).toBe(0);
   });
 
   test("rejects oversized canonical JSON before constructing a full canonical copy", () => {
