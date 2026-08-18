@@ -211,40 +211,8 @@ services:
         # credential allowed below is one decoded from DATABASE_URL itself.
         unset PGPASSWORD
         dsn="$${DATABASE_URL:-postgresql://steward:$${POSTGRES_PASSWORD:?}@postgres:5432/steward}"
-        # Strip user:password@ and ?password= from the DSN; pass the password
-        # via PGPASSWORD so it never appears on pg_dump's argv (SEC-050). A
-        # passwordless DSN is passed through unchanged. Query keywords are
-        # case-insensitive in libpq and may percent-encode their names, so
-        # decode keys before matching and fail closed on malformed escapes.
-        case "$$dsn" in
-          postgres://*|postgresql://*)
-            pg_scheme="$${dsn%%://*}"
-            pg_rest="$${dsn#*://}"
-            # Isolate the authority before looking for userinfo. Matching a
-            # colon and @ across the whole DSN mistakes host ports plus an @
-            # in a path/query value for credentials and corrupts the target.
-            pg_authority="$$(printf '%s' "$$pg_rest" | sed 's|[/?#].*||')"
-            pg_suffix="$${pg_rest#"$$pg_authority"}"
-            case "$$pg_authority" in
-              *:*@*)
-                pg_userinfo="$${pg_authority%%@*}"
-                pg_host="$${pg_authority#*@}"
-                pg_user="$${pg_userinfo%%:*}"
-                pg_pw="$${pg_userinfo#*:}"
-                dsn="$${pg_scheme}://$${pg_user}@$${pg_host}$${pg_suffix}"
-                # Percent-decode the password component (PGPASSWORD is literal).
-                # Reject malformed escapes and NUL, which cannot be represented
-                # in an environment and must never be silently truncated.
-                case "$$(printf '%s' "$$pg_pw" | sed 's/%[0-9A-Fa-f][0-9A-Fa-f]//g')" in
-                  *%*) echo 'Invalid percent escape in DATABASE_URL password' >&2; exit 1 ;;
-                esac
-                case "$$pg_pw" in *%00*) echo 'NUL is not allowed in DATABASE_URL password' >&2; exit 1 ;; esac
-                pg_pw="$$(printf '%s' "$$pg_pw" | sed 's/%/\\x/g')"
-                PGPASSWORD="$$(printf '%b' "$$pg_pw")"
-                export PGPASSWORD
-                ;;
-            esac
-        esac
+        # POSIX-portable percent-decoder (octal printf works in dash/BusyBox ash;
+        # printf '%b' with \xHH does not). Defined before first use.
         pg_url_decode() {
           pg_encoded="$$1"
           if printf '%s' "$$pg_encoded" | grep -q '[[:cntrl:]]'; then
@@ -275,6 +243,44 @@ services:
           done
           printf '%s' "$$pg_decoded"
         }
+        # Strip user:password@ and ?password= from the DSN; pass the password
+        # via PGPASSWORD so it never appears on pg_dump's argv (SEC-050). A
+        # passwordless DSN is passed through unchanged. Query keywords are
+        # case-insensitive in libpq and may percent-encode their names, so
+        # decode keys before matching and fail closed on malformed escapes.
+        case "$$dsn" in
+          postgres://*|postgresql://*)
+            pg_scheme="$${dsn%%://*}"
+            pg_rest="$${dsn#*://}"
+            # Isolate the authority before looking for userinfo. Matching a
+            # colon and @ across the whole DSN mistakes host ports plus an @
+            # in a path/query value for credentials and corrupts the target.
+            pg_authority="$$(printf '%s' "$$pg_rest" | sed 's|[/?#].*||')"
+            pg_suffix="$${pg_rest#"$$pg_authority"}"
+            case "$$pg_authority" in
+              *:*@*)
+                pg_userinfo="$${pg_authority%%@*}"
+                pg_host="$${pg_authority#*@}"
+                pg_user="$${pg_userinfo%%:*}"
+                pg_pw="$${pg_userinfo#*:}"
+                dsn="$${pg_scheme}://$${pg_user}@$${pg_host}$${pg_suffix}"
+                # Percent-decode the password component (PGPASSWORD is literal).
+                # Reject malformed escapes and NUL, which cannot be represented
+                # in an environment and must never be silently truncated. Decode
+                # via pg_url_decode: octal printf is POSIX-portable (dash,
+                # BusyBox ash), whereas printf '%b' with \xHH is not.
+                case "$$(printf '%s' "$$pg_pw" | sed 's/%[0-9A-Fa-f][0-9A-Fa-f]//g')" in
+                  *%*) echo 'Invalid percent escape in DATABASE_URL password' >&2; exit 1 ;;
+                esac
+                case "$$pg_pw" in *%00*) echo 'NUL is not allowed in DATABASE_URL password' >&2; exit 1 ;; esac
+                if ! pg_pw="$$(pg_url_decode "$$pg_pw")"; then
+                  echo 'Invalid percent escape in DATABASE_URL password' >&2; exit 1
+                fi
+                PGPASSWORD="$$pg_pw"
+                export PGPASSWORD
+                ;;
+            esac
+        esac
         pg_query_password=
         pg_query_password_found=
         # Query parameters are part of the DSN passed to pg_dump, so remove
