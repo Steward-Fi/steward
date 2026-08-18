@@ -60,9 +60,9 @@ const GOOGLE_OPERATION_METHOD = {
   "google.calendar.events.insert": "POST",
 } as const satisfies Readonly<Record<GoogleOperationKey, "GET" | "POST" | "DELETE">>;
 const GOOGLE_OPERATION_MINIMUM_RISK = {
-  "google.gmail.messages.send": "write",
+  "google.gmail.messages.send": "consequential",
   "google.calendar.events.list": "read",
-  "google.calendar.events.insert": "write",
+  "google.calendar.events.insert": "consequential",
 } as const satisfies Readonly<Record<GoogleOperationKey, ProviderRiskClass>>;
 const GOOGLE_OPERATION_EXACT_PATH = {
   "google.gmail.messages.send": "/gmail/v1/users/me/messages/send",
