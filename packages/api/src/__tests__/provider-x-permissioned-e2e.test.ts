@@ -448,6 +448,28 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
       .select()
       .from(providerOperations)
       .where(eq(providerOperations.id, P.OP_URL_DENY));
+
+    const digestMismatch = await providerActionService.evaluateApprovedExecution({
+      tenantId: P.TENANT,
+      workspaceId: P.WORKSPACE,
+      actorAgentId: P.AGENT,
+      operation,
+      intentId: b.intentId,
+      requestHash: b.requestHash,
+      actionDigest: b.actionDigest,
+      canonicalActionBytes: new Uint8Array(b.canonicalActionBytes),
+      safeSummary: b.safeSummary,
+      expectedXSummonAttestationDigest: `sha256:${"0".repeat(64)}`,
+      matchedGrantIds: b.matchedGrantIds,
+      priorGeneration: 1,
+      idempotencyKeyHash: b.idempotencyKeyHash,
+    });
+    expect(digestMismatch).toEqual({
+      ok: false,
+      code: "APPROVAL_ACTION_INTEGRITY_FAILED",
+      httpStatus: 409,
+    });
+
     __setProviderPolicyClockForTests(() => new Date(Date.parse(attestation.expiresAt) + 1));
     try {
       const resumed = await providerActionService.evaluateApprovedExecution({
@@ -460,13 +482,14 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
         actionDigest: b.actionDigest,
         canonicalActionBytes: new Uint8Array(b.canonicalActionBytes),
         safeSummary: b.safeSummary,
+        expectedXSummonAttestationDigest: b.requestEnvelope.xSummonAttestationDigest,
         matchedGrantIds: b.matchedGrantIds,
         priorGeneration: 1,
         idempotencyKeyHash: b.idempotencyKeyHash,
       });
       expect(resumed.ok).toBe(false);
       if (resumed.ok) throw new Error("stale summon provenance unexpectedly passed resume");
-      expect(resumed.code).toBe("POLICY_INPUT_UNAVAILABLE");
+      expect(resumed.code).toBe("APPROVAL_SUMMON_ATTESTATION_INVALID");
     } finally {
       __setProviderPolicyClockForTests(null);
     }

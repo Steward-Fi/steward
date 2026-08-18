@@ -2575,6 +2575,7 @@ class ProviderActionService {
     actionDigest: string;
     canonicalActionBytes: Uint8Array;
     safeSummary: Record<string, unknown>;
+    expectedXSummonAttestationDigest: unknown;
     matchedGrantIds: string[];
     priorGeneration: number;
     idempotencyKeyHash: string;
@@ -2612,18 +2613,29 @@ class ProviderActionService {
       return { ok: false, code: "APPROVAL_ACTION_INTEGRITY_FAILED", httpStatus: 409 };
     }
 
-    // Re-verify the frozen provider attestation at safe-resume. A signature
-    // that expired during human approval, a rotated/removed adapter key, or any
-    // cross-scope substitution removes the positive signal and makes
-    // summoned-only policy fail closed.
+    // Re-verify the frozen provider attestation at safe-resume and bind it to
+    // the digest captured in the immutable request envelope. A signature that
+    // expired during human approval, a rotated/removed adapter key, or any
+    // substitution must fail before an approval is consumed, even when the
+    // current policy would no longer require summoned-only provenance.
     let authenticatedXSummoned = false;
     if (args.operation.operationKey === "x.tweet.create") {
       const canonicalBody = asRecord(build.action.canonicalBody);
       const reply = canonicalBody.reply === undefined ? undefined : asRecord(canonicalBody.reply);
       const sourcePostId = reply?.in_reply_to_tweet_id;
-      if (typeof sourcePostId === "string" && args.safeSummary.xSummonAttestation !== undefined) {
-        authenticatedXSummoned = verifyXSummonAttestation(
-          args.safeSummary.xSummonAttestation,
+      const persistedAttestation = args.safeSummary.xSummonAttestation;
+      const expectedDigest = args.expectedXSummonAttestationDigest;
+      if (persistedAttestation !== undefined || expectedDigest !== undefined) {
+        if (
+          typeof sourcePostId !== "string" ||
+          persistedAttestation === undefined ||
+          typeof expectedDigest !== "string" ||
+          !/^sha256:[0-9a-f]{64}$/.test(expectedDigest)
+        ) {
+          return { ok: false, code: "APPROVAL_SUMMON_ATTESTATION_INVALID", httpStatus: 409 };
+        }
+        const verification = verifyXSummonAttestation(
+          persistedAttestation,
           {
             audience: process.env.STEWARD_X_SUMMON_ATTESTATION_AUDIENCE ?? "",
             tenantId: args.tenantId,
@@ -2635,7 +2647,14 @@ class ProviderActionService {
           },
           process.env.STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS,
           providerPolicyClockForTests?.() ?? new Date(),
-        ).ok;
+        );
+        if (!verification.ok) {
+          return { ok: false, code: "APPROVAL_SUMMON_ATTESTATION_INVALID", httpStatus: 409 };
+        }
+        if (verification.digest !== expectedDigest) {
+          return { ok: false, code: "APPROVAL_ACTION_INTEGRITY_FAILED", httpStatus: 409 };
+        }
+        authenticatedXSummoned = true;
       }
     }
 

@@ -279,4 +279,7 @@ persisted document.
 - **Adapter trust is explicit** — Steward does not perform a live X read during
   dispatch. The authenticated provider adapter is responsible for establishing
   mention/quote provenance, and its Ed25519 public key is an operator-managed
-  trust root. Missing or indeterminate provenance denies locally.
+  trust root. The signer MUST derive the tenant, workspace, actor, provider
+  account, source post, audience, and summon fact from its authenticated route
+  and live X result; it must never copy those authority fields from an
+  untrusted summon claimant. Missing or indeterminate provenance denies locally.

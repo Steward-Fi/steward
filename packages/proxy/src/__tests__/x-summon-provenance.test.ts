@@ -107,9 +107,9 @@ describe("dispatch X summon provenance boundary", () => {
     const tampered = fixture();
     tampered.requestEnvelope.workspaceId = "22000000-0000-4000-8000-000000000002";
     expect(verifyDispatchXSummonProvenance(tampered)).toBe("invalid");
-    expect(
-      verifyDispatchXSummonProvenance({ ...fixture(), audience: "steward-staging" }),
-    ).toBe("invalid");
+    expect(verifyDispatchXSummonProvenance({ ...fixture(), audience: "steward-staging" })).toBe(
+      "invalid",
+    );
   });
 
   test("allows truly absent provenance for non-summon-governed actions", () => {

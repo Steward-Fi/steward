@@ -87,10 +87,13 @@ describe("authenticated X summon provenance", () => {
     ).toEqual({ ok: false, reason: "unknown_key" });
     expect(
       verifyXSummonAttestation(
-        attestation({ attestedAt: "2026-02-31T00:59:30.000Z" }),
+        attestation({
+          attestedAt: "2026-02-31T00:00:00.000Z",
+          expiresAt: "2026-03-03T00:04:00.000Z",
+        }),
         expected,
         keysJson,
-        now,
+        new Date("2026-03-03T00:01:00.000Z"),
       ),
     ).toEqual({ ok: false, reason: "stale" });
   });
@@ -107,12 +110,7 @@ describe("authenticated X summon provenance", () => {
 
   test("rejects inherited key ids and non-canonical signature encodings without throwing", () => {
     expect(
-      verifyXSummonAttestation(
-        attestation({ keyId: "toString" }),
-        expected,
-        keysJson,
-        now,
-      ),
+      verifyXSummonAttestation(attestation({ keyId: "toString" }), expected, keysJson, now),
     ).toEqual({ ok: false, reason: "unknown_key" });
 
     const nonCanonical = attestation();

@@ -2104,6 +2104,7 @@ class ProviderApprovalService {
             actionDigest: binding.actionDigest,
             canonicalActionBytes: new Uint8Array(binding.canonicalActionBytes as Uint8Array),
             safeSummary: binding.safeSummary,
+            expectedXSummonAttestationDigest: binding.requestEnvelope.xSummonAttestationDigest,
             matchedGrantIds: binding.matchedGrantIds,
             priorGeneration: priorGeneration?.generation ?? 0,
             idempotencyKeyHash: binding.idempotencyKeyHash,
