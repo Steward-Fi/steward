@@ -11,7 +11,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   type CapabilityAuditEvent,
-  capabilityTokenScope,
   clampTtlSeconds,
   DEFAULT_ISSUE_TTL_SECONDS,
   issueCapability,
@@ -114,37 +113,33 @@ describe("issueCapability", () => {
     });
   });
 
-  test("token mode: mints a short-lived capability-scoped token", async () => {
+  test("github remains brokered until a provider-native token minter exists", async () => {
     const { events, sink } = collectAudit();
+    let minted = false;
     const res = await issueCapability({
       tenantId: "t1",
       agentId: "a1",
       manifest: "github:app:org",
       resolved: resolved("github", "github:app:org"),
       ttlSeconds: 60,
-      mintToken: fakeMinter,
+      mintToken: async (args) => {
+        minted = true;
+        return fakeMinter(args);
+      },
       emitAudit: sink,
     });
     expect(res.ok).toBe(true);
-    if (!res.ok || res.mode !== "token") throw new Error("expected token mode");
-    expect(res.token).toBe("tok.ttl=60");
-    expect(res.ttlSeconds).toBe(60);
-    expect(res.jti).toBe("jti-123");
-    // Least privilege (SEC-033): the token carries ONLY the capability scope.
-    // Stamping the broad `agent` scope would make it a general agent credential
-    // for the whole tenant surface.
-    expect(res.scopes).toEqual([capabilityTokenScope("github:app:org")]);
-    expect(res.scopes).not.toContain("agent");
+    if (!res.ok || res.mode !== "broker") throw new Error("expected broker mode");
+    expect(minted).toBe(false);
+    expect(res.delegation.capabilityName).toBe("github:app:org");
     expect(events[0]).toMatchObject({
       action: "capability.issue",
-      mode: "token",
+      mode: "broker",
       decision: "allow",
-      jti: "jti-123",
-      ttlSeconds: 60,
     });
   });
 
-  test("token mode: rejects out-of-range ttl with deny audit", async () => {
+  test("broker mode does not pretend to honor token TTL parameters", async () => {
     const { events, sink } = collectAudit();
     const res = await issueCapability({
       tenantId: "t1",
@@ -155,10 +150,10 @@ describe("issueCapability", () => {
       mintToken: fakeMinter,
       emitAudit: sink,
     });
-    expect(res.ok).toBe(false);
-    if (res.ok) throw new Error("expected deny");
-    expect(res.code).toBe("ttl_out_of_range");
-    expect(events[0]).toMatchObject({ decision: "deny", reason: "requested ttl out of range" });
+    expect(res.ok).toBe(true);
+    if (!res.ok) throw new Error("expected allow");
+    expect(res.mode).toBe("broker");
+    expect(events[0]).toMatchObject({ decision: "allow", mode: "broker" });
   });
 
   test("revocation: unresolved (no live grant) denies", async () => {
@@ -193,26 +188,6 @@ describe("issueCapability", () => {
     });
     expect(res.ok).toBe(true);
     expect(events[0].action).toBe("capability.renew");
-  });
-
-  test("mint failure denies (mint_failed) and never leaks", async () => {
-    const { events, sink } = collectAudit();
-    const failingMinter: ShortLivedTokenMinter = async () => {
-      throw new Error("hsm offline");
-    };
-    const res = await issueCapability({
-      tenantId: "t1",
-      agentId: "a1",
-      manifest: "github:app:org",
-      resolved: resolved("github", "github:app:org"),
-      mintToken: failingMinter,
-      emitAudit: sink,
-    });
-    expect(res.ok).toBe(false);
-    if (res.ok) throw new Error("expected deny");
-    expect(res.code).toBe("mint_failed");
-    expect(res.error).not.toContain("hsm");
-    expect(events[0]).toMatchObject({ decision: "deny", reason: "token mint failed" });
   });
 
   test("audit sink failure never changes the decision", async () => {

@@ -76,11 +76,12 @@ export const PROVIDER_MODES: readonly ProviderModeEntry[] = [
   },
   {
     provider: "github",
-    mode: "token",
+    mode: "broker",
     rationale:
-      "GitHub App installation tokens are natively short-lived (≈1h) and scopable per " +
-      "installation/permission; Steward can mint a scoped installation token in token mode. " +
-      "(A raw PAT-backed github provider would instead be broker mode.)",
+      "GitHub App installation tokens can be short-lived and scoped, but Steward does not yet " +
+      "exchange an installation identity for a GitHub-issued token. Until that provider-native " +
+      "mint exists, GitHub stays brokered so Steward never misrepresents an internal JWT as a " +
+      "provider credential.",
   },
   {
     provider: "llm",

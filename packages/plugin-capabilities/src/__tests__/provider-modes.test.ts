@@ -16,8 +16,8 @@ describe("provider modes", () => {
     expect(resolveProviderMode("discord")).toBe("broker");
   });
 
-  test("github is token (short-lived installation tokens)", () => {
-    expect(resolveProviderMode("github")).toBe("token");
+  test("github is broker until Steward mints a real installation token", () => {
+    expect(resolveProviderMode("github")).toBe("broker");
   });
 
   test("llm and wallet are broker", () => {
@@ -32,7 +32,7 @@ describe("provider modes", () => {
 
   test("resolution is case-insensitive", () => {
     expect(resolveProviderMode("DisCord")).toBe("broker");
-    expect(resolveProviderMode("GITHUB")).toBe("token");
+    expect(resolveProviderMode("GITHUB")).toBe("broker");
   });
 
   test("registry entries all carry a rationale", () => {

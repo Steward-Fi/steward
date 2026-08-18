@@ -3,8 +3,7 @@
  * routes (lane A1, scope 2-5). Mounts createManifestRoutes on a bare hono app
  * with an agent-token stub + real pglite store. Proves:
  *   - GET /manifest lists the agent's manifest entries,
- *   - token-mode (github) issue returns a short-lived scoped token,
- *   - broker-mode (discord) issue returns a delegation (no token),
+ *   - broker-mode GitHub and Discord issuance return delegations (no token),
  *   - renew hits the same path,
  *   - revoked/absent manifest entry → 403,
  *   - audit events are emitted for each outcome,
@@ -12,7 +11,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { verifyToken } from "@stwd/auth";
 import type { AppVariables } from "@stwd/shared";
 import { Hono } from "hono";
 import type { StewardAppContext } from "../context";
@@ -126,7 +124,7 @@ describe("manifest routes", () => {
     expect(ids).toEqual(["discord:bot-token:soliza", "github:app:org"]);
   });
 
-  test("token mode: github issue returns a short-lived scoped token", async () => {
+  test("github stays brokered until a provider-native installation token minter exists", async () => {
     await seedManifestCapability("gh-comment", "github:app:org");
     const app = buildApp(harness!.db, { agent: true });
 
@@ -138,23 +136,16 @@ describe("manifest routes", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       ok: boolean;
-      data: { mode: string; token: string; ttlSeconds: number; scopes: string[] };
+      data: { mode: string; token?: string; delegation: { capabilityName: string } };
     };
-    expect(body.data.mode).toBe("token");
-    expect(body.data.ttlSeconds).toBe(90);
-    expect(body.data.scopes).toContain("cap:github:app:org");
-    // SEC-033: never the broad `agent` scope on a capability token.
-    expect(body.data.scopes).not.toContain("agent");
-
-    const payload = await verifyToken(body.data.token);
-    expect(payload.agentId).toBe(agentId);
-    expect((payload.scopes as string[]) ?? []).toContain("cap:github:app:org");
-    expect((payload.scopes as string[]) ?? []).not.toContain("agent");
+    expect(body.data.mode).toBe("broker");
+    expect(body.data.token).toBeUndefined();
+    expect(body.data.delegation.capabilityName).toBe("gh-comment");
 
     // audit: exactly one issue/allow/token event.
     expect(
       auditLog.some(
-        (e) => e.action === "capability.issue" && e.decision === "allow" && e.mode === "token",
+        (e) => e.action === "capability.issue" && e.decision === "allow" && e.mode === "broker",
       ),
     ).toBe(true);
   });
@@ -202,7 +193,7 @@ describe("manifest routes", () => {
     expect(auditLog.some((e) => e.decision === "deny")).toBe(true);
   });
 
-  test("ttl out of range → 400", async () => {
+  test("brokered GitHub issuance ignores token-only TTL parameters", async () => {
     await seedManifestCapability("gh-comment", "github:app:org");
     const app = buildApp(harness!.db, { agent: true });
     const res = await app.request("/capabilities/manifest/github:app:org/issue", {
@@ -210,6 +201,11 @@ describe("manifest routes", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ttlSeconds: 99999 }),
     });
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { mode: string; token?: string };
+    };
+    expect(body.data.mode).toBe("broker");
+    expect(body.data.token).toBeUndefined();
   });
 });
