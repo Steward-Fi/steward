@@ -1253,7 +1253,53 @@ describe("refresh", () => {
       .select()
       .from(providerAccounts)
       .where(eq(providerAccounts.id, completed.providerAccountId));
-    expect(account.status).toBe("disabled");
+    expect(account.status).toBe("revoked");
+    const [lifecycle] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
+    expect(lifecycle).toMatchObject({
+      state: "revoked",
+      credentialSecretId: null,
+      lastErrorCode: "ROTATED_GRANT_REVOKED_AFTER_STAGING_FAILURE",
+    });
+    fake.restore();
+
+    const reconnected = await connectHappy(new MemoryConnectStore());
+    expect(reconnected.completed.providerAccountId).toBe(completed.providerAccountId);
+  });
+
+  test("blocks reconnect when a rotated grant cannot be staged or confirmed revoked", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    const fake = installFakeX({ revokeStatuses: [503] });
+    const originalCreate = vault.createSecretWithinTx;
+    Object.defineProperty(vault, "createSecretWithinTx", {
+      configurable: true,
+      value: async (...args: Parameters<typeof originalCreate>) => {
+        if (String(args[2]).startsWith("provider-x-lifecycle:")) {
+          throw new Error("simulated encrypted staging failure");
+        }
+        return originalCreate.apply(vault, args);
+      },
+    });
+    try {
+      await expect(
+        refreshXProviderCredential({
+          tenantId: TENANT,
+          workspaceId: WORKSPACE,
+          accountId: completed.providerAccountId,
+          vault,
+          config: CONFIG,
+          force: true,
+        }),
+      ).rejects.toThrow("simulated encrypted staging failure");
+    } finally {
+      Object.defineProperty(vault, "createSecretWithinTx", {
+        configurable: true,
+        value: originalCreate,
+      });
+    }
+    expect(fake.counters).toMatchObject({ refresh: 1, revoke: 1 });
     const [lifecycle] = await getDb()
       .select()
       .from(providerXCredentialLifecycles)
@@ -1261,12 +1307,13 @@ describe("refresh", () => {
     expect(lifecycle).toMatchObject({
       state: "needs_attention",
       credentialSecretId: null,
-      lastErrorCode: "REFRESH_OUTCOME_UNKNOWN",
+      lastErrorCode: "REFRESH_RESPONSE_STAGING_FAILED",
     });
     fake.restore();
 
-    const reconnected = await connectHappy(new MemoryConnectStore());
-    expect(reconnected.completed.providerAccountId).toBe(completed.providerAccountId);
+    await expect(connectHappy(new MemoryConnectStore())).rejects.toMatchObject({
+      code: "X_CREDENTIAL_NEEDS_ATTENTION",
+    });
   });
 
   test("the autonomous sweep fails closed a crashed pre-provider intent", async () => {

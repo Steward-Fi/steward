@@ -1219,14 +1219,30 @@ export async function refreshXProviderCredential(input: RefreshInput): Promise<R
     // fail Steward's adoption grammar while still being live at the provider.
     const accessToken = candidate ? boundedStagedToken(candidate.access_token) : null;
     const refreshToken = candidate ? boundedStagedToken(candidate.refresh_token) : null;
-    if (accessToken || refreshToken) {
-      await revokeUpstreamBestEffort(
-        input.config,
-        accessToken ?? (refreshToken as string),
-        refreshToken,
-      ).catch(() => false);
+    const revokedAtUpstream =
+      accessToken || refreshToken
+        ? await revokeUpstreamBestEffort(
+            input.config,
+            accessToken ?? (refreshToken as string),
+            refreshToken,
+          ).catch(() => false)
+        : false;
+    if (revokedAtUpstream) {
+      await revokeXAccountForLifecycle(
+        input,
+        prepared.lifecycleId,
+        "ROTATED_GRANT_REVOKED_AFTER_STAGING_FAILURE",
+      );
+    } else {
+      // There is no durable handle because staging itself failed. Keep this
+      // lifecycle non-supersedable: reconnect must not proceed while the new
+      // rotated grant may still be live upstream.
+      await disableXAccountForLifecycle(
+        input,
+        prepared.lifecycleId,
+        "REFRESH_RESPONSE_STAGING_FAILED",
+      );
     }
-    await disableXAccountForLifecycle(input, prepared.lifecycleId, "REFRESH_OUTCOME_UNKNOWN");
     throw error;
   }
   await afterXCredentialStageForTests?.();
@@ -1375,7 +1391,11 @@ async function disableXAccountForLifecycle(
   });
 }
 
-async function revokeXAccountForLifecycle(input: RefreshInput, lifecycleId: string): Promise<void> {
+async function revokeXAccountForLifecycle(
+  input: RefreshInput,
+  lifecycleId: string,
+  reason = "INVALID_GRANT",
+): Promise<void> {
   await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
     const tx = txRaw as DbExecutor;
     const [lifecycle] = await tx
@@ -1412,7 +1432,7 @@ async function revokeXAccountForLifecycle(input: RefreshInput, lifecycleId: stri
       accountRevoked = Boolean(revoked);
       await tx
         .update(providerXCredentialLifecycles)
-        .set({ state: "revoked", lastErrorCode: "INVALID_GRANT", updatedAt: new Date() })
+        .set({ state: "revoked", lastErrorCode: reason, updatedAt: new Date() })
         .where(
           and(
             eq(providerXCredentialLifecycles.tenantId, input.tenantId),
@@ -1427,7 +1447,7 @@ async function revokeXAccountForLifecycle(input: RefreshInput, lifecycleId: stri
       action: "provider.x.refresh.revoked",
       resourceType: "provider_account",
       resourceId: input.accountId,
-      metadata: { lifecycleId, workspaceId: input.workspaceId, accountRevoked },
+      metadata: { lifecycleId, workspaceId: input.workspaceId, accountRevoked, reason },
     });
   });
 }
