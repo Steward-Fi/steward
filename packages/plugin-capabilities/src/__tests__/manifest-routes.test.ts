@@ -13,8 +13,9 @@
 
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { AppVariables } from "@stwd/shared";
-import { Hono } from "hono";
+import { type Context, Hono, type Next } from "hono";
 import type { StewardAppContext } from "../context";
+import { capabilitiesPlugin } from "../index";
 import type { CapabilityAuditEvent } from "../issuance";
 import { createManifestRoutes, upstreamLeaseIssuanceAvailableInRuntime } from "../manifest-routes";
 import { CapabilityStore } from "../store";
@@ -110,6 +111,35 @@ describe("manifest routes", () => {
     const app = buildApp(harness!.db, { agent: false });
     const res = await app.request("/capabilities/manifest");
     expect(res.status).toBe(401);
+  });
+
+  test("the composed plugin keeps agent lease acknowledgement and revocation out of the operator tenant gate", async () => {
+    let tenantAuthCalls = 0;
+    const app = new Hono<{ Variables: AppVariables }>();
+    const ctx = {
+      ...buildCtx(harness!.db),
+      async requireCapabilityAgentJwt(c: Context<{ Variables: AppVariables }>, next: Next) {
+        c.set("tenantId", tenantId);
+        c.set("agentScope", agentId);
+        await next();
+      },
+      async tenantAuth(c: Context<{ Variables: AppVariables }>) {
+        tenantAuthCalls += 1;
+        return c.json({ ok: false, error: "operator tenant gate reached" }, 418);
+      },
+    } as StewardAppContext;
+    capabilitiesPlugin.register(app, ctx);
+
+    for (const prefix of ["", "/v1"]) {
+      for (const action of ["ack", "revoke"]) {
+        const res = await app.request(
+          `${prefix}/capabilities/manifest/leases/10000000-0000-4000-8000-000000000001/${action}`,
+          { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+        );
+        expect(res.status).toBe(400);
+      }
+    }
+    expect(tenantAuthCalls).toBe(0);
   });
 
   test("GET /manifest lists the agent's manifest", async () => {
