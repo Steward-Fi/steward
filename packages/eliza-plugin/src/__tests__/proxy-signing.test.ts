@@ -140,16 +140,30 @@ describe("Eliza plugin proxy request signing", () => {
     }
   });
 
-  it("keeps unsigned local/dev proxy operation available when enforcement is disabled", async () => {
+  it("allows unsigned proxy operation only with the explicit dev-mode opt-in (SEC-175)", async () => {
     delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
     try {
+      // Enforcement off but no dev-mode opt-in: the proxy fails closed rather
+      // than silently accepting an unsigned call.
       lastProxyRequest = null;
-      const result = await configuredService({
+      const denied = await configuredService({
         proxyRequestSigningSecret: undefined,
       }).callGovernedApi({ url: "https://api.example.com/v1/items" });
+      expect(denied.status).toBe(401);
 
-      expect(result.status).toBe(200);
-      expect(lastProxyRequest?.headers.get("x-steward-signature")).toBeNull();
+      // Local/dev unsigned operation remains available via explicit opt-in.
+      process.env.STEWARD_PROXY_DEV_MODE = "true";
+      try {
+        lastProxyRequest = null;
+        const result = await configuredService({
+          proxyRequestSigningSecret: undefined,
+        }).callGovernedApi({ url: "https://api.example.com/v1/items" });
+
+        expect(result.status).toBe(200);
+        expect(lastProxyRequest?.headers.get("x-steward-signature")).toBeNull();
+      } finally {
+        delete process.env.STEWARD_PROXY_DEV_MODE;
+      }
     } finally {
       process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
     }
