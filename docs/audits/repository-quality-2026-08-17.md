@@ -74,7 +74,7 @@ deployment/configuration contracts, and explicit security-inventory boundaries.
   units.
 - Regenerated both OpenAPI documents and SDK types from the runtime contract. Database migrations
   are sequential and immutable: external-custody reconciliation is `0091`; wallet idempotency is
-  `0092`.
+  `0107`.
 
 ## Dead-code result
 
