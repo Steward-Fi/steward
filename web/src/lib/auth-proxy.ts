@@ -115,6 +115,22 @@ export function normalizeRefreshToken(value: unknown): string | null {
 }
 
 /**
+ * Accept only the compact-JWT shape Steward issues for browser access tokens.
+ * The proxy is not a verifier, but this prevents a malformed upstream response
+ * from reflecting either submitted refresh token into browser-visible JSON.
+ */
+export function normalizeAccessToken(
+  value: unknown,
+  forbiddenTokens: readonly (string | null)[] = [],
+): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_REFRESH_TOKEN_LENGTH) {
+    return null;
+  }
+  if (forbiddenTokens.includes(value)) return null;
+  return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value) ? value : null;
+}
+
+/**
  * Forward a JSON payload to the Steward API from the server side. Returns the
  * upstream status and parsed body (or null when the body is not JSON).
  */

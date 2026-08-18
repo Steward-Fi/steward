@@ -4,6 +4,7 @@ import {
   forwardToApi,
   hasProxyHeader,
   isHttpsRequest,
+  normalizeAccessToken,
   normalizeRefreshToken,
   proxyJson,
   readRefreshCookie,
@@ -78,10 +79,7 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const rotatedToken = normalizeRefreshToken(upstream.json.refreshToken);
-  const accessToken =
-    typeof upstream.json.token === "string" && upstream.json.token.length > 0
-      ? upstream.json.token
-      : null;
+  const accessToken = normalizeAccessToken(upstream.json.token, [refreshToken, rotatedToken]);
   const expiresIn = upstream.json.expiresIn;
   if (
     !rotatedToken ||

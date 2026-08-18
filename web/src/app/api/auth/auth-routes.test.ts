@@ -115,7 +115,7 @@ describe("auth proxy route handlers (SEC-018)", () => {
               : upstreamStatus === 200
                 ? JSON.stringify({
                     ok: true,
-                    token: "new-access-jwt",
+                    token: "new.access.jwt",
                     refreshToken: "rotated-rt",
                     expiresIn: 900,
                   })
@@ -169,7 +169,7 @@ describe("auth proxy route handlers (SEC-018)", () => {
 
       // The browser gets the access token but NEVER the rotated refresh token.
       const body = (await res.json()) as Record<string, unknown>;
-      expect(body.token).toBe("new-access-jwt");
+      expect(body.token).toBe("new.access.jwt");
       expect(body.refreshToken).toBeUndefined();
 
       // The rotated token goes straight into the HttpOnly cookie.
@@ -218,7 +218,7 @@ describe("auth proxy route handlers (SEC-018)", () => {
       for (const expiresIn of [-1, 0, 0.5]) {
         upstreamBody = {
           ok: true,
-          token: "new-access-jwt",
+          token: "new.access.jwt",
           refreshToken: "rotated-rt",
           expiresIn,
         };
@@ -243,6 +243,21 @@ describe("auth proxy route handlers (SEC-018)", () => {
       );
       expect(res.status).toBe(429);
       expect(await res.json()).toEqual({ ok: false, error: "Refresh failed" });
+    });
+
+    test("refresh rejects credential reflection in the access-token field", async () => {
+      upstreamBody = {
+        ok: true,
+        token: "stale",
+        refreshToken: "rotated-rt",
+        expiresIn: 900,
+      };
+      const res = await refreshPOST(
+        postJson("https://app.example.test/api/auth/refresh", {}, { cookie: "steward_rt=stale" }),
+      );
+      expect(res.status).toBe(502);
+      expect(res.headers.get("Set-Cookie")).toContain("Max-Age=0");
+      expect(await res.json()).toEqual({ ok: false, error: "Malformed refresh response" });
     });
 
     test("bounds and times out the complete upstream response body", async () => {

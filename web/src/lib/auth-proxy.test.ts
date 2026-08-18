@@ -5,6 +5,7 @@ import {
   buildRefreshCookie,
   hasProxyHeader,
   isHttpsRequest,
+  normalizeAccessToken,
   normalizeRefreshToken,
   proxyJson,
   readRefreshCookie,
@@ -94,6 +95,15 @@ describe("auth proxy CSRF/header checks (SEC-018)", () => {
     expect(normalizeRefreshToken(123)).toBeNull();
     expect(normalizeRefreshToken("")).toBeNull();
     expect(normalizeRefreshToken("x".repeat(9000))).toBeNull();
+  });
+
+  test("normalizeAccessToken accepts only bounded compact JWTs and rejects credential reflection", () => {
+    expect(normalizeAccessToken("header.payload.signature")).toBe("header.payload.signature");
+    expect(normalizeAccessToken("refresh-token")).toBeNull();
+    expect(
+      normalizeAccessToken("header.payload.signature", ["header.payload.signature"]),
+    ).toBeNull();
+    expect(normalizeAccessToken("x".repeat(9000))).toBeNull();
   });
 });
 
