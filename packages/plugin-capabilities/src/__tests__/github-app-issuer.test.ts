@@ -70,6 +70,24 @@ describe("GitHub App upstream issuer transport", () => {
     expect(signal?.aborted).toBe(true);
   });
 
+  test("normalizes fetch abort diagnostics after the issuer deadline", async () => {
+    const issuer = new GitHubAppInstallationTokenIssuer(
+      ((_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(new Error("secret provider cancellation diagnostic")),
+            { once: true },
+          );
+        })) as typeof fetch,
+      25,
+    );
+
+    const error = await issuer.issue(request).catch((caught) => caught as Error);
+    expect(error.message).toBe("GitHub request timed out");
+    expect(error.message).not.toContain("secret provider cancellation diagnostic");
+  });
+
   test("bounds stalled response bodies and contains hostile cancel rejection", async () => {
     let cancelCalled = false;
     const issuer = new GitHubAppInstallationTokenIssuer(
