@@ -218,7 +218,9 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
     }
 
     if (
-      (process.env.NODE_ENV === "production" || process.env.CF_PAGES === "1") &&
+      (process.env.NODE_ENV === "production" ||
+        process.env.STEWARD_RUNTIME === "workers" ||
+        process.env.CF_PAGES === "1") &&
       process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY !== "true"
     ) {
       throw new Error(
