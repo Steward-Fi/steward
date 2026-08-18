@@ -2298,7 +2298,10 @@ export class Vault {
 
     // Fast-fail before the provider round-trip on the common rejection; the
     // authoritative re-check happens inside the locked transaction below.
-    if (!request.venue && detectChainType(agentRow.walletAddress) === request.chainFamily) {
+    // `encrypted_keys` is always the legacy EVM store. Do not infer its
+    // relevance from agents.walletAddress: importing a Solana key updates that
+    // primary address while deliberately preserving the legacy EVM row.
+    if (!request.venue && request.chainFamily === "evm") {
       const [legacyKey] = await db
         .select({ agentId: encryptedKeys.agentId })
         .from(encryptedKeys)
@@ -2364,7 +2367,7 @@ export class Vault {
         );
       }
 
-      if (!venue && detectChainType(agentRow.walletAddress) === request.chainFamily) {
+      if (!venue && request.chainFamily === "evm") {
         const [legacyKey] = await tx
           .select({ agentId: encryptedKeys.agentId })
           .from(encryptedKeys)
