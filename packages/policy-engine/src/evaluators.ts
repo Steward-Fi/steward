@@ -223,8 +223,10 @@ function isMoneroAddress(value: string, stagenet: boolean): boolean {
   const integrated = prefix === (stagenet ? 25 : 19);
   if (decoded.length !== (integrated ? 77 : 69)) return false;
   try {
-    ed25519.ExtendedPoint.fromHex(decoded.subarray(1, 33));
-    ed25519.ExtendedPoint.fromHex(decoded.subarray(33, 65));
+    for (const encodedPoint of [decoded.subarray(1, 33), decoded.subarray(33, 65)]) {
+      const point = ed25519.ExtendedPoint.fromHex(encodedPoint);
+      if (point.is0() || point.isSmallOrder() || !point.isTorsionFree()) return false;
+    }
     return true;
   } catch {
     return false;
