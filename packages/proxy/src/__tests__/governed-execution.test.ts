@@ -1262,6 +1262,39 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
+  it("P26: invalid summon evidence on a fresh execution is denied before claim", async () => {
+    const summonDigest = `sha256:${"8".repeat(64)}`;
+    const { intentId, authorizationId } = await seedExecutionReady({
+      requestEnvelope: {
+        schemaVersion: "steward.provider-request.v1",
+        xSummonAttestationDigest: summonDigest,
+      },
+      safeSummary: {
+        xSummonAttestation: {
+          schemaVersion: "steward.x-summon-attestation.v1",
+          keyId: "adapter-removed",
+          expiresAt: "2020-01-01T00:00:00.000Z",
+        },
+      },
+    });
+    delete process.env.STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS;
+
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res).toMatchObject({
+      ok: false,
+      code: "EXEC_AUTH_SUMMON_ATTESTATION_INVALID",
+    });
+    expect(captured).toBeNull();
+    const [nonce] = await getDb()
+      .select({
+        status: executionAuthorizationNonces.status,
+        dispatchState: executionAuthorizationNonces.dispatchState,
+      })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(nonce).toEqual({ status: "active", dispatchState: "none" });
+  });
+
   it("P48/F06: absent STEWARD_EXECUTION_AUTH_SECRET fails closed at dispatch (503)", async () => {
     const { intentId } = await seedExecutionReady();
     const saved = process.env.STEWARD_EXECUTION_AUTH_SECRET;
