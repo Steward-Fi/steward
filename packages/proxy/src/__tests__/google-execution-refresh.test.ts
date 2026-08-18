@@ -231,16 +231,19 @@ describe("Google execution-time token mint", () => {
       .set({ status: "active", revision: 6 })
       .where(eq(providerAccounts.id, accountId))
       .returning();
-    __setGoogleExecutionTokenForwarderForTests(async () =>
-      Response.json({
+    let refreshCalls = 0;
+    __setGoogleExecutionTokenForwarderForTests(async () => {
+      refreshCalls += 1;
+      return Response.json({
         access_token: "ephemeral-widened",
+        refresh_token: "rotated-widened-refresh",
         token_type: "Bearer",
         scope:
           "openid email https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/calendar.events",
         expires_in: 3600,
-      }),
-    );
-    await expect(
+      });
+    });
+    const mint = () =>
       mintGoogleExecutionAccessToken({
         tenantId: TENANT,
         workspaceId: WORKSPACE,
@@ -250,8 +253,10 @@ describe("Google execution-time token mint", () => {
         vault,
         clientId: "provider-client",
         clientSecret: "provider-secret",
-      }),
-    ).rejects.toThrow("Google refresh widened OAuth scope");
+      });
+    await expect(mint()).rejects.toThrow("Google refresh widened OAuth scope");
+    await expect(mint()).rejects.toThrow("Google provider account changed before token mint");
+    expect(refreshCalls).toBe(1);
     const [disabled] = await getDb()
       .select()
       .from(providerAccounts)
@@ -261,7 +266,9 @@ describe("Google execution-time token mint", () => {
       .select()
       .from(providerGoogleCredentialLifecycles)
       .where(eq(providerGoogleCredentialLifecycles.providerAccountId, accountId));
-    expect(rows.some((row) => row.state === "revocation_pending")).toBeTrue();
+    const pending = rows.find((row) => row.state === "revocation_pending");
+    expect(pending?.lastErrorCode).toBe("INVALID_REFRESH_RESPONSE");
+    expect(pending?.credentialSecretId).toBeTruthy();
   });
 
   test("never dispatches a token minted from a stale account revision", async () => {
@@ -303,5 +310,62 @@ describe("Google execution-time token mint", () => {
       .from(providerGoogleCredentialLifecycles)
       .where(eq(providerGoogleCredentialLifecycles.providerAccountId, accountId));
     expect(rows.some((row) => row.lastErrorCode === "ACCOUNT_REVISION_CHANGED")).toBeTrue();
+  });
+
+  test("blocks replay when a concurrent revision bump leaves the lifecycle unresolved", async () => {
+    await getDb()
+      .update(providerGoogleCredentialLifecycles)
+      .set({ state: "adopted", credentialSecretId: null })
+      .where(eq(providerGoogleCredentialLifecycles.providerAccountId, accountId));
+    const [account] = await getDb()
+      .update(providerAccounts)
+      .set({ status: "active", revision: 10 })
+      .where(eq(providerAccounts.id, accountId))
+      .returning();
+    let tokenRequests = 0;
+    __setGoogleExecutionTokenForwarderForTests(async () => {
+      tokenRequests += 1;
+      await getDb()
+        .update(providerAccounts)
+        .set({ revision: account.revision + 1, updatedAt: new Date() })
+        .where(eq(providerAccounts.id, accountId));
+      throw new Error("refresh-replay-canary");
+    });
+    await expect(
+      mintGoogleExecutionAccessToken({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId,
+        accountRevision: account.revision,
+        credential,
+        vault,
+        clientId: "provider-client",
+        clientSecret: "provider-secret",
+      }),
+    ).rejects.toThrow("refresh-replay-canary");
+    const [afterBump] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, accountId));
+    expect(afterBump.status).toBe("active");
+    expect(afterBump.revision).toBe(account.revision + 1);
+    const rows = await getDb()
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.providerAccountId, accountId));
+    expect(rows.some((row) => row.state === "needs_attention")).toBeTrue();
+    await expect(
+      mintGoogleExecutionAccessToken({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId,
+        accountRevision: afterBump.revision,
+        credential,
+        vault,
+        clientId: "provider-client",
+        clientSecret: "provider-secret",
+      }),
+    ).rejects.toThrow("Google credential refresh lifecycle must be reconciled before token mint");
+    expect(tokenRequests).toBe(1);
   });
 });

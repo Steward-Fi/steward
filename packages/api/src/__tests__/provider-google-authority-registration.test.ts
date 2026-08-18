@@ -141,13 +141,20 @@ describe("Google provider authority registration", () => {
       store.registerOperation(context(1), account.id, {
         operationKey: "google.gmail.messages.send",
         riskClass: "write",
+        secretRouteId: gmailRouteId,
+      }),
+    ).rejects.toMatchObject({ code: "bad_request", status: 400 });
+    await expect(
+      store.registerOperation(context(1), account.id, {
+        operationKey: "google.gmail.messages.send",
+        riskClass: "consequential",
         secretRouteId: wrongRouteId,
       }),
     ).rejects.toMatchObject({ code: "forbidden", status: 403 });
     await expect(
       store.registerOperation(context(1), account.id, {
         operationKey: "google.gmail.messages.send",
-        riskClass: "write",
+        riskClass: "consequential",
         secretRouteId: wrongInjectionRouteId,
       }),
     ).rejects.toMatchObject({ code: "forbidden", status: 403 });
@@ -167,7 +174,7 @@ describe("Google provider authority registration", () => {
 
     const gmail = await store.registerOperation(context(1), account.id, {
       operationKey: "google.gmail.messages.send",
-      riskClass: "write",
+      riskClass: "consequential",
       secretRouteId: gmailRouteId,
     });
     const list = await store.registerOperation(context(2), account.id, {
@@ -177,7 +184,7 @@ describe("Google provider authority registration", () => {
     });
     const insert = await store.registerOperation(context(3), account.id, {
       operationKey: "google.calendar.events.insert",
-      riskClass: "write",
+      riskClass: "consequential",
       secretRouteId: calendarInsertRouteId,
     });
     expect([gmail.operationKey, list.operationKey, insert.operationKey]).toEqual([

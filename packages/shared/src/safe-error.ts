@@ -33,6 +33,47 @@
 /** Last-resort description when every coercion of the thrown value misbehaves. */
 export const UNPRINTABLE_THROWN_VALUE = "policy evaluator threw an unprintable value";
 
+export interface RedactedThrownDiagnostics {
+  errorClass: string;
+  errorCode: string | null;
+}
+
+const SAFE_ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/**
+ * Return bounded, non-secret diagnostics for logs at credential boundaries.
+ * Both `instanceof` and property access are guarded because hostile proxies can
+ * throw from either operation. Arbitrary error names and codes are never
+ * returned: names can contain secrets, while codes are limited to the usual
+ * uppercase machine-code grammar.
+ */
+export function redactedThrownDiagnostics(value: unknown): RedactedThrownDiagnostics {
+  let errorClass: string = typeof value;
+  try {
+    if (value instanceof Error) errorClass = "Error";
+  } catch {
+    errorClass = "object";
+  }
+
+  let errorCode: string | null = null;
+  try {
+    if (
+      value !== null &&
+      (typeof value === "object" || typeof value === "function") &&
+      "code" in value
+    ) {
+      const candidate = (value as { code?: unknown }).code;
+      if (typeof candidate === "string" && SAFE_ERROR_CODE.test(candidate)) {
+        errorCode = candidate;
+      }
+    }
+  } catch {
+    // A hostile proxy/getter is intentionally reduced to the fixed fallback.
+  }
+
+  return { errorClass, errorCode };
+}
+
 /**
  * Try to read a hostile-safe `.message` off a value that claims to be an Error.
  * The property access itself can throw (Proxy get-trap / throwing getter), so it

@@ -1,3 +1,4 @@
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { SecretVault } from "@stwd/vault";
 import {
   type GoogleCredentialLifecycleSweepResult,
@@ -8,7 +9,6 @@ import {
 const DEFAULT_INTERVAL_MS = 60_000;
 const MIN_INTERVAL_MS = 5_000;
 const MAX_INTERVAL_MS = 5 * 60_000;
-
 function configuredInterval(): number {
   const raw = process.env.STEWARD_GOOGLE_LIFECYCLE_SWEEP_INTERVAL_MS;
   if (raw === undefined) return DEFAULT_INTERVAL_MS;
@@ -55,7 +55,13 @@ export function startGoogleCredentialLifecycleScheduler(options?: {
           );
         }
       })
-      .catch((error) => console.error("[provider-google] lifecycle sweep failed:", error))
+      .catch((error) => {
+        const classified = redactedThrownDiagnostics(error);
+        console.error("[provider-google] lifecycle sweep failed", {
+          errorClass: classified.errorClass,
+          errorCode: classified.errorCode,
+        });
+      })
       .finally(() => {
         active = undefined;
         if (rerunRequested && !stopped) {

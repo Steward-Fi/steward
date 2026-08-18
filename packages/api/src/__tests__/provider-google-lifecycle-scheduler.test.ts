@@ -29,3 +29,31 @@ test("Google lifecycle scheduler runs immediately, drains bounded pages, and sto
   expect(calls).toBe(2);
   expect(maxConcurrent).toBe(1);
 });
+
+test("Google lifecycle scheduler redacts failure logs to class/code only", async () => {
+  const canary = "refresh-canary-never-log secret-canary-never-log";
+  const logged: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    logged.push(
+      args.map((value) => (typeof value === "string" ? value : JSON.stringify(value))).join(" "),
+    );
+  };
+  try {
+    const stop = startGoogleCredentialLifecycleScheduler({
+      intervalMs: 60_000,
+      sweep: async () => {
+        const error = Object.assign(new Error(canary), { name: canary, code: canary });
+        throw error;
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await stop();
+  } finally {
+    console.error = originalError;
+  }
+  expect(logged.join("\n")).toContain('"errorClass":"Error"');
+  expect(logged.join("\n")).toContain('"errorCode":null');
+  expect(logged.join("\n")).not.toContain(canary);
+  expect(logged.join("\n")).not.toContain("secret-name-canary");
+});

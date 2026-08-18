@@ -8,6 +8,7 @@ describe("Google governed operations", () => {
       subject: "Board",
       body: "canary-secret-body",
     });
+    expect(b.risk).toBe("consequential");
     expect(b.policyArgs).toEqual({
       toDomainSet: ["example.com", "other.test"],
       hasAttachment: false,
@@ -89,6 +90,7 @@ describe("Google governed operations", () => {
       end: "2026-01-01T01:00:00Z",
       attendees: ["B@Other.test", "a@example.com", "a@example.com"],
     });
+    expect(first.risk).toBe("consequential");
     const reordered = buildGoogleAction("google.calendar.events.insert", {
       summary: "review",
       start: "2026-01-01T00:00:00Z",

@@ -31,7 +31,7 @@ import {
   workspaces,
 } from "@stwd/db";
 import { getRedis, type SpendReservation, settleReservedSpend } from "@stwd/redis";
-import { isValidOAuthBearerToken, strictParseJson } from "@stwd/shared";
+import { isValidOAuthBearerToken, redactedThrownDiagnostics, strictParseJson } from "@stwd/shared";
 import { SecretVault } from "@stwd/vault";
 import type { Context } from "hono";
 import { boundedPositiveIntegerEnv, isProxyDevMode } from "../config";
@@ -1896,7 +1896,11 @@ export async function handleProxy(c: Context): Promise<Response> {
       credential = extractProviderCredentialForHost(target.host, credential);
     }
   } catch (err) {
-    console.error(`[proxy] Failed to decrypt secret ${route.secretId}:`, err);
+    const classified = redactedThrownDiagnostics(err);
+    console.error("[proxy] Failed to resolve provider credential", {
+      errorClass: classified.errorClass,
+      errorCode: classified.errorCode,
+    });
     await recordAudit({
       agentId,
       tenantId,
@@ -1905,12 +1909,12 @@ export async function handleProxy(c: Context): Promise<Response> {
       method,
       statusCode: 500,
       latencyMs: Date.now() - startTime,
-      reason: "credential-decrypt-failed",
+      reason: "credential-resolution-failed",
     });
     await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
     await releaseUnsafeProxyRequest(replayClaim);
     proxySlot.release();
-    return c.json({ ok: false, error: "Failed to decrypt credential" }, 500);
+    return c.json({ ok: false, error: "Failed to resolve credential" }, 500);
   }
 
   if (target.host === "slack.com" && !isSlackBotTokenCredential(credential)) {
