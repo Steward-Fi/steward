@@ -163,6 +163,7 @@ describe("measurement registry", () => {
     );
     expect(registryPayloadDigest(payload)).toHaveLength(64);
     expect(canonicalizeJson({ b: 1, a: 2 })).toBe('{"a":2,"b":1}');
+    expect(canonicalizeJson({ ä: 1, z: 2 })).toBe('{"z":2,"ä":1}');
     expect(
       verifyQuoteAgainstRegistry(
         {
@@ -390,6 +391,66 @@ describe("measurement registry", () => {
         registryFingerprints(registry),
       ).ok,
     ).toBe(false);
+  });
+
+  test("registry structure and canonicalization are bounded and fail closed", () => {
+    const registry = signRegistry(basePayload());
+    for (const payload of [
+      { ...basePayload(), updatedAt: "2026-07-30" },
+      { ...basePayload(), unexpected: true },
+      { ...basePayload(), deployments: [] },
+      {
+        ...basePayload(),
+        deployments: {
+          prod: {
+            ...basePayload().deployments.prod,
+            measurement: { imageDigest: "x".repeat(1025), configHash: "compose" },
+          },
+        },
+      },
+    ]) {
+      expect(
+        verifyRegistrySignatures(
+          { ...registry, payload: payload as never },
+          1,
+          undefined,
+          registryFingerprints(registry),
+        ).ok,
+      ).toBe(false);
+    }
+
+    const tooManyDeployments = Object.fromEntries(
+      Array.from({ length: 1025 }, (_, index) => [
+        `deployment-${index}`,
+        basePayload().deployments.prod,
+      ]),
+    );
+    expect(
+      verifyRegistrySignatures(
+        { ...registry, payload: { ...basePayload(), deployments: tooManyDeployments } },
+        1,
+        undefined,
+        registryFingerprints(registry),
+      ).ok,
+    ).toBe(false);
+
+    expect(() => canonicalizeJson({ value: Number.NaN })).toThrow();
+    expect(() => canonicalizeJson({ value: undefined })).toThrow();
+    const decoratedArray = [1];
+    Object.assign(decoratedArray, { extra: true });
+    expect(() => canonicalizeJson(decoratedArray)).toThrow();
+    const disguisedSparseArray = Array(2);
+    disguisedSparseArray[1] = 1;
+    Object.assign(disguisedSparseArray, { extra: true });
+    expect(() => canonicalizeJson(disguisedSparseArray)).toThrow();
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    expect(() => canonicalizeJson(cyclic)).toThrow();
+
+    const malformedQuote = () =>
+      verifyQuoteAgainstRegistry({ verified: true, measurement: null } as never, registry, "prod");
+    expect(malformedQuote).not.toThrow();
+    expect(malformedQuote().ok).toBe(false);
   });
 });
 
