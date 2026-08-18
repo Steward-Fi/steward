@@ -227,6 +227,8 @@ interface SeedNonceOpts {
   dispatchState?: string;
   intentSuffix?: string;
   action?: GithubCanonicalActionV1 | GenericHttpCanonicalActionV1;
+  requestEnvelope?: Record<string, unknown>;
+  safeSummary?: Record<string, unknown>;
 }
 
 async function seedExecutionReady(opts: SeedNonceOpts = {}) {
@@ -289,7 +291,11 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
   const actionBytes = generic
     ? genericHttpCanonicalActionBytes(action as GenericHttpCanonicalActionV1)
     : canonicalActionBytes(action as GithubCanonicalActionV1);
-  const requestHash = sha256HexPrefixed(`req:${intentId}`);
+  const requestEnvelope = opts.requestEnvelope ?? { schemaVersion: "steward.provider-request.v1" };
+  const requestHash =
+    opts.requestEnvelope === undefined
+      ? sha256HexPrefixed(`req:${intentId}`)
+      : sha256HexPrefixed(jcsStringify(requestEnvelope));
   const policyRevisionHash = sha256HexPrefixed("policy:1");
   const accessDecisionHash = sha256HexPrefixed("access:1");
   const approvalId = `aq_${randomUUID().slice(0, 8)}`;
@@ -397,10 +403,10 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
     canonicalProfile: action.profile,
     canonicalActionBytes: Buffer.from(actionBytes, "utf8"),
     actionDigest,
-    requestEnvelope: { schemaVersion: "steward.provider-request.v1" },
+    requestEnvelope,
     requestHash,
     idempotencyKeyHash: sha256HexPrefixed(`idem:${intentId}`),
-    safeSummary: {},
+    safeSummary: opts.safeSummary ?? {},
     accessDecisionId: randomUUID(),
     accessEffect: "allow",
     accessReasonCode: "ok",
@@ -1223,6 +1229,72 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
+  it.each([
+    ["expired", "succeeded", "adapter-current", "EXEC_TERMINAL_STATE"],
+    ["key-rotated", "succeeded", "adapter-removed", "EXEC_TERMINAL_STATE"],
+    ["expired", "outcome_unknown", "adapter-current", "EXEC_DISPATCH_OUTCOME_UNKNOWN"],
+    ["key-rotated", "outcome_unknown", "adapter-removed", "EXEC_DISPATCH_OUTCOME_UNKNOWN"],
+  ])("P26: %s summon evidence preserves %s replay state", async (_case, dispatchState, keyId, expectedCode) => {
+    const summonDigest = `sha256:${"7".repeat(64)}`;
+    const { intentId } = await seedExecutionReady({
+      status: "consumed",
+      dispatchState,
+      requestEnvelope: {
+        schemaVersion: "steward.provider-request.v1",
+        xSummonAttestationDigest: summonDigest,
+      },
+      safeSummary: {
+        xSummonAttestation: {
+          schemaVersion: "steward.x-summon-attestation.v1",
+          keyId,
+          expiresAt: "2020-01-01T00:00:00.000Z",
+        },
+      },
+    });
+    delete process.env.STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS;
+
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res).toMatchObject({
+      ok: false,
+      code: expectedCode,
+      dispatchState,
+    });
+    expect(captured).toBeNull();
+  });
+
+  it("P26: invalid summon evidence on a fresh execution is denied before claim", async () => {
+    const summonDigest = `sha256:${"8".repeat(64)}`;
+    const { intentId, authorizationId } = await seedExecutionReady({
+      requestEnvelope: {
+        schemaVersion: "steward.provider-request.v1",
+        xSummonAttestationDigest: summonDigest,
+      },
+      safeSummary: {
+        xSummonAttestation: {
+          schemaVersion: "steward.x-summon-attestation.v1",
+          keyId: "adapter-removed",
+          expiresAt: "2020-01-01T00:00:00.000Z",
+        },
+      },
+    });
+    delete process.env.STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS;
+
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res).toMatchObject({
+      ok: false,
+      code: "EXEC_AUTH_SUMMON_ATTESTATION_INVALID",
+    });
+    expect(captured).toBeNull();
+    const [nonce] = await getDb()
+      .select({
+        status: executionAuthorizationNonces.status,
+        dispatchState: executionAuthorizationNonces.dispatchState,
+      })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(nonce).toEqual({ status: "active", dispatchState: "none" });
+  });
+
   it("P48/F06: absent STEWARD_EXECUTION_AUTH_SECRET fails closed at dispatch (503)", async () => {
     const { intentId } = await seedExecutionReady();
     const saved = process.env.STEWARD_EXECUTION_AUTH_SECRET;
@@ -1583,13 +1655,16 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
-  it("P36: a successful governed dispatch DRAINS the proxy response body so the in-flight slot is released (codex P2 slot leak)", async () => {
+  it("P36: an oversized credential-bearing response fails closed and releases the in-flight slot", async () => {
     const { intentId } = await seedExecutionReady();
     forwarderMode = "stream"; // 200 with an open, never-auto-closing body
     const res = await dispatchGovernedExecution(intentId, IDS.tenant);
-    expect(res.ok).toBe(true);
-    // The dispatcher drains the body fire-and-forget (never blocking the outcome
-    // path), so the cancel resolves on a subsequent microtask/tick. Poll briefly.
+    // The response declares a body larger than the bounded credential scanner
+    // permits. The proxy must reject it as an unambiguous upstream failure and
+    // cancel the hostile open stream, which also releases the in-flight slot.
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe("EXEC_DISPATCH_UPSTREAM_ERROR");
+    // Stream cancellation can resolve on a later microtask/tick. Poll briefly.
     for (let i = 0; i < 50 && !streamingBodyCancelled; i++) {
       await new Promise((r) => setTimeout(r, 10));
     }
