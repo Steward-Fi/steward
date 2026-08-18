@@ -12,12 +12,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { verifyToken } from "@stwd/auth";
 import type { AppVariables } from "@stwd/shared";
-import { Hono } from "hono";
+import { type Context, Hono, type Next } from "hono";
 import type { StewardAppContext } from "../context";
+import { capabilitiesPlugin } from "../index";
 import type { CapabilityAuditEvent } from "../issuance";
-import { createManifestRoutes } from "../manifest-routes";
+import { createManifestRoutes, upstreamLeaseIssuanceAvailableInRuntime } from "../manifest-routes";
 import { CapabilityStore } from "../store";
 import { validateCapabilitySpec } from "../validate";
 import { ensureAgent, ensureSecret, ensureTenant, type Harness, makeHarness } from "./_harness";
@@ -41,7 +41,9 @@ const GH_SPEC = {
 function buildCtx(db: unknown): StewardAppContext {
   return {
     db,
-    getRedisClient: () => null,
+    getRedisClient() {
+      return null;
+    },
     async writeAuditEvent(ev: Record<string, unknown>) {
       // Reconstruct the structured event from the core-audit shape for assertion.
       const md = (ev.metadata ?? {}) as Record<string, unknown>;
@@ -111,6 +113,35 @@ describe("manifest routes", () => {
     expect(res.status).toBe(401);
   });
 
+  test("the composed plugin keeps agent lease acknowledgement and revocation out of the operator tenant gate", async () => {
+    let tenantAuthCalls = 0;
+    const app = new Hono<{ Variables: AppVariables }>();
+    const ctx = {
+      ...buildCtx(harness!.db),
+      async requireCapabilityAgentJwt(c: Context<{ Variables: AppVariables }>, next: Next) {
+        c.set("tenantId", tenantId);
+        c.set("agentScope", agentId);
+        await next();
+      },
+      async tenantAuth(c: Context<{ Variables: AppVariables }>) {
+        tenantAuthCalls += 1;
+        return c.json({ ok: false, error: "operator tenant gate reached" }, 418);
+      },
+    } as StewardAppContext;
+    capabilitiesPlugin.register(app, ctx);
+
+    for (const prefix of ["", "/v1"]) {
+      for (const action of ["ack", "revoke"]) {
+        const res = await app.request(
+          `${prefix}/capabilities/manifest/leases/10000000-0000-4000-8000-000000000001/${action}`,
+          { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+        );
+        expect(res.status).toBe(400);
+      }
+    }
+    expect(tenantAuthCalls).toBe(0);
+  });
+
   test("GET /manifest lists the agent's manifest", async () => {
     await seedManifestCapability("gh-comment", "github:app:org");
     await seedManifestCapability("discord-send", "discord:bot-token:soliza");
@@ -126,7 +157,7 @@ describe("manifest routes", () => {
     expect(ids).toEqual(["discord:bot-token:soliza", "github:app:org"]);
   });
 
-  test("token mode: github issue returns a short-lived scoped token", async () => {
+  test("token mode: github refuses issuance without an upstream lease configuration", async () => {
     await seedManifestCapability("gh-comment", "github:app:org");
     const app = buildApp(harness!.db, { agent: true });
 
@@ -135,28 +166,52 @@ describe("manifest routes", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ttlSeconds: 90 }),
     });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      ok: boolean;
-      data: { mode: string; token: string; ttlSeconds: number; scopes: string[] };
-    };
-    expect(body.data.mode).toBe("token");
-    expect(body.data.ttlSeconds).toBe(90);
-    expect(body.data.scopes).toContain("cap:github:app:org");
-    // SEC-033: never the broad `agent` scope on a capability token.
-    expect(body.data.scopes).not.toContain("agent");
+    expect(res.status).toBe(400);
+  });
 
-    const payload = await verifyToken(body.data.token);
-    expect(payload.agentId).toBe(agentId);
-    expect((payload.scopes as string[]) ?? []).toContain("cap:github:app:org");
-    expect((payload.scopes as string[]) ?? []).not.toContain("agent");
+  test("the shipped Workers profile fails lease issuance closed without scheduled recovery", async () => {
+    await seedManifestCapability("gh-comment", "github:app:org");
+    const previousRuntime = process.env.STEWARD_RUNTIME;
+    process.env.STEWARD_RUNTIME = "workers";
+    try {
+      const app = buildApp(harness!.db, { agent: true });
+      const res = await app.request("/capabilities/manifest/github:app:org/issue", {
+        method: "POST",
+      });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({
+        ok: false,
+        error: "upstream credential leases require autonomous recovery",
+      });
+    } finally {
+      if (previousRuntime === undefined) delete process.env.STEWARD_RUNTIME;
+      else process.env.STEWARD_RUNTIME = previousRuntime;
+    }
+  });
 
-    // audit: exactly one issue/allow/token event.
-    expect(
-      auditLog.some(
-        (e) => e.action === "capability.issue" && e.decision === "allow" && e.mode === "token",
-      ),
-    ).toBe(true);
+  test("server issuance cannot configure away timely autonomous recovery", async () => {
+    const previousRuntime = process.env.STEWARD_RUNTIME;
+    const previousSweeper = process.env.STEWARD_UPSTREAM_LEASE_SWEEPER;
+    const previousInterval = process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS;
+    process.env.STEWARD_RUNTIME = "bun";
+    try {
+      process.env.STEWARD_UPSTREAM_LEASE_SWEEPER = "false";
+      delete process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS;
+      expect(upstreamLeaseIssuanceAvailableInRuntime()).toBe(false);
+      process.env.STEWARD_UPSTREAM_LEASE_SWEEPER = "true";
+      process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS = "30000";
+      expect(upstreamLeaseIssuanceAvailableInRuntime()).toBe(false);
+      process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS = "15000";
+      expect(upstreamLeaseIssuanceAvailableInRuntime()).toBe(true);
+    } finally {
+      if (previousRuntime === undefined) delete process.env.STEWARD_RUNTIME;
+      else process.env.STEWARD_RUNTIME = previousRuntime;
+      if (previousSweeper === undefined) delete process.env.STEWARD_UPSTREAM_LEASE_SWEEPER;
+      else process.env.STEWARD_UPSTREAM_LEASE_SWEEPER = previousSweeper;
+      if (previousInterval === undefined)
+        delete process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS;
+      else process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS = previousInterval;
+    }
   });
 
   test("broker mode: discord issue returns a delegation, no token", async () => {
@@ -177,14 +232,13 @@ describe("manifest routes", () => {
     expect(auditLog.some((e) => e.mode === "broker" && e.decision === "allow")).toBe(true);
   });
 
-  test("renew hits the same path (audit action = renew)", async () => {
+  test("renew also refuses an unconfigured upstream lease", async () => {
     await seedManifestCapability("gh-comment", "github:app:org");
     const app = buildApp(harness!.db, { agent: true });
     const res = await app.request("/capabilities/manifest/github:app:org/renew", {
       method: "POST",
     });
-    expect(res.status).toBe(200);
-    expect(auditLog.some((e) => e.action === "capability.renew")).toBe(true);
+    expect(res.status).toBe(400);
   });
 
   test("revocation: revoked grant → 403 not_granted at next issue", async () => {

@@ -19,6 +19,7 @@ import { shouldUsePGLite } from "@stwd/db/pglite";
 import { sql } from "drizzle-orm";
 import { composeApp } from "./compose";
 import { getRedisClient, initRedis, isRedisConfigured, shutdownRedis } from "./middleware/redis";
+import { resolveEnabledPlugins } from "./plugin-config";
 import { assertAuthStoresAreSafe, getAuthStoreSources, initAuthStores } from "./routes/auth";
 import {
   API_VERSION,
@@ -36,6 +37,10 @@ import {
   resolveClientIp,
 } from "./services/runtime-gate";
 import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
+import {
+  getUpstreamCredentialLeaseSchedulerHealth,
+  startUpstreamCredentialLeaseScheduler,
+} from "./services/upstream-credential-lease-scheduler";
 import { configuredVaultStartupLogLine, getConfiguredVault } from "./services/vault-factory";
 import { startWebhookRetryScheduler } from "./services/webhook-retry-scheduler";
 
@@ -55,6 +60,7 @@ validateJwtSecretEnv();
 // plugin is dynamically imported so the lean core graph never statically pulls
 // in the trading stack. top-level await is supported by the Bun entry.
 const app = await composeApp();
+const capabilitiesEnabled = resolveEnabledPlugins().has("capabilities");
 
 // ─── In-memory rate-limit log + shutdown guard ───────────────────────────────
 //
@@ -78,6 +84,7 @@ let cancelRetention: (() => void) | undefined;
 let cancelProviderReservationReconciliation: (() => void) | undefined;
 let cancelTransactionReceiptPolling: (() => void) | undefined;
 let cancelWebhookRetryScheduler: (() => void) | undefined;
+let cancelUpstreamCredentialLeaseScheduler: (() => Promise<void>) | undefined;
 
 function runtimeGate(request: Request, peerAddress: string | null): Response | null {
   const url = new URL(request.url);
@@ -240,6 +247,21 @@ app.get("/ready", async (c) => {
       : {}),
   };
 
+  if (capabilitiesEnabled) {
+    const health = getUpstreamCredentialLeaseSchedulerHealth();
+    checks.upstreamCredentialLeases = {
+      ok: health.ok,
+      detail: {
+        enabled: health.enabled,
+        inFlight: health.inFlight,
+        lastStartedAt: health.lastStartedAt,
+        lastSucceededAt: health.lastSucceededAt,
+        lastFailedAt: health.lastFailedAt,
+      },
+      ...(health.lastError ? { error: health.lastError } : {}),
+    };
+  }
+
   const allOk = Object.values(checks).every((check) => check.ok || check.required === false);
   const verbose = readyProbeAuthorized(c.req.header("x-steward-probe-token"));
   const publicChecks = Object.fromEntries(
@@ -334,6 +356,9 @@ if (migrationsRan) {
   }
   cancelTransactionReceiptPolling = startTransactionReceiptPollingScheduler();
   cancelWebhookRetryScheduler = startWebhookRetryScheduler();
+  if (capabilitiesEnabled) {
+    cancelUpstreamCredentialLeaseScheduler = await startUpstreamCredentialLeaseScheduler();
+  }
 }
 
 // Resolve custody before accepting traffic. A configured backend that cannot
@@ -367,6 +392,7 @@ const shutdown = async (signal: string) => {
   if (cancelProviderReservationReconciliation) cancelProviderReservationReconciliation();
   if (cancelTransactionReceiptPolling) cancelTransactionReceiptPolling();
   if (cancelWebhookRetryScheduler) cancelWebhookRetryScheduler();
+  if (cancelUpstreamCredentialLeaseScheduler) await cancelUpstreamCredentialLeaseScheduler();
   rateLimiter.clear();
 
   try {

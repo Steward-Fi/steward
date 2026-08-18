@@ -27,14 +27,21 @@ describe("assertSecureBaseUrl", () => {
   test("rejects plaintext non-loopback baseUrls", () => {
     expect(() => assertSecureBaseUrl("http://api.steward.example")).toThrow(/must use HTTPS/);
     expect(() => assertSecureBaseUrl("http://192.168.1.10:3200")).toThrow(/must use HTTPS/);
-    expect(() => assertSecureBaseUrl("ftp://api.steward.example")).toThrow(/must use HTTPS/);
+    expect(() => assertSecureBaseUrl("ftp://api.steward.example")).toThrow(/must use HTTP\(S\)/);
     expect(() => assertSecureBaseUrl("not-a-url")).toThrow(/valid absolute URL/);
   });
 
-  test("rejects URL-embedded credentials even over HTTPS", () => {
-    expect(() => assertSecureBaseUrl("https://user:secret@api.example.test")).toThrow(
-      "must not embed credentials",
+  test("rejects credential-bearing and ambiguous base URLs before any opt-out", () => {
+    expect(() => assertSecureBaseUrl("https://user:secret@api.steward.example")).toThrow(
+      /must not embed credentials/,
     );
+    expect(() => assertSecureBaseUrl("http://user:secret@localhost:3200", true)).toThrow(
+      /must not embed credentials/,
+    );
+    expect(() => assertSecureBaseUrl("https://api.steward.example?token=secret")).toThrow(
+      /query or fragment/,
+    );
+    expect(() => assertSecureBaseUrl("file:///tmp/steward", true)).toThrow(/must use HTTP\(S\)/);
   });
 
   test("allowInsecureBaseUrl opts out but warns loudly", () => {
@@ -49,7 +56,7 @@ describe("assertSecureBaseUrl", () => {
   });
 
   test("the insecure opt-out permits HTTP only, never arbitrary URL schemes", () => {
-    expect(() => assertSecureBaseUrl("ftp://api.steward.example", true)).toThrow(/HTTPS/);
+    expect(() => assertSecureBaseUrl("ftp://api.steward.example", true)).toThrow(/HTTP\(S\)/);
   });
 });
 

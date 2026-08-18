@@ -6,6 +6,11 @@ account_id = "REPLACE_ME"
 workers_dev = true
 minify = true
 
+[triggers]
+# Cloudflare's minimum cron cadence is one minute. This recovers pre-existing
+# leases; request-time issuance performs tenant recovery before creating a token.
+crons = ["* * * * *"]
+
 [observability]
 enabled = true
 
