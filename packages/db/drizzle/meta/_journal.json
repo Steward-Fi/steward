@@ -519,6 +519,13 @@
       "when": 1785177600000,
       "tag": "0093_upstream_credential_leases",
       "breakpoints": true
+    },
+    {
+      "idx": 94,
+      "version": "7",
+      "when": 1785264000000,
+      "tag": "0094_operator_transfer_reservations",
+      "breakpoints": true
     }
   ]
 }
