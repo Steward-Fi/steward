@@ -77,9 +77,27 @@ function unsafeTelemetryArguments(source: ts.SourceFile): string[] {
       }
       for (const argument of node.arguments) {
         const text = argument.getText(source);
-        if (text.includes("redactedThrownDiagnostics(")) continue;
         const referencesCaughtThrowable = (candidate: ts.Node): boolean => {
-          if (ts.isIdentifier(candidate) && caughtThrowables.has(candidate.text)) return true;
+          if (
+            ts.isCallExpression(candidate) &&
+            ts.isIdentifier(candidate.expression) &&
+            candidate.expression.text === "redactedThrownDiagnostics"
+          ) {
+            return false;
+          }
+          if (ts.isIdentifier(candidate) && caughtThrowables.has(candidate.text)) {
+            const parent = candidate.parent;
+            // Property names such as `{ error: "fixed" }` and `value.error`
+            // are labels, not references to a catch binding with the same name.
+            if (
+              (ts.isPropertyAssignment(parent) && parent.name === candidate) ||
+              (ts.isPropertyAccessExpression(parent) && parent.name === candidate) ||
+              (ts.isMethodDeclaration(parent) && parent.name === candidate)
+            ) {
+              return false;
+            }
+            return true;
+          }
           return candidate.getChildren(source).some(referencesCaughtThrowable);
         };
         if (
@@ -160,6 +178,21 @@ describe("runtime error logging", () => {
         `,
       ),
     ).toEqual([]);
+  });
+
+  test("does not let one sanitizer call mask a sibling raw throwable", () => {
+    expect(
+      failuresForSnippet(`
+        try {
+          doThing();
+        } catch (err) {
+          console.error({ safe: redactedThrownDiagnostics(err), raw: err });
+          writeAuditEvent({
+            metadata: { diagnostics: redactedThrownDiagnostics(err), message: err.message },
+          });
+        }
+      `),
+    ).toHaveLength(2);
   });
 
   test("never passes raw throwables, messages, or stacks to console sinks", async () => {
