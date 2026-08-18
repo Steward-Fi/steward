@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  __buildNeonTransactionPoolConfigForTests,
   createDbForRequest,
   createNeonTransactionDbForRequest,
   getDatabaseDriver,
@@ -62,10 +63,57 @@ describe("transaction-capable Workers database driver", () => {
     ).toThrow("RLS_TRANSACTION_DRIVER_REQUIRED");
   });
 
+  test("uses Worker bindings as the production TLS authority", () => {
+    // Cloudflare's checked-in bindings do not define NODE_ENV. The transaction
+    // transport must therefore default to production enforcement, not skip it.
+    expect(() =>
+      createNeonTransactionDbForRequest({
+        DATABASE_DRIVER: "neon-websocket",
+        DATABASE_URL: "postgresql://db.example.test/steward",
+      }),
+    ).toThrow("DATABASE_URL must include sslmode=verify-full");
+
+    expect(() =>
+      createNeonTransactionDbForRequest({
+        DATABASE_DRIVER: "neon-websocket",
+        DATABASE_URL: "postgresql://db.example.test/steward",
+        NODE_ENV: "production",
+      }),
+    ).toThrow("DATABASE_URL must include sslmode=verify-full");
+
+    expect(() =>
+      createNeonTransactionDbForRequest({
+        DATABASE_DRIVER: "neon-websocket",
+        DATABASE_URL: "postgresql://db.example.test/steward?sslmode=require",
+        NODE_ENV: "production",
+      }),
+    ).toThrow("does not authenticate the database server");
+  });
+
+  test("bounds connection, query, lock, statement, and idle transaction phases", () => {
+    const config = __buildNeonTransactionPoolConfigForTests({
+      DATABASE_DRIVER: "neon-websocket",
+      DATABASE_URL: "postgresql://db.example.test/steward?sslmode=verify-full",
+      NODE_ENV: "production",
+    });
+    expect(config.max).toBe(1);
+    expect(config.connectionTimeoutMillis).toBe(10_000);
+    expect(config.idleTimeoutMillis).toBe(30_000);
+    expect(config.query_timeout).toBe(30_000);
+    expect(config.statement_timeout).toBe(29_900);
+    expect(config.lock_timeout).toBe(29_900);
+    expect(config.idle_in_transaction_session_timeout).toBe(29_900);
+    const options = new URL(config.connectionString).searchParams.get("options") ?? "";
+    expect(options).toContain("statement_timeout=29900");
+    expect(options).toContain("lock_timeout=29900");
+    expect(options).toContain("idle_in_transaction_session_timeout=29900");
+  });
+
   test("returns an explicitly closeable request handle with idempotent cleanup", async () => {
     const handle = createNeonTransactionDbForRequest({
       DATABASE_DRIVER: "neon-websocket",
       DATABASE_URL: "postgresql://example.invalid/steward",
+      NODE_ENV: "test",
     });
     expect(handle.driver).toBe("neon-websocket");
     expect(typeof handle.db.transaction).toBe("function");

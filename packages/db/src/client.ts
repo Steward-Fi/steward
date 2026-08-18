@@ -71,11 +71,20 @@ export function getDatabaseUrl(): string {
  * `require` is accepted only with STEWARD_ALLOW_UNVERIFIED_DB_TLS=true, which
  * deliberately acknowledges encryption without peer authentication.
  */
-export function assertDatabaseUrlTls(connectionString: string): void {
-  if (process.env.NODE_ENV !== "production") return;
+type DatabaseSecurityEnv = {
+  NODE_ENV?: string;
+  STEWARD_ALLOW_INSECURE_DB?: string;
+  STEWARD_ALLOW_UNVERIFIED_DB_TLS?: string;
+};
 
-  const allowInsecure = process.env.STEWARD_ALLOW_INSECURE_DB === "true";
-  const allowUnverifiedTls = process.env.STEWARD_ALLOW_UNVERIFIED_DB_TLS === "true";
+export function assertDatabaseUrlTls(
+  connectionString: string,
+  securityEnv: DatabaseSecurityEnv = process.env,
+): void {
+  if (securityEnv.NODE_ENV !== "production") return;
+
+  const allowInsecure = securityEnv.STEWARD_ALLOW_INSECURE_DB === "true";
+  const allowUnverifiedTls = securityEnv.STEWARD_ALLOW_UNVERIFIED_DB_TLS === "true";
   let parsed: URL;
   try {
     parsed = new URL(connectionString);
@@ -320,21 +329,29 @@ export interface NeonTransactionDbHandle {
   close(): Promise<void>;
 }
 
-/**
- * Create one request-scoped, transaction-capable Neon database handle.
- *
- * Unlike neon-http, the WebSocket transport pins an interactive transaction
- * to one checked-out connection, so `withTenantRlsTransaction()` can safely
- * use transaction-local `set_config`. The caller MUST await `close()` after
- * every request (normally from a `finally` block before returning the
- * response). This handle is deliberately excluded from the global singleton:
- * a Worker isolate must not retain request-owned sockets after the request's
- * lifetime.
- */
-export function createNeonTransactionDbForRequest(env: {
+const NEON_TRANSACTION_DEADLINE_MS = 30_000;
+const NEON_TRANSACTION_CONNECT_TIMEOUT_MS = 10_000;
+
+interface NeonTransactionRequestEnv extends DatabaseSecurityEnv {
   DATABASE_URL?: string;
   DATABASE_DRIVER?: string;
-}): NeonTransactionDbHandle {
+}
+
+interface NeonTransactionPoolConfig {
+  connectionString: string;
+  max: 1;
+  connectionTimeoutMillis: number;
+  idleTimeoutMillis: number;
+  query_timeout: number;
+  statement_timeout: number;
+  lock_timeout: number;
+  idle_in_transaction_session_timeout: number;
+}
+
+/** @internal Exported only so security invariants can inspect the driver config without I/O. */
+export function __buildNeonTransactionPoolConfigForTests(
+  env: NeonTransactionRequestEnv,
+): NeonTransactionPoolConfig {
   if (env.DATABASE_DRIVER?.trim().toLowerCase() !== "neon-websocket") {
     throw new Error(
       "RLS_TRANSACTION_DRIVER_REQUIRED: set DATABASE_DRIVER=neon-websocket for transaction-capable Workers database access",
@@ -346,16 +363,51 @@ export function createNeonTransactionDbForRequest(env: {
       "DATABASE_URL binding is required for transaction-capable Workers database access",
     );
   }
-  assertDatabaseUrlTls(connectionString);
+
+  // Worker bindings, not a Node compatibility shim's process.env, are the
+  // deployment authority. Cloudflare does not synthesize NODE_ENV, so fail
+  // secure: a request-owned production transport is the default unless the
+  // caller explicitly declares a non-production environment.
+  assertDatabaseUrlTls(connectionString, {
+    ...env,
+    NODE_ENV: env.NODE_ENV ?? "production",
+  });
+  const serverMs = NEON_TRANSACTION_DEADLINE_MS - DATABASE_DEADLINE_CLEANUP_GRACE_MS;
+  return {
+    connectionString: withServerDeadlineInUrl(connectionString, NEON_TRANSACTION_DEADLINE_MS),
+    max: 1,
+    connectionTimeoutMillis: NEON_TRANSACTION_CONNECT_TIMEOUT_MS,
+    idleTimeoutMillis: NEON_TRANSACTION_DEADLINE_MS,
+    query_timeout: NEON_TRANSACTION_DEADLINE_MS,
+    statement_timeout: serverMs,
+    lock_timeout: serverMs,
+    idle_in_transaction_session_timeout: serverMs,
+  };
+}
+
+/**
+ * Create one request-scoped, transaction-capable Neon database handle.
+ *
+ * Unlike neon-http, the WebSocket transport pins an interactive transaction
+ * to one checked-out connection, so `withTenantRlsTransaction()` can safely
+ * use transaction-local `set_config`. The caller MUST await `close()` after
+ * every request (normally from a `finally` block before returning the
+ * response). This handle is deliberately excluded from the global singleton:
+ * a Worker isolate must not retain request-owned sockets after the request's
+ * lifetime.
+ */
+export function createNeonTransactionDbForRequest(
+  env: NeonTransactionRequestEnv,
+): NeonTransactionDbHandle {
+  const poolConfig = __buildNeonTransactionPoolConfigForTests(env);
   const { Pool } = require("@neondatabase/serverless") as {
-    Pool: new (config: {
-      connectionString: string;
-      max: number;
-    }) => {
+    Pool: new (
+      config: NeonTransactionPoolConfig,
+    ) => {
       end(): Promise<void>;
     };
   };
-  const pool = new Pool({ connectionString, max: 1 });
+  const pool = new Pool(poolConfig);
   const db = drizzleNeonWebSocket(pool as never, { schema: FULL_SCHEMA });
   let closePromise: Promise<void> | undefined;
   return {
