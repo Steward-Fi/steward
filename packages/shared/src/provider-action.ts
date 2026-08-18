@@ -725,6 +725,10 @@ export interface ProviderRequestEnvelopeV1 {
    * provider request includes it.
    */
   policyInputDigest?: string;
+  /** Digest of an authenticated X summon provenance record. The signed record
+   * is stored separately in the immutable safe summary; this digest makes it a
+   * load-bearing part of requestHash without putting raw post content here. */
+  xSummonAttestationDigest?: string;
   idempotencyKeyHash: string;
   requestedAt: string;
   expiresAt: string;
@@ -793,6 +797,8 @@ function toEnvelopeObject(e: ProviderRequestEnvelopeV1): Record<string, unknown>
   };
   // Preserve the byte-for-byte hash of legacy envelopes that predate #229.
   if (e.policyInputDigest !== undefined) envelope.policyInputDigest = e.policyInputDigest;
+  if (e.xSummonAttestationDigest !== undefined)
+    envelope.xSummonAttestationDigest = e.xSummonAttestationDigest;
   return envelope;
 }
 
