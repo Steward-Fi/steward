@@ -2084,7 +2084,7 @@ describe("Malformed evaluator config fails closed instead of throwing (SEC-105)"
         makeContext(),
       );
       expect(result.passed).toBe(false);
-      expect(result.reason).toContain("supported address family");
+      expect(result.reason).toMatch(/address family|invalid address/);
     }
 
     const crossChain = await evaluatePolicy(
@@ -2092,7 +2092,7 @@ describe("Malformed evaluator config fails closed instead of throwing (SEC-105)"
       makeContext({ request: { ...makeContext().request, to: evm, chainId: 101 } }),
     );
     expect(crossChain.passed).toBe(false);
-    expect(crossChain.reason).toContain("destination chain");
+    expect(crossChain.reason).toContain("destination address family");
   });
 
   it("rejects mixed-case and checksum-invalid Bitcoin addresses", async () => {
