@@ -119,7 +119,7 @@ describe("WebhookDispatcher SSRF guard for IP-literal URLs", () => {
     }
   });
 
-  it("does not over-block adjacent public IPv6 prefixes", async () => {
+  it("rejects adjacent special-use space without over-blocking public IPv6", async () => {
     const dispatcher = new WebhookDispatcher({
       maxRetries: 0,
       retryDelayMs: 1,
@@ -128,15 +128,40 @@ describe("WebhookDispatcher SSRF guard for IP-literal URLs", () => {
       allowInsecureHttp: true,
     });
 
+    for (const url of ["http://[100:1::]/hook", "http://[2001:2:1::]/hook"]) {
+      const result = await dispatcher.dispatch(makeEvent(), { url, secret: SECRET });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("must resolve to a public address");
+    }
+
+    const publicResult = await dispatcher.dispatch(makeEvent(), {
+      url: "http://[2001:4860:4860::8888]/hook",
+      secret: SECRET,
+    });
+    expect(publicResult.success).toBe(false);
+    expect(publicResult.error ?? "").not.toContain("must resolve to a public address");
+  });
+
+  it("rejects remaining special-purpose and unallocated literals", async () => {
+    const dispatcher = new WebhookDispatcher({
+      maxRetries: 0,
+      retryDelayMs: 1,
+      timeoutMs: 500,
+      allowPrivateNetwork: false,
+      allowInsecureHttp: true,
+    });
     for (const url of [
-      "http://[100:1::]/hook", // outside 100::/64
-      "http://[2001:2:1::]/hook", // outside 2001:2::/48
-      "http://[::ffff:1:7f00:1]/hook", // words[5] !== 0: not the translated prefix
+      "http://192.31.196.1/hook",
+      "http://192.52.193.1/hook",
+      "http://192.175.48.1/hook",
+      "http://[2001:100::1]/hook",
+      "http://[2620:4f:8000::1]/hook",
+      "http://[3fff::1]/hook",
+      "http://[4000::1]/hook",
     ]) {
       const result = await dispatcher.dispatch(makeEvent(), { url, secret: SECRET });
       expect(result.success).toBe(false);
-      // Rejected by the network failure path (no route), NOT by the SSRF guard.
-      expect(result.error ?? "").not.toContain("must resolve to a public address");
+      expect(result.error).toContain("must resolve to a public address");
     }
   });
 

@@ -92,8 +92,11 @@ function isNonPublicIpv4(address: string): boolean {
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) ||
     (a === 100 && b >= 64 && b <= 127) ||
-    (a === 192 && b === 0) ||
+    (a === 192 && b === 0 && (octets[2] === 0 || octets[2] === 2)) ||
+    (a === 192 && b === 31 && octets[2] === 196) ||
+    (a === 192 && b === 52 && octets[2] === 193) ||
     (a === 192 && b === 88 && octets[2] === 99) ||
+    (a === 192 && b === 175 && octets[2] === 48) ||
     (a === 198 && (b === 18 || b === 19)) ||
     (a === 198 && b === 51 && octets[2] === 100) ||
     (a === 203 && b === 0 && octets[2] === 113) ||
@@ -193,7 +196,11 @@ function isNonPublicIpv6(address: string): boolean {
   if (ipv4Mapped) return isNonPublicIpv4(ipv4Mapped);
   const ipv4Embedded = embeddedIpv4FromIpv6(normalized);
   if (ipv4Embedded) return isNonPublicIpv4(ipv4Embedded);
-  if (words?.[0] === 0x2001 && (words[1] === 0 || words[1] === 0xdb8)) return true;
+  // Public IPv4 embeddings return above. Other literals must be ordinary
+  // global-unicast addresses; reserved/local/unallocated space is fail-closed.
+  if (words?.[0] !== undefined && (words[0] & 0xe000) !== 0x2000) return true;
+  if (words?.[0] === 0x2001 && words[1] <= 0x01ff) return true;
+  if (words?.[0] === 0x2001 && words[1] === 0xdb8) return true;
   // 2001:2::/48 benchmarking (RFC 5180) — documentation/special-use, never a
   // public webhook target (SEC-178).
   if (words?.[0] === 0x2001 && words[1] === 0x0002 && words[2] === 0) return true;
@@ -201,6 +208,8 @@ function isNonPublicIpv6(address: string): boolean {
   if (words?.[0] === 0x0100 && words[1] === 0 && words[2] === 0 && words[3] === 0) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfe80) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfec0) return true;
+  if (words?.[0] === 0x2620 && words[1] === 0x004f && words[2] === 0x8000) return true;
+  if (words?.[0] === 0x3fff && (words[1] & 0xf000) === 0) return true;
   return (
     normalized === "::" ||
     normalized === "::1" ||
@@ -243,10 +252,12 @@ function assertPublicWebhookHostname(hostname: string): void {
 }
 
 function assertPublicAddress(address: string, family?: number): void {
+  const detectedFamily = isIP(address);
   if (
-    (family === 4 && isNonPublicIpv4(address)) ||
-    (family === 6 && isNonPublicIpv6(address)) ||
-    (family !== 4 && family !== 6 && (isNonPublicIpv4(address) || isNonPublicIpv6(address)))
+    detectedFamily === 0 ||
+    (family !== undefined && family !== detectedFamily) ||
+    (detectedFamily === 4 && isNonPublicIpv4(address)) ||
+    (detectedFamily === 6 && isNonPublicIpv6(address))
   ) {
     throw new WebhookValidationError("Webhook host must resolve to a public address");
   }
