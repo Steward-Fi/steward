@@ -75,6 +75,7 @@ import {
   sha256HexPrefixed,
   UnregisteredProfileError,
   validateGenericHttpDescriptor,
+  verifyXSummonAttestation,
   type XCanonicalActionV1,
 } from "@stwd/shared";
 
@@ -385,9 +386,12 @@ function asRecord(value: unknown): Record<string, unknown> {
  * would let callers bypass summoned-only reply policy. Until an authenticated X
  * lookup supplies that fact, summoned-only fails closed.
  */
-function xPolicySignalsFrom(args: Record<string, unknown>): {
+function xPolicySignalsFrom(
+  args: Record<string, unknown>,
+  authenticatedSummoned = false,
+): {
   isReply?: boolean;
-  summoned?: false;
+  summoned?: boolean;
   hasUrl?: boolean;
   textCodePointLength?: number;
 } {
@@ -396,7 +400,11 @@ function xPolicySignalsFrom(args: Record<string, unknown>): {
     // A negative assertion cannot grant authority, so it is safe to preserve
     // the specific not-summoned deny. A positive assertion remains unavailable
     // until independently attested.
-    ...(args.summoned === false ? { summoned: false as const } : {}),
+    ...(authenticatedSummoned
+      ? { summoned: true as const }
+      : args.summoned === false
+        ? { summoned: false as const }
+        : {}),
     ...(typeof args.hasUrl === "boolean" ? { hasUrl: args.hasUrl } : {}),
     ...(typeof args.textCodePointLength === "number" && Number.isInteger(args.textCodePointLength)
       ? { textCodePointLength: args.textCodePointLength }
@@ -618,6 +626,9 @@ export interface CreateProviderActionInput {
   nonce: string;
   /** Audit provenance (never authority). */
   requestId?: string | null;
+  /** Authenticated adapter provenance. Caller transport is untrusted; the
+   * service verifies its Ed25519 signature and exact scope before use. */
+  summonAttestation?: unknown;
 }
 
 // ─── The in-process executor stub (PR2 only — NEVER real dispatch) ─────────────
@@ -874,6 +885,51 @@ class ProviderActionService {
       );
     }
 
+    // Caller-supplied `summoned: true` is never authority. Only a configured
+    // provider adapter's signed attestation can promote the signal. Freeze the
+    // verified record for resume/dispatch revalidation and bind its digest into
+    // the immutable request envelope.
+    let authenticatedXSummoned = false;
+    let xSummonAttestationDigest: string | undefined;
+    if (input.operationKey === "x.tweet.create") {
+      build = {
+        ...build,
+        safeSummary: { ...build.safeSummary, summoned: false },
+      } as ConcreteProviderActionBuild;
+    }
+    if (input.operationKey === "x.tweet.create" && input.summonAttestation !== undefined) {
+      const canonicalBody = asRecord(build.action.canonicalBody);
+      const reply = canonicalBody.reply === undefined ? undefined : asRecord(canonicalBody.reply);
+      const sourcePostId = reply?.in_reply_to_tweet_id;
+      if (typeof sourcePostId === "string") {
+        const verification = verifyXSummonAttestation(
+          input.summonAttestation,
+          {
+            tenantId,
+            workspaceId: input.workspaceId,
+            actorAgentId,
+            providerAccountId: account.id,
+            sourcePostId,
+            idempotencyKeyHash: input.idempotencyKeyHash,
+          },
+          process.env.STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS,
+          providerPolicyClockForTests?.() ?? new Date(),
+        );
+        if (verification.ok) {
+          authenticatedXSummoned = true;
+          xSummonAttestationDigest = verification.digest;
+          build = {
+            ...build,
+            safeSummary: {
+              ...build.safeSummary,
+              summoned: true,
+              xSummonAttestation: verification.attestation,
+            },
+          } as ConcreteProviderActionBuild;
+        }
+      }
+    }
+
     // Compute the canonical action digest + request envelope/hash up-front (they
     // are pure and needed for the binding + idempotency conflict check).
     const actionDigest = sha256HexPrefixed(jcsStringify(this.canonicalActionObject(build.action)));
@@ -907,12 +963,14 @@ class ProviderActionService {
       // Legacy envelopes have no such member and retain the historical
       // action-only replay behavior; this is a bounded compatibility path for
       // pre-rollout rows, never used by a newly-created binding.
-      const persistedPolicyInputDigest = (priorBinding.requestEnvelope as Record<string, unknown>)
-        .policyInputDigest;
+      const persistedEnvelope = priorBinding.requestEnvelope as Record<string, unknown>;
+      const persistedPolicyInputDigest = persistedEnvelope.policyInputDigest;
+      const persistedXSummonAttestationDigest = persistedEnvelope.xSummonAttestationDigest;
       if (
         priorBinding.actionDigest !== actionDigest ||
         (persistedPolicyInputDigest !== undefined &&
-          persistedPolicyInputDigest !== policyInputDigest)
+          persistedPolicyInputDigest !== policyInputDigest) ||
+        persistedXSummonAttestationDigest !== xSummonAttestationDigest
       ) {
         return {
           kind: "replay_conflict",
@@ -1030,6 +1088,7 @@ class ProviderActionService {
           operationRevision: txOperation.revision,
           actionDigest,
           policyInputDigest,
+          xSummonAttestationDigest,
         });
         requestHash = sha256HexPrefixed(jcsStringify(this.envelopeObject(envelope)));
 
@@ -1062,6 +1121,7 @@ class ProviderActionService {
                 // scope resolves to "" and the composer fails closed if a rule
                 // aggregates over grant without one.
                 grantId: access.doc.matchedGrantIds[0] ?? null,
+                authenticatedXSummoned,
               })
             : null;
         cumulativeSpendReservations = policy?.cumulativeSpendReservations ?? [];
@@ -1222,6 +1282,7 @@ class ProviderActionService {
             operationKey: input.operationKey,
             actionDigest,
             requestHash,
+            xSummonAttestationDigest: xSummonAttestationDigest ?? null,
             accessDecisionId,
             accessDecisionHash,
             accessEffect: effects.access,
@@ -2209,6 +2270,8 @@ class ProviderActionService {
     /** Append-only reservation generation. Stable identities derived from this
      * make an approval retry idempotent across the Redis-before-PG crash gap. */
     reservationGeneration?: number;
+    /** Verified independently at this evaluation boundary. */
+    authenticatedXSummoned?: boolean;
   }): Promise<{
     doc: PersistedPolicyDecisionV1;
     evaluation: ProviderPolicyEvaluationV1;
@@ -2394,7 +2457,7 @@ class ProviderActionService {
         // `summoned` assertion is intentionally not promoted to this trusted
         // channel; a summoned-only rule denies until an authenticated adapter
         // attestation is available.
-        x: xPolicySignalsFrom(build.policyArgs),
+        x: xPolicySignalsFrom(build.policyArgs, args.authenticatedXSummoned === true),
       };
 
       const ruleEvaluation = composeProviderActionPolicyDecision(rules, context);
@@ -2513,6 +2576,7 @@ class ProviderActionService {
     safeSummary: Record<string, unknown>;
     matchedGrantIds: string[];
     priorGeneration: number;
+    idempotencyKeyHash: string;
   }): Promise<
     | {
         ok: true;
@@ -2547,6 +2611,32 @@ class ProviderActionService {
       return { ok: false, code: "APPROVAL_ACTION_INTEGRITY_FAILED", httpStatus: 409 };
     }
 
+    // Re-verify the frozen provider attestation at safe-resume. A signature
+    // that expired during human approval, a rotated/removed adapter key, or any
+    // cross-scope substitution removes the positive signal and makes
+    // summoned-only policy fail closed.
+    let authenticatedXSummoned = false;
+    if (args.operation.operationKey === "x.tweet.create") {
+      const canonicalBody = asRecord(build.action.canonicalBody);
+      const reply = canonicalBody.reply === undefined ? undefined : asRecord(canonicalBody.reply);
+      const sourcePostId = reply?.in_reply_to_tweet_id;
+      if (typeof sourcePostId === "string" && args.safeSummary.xSummonAttestation !== undefined) {
+        authenticatedXSummoned = verifyXSummonAttestation(
+          args.safeSummary.xSummonAttestation,
+          {
+            tenantId: args.tenantId,
+            workspaceId: args.workspaceId,
+            actorAgentId: args.actorAgentId,
+            providerAccountId: args.operation.providerAccountId,
+            sourcePostId,
+            idempotencyKeyHash: args.idempotencyKeyHash,
+          },
+          process.env.STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS,
+          providerPolicyClockForTests?.() ?? new Date(),
+        ).ok;
+      }
+    }
+
     const policy = await this.evaluatePolicy({
       db: args.db,
       tenantId: args.tenantId,
@@ -2559,6 +2649,7 @@ class ProviderActionService {
       actionDigest: args.actionDigest,
       grantId: args.matchedGrantIds[0] ?? null,
       reservationGeneration: generation,
+      authenticatedXSummoned,
     });
     if (policy.doc.effect === "hard_deny") {
       await this.releasePolicyReservationHandles(
@@ -2943,6 +3034,7 @@ class ProviderActionService {
       operationRevision: number;
       actionDigest: string;
       policyInputDigest: string;
+      xSummonAttestationDigest?: string;
     },
   ): ProviderRequestEnvelopeV1 {
     return {
@@ -2955,6 +3047,9 @@ class ProviderActionService {
       operationRevision: ids.operationRevision,
       actionDigest: ids.actionDigest,
       policyInputDigest: ids.policyInputDigest,
+      ...(ids.xSummonAttestationDigest !== undefined
+        ? { xSummonAttestationDigest: ids.xSummonAttestationDigest }
+        : {}),
       idempotencyKeyHash: input.idempotencyKeyHash,
       requestedAt: input.requestedAt,
       expiresAt: input.expiresAt,
@@ -2978,6 +3073,8 @@ class ProviderActionService {
       nonce: e.nonce,
     };
     if (e.policyInputDigest !== undefined) envelope.policyInputDigest = e.policyInputDigest;
+    if (e.xSummonAttestationDigest !== undefined)
+      envelope.xSummonAttestationDigest = e.xSummonAttestationDigest;
     return envelope;
   }
 

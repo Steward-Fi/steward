@@ -43,6 +43,7 @@ import {
   setDefaultTimeout,
   test,
 } from "bun:test";
+import { generateKeyPairSync, sign } from "node:crypto";
 import {
   agents,
   approvalQueue,
@@ -70,11 +71,16 @@ import {
   computeXActionDigest,
   jcsStringify,
   sha256HexPrefixed,
+  type XSummonAttestationV1,
   xCanonicalActionBytes,
+  xSummonAttestationSignatureInput,
 } from "@stwd/shared";
 import { eq } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
-import { providerActionService } from "../services/provider-action-service";
+import {
+  __setProviderPolicyClockForTests,
+  providerActionService,
+} from "../services/provider-action-service";
 
 setDefaultTimeout(120_000);
 
@@ -98,6 +104,11 @@ const P = {
 
 const OP_TWEET = "x.tweet.create";
 const FUTURE = new Date(Date.now() + 365 * 24 * 3600_000);
+const SUMMON_KEY_ID = "permissioned-x-test";
+const summonKeyPair = generateKeyPairSync("ed25519");
+const summonPublicRaw = summonKeyPair.publicKey
+  .export({ format: "der", type: "spki" })
+  .subarray(-32);
 
 function principal(): ProviderPrincipalV1 {
   return {
@@ -261,7 +272,32 @@ function idemHash(seedStr: string): string {
   return `sha256:${Buffer.from(seedStr.padEnd(32, "0")).toString("hex").slice(0, 64)}`;
 }
 
-async function propose(args: unknown, seedStr: string) {
+function signedSummonAttestation(seedStr: string, sourcePostId: string) {
+  const now = new Date();
+  const a: XSummonAttestationV1 = {
+    schemaVersion: "steward.x-summon-attestation.v1",
+    keyId: SUMMON_KEY_ID,
+    tenantId: P.TENANT,
+    workspaceId: P.WORKSPACE,
+    actorAgentId: P.AGENT,
+    providerAccountId: P.ACCOUNT,
+    operationKey: "x.tweet.create",
+    sourcePostId,
+    idempotencyKeyHash: idemHash(seedStr),
+    summoned: true,
+    attestedAt: new Date(now.getTime() - 1_000).toISOString(),
+    expiresAt: new Date(now.getTime() + 299_000).toISOString(),
+    signature: "A".repeat(86),
+  };
+  a.signature = sign(
+    null,
+    Buffer.from(xSummonAttestationSignatureInput(a), "utf8"),
+    summonKeyPair.privateKey,
+  ).toString("base64url");
+  return a;
+}
+
+async function propose(args: unknown, seedStr: string, summonAttestation?: unknown) {
   const now = new Date();
   return providerActionService.createProviderAction({
     principal: principal(),
@@ -274,6 +310,7 @@ async function propose(args: unknown, seedStr: string) {
     expiresAt: new Date(now.getTime() + 300_000).toISOString(),
     nonce: seedStr.padEnd(32, "N").slice(0, 32),
     requestId: null,
+    summonAttestation,
   });
 }
 
@@ -289,12 +326,16 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY ||= "0".repeat(64);
+    process.env.STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS = JSON.stringify({
+      [SUMMON_KEY_ID]: summonPublicRaw.toString("base64url"),
+    });
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => client.close());
   });
   afterAll(async () => {
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
+    delete process.env.STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS;
   });
   beforeEach(async () => {
     await wipe();
@@ -368,6 +409,121 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
     expect(out.code).toBe("POLICY_INPUT_UNAVAILABLE");
     const b = await bindingRow(out.intentId);
     expect(b.status).not.toBe("stub_succeeded");
+  });
+
+  test("replyPolicy summoned-only accepts exact authenticated adapter provenance", async () => {
+    await seed([
+      allowRule("11111111-1111-4111-8111-1111111111b2", { replyPolicy: { mode: "summoned-only" } }),
+    ]);
+    const seedStr = "summon-attested";
+    const sourcePostId = "1750000000000000000";
+    const attestation = signedSummonAttestation(seedStr, sourcePostId);
+    const out = await propose(
+      { text: "thanks for the mention!", replyToTweetId: sourcePostId, summoned: true },
+      seedStr,
+      attestation,
+    );
+    expect(out.kind).toBe("allowed");
+    if (out.kind !== "allowed") throw new Error(`got ${out.kind}`);
+    const b = await bindingRow(out.intentId);
+    expect(b.requestEnvelope.xSummonAttestationDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(b.safeSummary.xSummonAttestation).toEqual(attestation);
+    expect(JSON.stringify(b)).not.toContain("thanks for the mention!");
+    const auditRows = await getDb()
+      .select()
+      .from(providerActionAuditOutbox)
+      .where(eq(providerActionAuditOutbox.intentId, out.intentId));
+    expect(
+      auditRows.some(
+        (row) =>
+          (row.metadata as Record<string, unknown>).xSummonAttestationDigest ===
+          b.requestEnvelope.xSummonAttestationDigest,
+      ),
+    ).toBe(true);
+
+    const [operation] = await getDb()
+      .select()
+      .from(providerOperations)
+      .where(eq(providerOperations.id, P.OP_URL_DENY));
+    __setProviderPolicyClockForTests(() => new Date(Date.parse(attestation.expiresAt) + 1));
+    try {
+      const resumed = await providerActionService.evaluateApprovedExecution({
+        tenantId: P.TENANT,
+        workspaceId: P.WORKSPACE,
+        actorAgentId: P.AGENT,
+        operation,
+        intentId: b.intentId,
+        requestHash: b.requestHash,
+        actionDigest: b.actionDigest,
+        canonicalActionBytes: new Uint8Array(b.canonicalActionBytes),
+        safeSummary: b.safeSummary,
+        matchedGrantIds: b.matchedGrantIds,
+        priorGeneration: 1,
+        idempotencyKeyHash: b.idempotencyKeyHash,
+      });
+      expect(resumed.ok).toBe(false);
+      if (resumed.ok) throw new Error("stale summon provenance unexpectedly passed resume");
+      expect(resumed.code).toBe("POLICY_INPUT_UNAVAILABLE");
+    } finally {
+      __setProviderPolicyClockForTests(null);
+    }
+  });
+
+  test("summon provenance fails closed when replayed across a source post or retry identity", async () => {
+    await seed([
+      allowRule("11111111-1111-4111-8111-1111111111b2", { replyPolicy: { mode: "summoned-only" } }),
+    ]);
+    const attestation = signedSummonAttestation("attested-original", "1750000000000000000");
+    const postReplay = await propose(
+      { text: "reply", replyToTweetId: "1750000000000000001", summoned: true },
+      "attested-original",
+      attestation,
+    );
+    expect(postReplay.kind).toBe("policy_denied");
+    const retryReplay = await propose(
+      { text: "reply", replyToTweetId: "1750000000000000000", summoned: true },
+      "attested-other-key",
+      attestation,
+    );
+    expect(retryReplay.kind).toBe("policy_denied");
+  });
+
+  test("summon provenance conflicts when a retry key is rebound to different signed evidence", async () => {
+    await seed([
+      allowRule("11111111-1111-4111-8111-1111111111b2", { replyPolicy: { mode: "summoned-only" } }),
+    ]);
+    const retryKey = "attested-rebind";
+    const sourcePostId = "1750000000000000000";
+    const firstAttestation = signedSummonAttestation(retryKey, sourcePostId);
+    const first = await propose(
+      { text: "reply", replyToTweetId: sourcePostId, summoned: true },
+      retryKey,
+      firstAttestation,
+    );
+    expect(first.kind).toBe("allowed");
+
+    const reboundAttestation = {
+      ...firstAttestation,
+      attestedAt: new Date(Date.parse(firstAttestation.attestedAt) + 1).toISOString(),
+      expiresAt: new Date(Date.parse(firstAttestation.expiresAt) + 1).toISOString(),
+    };
+    reboundAttestation.signature = sign(
+      null,
+      Buffer.from(xSummonAttestationSignatureInput(reboundAttestation), "utf8"),
+      summonKeyPair.privateKey,
+    ).toString("base64url");
+    expect(reboundAttestation.signature).not.toBe(firstAttestation.signature);
+
+    const replay = await propose(
+      { text: "reply", replyToTweetId: sourcePostId, summoned: true },
+      retryKey,
+      reboundAttestation,
+    );
+    expect(replay).toEqual({
+      kind: "replay_conflict",
+      code: "REPLAY_IDEMPOTENCY_CONFLICT",
+      httpStatus: 409,
+    });
   });
 
   test("policy-input replay identity: exact summoned replay returns the original outcome", async () => {

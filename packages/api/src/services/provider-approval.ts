@@ -2106,6 +2106,7 @@ class ProviderApprovalService {
             safeSummary: binding.safeSummary,
             matchedGrantIds: binding.matchedGrantIds,
             priorGeneration: priorGeneration?.generation ?? 0,
+            idempotencyKeyHash: binding.idempotencyKeyHash,
           });
           if (!executionPolicy.ok) {
             await append({
