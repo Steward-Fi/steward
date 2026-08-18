@@ -116,7 +116,7 @@ const PROFILES = [
     host: "ec2.us-west-2.amazonaws.com",
     method: "POST",
     path: "/",
-    args: { region: "us-west-2" },
+    args: { region: "us-west-2", instanceIds: ["i-0123456789abcdef0"] },
     requestProfile: {},
   },
   {
@@ -370,12 +370,11 @@ async function prepareAuthenticatedBoundary(
       // region the fixture host commits to). Both assertAwsCredentialRouteBinding
       // (ingress) and injectAwsSigV4AtFinalBoundary (dispatch) fail closed
       // without it. Other profiles keep the seeded header-injection strategy.
-      ...(fixture.profile === AWS_PROVIDER_ACTION_PROFILE
-        ? {
-            injectionStrategy: "sigv4",
-            injectionConfig: { service: "ec2", region: "us-west-2" },
-          }
-        : {}),
+      injectionStrategy: fixture.profile === AWS_PROVIDER_ACTION_PROFILE ? "sigv4" : "header",
+      injectionConfig:
+        fixture.profile === AWS_PROVIDER_ACTION_PROFILE
+          ? { service: "ec2", region: "us-west-2" }
+          : {},
     })
     .where(and(eq(secretRoutes.tenantId, F.TENANT), eq(secretRoutes.id, F.ROUTE)));
 
@@ -551,7 +550,7 @@ describe("#220 real production profile boundaries", () => {
       );
     };
     proxy.__setGoogleExecutionTokenForwarderForTests(async () => {
-      const error = Object.assign(new Error(canary), { code: "ECONNRESET" });
+      const error = Object.assign(new Error(canary), { name: canary, code: canary });
       throw error;
     });
     try {
@@ -571,7 +570,7 @@ describe("#220 real production profile boundaries", () => {
     expect(audits.some((audit) => audit.reason === "credential-decrypt-failed")).toBeTrue();
     expect(JSON.stringify(audits)).not.toContain(canary);
     expect(logged.join("\n")).toContain('"errorClass":"Error"');
-    expect(logged.join("\n")).toContain('"errorCode":"ECONNRESET"');
+    expect(logged.join("\n")).toContain('"errorCode":null');
     expect(logged.join("\n")).not.toContain(canary);
   });
 });

@@ -43,7 +43,7 @@ test("Google lifecycle scheduler redacts failure logs to class/code only", async
     const stop = startGoogleCredentialLifecycleScheduler({
       intervalMs: 60_000,
       sweep: async () => {
-        const error = Object.assign(new Error(canary), { code: "ECONNRESET" });
+        const error = Object.assign(new Error(canary), { name: canary, code: canary });
         throw error;
       },
     });
@@ -52,6 +52,7 @@ test("Google lifecycle scheduler redacts failure logs to class/code only", async
   } finally {
     console.error = originalError;
   }
-  expect(logged.join("\n")).toContain("ECONNRESET");
+  expect(logged.join("\n")).toContain('"errorClass":"Error"');
+  expect(logged.join("\n")).toContain('"errorCode":null');
   expect(logged.join("\n")).not.toContain(canary);
 });
