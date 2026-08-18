@@ -1,7 +1,59 @@
-import { buildPluginContext } from "../plugin";
-
 const DEFAULT_INTERVAL_MS = 15_000;
 const MAX_INTERVAL_MS = 15_000;
+const HEALTH_STALE_AFTER_MS = MAX_INTERVAL_MS * 3;
+
+export interface UpstreamCredentialLeaseSchedulerHealth {
+  ok: boolean;
+  enabled: boolean;
+  inFlight: boolean;
+  lastStartedAt: number | null;
+  lastSucceededAt: number | null;
+  lastFailedAt: number | null;
+  lastError: string | null;
+}
+
+const schedulerHealth: Omit<UpstreamCredentialLeaseSchedulerHealth, "ok"> = {
+  enabled: false,
+  inFlight: false,
+  lastStartedAt: null,
+  lastSucceededAt: null,
+  lastFailedAt: null,
+  lastError: null,
+};
+let unresolvedRecoveryLatched = false;
+
+export function getUpstreamCredentialLeaseSchedulerHealth(
+  now = Date.now(),
+): UpstreamCredentialLeaseSchedulerHealth {
+  const lastSuccess = schedulerHealth.lastSucceededAt;
+  const latestAttemptSucceeded =
+    lastSuccess !== null &&
+    (schedulerHealth.lastFailedAt === null || lastSuccess >= schedulerHealth.lastFailedAt);
+  return {
+    ...schedulerHealth,
+    ok:
+      schedulerHealth.enabled &&
+      latestAttemptSucceeded &&
+      lastSuccess !== null &&
+      now - lastSuccess <= HEALTH_STALE_AFTER_MS,
+  };
+}
+
+export async function runUpstreamCredentialLeaseSweep() {
+  const { GitHubAppInstallationTokenIssuer, recoverAllInterruptedUpstreamCredentialLeases } =
+    await import("@stwd/plugin-capabilities");
+  const { buildPluginContext } = await import("../plugin");
+  const ctx = buildPluginContext();
+  if (!ctx.exerciseCredentialLeaseToken) {
+    throw new Error("credential lease recovery is not configured");
+  }
+  return recoverAllInterruptedUpstreamCredentialLeases({
+    db: ctx.db,
+    issuer: new GitHubAppInstallationTokenIssuer(),
+    exerciseToken: ctx.exerciseCredentialLeaseToken,
+    auditedTransaction: ctx.withTenantAuditedTransaction,
+  });
+}
 
 function configuredInterval(): number {
   if (process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS === undefined) {
@@ -32,24 +84,24 @@ export async function startUpstreamCredentialLeaseScheduler(options?: {
     remaining?: boolean;
   }>;
 }): Promise<() => Promise<void>> {
-  if (process.env.STEWARD_UPSTREAM_LEASE_SWEEPER === "false") return async () => {};
-  let sweep = options?.sweep;
-  if (!sweep) {
-    const { GitHubAppInstallationTokenIssuer, recoverAllInterruptedUpstreamCredentialLeases } =
-      await import("@stwd/plugin-capabilities");
-    const ctx = buildPluginContext();
-    if (!ctx.exerciseCredentialLeaseToken) {
-      throw new Error("credential lease recovery is not configured");
-    }
-    const issuer = new GitHubAppInstallationTokenIssuer();
-    sweep = () =>
-      recoverAllInterruptedUpstreamCredentialLeases({
-        db: ctx.db,
-        issuer,
-        exerciseToken: ctx.exerciseCredentialLeaseToken,
-        auditedTransaction: ctx.withTenantAuditedTransaction,
-      });
+  if (process.env.STEWARD_UPSTREAM_LEASE_SWEEPER === "false") {
+    Object.assign(schedulerHealth, {
+      enabled: false,
+      inFlight: false,
+      lastError: "credential lease sweeper is disabled",
+    });
+    return async () => {};
   }
+  const sweep = options?.sweep ?? runUpstreamCredentialLeaseSweep;
+  Object.assign(schedulerHealth, {
+    enabled: true,
+    inFlight: false,
+    lastStartedAt: null,
+    lastSucceededAt: null,
+    lastFailedAt: null,
+    lastError: null,
+  });
+  unresolvedRecoveryLatched = false;
   let active: Promise<void> | undefined;
   let stopped = false;
   let rerunRequested = false;
@@ -59,14 +111,35 @@ export async function startUpstreamCredentialLeaseScheduler(options?: {
       rerunRequested = true;
       return;
     }
+    schedulerHealth.inFlight = true;
+    schedulerHealth.lastStartedAt = Date.now();
     active = sweep()
       .then((result) => {
+        const unresolved = result.unknown + result.attention;
+        if (unresolved > 0) {
+          unresolvedRecoveryLatched = true;
+          schedulerHealth.lastFailedAt = Date.now();
+          schedulerHealth.lastError =
+            `credential lease recovery left ${unresolved} lease(s) unresolved; ` +
+            "operator verification and process restart are required";
+        } else if (!unresolvedRecoveryLatched) {
+          // An unresolved result is deliberately latched until restart. A later
+          // empty page cannot prove that the original lease was repaired.
+          schedulerHealth.lastSucceededAt = Date.now();
+          schedulerHealth.lastError = null;
+        }
         rerunRequested ||= result.remaining === true;
         const changed = result.unknown + result.revoked + result.attention + result.expired;
         if (changed > 0) console.log(`[upstream-leases] reconciled ${changed} lease(s)`);
       })
-      .catch((error) => console.error("[upstream-leases] sweep failed:", error))
+      .catch((error) => {
+        schedulerHealth.lastFailedAt = Date.now();
+        schedulerHealth.lastError =
+          error instanceof Error ? error.message : "unknown sweep failure";
+        console.error("[upstream-leases] sweep failed:", error);
+      })
       .finally(() => {
+        schedulerHealth.inFlight = false;
         active = undefined;
         if (rerunRequested && !stopped) {
           rerunRequested = false;
@@ -81,5 +154,7 @@ export async function startUpstreamCredentialLeaseScheduler(options?: {
     stopped = true;
     clearInterval(timer);
     await active;
+    schedulerHealth.enabled = false;
+    schedulerHealth.inFlight = false;
   };
 }

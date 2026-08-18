@@ -71,6 +71,39 @@ export interface Env {
   [key: string]: unknown;
 }
 
+type WorkerLeaseSweepResult = {
+  unknown: number;
+  revoked: number;
+  attention: number;
+  expired: number;
+  remaining?: boolean;
+};
+
+/**
+ * Run one autonomous, globally-scoped recovery pass from a Worker Cron Trigger.
+ * Cloudflare cron has a one-minute minimum cadence, so this is recovery for
+ * pre-existing leases, not the Bun scheduler's <=15-second authority guarantee.
+ * New Worker issuance still runs tenant recovery synchronously before issuing.
+ */
+export async function runWorkerUpstreamCredentialLeaseSweep(
+  env: Env,
+  options?: {
+    capabilitiesEnabled?: boolean;
+    sweep?: () => Promise<WorkerLeaseSweepResult>;
+  },
+): Promise<WorkerLeaseSweepResult | null> {
+  hydrateProcessEnv(env);
+  const capabilitiesEnabled =
+    options?.capabilitiesEnabled ??
+    (await import("./plugin-config")).resolveEnabledPlugins().has("capabilities");
+  if (!capabilitiesEnabled || process.env.STEWARD_UPSTREAM_LEASE_SWEEPER === "false") return null;
+  const sweep =
+    options?.sweep ??
+    (await import("./services/upstream-credential-lease-scheduler"))
+      .runUpstreamCredentialLeaseSweep;
+  return sweep();
+}
+
 /**
  * Pull Worker `env` bindings into `globalThis.process.env` so any code that
  * reads `process.env.X` at request time (e.g. JWT secret, RPC URL) can find it.
@@ -192,5 +225,12 @@ export default {
     await ensureWorkerInit(env);
     const app = await getComposedApp();
     return app.fetch(request, env, ctx as never);
+  },
+  async scheduled(
+    _controller: unknown,
+    env: Env,
+    ctx: { waitUntil(promise: Promise<unknown>): void },
+  ) {
+    ctx.waitUntil(runWorkerUpstreamCredentialLeaseSweep(env));
   },
 };

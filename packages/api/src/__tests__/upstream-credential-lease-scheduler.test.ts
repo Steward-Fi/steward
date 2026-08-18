@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { startUpstreamCredentialLeaseScheduler } from "../services/upstream-credential-lease-scheduler";
+import {
+  getUpstreamCredentialLeaseSchedulerHealth,
+  startUpstreamCredentialLeaseScheduler,
+} from "../services/upstream-credential-lease-scheduler";
 
 test("lease scheduler runs at startup, repeats, and stops cleanly", async () => {
   let calls = 0;
@@ -68,4 +71,62 @@ test("lease scheduler rejects a production interval that cannot honor the ACK de
     if (previous === undefined) delete process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS;
     else process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS = previous;
   }
+});
+
+test("lease scheduler health fails closed after a sweep error and recovers on success", async () => {
+  let calls = 0;
+  let firstAttempt!: () => void;
+  const attempted = new Promise<void>((resolve) => {
+    firstAttempt = resolve;
+  });
+  let secondAttempt!: () => void;
+  const retried = new Promise<void>((resolve) => {
+    secondAttempt = resolve;
+  });
+  const stop = await startUpstreamCredentialLeaseScheduler({
+    intervalMs: 5,
+    sweep: async () => {
+      calls += 1;
+      if (calls === 1) {
+        firstAttempt();
+        throw new Error("provider unavailable");
+      }
+      secondAttempt();
+      return { unknown: 0, revoked: 0, attention: 0, expired: 0 };
+    },
+  });
+  await attempted;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(getUpstreamCredentialLeaseSchedulerHealth().ok).toBe(false);
+  expect(getUpstreamCredentialLeaseSchedulerHealth().lastError).toBe("provider unavailable");
+  await retried;
+  await new Promise((resolve) => setTimeout(resolve, 1));
+  expect(getUpstreamCredentialLeaseSchedulerHealth().ok).toBe(true);
+  expect(getUpstreamCredentialLeaseSchedulerHealth().lastError).toBeNull();
+  await stop();
+});
+
+test("lease scheduler latches unresolved recovery outcomes until restart", async () => {
+  let calls = 0;
+  let completedCleanPass!: () => void;
+  const cleanPass = new Promise<void>((resolve) => {
+    completedCleanPass = resolve;
+  });
+  const stop = await startUpstreamCredentialLeaseScheduler({
+    intervalMs: 5,
+    sweep: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return { unknown: 1, revoked: 0, attention: 1, expired: 0 };
+      }
+      completedCleanPass();
+      return { unknown: 0, revoked: 0, attention: 0, expired: 0 };
+    },
+  });
+  await cleanPass;
+  expect(getUpstreamCredentialLeaseSchedulerHealth().ok).toBe(false);
+  expect(getUpstreamCredentialLeaseSchedulerHealth().lastError).toContain(
+    "left 2 lease(s) unresolved",
+  );
+  await stop();
 });
