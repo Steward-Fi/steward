@@ -270,12 +270,14 @@ export async function withTenantAuditQueue<T>(
 ): Promise<T> {
   const prior = tenantAuditQueues.get(tenantId) ?? Promise.resolve();
   let cancelled = false;
+  let started = false;
   const run = prior
     .catch(() => undefined)
     .then(() => {
       if (cancelled || (deadlineAt !== undefined && Date.now() >= deadlineAt)) {
         throw new DatabaseDeadlineExceededError();
       }
+      started = true;
       return fn();
     });
   const tail = run.then(
@@ -296,16 +298,18 @@ export async function withTenantAuditQueue<T>(
     throw new DatabaseDeadlineExceededError();
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<never>((_resolve, reject) => {
+  const waitingDeadline = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
+      // Once fn has begun, its driver owns cancellation and rollback. Rejecting
+      // here would abandon an in-flight mutation and let it complete after the
+      // caller regained control.
+      if (started) return;
       cancelled = true;
       reject(new DatabaseDeadlineExceededError());
     }, remainingMs);
   });
   try {
-    // Racing is safe here: cancellation is checked before `fn` begins, so no
-    // database work is abandoned after it starts.
-    return await Promise.race([run, deadline]);
+    return await Promise.race([run, waitingDeadline]);
   } finally {
     if (timer) clearTimeout(timer);
   }

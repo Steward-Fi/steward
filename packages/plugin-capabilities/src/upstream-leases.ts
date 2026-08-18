@@ -24,6 +24,8 @@ export const DELIVERY_ACK_TIMEOUT_MS = 30_000;
 export const UPSTREAM_LEASE_LIFECYCLE_DEADLINE_MS = 25_000;
 const MIN_DATABASE_PHASE_MS = 1_000;
 const MIN_PROVIDER_AND_FINALIZE_MS = 12_000;
+const POST_ISSUE_DURABLE_RESERVE_MS = 13_000;
+const MIN_ISSUER_START_MS = 23_000;
 export const MAX_UPSTREAM_LEASE_SWEEP_INTERVAL_MS = DELIVERY_ACK_TIMEOUT_MS / 2;
 export const UPSTREAM_LEASE_AUTHORITY_RECHECK_INTERVAL_MS = MAX_UPSTREAM_LEASE_SWEEP_INTERVAL_MS;
 const MAX_GITHUB_PERMISSION_COUNT = 100;
@@ -105,12 +107,15 @@ function requireLeaseBudget(deadlineAt: number | undefined, minimumMs: number): 
 function deadlineAwareIssuer(issuer: UpstreamTokenIssuer, deadlineAt: number): UpstreamTokenIssuer {
   return {
     issue: async (input) => {
-      requireLeaseBudget(deadlineAt, MIN_PROVIDER_AND_FINALIZE_MS);
-      return issuer.issue(input, { deadlineAt });
+      // A mint can create a live upstream secret. Reserve a full provider call
+      // plus durable DB cleanup after the issuance deadline, so
+      // even the worst-case successful mint still has time to escrow/revoke.
+      requireLeaseBudget(deadlineAt, MIN_ISSUER_START_MS);
+      return issuer.issue(input, { deadlineAt: deadlineAt - POST_ISSUE_DURABLE_RESERVE_MS });
     },
     revoke: async (token) => {
       requireLeaseBudget(deadlineAt, MIN_PROVIDER_AND_FINALIZE_MS);
-      return issuer.revoke(token, { deadlineAt });
+      return issuer.revoke(token, { deadlineAt: deadlineAt - MIN_DATABASE_PHASE_MS });
     },
   };
 }

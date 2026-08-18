@@ -23,20 +23,20 @@ afterEach(() => {
 });
 
 describe("cancel-safe database deadlines", () => {
-  test("a timed-out audit queue waiter never begins later in the background", async () => {
-    let release!: () => void;
-    let entered!: () => void;
+  test("a timed-out audit waiter never runs later, while started work is awaited", async () => {
+    let releaseFirst!: () => void;
+    let firstEntered!: () => void;
     const blocked = new Promise<void>((resolve) => {
-      release = resolve;
+      releaseFirst = resolve;
     });
-    const firstEntered = new Promise<void>((resolve) => {
-      entered = resolve;
+    const entered = new Promise<void>((resolve) => {
+      firstEntered = resolve;
     });
     const first = withTenantAuditQueue("deadline-queue", async () => {
-      entered();
+      firstEntered();
       await blocked;
     });
-    await firstEntered;
+    await entered;
 
     let lateMutation = false;
     await expect(
@@ -45,13 +45,38 @@ describe("cancel-safe database deadlines", () => {
         async () => {
           lateMutation = true;
         },
-        Date.now() + 30,
+        Date.now() + 25,
       ),
     ).rejects.toBeInstanceOf(DatabaseDeadlineExceededError);
-    release();
+    releaseFirst();
     await first;
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await Bun.sleep(0);
     expect(lateMutation).toBe(false);
+
+    let releaseStarted!: () => void;
+    const startedBlock = new Promise<void>((resolve) => {
+      releaseStarted = resolve;
+    });
+    let startedEntered!: () => void;
+    const didStart = new Promise<void>((resolve) => {
+      startedEntered = resolve;
+    });
+    let returned = false;
+    const started = withTenantAuditQueue(
+      "deadline-queue-started",
+      async () => {
+        startedEntered();
+        await startedBlock;
+      },
+      Date.now() + 25,
+    ).then(() => {
+      returned = true;
+    });
+    await didStart;
+    await Bun.sleep(40);
+    expect(returned).toBe(false);
+    releaseStarted();
+    await started;
   });
 
   test("aborts a stalled Neon fetch and exposes only the normalized error", async () => {

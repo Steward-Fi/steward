@@ -43,6 +43,8 @@ let workspaceId: string;
 class FakeIssuer implements UpstreamTokenIssuer {
   issueCalls = 0;
   revokeCalls = 0;
+  issueDeadlineAts: Array<number | undefined> = [];
+  revokeDeadlineAts: Array<number | undefined> = [];
   failIssue = false;
   failRevoke = false;
   revokeFailuresRemaining = 0;
@@ -52,8 +54,12 @@ class FakeIssuer implements UpstreamTokenIssuer {
   issueBarrier?: Promise<void>;
   beforeRevoke?: () => Promise<void>;
 
-  async issue() {
+  async issue(
+    _input: Parameters<UpstreamTokenIssuer["issue"]>[0],
+    options?: Parameters<UpstreamTokenIssuer["issue"]>[1],
+  ) {
     this.issueCalls += 1;
+    this.issueDeadlineAts.push(options?.deadlineAt);
     this.issueStarted?.();
     if (this.issueBarrier) await this.issueBarrier;
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -61,8 +67,9 @@ class FakeIssuer implements UpstreamTokenIssuer {
     return { token: this.token, expiresAt: new Date(NOW.getTime() + this.expiryOffsetMs) };
   }
 
-  async revoke(token: string) {
+  async revoke(token: string, options?: Parameters<UpstreamTokenIssuer["revoke"]>[1]) {
     this.revokeCalls += 1;
+    this.revokeDeadlineAts.push(options?.deadlineAt);
     expect(token).toBe(this.token);
     await this.beforeRevoke?.();
     if (this.failRevoke) throw new Error("revoker down");
@@ -275,6 +282,82 @@ describe("upstream credential leases", () => {
     });
     expect(observedDeadlines).toHaveLength(5);
     expect(observedDeadlines.every((deadline) => deadline > Date.now())).toBe(true);
+  });
+
+  test("reserves provider and durable-finalization budgets at the actual issuer calls", async () => {
+    const issuer = new FakeIssuer();
+    const issueDeadlineAt = Date.now() + 25_000;
+    const issued = await issueUpstreamCredentialLease({
+      ...issueArgs(issuer, "idempotency-provider-deadline-threading"),
+      deadlineAt: issueDeadlineAt,
+    });
+    if (!issued.ok) throw new Error("expected issuance");
+    expect(issuer.issueDeadlineAts).toEqual([issueDeadlineAt - 13_000]);
+
+    expect(await acknowledge(issued)).toEqual({ ok: true });
+    const revokeDeadlineAt = Date.now() + 25_000;
+    expect(
+      await revokeUpstreamCredentialLease({
+        db: harness.db,
+        tenantId: TENANT,
+        agentId: AGENT,
+        leaseId: issued.leaseId,
+        token: issued.token,
+        issuer,
+        auditedTransaction: auditedTransaction(),
+        deadlineAt: revokeDeadlineAt,
+        now: NOW,
+      }),
+    ).toEqual({ ok: true });
+    expect(issuer.revokeDeadlineAts).toEqual([revokeDeadlineAt - 1_000]);
+  });
+
+  test("does not mint when the actual issuer call cannot preserve its cleanup reserve", async () => {
+    const issuer = new FakeIssuer();
+    const denied = await issueUpstreamCredentialLease({
+      ...issueArgs(issuer, "idempotency-insufficient-issuer-reserve"),
+      deadlineAt: Date.now() + 22_000,
+    });
+    expect(denied).toMatchObject({ ok: false, status: 503, code: "issuer_unavailable" });
+    expect(issuer.issueCalls).toBe(0);
+    const [lease] = await harness.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(
+        eq(
+          upstreamCredentialLeases.idempotencyKeyHash,
+          sha256("idempotency-insufficient-issuer-reserve"),
+        ),
+      );
+    expect(lease.status).toBe("needs_attention");
+  });
+
+  test("does not revoke upstream when the actual call cannot preserve finalization time", async () => {
+    const issuer = new FakeIssuer();
+    const issued = await issueUpstreamCredentialLease(
+      issueArgs(issuer, "idempotency-insufficient-revoke-reserve"),
+    );
+    if (!issued.ok) throw new Error("expected issuance");
+    expect(await acknowledge(issued)).toEqual({ ok: true });
+
+    const denied = await revokeUpstreamCredentialLease({
+      db: harness.db,
+      tenantId: TENANT,
+      agentId: AGENT,
+      leaseId: issued.leaseId,
+      token: issued.token,
+      issuer,
+      auditedTransaction: auditedTransaction(),
+      deadlineAt: Date.now() + 11_000,
+      now: NOW,
+    });
+    expect(denied).toMatchObject({ ok: false, status: 503 });
+    expect(issuer.revokeCalls).toBe(0);
+    const [lease] = await harness.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+    expect(lease.status).toBe("needs_attention");
   });
 
   test("does not acquire a database handle when the lifecycle budget is already insufficient", async () => {

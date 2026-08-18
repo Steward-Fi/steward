@@ -60,14 +60,16 @@ the live grant expires before GitHub's fixed one-hour token expiry; a provider
 token is never delivered with a lifetime beyond its authority.
 
 Issue, acknowledgement, revoke, and recovery use one 25-second absolute
-lifecycle deadline inside the 30-second delivery/recovery contract. A provider
-phase requires at least 12 seconds remaining (the 10-second GitHub transport
-limit plus a two-second durable-finalization reserve), and a database phase is
-not started with less than one second remaining. postgres-js uses a fresh
-single-connection client for each lifecycle, so connection/pool acquisition,
-DNS/TCP/TLS/authentication, statements, locks, and transactions are all inside
-the deadline; timeout closes that connection and PostgreSQL rolls an open
-transaction back before control returns. Neon HTTP requests carry an abort
+lifecycle deadline inside the 30-second delivery/recovery contract. Minting is
+started only with at least 23 seconds remaining, and the GitHub transport gets
+an earlier sub-deadline that reserves 13 seconds for escrow, durable
+finalization, or compensating revocation. Revocation starts only with at least
+12 seconds remaining and reserves the final second for its database outcome. A
+database phase is not started with less than one second remaining. postgres-js
+uses a fresh single-connection client for each lifecycle, so connection/pool
+acquisition, DNS/TCP/TLS/authentication, statements, locks, and transactions are
+all inside the deadline; timeout closes that connection and PostgreSQL rolls an
+open transaction back before control returns. Neon HTTP requests carry an abort
 signal and earlier server-side statement/lock/transaction limits. Timeout
 errors are normalized and never contain SQL, parameters, provider bodies, or
 connection strings.
