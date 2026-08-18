@@ -295,23 +295,77 @@ function evaluateRawSigningChain(rule: PolicyRule, ctx: EvaluatorContext): Polic
  * Accepts both the canonical format and the simplified maxAmount/period format.
  */
 function normalizeSpendingLimitConfig(config: Record<string, unknown>): SpendingLimitConfig {
+  const simplifiedWeiCaps = (): Pick<
+    SpendingLimitConfig,
+    "maxPerTx" | "maxPerDay" | "maxPerWeek"
+  > => {
+    const maxAmount = String(config.maxAmount ?? "0");
+    const period = String(config.period ?? "day").toLowerCase();
+
+    switch (period) {
+      case "tx":
+      case "transaction":
+        return {
+          maxPerTx: maxAmount,
+          maxPerDay: MAX_UINT256_DECIMAL,
+          maxPerWeek: MAX_UINT256_DECIMAL,
+        };
+      case "day":
+      case "daily":
+        return {
+          maxPerTx: maxAmount,
+          maxPerDay: maxAmount,
+          maxPerWeek: MAX_UINT256_DECIMAL,
+        };
+      case "week":
+      case "weekly":
+        return {
+          maxPerTx: maxAmount,
+          maxPerDay: MAX_UINT256_DECIMAL,
+          maxPerWeek: maxAmount,
+        };
+      default:
+        // Preserve the historical fail-safe fallback: an unknown period is
+        // treated as a per-transaction cap rather than as unbounded spend.
+        return {
+          maxPerTx: maxAmount,
+          maxPerDay: MAX_UINT256_DECIMAL,
+          maxPerWeek: MAX_UINT256_DECIMAL,
+        };
+    }
+  };
+
+  const hasCanonicalWeiCap =
+    config.maxPerTx !== undefined ||
+    config.maxPerDay !== undefined ||
+    config.maxPerWeek !== undefined;
+  const hasUsdCap =
+    config.maxPerTxUsd !== undefined ||
+    config.maxPerDayUsd !== undefined ||
+    config.maxPerWeekUsd !== undefined;
+
   // Any canonical wei or USD field selects the canonical format. Missing wei
   // caps are unbounded, but every explicitly declared cap must survive
   // normalization. Checking only the per-tx fields caused a mixed config such
   // as { maxPerDay, maxPerDayUsd } to take the USD-only branch and silently
   // discard maxPerDay.
-  if (
-    config.maxPerTx !== undefined ||
-    config.maxPerDay !== undefined ||
-    config.maxPerWeek !== undefined ||
-    config.maxPerTxUsd !== undefined ||
-    config.maxPerDayUsd !== undefined ||
-    config.maxPerWeekUsd !== undefined
-  ) {
+  if (hasCanonicalWeiCap || hasUsdCap) {
+    // Legacy policies can legitimately contain `{ maxAmount, period }` plus a
+    // newer USD cap. Do not let the USD field erase that existing wei limit.
+    // Explicit canonical wei fields still take precedence over the legacy
+    // representation when both are present.
+    const weiCaps =
+      !hasCanonicalWeiCap && config.maxAmount !== undefined
+        ? simplifiedWeiCaps()
+        : {
+            maxPerTx: config.maxPerTx !== undefined ? String(config.maxPerTx) : MAX_UINT256_DECIMAL,
+            maxPerDay:
+              config.maxPerDay !== undefined ? String(config.maxPerDay) : MAX_UINT256_DECIMAL,
+            maxPerWeek:
+              config.maxPerWeek !== undefined ? String(config.maxPerWeek) : MAX_UINT256_DECIMAL,
+          };
     return {
-      maxPerTx: config.maxPerTx !== undefined ? String(config.maxPerTx) : MAX_UINT256_DECIMAL,
-      maxPerDay: config.maxPerDay !== undefined ? String(config.maxPerDay) : MAX_UINT256_DECIMAL,
-      maxPerWeek: config.maxPerWeek !== undefined ? String(config.maxPerWeek) : MAX_UINT256_DECIMAL,
+      ...weiCaps,
       maxPerTxUsd: config.maxPerTxUsd as number | undefined,
       maxPerDayUsd: config.maxPerDayUsd as number | undefined,
       maxPerWeekUsd: config.maxPerWeekUsd as number | undefined,
@@ -319,39 +373,7 @@ function normalizeSpendingLimitConfig(config: Record<string, unknown>): Spending
   }
 
   // Convert from maxAmount/period format
-  const maxAmount = String(config.maxAmount ?? "0");
-  const period = String(config.period ?? "day").toLowerCase();
-
-  switch (period) {
-    case "tx":
-    case "transaction":
-      return {
-        maxPerTx: maxAmount,
-        maxPerDay: MAX_UINT256_DECIMAL,
-        maxPerWeek: MAX_UINT256_DECIMAL,
-      };
-    case "day":
-    case "daily":
-      return {
-        maxPerTx: maxAmount,
-        maxPerDay: maxAmount,
-        maxPerWeek: MAX_UINT256_DECIMAL,
-      };
-    case "week":
-    case "weekly":
-      return {
-        maxPerTx: maxAmount,
-        maxPerDay: MAX_UINT256_DECIMAL,
-        maxPerWeek: maxAmount,
-      };
-    default:
-      // Fallback: treat as per-tx limit
-      return {
-        maxPerTx: maxAmount,
-        maxPerDay: MAX_UINT256_DECIMAL,
-        maxPerWeek: MAX_UINT256_DECIMAL,
-      };
-  }
+  return simplifiedWeiCaps();
 }
 
 /**
@@ -476,7 +498,8 @@ async function evaluateSpendingLimit(
     if (
       rule.config.maxPerTx === undefined &&
       rule.config.maxPerDay === undefined &&
-      rule.config.maxPerWeek === undefined
+      rule.config.maxPerWeek === undefined &&
+      rule.config.maxAmount === undefined
     ) {
       return { ...base, passed: true };
     }

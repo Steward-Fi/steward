@@ -598,6 +598,25 @@ describe("Spending Limit Policy", () => {
     expect(result.reason).toContain("weekly spending limit");
   });
 
+  it("preserves a legacy maxAmount cap when a USD cap is added", async () => {
+    const rule = makeSpendingRule({
+      maxAmount: "1000000000000000000", // 1 ETH daily and per transaction
+      period: "day",
+      maxPerDayUsd: 5000,
+    });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "200000000000000000" }, // 0.2 ETH
+        spentToday: BigInt("900000000000000000"), // 0.9 ETH
+        priceOracle: ethPriceOracle,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily spending limit");
+  });
+
   // ─── Per-tx boundary tests ─────────────────────────────────────────────
 
   it("passes when value is exactly at the per-tx limit (boundary)", async () => {
