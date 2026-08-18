@@ -794,4 +794,42 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
       }),
     ]);
   });
+
+  it("claims SMS verify attempts before verifying: concurrent wrong codes cannot exceed the slot budget", async () => {
+    const phone = "+14155550901";
+    const sendRes = await authRoutes.request("/sms/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone }),
+    });
+    expect(sendRes.status).toBe(200);
+    const inboxRes = await authRoutes.request(`/test/sms-inbox/${encodeURIComponent(phone)}`);
+    const inbox = (await inboxRes.json()) as { code: string };
+    const wrongCode = inbox.code === "000000" ? "000001" : "000000";
+
+    // Six concurrent wrong-code verifies against a five-slot budget. With the
+    // claim-first boundary the attempt slot is consumed BEFORE verifyOtp runs,
+    // so the sixth request is denied without ever reaching verification — a
+    // check-then-record boundary would let all six through.
+    const statuses = await Promise.all(
+      Array.from({ length: 6 }, async () => {
+        const res = await authRoutes.request("/sms/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ phone, code: wrongCode }),
+        });
+        return res.status;
+      }),
+    );
+    expect(statuses.filter((status) => status === 401)).toHaveLength(5);
+    expect(statuses.filter((status) => status === 429)).toHaveLength(1);
+
+    // The budget stays exhausted for subsequent requests.
+    const afterRes = await authRoutes.request("/sms/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone, code: wrongCode }),
+    });
+    expect(afterRes.status).toBe(429);
+  });
 });

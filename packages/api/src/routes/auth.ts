@@ -5460,9 +5460,10 @@ auth.post("/sms/verify", async (c) => {
   if (methodResponse) return methodResponse;
   const otpPurpose = smsLoginPurpose(otpTenantId);
 
-  if (
-    (await getSmsVerifyFailedAttempts(body.phone, otpPurpose)) >= SMS_VERIFY_MAX_FAILED_ATTEMPTS
-  ) {
+  // Claim-first: atomically consume one attempt slot BEFORE verifying, so
+  // concurrent requests cannot both pass a check-then-record boundary and
+  // stretch the attempt budget (~2x under a race).
+  if (!(await claimSmsVerifyAttempt(body.phone, otpPurpose))) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -5474,7 +5475,6 @@ auth.post("/sms/verify", async (c) => {
 
   const result = await getPhoneAuth().verifyOtp(body.phone, body.code, otpPurpose);
   if (!result.valid) {
-    await recordSmsVerifyFailure(body.phone, otpPurpose);
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
   await clearSmsVerifyFailures(body.phone, otpPurpose);
@@ -5631,9 +5631,10 @@ auth.post("/whatsapp/verify", async (c) => {
   if (methodResponse) return methodResponse;
   const otpPurpose = whatsappLoginPurpose(otpTenantId);
 
-  if (
-    (await getSmsVerifyFailedAttempts(body.phone, otpPurpose)) >= SMS_VERIFY_MAX_FAILED_ATTEMPTS
-  ) {
+  // Claim-first: atomically consume one attempt slot BEFORE verifying, so
+  // concurrent requests cannot both pass a check-then-record boundary and
+  // stretch the attempt budget (~2x under a race).
+  if (!(await claimSmsVerifyAttempt(body.phone, otpPurpose))) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -5645,7 +5646,6 @@ auth.post("/whatsapp/verify", async (c) => {
 
   const result = await getPhoneAuth().verifyOtp(body.phone, body.code, otpPurpose);
   if (!result.valid) {
-    await recordSmsVerifyFailure(body.phone, otpPurpose);
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
   await clearSmsVerifyFailures(body.phone, otpPurpose);
@@ -7045,8 +7045,9 @@ auth.post("/mfa/sms/verify", async (c) => {
   if (stepUpResponse) return stepUpResponse;
 
   const pendingPurpose = pending.purpose ?? smsMfaEnrollPurpose(session.payload.userId);
-  const failures = await getSmsVerifyFailedAttempts(pending.phone, pendingPurpose);
-  if (failures >= SMS_VERIFY_MAX_FAILED_ATTEMPTS) {
+  // Claim-first: atomically consume one attempt slot BEFORE verifying, so
+  // concurrent requests cannot both pass a check-then-record boundary.
+  if (!(await claimSmsVerifyAttempt(pending.phone, pendingPurpose))) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many invalid SMS verification attempts. Request a new code." },
       429,
@@ -7055,7 +7056,6 @@ auth.post("/mfa/sms/verify", async (c) => {
 
   const verified = await getPhoneAuth().verifyOtp(pending.phone, body.code, pendingPurpose);
   if (!verified.valid) {
-    await recordSmsVerifyFailure(pending.phone, pendingPurpose);
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
   await clearSmsVerifyFailures(pending.phone, pendingPurpose);
@@ -7173,9 +7173,9 @@ auth.post("/mfa/sms/complete", async (c) => {
   }
 
   const otpPurpose = smsMfaChallengePurpose(body.challengeId);
-  if (
-    (await getSmsVerifyFailedAttempts(smsMfa.phone, otpPurpose)) >= SMS_VERIFY_MAX_FAILED_ATTEMPTS
-  ) {
+  // Claim-first: atomically consume one attempt slot BEFORE verifying, so
+  // concurrent requests cannot both pass a check-then-record boundary.
+  if (!(await claimSmsVerifyAttempt(smsMfa.phone, otpPurpose))) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -7187,7 +7187,6 @@ auth.post("/mfa/sms/complete", async (c) => {
 
   const verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
   if (!verified.valid) {
-    await recordSmsVerifyFailure(smsMfa.phone, otpPurpose);
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
   if ((await getMfaBackend().consume(challengeKey)) === null) {
@@ -7244,9 +7243,9 @@ auth.post("/mfa/sms/step-up", async (c) => {
   }
 
   const otpPurpose = smsMfaManagePurpose(session.payload.userId);
-  if (
-    (await getSmsVerifyFailedAttempts(smsMfa.phone, otpPurpose)) >= SMS_VERIFY_MAX_FAILED_ATTEMPTS
-  ) {
+  // Claim-first: atomically consume one attempt slot BEFORE verifying, so
+  // concurrent requests cannot both pass a check-then-record boundary.
+  if (!(await claimSmsVerifyAttempt(smsMfa.phone, otpPurpose))) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many invalid SMS verification attempts. Request a new code." },
       429,
@@ -7255,7 +7254,6 @@ auth.post("/mfa/sms/step-up", async (c) => {
 
   const verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
   if (!verified.valid) {
-    await recordSmsVerifyFailure(smsMfa.phone, otpPurpose);
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
   await clearSmsVerifyFailures(smsMfa.phone, otpPurpose);
@@ -7471,9 +7469,9 @@ auth.post("/mfa/sms/unenroll", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "SMS MFA is not enabled" }, 404);
   }
   const otpPurpose = smsMfaManagePurpose(session.payload.userId);
-  if (
-    (await getSmsVerifyFailedAttempts(smsMfa.phone, otpPurpose)) >= SMS_VERIFY_MAX_FAILED_ATTEMPTS
-  ) {
+  // Claim-first: atomically consume one attempt slot BEFORE verifying, so
+  // concurrent requests cannot both pass a check-then-record boundary.
+  if (!(await claimSmsVerifyAttempt(smsMfa.phone, otpPurpose))) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -7484,7 +7482,6 @@ auth.post("/mfa/sms/unenroll", async (c) => {
   }
   const verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
   if (!verified.valid) {
-    await recordSmsVerifyFailure(smsMfa.phone, otpPurpose);
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
   await clearSmsVerifyFailures(smsMfa.phone, otpPurpose);
