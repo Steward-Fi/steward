@@ -48,7 +48,11 @@ import {
   sql,
   withTenantAuditedTransaction,
 } from "@stwd/db";
-import { isValidOAuthBearerToken, isValidOAuthOpaqueToken } from "@stwd/shared";
+import {
+  isValidOAuthBearerToken,
+  isValidOAuthOpaqueToken,
+  MAX_OAUTH_TOKEN_LENGTH,
+} from "@stwd/shared";
 import type { SecretVault } from "@stwd/vault";
 
 type DbBase = ReturnType<typeof getDb>;
@@ -1731,11 +1735,11 @@ async function reconcileStagedXRefreshRevocation(
       throw new Error("staged token invalid");
     }
     const raw = token as Record<string, unknown>;
-    // Prefer the rotating refresh credential when X returned one. A malformed
-    // access token must not prevent us from revoking the exact valid refresh
-    // handle that was already durably staged.
-    accessToken = isValidOAuthBearerToken(raw.access_token) ? raw.access_token : null;
-    refreshToken = isValidOAuthOpaqueToken(raw.refresh_token) ? raw.refresh_token : null;
+    // Adoption applies the strict token grammar. Revocation instead uses the
+    // exact bounded string X returned: a rotated refresh credential that fails
+    // Steward's grammar may still be live upstream and must not be discarded.
+    accessToken = boundedStagedToken(raw.access_token);
+    refreshToken = boundedStagedToken(raw.refresh_token);
     if (!accessToken && !refreshToken) throw new Error("no revocable staged token");
   } catch {
     await finishStagedXRefreshRevocation(input, claimed, false, "STAGED_REVOCATION_HANDLE_INVALID");
@@ -1759,6 +1763,12 @@ async function reconcileStagedXRefreshRevocation(
     revoked ? "STAGED_CREDENTIAL_REVOKED" : "STAGED_REVOCATION_FAILED",
   );
   return revoked;
+}
+
+function boundedStagedToken(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_OAUTH_TOKEN_LENGTH
+    ? value
+    : null;
 }
 
 async function finishStagedXRefreshRevocation(

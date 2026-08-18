@@ -139,13 +139,20 @@ interface FakeXCounters {
   identity: number;
   refresh: number;
   revoke: number;
+  revokeBodies: string[];
 }
 
 function installFakeX(opts: FakeXOptions = {}): {
   counters: FakeXCounters;
   restore: () => void;
 } {
-  const counters: FakeXCounters = { exchange: 0, identity: 0, refresh: 0, revoke: 0 };
+  const counters: FakeXCounters = {
+    exchange: 0,
+    identity: 0,
+    refresh: 0,
+    revoke: 0,
+    revokeBodies: [],
+  };
   let refreshIdx = 0;
   const fn = async (req: XForwardRequest): Promise<XForwardResponse> => {
     // Token endpoint: distinguish exchange vs refresh by grant_type.
@@ -186,6 +193,7 @@ function installFakeX(opts: FakeXOptions = {}): {
     }
     if (req.url.includes("/oauth2/revoke")) {
       counters.revoke += 1;
+      counters.revokeBodies.push(req.body ?? "");
       const status = opts.revokeStatuses?.[counters.revoke - 1] ?? 200;
       return jsonResponse(status, status === 200 ? {} : { error: "temporarily_unavailable" });
     }
@@ -906,6 +914,47 @@ describe("refresh", () => {
     expect(revoked.state).toBe("revoked");
     expect(revoked.credentialSecretId).toBeNull();
     invalid.restore();
+  });
+
+  test("revokes the exact bounded rotated refresh token even when adoption rejects its grammar", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    const invalidRefresh = "rotated refresh with spaces";
+    const fake = installFakeX({
+      refreshResponses: [
+        {
+          status: 200,
+          body: {
+            access_token: "access-valid",
+            refresh_token: invalidRefresh,
+            scope: "tweet.read tweet.write users.read offline.access",
+          },
+        },
+      ],
+    });
+    await expect(
+      refreshXProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        vault,
+        config: CONFIG,
+        force: true,
+      }),
+    ).rejects.toMatchObject({ code: "X_REFRESH_FAILED" });
+
+    const swept = await runXCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: new Date(Date.now() + 20_000),
+    });
+    expect(swept).toMatchObject({ processed: 1, revoked: 1, attention: 0 });
+    expect(fake.counters.refresh).toBe(1);
+    expect(fake.counters.revoke).toBe(1);
+    expect(new URLSearchParams(fake.counters.revokeBodies[0]).get("token")).toBe(invalidRefresh);
+    expect(new URLSearchParams(fake.counters.revokeBodies[0]).get("token_type_hint")).toBe(
+      "refresh_token",
+    );
+    fake.restore();
   });
 
   test("a crash after encrypted staging adopts on retry without a second provider call", async () => {
