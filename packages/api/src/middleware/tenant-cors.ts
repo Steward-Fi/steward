@@ -30,9 +30,20 @@ interface CacheEntry {
 }
 
 const CACHE_TTL_MS = 60_000; // 60 seconds
+// Unknown/bogus tenant ids are negative-cached briefly so repeated requests
+// carrying a random X-Steward-Tenant header don't each cost two DB queries.
+const NEGATIVE_CACHE_TTL_MS = 10_000; // 10 seconds
 const MAX_CORS_CACHE_ENTRIES = 1_000;
 const TENANT_ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 const originsCache = new Map<string, CacheEntry>();
+
+function cacheTenantOrigins(tenantId: string, origins: string[], ttlMs: number, now: number): void {
+  if (originsCache.size >= MAX_CORS_CACHE_ENTRIES) {
+    const oldest = originsCache.keys().next().value;
+    if (oldest) originsCache.delete(oldest);
+  }
+  originsCache.set(tenantId, { origins, expiresAt: now + ttlMs });
+}
 
 async function getTenantOrigins(tenantId: string): Promise<string[]> {
   if (!TENANT_ID_RE.test(tenantId)) return [];
@@ -54,18 +65,17 @@ async function getTenantOrigins(tenantId: string): Promise<string[]> {
       and(eq(tenantAppClientsTable.tenantId, tenantId), eq(tenantAppClientsTable.enabled, true)),
     );
 
-  if (!row && clientRows.length === 0) return [];
+  if (!row && clientRows.length === 0) {
+    cacheTenantOrigins(tenantId, [], NEGATIVE_CACHE_TTL_MS, now);
+    return [];
+  }
 
   const origins = new Set<string>(row?.allowedOrigins ?? []);
   for (const client of clientRows) {
     for (const origin of client.allowedOrigins ?? []) origins.add(origin);
   }
   const originList = [...origins];
-  if (originsCache.size >= MAX_CORS_CACHE_ENTRIES) {
-    const oldest = originsCache.keys().next().value;
-    if (oldest) originsCache.delete(oldest);
-  }
-  originsCache.set(tenantId, { origins: originList, expiresAt: now + CACHE_TTL_MS });
+  cacheTenantOrigins(tenantId, originList, CACHE_TTL_MS, now);
   return originList;
 }
 
@@ -130,11 +140,29 @@ const MAX_AGE = "86400";
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
+/**
+ * The wildcard CORS fallback is a dev-only convenience and requires an EXPLICIT
+ * non-production NODE_ENV ("development"/"test"). Bare `bun run` leaves
+ * NODE_ENV unset and previously got `Access-Control-Allow-Origin: *` with all
+ * X-Steward-* and Authorization headers allowed — unset/unknown values now
+ * fail closed exactly like production.
+ */
+function devWildcardAllowed(): boolean {
+  const env = process.env.NODE_ENV;
+  return env === "development" || env === "test";
+}
+
 export async function tenantCors(c: Context, next: Next): Promise<Response | undefined> {
   const origin = c.req.header("origin") ?? "";
   const tenantId = c.req.header("X-Steward-Tenant");
 
-  let allowOrigin = process.env.NODE_ENV === "production" ? "" : "*";
+  // Set this before any lookup or early deny. A shared cache must never reuse
+  // a 403/error produced for one origin or tenant hint for another request.
+  // This is harmless for the explicit development wildcard and keeps every
+  // exit path (including DB failures) on the same cache contract.
+  c.header("Vary", "Origin, X-Steward-Tenant");
+
+  let allowOrigin = devWildcardAllowed() ? "*" : "";
 
   if (!tenantId && origin) {
     // No tenant header (true for ALL browser preflights and any SDK call that
@@ -144,7 +172,7 @@ export async function tenantCors(c: Context, next: Next): Promise<Response | und
       const allOrigins = await getAllAllowedOrigins();
       if (allOrigins.has(origin)) {
         allowOrigin = origin;
-      } else if (process.env.NODE_ENV === "production") {
+      } else if (!devWildcardAllowed()) {
         if (c.req.method === "OPTIONS") {
           return c.newResponse(null, 403);
         }
@@ -176,7 +204,7 @@ export async function tenantCors(c: Context, next: Next): Promise<Response | und
           await next();
           return;
         }
-      } else if (process.env.NODE_ENV === "production") {
+      } else if (!devWildcardAllowed()) {
         if (c.req.method === "OPTIONS") {
           return c.newResponse(null, 403);
         }
@@ -201,11 +229,6 @@ export async function tenantCors(c: Context, next: Next): Promise<Response | und
     c.header("Access-Control-Allow-Headers", ALLOW_HEADERS);
     c.header("Access-Control-Expose-Headers", EXPOSE_HEADERS);
     c.header("Access-Control-Max-Age", MAX_AGE);
-  }
-
-  if (allowOrigin !== "*") {
-    // Let caches vary on Origin when we're doing selective allow
-    c.header("Vary", "Origin");
   }
 
   if (c.req.method === "OPTIONS") {

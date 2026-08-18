@@ -454,6 +454,15 @@ erc8004Routes.post("/:id/feedback", async (c) => {
 export const discoveryRoutes = new Hono<{ Variables: AppVariables }>();
 
 // GET /discovery/agents — query registered agents across registries.
+//
+// SEC-213 (decision: intentionally public). This listing is unauthenticated
+// and cross-tenant BY DESIGN: erc8004 registrations are on-chain public
+// records, and this endpoint exists so any client can discover them without
+// scraping the chain itself. The exposed fields (token_id, chain_id,
+// registry_address, feedback_count) are all chain-public identity facts — no
+// tenant-internal data (agent names, wallets, policies, owners) is ever
+// selected. Keep it that way: any future column added here must be evaluated
+// against "is this already public on-chain?" before being exposed.
 
 discoveryRoutes.get("/agents", async (c) => {
   const rawChainId = c.req.query("chainId");

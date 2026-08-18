@@ -28,14 +28,15 @@ describe("external agent JWT hardening", () => {
     expect(source).toContain("agent is not registered for tenant");
   });
 
-  it("requires explicit trade scope and configured production JWKS for external agent order JWTs", () => {
+  it("requires explicit trade scope and configured JWKS for external agent order JWTs", () => {
     expect(source).toContain('const TRADE_ORDER_SCOPE = "trade:order"');
     expect(source).toContain('stringArrayClaim(payload, "scopes", "scope")');
     expect(source).toContain("auth.scopes.includes(TRADE_ORDER_SCOPE)");
     expect(source).toContain("Token missing required ${TRADE_ORDER_SCOPE} scope");
-    expect(source).toContain(
-      'process.env.NODE_ENV === "production" && !process.env.ELIZA_CLOUD_JWKS_URL',
-    );
+    // SEC-069: no implicit hardcoded trust anchor — production requires
+    // ELIZA_CLOUD_JWKS_URL, and the dev anchor requires an explicit opt-in.
+    expect(source).toContain("function resolveJwksUrl()");
+    expect(source).toContain('process.env.STEWARD_ALLOW_DEFAULT_ELIZA_JWKS === "true"');
     expect(source).toContain('throw new Error("jwks-url-required")');
   });
 
