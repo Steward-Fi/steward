@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
-import { AUTH_PROXY_HEADER } from "@/lib/auth-proxy";
+import { AUTH_PROXY_HEADER, forwardToApi, isHttpsRequest } from "@/lib/auth-proxy";
 import { POST as refreshPOST } from "./refresh/route";
 import { POST as revokePOST } from "./revoke/route";
 import { DELETE as sessionDELETE, POST as sessionPOST } from "./session/route";
@@ -84,11 +84,15 @@ describe("auth proxy route handlers (SEC-018)", () => {
     let upstreamRequests: Array<{ path: string; body: Record<string, unknown> }>;
     let upstreamStatus: number;
     let upstreamBody: Record<string, unknown> | null;
+    let upstreamRawBody: string | null;
+    let stallUpstreamBody: boolean;
 
     beforeEach(async () => {
       upstreamRequests = [];
       upstreamStatus = 200;
       upstreamBody = null;
+      upstreamRawBody = null;
+      stallUpstreamBody = false;
       upstream = createServer((req: IncomingMessage, res) => {
         let body = "";
         req.on("data", (chunk) => {
@@ -97,6 +101,14 @@ describe("auth proxy route handlers (SEC-018)", () => {
         req.on("end", () => {
           upstreamRequests.push({ path: req.url ?? "/", body: JSON.parse(body || "{}") });
           res.writeHead(upstreamStatus, { "Content-Type": "application/json" });
+          if (stallUpstreamBody) {
+            res.write('{"ok":');
+            return;
+          }
+          if (upstreamRawBody !== null) {
+            res.end(upstreamRawBody);
+            return;
+          }
           res.end(
             upstreamBody
               ? JSON.stringify(upstreamBody)
@@ -233,6 +245,19 @@ describe("auth proxy route handlers (SEC-018)", () => {
       expect(await res.json()).toEqual({ ok: false, error: "Refresh failed" });
     });
 
+    test("bounds and times out the complete upstream response body", async () => {
+      upstreamRawBody = JSON.stringify({ ok: true, padding: "x".repeat(1024) });
+      await expect(
+        forwardToApi("/auth/refresh", { refreshToken: "canary-secret" }, { maxBytes: 64 }),
+      ).rejects.toThrow("response is too large");
+
+      upstreamRawBody = null;
+      stallUpstreamBody = true;
+      await expect(
+        forwardToApi("/auth/refresh", { refreshToken: "canary-secret" }, { timeoutMs: 25 }),
+      ).rejects.toThrow();
+    });
+
     test("revoke forwards the cookie token and always clears the cookie", async () => {
       const res = await revokePOST(
         postJson("https://app.example.test/api/auth/revoke", {}, { cookie: "steward_rt=rt-9" }),
@@ -250,5 +275,17 @@ describe("auth proxy route handlers (SEC-018)", () => {
       expect(upstreamRequests).toHaveLength(0);
       expect(res.headers.get("Set-Cookie")).toContain("Max-Age=0");
     });
+  });
+
+  test("production cookies stay Secure behind an internal HTTP reverse proxy", () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    try {
+      expect(isHttpsRequest(new Request("http://app.example.test/api/auth/session"))).toBe(true);
+      expect(isHttpsRequest(new Request("http://127.0.0.1/api/auth/session"))).toBe(false);
+    } finally {
+      if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = originalNodeEnv;
+    }
   });
 });

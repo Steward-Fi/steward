@@ -320,6 +320,8 @@ export class StewardAuth {
   private readonly authProxyUrl: string | undefined;
   private readonly listeners: Array<(session: StewardSession | null) => void> = [];
   private refreshPromise: Promise<StewardSession | null> | null = null;
+  private rotationTail: Promise<void> = Promise.resolve();
+  private sessionGeneration = 0;
 
   constructor({
     baseUrl,
@@ -573,6 +575,9 @@ export class StewardAuth {
    * Clears the stored session (both tokens) and notifies listeners.
    */
   signOut(): void {
+    // Invalidate any refresh already in flight so its eventual response cannot
+    // resurrect a session after the user signed out.
+    this.sessionGeneration += 1;
     this.clearToken();
     this.notifyListeners(null);
   }
@@ -587,7 +592,7 @@ export class StewardAuth {
     // family. Coalesce near-expiry callers so one client instance never sends
     // the same one-time token more than once concurrently.
     if (this.refreshPromise) return this.refreshPromise;
-    const refresh = this.refreshSessionOnce();
+    const refresh = this.runSerializedRotation(() => this.rotateSession());
     this.refreshPromise = refresh;
     const clear = () => {
       if (this.refreshPromise === refresh) this.refreshPromise = null;
@@ -596,10 +601,10 @@ export class StewardAuth {
     return refresh;
   }
 
-  private async refreshSessionOnce(): Promise<StewardSession | null> {
-    if (this.authProxyUrl) {
-      return this.refreshViaProxyWithBrowserLock();
-    }
+  private async refreshDirect(
+    tenantId: string | undefined,
+    generation: number,
+  ): Promise<StewardSession | null> {
     const refreshToken = this.getRefreshToken();
     if (!refreshToken) return null;
 
@@ -607,7 +612,7 @@ export class StewardAuth {
     try {
       res = await authRequest<StewardRefreshResult>(this.baseUrl, "/auth/refresh", {
         method: "POST",
-        body: JSON.stringify({ refreshToken }),
+        body: JSON.stringify({ refreshToken, ...(tenantId ? { tenantId } : {}) }),
       });
     } catch {
       return null;
@@ -619,6 +624,8 @@ export class StewardAuth {
       }
       return null;
     }
+
+    if (generation !== this.sessionGeneration) return null;
 
     this.storage.setItem(STORAGE_KEY, res.data.token);
     this.storage.setItem(REFRESH_TOKEN_KEY, res.data.refreshToken);
@@ -632,6 +639,13 @@ export class StewardAuth {
    * Also clears local session state.
    */
   async revokeSession(): Promise<void> {
+    await this.runSerializedRotation(async () => this.revokeSessionOnce());
+  }
+
+  private async revokeSessionOnce(): Promise<void> {
+    // The rotation queue guarantees we revoke the newest token, not the stale
+    // predecessor of an in-flight refresh. Invalidate any later response too.
+    this.sessionGeneration += 1;
     if (this.authProxyUrl) {
       // The proxy injects the cookie-held refresh token and clears the cookie.
       await authRequest(this.authProxyUrl, "/revoke", {
@@ -2281,29 +2295,7 @@ export class StewardAuth {
    * Returns the new session, or null if the switch failed (user may need to re-auth).
    */
   async switchTenant(tenantId: string): Promise<StewardSession | null> {
-    if (this.authProxyUrl) {
-      return this.refreshViaProxyWithBrowserLock(tenantId);
-    }
-    const refreshToken = this.getRefreshToken();
-    if (!refreshToken) {
-      return null;
-    }
-
-    const res = await authRequest<StewardRefreshResult>(this.baseUrl, "/auth/refresh", {
-      method: "POST",
-      body: JSON.stringify({ refreshToken, tenantId }),
-    });
-
-    if (!res.ok) {
-      // Refresh failed, user needs to re-authenticate
-      return null;
-    }
-
-    this.storage.setItem(STORAGE_KEY, res.data.token);
-    this.storage.setItem(REFRESH_TOKEN_KEY, res.data.refreshToken);
-    const session = sessionFromToken(res.data.token);
-    this.notifyListeners(session);
-    return session;
+    return this.runSerializedRotation(() => this.rotateSession(tenantId));
   }
 
   // ─── Private helpers ────────────────────────────────────────────────────────
@@ -2313,7 +2305,10 @@ export class StewardAuth {
    * which holds the refresh token in an HttpOnly cookie. The proxy rotates the
    * cookie itself; only the new access token comes back to JS-readable storage.
    */
-  private async refreshViaProxy(tenantId?: string): Promise<StewardSession | null> {
+  private async refreshViaProxy(
+    tenantId: string | undefined,
+    generation: number,
+  ): Promise<StewardSession | null> {
     const proxyUrl = this.authProxyUrl;
     if (!proxyUrl) return null;
 
@@ -2335,6 +2330,13 @@ export class StewardAuth {
       return null;
     }
 
+    if (generation !== this.sessionGeneration) {
+      // The response may already have rotated the HttpOnly cookie. Clear it
+      // again after the stale response so a concurrent sign-out stays final.
+      this.clearToken();
+      return null;
+    }
+
     this.storage.setItem(STORAGE_KEY, res.data.token);
     const session = sessionFromToken(res.data.token);
     this.notifyListeners(session);
@@ -2347,11 +2349,31 @@ export class StewardAuth {
    * a waiting tab therefore sends the newly rotated cookie after its predecessor
    * completes instead of replaying the predecessor's one-time token.
    */
-  private async refreshViaProxyWithBrowserLock(tenantId?: string): Promise<StewardSession | null> {
+  private async rotateSession(tenantId?: string): Promise<StewardSession | null> {
+    const generation = this.sessionGeneration;
+    const rotate = () =>
+      this.authProxyUrl
+        ? this.refreshViaProxy(tenantId, generation)
+        : this.refreshDirect(tenantId, generation);
     if (isBrowser() && navigator.locks) {
-      return navigator.locks.request("steward-auth-refresh", () => this.refreshViaProxy(tenantId));
+      return navigator.locks.request("steward-auth-refresh", rotate);
     }
-    return this.refreshViaProxy(tenantId);
+    return rotate();
+  }
+
+  /** Serialize every one-time refresh-token mutation within this instance. */
+  private async runSerializedRotation<T>(operation: () => Promise<T>): Promise<T> {
+    const predecessor = this.rotationTail;
+    let release!: () => void;
+    this.rotationTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await predecessor;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
   }
 
   /**

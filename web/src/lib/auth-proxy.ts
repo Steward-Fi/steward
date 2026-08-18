@@ -30,6 +30,8 @@ const REFRESH_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60; // 30 days
 
 /** Sanity bound so a malformed deposit cannot write an oversized cookie. */
 const MAX_REFRESH_TOKEN_LENGTH = 8192;
+const AUTH_UPSTREAM_TIMEOUT_MS = 10_000;
+const AUTH_UPSTREAM_MAX_BYTES = 1024 * 1024;
 
 function cookieAttributes(secure: boolean): string {
   return `Path=${REFRESH_COOKIE_PATH}; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`;
@@ -92,9 +94,16 @@ export function proxyJson(
 
 export function isHttpsRequest(request: Request): boolean {
   try {
-    return new URL(request.url).protocol === "https:";
+    const url = new URL(request.url);
+    if (url.protocol === "https:") return true;
+    // Local test/dev origins need a non-Secure cookie. Everywhere else in a
+    // production build, require Secure even if a reverse proxy presented an
+    // internal http URL; omitting it would silently weaken browser custody.
+    const hostname = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    const loopback = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+    return process.env.NODE_ENV === "production" && !loopback;
   } catch {
-    return false;
+    return process.env.NODE_ENV === "production";
   }
 }
 
@@ -112,6 +121,7 @@ export function normalizeRefreshToken(value: unknown): string | null {
 export async function forwardToApi(
   path: string,
   payload: Record<string, unknown>,
+  limits: { timeoutMs?: number; maxBytes?: number } = {},
 ): Promise<{ status: number; json: Record<string, unknown> | null }> {
   // Resolved per call: route handlers run server-side, where the env var is
   // available at request time (and tests can point it at a stub server).
@@ -119,21 +129,61 @@ export async function forwardToApi(
     /\/+$/,
     "",
   );
-  const response = await fetch(`${apiBase}${path}`, {
-    method: "POST",
-    // A 307/308 would otherwise replay the refresh-token-bearing POST body to
-    // the redirect target. The configured Steward origin is the only trusted
-    // recipient, so redirects are always a hard failure at this boundary.
-    redirect: "error",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const text = await response.text();
-  let json: Record<string, unknown> | null = null;
+  const timeoutMs = limits.timeoutMs ?? AUTH_UPSTREAM_TIMEOUT_MS;
+  const maxBytes = limits.maxBytes ?? AUTH_UPSTREAM_MAX_BYTES;
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    json = text ? (JSON.parse(text) as Record<string, unknown>) : null;
-  } catch {
-    json = null;
+    const response = await fetch(`${apiBase}${path}`, {
+      method: "POST",
+      // A 307/308 would otherwise replay the refresh-token-bearing POST body to
+      // the redirect target. The configured Steward origin is the only trusted
+      // recipient, so redirects are always a hard failure at this boundary.
+      redirect: "error",
+      signal: controller.signal,
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    const declaredLength = response.headers.get("content-length");
+    if (declaredLength && /^\d+$/.test(declaredLength)) {
+      const bytes = Number(declaredLength);
+      if (!Number.isSafeInteger(bytes) || bytes > maxBytes) {
+        controller.abort();
+        throw new Error("Steward API response is too large");
+      }
+    }
+
+    const reader = response.body?.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    if (reader) {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > maxBytes) {
+          controller.abort();
+          throw new Error("Steward API response is too large");
+        }
+        chunks.push(value);
+      }
+    }
+    const body = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const text = new TextDecoder().decode(body);
+    let json: Record<string, unknown> | null = null;
+    try {
+      json = text ? (JSON.parse(text) as Record<string, unknown>) : null;
+    } catch {
+      json = null;
+    }
+    return { status: response.status, json };
+  } finally {
+    clearTimeout(deadline);
   }
-  return { status: response.status, json };
 }
