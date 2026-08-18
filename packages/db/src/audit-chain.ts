@@ -462,12 +462,39 @@ export async function withTenantAuditedTransaction<T>(
 ): Promise<T> {
   const db = getDb();
 
-  return withTenantAuditQueue(tenantId, async () => {
+  return withTenantAuditedTransactionOnDb(db, tenantId, fn);
+}
+
+/** Deadline-aware form used by bounded credential-lease lifecycles. The
+ * supplied handle is dedicated to that lifecycle, so all reads and audited
+ * mutations share one driver cancellation boundary. */
+export async function withTenantAuditedTransactionOnDb<T>(
+  db: ReturnType<typeof getDb>,
+  tenantId: string,
+  fn: (tx: unknown, appendRequiredAudit: AppendRequiredAudit) => Promise<T>,
+  deadlineAt?: number,
+): Promise<T> {
+  const assertRemaining = () => {
+    if (deadlineAt !== undefined && deadlineAt - Date.now() < 1_000) {
+      throw new Error("database operation deadline exceeded");
+    }
+  };
+
+  const execute = async () => {
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
+        assertRemaining();
         const committedEvents: AuditEventInput[] = [];
         const result = await db.transaction(async (tx) => {
           if (!isPGLiteRuntime()) {
+            if (deadlineAt !== undefined) {
+              const remaining = Math.max(1, deadlineAt - Date.now());
+              await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${remaining}ms'`));
+              await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${remaining}ms'`));
+              await tx.execute(
+                sql.raw(`SET LOCAL idle_in_transaction_session_timeout = '${remaining}ms'`),
+              );
+            }
             await tx.execute(
               sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_audit_${tenantId}`}, 0))`,
             );
@@ -493,6 +520,7 @@ export async function withTenantAuditedTransaction<T>(
         return result;
       } catch (err) {
         if (attempt < 4 && isAuditSequenceConflict(err)) {
+          assertRemaining();
           await new Promise((resolve) => setTimeout(resolve, 5 * (attempt + 1)));
           continue;
         }
@@ -501,5 +529,12 @@ export async function withTenantAuditedTransaction<T>(
     }
     // Unreachable: the loop either returns or throws.
     throw new Error("withTenantAuditedTransaction: exhausted retries");
-  });
+  };
+
+  // A deadline-bound network handle must not sit behind an uncancellable
+  // process-local queue. PostgreSQL's transaction advisory lock is the source
+  // of truth and is covered by lock_timeout; the queue remains necessary for
+  // PGLite, which has no advisory locks.
+  if (deadlineAt !== undefined && !isPGLiteRuntime()) return execute();
+  return withTenantAuditQueue(tenantId, execute);
 }

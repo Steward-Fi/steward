@@ -44,6 +44,7 @@ import {
   MAX_UPSTREAM_LEASE_SWEEP_INTERVAL_MS,
   recoverInterruptedUpstreamCredentialLeases,
   revokeUpstreamCredentialLease,
+  UPSTREAM_LEASE_LIFECYCLE_DEADLINE_MS,
 } from "./upstream-leases";
 
 export function upstreamLeaseIssuanceAvailableInRuntime(): boolean {
@@ -243,6 +244,7 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
             503,
           );
         }
+        const leaseDeadlineAt = Date.now() + UPSTREAM_LEASE_LIFECYCLE_DEADLINE_MS;
         try {
           await recoverInterruptedUpstreamCredentialLeases({
             db: ctx.db,
@@ -250,6 +252,8 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
             issuer: githubIssuer,
             exerciseToken: ctx.exerciseCredentialLeaseToken,
             auditedTransaction: ctx.withTenantAuditedTransaction,
+            deadlineAt: leaseDeadlineAt,
+            withDatabaseDeadline: ctx.withCredentialLeaseDatabaseDeadline,
           });
         } catch {
           return c.json<ApiResponse>({ ok: false, error: "credential lease recovery failed" }, 503);
@@ -267,6 +271,8 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
           sealToken: ctx.sealCredentialLeaseToken,
           auditedTransaction: ctx.withTenantAuditedTransaction,
           issuer: githubIssuer,
+          deadlineAt: leaseDeadlineAt,
+          withDatabaseDeadline: ctx.withCredentialLeaseDatabaseDeadline,
         });
         if (!leased.ok) {
           return c.json<ApiResponse>({ ok: false, error: leased.error }, leased.status);
@@ -332,6 +338,7 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
       token: body.token,
       issuer: githubIssuer,
       auditedTransaction: ctx.withTenantAuditedTransaction,
+      withDatabaseDeadline: ctx.withCredentialLeaseDatabaseDeadline,
     });
     if (!result.ok) return c.json<ApiResponse>({ ok: false, error: result.error }, result.status);
     c.header("Cache-Control", "no-store, max-age=0");
@@ -355,6 +362,7 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
       leaseId: c.req.param("leaseId"),
       token: body.token,
       auditedTransaction: ctx.withTenantAuditedTransaction,
+      withDatabaseDeadline: ctx.withCredentialLeaseDatabaseDeadline,
     });
     if (!result.ok) return c.json<ApiResponse>({ ok: false, error: result.error }, result.status);
     c.header("Cache-Control", "no-store, max-age=0");

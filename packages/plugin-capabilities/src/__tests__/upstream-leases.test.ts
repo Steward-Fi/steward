@@ -216,6 +216,87 @@ describe("upstream credential leases", () => {
     expect(issuer.issueCalls).toBe(0);
   });
 
+  test("threads one absolute database deadline through issue, ACK, revoke, and recovery", async () => {
+    const observedDeadlines: number[] = [];
+    const withDatabaseDeadline = async <T>(
+      deadlineAt: number,
+      use: (db: any, audited: ReturnType<typeof auditedTransaction>) => Promise<T>,
+    ) => {
+      observedDeadlines.push(deadlineAt);
+      return use(harness.db, auditedTransaction());
+    };
+    const issuer = new FakeIssuer();
+    const issued = await issueUpstreamCredentialLease({
+      ...issueArgs(issuer, "idempotency-deadline-threading"),
+      withDatabaseDeadline,
+    });
+    if (!issued.ok) throw new Error("expected issuance");
+    expect(
+      await acknowledgeUpstreamCredentialLease({
+        db: harness.db,
+        tenantId: TENANT,
+        agentId: AGENT,
+        leaseId: issued.leaseId,
+        token: issued.token,
+        auditedTransaction: auditedTransaction(),
+        withDatabaseDeadline,
+        now: NOW,
+      }),
+    ).toEqual({ ok: true });
+    expect(
+      await revokeUpstreamCredentialLease({
+        db: harness.db,
+        tenantId: TENANT,
+        agentId: AGENT,
+        leaseId: issued.leaseId,
+        token: issued.token,
+        issuer,
+        auditedTransaction: auditedTransaction(),
+        withDatabaseDeadline,
+        now: NOW,
+      }),
+    ).toEqual({ ok: true });
+    await recoverInterruptedUpstreamCredentialLeases({
+      db: harness.db,
+      tenantId: TENANT,
+      issuer,
+      exerciseToken,
+      auditedTransaction: auditedTransaction(),
+      withDatabaseDeadline,
+      now: NOW,
+    });
+    await recoverAllInterruptedUpstreamCredentialLeases({
+      db: harness.db,
+      issuer,
+      exerciseToken,
+      auditedTransaction: auditedTransaction(),
+      withDatabaseDeadline,
+      now: NOW,
+    });
+    expect(observedDeadlines).toHaveLength(5);
+    expect(observedDeadlines.every((deadline) => deadline > Date.now())).toBe(true);
+  });
+
+  test("does not acquire a database handle when the lifecycle budget is already insufficient", async () => {
+    let acquisitions = 0;
+    await expect(
+      acknowledgeUpstreamCredentialLease({
+        db: harness.db,
+        tenantId: TENANT,
+        agentId: AGENT,
+        leaseId: "90000000-0000-4000-8000-000000000001",
+        token: TOKEN,
+        auditedTransaction: auditedTransaction(),
+        deadlineAt: Date.now() + 100,
+        withDatabaseDeadline: async (_deadlineAt, use) => {
+          acquisitions += 1;
+          return use(harness.db, auditedTransaction());
+        },
+      }),
+    ).rejects.toThrow("credential lease lifecycle timed out");
+    expect(acquisitions).toBe(0);
+  });
+
   test("denies and revokes when the fixed provider token would outlive its grant", async () => {
     const issuer = new FakeIssuer();
     await harness.db
@@ -826,6 +907,43 @@ describe("upstream credential leases", () => {
     expect(row.status).toBe("revoked");
   });
 
+  test("global recovery does not start provider work without the minimum remaining budget", async () => {
+    const issued = await issueUpstreamCredentialLease(
+      issueArgs(new FakeIssuer(), "idempotency-insufficient-recovery-budget"),
+    );
+    if (!issued.ok) throw new Error("expected issuance");
+    await harness.db
+      .update(upstreamCredentialLeases)
+      .set({ updatedAt: new Date(NOW.getTime() - DELIVERY_ACK_TIMEOUT_MS - 1_000) })
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+    let providerCalls = 0;
+    const issuer: UpstreamTokenIssuer = {
+      issue: async () => {
+        throw new Error("not used");
+      },
+      revoke: async () => {
+        providerCalls += 1;
+      },
+    };
+
+    const result = await recoverAllInterruptedUpstreamCredentialLeases({
+      db: harness.db,
+      issuer,
+      exerciseToken,
+      auditedTransaction: auditedTransaction(),
+      now: NOW,
+      runDeadlineMs: 5_000,
+    });
+
+    expect(providerCalls).toBe(0);
+    expect(result.remaining).toBe(true);
+    const [row] = await harness.db
+      .select({ status: upstreamCredentialLeases.status })
+      .from(upstreamCredentialLeases)
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+    expect(row.status).toBe("delivery_pending");
+  });
+
   test("global deadline ordering drains over 100 tenants despite a slow failing oldest tenant", async () => {
     const [baseWorkspace] = await harness.db
       .select()
@@ -913,7 +1031,7 @@ describe("upstream credential leases", () => {
       now: NOW,
       workLimit: 200,
       concurrency: 16,
-      runDeadlineMs: 5_000,
+      runDeadlineMs: 25_000,
     });
     await oldestStarted;
     const lastId = uuid(count, 2);

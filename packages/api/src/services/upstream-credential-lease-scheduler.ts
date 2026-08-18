@@ -52,6 +52,7 @@ export async function runUpstreamCredentialLeaseSweep() {
     issuer: new GitHubAppInstallationTokenIssuer(),
     exerciseToken: ctx.exerciseCredentialLeaseToken,
     auditedTransaction: ctx.withTenantAuditedTransaction,
+    withDatabaseDeadline: ctx.withCredentialLeaseDatabaseDeadline,
   });
 }
 

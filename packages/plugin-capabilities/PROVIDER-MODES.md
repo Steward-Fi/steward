@@ -59,6 +59,19 @@ an upstream lifetime Steward cannot enforce. Issuance also fails closed when
 the live grant expires before GitHub's fixed one-hour token expiry; a provider
 token is never delivered with a lifetime beyond its authority.
 
+Issue, acknowledgement, revoke, and recovery use one 25-second absolute
+lifecycle deadline inside the 30-second delivery/recovery contract. A provider
+phase requires at least 12 seconds remaining (the 10-second GitHub transport
+limit plus a two-second durable-finalization reserve), and a database phase is
+not started with less than one second remaining. postgres-js uses a fresh
+single-connection client for each lifecycle, so connection/pool acquisition,
+DNS/TCP/TLS/authentication, statements, locks, and transactions are all inside
+the deadline; timeout closes that connection and PostgreSQL rolls an open
+transaction back before control returns. Neon HTTP requests carry an abort
+signal and earlier server-side statement/lock/transaction limits. Timeout
+errors are normalized and never contain SQL, parameters, provider bodies, or
+connection strings.
+
 The long-lived API starts an immediate, periodic, cursor-bounded recovery sweep
 for every tenant with durable lease state. It revokes abandoned deliveries and
 stale encrypted handles without waiting for another issuance request, and
