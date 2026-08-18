@@ -213,6 +213,7 @@ type ReservationReconciliationTarget = "settled" | "released";
 let reservationReconciliationFaultForTests: "before_apply" | "after_apply" | null = null;
 let providerPolicyClockForTests: (() => Date) | null = null;
 let decisionReservationCrashForTests = false;
+let providerCreateAfterOptimisticReplayLookupForTests: (() => Promise<void>) | null = null;
 
 class SimulatedDecisionReservationCrash extends Error {}
 
@@ -233,6 +234,14 @@ export function __setProviderPolicyClockForTests(clock: (() => Date) | null): vo
  * create transaction can persist its intent/generation. */
 export function __setDecisionReservationCrashForTests(enabled: boolean): void {
   decisionReservationCrashForTests = enabled;
+}
+
+/** Test-only barrier after the unlocked replay miss. This lets the real-Postgres
+ * suite deterministically put two requests on the production advisory-lock path. */
+export function __setProviderCreateAfterOptimisticReplayLookupForTests(
+  hook: (() => Promise<void>) | null,
+): void {
+  providerCreateAfterOptimisticReplayLookupForTests = hook;
 }
 
 function persistedReservationHandles(
@@ -982,6 +991,8 @@ class ProviderActionService {
       return await this.outcomeFromBinding(priorBinding);
     }
 
+    await providerCreateAfterOptimisticReplayLookupForTests?.();
+
     // Reservation identity must survive a process death after Redis admission
     // but before PostgreSQL commit. Derive the intent from the already-scoped
     // idempotency identity; the transaction advisory lock below serializes
@@ -1361,12 +1372,14 @@ class ProviderActionService {
 
     if (transactionReplay) {
       const replay = transactionReplay as typeof providerActionBindings.$inferSelect;
-      const persistedPolicyInputDigest = (replay.requestEnvelope as Record<string, unknown>)
-        .policyInputDigest;
+      const persistedEnvelope = replay.requestEnvelope as Record<string, unknown>;
+      const persistedPolicyInputDigest = persistedEnvelope.policyInputDigest;
+      const persistedXSummonAttestationDigest = persistedEnvelope.xSummonAttestationDigest;
       if (
         replay.actionDigest !== actionDigest ||
         (persistedPolicyInputDigest !== undefined &&
-          persistedPolicyInputDigest !== policyInputDigest)
+          persistedPolicyInputDigest !== policyInputDigest) ||
+        persistedXSummonAttestationDigest !== xSummonAttestationDigest
       ) {
         return {
           kind: "replay_conflict",
