@@ -415,6 +415,23 @@ export async function dispatchGovernedExecution(
   await hook("afterLoad");
   if (!loaded) return deny("EXEC_AUTH_NOT_READY", 409, intentId);
 
+  // Terminal / already-dispatched executions are immutable idempotent reads.
+  // Return their persisted disposition before revalidating short-lived summon
+  // evidence: expiry or adapter-key rotation after a completed dispatch must
+  // never rewrite the observed terminal result (and never reaches claim,
+  // credential decrypt, or upstream fetch).
+  if (loaded.authStatus !== "active" || loaded.dispatchState !== "none") {
+    if (loaded.dispatchState === "outcome_unknown")
+      return deny("EXEC_DISPATCH_OUTCOME_UNKNOWN", 202, intentId, {
+        executionId: loaded.executionId,
+        dispatchState: loaded.dispatchState,
+      });
+    return deny("EXEC_TERMINAL_STATE", 409, intentId, {
+      executionId: loaded.executionId,
+      dispatchState: loaded.dispatchState,
+    });
+  }
+
   // Revalidate authenticated X summon provenance at the final dispatch
   // boundary. The request hash makes the attestation digest load-bearing; the
   // proxy independently verifies the adapter signature, exact scope/source and
@@ -426,23 +443,6 @@ export async function dispatchGovernedExecution(
   });
   if (summonProvenance === "invalid") {
     return deny("EXEC_AUTH_SUMMON_ATTESTATION_INVALID", 409, intentId);
-  }
-
-  // Terminal / already-dispatched: never re-dispatch (X8, P26). A consumed nonce
-  // with a terminal dispatch_state returns its current state without dispatching.
-  // This is checked BEFORE the binding-ready guard so a re-read of an already
-  // dispatched/outcome_unknown execution returns its true state (its binding is
-  // no longer execution_ready by then).
-  if (loaded.authStatus !== "active" || loaded.dispatchState !== "none") {
-    if (loaded.dispatchState === "outcome_unknown")
-      return deny("EXEC_DISPATCH_OUTCOME_UNKNOWN", 202, intentId, {
-        executionId: loaded.executionId,
-        dispatchState: loaded.dispatchState,
-      });
-    return deny("EXEC_TERMINAL_STATE", 409, intentId, {
-      executionId: loaded.executionId,
-      dispatchState: loaded.dispatchState,
-    });
   }
 
   // #239 rollout boundary: a pre-0084 execution_ready row may carry a validly
