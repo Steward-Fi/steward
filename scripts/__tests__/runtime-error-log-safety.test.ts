@@ -64,6 +64,13 @@ function unsafeTelemetryArguments(source: ts.SourceFile): string[] {
   };
   const inspectCatch = (clause: ts.CatchClause, caughtName: string): void => {
     const tainted = new Set([caughtName]);
+    const taintMutationTarget = (candidate: ts.Expression): void => {
+      let target: ts.Expression = candidate;
+      while (ts.isPropertyAccessExpression(target) || ts.isElementAccessExpression(target)) {
+        target = target.expression;
+      }
+      if (ts.isIdentifier(target)) tainted.add(target.text);
+    };
     const isTainted = (candidate: ts.Node): boolean => {
       if (
         ts.isPropertyAccessExpression(candidate) &&
@@ -120,9 +127,31 @@ function unsafeTelemetryArguments(source: ts.SourceFile): string[] {
       ) {
         if (ts.isIdentifier(node.left)) {
           tainted.add(node.left.text);
+        } else if (
+          ts.isPropertyAccessExpression(node.left) ||
+          ts.isElementAccessExpression(node.left)
+        ) {
+          taintMutationTarget(node.left);
         }
       }
       if (ts.isCallExpression(node)) {
+        if (
+          ts.isPropertyAccessExpression(node.expression) &&
+          ["push", "unshift", "splice", "set"].includes(node.expression.name.text) &&
+          node.arguments.some(isTainted)
+        ) {
+          taintMutationTarget(node.expression.expression);
+        }
+        if (
+          ts.isPropertyAccessExpression(node.expression) &&
+          ts.isIdentifier(node.expression.expression) &&
+          node.expression.expression.text === "Object" &&
+          node.expression.name.text === "assign" &&
+          node.arguments.length > 1 &&
+          node.arguments.slice(1).some(isTainted)
+        ) {
+          taintMutationTarget(node.arguments[0]);
+        }
         const isConsoleSink =
           ts.isPropertyAccessExpression(node.expression) &&
           ts.isIdentifier(node.expression.expression) &&
@@ -239,6 +268,24 @@ describe("runtime error logging", () => {
         }
       `),
     ).toHaveLength(1);
+  });
+
+  test("tracks caught values written into mutable telemetry payloads", () => {
+    expect(
+      failuresForSnippet(`
+        try {
+          doThing();
+        } catch (err) {
+          const payload = { detail: "safe" };
+          payload.detail = err.message;
+          console.error(payload);
+
+          const values = [];
+          values.push(err.stack);
+          writeAuditEvent({ values });
+        }
+      `),
+    ).toHaveLength(2);
   });
 
   test("allows aliases of bounded diagnostics", () => {
