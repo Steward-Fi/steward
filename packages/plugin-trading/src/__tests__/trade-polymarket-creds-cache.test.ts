@@ -37,9 +37,25 @@ const fakeRedis = {
   get: async (key: string) => redisStore.get(key) ?? null,
   // IoredisLike.set — the durable idempotency store (SEC-043) writes through
   // this with a PX TTL; the creds cache itself uses setex below.
-  set: async (key: string, value: string, _mode?: "PX", _ttlMs?: number) => {
+  set: async (key: string, value: string, _mode?: "PX", _ttlMs?: number, condition?: "NX") => {
+    if (condition === "NX" && redisStore.has(key)) return null;
     redisStore.set(key, value);
     return "OK";
+  },
+  eval: async (
+    script: string,
+    _numKeys: number,
+    key: string,
+    token: string,
+    ...args: unknown[]
+  ) => {
+    const raw = redisStore.get(key);
+    if (!raw) return 0;
+    const current = JSON.parse(raw) as { state?: string; claimToken?: string };
+    if (current.state !== "pending" || current.claimToken !== token) return 0;
+    if (script.includes('redis.call("DEL"')) redisStore.delete(key);
+    else redisStore.set(key, args[0] as string);
+    return 1;
   },
   setex: async (key: string, _ttlSeconds: number, value: string) => {
     redisStore.set(key, value);
@@ -178,6 +194,7 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
     // Real provisioning into the encrypted venue-scoped vault; no key material
     // leaves the vault, and the L1->L2 derivation signs for real.
     const wallet = await ctx.vault.createWallet({
+      tenantId,
       agentId,
       venue: "polymarket",
       chainType: "evm",
@@ -282,6 +299,7 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
 
     const { tenantId, agentId } = await seedTenantAgent();
     const wallet = await ctx.vault.createWallet({
+      tenantId,
       agentId,
       venue: "polymarket",
       chainType: "evm",

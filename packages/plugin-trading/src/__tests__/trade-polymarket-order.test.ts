@@ -631,8 +631,8 @@ describe("POST /v1/trade/polymarket/order", () => {
           orderID: "pm-e2e-order-1",
           status: "matched",
           success: true,
-          makingAmount: "10000000",
-          takingAmount: "20000000",
+          makingAmount: "10",
+          takingAmount: "20",
         };
       }
       throw new Error(`unexpected deterministic CLOB POST ${path}`);

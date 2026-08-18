@@ -944,9 +944,25 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         409,
       );
     }
+    idempotency = idempotency.claim ? await idempotency.claim() : idempotency;
+    if (idempotency.conflict) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency key reused with a different body" },
+        409,
+      );
+    }
+    if (idempotency.response) return tradeReplayResponse(c, idempotency.response);
+    if (idempotency.inProgress) {
+      c.header("Retry-After", "1");
+      return c.json<ApiResponse>(
+        { ok: false, error: "Request with this idempotency key is in progress" },
+        409,
+      );
+    }
 
     const session = await getSessionManager().getActive(tenantId, body.sessionId);
     if (!session || session.agentId !== agentId || session.venue !== "hyperliquid") {
+      await idempotency.release?.();
       return c.json<ApiResponse>({ ok: false, error: "Active Hyperliquid session required" }, 403);
     }
     const coin = body.coin ?? body.asset;
@@ -964,7 +980,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         asset: coin,
         reason,
       });
-      return c.json({ code: "policy-violation", reason }, 400);
+      const envelope: TradeIdempotencyResponse = {
+        status: 400,
+        body: { code: "policy-violation", reason },
+      };
+      await idempotency.store?.(envelope);
+      return c.json(envelope.body, envelope.status);
     }
 
     const builderPerp = isBuilderPerpSymbol(parsedAsset.data);
@@ -1001,7 +1022,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         dailySpendUsd: session.dailySpendUsd,
         reason,
       });
-      return c.json({ code: "policy-violation", reason }, 400);
+      const envelope: TradeIdempotencyResponse = {
+        status: 400,
+        body: { code: "policy-violation", reason },
+      };
+      await idempotency.store?.(envelope);
+      return c.json(envelope.body, envelope.status);
     };
 
     const limitPx = body.limitPx ?? body.limitPrice;
@@ -1011,10 +1037,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         ? !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(limitPx) || Number(limitPx) <= 0
         : !Number.isFinite(limitPx) || limitPx <= 0)
     ) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "limitPx must be a positive finite price" },
-        400,
-      );
+      const envelope: TradeIdempotencyResponse = {
+        status: 400,
+        body: { ok: false, error: "limitPx must be a positive finite price" },
+      };
+      await idempotency.store?.(envelope);
+      return c.json(envelope.body, envelope.status);
     }
     if (limitPx === undefined) {
       // SEC-114: marketable order without an explicit limit — the notional is
@@ -1076,21 +1104,6 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
 
     const walletAddress = session.walletId;
     const manager = getSessionManager();
-    idempotency = idempotency.claim ? await idempotency.claim() : idempotency;
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.response) return tradeReplayResponse(c, idempotency.response);
-    if (idempotency.inProgress) {
-      c.header("Retry-After", "1");
-      return c.json<ApiResponse>(
-        { ok: false, error: "Request with this idempotency key is in progress" },
-        409,
-      );
-    }
     const fenced = await manager.withActiveSubmissionFence(
       { tenantId, id: session.id },
       async (sessionFromFence?: TradeSession) => {
@@ -1756,17 +1769,36 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     // needs the notional; the adapter re-validates the (0,1) price range).
     const amount = Number(body.amount);
     const price = Number(body.price);
-    if (!Number.isFinite(amount) || amount <= 0) {
+    idempotency = idempotency.claim ? await idempotency.claim() : idempotency;
+    if (idempotency.conflict) {
       return c.json<ApiResponse>(
-        { ok: false, error: "amount must be a positive finite number" },
-        400,
+        { ok: false, error: "Idempotency key reused with a different body" },
+        409,
       );
     }
-    if (!Number.isFinite(price) || price <= 0 || price >= 1) {
+    if (idempotency.response) return tradeReplayResponse(c, idempotency.response);
+    if (idempotency.inProgress) {
+      c.header("Retry-After", "1");
       return c.json<ApiResponse>(
-        { ok: false, error: "price must be in the open interval (0,1)" },
-        400,
+        { ok: false, error: "Request with this idempotency key is in progress" },
+        409,
       );
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      const envelope: TradeIdempotencyResponse = {
+        status: 400,
+        body: { ok: false, error: "amount must be a positive finite number" },
+      };
+      await idempotency.store?.(envelope);
+      return c.json(envelope.body, envelope.status);
+    }
+    if (!Number.isFinite(price) || price <= 0 || price >= 1) {
+      const envelope: TradeIdempotencyResponse = {
+        status: 400,
+        body: { ok: false, error: "price must be in the open interval (0,1)" },
+      };
+      await idempotency.store?.(envelope);
+      return c.json(envelope.body, envelope.status);
     }
     // SEC-041: a SELL's notional must be floored at the live best bid — a FOK
     // sell at an arbitrarily low limit fills at the bid, so sizing on the
@@ -1831,6 +1863,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     // polymarket session. A mismatch is treated as "no active session" (403) — we
     // never leak another agent's session existence.
     if (session.agentId !== agentId || session.venue !== "polymarket") {
+      await idempotency.release?.();
       return c.json<ApiResponse>({ ok: false, error: "Active Polymarket session required" }, 403);
     }
 
@@ -1850,6 +1883,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       if (status === 403) {
         // 403s are not stored for idempotent replay (session state can change to
         // active and a retry should re-evaluate) — mirrors HL's session-required 403.
+        await idempotency.release?.();
         return c.json<ApiResponse>({ ok: false, error: "Active Polymarket session required" }, 403);
       }
       const envelope: TradeIdempotencyResponse = {
@@ -1875,6 +1909,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         conditionId: body.conditionId ?? null,
         reason: creds.reason,
       });
+      await idempotency.release?.();
       return c.json<ApiResponse>({ ok: false, error: reason }, 409);
     }
 
@@ -1892,6 +1927,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         sessionWallet: session.walletId,
         resolvedWallet: creds.walletAddress,
       });
+      await idempotency.release?.();
       return c.json<ApiResponse>(
         {
           ok: false,
@@ -1928,21 +1964,6 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     };
 
     const manager = getSessionManager();
-    idempotency = idempotency.claim ? await idempotency.claim() : idempotency;
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.response) return tradeReplayResponse(c, idempotency.response);
-    if (idempotency.inProgress) {
-      c.header("Retry-After", "1");
-      return c.json<ApiResponse>(
-        { ok: false, error: "Request with this idempotency key is in progress" },
-        409,
-      );
-    }
     // Fence reserve→submit against concurrent revocation (mirrors HL's
     // withActiveSubmissionFence). After SEC-044 the fence's advisory lock covers
     // ONLY the DB-level active check — it is released before this callback runs
