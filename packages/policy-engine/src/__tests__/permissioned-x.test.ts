@@ -33,21 +33,32 @@ function ctx(
   args: Record<string, unknown> = {},
   extra: Partial<ProviderPolicyContext> = {},
 ): ProviderPolicyContext {
+  const builtArgs = {
+    isReply: false,
+    hasUrl: false,
+    summoned: false,
+    textCodePointLength: 5,
+    textByteLength: 5,
+    ...args,
+  };
+  const { x: extraX, ...rest } = extra;
   return {
     operationKey: OP_TWEET,
-    args: {
-      isReply: false,
-      hasUrl: false,
-      summoned: false,
-      textCodePointLength: 5,
-      textByteLength: 5,
-      ...args,
-    },
+    args: builtArgs,
     method: "POST",
     host: "api.x.com",
     path: "/2/tweets",
     invokeCount1h: 0,
-    ...extra,
+    x: {
+      ...(typeof builtArgs.isReply === "boolean" ? { isReply: builtArgs.isReply } : {}),
+      ...(typeof builtArgs.hasUrl === "boolean" ? { hasUrl: builtArgs.hasUrl } : {}),
+      ...(typeof builtArgs.summoned === "boolean" ? { summoned: builtArgs.summoned } : {}),
+      ...(typeof builtArgs.textCodePointLength === "number"
+        ? { textCodePointLength: builtArgs.textCodePointLength }
+        : {}),
+      ...extraX,
+    },
+    ...rest,
   };
 }
 
@@ -131,7 +142,7 @@ describe("permissioned-X: contentPolicy", () => {
     const x: XConstraints = { contentPolicy: { maxLength: 10 } };
     const c = ctx();
     // strip the length signal
-    (c.args as Record<string, unknown>).textCodePointLength = undefined;
+    delete (c.x as { textCodePointLength?: number }).textCodePointLength;
     expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
 
@@ -154,13 +165,9 @@ describe("permissioned-X: contentPolicy", () => {
 
   it("does not fall back to caller args when a typed signal is missing (SEC-182)", () => {
     const x: XConstraints = { replyPolicy: { mode: "summoned-only" } };
-    const decision = decide(
-      x,
-      ctx(
-        { isReply: true, summoned: true },
-        { x: { isReply: true } }, // no authoritative summoned attestation
-      ),
-    );
+    const c = ctx({ isReply: true, summoned: true });
+    delete (c.x as { summoned?: boolean }).summoned;
+    const decision = decide(x, c);
     expect(decision.effect).toBe("hard_deny");
     expect(decision.reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
@@ -402,7 +409,7 @@ describe("permissioned-X: scoping + fail-closed", () => {
   it("allowUrls=false fails closed when the hasUrl signal is absent", () => {
     const x: XConstraints = { contentPolicy: { allowUrls: false } };
     const c = ctx();
-    delete (c.args as Record<string, unknown>).hasUrl;
+    delete (c.x as { hasUrl?: boolean }).hasUrl;
     const d = decide(x, c);
     expect(d.effect).toBe("hard_deny");
     expect(d.reasonCodes).toContain(R.INPUT_UNAVAILABLE);
@@ -417,28 +424,28 @@ describe("permissioned-X: scoping + fail-closed", () => {
   it("replyPolicy fails closed when the isReply signal is absent", () => {
     const x: XConstraints = { replyPolicy: { mode: "none" } };
     const c = ctx();
-    delete (c.args as Record<string, unknown>).isReply;
+    delete (c.x as { isReply?: boolean }).isReply;
     expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
 
   it("summoned-only fails closed when the summoned signal is absent on a reply", () => {
     const x: XConstraints = { replyPolicy: { mode: "summoned-only" } };
     const c = ctx({ isReply: true });
-    delete (c.args as Record<string, unknown>).summoned;
+    delete (c.x as { summoned?: boolean }).summoned;
     expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
 
   it("url escalation fails closed when hasUrl is absent", () => {
     const x: XConstraints = { escalation: { urlPostRequiresApproval: true } };
     const c = ctx();
-    delete (c.args as Record<string, unknown>).hasUrl;
+    delete (c.x as { hasUrl?: boolean }).hasUrl;
     expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
 
   it("spendPolicy fails closed when hasUrl is absent (cannot price the action)", () => {
     const x: XConstraints = { spendPolicy: { maxSpendMicros: 1_000_000 } };
     const c = ctx({}, { x: { accumulatedSpendMicros: 0 } });
-    delete (c.args as Record<string, unknown>).hasUrl;
+    delete (c.x as { hasUrl?: boolean }).hasUrl;
     expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
 

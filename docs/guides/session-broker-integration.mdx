@@ -203,7 +203,7 @@ curl -X PUT http://localhost:3200/agents/my-agent/policies \
 | `effect` | string | `allow`, `deny`, or `require-approval`. A matched `deny` always wins; `require-approval` routes to a `202` queued outcome. |
 | `constraints.maxCallsPerHour` | number | Cap on invokes per trailing hour for this (agent, capability). |
 | `constraints.argEquals` | object | Each key must exist in the invoke `args` and strictly equal the value. |
-| `constraints.argMatches` | object | Each key must match the (anchored) regex. |
+| `constraints.argMatches` | object | Each key must match the full value using a linear-time RE2-compatible regex. Unsupported constructs such as backreferences fail closed. |
 
 <Warning>
   `PUT /agents/:id/policies` **replaces** the entire policy set. Always send the

@@ -7,7 +7,7 @@ import {
   isEncryptedWebhookSecret,
   WebhookDispatcher,
 } from "@stwd/webhooks";
-import { db, tenantConfigs } from "./context";
+import { db } from "./context";
 import {
   acceptsConfiguredWebhookEvent,
   type ConfiguredWebhookEventType,
@@ -34,12 +34,9 @@ export function dispatchWebhook(
   // WebhookEventRegistry (core ∪ plugin-declared) because the plugin host merged
   // it in. We thread the raw plugin event name into the configured fan-out so a
   // tenant can subscribe to a plugin event specifically (events: ["plugin.evt"]).
-  // We do NOT drop unregistered types here: the legacy tenant-config webhook is a
-  // deliberate catch-all escape hatch that fires for EVERY event type (it has
-  // always done so), so dropping would change long-standing behavior. The
-  // configured fan-out only ever matches a plugin event when it is registry-valid
-  // AND a config explicitly lists it, so an arbitrary unregistered string can
-  // never masquerade as a configured event.
+  // The configured fan-out only ever matches a plugin event when it is
+  // registry-valid AND a config explicitly lists it, so an arbitrary
+  // unregistered string can never masquerade as a configured event.
   const isPluginEvent = configuredType === null && webhookEventRegistry.has(type);
   const redactedData = redactWebhookSecrets(data) as Record<string, unknown>;
   // `type` has passed the emission gate above (it is a configured/aliasable core
@@ -60,25 +57,10 @@ export function dispatchWebhook(
     },
   );
 
-  // Legacy tenant-config single webhook URL. Tenants can still set a webhookUrl
-  // via the tenants route (tenants.ts), so this fan-out must remain until that
-  // path is fully migrated to persisted webhook configs. It fires for every
-  // event regardless of configured-type mapping, using the raw event type.
-  // Payload is redacted on the same terms as configured webhooks.
-  const tenantConfigWebhookUrl = tenantConfigs.get(tenantId)?.webhookUrl;
-  if (tenantConfigWebhookUrl) {
-    const tenantConfigEvent: WebhookEvent = {
-      type: type as WebhookEvent["type"],
-      tenantId,
-      agentId,
-      data: redactedData,
-      timestamp: new Date(),
-    };
-    const dispatcher = new WebhookDispatcher();
-    dispatcher.dispatch(tenantConfigEvent, tenantConfigWebhookUrl).catch((error) => {
-      console.error("[webhooks] Failed to dispatch tenant config webhook:", error);
-    });
-  }
+  // SEC-101: tenant-route webhookUrl writes are mirrored into webhook_configs
+  // with a generated, encrypted, per-endpoint secret. The former second fan-out
+  // through a bare URL both duplicate-delivered each event and could only sign
+  // with a process-wide key. The configured path above is now the sole path.
 }
 
 export async function dispatchTestWebhook(config: {

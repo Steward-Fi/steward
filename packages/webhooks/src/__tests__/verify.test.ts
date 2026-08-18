@@ -102,6 +102,9 @@ describe("verifyWebhookSignature (SEC-177)", () => {
       }),
     ).toBe(false);
     expect(verifyWebhookSignature({ ...baseInput, signature, nowSeconds: Number.NaN })).toBe(false);
+    expect(verifyWebhookSignature({ ...baseInput, signature, toleranceSeconds: 1.5 })).toBe(false);
+    expect(verifyWebhookSignature({ ...baseInput, signature, deliveryId: "   " })).toBe(false);
+    expect(verifyWebhookSignature({ ...baseInput, signature, eventType: "   " })).toBe(false);
     expect(verifyWebhookSignature({ ...baseInput, signature, secret: "" })).toBe(false);
   });
 });

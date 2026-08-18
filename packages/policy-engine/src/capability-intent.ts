@@ -1937,47 +1937,24 @@ export type XConstraintVerdict =
   | { kind: "escalate" };
 
 /**
- * Read a REQUIRED boolean policy arg. Returns the boolean value, or `undefined`
- * when the arg is absent or not a boolean. A permissioned-X policy that DEPENDS
- * on this signal must fail closed (POLICY_INPUT_UNAVAILABLE) on `undefined` — we
- * NEVER coerce a missing/mistyped signal to `false`, because that would let a
- * URL/reply gate silently pass on an operation whose build doesn't carry the
- * signal (e.g. x.tweet.delete / x.user.me.read, or a malformed context). This is
- * the content-shape fail-closed contract (codex P2, PR review).
- */
-function readBool(args: Record<string, unknown>, key: string): boolean | undefined {
-  const v = args[key];
-  return typeof v === "boolean" ? v : undefined;
-}
-
-/**
- * Read an X security signal from the typed channel when the caller supplies
- * that channel. A missing field in an otherwise-present typed channel stays
- * unavailable; it MUST NOT fall back to the caller-influenced args bag. The
- * args fallback exists only for legacy evaluators that provide no typed channel
- * at all (SEC-182).
+ * Read X security signals exclusively from the typed, server-populated channel.
+ * The generic args bag is caller-influenced, including when no typed channel is
+ * present, so it can never be an authority fallback (SEC-182).
  */
 function xBoolSignal(
   ctx: ProviderPolicyContext,
   key: "isReply" | "summoned" | "hasUrl",
 ): boolean | undefined {
-  if (ctx.x !== undefined) {
-    const typed = ctx.x[key];
-    return typeof typed === "boolean" ? typed : undefined;
-  }
-  return readBool(ctx.args, key);
+  const typed = ctx.x?.[key];
+  return typeof typed === "boolean" ? typed : undefined;
 }
 
 function xIntegerSignal(
   ctx: ProviderPolicyContext,
   key: "textCodePointLength",
 ): number | undefined {
-  if (ctx.x !== undefined) {
-    const typed = ctx.x[key];
-    return typeof typed === "number" && Number.isInteger(typed) ? typed : undefined;
-  }
-  const legacy = ctx.args[key];
-  return typeof legacy === "number" && Number.isInteger(legacy) ? legacy : undefined;
+  const typed = ctx.x?.[key];
+  return typeof typed === "number" && Number.isInteger(typed) ? typed : undefined;
 }
 
 /**

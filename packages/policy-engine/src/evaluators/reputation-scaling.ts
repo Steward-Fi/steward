@@ -42,9 +42,12 @@ export function computeScaledLimit(config: ReputationScalingConfig, score: numbe
     return base + ((max - base) * ratioFixed) / 10000n;
   }
 
-  // Linear: base + (max - base) * (score / 100)
+  // Linear: base + (max - base) * (score / 100). Reputation scores may be
+  // fractional, so use the same fixed-point strategy as the logarithmic path
+  // rather than calling BigInt(72.5), which throws.
   const range = max - base;
-  return base + (range * BigInt(clampedScore)) / 100n;
+  const scoreFixed = BigInt(Math.round(clampedScore * 10_000));
+  return base + (range * scoreFixed) / 1_000_000n;
 }
 
 export function evaluateReputationScaling(
@@ -56,16 +59,24 @@ export function evaluateReputationScaling(
 
   // Mirror the complete write-time contract at runtime. A hand-edited row must
   // not throw, silently select the linear curve, or invert base/max limits.
+  const isUint256 = (value: unknown): value is string => {
+    if (typeof value !== "string" || !/^\d+$/.test(value)) return false;
+    const normalized = value.replace(/^0+/, "") || "0";
+    const uint256Max =
+      "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+    return (
+      normalized.length < uint256Max.length ||
+      (normalized.length === uint256Max.length && normalized <= uint256Max)
+    );
+  };
   if (
     typeof rawConfig !== "object" ||
     rawConfig === null ||
     Array.isArray(rawConfig) ||
     !("baseMaxPerTx" in rawConfig) ||
-    typeof rawConfig.baseMaxPerTx !== "string" ||
-    !/^\d+$/.test(rawConfig.baseMaxPerTx) ||
+    !isUint256(rawConfig.baseMaxPerTx) ||
     !("maxMaxPerTx" in rawConfig) ||
-    typeof rawConfig.maxMaxPerTx !== "string" ||
-    !/^\d+$/.test(rawConfig.maxMaxPerTx) ||
+    !isUint256(rawConfig.maxMaxPerTx) ||
     BigInt(rawConfig.maxMaxPerTx) < BigInt(rawConfig.baseMaxPerTx) ||
     !("curve" in rawConfig) ||
     (rawConfig.curve !== "linear" && rawConfig.curve !== "logarithmic")
@@ -74,7 +85,7 @@ export function evaluateReputationScaling(
       ...base,
       passed: false,
       reason:
-        "Reputation-scaling config is malformed; limits must be base-10 wei strings with max >= base and a supported curve",
+        "Reputation-scaling config is malformed; limits must be ordered uint256 wei strings with a supported curve",
     };
   }
   const config = rawConfig as ReputationScalingConfig;

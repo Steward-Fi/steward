@@ -296,6 +296,27 @@ describe("reputation-scaling malformed input (SEC-105)", () => {
     expect(result.passed).toBe(true); // exactly at the score-0 base limit
   });
 
+  it("supports fractional linear scores without throwing", () => {
+    const limit = computeScaledLimit(
+      { baseMaxPerTx: "0", maxMaxPerTx: "1000000", curve: "linear" },
+      72.5,
+    );
+    expect(limit).toBe(725000n);
+  });
+
+  it("rejects wei limits above uint256", () => {
+    const result = evaluateReputationScaling(
+      makeRule("reputation-scaling", {
+        ...linearConfig,
+        maxMaxPerTx:
+          "115792089237316195423570985008687907853269984665640564039457584007913129639936",
+      }),
+      { reputationScore: 50, txValue: 1n },
+    );
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("uint256");
+  });
+
   it("rejects the complete malformed runtime shape instead of silently choosing a curve", () => {
     for (const config of [
       { ...linearConfig, curve: "surprise" },
