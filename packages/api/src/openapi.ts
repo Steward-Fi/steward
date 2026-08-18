@@ -2727,7 +2727,7 @@ function approvalPaths(prefix = ""): Record<string, unknown> {
       get: {
         tags: ["Approvals"],
         summary: "List manual approval queue entries",
-        description: `${approvalDescription} Supports status and tenant-scoped agent filters before limit/offset pagination.`,
+        description: `${approvalDescription} Supports status and tenant-scoped agent filters before stable (requestedAt, id) keyset pagination.`,
         security: [{ bearerAuth: [] }],
         parameters: [
           parameter("status", "query", {
@@ -2737,6 +2737,8 @@ function approvalPaths(prefix = ""): Record<string, unknown> {
           parameter("agentId", "query", { type: "string", minLength: 1, maxLength: 64 }),
           parameter("limit", "query", { type: "integer", minimum: 1, maximum: 200 }),
           parameter("offset", "query", { type: "integer", minimum: 0, maximum: 10000 }),
+          parameter("cursorRequestedAt", "query", { type: "string", format: "date-time" }),
+          parameter("cursorId", "query", { type: "string", minLength: 1, maxLength: 128 }),
         ],
         responses: {
           "200": jsonResponse(apiResponse({ type: "array", items: approvalQueueEntrySchema })),

@@ -4,7 +4,7 @@
  * Mount: app.route("/approvals", approvalRoutes)
  */
 
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, lt, or, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
 import {
@@ -53,6 +53,7 @@ const MAX_APPROVAL_LIST_LIMIT = 200;
 const MAX_APPROVAL_LIST_OFFSET = 10_000;
 const MAX_APPROVAL_TEXT_LENGTH = 1_000;
 const MAX_APPROVAL_AGENT_ID_LENGTH = 64;
+const MAX_APPROVAL_CURSOR_ID_LENGTH = 128;
 
 const approvalTransactionMatchesQueue = sql`${transactions.agentId} = ${approvalQueue.agentId}`;
 
@@ -173,12 +174,47 @@ function parseApprovalListParams(c: Context<{ Variables: AppVariables }>) {
     };
   }
 
+  const rawCursorRequestedAt = c.req.query("cursorRequestedAt");
+  const rawCursorId = c.req.query("cursorId");
+  if ((rawCursorRequestedAt === undefined) !== (rawCursorId === undefined)) {
+    return {
+      ok: false as const,
+      error: "cursorRequestedAt and cursorId must be supplied together",
+    };
+  }
+  if (rawCursorRequestedAt !== undefined && c.req.query("offset") !== undefined) {
+    return { ok: false as const, error: "cursor pagination cannot be combined with offset" };
+  }
+
+  let cursorRequestedAt: Date | undefined;
+  if (rawCursorRequestedAt !== undefined && rawCursorId !== undefined) {
+    cursorRequestedAt = new Date(rawCursorRequestedAt);
+    if (
+      Number.isNaN(cursorRequestedAt.getTime()) ||
+      cursorRequestedAt.toISOString() !== rawCursorRequestedAt
+    ) {
+      return { ok: false as const, error: "cursorRequestedAt must be an ISO 8601 timestamp" };
+    }
+    if (
+      rawCursorId.length === 0 ||
+      rawCursorId.length > MAX_APPROVAL_CURSOR_ID_LENGTH ||
+      rawCursorId.trim() !== rawCursorId
+    ) {
+      return {
+        ok: false as const,
+        error: `cursorId must be a non-empty string of at most ${MAX_APPROVAL_CURSOR_ID_LENGTH} characters`,
+      };
+    }
+  }
+
   return {
     ok: true as const,
     status: rawStatus as ApprovalStatusFilter,
     limit: rawLimit,
     offset: rawOffset,
     agentId,
+    cursorRequestedAt,
+    cursorId: rawCursorId,
   };
 }
 
@@ -249,7 +285,7 @@ approvalRoutes.get("/", async (c) => {
   if (!params.ok) {
     return c.json<ApiResponse>({ ok: false, error: params.error }, 400);
   }
-  const { status: statusFilter, limit, offset, agentId } = params;
+  const { status: statusFilter, limit, offset, agentId, cursorRequestedAt, cursorId } = params;
 
   // Join approval_queue with agents to filter by tenant
   const results = await db
@@ -281,6 +317,12 @@ approvalRoutes.get("/", async (c) => {
         approvalTransactionMatchesQueue,
         agentId ? eq(approvalQueue.agentId, agentId) : undefined,
         statusFilter !== "all" ? eq(approvalQueue.status, statusFilter) : undefined,
+        cursorRequestedAt && cursorId
+          ? or(
+              lt(approvalQueue.requestedAt, cursorRequestedAt),
+              and(eq(approvalQueue.requestedAt, cursorRequestedAt), lt(approvalQueue.id, cursorId)),
+            )
+          : undefined,
       ),
     )
     // Stable ordering is required for offset pagination when multiple queue

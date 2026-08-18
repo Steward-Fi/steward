@@ -94,7 +94,6 @@ describe("useApprovals()", () => {
       status: "pending",
       agentId: "agent x",
       limit: 200,
-      offset: 0,
     });
     // SEC-195: no credential-less raw fetch on any path.
     expect(fetchMock).not.toHaveBeenCalled();
@@ -126,7 +125,6 @@ describe("useApprovals()", () => {
       status: "pending",
       agentId: "agent x",
       limit: 200,
-      offset: 0,
     });
     expect(listApprovalsMock.mock.results[0]?.value).resolves.toEqual([targetApproval]);
   });

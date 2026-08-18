@@ -5094,11 +5094,12 @@ describe("StewardClient tenant approvals", () => {
       status: "pending",
       agentId: "agent with spaces",
       limit: 200,
-      offset: 50,
+      cursorRequestedAt: "2026-01-01T00:00:00.000Z",
+      cursorId: "approval-200",
     });
 
     expect(lastCapture?.url).toBe(
-      "https://api.steward.example/approvals?status=pending&agentId=agent+with+spaces&limit=200&offset=50",
+      "https://api.steward.example/approvals?status=pending&agentId=agent+with+spaces&limit=200&cursorRequestedAt=2026-01-01T00%3A00%3A00.000Z&cursorId=approval-200",
     );
   });
 

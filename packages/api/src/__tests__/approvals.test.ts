@@ -266,6 +266,36 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
         expect(body.error).toContain("agentId must be a non-empty string of at most 64 characters");
       }
     });
+
+    it("paginates by the stable requestedAt and id keyset", async () => {
+      const first = await fetch(
+        `${BASE_URL}/approvals?status=pending&agentId=${encodeURIComponent(TEST_AGENT)}&limit=1`,
+        { headers: adminHeaders() },
+      );
+      expect(first.status).toBe(200);
+      const firstBody = await first.json();
+      expect(firstBody.data).toHaveLength(1);
+      const boundary = firstBody.data[0] as { id: string; requestedAt: string };
+
+      const second = await fetch(
+        `${BASE_URL}/approvals?status=pending&agentId=${encodeURIComponent(TEST_AGENT)}&limit=50&cursorRequestedAt=${encodeURIComponent(boundary.requestedAt)}&cursorId=${encodeURIComponent(boundary.id)}`,
+        { headers: adminHeaders() },
+      );
+      expect(second.status).toBe(200);
+      const secondBody = await second.json();
+      expect(secondBody.data.every((entry: { id: string }) => entry.id !== boundary.id)).toBe(true);
+    });
+
+    it("rejects partial, malformed, and offset-combined cursors", async () => {
+      for (const query of [
+        "cursorId=approval-1",
+        "cursorRequestedAt=not-a-date&cursorId=approval-1",
+        "cursorRequestedAt=2026-01-01T00%3A00%3A00.000Z&cursorId=approval-1&offset=1",
+      ]) {
+        const res = await fetch(`${BASE_URL}/approvals?${query}`, { headers: adminHeaders() });
+        expect(res.status).toBe(400);
+      }
+    });
   });
 
   describe("GET /approvals/stats", () => {
