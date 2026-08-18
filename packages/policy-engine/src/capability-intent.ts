@@ -75,6 +75,8 @@ export const CAPABILITY_INTENT_RULE_TYPE = "capability-intent" as const;
  */
 export const MAX_POLICY_PATTERN_LENGTH = 256;
 export const MAX_POLICY_PATTERN_INPUT_LENGTH = 8_192;
+const MAX_ARG_ARRAY_VALUES = 64;
+const MAX_ARG_ARRAY_VALUE_LENGTH = 512;
 
 // ─── Permissioned-X: per-post price table (versioned constant) ────────────────
 //
@@ -260,6 +262,12 @@ export interface CapabilityIntentConstraints {
    */
   readonly argMatches?: Record<string, string>;
   /**
+   * Every named arg must be a non-empty string array, and every element must
+   * belong to the configured allowlist. This is an array-subset check, not a
+   * string coercion; malformed, mixed-type, empty, or over-bounded arrays deny.
+   */
+  readonly argArraySubset?: Record<string, string[]>;
+  /**
    * X-only instance-level policy sub-block (permissioned X). ONLY valid on an
    * `x.*` operation — present on a non-X operation => config error (fail closed).
    * See {@link XConstraints} + docs/security/permissioned-x.mdx.
@@ -382,6 +390,7 @@ const ALLOWED_CONSTRAINT_KEYS: ReadonlySet<string> = new Set([
   "cumulativeSpend",
   "argEquals",
   "argMatches",
+  "argArraySubset",
   "timeWindow",
   "x",
 ]);
@@ -928,6 +937,11 @@ function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: strin
     if (c.argMatches !== undefined && !isStringRecord(c.argMatches)) {
       return { error: "capability-intent: `constraints.argMatches` must be Record<string,string>" };
     }
+    if (c.argArraySubset !== undefined && !isStringArrayRecord(c.argArraySubset)) {
+      return {
+        error: "capability-intent: `constraints.argArraySubset` must be Record<string,string[]>",
+      };
+    }
     // SEC-107: bound operator-supplied regexes at store/parse time, not just at
     // evaluation time, so a pathological pattern fails closed as a config error.
     if (
@@ -972,6 +986,9 @@ function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: strin
         : {}),
       ...(c.argEquals !== undefined ? { argEquals: c.argEquals as Record<string, string> } : {}),
       ...(c.argMatches !== undefined ? { argMatches: c.argMatches as Record<string, string> } : {}),
+      ...(c.argArraySubset !== undefined
+        ? { argArraySubset: c.argArraySubset as Record<string, string[]> }
+        : {}),
       ...(timeWindow !== undefined ? { timeWindow } : {}),
       ...(xConstraints !== undefined ? { x: xConstraints } : {}),
     };
@@ -987,6 +1004,19 @@ function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: strin
 function isStringRecord(value: unknown): value is Record<string, string> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   return Object.values(value).every((v) => typeof v === "string");
+}
+
+function isStringArrayRecord(value: unknown): value is Record<string, string[]> {
+  if (!isPlainObject(value)) return false;
+  return Object.values(value).every(
+    (entry) =>
+      Array.isArray(entry) &&
+      entry.length <= MAX_ARG_ARRAY_VALUES &&
+      entry.every(
+        (item) =>
+          typeof item === "string" && item.length > 0 && item.length <= MAX_ARG_ARRAY_VALUE_LENGTH,
+      ),
+  );
 }
 
 /**
@@ -1081,6 +1111,30 @@ function evaluateConstraints(
           ...base,
           passed: false,
           reason: `capability-intent: arg "${key}" does not match required pattern`,
+        };
+      }
+    }
+  }
+  if (constraints.argArraySubset) {
+    for (const [key, allowedValues] of Object.entries(constraints.argArraySubset)) {
+      const value = args[key];
+      const allowed = new Set(allowedValues);
+      if (
+        !Array.isArray(value) ||
+        value.length === 0 ||
+        value.length > MAX_ARG_ARRAY_VALUES ||
+        !value.every(
+          (item) =>
+            typeof item === "string" &&
+            item.length > 0 &&
+            item.length <= MAX_ARG_ARRAY_VALUE_LENGTH &&
+            allowed.has(item),
+        )
+      ) {
+        return {
+          ...base,
+          passed: false,
+          reason: `capability-intent: every value of arg "${key}" must belong to its configured allowlist`,
         };
       }
     }
@@ -1804,6 +1858,26 @@ function evaluateProviderConstraints(
         return PROVIDER_POLICY_REASON.HARD_DENY;
       }
       if (typeof value !== "string" || !re.test(value)) return PROVIDER_POLICY_REASON.HARD_DENY;
+    }
+  }
+  if (constraints.argArraySubset) {
+    for (const [key, allowedValues] of Object.entries(constraints.argArraySubset)) {
+      const value = ctx.args[key];
+      const allowed = new Set(allowedValues);
+      if (
+        !Array.isArray(value) ||
+        value.length === 0 ||
+        value.length > MAX_ARG_ARRAY_VALUES ||
+        !value.every(
+          (item) =>
+            typeof item === "string" &&
+            item.length > 0 &&
+            item.length <= MAX_ARG_ARRAY_VALUE_LENGTH &&
+            allowed.has(item),
+        )
+      ) {
+        return PROVIDER_POLICY_REASON.HARD_DENY;
+      }
     }
   }
   if (constraints.timeWindow) {

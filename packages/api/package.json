@@ -37,6 +37,7 @@
     "@stwd/policy-engine": "workspace:*",
     "@stwd/provider-github": "workspace:*",
     "@stwd/provider-slack": "workspace:*",
+    "@stwd/provider-google": "workspace:*",
     "@stwd/provider-x": "workspace:*",
     "@stwd/redis": "workspace:*",
     "@stwd/shared": "workspace:*",

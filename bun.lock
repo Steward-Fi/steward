@@ -65,6 +65,7 @@
         "@stwd/policy-engine": "workspace:*",
         "@stwd/provider-github": "workspace:*",
         "@stwd/provider-slack": "workspace:*",
+        "@stwd/provider-google": "workspace:*",
         "@stwd/provider-x": "workspace:*",
         "@stwd/redis": "workspace:*",
         "@stwd/shared": "workspace:*",
@@ -322,6 +323,17 @@
       "version": "0.1.0",
       "dependencies": {
         "@stwd/shared": "workspace:*",
+      },
+    },
+    "packages/provider-google": {
+      "name": "@stwd/provider-google",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stwd/shared": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.3.8",
+        "typescript": "^5.9.3",
       },
     },
     "packages/provider-x": {
@@ -1763,6 +1775,7 @@
     "@stwd/provider-github": ["@stwd/provider-github@workspace:packages/provider-github"],
 
     "@stwd/provider-slack": ["@stwd/provider-slack@workspace:packages/provider-slack"],
+    "@stwd/provider-google": ["@stwd/provider-google@workspace:packages/provider-google"],
 
     "@stwd/provider-x": ["@stwd/provider-x@workspace:packages/provider-x"],
 

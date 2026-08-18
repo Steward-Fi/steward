@@ -68,6 +68,7 @@ import { registerProviderActionRoutes } from "./routes/provider-actions";
 import { registerProviderApprovalRoutes } from "./routes/provider-approvals";
 import { providerAuthorityRoutes } from "./routes/provider-authority";
 import { registerProviderCaseRoutes } from "./routes/provider-case";
+import { registerProviderGoogleConnectRoutes } from "./routes/provider-google-connect";
 import { registerProviderXConnectRoutes } from "./routes/provider-x-connect";
 import { quoteRoutes } from "./routes/quote";
 import { secretsRoutes } from "./routes/secrets";
@@ -307,6 +308,7 @@ export function mountCoreIdempotencyAndRoutes(
   // and BEFORE the `/v2` authority sub-app so the specific connect paths win
   // over the authority `/provider-accounts/:id/...` wildcards.
   registerProviderXConnectRoutes(app);
+  registerProviderGoogleConnectRoutes(app);
   // PR5 case/evidence routes: registered CONCRETELY and BEFORE the `/v2`
   // authority sub-app so the specific /provider-actions/:id/{case,evidence}
   // paths win over the authority wildcards (same pattern as provider-actions).

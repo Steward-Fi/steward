@@ -16,6 +16,8 @@ export const DEFAULT_ALIASES: Record<string, string> = {
   github: "api.github.com",
   x: "api.x.com",
   slack: "slack.com",
+  "google-gmail": "gmail.googleapis.com",
+  "google-calendar": "www.googleapis.com",
 };
 
 /** Parse a bounded integer setting at module load so malformed resource limits fail closed. */
