@@ -10,7 +10,7 @@ import { getSpend, getSpendByHost, invalidateCache, type SpendPeriod } from "@st
 import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { isRedisAvailable } from "../middleware/redis";
-import { writeAuditEvent } from "../services/audit";
+import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
 import {
   AGENT_TOKEN_EXPIRY,
   type AgentIdentity,
@@ -954,6 +954,7 @@ export function buildAgentPolicyCompareAndSwapPredicate(
     eq(agentPolicies.allowedAssets, expected.allowedAssets),
     eq(agentPolicies.allowedVenues, expected.allowedVenues),
     eq(agentPolicies.allowBuilderPerps, expected.allowBuilderPerps),
+    eq(agentPolicies.updatedAt, expected.updatedAt),
     eq(agentPolicies.updatedBy, expected.updatedBy),
     expected.updatedReason === null
       ? isNull(agentPolicies.updatedReason)
@@ -1840,73 +1841,67 @@ agentRoutes.put("/:agentId/policy", async (c) => {
     updatedReason,
   };
 
-  let upserted: typeof agentPolicies.$inferSelect | undefined;
-  if (isAgentSelfUpdate) {
-    // SEC-208 concurrency fence: the earlier comparison is useful for a clear
-    // error, but it is not authorization by itself. Two requests can read the
-    // same row, both appear to tighten it, and then overwrite each other. Make
-    // the write conditional on the exact row that was authorized above. This
-    // is stricter than comparing only the proposed caps/allowlists: accepting a
-    // stale-but-stricter proposal would preserve safety, but its audit `before`
-    // snapshot and returned diff would describe a row that was no longer
-    // current. Exact optimistic CAS keeps both the policy and its evidence
-    // linearizable; a stale writer retries from a fresh snapshot.
-    const expected = existing;
-    if (!expected) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Agent policy changed concurrently; retry against the latest policy" },
-        409,
-      );
-    }
-    [upserted] = await db
-      .update(agentPolicies)
-      .set(nextPolicyValues)
-      .where(buildAgentPolicyCompareAndSwapPredicate(agentId, tenantId, expected))
-      .returning();
-    if (!upserted) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Agent policy changed concurrently; retry against the latest policy" },
-        409,
-      );
-    }
-  } else {
-    [upserted] = await db
-      .insert(agentPolicies)
-      .values({ agentId, tenantId, ...nextPolicyValues })
-      .onConflictDoUpdate({
-        target: agentPolicies.agentId,
-        set: {
-          ...nextPolicyValues,
-        },
-      })
-      .returning();
-  }
-
-  if (!upserted) {
-    return c.json<ApiResponse>({ ok: false, error: "Failed to update agent policy" }, 500);
-  }
-
-  const after = policyRowToResponse(upserted);
-  const diff = policyDiff(before, after);
-  await writeAuditEvent({
+  const mutation = await withTenantAuditedTransaction(
     tenantId,
-    actorType: isAgentSelfUpdate ? "agent" : "user",
-    actorId: updatedBy,
-    action: "agent.policy.updated",
-    resourceType: "agent_policy",
-    resourceId: agentId,
-    metadata: {
-      agentId,
-      reason: updatedReason,
-      diff,
-      before,
-      after,
-      multisigApprovalProvided: body.multisigApproval !== undefined,
+    async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
+      let upserted: typeof agentPolicies.$inferSelect | undefined;
+      if (isAgentSelfUpdate) {
+        // SEC-208 concurrency fence: authorize against one exact row and commit
+        // that CAS together with its required audit. A stale writer changes
+        // neither policy nor evidence and retries from a fresh snapshot.
+        const expected = existing;
+        if (!expected) return { kind: "conflict" as const };
+        [upserted] = await tx
+          .update(agentPolicies)
+          .set(nextPolicyValues)
+          .where(buildAgentPolicyCompareAndSwapPredicate(agentId, tenantId, expected))
+          .returning();
+        if (!upserted) return { kind: "conflict" as const };
+      } else {
+        [upserted] = await tx
+          .insert(agentPolicies)
+          .values({ agentId, tenantId, ...nextPolicyValues })
+          .onConflictDoUpdate({
+            target: agentPolicies.agentId,
+            set: { ...nextPolicyValues },
+          })
+          .returning();
+      }
+      if (!upserted) throw new Error("Failed to update agent policy");
+
+      const after = policyRowToResponse(upserted);
+      const diff = policyDiff(before, after);
+      await appendRequiredAudit({
+        tenantId,
+        actorType: isAgentSelfUpdate ? "agent" : "user",
+        actorId: updatedBy,
+        action: "agent.policy.updated",
+        resourceType: "agent_policy",
+        resourceId: agentId,
+        metadata: {
+          agentId,
+          reason: updatedReason,
+          diff,
+          before,
+          after,
+          multisigApprovalProvided: body.multisigApproval !== undefined,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+      return { kind: "updated" as const, after, diff };
     },
-    ipAddress: c.req.header("x-forwarded-for") ?? null,
-    userAgent: c.req.header("user-agent") ?? null,
-    requestId: c.get("requestId") ?? null,
-  });
+  );
+
+  if (mutation.kind === "conflict") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Agent policy changed concurrently; retry against the latest policy" },
+      409,
+    );
+  }
+  const { after, diff } = mutation;
 
   return c.json<
     ApiResponse<{ policy: AgentTradePolicyResponse; diff: ReturnType<typeof policyDiff> }>

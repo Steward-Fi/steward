@@ -287,7 +287,12 @@ describe("agent trade policy", () => {
       ["first concurrent reason", "second concurrent reason"].map((reason) =>
         getDb()
           .update(agentPolicies)
-          .set({ updatedReason: reason })
+          .set({
+            updatedReason: reason,
+            updatedAt: new Date(
+              expected.updatedAt.getTime() + (reason.startsWith("first") ? 1 : 2),
+            ),
+          })
           .where(buildAgentPolicyCompareAndSwapPredicate(agentId, tenantId, expected))
           .returning({ agentId: agentPolicies.agentId }),
       ),
