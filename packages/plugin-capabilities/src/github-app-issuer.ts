@@ -80,14 +80,22 @@ export class GitHubAppInstallationTokenIssuer implements UpstreamTokenIssuer {
   private async withDeadline<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
     const deadline = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => {
+        timedOut = true;
         controller.abort();
         reject(new Error("GitHub request timed out"));
       }, this.requestTimeoutMs);
     });
     try {
       return await Promise.race([run(controller.signal), deadline]);
+    } catch (error) {
+      // abort() can synchronously cause fetch/stream implementations to reject
+      // before the deadline promise wins the race. Never surface provider or
+      // cancellation diagnostics once our own deadline has elapsed.
+      if (timedOut) throw new Error("GitHub request timed out");
+      throw error;
     } finally {
       if (timer) clearTimeout(timer);
     }
