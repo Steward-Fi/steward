@@ -7,6 +7,12 @@ import CryptoKit
 import Crypto
 #endif
 import Foundation
+#if canImport(FoundationNetworking)
+// Linux/Windows: URLRequest/URLSession/HTTPURLResponse live in the separate
+// FoundationNetworking module; on Apple platforms Foundation already provides
+// them (defaultTransport is the only consumer).
+import FoundationNetworking
+#endif
 
 public typealias StewardJSON = [String: Any]
 public typealias StewardTransport = (String, URL, [String: String], Data?, TimeInterval) throws -> (Int, [String: String], Data)
