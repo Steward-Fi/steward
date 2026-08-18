@@ -581,6 +581,27 @@ function isAuthTokenResponseReplaySuppressedPath(pathname: string): boolean {
   return pathname === "/auth" || pathname.startsWith("/auth/");
 }
 
+// SEC-070: secret-bearing mutating routes must never have their response
+// bodies persisted to the idempotency store (Redis or memory, up to 24h).
+// The reservation itself is still recorded (409-on-reuse semantics are
+// preserved); the completed body is suppressed exactly like /auth token
+// responses. Named per the audit: wallet export key material, KMS decrypt
+// plaintext, and the /secrets value plane.
+const SECRET_BEARING_RESPONSE_PATTERNS = [
+  /^\/vault\/[^/]+\/export$/, // POST /vault/:agentId/export — wallet key material
+  /^\/user\/me\/wallet\/export$/, // POST /user/me/wallet/export — user wallet key material
+  /^\/v1\/kms\/keys\/[^/]+\/decrypt$/, // POST /v1/kms/keys/:keyId/decrypt — plaintext
+  /^\/secrets(?:\/|$)/, // POST /secrets — secret values
+  // Review-wave extension of the audit's named list (same issue class):
+  // recovery setup returns the one-time BIP39 mnemonic ("shown once, not
+  // stored"), so its body must never land in the idempotency store either.
+  /^\/user\/me\/wallet\/recovery\/setup$/, // POST …/recovery/setup — one-time BIP39 mnemonic
+];
+
+function isSecretBearingResponseReplaySuppressedPath(pathname: string): boolean {
+  return SECRET_BEARING_RESPONSE_PATTERNS.some((pattern) => pattern.test(pathname));
+}
+
 function hasReplaySafeAuthenticatedContext(c: { get: (key: keyof AppVariables) => unknown }) {
   if (c.get("requestSignatureVerified")) return true;
   const authType = c.get("authType");
@@ -698,7 +719,10 @@ export function idempotencyMiddleware(options?: { store?: IdempotencyStore; ttlM
         return;
       }
       try {
-        if (isAuthTokenResponseReplaySuppressedPath(c.req.path)) {
+        if (
+          isAuthTokenResponseReplaySuppressedPath(c.req.path) ||
+          isSecretBearingResponseReplaySuppressedPath(c.req.path)
+        ) {
           await store.setCompleted(storageKey);
           recordIdempotencyMetric(metricsTenantId, "suppressedAuthResponses");
         } else {

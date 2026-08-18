@@ -55,6 +55,38 @@ describe("gas sponsorship config", () => {
     });
   });
 
+  it("rejects non-public paymaster/bundler URL hosts (SEC-072)", () => {
+    for (const url of [
+      "https://192.168.1.10/rpc",
+      "https://10.0.0.4/rpc",
+      "https://169.254.169.254/latest/meta-data",
+      "https://[::1]/rpc",
+      "https://[fd00::1]/rpc",
+      "https://paymaster.internal/rpc",
+      "https://paymaster.local/rpc",
+    ]) {
+      const result = normalizeGasSponsorshipConfig({
+        provider: "custom_evm_paymaster",
+        paymasterUrl: url,
+      });
+      expect(result).toStartWith("paymasterUrl must be a public https URL");
+    }
+
+    // Public https hosts still pass, and the dev/test localhost exception holds.
+    expect(
+      normalizeGasSponsorshipConfig({
+        provider: "custom_evm_paymaster",
+        paymasterUrl: "https://paymaster.example/rpc",
+      }),
+    ).toMatchObject({ paymasterUrl: "https://paymaster.example/rpc" });
+    expect(
+      normalizeGasSponsorshipConfig({
+        provider: "custom_bundler",
+        bundlerUrl: "http://localhost:4337/rpc",
+      }),
+    ).toMatchObject({ bundlerUrl: "http://localhost:4337/rpc" });
+  });
+
   it("normalizes gas spend queries with second or millisecond timestamps", () => {
     const seconds = normalizeGasSpendQuery({
       walletIds: ["agent-1", "agent-1", "agent-2"],

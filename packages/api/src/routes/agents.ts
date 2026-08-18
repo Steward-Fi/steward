@@ -1012,8 +1012,10 @@ agentRoutes.post("/", async (c) => {
     }
     return c.json<ApiResponse<AgentIdentity>>({ ok: true, data: identity });
   } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "Unknown error";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+    // SEC-210: never return raw internal error text (DB constraint names, RPC
+    // endpoint details); sanitizeErrorMessage passes through only known-safe
+    // client-facing messages.
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 400);
   }
 });
 
@@ -1163,10 +1165,7 @@ agentRoutes.post("/pregenerated", async (c) => {
     return c.json<ApiResponse>(
       {
         ok: false,
-        error:
-          error instanceof Error
-            ? `Failed to create pregenerated wallets: ${error.message}`
-            : "Failed to create pregenerated wallets",
+        error: `Failed to create pregenerated wallets: ${sanitizeErrorMessage(error)}`,
       },
       500,
     );
@@ -1619,8 +1618,10 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
       }>
     >({ ok: true, data: { ...wallet, metadata: redactWalletMetadataSecrets(wallet.metadata) } });
   } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "Unknown error";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+    // SEC-210: never return raw internal error text (DB constraint names, RPC
+    // endpoint details); sanitizeErrorMessage passes through only known-safe
+    // client-facing messages.
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 400);
   }
 });
 
@@ -1666,8 +1667,10 @@ agentRoutes.get("/:agentId/policy", async (c) => {
 
 agentRoutes.put("/:agentId/policy", async (c) => {
   // SEC-208: two write paths into the trade-policy table —
-  //   1. agent token (self-update): TIGHTEN-ONLY, enforced below after
-  //      validation via policyLooseningViolation.
+  //   1. agent token (self-update): TIGHTEN-ONLY against the existing row,
+  //      enforced below after validation via policyLooseningViolation, and
+  //      forbidden from creating the initial row (creation activates the
+  //      trade-route ceilings, so it is reserved for path 2).
   //   2. human owner/admin session with recent MFA: unrestricted (subject to
   //      the platform ceilings), restoring the human-ceiling administration
   //      path this route previously lacked.
@@ -1767,6 +1770,20 @@ agentRoutes.put("/:agentId/policy", async (c) => {
   // SEC-208: agent self-updates are tighten-only — reject any loosening here
   // (fail closed, AFTER input validation so malformed bodies still 400).
   if (isAgentSelfUpdate) {
+    // SEC-208 residual: tighten-only constrains updates against the CURRENT
+    // row, but a policy-less agent could still CREATE its initial policy at
+    // full platform defaults — activating trade ceilings (the trade route
+    // fails closed when the row is absent) with no human approval. Initial
+    // creation is therefore reserved for the human owner/admin+MFA path.
+    if (!existing) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Initial trade policy creation requires an owner/admin session with recent MFA",
+        },
+        403,
+      );
+    }
     const loosening = policyLooseningViolation(before, {
       dailyCap: dailyCapValue,
       perOrderCap: perOrderCapValue,
@@ -2020,8 +2037,10 @@ agentRoutes.get("/:agentId/balance", async (c) => {
       },
     });
   } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "Unknown error";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+    // SEC-210: never return raw internal error text (DB constraint names, RPC
+    // endpoint details); sanitizeErrorMessage passes through only known-safe
+    // client-facing messages.
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 400);
   }
 });
 
@@ -2077,8 +2096,10 @@ agentRoutes.get("/:agentId/tokens", async (c) => {
       },
     });
   } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "Unknown error";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+    // SEC-210: never return raw internal error text (DB constraint names, RPC
+    // endpoint details); sanitizeErrorMessage passes through only known-safe
+    // client-facing messages.
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 400);
   }
 });
 

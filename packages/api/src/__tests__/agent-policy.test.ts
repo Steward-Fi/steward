@@ -64,6 +64,18 @@ beforeAll(async () => {
       },
     ]);
   agentToken = await signAgentToken({ agentId, tenantId, sub: `agent:${agentId}` } as never, "1h");
+
+  // SEC-208 residual: agent tokens can no longer CREATE the initial policy row
+  // (creation activates the trade ceilings; it requires a human owner/admin
+  // session with recent MFA). Seed the row the way the human path would leave
+  // it — platform defaults — so the agent-token PUTs below exercise
+  // tighten-only UPDATES.
+  await getDb().insert(agentPolicies).values({
+    agentId,
+    tenantId,
+    updatedBy: "user:bootstrap-admin",
+    updatedReason: "initial human-created policy",
+  });
 });
 
 afterAll(async () => {
@@ -92,7 +104,50 @@ describe("agent trade policy", () => {
     expect(body.data.defaults).toMatchObject({ dailyCap: 1000, perOrderCap: 500, leverageCap: 10 });
   });
 
-  it("PUT creates a new policy from defaults and records updated_by", async () => {
+  it("rejects agent-token creation of the initial policy row (SEC-208 residual)", async () => {
+    // missingAgentId has NO policy row: an agent token must not self-CREATE
+    // one at platform defaults — creation requires the human admin+MFA path.
+    const res = await app.request(`/v1/agents/${missingAgentId}/policy`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${agentToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ dailyCap: 800, reason: "agent self-create attempt" }),
+    });
+
+    // The scoped token does not match missingAgentId, so this fails at the
+    // scope check; use a correctly-scoped token to isolate the creation gate.
+    expect(res.status).toBe(403);
+
+    const missingAgentToken = await signAgentToken(
+      { agentId: missingAgentId, tenantId, sub: `agent:${missingAgentId}` } as never,
+      "1h",
+    );
+    const createRes = await app.request(`/v1/agents/${missingAgentId}/policy`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${missingAgentToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ dailyCap: 800, reason: "agent self-create attempt" }),
+    });
+    expect(createRes.status).toBe(403);
+    const createBody = (await createRes.json()) as { ok: boolean; error: string };
+    expect(createBody.ok).toBe(false);
+    expect(createBody.error).toContain(
+      "Initial trade policy creation requires an owner/admin session",
+    );
+
+    // No row may have been created as a side effect.
+    const [row] = await getDb()
+      .select()
+      .from(agentPolicies)
+      .where(eq(agentPolicies.agentId, missingAgentId));
+    expect(row).toBeUndefined();
+  });
+
+  it("PUT tighten-updates the admin-seeded policy row and records updated_by", async () => {
     const res = await putPolicy({
       dailyCap: 800,
       perOrderCap: 250,
@@ -245,7 +300,7 @@ describe("agent trade policy", () => {
     );
   });
 
-  it("SEC-208: an agent token cannot create an initial policy looser than the defaults", async () => {
+  it("SEC-208: an agent token cannot create an initial policy row at all", async () => {
     const res = await app.request(`/v1/agents/${missingAgentId}/policy`, {
       method: "PUT",
       headers: {
@@ -266,9 +321,11 @@ describe("agent trade policy", () => {
       },
       body: JSON.stringify({ dailyCap: 1_001, reason: "just above default" }),
     });
+    // SEC-208 residual: creation-by-agent-token is denied outright — the gate
+    // fires before the loosening-vs-defaults comparison, whatever the body.
     expect(justAboveDefaults.status).toBe(403);
     expect(((await justAboveDefaults.json()) as { error: string }).error).toContain(
-      "dailyCap cannot be raised above 1000",
+      "Initial trade policy creation requires an owner/admin session",
     );
   });
 

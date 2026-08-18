@@ -13,6 +13,10 @@
  *   - Does NOT register `process.on(SIGINT|SIGTERM)` — Workers are stateless.
  *   - Does NOT have any top-level `await` that hits the network at module init.
  *
+ * Global rate limiting on this entry is provided by the shared Redis-backed
+ * sliding-window limiter that app.ts mounts when it detects the Workers
+ * runtime (SEC-068, see middleware/global-rate-limit.ts).
+ *
  * Required bindings (set via `wrangler secret put` or `vars` in wrangler.toml):
  *   - DATABASE_URL                  Neon HTTP connection string
  *   - DATABASE_DRIVER=neon-http     Selects the HTTP-based postgres driver
@@ -73,20 +77,40 @@ export interface Env {
  *
  * Workers expose `nodejs_compat`'s `process.env` as an empty object on cold
  * boot — bindings come in via the `fetch` handler's `env` argument instead.
- * We do this on each request because Workers may reuse isolates across
- * different deployments (and therefore different binding sets).
+ * This runs on EVERY request (SEC-148): Workers may reuse isolates across
+ * different deployments (and therefore different binding sets), and rotated
+ * bindings/secrets must take effect without waiting for an isolate recycle.
+ * Keys we hydrated that disappear from a later binding set are deleted again
+ * so stale values cannot linger. Module-init-time readers still see only the
+ * first binding set an isolate ever served (imports are cached per isolate) —
+ * that is inherent to the module registry and unchanged by this.
+ *
+ * Known trade-off (accepted, SEC-148): string bindings — including secrets —
+ * are copied onto the global `process.env`, because the entire codebase reads
+ * configuration through `process.env`. Moving every reader onto per-request
+ * binding access is out of scope; per-request hydration at least keeps the
+ * values current and bounded to the current binding set.
  */
+const hydratedEnvKeys = new Set<string>();
+
 function hydrateProcessEnv(env: Env): void {
   const target = (globalThis as any).process?.env;
   if (!target) return;
 
   target.STEWARD_RUNTIME = "workers";
+  const present = new Set<string>();
   for (const key of Object.keys(env)) {
     const value = env[key];
     if (typeof value === "string") {
       target[key] = value;
+      present.add(key);
     }
   }
+  for (const key of hydratedEnvKeys) {
+    if (!present.has(key)) delete target[key];
+  }
+  hydratedEnvKeys.clear();
+  for (const key of present) hydratedEnvKeys.add(key);
 }
 
 let workerInit: Promise<void> | null = null;
@@ -160,6 +184,10 @@ async function getComposedApp() {
 
 export default {
   async fetch(request: Request, env: Env, ctx: unknown): Promise<Response> {
+    // SEC-148: refresh process.env from the CURRENT request's bindings on every
+    // request (not once per isolate) so rotated bindings take effect promptly;
+    // the once-per-isolate init below only bootstraps stores/imports.
+    hydrateProcessEnv(env);
     await ensureWorkerInit(env);
     const app = await getComposedApp();
     return app.fetch(request, env, ctx as never);

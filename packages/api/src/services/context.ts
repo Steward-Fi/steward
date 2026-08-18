@@ -383,6 +383,8 @@ export const defaultTenantReady = db
     // the sha256 hex hash of the plaintext key — it is stored verbatim as
     // apiKeyHash and compared against sha256(X-Steward-Key). A plaintext
     // value fails closed (default tenant unreachable); empty stays 403.
+    // SEC-153: this legacy tenant-wide key is unscoped full-tenant authority
+    // with no per-key revocation; prefer app-client secrets for new deployments.
     apiKeyHash: process.env.STEWARD_DEFAULT_TENANT_KEY || "",
   })
   .onConflictDoNothing();
@@ -946,6 +948,10 @@ export function requireAgentAccess(c: Context<{ Variables: AppVariables }>): boo
 
 export function requireTenantLevel(c: Context<{ Variables: AppVariables }>): boolean {
   const authType = c.get("authType");
+  // SEC-153: the legacy tenant-wide X-Steward-Key ("api-key") is unscoped
+  // full-tenant authority — a standing single point of compromise. It remains
+  // for backwards compatibility only; new integrations should use app-client
+  // secrets ("app-secret", per-client revocation) or owner/admin sessions.
   if (authType === "api-key") return true;
   if (authType === "agent-token") return false;
 

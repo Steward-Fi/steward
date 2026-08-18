@@ -94,4 +94,16 @@ describe("transaction receipt poller", () => {
       "if (cancelTransactionReceiptPolling) cancelTransactionReceiptPolling()",
     );
   });
+
+  it("defaults Ethereum L1 mainnet to 12 confirmations unless explicitly overridden (SEC-152)", async () => {
+    const { minConfirmationsForChain } = await import("../services/transaction-receipt-poller");
+    // Mainnet L1 is reorg-unsafe at 1 confirmation — the per-chain default applies.
+    expect(minConfirmationsForChain(1)).toBe(12);
+    // Other chains keep the global fallback.
+    expect(minConfirmationsForChain(84532)).toBe(1);
+    expect(minConfirmationsForChain(8453)).toBe(1);
+    // An explicit operator override always wins, on every chain.
+    expect(minConfirmationsForChain(1, 6)).toBe(6);
+    expect(minConfirmationsForChain(8453, 3)).toBe(3);
+  });
 });

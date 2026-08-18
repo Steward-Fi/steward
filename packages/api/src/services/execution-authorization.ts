@@ -11,6 +11,7 @@ import {
   canonicalJsonStringify,
   type ExecutionAuthorization,
   type ExecutionCapability,
+  loadExecutionAuthV2Keys,
   type NormalizedEvmExecutionPayload,
   normalizeEvmExecutionPayload,
   type PolicyRule,
@@ -265,16 +266,27 @@ function signExecutionAuthorization(authorization: ExecutionAuthorization): stri
 }
 
 function executionAuthorizationKey(): Uint8Array {
-  const secret = process.env.STEWARD_JWT_SECRET?.trim();
-  if (!secret) {
+  // SEC-074: derive from the dedicated execution-auth secret, NEVER from
+  // STEWARD_JWT_SECRET (the most widely-used secret in the deployment; its
+  // compromise must not yield forgeable execution authorizations). Mirrors the
+  // v2 mint posture (provider-execution.ts, X7): no JWT-secret fallback. v1
+  // authorizations are minted and consumed inside this process within a 60s
+  // TTL, so the active (first) key entry suffices; v1 keeps its own HKDF
+  // salt/info above for domain separation from the v2 derived keys.
+  let secret: Uint8Array;
+  try {
+    // Reuse the v2 parser so v1 cannot bypass its 32-character entropy floor,
+    // malformed-entry rejection, or rotation-list semantics.
+    secret = loadExecutionAuthV2Keys()[0]!.key;
+  } catch {
     throw new ExecutionAuthorizationError(
-      "STEWARD_JWT_SECRET is required for execution authorization",
+      "STEWARD_EXECUTION_AUTH_SECRET is required for execution authorization",
       "secret_unavailable",
     );
   }
   const key = hkdfSync(
     "sha256",
-    new TextEncoder().encode(secret),
+    secret,
     new TextEncoder().encode(EXECUTION_AUTHORIZATION_HKDF_SALT),
     new TextEncoder().encode(EXECUTION_AUTHORIZATION_HKDF_INFO),
     32,
