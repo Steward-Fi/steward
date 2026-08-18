@@ -22,6 +22,7 @@ const MAX_GITHUB_ISSUED_TTL_MS = (GITHUB_INSTALLATION_TOKEN_TTL_SECONDS + 30) * 
 const REVOCATION_CLAIM_TIMEOUT_MS = 30_000;
 export const DELIVERY_ACK_TIMEOUT_MS = 30_000;
 export const MAX_UPSTREAM_LEASE_SWEEP_INTERVAL_MS = DELIVERY_ACK_TIMEOUT_MS / 2;
+export const UPSTREAM_LEASE_AUTHORITY_RECHECK_INTERVAL_MS = MAX_UPSTREAM_LEASE_SWEEP_INTERVAL_MS;
 
 export interface GitHubLeaseResource {
   repositories: string[];
@@ -631,6 +632,11 @@ export async function recoverInterruptedUpstreamCredentialLeases(input: {
 
 type RecoveryTotals = { unknown: number; revoked: number; attention: number; expired?: number };
 type LeaseRow = typeof upstreamCredentialLeases.$inferSelect;
+type RecoveryCandidate = {
+  lease: LeaseRow;
+  phase: "interrupted" | "expiry" | "authority";
+  deadlineAt: number;
+};
 
 async function recoverOneDueLease(input: {
   db: Db;
@@ -836,42 +842,93 @@ export async function recoverAllInterruptedUpstreamCredentialLeases(input: {
 }> {
   const now = input.now ?? new Date();
   const cutoff = new Date(now.getTime() - DELIVERY_ACK_TIMEOUT_MS);
+  const authorityCutoff = new Date(now.getTime() - UPSTREAM_LEASE_AUTHORITY_RECHECK_INTERVAL_MS);
   const workLimit = Math.max(1, Math.min(input.workLimit ?? 500, 2_000));
   const concurrency = Math.max(1, Math.min(input.concurrency ?? 16, 64));
   const runDeadlineMs = Math.max(100, Math.min(input.runDeadlineMs ?? 5_000, 10_000));
   const deadlineAt = Date.now() + runDeadlineMs;
-  const due: LeaseRow[] = await input.db
-    .select()
-    .from(upstreamCredentialLeases)
-    .where(
-      or(
-        and(
-          eq(upstreamCredentialLeases.status, "issuing"),
-          lte(upstreamCredentialLeases.updatedAt, cutoff),
-        ),
-        and(
-          eq(upstreamCredentialLeases.status, "delivery_pending"),
-          lte(upstreamCredentialLeases.updatedAt, cutoff),
-        ),
-        and(
-          eq(upstreamCredentialLeases.status, "acknowledging"),
-          lte(upstreamCredentialLeases.updatedAt, cutoff),
-        ),
-        and(
-          eq(upstreamCredentialLeases.status, "needs_attention"),
-          isNotNull(upstreamCredentialLeases.tokenCiphertext),
-          lte(upstreamCredentialLeases.updatedAt, cutoff),
-        ),
-        and(
-          eq(upstreamCredentialLeases.status, "revoking"),
-          isNotNull(upstreamCredentialLeases.tokenCiphertext),
-          lte(upstreamCredentialLeases.updatedAt, cutoff),
-        ),
-      ),
-    )
-    .orderBy(asc(upstreamCredentialLeases.updatedAt), asc(upstreamCredentialLeases.id))
-    .limit(workLimit + 1);
-  const candidates = due.slice(0, workLimit);
+  // Pull at most one global page from each independently indexed deadline
+  // class, then merge them by their actual recovery deadline. Fetching
+  // workLimit + 1 from each class is sufficient to identify the global first
+  // workLimit entries while retaining an exact backlog bit.
+  const [interrupted, expired, authorityDue]: [LeaseRow[], LeaseRow[], LeaseRow[]] =
+    await Promise.all([
+      input.db
+        .select()
+        .from(upstreamCredentialLeases)
+        .where(
+          or(
+            and(
+              eq(upstreamCredentialLeases.status, "issuing"),
+              lte(upstreamCredentialLeases.updatedAt, cutoff),
+            ),
+            and(
+              eq(upstreamCredentialLeases.status, "delivery_pending"),
+              lte(upstreamCredentialLeases.updatedAt, cutoff),
+            ),
+            and(
+              eq(upstreamCredentialLeases.status, "acknowledging"),
+              lte(upstreamCredentialLeases.updatedAt, cutoff),
+            ),
+            and(
+              eq(upstreamCredentialLeases.status, "needs_attention"),
+              isNotNull(upstreamCredentialLeases.tokenCiphertext),
+              lte(upstreamCredentialLeases.updatedAt, cutoff),
+            ),
+            and(
+              eq(upstreamCredentialLeases.status, "revoking"),
+              isNotNull(upstreamCredentialLeases.tokenCiphertext),
+              lte(upstreamCredentialLeases.updatedAt, cutoff),
+            ),
+          ),
+        )
+        .orderBy(asc(upstreamCredentialLeases.updatedAt), asc(upstreamCredentialLeases.id))
+        .limit(workLimit + 1),
+      input.db
+        .select()
+        .from(upstreamCredentialLeases)
+        .where(
+          and(
+            eq(upstreamCredentialLeases.status, "active"),
+            lte(upstreamCredentialLeases.expiresAt, now),
+          ),
+        )
+        .orderBy(asc(upstreamCredentialLeases.expiresAt), asc(upstreamCredentialLeases.id))
+        .limit(workLimit + 1),
+      input.db
+        .select()
+        .from(upstreamCredentialLeases)
+        .where(
+          and(
+            eq(upstreamCredentialLeases.status, "active"),
+            gt(upstreamCredentialLeases.expiresAt, now),
+            lte(upstreamCredentialLeases.authorityCheckedAt, authorityCutoff),
+          ),
+        )
+        .orderBy(asc(upstreamCredentialLeases.authorityCheckedAt), asc(upstreamCredentialLeases.id))
+        .limit(workLimit + 1),
+    ]);
+  const allCandidates: RecoveryCandidate[] = [
+    ...interrupted.map((lease) => ({
+      lease,
+      phase: "interrupted" as const,
+      deadlineAt: lease.updatedAt.getTime() + DELIVERY_ACK_TIMEOUT_MS,
+    })),
+    ...expired.map((lease) => ({
+      lease,
+      phase: "expiry" as const,
+      deadlineAt: lease.expiresAt?.getTime() ?? Number.MAX_SAFE_INTEGER,
+    })),
+    ...authorityDue.map((lease) => ({
+      lease,
+      phase: "authority" as const,
+      deadlineAt: lease.authorityCheckedAt.getTime() + UPSTREAM_LEASE_AUTHORITY_RECHECK_INTERVAL_MS,
+    })),
+  ].sort(
+    (left, right) =>
+      left.deadlineAt - right.deadlineAt || left.lease.id.localeCompare(right.lease.id),
+  );
+  const candidates = allCandidates.slice(0, workLimit);
   const touchedTenants = new Set<string>();
   const totals = {
     tenants: 0,
@@ -879,99 +936,39 @@ export async function recoverAllInterruptedUpstreamCredentialLeases(input: {
     revoked: 0,
     attention: 0,
     expired: 0,
-    remaining: due.length > workLimit,
+    remaining: allCandidates.length > workLimit,
   };
   const started = await mapWithDeadline({
     items: candidates,
     concurrency,
     deadlineAt,
-    run: async (lease) => {
+    run: async (candidate) => {
+      const { lease } = candidate;
       touchedTenants.add(lease.tenantId);
       try {
-        const recovered = await recoverOneDueLease({ ...input, lease, now, cutoff });
-        totals.unknown += recovered.unknown;
-        totals.revoked += recovered.revoked;
-        totals.attention += recovered.attention;
-      } catch {
-        // A failed tenant transaction or provider must not starve other due leases.
-        totals.attention += 1;
-      }
-    },
-  });
-  let remainingCapacity = workLimit - started;
-  if (remainingCapacity > 0 && Date.now() < deadlineAt) {
-    const expired: LeaseRow[] = await input.db
-      .select()
-      .from(upstreamCredentialLeases)
-      .where(
-        and(
-          eq(upstreamCredentialLeases.status, "active"),
-          lte(upstreamCredentialLeases.expiresAt, now),
-        ),
-      )
-      .orderBy(asc(upstreamCredentialLeases.expiresAt), asc(upstreamCredentialLeases.id))
-      .limit(remainingCapacity + 1);
-    const expiredCandidates = expired.slice(0, remainingCapacity);
-    const expiredStarted = await mapWithDeadline({
-      items: expiredCandidates,
-      concurrency,
-      deadlineAt,
-      run: async (lease) => {
-        touchedTenants.add(lease.tenantId);
-        try {
+        if (candidate.phase === "expiry") {
           totals.expired += await expireOneActiveLease({
             lease,
             auditedTransaction: input.auditedTransaction,
             now,
           });
-        } catch {
-          totals.attention += 1;
-        }
-      },
-    });
-    remainingCapacity -= expiredStarted;
-    totals.remaining ||=
-      expired.length > expiredCandidates.length || expiredStarted < expiredCandidates.length;
-  }
-  if (remainingCapacity > 0 && Date.now() < deadlineAt) {
-    const active: LeaseRow[] = await input.db
-      .select()
-      .from(upstreamCredentialLeases)
-      .where(
-        and(
-          eq(upstreamCredentialLeases.status, "active"),
-          gt(upstreamCredentialLeases.expiresAt, now),
-        ),
-      )
-      .orderBy(
-        asc(upstreamCredentialLeases.authorityCheckedAt),
-        asc(upstreamCredentialLeases.expiresAt),
-        asc(upstreamCredentialLeases.id),
-      )
-      .limit(remainingCapacity + 1);
-    const activeCandidates = active.slice(0, remainingCapacity);
-    const activeStarted = await mapWithDeadline({
-      items: activeCandidates,
-      concurrency,
-      deadlineAt,
-      run: async (lease) => {
-        touchedTenants.add(lease.tenantId);
-        try {
-          const recovered = await recoverOneActiveLease({ ...input, lease, now });
+        } else {
+          const recovered =
+            candidate.phase === "interrupted"
+              ? await recoverOneDueLease({ ...input, lease, now, cutoff })
+              : await recoverOneActiveLease({ ...input, lease, now });
           totals.unknown += recovered.unknown;
           totals.revoked += recovered.revoked;
           totals.attention += recovered.attention;
-          totals.expired += recovered.expired ?? 0;
-        } catch {
-          totals.attention += 1;
         }
-      },
-    });
-    totals.remaining ||=
-      active.length > remainingCapacity || activeStarted < activeCandidates.length;
-  }
+      } catch {
+        // A failed tenant transaction or provider must not starve another lease.
+        totals.attention += 1;
+      }
+    },
+  });
   totals.tenants = touchedTenants.size;
-  totals.remaining ||= started < candidates.length;
+  totals.remaining ||= started < allCandidates.length;
   return totals;
 }
 
@@ -1088,6 +1085,7 @@ export async function issueUpstreamCredentialLease(input: {
         authorityDigest: expectedAuthorityDigest,
         idempotencyKeyHash: sha256(input.idempotencyKey),
         status: "issuing",
+        authorityCheckedAt: now,
         createdAt: now,
         updatedAt: now,
       })

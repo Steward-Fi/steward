@@ -22,6 +22,7 @@ import {
   revokeUpstreamCredentialLease,
   revokeUpstreamLeasesForAuthority,
   sha256,
+  UPSTREAM_LEASE_AUTHORITY_RECHECK_INTERVAL_MS,
   type UpstreamTokenIssuer,
 } from "../upstream-leases";
 import { ensureAgent, ensureTenant, type Harness, makeHarness } from "./_harness";
@@ -871,6 +872,139 @@ describe("upstream credential leases", () => {
     expect(oldest?.status).toBe("needs_attention");
   });
 
+  test("global ordering chooses older expiry and authority deadlines before interrupted delivery", async () => {
+    const issuer = new FakeIssuer();
+    const expiring = await issueUpstreamCredentialLease(
+      issueArgs(issuer, "idempotency-global-order-expiry"),
+    );
+    const authority = await issueUpstreamCredentialLease(
+      issueArgs(issuer, "idempotency-global-order-authority"),
+    );
+    const interrupted = await issueUpstreamCredentialLease(
+      issueArgs(issuer, "idempotency-global-order-interrupted"),
+    );
+    if (!expiring.ok || !authority.ok || !interrupted.ok) {
+      throw new Error("expected issuance");
+    }
+    expect(await acknowledge(expiring)).toEqual({ ok: true });
+    expect(await acknowledge(authority)).toEqual({ ok: true });
+    await harness.db
+      .update(upstreamCredentialLeases)
+      .set({
+        expiresAt: new Date(NOW.getTime() - 60_000),
+        authorityCheckedAt: new Date(NOW.getTime() - 60_000),
+      })
+      .where(eq(upstreamCredentialLeases.id, expiring.leaseId));
+    await harness.db
+      .update(upstreamCredentialLeases)
+      .set({ authorityCheckedAt: new Date(NOW.getTime() - 60_000) })
+      .where(eq(upstreamCredentialLeases.id, authority.leaseId));
+    await harness.db
+      .update(upstreamCredentialLeases)
+      .set({ updatedAt: new Date(NOW.getTime() - DELIVERY_ACK_TIMEOUT_MS - 1_000) })
+      .where(eq(upstreamCredentialLeases.id, interrupted.leaseId));
+    await harness.db
+      .update(capabilities)
+      .set({ enabled: false })
+      .where(eq(capabilities.id, CAPABILITY));
+
+    const first = await recoverAllInterruptedUpstreamCredentialLeases({
+      db: harness.db,
+      issuer,
+      exerciseToken,
+      auditedTransaction: auditedTransaction(),
+      now: NOW,
+      workLimit: 2,
+      concurrency: 1,
+    });
+    expect(first).toMatchObject({ expired: 1, revoked: 1, remaining: true });
+    const firstRows = await harness.db.select().from(upstreamCredentialLeases);
+    expect(firstRows.find((row) => row.id === expiring.leaseId)?.status).toBe("expired");
+    expect(firstRows.find((row) => row.id === authority.leaseId)?.status).toBe("revoked");
+    expect(firstRows.find((row) => row.id === interrupted.leaseId)?.status).toBe(
+      "delivery_pending",
+    );
+
+    const second = await recoverAllInterruptedUpstreamCredentialLeases({
+      db: harness.db,
+      issuer,
+      exerciseToken,
+      auditedTransaction: auditedTransaction(),
+      now: NOW,
+      workLimit: 2,
+      concurrency: 1,
+    });
+    expect(second).toMatchObject({ revoked: 1, remaining: false });
+  });
+
+  test("authority backlog over the work cap drains once without a healthy-lease hot loop", async () => {
+    const issuer = new FakeIssuer();
+    const issued = await issueUpstreamCredentialLease(
+      issueArgs(issuer, "idempotency-authority-backlog-base"),
+    );
+    if (!issued.ok) throw new Error("expected issuance");
+    expect(await acknowledge(issued)).toEqual({ ok: true });
+    const [base] = await harness.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+    if (!base) throw new Error("expected base lease");
+    const authorityCheckedAt = new Date(
+      NOW.getTime() - UPSTREAM_LEASE_AUTHORITY_RECHECK_INTERVAL_MS - 1,
+    );
+    await harness.db
+      .update(upstreamCredentialLeases)
+      .set({ authorityCheckedAt })
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
+    await harness.db.insert(upstreamCredentialLeases).values(
+      Array.from({ length: 500 }, (_, index) => ({
+        ...base,
+        id: `${(index + 1_000).toString(16).padStart(8, "0")}-1000-4000-8000-${(index + 1)
+          .toString(16)
+          .padStart(12, "0")}`,
+        idempotencyKeyHash: sha256(`authority-backlog-${index}`),
+        authorityCheckedAt,
+      })),
+    );
+
+    const first = await recoverAllInterruptedUpstreamCredentialLeases({
+      db: harness.db,
+      issuer,
+      exerciseToken,
+      auditedTransaction: auditedTransaction(),
+      now: NOW,
+      workLimit: 500,
+      concurrency: 16,
+    });
+    expect(first).toMatchObject({ tenants: 1, revoked: 0, attention: 0, remaining: true });
+    let drained = first;
+    let immediateRuns = 1;
+    while (drained.remaining && immediateRuns < 10) {
+      drained = await recoverAllInterruptedUpstreamCredentialLeases({
+        db: harness.db,
+        issuer,
+        exerciseToken,
+        auditedTransaction: auditedTransaction(),
+        now: NOW,
+        workLimit: 500,
+        concurrency: 16,
+      });
+      immediateRuns += 1;
+    }
+    expect(drained).toMatchObject({ revoked: 0, attention: 0, remaining: false });
+    expect(immediateRuns).toBeLessThan(10);
+    const settled = await recoverAllInterruptedUpstreamCredentialLeases({
+      db: harness.db,
+      issuer,
+      exerciseToken,
+      auditedTransaction: auditedTransaction(),
+      now: NOW,
+      workLimit: 500,
+      concurrency: 16,
+    });
+    expect(settled).toMatchObject({ tenants: 0, revoked: 0, attention: 0, remaining: false });
+  });
+
   test("stale exact-token revocation claims are idempotently reconciled", async () => {
     const issuer = new FakeIssuer();
     const issued = await issueUpstreamCredentialLease(
@@ -1270,6 +1404,14 @@ describe("upstream credential leases", () => {
       .update(capabilities)
       .set({ enabled: false })
       .where(eq(capabilities.id, CAPABILITY));
+    await harness.db
+      .update(upstreamCredentialLeases)
+      .set({
+        authorityCheckedAt: new Date(
+          NOW.getTime() - UPSTREAM_LEASE_AUTHORITY_RECHECK_INTERVAL_MS - 1,
+        ),
+      })
+      .where(eq(upstreamCredentialLeases.id, issued.leaseId));
     expect(
       await recoverAllInterruptedUpstreamCredentialLeases({
         db: harness.db,
