@@ -486,6 +486,71 @@ describe("SEC-042: withdraw policy evaluation is real", () => {
     expect(body.reason).toContain("Hourly tx limit");
     expect(signWithdrawCalls).toHaveLength(0);
   });
+
+  it("keeps an outcome-unknown core transfer in operator rate counters", async () => {
+    const { tenantId, agentId } = await seedAgent({
+      policies: [
+        { type: "approved-addresses", config: { mode: "whitelist", addresses: [DEST_A] } },
+        { type: "rate-limit", config: { maxTxPerHour: 1, maxTxPerDay: 100 } },
+      ],
+    });
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: `tx_unknown_rate_${agentId}`,
+        agentId,
+        status: "outcome_unknown",
+        toAddress: DEST_A,
+        value: "1000000",
+        chainId: ARBITRUM_CHAIN_ID,
+        signedAt: new Date(),
+      });
+    signWithdrawCalls.length = 0;
+    const app = await buildApp();
+
+    const res = await postTransfer(app, "withdraw", tenantId, {
+      agentId,
+      destination: DEST_A,
+      amount: "1",
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { reason?: string }).reason).toContain("Hourly tx limit");
+    expect(signWithdrawCalls).toHaveLength(0);
+  });
+
+  it("keeps an outcome-unknown core transfer in operator USD spend", async () => {
+    const { tenantId, agentId } = await seedAgent({
+      policies: [
+        { type: "approved-addresses", config: { mode: "whitelist", addresses: [DEST_A] } },
+        { type: "spending-limit", config: { maxPerDayUsd: 100 } },
+      ],
+    });
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: `tx_unknown_spend_${agentId}`,
+        agentId,
+        status: "outcome_unknown",
+        toAddress: DEST_A,
+        // $95 at the pinned $4,000/ETH quote.
+        value: "23750000000000000",
+        chainId: ARBITRUM_CHAIN_ID,
+        signedAt: new Date(),
+      });
+    signWithdrawCalls.length = 0;
+    const app = await buildApp({ priceOracle: stubPriceOracle });
+
+    const res = await postTransfer(app, "withdraw", tenantId, {
+      agentId,
+      destination: DEST_A,
+      amount: "10",
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { reason?: string }).reason).toContain(
+      "daily USD spending limit",
+    );
+    expect(signWithdrawCalls).toHaveLength(0);
+  });
 });
 
 describe("SEC-043: operator idempotency stores ambiguous outcomes", () => {
