@@ -193,6 +193,29 @@ describe("DurableIdempotencyStore (SEC-043)", () => {
     expect(replay.record).toEqual({ status: 200, body: { ok: true, i: 0 } });
   });
 
+  it("preserves an in-flight claim when completed records saturate the memory fallback", async () => {
+    const store = new DurableIdempotencyStore<TestRecord>({
+      namespace: "trade",
+      getRedisClient: () => null,
+    });
+    const inFlight = await store.check("scope", "in-flight", "in-flight-hash");
+    expect((await inFlight.claim?.())?.store).toBeDefined();
+
+    for (let i = 0; i < 999; i++) {
+      const checked = await store.check("scope", `completed-${i}`, `hash-${i}`);
+      await (await checked.claim?.())?.store?.({ status: 200, body: { i } });
+    }
+
+    const overflow = await store.check("scope", "overflow", "overflow-hash");
+    await expect(overflow.claim?.()).rejects.toThrow("saturated with live records");
+
+    // Losing this pending marker would allow a retry to claim the key and
+    // execute the external movement a second time while the first is ongoing.
+    const retry = await store.check("scope", "in-flight", "in-flight-hash");
+    expect(retry.inProgress).toBe(true);
+    expect(retry.claim).toBeUndefined();
+  });
+
   it("still sweeps expired entries before refusing a new claim", async () => {
     const realNow = Date.now;
     const t0 = realNow();

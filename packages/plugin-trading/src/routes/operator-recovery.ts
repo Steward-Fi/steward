@@ -219,8 +219,9 @@ export function createOperatorRecoveryRoutes(
   // REPLAYS the recorded outcome instead of re-executing a possibly-completed
   // fund movement. SEC-043: records are Redis-backed when a client is available
   // (multi-replica dedup survives restarts); without Redis the store falls back
-  // to a bounded (1_000 entries, expired-sweep only; new claims fail closed
-  // when saturated with live records) process-local map.
+  // to a bounded (1_000 entries, expired-only sweep) process-local map. When
+  // that map is full of live records, new claims fail closed rather than
+  // evicting replay protection for an earlier fund movement.
   type OperatorIdempotencyRecord = { status: 200 | 409 | 502; body: unknown };
   type OperatorIdempotency = {
     conflict?: boolean;
