@@ -2031,7 +2031,7 @@ describe("Malformed evaluator config fails closed instead of throwing (SEC-105)"
     ]) {
       const result = await evaluatePolicy(makeAddressRule(config as never), makeContext());
       expect(result.passed).toBe(false);
-      expect(result.reason).toMatch(/array of strings|address family/);
+      expect(result.reason).toMatch(/array of strings|address family|invalid address/);
     }
   });
 
@@ -2093,5 +2093,77 @@ describe("Malformed evaluator config fails closed instead of throwing (SEC-105)"
     );
     expect(crossChain.passed).toBe(false);
     expect(crossChain.reason).toContain("destination chain");
+  });
+
+  it("rejects mixed-case and checksum-invalid Bitcoin addresses", async () => {
+    const bitcoin = "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu";
+    const upper = bitcoin.toUpperCase();
+    const uppercaseMatch = await evaluatePolicy(
+      makeAddressRule({ addresses: [upper], mode: "whitelist" }),
+      makeContext({ request: { ...makeContext().request, to: bitcoin, chainId: 201 } }),
+    );
+    expect(uppercaseMatch.passed).toBe(true);
+
+    for (const invalid of [
+      `bC${bitcoin.slice(2)}`,
+      `${bitcoin.slice(0, -1)}q`,
+      "1BoatSLRHtKNngkdXEeobR76b53LETtpyU",
+    ]) {
+      const result = await evaluatePolicy(
+        makeAddressRule({ addresses: [bitcoin], mode: "whitelist" }),
+        makeContext({ request: { ...makeContext().request, to: invalid, chainId: 201 } }),
+      );
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("address family");
+    }
+  });
+
+  it("binds Bitcoin and Monero policy addresses to the request network", async () => {
+    const bitcoinMainnet = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT";
+    const moneroMainnet =
+      "45AmZ2FRjuqZts5NGzb7ZXSNRuwS9MUqEeakpyEeSHsB5mywLwBzzq2cTsbJzTVUuLSHxtbfgKyZJVBqPffpP8fm79sjAcK";
+    for (const [address, chainId] of [
+      [bitcoinMainnet, 202],
+      [moneroMainnet, 302],
+    ] as const) {
+      const result = await evaluatePolicy(
+        makeAddressRule({ addresses: [address], mode: "whitelist" }),
+        makeContext({ request: { ...makeContext().request, to: address, chainId } }),
+      );
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("address family");
+    }
+  });
+
+  it("rejects malformed decoded lengths and tampered Monero checksums", async () => {
+    const monero =
+      "45AmZ2FRjuqZts5NGzb7ZXSNRuwS9MUqEeakpyEeSHsB5mywLwBzzq2cTsbJzTVUuLSHxtbfgKyZJVBqPffpP8fm79sjAcK";
+    for (const [address, chainId] of [
+      ["111111111111111111111111111111111", 101],
+      [`${monero.slice(0, -1)}M`, 301],
+    ] as const) {
+      const result = await evaluatePolicy(
+        makeAddressRule({ addresses: [address], mode: "whitelist" }),
+        makeContext({ request: { ...makeContext().request, to: address, chainId } }),
+      );
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("address family");
+    }
+  });
+
+  it("filters valid mixed-family policy entries to the request chain", async () => {
+    const evm = "0x1234567890123456789012345678901234567890";
+    const solana = "11111111111111111111111111111111";
+    const rule = makeAddressRule({ addresses: [evm, solana], mode: "whitelist" });
+    const evmResult = await evaluatePolicy(
+      rule,
+      makeContext({ request: { ...makeContext().request, to: evm, chainId: 1 } }),
+    );
+    const solanaResult = await evaluatePolicy(
+      rule,
+      makeContext({ request: { ...makeContext().request, to: solana, chainId: 101 } }),
+    );
+    expect(evmResult.passed).toBe(true);
+    expect(solanaResult.passed).toBe(true);
   });
 });

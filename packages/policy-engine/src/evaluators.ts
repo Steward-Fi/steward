@@ -1,3 +1,5 @@
+import { keccak_256 } from "@noble/hashes/sha3";
+import { sha256 } from "@noble/hashes/sha256";
 import {
   type AllowedChainsConfig,
   type ApprovedAddressesConfig,
@@ -43,9 +45,12 @@ function isEvmAddress(value: unknown): value is string {
 type PolicyAddressFamily = "evm" | "solana" | "bitcoin" | "monero";
 
 const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-const BECH32_ALPHABET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+const MONERO_BLOCK_BYTES = [0, 2, 3, 5, 6, 7, 9, 10, 11] as const;
 
 function decodeBase58(value: string): Uint8Array | null {
+  if (!value) return null;
+  let leadingZeroes = 0;
+  while (value[leadingZeroes] === "1") leadingZeroes += 1;
   let number = 0n;
   for (const character of value) {
     const digit = BASE58_ALPHABET.indexOf(character);
@@ -54,54 +59,65 @@ function decodeBase58(value: string): Uint8Array | null {
   }
   const bytes: number[] = [];
   while (number > 0n) {
-    bytes.push(Number(number & 0xffn));
+    bytes.unshift(Number(number & 0xffn));
     number >>= 8n;
   }
-  for (let index = 0; index < value.length && value[index] === "1"; index += 1) bytes.push(0);
-  return Uint8Array.from(bytes.reverse());
+  return Uint8Array.from([...new Array(leadingZeroes).fill(0), ...bytes]);
 }
 
-function bech32Polymod(values: readonly number[]): number {
+function isSolanaAddress(value: string): boolean {
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value) && decodeBase58(value)?.length === 32;
+}
+
+function bech32Polymod(values: number[]): number {
   const generators = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
   let checksum = 1;
   for (const value of values) {
     const top = checksum >>> 25;
     checksum = ((checksum & 0x1ffffff) << 5) ^ value;
     for (let bit = 0; bit < 5; bit += 1) {
-      if ((top >>> bit) & 1) checksum ^= generators[bit];
+      if ((top >>> bit) & 1) checksum ^= generators[bit] as number;
     }
   }
   return checksum >>> 0;
 }
 
-function decodeSegwitAddress(value: string): { hrp: string; version: number } | null {
-  if (value.length > 90 || (value !== value.toLowerCase() && value !== value.toUpperCase())) {
+function decodeBech32Address(
+  value: string,
+): { hrp: string; version: number; program: Uint8Array } | null {
+  if (
+    value.length < 8 ||
+    value.length > 90 ||
+    (value !== value.toLowerCase() && value !== value.toUpperCase())
+  ) {
     return null;
   }
   const normalized = value.toLowerCase();
   const separator = normalized.lastIndexOf("1");
   if (separator < 1 || separator + 7 > normalized.length) return null;
   const hrp = normalized.slice(0, separator);
-  if (hrp !== "bc" && hrp !== "tb" && hrp !== "bcrt") return null;
-  const data = [...normalized.slice(separator + 1)].map((character) =>
-    BECH32_ALPHABET.indexOf(character),
-  );
-  if (data.some((digit) => digit < 0)) return null;
+  const alphabet = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+  const words: number[] = [];
+  for (const character of normalized.slice(separator + 1)) {
+    const word = alphabet.indexOf(character);
+    if (word < 0) return null;
+    words.push(word);
+  }
   const expanded = [
     ...[...hrp].map((character) => character.charCodeAt(0) >>> 5),
     0,
     ...[...hrp].map((character) => character.charCodeAt(0) & 31),
-    ...data,
   ];
-  const polymod = bech32Polymod(expanded);
-  const version = data[0];
-  if (version > 16 || (version === 0 ? polymod !== 1 : polymod !== 0x2bc830a3)) return null;
-
+  const encoding = bech32Polymod([...expanded, ...words]);
+  if (encoding !== 1 && encoding !== 0x2bc830a3) return null;
+  const payload = words.slice(0, -6);
+  const version = payload[0];
+  if (version === undefined || version > 16) return null;
   let accumulator = 0;
   let bits = 0;
   const program: number[] = [];
-  for (const digit of data.slice(1, -6)) {
-    accumulator = (accumulator << 5) | digit;
+  for (const word of payload.slice(1)) {
+    accumulator = (accumulator << 5) | word;
     bits += 5;
     while (bits >= 8) {
       bits -= 8;
@@ -110,36 +126,99 @@ function decodeSegwitAddress(value: string): { hrp: string; version: number } | 
   }
   if (bits >= 5 || ((accumulator << (8 - bits)) & 0xff) !== 0) return null;
   if (program.length < 2 || program.length > 40) return null;
-  if (version === 0 && program.length !== 20 && program.length !== 32) return null;
-  return { hrp, version };
+  if (version === 0 && (encoding !== 1 || (program.length !== 20 && program.length !== 32)))
+    return null;
+  if (version > 0 && encoding !== 0x2bc830a3) return null;
+  return { hrp, version, program: Uint8Array.from(program) };
 }
 
-function isPolicyAddressForFamily(value: unknown, family: PolicyAddressFamily): value is string {
+function isBitcoinAddress(value: string, testnet: boolean): boolean {
+  const bech32 = decodeBech32Address(value);
+  if (bech32) return testnet ? bech32.hrp === "tb" || bech32.hrp === "bcrt" : bech32.hrp === "bc";
+  if (!/^[123mn2][1-9A-HJ-NP-Za-km-z]{25,34}$/.test(value)) return false;
+  const decoded = decodeBase58(value);
+  if (!decoded || decoded.length !== 25) return false;
+  const expected = sha256(sha256(decoded.subarray(0, 21))).subarray(0, 4);
+  if (!expected.every((byte, index) => byte === decoded[21 + index])) return false;
+  return testnet ? decoded[0] === 111 || decoded[0] === 196 : decoded[0] === 0 || decoded[0] === 5;
+}
+
+function decodeMoneroBlock(value: string, byteLength: number): Uint8Array | null {
+  let number = 0n;
+  for (const character of value) {
+    const digit = BASE58_ALPHABET.indexOf(character);
+    if (digit < 0) return null;
+    number = number * 58n + BigInt(digit);
+  }
+  const result = new Uint8Array(byteLength);
+  for (let index = byteLength - 1; index >= 0; index -= 1) {
+    result[index] = Number(number & 0xffn);
+    number >>= 8n;
+  }
+  return number === 0n ? result : null;
+}
+
+function decodeMoneroAddress(value: string): Uint8Array | null {
+  if (value.length !== 95 && value.length !== 106) return null;
+  const fullBlocks = Math.floor(value.length / 11);
+  const trailingCharacters = value.length % 11;
+  const trailingBytes = MONERO_BLOCK_BYTES.indexOf(
+    trailingCharacters as (typeof MONERO_BLOCK_BYTES)[number],
+  );
+  if (trailingBytes < 0) return null;
+  const decoded = new Uint8Array(fullBlocks * 8 + trailingBytes);
+  for (let index = 0; index < fullBlocks; index += 1) {
+    const block = decodeMoneroBlock(value.slice(index * 11, (index + 1) * 11), 8);
+    if (!block) return null;
+    decoded.set(block, index * 8);
+  }
+  if (trailingBytes > 0) {
+    const block = decodeMoneroBlock(value.slice(fullBlocks * 11), trailingBytes);
+    if (!block) return null;
+    decoded.set(block, fullBlocks * 8);
+  }
+  return decoded;
+}
+
+function isMoneroAddress(value: string, stagenet: boolean): boolean {
+  const decoded = decodeMoneroAddress(value);
+  if (!decoded || (decoded.length !== 69 && decoded.length !== 77)) return false;
+  const body = decoded.subarray(0, -4);
+  const checksum = keccak_256(body).subarray(0, 4);
+  if (!checksum.every((byte, index) => byte === decoded[decoded.length - 4 + index])) return false;
+  const standardPrefixes = stagenet ? [24, 25, 36] : [18, 19, 42];
+  const prefix = decoded[0] as number;
+  if (!standardPrefixes.includes(prefix)) return false;
+  const integrated = prefix === (stagenet ? 25 : 19);
+  return decoded.length === (integrated ? 77 : 69);
+}
+
+function isPolicyAddressForChain(value: unknown, chainId: number): value is string {
   if (typeof value !== "string") return false;
-  switch (family) {
+  const chain = chainFromNumeric(chainId);
+  switch (chain?.family) {
     case "evm":
       return isEvmAddress(value);
-    case "solana": {
-      const decoded = decodeBase58(value);
-      return decoded?.length === 32;
-    }
-    case "bitcoin": {
-      if (decodeSegwitAddress(value)) return true;
-      if (!/^[123mn2][1-9A-HJ-NP-Za-km-z]{25,34}$/.test(value)) return false;
-      const decoded = decodeBase58(value);
-      return decoded?.length === 25 && [0x00, 0x05, 0x6f, 0xc4].includes(decoded[0]);
-    }
+    case "solana":
+      return isSolanaAddress(value);
+    case "bitcoin":
+      return isBitcoinAddress(value, chain.testnet);
     case "monero":
-      return /^(?:[1-9A-HJ-NP-Za-km-z]{95}|[1-9A-HJ-NP-Za-km-z]{106})$/.test(value);
+      return isMoneroAddress(value, chain.testnet);
+    default:
+      return false;
   }
 }
 
-function isSupportedPolicyAddress(value: unknown): value is string {
+function isRecognizedPolicyAddress(value: unknown): value is string {
   return (
-    isPolicyAddressForFamily(value, "evm") ||
-    isPolicyAddressForFamily(value, "solana") ||
-    isPolicyAddressForFamily(value, "bitcoin") ||
-    isPolicyAddressForFamily(value, "monero")
+    typeof value === "string" &&
+    (isEvmAddress(value) ||
+      isSolanaAddress(value) ||
+      isBitcoinAddress(value, false) ||
+      isBitcoinAddress(value, true) ||
+      isMoneroAddress(value, false) ||
+      isMoneroAddress(value, true))
   );
 }
 
@@ -760,21 +839,21 @@ function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): Pol
   }
 
   const family = chainFromNumeric(ctx.request.chainId)?.family;
-  if (
-    !family ||
-    !isPolicyAddressForFamily(targetAddress, family) ||
-    !config.addresses.every(isSupportedPolicyAddress)
-  ) {
+  if (!family || !isPolicyAddressForChain(targetAddress, ctx.request.chainId)) {
     return {
       ...base,
       passed: false,
-      reason:
-        "Approved addresses must use a supported address family and match the destination chain",
+      reason: "Approved addresses must match the destination address family",
     };
+  }
+  if (!config.addresses.every(isRecognizedPolicyAddress)) {
+    return { ...base, passed: false, reason: "Approved addresses contain an invalid address" };
   }
 
   const target = normalizePolicyAddress(targetAddress, family);
-  const listed = config.addresses.map((address) => normalizePolicyAddress(address, family));
+  const listed = config.addresses
+    .filter((address) => isPolicyAddressForChain(address, ctx.request.chainId))
+    .map((address) => normalizePolicyAddress(address, family));
   const mode = config.mode;
 
   if (mode === "whitelist") {
@@ -1136,8 +1215,9 @@ function evaluateContractAllowlist(rule: PolicyRule, ctx: EvaluatorContext): Pol
   // contract/selector gating) but a common misconfiguration seam: operators
   // who expect contract-allowlist to also constrain native sends MUST pair it
   // with an approved-addresses rule (note: the write validator restricts
-  // approved-addresses to known chain address families and evaluates against
-  // the request's chain family). Flipping this branch to deny would silently
+  // approved-addresses to EVM addresses, so on Solana/Monero paths that rule
+  // can never match and always denies — native-transfer gating there needs a
+  // chain-appropriate rule). Flipping this branch to deny would silently
   // break existing tenants that rely on the documented behavior, so the
   // decision to gate native transfers explicitly is deferred (see SEC-183).
   if (!data || data === "0x") {
