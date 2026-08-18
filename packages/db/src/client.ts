@@ -307,9 +307,9 @@ export function createDb(connectionString = getDatabaseUrl()) {
  */
 export function createNeonHttpDb(
   connectionString = getDatabaseUrl(),
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; securityEnv?: DatabaseSecurityEnv } = {},
 ) {
-  assertDatabaseUrlTls(connectionString);
+  assertDatabaseUrlTls(connectionString, options.securityEnv);
   // Lazy-require so Bun/Node entry points don't pull @neondatabase/serverless
   // into their bundle when the postgres-js driver is in use.
   const { neon } = require("@neondatabase/serverless") as {
@@ -433,7 +433,7 @@ export function createNeonTransactionDbForRequest(
  * @param env  An object with a DATABASE_URL string field. Workers pass in the
  *             whole `env` binding object.
  */
-export function createDbForRequest(env: { DATABASE_URL?: string; DATABASE_DRIVER?: string }) {
+export function createDbForRequest(env: NeonTransactionRequestEnv) {
   // Worker bindings are the authority for this request. Falling back to the
   // process-level selector keeps the helper compatible with Bun/Node callers,
   // but must not let an explicit WebSocket binding silently create neon-http.
@@ -449,7 +449,9 @@ export function createDbForRequest(env: { DATABASE_URL?: string; DATABASE_DRIVER
   }
   const url = env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL binding is required for createDbForRequest()");
-  return createNeonHttpDb(url).db;
+  return createNeonHttpDb(url, {
+    securityEnv: { ...env, NODE_ENV: env.NODE_ENV ?? "production" },
+  }).db;
 }
 
 // ─── PGLite support ───────────────────────────────────────────────────────────

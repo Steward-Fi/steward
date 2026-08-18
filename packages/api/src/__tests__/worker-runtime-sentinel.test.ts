@@ -1,10 +1,9 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { getDb } from "@stwd/db";
 import {
   hydrateProcessEnv,
   runWorkerGoogleCredentialLifecycleSweep,
+  runWorkerScheduledRecovery,
   runWorkerUpstreamCredentialLeaseSweep,
   runWorkerXCredentialLifecycleSweep,
   withWorkerRequestDatabase,
@@ -101,15 +100,36 @@ test("Worker database selection rejects missing or unsupported drivers", async (
   }
 });
 
-test("every autonomous recovery sweep owns its own request database", () => {
-  const source = readFileSync(join(import.meta.dir, "../worker.ts"), "utf8");
-  for (const sweep of [
-    "runWorkerUpstreamCredentialLeaseSweep",
-    "runWorkerGoogleCredentialLifecycleSweep",
-    "runWorkerXCredentialLifecycleSweep",
-  ]) {
-    expect(source).toContain(`withWorkerRequestDatabase(env, () => ${sweep}(env))`);
-  }
+test("every autonomous recovery sweep runs inside its own request database", async () => {
+  let databaseContexts = 0;
+  const calls: string[] = [];
+  const result = await runWorkerScheduledRecovery(
+    {
+      DATABASE_URL: "postgresql://worker.invalid/steward",
+      DATABASE_DRIVER: "neon-websocket",
+    },
+    {
+      async runWithDatabase(_env, callback) {
+        databaseContexts += 1;
+        return callback();
+      },
+      upstreamSweep: async () => {
+        calls.push("upstream");
+        return "upstream-result";
+      },
+      googleSweep: async () => {
+        calls.push("google");
+        return "google-result";
+      },
+      xSweep: async () => {
+        calls.push("x");
+        return "x-result";
+      },
+    },
+  );
+  expect(databaseContexts).toBe(3);
+  expect(calls.sort()).toEqual(["google", "upstream", "x"]);
+  expect(result).toEqual(["upstream-result", "google-result", "x-result"]);
 });
 
 test("Worker socket cleanup diagnostics are fixed and cannot replace handler errors", async () => {

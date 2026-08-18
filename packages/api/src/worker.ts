@@ -97,6 +97,9 @@ type WorkerDatabaseHandleFactory = (env: {
 type WorkerHttpDatabaseFactory = (env: {
   DATABASE_URL?: string;
   DATABASE_DRIVER?: string;
+  NODE_ENV?: string;
+  STEWARD_ALLOW_INSECURE_DB?: string;
+  STEWARD_ALLOW_UNVERIFIED_DB_TLS?: string;
 }) => ReturnType<typeof getDb>;
 
 /**
@@ -142,6 +145,31 @@ export async function withWorkerRequestDatabase<T>(
   }
   if (callbackError !== noCallbackError) throw callbackError;
   return result as T;
+}
+
+type WorkerDatabaseRunner = <T>(env: Env, callback: () => Promise<T>) => Promise<T>;
+
+export async function runWorkerScheduledRecovery(
+  env: Env,
+  options?: {
+    runWithDatabase?: WorkerDatabaseRunner;
+    upstreamSweep?: () => Promise<unknown>;
+    googleSweep?: () => Promise<unknown>;
+    xSweep?: () => Promise<unknown>;
+  },
+): Promise<unknown[]> {
+  const runWithDatabase = options?.runWithDatabase ?? withWorkerRequestDatabase;
+  return Promise.all([
+    runWithDatabase(
+      env,
+      options?.upstreamSweep ?? (() => runWorkerUpstreamCredentialLeaseSweep(env)),
+    ),
+    runWithDatabase(
+      env,
+      options?.googleSweep ?? (() => runWorkerGoogleCredentialLifecycleSweep(env)),
+    ),
+    runWithDatabase(env, options?.xSweep ?? (() => runWorkerXCredentialLifecycleSweep(env))),
+  ]);
 }
 
 type WorkerLeaseSweepResult = {
@@ -354,12 +382,6 @@ export default {
     env: Env,
     ctx: { waitUntil(promise: Promise<unknown>): void },
   ) {
-    ctx.waitUntil(
-      Promise.all([
-        withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
-        withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),
-        withWorkerRequestDatabase(env, () => runWorkerXCredentialLifecycleSweep(env)),
-      ]),
-    );
+    ctx.waitUntil(runWorkerScheduledRecovery(env));
   },
 };

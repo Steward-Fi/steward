@@ -91,9 +91,10 @@ The handle exposes an idempotent `close()` which callers must await before a
 Worker request finishes. Connection acquisition is capped at 10 seconds; query,
 statement, lock, idle-connection, and idle-in-transaction phases are capped at
 30 seconds (with PostgreSQL cancellation scheduled slightly earlier). Production
-TLS policy is evaluated from the Worker bindings passed to the handle, not from
-a Node compatibility shim's `process.env`; because Cloudflare does not provide
-`NODE_ENV` automatically, missing `NODE_ENV` defaults to production enforcement.
+TLS policy for both Worker transports is evaluated from the bindings passed to
+the request database factory, not from a Node compatibility shim's
+`process.env`; because Cloudflare does not provide `NODE_ENV` automatically,
+missing `NODE_ENV` defaults to production enforcement.
 
 Both `neon-http` and `neon-websocket` are bound through request-local async
 context. The context is revoked as soon as the owning callback settles, so any

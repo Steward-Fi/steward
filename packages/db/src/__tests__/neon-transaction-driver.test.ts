@@ -88,6 +88,20 @@ describe("transaction-capable Workers database driver", () => {
         NODE_ENV: "production",
       }),
     ).toThrow("does not authenticate the database server");
+
+    expect(() =>
+      createDbForRequest({
+        DATABASE_DRIVER: "neon-http",
+        DATABASE_URL: "postgresql://db.example.test/steward",
+      }),
+    ).toThrow("DATABASE_URL must include sslmode=verify-full");
+
+    expect(() =>
+      createDbForRequest({
+        DATABASE_DRIVER: "neon-http",
+        DATABASE_URL: "postgresql://db.example.test/steward?sslmode=require",
+      }),
+    ).toThrow("does not authenticate the database server");
   });
 
   test("bounds connection, query, lock, statement, and idle transaction phases", () => {
