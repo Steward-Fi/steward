@@ -440,7 +440,9 @@ describe("POST /v1/trade/polymarket/order", () => {
     const app = makeApp(tenantId, agentId, tradeRoutes);
 
     const prevNodeEnv = process.env.NODE_ENV;
+    const prevMemoryAck = process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
     process.env.NODE_ENV = "production";
+    process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = "true";
     process.env.STEWARD_PM_TEST_CREDS = "1";
     try {
       const res = await postOrder(app, sessionId, crypto.randomUUID());
@@ -454,6 +456,8 @@ describe("POST /v1/trade/polymarket/order", () => {
     } finally {
       if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
       else process.env.NODE_ENV = prevNodeEnv;
+      if (prevMemoryAck === undefined) delete process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+      else process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = prevMemoryAck;
       delete process.env.STEWARD_PM_TEST_CREDS;
     }
   });
@@ -479,7 +483,9 @@ describe("POST /v1/trade/polymarket/order", () => {
     const app = makeApp(tenantId, agentId, tradeRoutes);
 
     const prevNodeEnv = process.env.NODE_ENV;
+    const prevMemoryAck = process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
     process.env.NODE_ENV = "production";
+    process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = "true";
     process.env.POLYMARKET_CLOB_API_URL = "http://clob.e2e.invalid";
     process.env.STEWARD_PM_TEST_CREDS = "1";
     try {
@@ -493,6 +499,8 @@ describe("POST /v1/trade/polymarket/order", () => {
     } finally {
       if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
       else process.env.NODE_ENV = prevNodeEnv;
+      if (prevMemoryAck === undefined) delete process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+      else process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = prevMemoryAck;
       delete process.env.POLYMARKET_CLOB_API_URL;
       delete process.env.STEWARD_PM_TEST_CREDS;
     }
@@ -631,8 +639,8 @@ describe("POST /v1/trade/polymarket/order", () => {
           orderID: "pm-e2e-order-1",
           status: "matched",
           success: true,
-          makingAmount: "10000000",
-          takingAmount: "20000000",
+          makingAmount: "10",
+          takingAmount: "20",
         };
       }
       throw new Error(`unexpected deterministic CLOB POST ${path}`);

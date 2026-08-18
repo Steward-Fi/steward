@@ -14,7 +14,7 @@ type TestRecord = { status: number; body: unknown };
 /** Minimal in-memory IoredisLike double (records raw set args for assertions). */
 function fakeRedis() {
   const data = new Map<string, string>();
-  const setCalls: Array<{ key: string; ttlMs?: number }> = [];
+  const setCalls: Array<{ key: string; ttlMs?: number; condition?: string }> = [];
   const client = {
     get: async (key: string) => data.get(key) ?? null,
     set: async (...args: unknown[]) => {
@@ -22,9 +22,29 @@ function fakeRedis() {
       const value = args[1] as string;
       const mode = args[2] as string | undefined;
       const ttlMs = mode === "PX" ? (args[3] as number) : undefined;
-      setCalls.push({ key, ttlMs });
+      const condition = args[4] as string | undefined;
+      setCalls.push({ key, ttlMs, condition });
+      if (condition === "NX" && data.has(key)) return null;
       data.set(key, value);
       return "OK";
+    },
+    eval: async (
+      script: string,
+      _numKeys: number,
+      key: string,
+      token: string,
+      ...args: unknown[]
+    ) => {
+      const raw = data.get(key);
+      if (!raw) return 0;
+      const current = JSON.parse(raw) as { state?: string; claimToken?: string };
+      if (current.state !== "pending" || current.claimToken !== token) return 0;
+      if (script.includes('redis.call("DEL"')) {
+        data.delete(key);
+      } else {
+        data.set(key, args[0] as string);
+      }
+      return 1;
     },
   } as unknown as IoredisLike;
   return { client, data, setCalls };
@@ -37,7 +57,8 @@ describe("DurableIdempotencyStore (SEC-043)", () => {
       namespace: "trade:operator",
       getRedisClient: () => client,
     });
-    const first = await replicaA.check("tenant:withdraw", "key-1", "hash-1");
+    const checked = await replicaA.check("tenant:withdraw", "key-1", "hash-1");
+    const first = await checked.claim?.();
     expect(first.record).toBeUndefined();
     expect(first.conflict).toBeUndefined();
     await first.store?.({ status: 200, body: { ok: true, data: { moved: true } } });
@@ -59,7 +80,8 @@ describe("DurableIdempotencyStore (SEC-043)", () => {
       namespace: "trade",
       getRedisClient: () => client,
     });
-    const first = await store.check("scope", "key-1", "hash-1");
+    const checked = await store.check("scope", "key-1", "hash-1");
+    const first = await checked.claim?.();
     await first.store?.({ status: 502, body: { ok: false } });
 
     const conflict = await store.check("scope", "key-1", "hash-DIFFERENT");
@@ -74,10 +96,12 @@ describe("DurableIdempotencyStore (SEC-043)", () => {
       namespace: "trade",
       getRedisClient: () => client,
     });
-    const check = await store.check("scope", "key-1", "hash-1");
+    const initial = await store.check("scope", "key-1", "hash-1");
+    const check = await initial.claim?.();
     await check.store?.({ status: 200, body: { ok: true } });
     expect(setCalls).toHaveLength(1);
     expect(setCalls[0]?.ttlMs).toBe(24 * 60 * 60 * 1000);
+    expect(setCalls[0]?.condition).toBe("NX");
   });
 
   it("fails CLOSED when the Redis check errors (never executes without the dedup record)", async () => {
@@ -95,9 +119,14 @@ describe("DurableIdempotencyStore (SEC-043)", () => {
   });
 
   it("swallows a Redis store error (the movement already executed; caller gets the real outcome)", async () => {
+    const data = new Map<string, string>();
     const broken = {
       get: async () => null,
-      set: async () => {
+      set: async (key: string, value: string) => {
+        data.set(key, value);
+        return "OK";
+      },
+      eval: async () => {
         throw new Error("redis down");
       },
     } as unknown as IoredisLike;
@@ -105,7 +134,8 @@ describe("DurableIdempotencyStore (SEC-043)", () => {
       namespace: "trade",
       getRedisClient: () => broken,
     });
-    const check = await store.check("scope", "key-1", "hash-1");
+    const initial = await store.check("scope", "key-1", "hash-1");
+    const check = await initial.claim?.();
     await expect(check.store?.({ status: 200, body: {} })).resolves.toBeUndefined();
   });
 
@@ -115,7 +145,8 @@ describe("DurableIdempotencyStore (SEC-043)", () => {
       namespace: "trade",
       getRedisClient: noRedis,
     });
-    const first = await storeA.check("scope", "key-1", "hash-1");
+    const checked = await storeA.check("scope", "key-1", "hash-1");
+    const first = await checked.claim?.();
     await first.store?.({ status: 200, body: { ok: true } });
 
     // Same process: replay works.
@@ -139,5 +170,122 @@ describe("DurableIdempotencyStore (SEC-043)", () => {
       getRedisClient: () => client,
     });
     expect(await store.check("scope", undefined, "hash-1")).toEqual({});
+  });
+
+  it("atomically admits only one concurrent replica for the same key", async () => {
+    const { client } = fakeRedis();
+    const replicaA = new DurableIdempotencyStore<TestRecord>({
+      namespace: "trade",
+      getRedisClient: () => client,
+    });
+    const replicaB = new DurableIdempotencyStore<TestRecord>({
+      namespace: "trade",
+      getRedisClient: () => client,
+    });
+    const [checkA, checkB] = await Promise.all([
+      replicaA.check("scope", "same-key", "same-body"),
+      replicaB.check("scope", "same-key", "same-body"),
+    ]);
+    const [claimA, claimB] = await Promise.all([checkA.claim?.(), checkB.claim?.()]);
+    expect([claimA?.store !== undefined, claimB?.store !== undefined].filter(Boolean)).toHaveLength(
+      1,
+    );
+    expect([claimA?.inProgress, claimB?.inProgress].filter(Boolean)).toHaveLength(1);
+  });
+
+  it("releases a pre-execution claim so a corrected retry can execute", async () => {
+    const { client } = fakeRedis();
+    const store = new DurableIdempotencyStore<TestRecord>({
+      namespace: "trade",
+      getRedisClient: () => client,
+    });
+    const initial = await store.check("scope", "key-1", "hash-1");
+    const owned = await initial.claim?.();
+    await owned?.release?.();
+    const retry = await store.check("scope", "key-1", "hash-1");
+    expect((await retry.claim?.())?.store).toBeDefined();
+  });
+
+  it("fails closed on a malformed durable record instead of overwriting it", async () => {
+    const { client, data, setCalls } = fakeRedis();
+    const store = new DurableIdempotencyStore<TestRecord>({
+      namespace: "trade",
+      getRedisClient: () => client,
+    });
+    const initial = await store.check("scope", "key-1", "hash-1");
+    await initial.claim?.();
+    const durableKey = setCalls[0]?.key;
+    expect(durableKey).toMatch(/^idempotency:trade:[a-f0-9]{64}$/);
+    data.set(durableKey!, "not-json");
+    await expect(store.check("scope", "key-1", "hash-1")).rejects.toThrow(
+      "Malformed durable idempotency record",
+    );
+  });
+
+  it("uses collision-safe opaque keys for delimiter-containing tenant scopes", async () => {
+    const { client, setCalls } = fakeRedis();
+    const store = new DurableIdempotencyStore<TestRecord>({
+      namespace: "trade",
+      getRedisClient: () => client,
+    });
+    await (await store.check("tenant:a", "b:key", "hash-1")).claim?.();
+    await (await store.check("tenant", "a:b:key", "hash-2")).claim?.();
+    expect(setCalls).toHaveLength(2);
+    expect(setCalls[0]?.key).not.toBe(setCalls[1]?.key);
+    expect(setCalls[0]?.key).toMatch(/^idempotency:trade:[a-f0-9]{64}$/);
+    expect(setCalls[0]?.key).not.toContain("tenant");
+    expect(setCalls[0]?.key).not.toContain("b:key");
+  });
+
+  it("fails closed in production when durable Redis idempotency is unavailable", async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalAcknowledgement = process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+    process.env.NODE_ENV = "production";
+    delete process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+    try {
+      const store = new DurableIdempotencyStore<TestRecord>({
+        namespace: "trade",
+        getRedisClient: () => null,
+      });
+      await expect(store.check("scope", "key-1", "hash-1")).rejects.toThrow(
+        "Trading idempotency requires Redis in production",
+      );
+    } finally {
+      if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = originalNodeEnv;
+      if (originalAcknowledgement === undefined) {
+        delete process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+      } else {
+        process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = originalAcknowledgement;
+      }
+    }
+  });
+
+  it("fails closed in the Workers runtime even when NODE_ENV is unset", async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalRuntime = process.env.STEWARD_RUNTIME;
+    const originalAcknowledgement = process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+    delete process.env.NODE_ENV;
+    process.env.STEWARD_RUNTIME = "workers";
+    delete process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+    try {
+      const store = new DurableIdempotencyStore<TestRecord>({
+        namespace: "trade",
+        getRedisClient: () => null,
+      });
+      await expect(store.check("scope", "key-1", "hash-1")).rejects.toThrow(
+        "Trading idempotency requires Redis in production",
+      );
+    } finally {
+      if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = originalNodeEnv;
+      if (originalRuntime === undefined) delete process.env.STEWARD_RUNTIME;
+      else process.env.STEWARD_RUNTIME = originalRuntime;
+      if (originalAcknowledgement === undefined) {
+        delete process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+      } else {
+        process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = originalAcknowledgement;
+      }
+    }
   });
 });
