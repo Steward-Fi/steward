@@ -202,6 +202,22 @@ describe("auth proxy route handlers (SEC-018)", () => {
       expect(await res.json()).toEqual({ ok: false, error: "Malformed refresh response" });
     });
 
+    test("refresh rejects non-positive or fractional access-token lifetimes", async () => {
+      for (const expiresIn of [-1, 0, 0.5]) {
+        upstreamBody = {
+          ok: true,
+          token: "new-access-jwt",
+          refreshToken: "rotated-rt",
+          expiresIn,
+        };
+        const res = await refreshPOST(
+          postJson("https://app.example.test/api/auth/refresh", {}, { cookie: "steward_rt=stale" }),
+        );
+        expect(res.status).toBe(502);
+        expect(res.headers.get("Set-Cookie")).toContain("Max-Age=0");
+      }
+    });
+
     test("refresh errors never reflect upstream refresh-token fields", async () => {
       upstreamStatus = 429;
       upstreamBody = {

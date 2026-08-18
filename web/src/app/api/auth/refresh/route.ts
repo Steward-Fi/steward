@@ -88,7 +88,8 @@ export async function POST(request: Request): Promise<Response> {
     !rotatedToken ||
     !accessToken ||
     typeof expiresIn !== "number" ||
-    !Number.isFinite(expiresIn)
+    !Number.isSafeInteger(expiresIn) ||
+    expiresIn <= 0
   ) {
     // Whitelist the exact upstream success contract. Besides failing closed on
     // malformed responses, this prevents an upstream reflection from putting
