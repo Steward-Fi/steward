@@ -78,7 +78,7 @@ describe("PR6 fake-transport static inventory (U1)", () => {
     expect(productionImporters).toEqual([]);
   });
 
-  test("PN02: the ONLY forwarder setter is the __ test seam; default is DNS-vetted", async () => {
+  test("PN02: forwarder rebindings are limited to test seams; default is DNS-vetted", async () => {
     const proxy = stripComments(await read("../handlers/proxy.ts"));
 
     // The default binding is the real, DNS-vetted forwarder.
@@ -88,17 +88,17 @@ describe("PR6 fake-transport static inventory (U1)", () => {
       ),
     ).toBe(true);
 
-    // The ONLY bare `binding = value` assignment (the typed `let ... :
-    // ProxyForwarder = ...` initializer is NOT a bare `name =` match because the
-    // type annotation sits between the name and the `=`) is inside the
-    // `__setForwardProxyRequestForTests` setter body.
-    const bareAssignments = [...proxy.matchAll(/forwardProxyRequestForHandler\s*=/g)];
-    // Exactly one bare assignment: the setter body. If this grows, a new
-    // rebinding path was introduced — classify it (must be test-only).
-    expect(bareAssignments.length).toBe(1);
-    // And the setter that contains it is the `__` test seam.
+    // The typed initializer is not a bare assignment. The only rebindings are
+    // the explicit test setter and the test reset back to the vetted default.
+    const assignmentValues = [
+      ...proxy.matchAll(/forwardProxyRequestForHandler\s*=\s*([^;]+);/g),
+    ].map((match) => match[1]?.trim());
+    expect(assignmentValues).toEqual(["forwarder", "forwardWithVettedDns"]);
+
     const setterBody = proxy.slice(proxy.indexOf("__setForwardProxyRequestForTests"));
     expect(/forwardProxyRequestForHandler\s*=\s*forwarder\b/.test(setterBody)).toBe(true);
+    const resetBody = proxy.slice(proxy.indexOf("__resetProxyHandlerTestHooksForTests"));
+    expect(/forwardProxyRequestForHandler\s*=\s*forwardWithVettedDns\b/.test(resetBody)).toBe(true);
 
     // The setter is `__`-prefixed and test-only-named.
     expect(/export function __setForwardProxyRequestForTests\(/.test(proxy)).toBe(true);
@@ -110,22 +110,23 @@ describe("PR6 fake-transport static inventory (U1)", () => {
     expect(/forwardProxyRequestForHandler\s*=\s*[^;]*NODE_ENV/.test(proxy)).toBe(false);
   });
 
-  test("PN02: no production proxy module calls __setForwardProxyRequestForTests", async () => {
+  test("PN02: no production proxy module calls the forwarder test hooks", async () => {
     const proxySrcRoot = new URL("../", import.meta.url).pathname;
     const glob = new Bun.Glob("**/*.ts");
     const callers: string[] = [];
     for (const rel of glob.scanSync({ cwd: proxySrcRoot })) {
       if (rel.includes("__tests__/")) continue;
       const src = stripComments(await Bun.file(`${proxySrcRoot}${rel}`).text());
-      // Allow the DECLARATION (export function ...) but not a CALL.
-      if (/__setForwardProxyRequestForTests\s*\(/.test(src)) {
-        // The declaration site (proxy.ts) contains `export function __set...(` —
-        // that is a declaration, not a call. Only flag a bare call expression.
+      for (const hook of [
+        "__setForwardProxyRequestForTests",
+        "__resetProxyHandlerTestHooksForTests",
+      ]) {
+        if (!new RegExp(`${hook}\\s*\\(`).test(src)) continue;
         const withoutDecl = src.replace(
-          /export function __setForwardProxyRequestForTests\s*\([^)]*\)\s*:\s*void\s*\{/,
+          new RegExp(`export function ${hook}\\s*\\([^)]*\\)\\s*:\\s*void\\s*\\{`),
           "",
         );
-        if (/__setForwardProxyRequestForTests\s*\(/.test(withoutDecl)) callers.push(rel);
+        if (new RegExp(`${hook}\\s*\\(`).test(withoutDecl)) callers.push(`${rel}:${hook}`);
       }
     }
     expect(callers).toEqual([]);
