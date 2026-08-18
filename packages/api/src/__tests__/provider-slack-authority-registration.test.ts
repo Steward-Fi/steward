@@ -3,6 +3,7 @@ import {
   agents,
   closeDb,
   getDb,
+  providerAccounts,
   providerOperations,
   secretRoutes,
   tenants,
@@ -27,6 +28,7 @@ describe("Slack provider authority registration", () => {
   const store = new ProviderAuthorityStore();
   let secretId: string;
   let routeId: string;
+  let wrongPathRouteId: string;
 
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
@@ -64,6 +66,16 @@ describe("Slack provider authority registration", () => {
       injectFormat: "Bearer {value}",
     });
     routeId = route.id;
+    const wrongPathRoute = await vault.createRoute(TENANT, secret.id, {
+      agentId: AGENT,
+      hostPattern: "slack.com",
+      pathPattern: "/api/admin.users.session.reset",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "authorization",
+      injectFormat: "Bearer {value}",
+    });
+    wrongPathRouteId = wrongPathRoute.id;
   });
 
   afterAll(async () => {
@@ -102,6 +114,38 @@ describe("Slack provider authority registration", () => {
         secretRouteId: routeId,
       }),
     ).rejects.toMatchObject({ code: "bad_request", status: 400 });
+
+    await expect(
+      store.registerOperation(context(1), account.id, {
+        operationKey: "slack.chat.postMessage",
+        riskClass: "write",
+        secretRouteId: wrongPathRouteId,
+      }),
+    ).rejects.toMatchObject({ code: "forbidden", status: 403 });
+
+    // The completed audit is part of the same transaction as the account CAS,
+    // operation insert, and route promotion. If audit signing fails, all three
+    // mutations must roll back together.
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    await expect(
+      store.registerOperation(context(1), account.id, {
+        operationKey: "slack.chat.postMessage",
+        riskClass: "write",
+        secretRouteId: routeId,
+      }),
+    ).rejects.toThrow("STEWARD_AUDIT_HMAC_KEY is required");
+    process.env.STEWARD_AUDIT_HMAC_KEY = "a".repeat(64);
+    expect(await getDb().select().from(providerOperations)).toHaveLength(0);
+    const [rolledBackAccount] = await getDb()
+      .select({ revision: providerAccounts.revision })
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, account.id));
+    expect(rolledBackAccount?.revision).toBe(1);
+    const [rolledBackRoute] = await getDb()
+      .select({ mode: secretRoutes.authorityMode, operationId: secretRoutes.providerOperationId })
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, routeId));
+    expect(rolledBackRoute).toEqual({ mode: "legacy", operationId: null });
 
     const operation = await store.registerOperation(context(1), account.id, {
       operationKey: "slack.chat.postMessage",

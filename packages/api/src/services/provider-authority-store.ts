@@ -15,6 +15,7 @@ import {
   withTenantAuditedTransaction,
   workspaces,
 } from "@stwd/db";
+import { SLACK_OPERATION_RISK, type SlackOperationKey } from "@stwd/provider-slack";
 import {
   GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
   genericDescriptorAllowsExactPath,
@@ -42,6 +43,16 @@ import {
 const RECENT_MFA_MS = 5 * 60_000;
 const OPERATION_KEY = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_]*)+$/;
 const KEY = /^[a-z][a-z0-9_-]{0,127}$/;
+const SLACK_OPERATION_METHOD = {
+  "slack.chat.postMessage": "POST",
+  "slack.conversations.list": "GET",
+  "slack.users.info": "GET",
+} as const satisfies Readonly<Record<SlackOperationKey, "GET" | "POST" | "DELETE">>;
+const SLACK_OPERATION_EXACT_PATH = {
+  "slack.chat.postMessage": "/api/chat.postMessage",
+  "slack.conversations.list": "/api/conversations.list",
+  "slack.users.info": "/api/users.info",
+} as const satisfies Readonly<Record<SlackOperationKey, string>>;
 const PROVIDER_OPERATION_ALLOWLIST: Readonly<
   Record<string, Readonly<Record<string, "GET" | "POST" | "DELETE">>>
 > = {
@@ -54,11 +65,7 @@ const PROVIDER_OPERATION_ALLOWLIST: Readonly<
     "x.tweet.delete": "DELETE",
     "x.user.me.read": "GET",
   },
-  slack: {
-    "slack.chat.postMessage": "POST",
-    "slack.conversations.list": "GET",
-    "slack.users.info": "GET",
-  },
+  slack: SLACK_OPERATION_METHOD,
 };
 const PROVIDER_OPERATION_MINIMUM_RISK: Readonly<
   Record<string, Readonly<Record<string, ProviderRiskClass>>>
@@ -72,11 +79,10 @@ const PROVIDER_OPERATION_MINIMUM_RISK: Readonly<
     "x.tweet.delete": "write",
     "x.user.me.read": "read",
   },
-  slack: {
-    "slack.chat.postMessage": "write",
-    "slack.conversations.list": "read",
-    "slack.users.info": "read",
-  },
+  slack: SLACK_OPERATION_RISK,
+};
+const PROVIDER_OPERATION_EXACT_PATH: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  slack: SLACK_OPERATION_EXACT_PATH,
 };
 const PROVIDER_RISK_RANK: Readonly<Record<ProviderRiskClass, number>> = {
   read: 0,
@@ -862,7 +868,9 @@ export class ProviderAuthorityStore {
             route?.pathPattern &&
               genericDescriptorAllowsExactPath(genericDescriptor, route.pathPattern),
           )
-        : Boolean(route?.pathPattern && !route.pathPattern.includes("*"));
+        : PROVIDER_OPERATION_EXACT_PATH[account.adapterKey]?.[operationKey]
+          ? route?.pathPattern === PROVIDER_OPERATION_EXACT_PATH[account.adapterKey]?.[operationKey]
+          : Boolean(route?.pathPattern && !route.pathPattern.includes("*"));
       if (
         !route ||
         route.secretId !== credentialSecretId ||
@@ -967,7 +975,10 @@ export class ProviderAuthorityStore {
               route?.pathPattern &&
                 genericDescriptorAllowsExactPath(genericDescriptor, route.pathPattern),
             )
-          : Boolean(route?.pathPattern && !route.pathPattern.includes("*"));
+          : PROVIDER_OPERATION_EXACT_PATH[account.adapterKey]?.[operationKey]
+            ? route?.pathPattern ===
+              PROVIDER_OPERATION_EXACT_PATH[account.adapterKey]?.[operationKey]
+            : Boolean(route?.pathPattern && !route.pathPattern.includes("*"));
         if (
           !credentialSecretId ||
           !route ||
