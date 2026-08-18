@@ -10,6 +10,7 @@
 
 import { assertRedisUrlTls } from "@stwd/redis";
 import { Redis } from "ioredis";
+import { MONOTONIC_REVOCATION_SCRIPT } from "./revocation-script";
 
 export class TokenRevokedError extends Error {
   constructor(message = "Token has been revoked") {
@@ -38,46 +39,6 @@ function ttlMs(expiresAt: ExpiresAt, now = Date.now()): number {
 }
 
 const DEFAULT_AGENT_REVOCATION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-export const MONOTONIC_REVOCATION_SCRIPT = `
-local markerKey = KEYS[1]
-local latestKey = KEYS[2]
-local issuedBefore = tonumber(ARGV[1])
-local ttlMs = tonumber(ARGV[2])
-local existingRaw = redis.call("GET", latestKey)
-local existingTtlMs = redis.call("PTTL", latestKey)
-redis.call("SET", markerKey, "1", "PX", ttlMs)
-if existingRaw == false then
-  redis.call("SET", latestKey, ARGV[1], "PX", ttlMs)
-  return issuedBefore
-end
-
-local existing = tonumber(existingRaw)
-if existing == nil then
-  redis.call("SET", latestKey, ARGV[1], "PX", ttlMs)
-  return issuedBefore
-end
-
--- A stale revocation request must not shorten the current revocation line.
--- Retain the longer of the existing and incoming TTLs for every value update.
-local effectiveTtlMs = ttlMs
-if existingTtlMs == -1 then
-  -- A persistent line is safer than any expiring replacement. Preserve it if
-  -- legacy/operator data ever lacks the expected TTL.
-  effectiveTtlMs = -1
-elseif existingTtlMs > effectiveTtlMs then
-  effectiveTtlMs = existingTtlMs
-end
-if issuedBefore > existing then
-  if effectiveTtlMs == -1 then
-    redis.call("SET", latestKey, ARGV[1])
-  else
-    redis.call("SET", latestKey, ARGV[1], "PX", effectiveTtlMs)
-  end
-elseif effectiveTtlMs > existingTtlMs then
-  redis.call("PEXPIRE", latestKey, effectiveTtlMs)
-end
-return existing
-`;
 
 class InMemoryRevocationStore implements RevocationStore {
   private readonly revokedJtis = new Map<string, number>();
@@ -114,11 +75,12 @@ class InMemoryRevocationStore implements RevocationStore {
     const expiresAtMs = toMillis(expiresAt);
     const existing = this.agentIssuedBefore.get(agentId);
     const active = existing && existing.expiresAtMs > Date.now() ? existing : null;
+    const effectiveIssuedBefore = Math.max(active?.issuedBefore ?? -1, issuedBefore);
     this.agentIssuedBefore.set(agentId, {
-      issuedBefore: Math.max(active?.issuedBefore ?? -1, issuedBefore),
+      issuedBefore: effectiveIssuedBefore,
       expiresAtMs: Math.max(active?.expiresAtMs ?? -1, expiresAtMs),
     });
-    return issuedBefore;
+    return effectiveIssuedBefore;
   }
 
   async getAgentRevokedBefore(agentId: string): Promise<number | null> {
@@ -139,11 +101,12 @@ class InMemoryRevocationStore implements RevocationStore {
     const expiresAtMs = toMillis(expiresAt);
     const existing = this.userIssuedBefore.get(userId);
     const active = existing && existing.expiresAtMs > Date.now() ? existing : null;
+    const effectiveIssuedBefore = Math.max(active?.issuedBefore ?? -1, issuedBefore);
     this.userIssuedBefore.set(userId, {
-      issuedBefore: Math.max(active?.issuedBefore ?? -1, issuedBefore),
+      issuedBefore: effectiveIssuedBefore,
       expiresAtMs: Math.max(active?.expiresAtMs ?? -1, expiresAtMs),
     });
-    return issuedBefore;
+    return effectiveIssuedBefore;
   }
 
   async getUserRevokedBefore(userId: string): Promise<number | null> {
@@ -239,11 +202,14 @@ class RedisRevocationStore implements RevocationStore {
     try {
       const markerKey = `revoked-agent:${agentId}:${issuedBefore}`;
       const latestKey = `revoked-agent:${agentId}:issued-before`;
-      await redis.eval(MONOTONIC_REVOCATION_SCRIPT, 2, markerKey, latestKey, issuedBefore, ms);
+      const effective = Number(
+        await redis.eval(MONOTONIC_REVOCATION_SCRIPT, 2, markerKey, latestKey, issuedBefore, ms),
+      );
+      if (!Number.isFinite(effective)) throw new Error("invalid Redis revocation line result");
+      return effective;
     } catch (error) {
       throw new Error("Shared agent revocation store unavailable", { cause: error });
     }
-    return issuedBefore;
   }
 
   async getAgentRevokedBefore(agentId: string): Promise<number | null> {
@@ -272,11 +238,14 @@ class RedisRevocationStore implements RevocationStore {
     try {
       const markerKey = `revoked-user:${userId}:${issuedBefore}`;
       const latestKey = `revoked-user:${userId}:issued-before`;
-      await redis.eval(MONOTONIC_REVOCATION_SCRIPT, 2, markerKey, latestKey, issuedBefore, ms);
+      const effective = Number(
+        await redis.eval(MONOTONIC_REVOCATION_SCRIPT, 2, markerKey, latestKey, issuedBefore, ms),
+      );
+      if (!Number.isFinite(effective)) throw new Error("invalid Redis revocation line result");
+      return effective;
     } catch (error) {
       throw new Error("Shared user revocation store unavailable", { cause: error });
     }
-    return issuedBefore;
   }
 
   async getUserRevokedBefore(userId: string): Promise<number | null> {
