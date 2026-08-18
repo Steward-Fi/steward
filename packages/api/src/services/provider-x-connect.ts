@@ -224,6 +224,7 @@ let forwardImpl: XForwardFn = defaultForward;
 let afterXRefreshIntentForTests: (() => Promise<void>) | null = null;
 let afterXCredentialStageForTests: (() => Promise<void>) | null = null;
 let afterXRevocationClaimForTests: (() => Promise<void>) | null = null;
+let afterXDisconnectJournalForTests: (() => Promise<void>) | null = null;
 
 /**
  * Test-only seam setter. Mirrors the repo's `__setForwardProxyRequestForTests`
@@ -261,6 +262,15 @@ export function __setAfterXRevocationClaimForTests(fn: (() => Promise<void>) | n
   afterXRevocationClaimForTests = fn;
   return () => {
     afterXRevocationClaimForTests = previous;
+  };
+}
+
+/** Test-only crash seam after local revocation and durable upstream handoff. */
+export function __setAfterXDisconnectJournalForTests(fn: (() => Promise<void>) | null): () => void {
+  const previous = afterXDisconnectJournalForTests;
+  afterXDisconnectJournalForTests = fn;
+  return () => {
+    afterXDisconnectJournalForTests = previous;
   };
 }
 
@@ -2499,7 +2509,7 @@ export interface DisconnectResult {
 export async function disconnectXProviderCredential(
   input: DisconnectInput,
 ): Promise<DisconnectResult> {
-  return withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
+  const prepared = await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
     const tx = txRaw as DbExecutor;
     const [account] = await tx
       .select()
@@ -2518,28 +2528,35 @@ export async function disconnectXProviderCredential(
       throw new XConnectError("X_ACCOUNT_NOT_X", 400, "provider account is not an X account");
     }
 
-    let revokedAtUpstream = false;
+    let credential: LoadedCredential | null = null;
     if (account.credentialSecretId) {
-      try {
-        const cred = await loadCredential(
-          input.vault,
-          input.tenantId,
-          account.credentialSecretId,
-          tx,
-        );
-        if (cred.payload.xUserId !== account.externalRef) {
-          throw new XConnectError("X_REFRESH_FAILED", 409, "credential account binding mismatch");
-        }
-        revokedAtUpstream = await revokeUpstreamBestEffort(
-          input.config,
-          cred.payload.accessToken,
-          cred.refreshToken,
-        );
-      } catch {
-        // Best-effort only. Local degrade proceeds regardless.
-        revokedAtUpstream = false;
+      credential = await loadCredential(
+        input.vault,
+        input.tenantId,
+        account.credentialSecretId,
+        tx,
+      );
+      if (credential.payload.xUserId !== account.externalRef) {
+        throw new XConnectError("X_REFRESH_FAILED", 409, "credential account binding mismatch");
       }
     }
+    const [activeLifecycle] = await tx
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+          eq(providerXCredentialLifecycles.providerAccountId, account.id),
+          inArray(providerXCredentialLifecycles.state, [
+            "inflight",
+            "credential_staged",
+            "revocation_pending",
+            "needs_attention",
+          ]),
+        ),
+      )
+      .limit(1)
+      .for("update");
 
     const [degraded] = await tx
       .update(providerAccounts)
@@ -2556,6 +2573,71 @@ export async function disconnectXProviderCredential(
       throw new XConnectError("X_REFRESH_FAILED", 409, "account revision conflict on disconnect");
     }
 
+    const lifecycleId = credential ? (activeLifecycle?.id ?? randomUUID()) : null;
+    let lifecycleSecretId = activeLifecycle?.credentialSecretId ?? null;
+    if (credential && lifecycleId) {
+      if (!lifecycleSecretId) {
+        const secret = await input.vault.createSecretWithinTx(
+          tx,
+          input.tenantId,
+          `provider-x-lifecycle:${lifecycleId}:disconnect`,
+          JSON.stringify({
+            schemaVersion: "steward.provider-x.lifecycle.v1",
+            token: {
+              access_token: credential.payload.accessToken,
+              refresh_token: credential.refreshToken ?? undefined,
+            },
+          } satisfies XRefreshLifecycleSecret),
+          { description: "Encrypted transient X OAuth revocation material" },
+        );
+        lifecycleSecretId = secret.id;
+      }
+      if (activeLifecycle) {
+        const retryAt = new Date();
+        await tx
+          .update(providerXCredentialLifecycles)
+          .set({
+            kind: activeLifecycle.credentialSecretId ? activeLifecycle.kind : "disconnect_revoke",
+            state: "revocation_pending",
+            credentialSecretId: lifecycleSecretId,
+            expectedAccountRevision: degraded.revision,
+            attempts: 0,
+            nextRetryAt: retryAt,
+            lastErrorCode: "DISCONNECT_REVOCATION_PENDING",
+            updatedAt: retryAt,
+          })
+          .where(
+            and(
+              eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+              eq(providerXCredentialLifecycles.id, lifecycleId),
+            ),
+          );
+      } else {
+        const retryAt = new Date();
+        await tx.insert(providerXCredentialLifecycles).values({
+          id: lifecycleId,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          providerAccountId: account.id,
+          kind: "disconnect_revoke",
+          state: "revocation_pending",
+          credentialSecretId: lifecycleSecretId,
+          expectedAccountRevision: degraded.revision,
+          attempts: 0,
+          nextRetryAt: retryAt,
+        });
+      }
+      await append({
+        tenantId: input.tenantId,
+        actorType: "user",
+        actorId: input.callerUserId,
+        action: "provider.x.disconnect.intent_staged",
+        resourceType: "provider_x_credential_lifecycle",
+        resourceId: lifecycleId,
+        metadata: { workspaceId: input.workspaceId, providerAccountId: account.id },
+      });
+    }
+
     await append({
       tenantId: input.tenantId,
       actorType: "user",
@@ -2566,15 +2648,41 @@ export async function disconnectXProviderCredential(
       metadata: {
         workspaceId: input.workspaceId,
         xUserId: account.externalRef,
-        revokedAtUpstream,
+        revokedAtUpstream: false,
+        upstreamRevocationPending: Boolean(lifecycleId),
         previousRevision: account.revision,
         newRevision: degraded.revision,
         requestId: input.requestId ?? null,
       },
     });
 
-    return { providerAccountId: account.id, revoked: revokedAtUpstream };
+    return {
+      lifecycleId,
+    };
   });
+
+  if (!prepared.lifecycleId) {
+    return { providerAccountId: input.accountId, revoked: false };
+  }
+  await afterXDisconnectJournalForTests?.();
+  const [lifecycle] = await (getDb() as DbExecutor)
+    .select({ nextRetryAt: providerXCredentialLifecycles.nextRetryAt })
+    .from(providerXCredentialLifecycles)
+    .where(
+      and(
+        eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+        eq(providerXCredentialLifecycles.id, prepared.lifecycleId),
+      ),
+    )
+    .limit(1);
+  const revokedAtUpstream = lifecycle
+    ? await reconcileStagedXCredentialRevocation({
+        ...input,
+        lifecycleId: prepared.lifecycleId,
+        now: lifecycle.nextRetryAt ?? new Date(),
+      })
+    : false;
+  return { providerAccountId: input.accountId, revoked: revokedAtUpstream };
 }
 
 async function revokeUpstreamBestEffort(
