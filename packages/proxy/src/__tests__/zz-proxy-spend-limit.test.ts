@@ -609,6 +609,50 @@ describe("proxy spend-limit enforcement", () => {
     );
   });
 
+  for (const [label, declaredLength] of [
+    ["missing Content-Length", undefined],
+    ["lying small Content-Length", "1"],
+  ] as const) {
+    test(`bounds credential response inspection with ${label}`, async () => {
+      spendResult.configured = false;
+      let cancelled = false;
+      globalThis.fetch = (async () => {
+        fetchCalls++;
+        let chunks = 0;
+        const stream = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            chunks += 1;
+            controller.enqueue(new Uint8Array(64 * 1024));
+            if (chunks >= 40) controller.close();
+          },
+          cancel() {
+            cancelled = true;
+          },
+        });
+        const headers = new Headers({ "content-type": "application/octet-stream" });
+        if (declaredLength !== undefined) headers.set("content-length", declaredLength);
+        return new Response(stream, { status: 200, headers });
+      }) as typeof fetch;
+
+      const { handleProxy, __setCheckProxySpendLimitForTests } = await loadProxy();
+      __setCheckProxySpendLimitForTests(async () => spendResult);
+
+      const response = await handleProxy(makeContext());
+      const body = await response.text();
+      expect(response.status).toBe(502);
+      expect(body).toContain("could not be inspected safely");
+      expect(body).not.toContain("test-secret");
+      expect(cancelled).toBe(true);
+      expect(audits).toContainEqual(
+        expect.objectContaining({
+          targetHost: "example.com",
+          statusCode: 502,
+          reason: "credential-response-inspection-failed",
+        }),
+      );
+    });
+  }
+
   test("blocks streaming responses after injecting a credential", async () => {
     spendResult.configured = false;
     globalThis.fetch = (async (url: string | URL | Request) => {
