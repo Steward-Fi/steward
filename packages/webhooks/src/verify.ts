@@ -55,7 +55,7 @@ export function verifyWebhookSignature(input: VerifyWebhookSignatureInput): bool
 
     // The signed material is only meaningful with real field values; an empty
     // delivery id or event type would verify an attacker-shaped payload.
-    if (!input.deliveryId.trim() || !input.eventType.trim() || !input.secret) return false;
+    if (!input.deliveryId.trim() || !input.eventType.trim() || !input.secret.trim()) return false;
 
     if (!input.signature.startsWith("v2=")) return false;
     const providedHex = input.signature.slice(3);

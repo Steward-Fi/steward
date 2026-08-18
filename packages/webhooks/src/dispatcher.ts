@@ -395,6 +395,9 @@ async function postWebhook(
 /** Fail closed on the retired bare-URL form, which cannot carry a receiver-known secret. */
 function normalizeWebhook(webhook: WebhookConfig | string): WebhookConfig {
   if (typeof webhook !== "string") {
+    if (typeof webhook.secret !== "string" || !webhook.secret.trim()) {
+      throw new WebhookValidationError("Webhook secret must not be empty");
+    }
     return webhook;
   }
   // A bare URL has no receiver-provisioned tenant secret. Server-side key

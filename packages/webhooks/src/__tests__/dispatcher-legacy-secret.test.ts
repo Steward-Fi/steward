@@ -32,4 +32,29 @@ describe("WebhookDispatcher legacy string-URL configuration (SEC-101)", () => {
       else process.env.STEWARD_WEBHOOK_SECRET = original;
     }
   });
+
+  it("rejects a whitespace-only endpoint secret before network access", async () => {
+    let lookupCalls = 0;
+    const dispatcher = new WebhookDispatcher({
+      lookup: (_hostname, _options, callback) => {
+        lookupCalls += 1;
+        callback(null, "203.0.113.10", 4);
+      },
+    });
+
+    await expect(
+      dispatcher.dispatch(makeEvent("tenant-a"), {
+        url: "https://example.com/hook",
+        secret: "   ",
+      }),
+    ).rejects.toThrow("Webhook secret must not be empty");
+    expect(lookupCalls).toBe(0);
+
+    await expect(
+      dispatcher.dispatch(makeEvent("tenant-a"), {
+        url: "https://example.com/hook",
+      } as never),
+    ).rejects.toThrow("Webhook secret must not be empty");
+    expect(lookupCalls).toBe(0);
+  });
 });

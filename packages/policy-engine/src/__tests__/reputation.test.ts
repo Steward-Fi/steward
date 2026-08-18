@@ -158,6 +158,36 @@ describe("reputation-threshold evaluator", () => {
     expect(result.passed).toBe(true);
   });
 
+  it("fails closed without throwing on malformed persisted configuration", () => {
+    const malformedConfigs: unknown[] = [
+      null,
+      { ...config, minScore: Number.NaN },
+      { ...config, minScore: -1 },
+      { ...config, minScore: 101 },
+      { ...config, action: "allow" },
+      { ...config, source: "caller" },
+      { ...config, fallbackAction: "allow" },
+    ];
+
+    for (const malformedConfig of malformedConfigs) {
+      const rule = makeRule("reputation-threshold", malformedConfig as Record<string, unknown>);
+      expect(() => evaluateReputationThreshold(rule, { reputationScore: 75 })).not.toThrow();
+      const result = evaluateReputationThreshold(rule, { reputationScore: 75 });
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("Malformed");
+    }
+  });
+
+  it("fails closed on non-finite and out-of-range authority scores", () => {
+    for (const reputationScore of [Number.NaN, Number.POSITIVE_INFINITY, -1, 101]) {
+      const result = evaluateReputationThreshold(makeRule("reputation-threshold", config), {
+        reputationScore,
+      });
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("Invalid reputation score");
+    }
+  });
+
   it("integrates through evaluatePolicy switch", async () => {
     const rule = makeRule("reputation-threshold", config);
     const ctx = makeEvalCtx({ reputationScore: 75 });
