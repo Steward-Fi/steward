@@ -48,6 +48,9 @@ interface DexScreenerResponse {
   pairs?: DexScreenerPair[];
 }
 
+const MAX_DEX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_DEX_PAIRS = 1_000;
+
 // ─── Cache Entry ──────────────────────────────────────────────────────────────
 
 interface CacheEntry {
@@ -71,6 +74,60 @@ function decimalNumberRatio(value: number): [numerator: bigint, denominator: big
     return [numerator, 1n];
   }
   return [numerator, 10n ** BigInt(-exponent)];
+}
+
+/** DexScreener documents priceUsd as a decimal string. Number() also accepts
+ * JavaScript-only syntaxes such as hexadecimal and binary; accepting those in
+ * an external price feed could turn malformed data into a valid policy price. */
+function parsePositiveDecimal(value: unknown): number | null {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 128 ||
+    !/^\d+(?:\.\d+)?(?:e[+-]?\d+)?$/i.test(value)
+  ) {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+async function readBoundedDexResponse(response: Response): Promise<DexScreenerResponse> {
+  const contentLength = Number(response.headers.get("content-length") ?? "0");
+  if (Number.isFinite(contentLength) && contentLength > MAX_DEX_RESPONSE_BYTES) {
+    throw new Error("DexScreener response exceeded the size limit");
+  }
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("DexScreener returned an empty response");
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_DEX_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new Error("DexScreener response exceeded the size limit");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const decoded = JSON.parse(
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+  ) as DexScreenerResponse;
+  if (!decoded || typeof decoded !== "object") {
+    throw new Error("DexScreener returned an invalid response");
+  }
+  return decoded;
 }
 
 // ─── Implementation ───────────────────────────────────────────────────────────
@@ -163,23 +220,36 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
         return null;
       }
 
-      const data = (await res.json()) as DexScreenerResponse;
-      if (!data.pairs || data.pairs.length === 0) {
+      const data = await readBoundedDexResponse(res);
+      if (!Array.isArray(data.pairs) || data.pairs.length === 0) {
         console.warn(`[price-oracle] No pairs found for ${tokenAddress}`);
+        return null;
+      }
+      if (data.pairs.length > MAX_DEX_PAIRS) {
+        console.warn(`[price-oracle] DexScreener returned too many pairs for ${tokenAddress}`);
         return null;
       }
 
       // Sort by liquidity (descending) and pick the best one with a valid priceUsd
       const sorted = [...data.pairs]
-        .filter((p) => {
-          const parsed = Number(p.priceUsd);
-          return p.chainId === expectedDexChainId && Number.isFinite(parsed) && parsed > 0;
-        })
-        .sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+        .filter(
+          (p) => p.chainId === expectedDexChainId && parsePositiveDecimal(p.priceUsd) !== null,
+        )
+        .sort((a, b) => {
+          const aLiquidity =
+            typeof a.liquidity?.usd === "number" && Number.isFinite(a.liquidity.usd)
+              ? a.liquidity.usd
+              : 0;
+          const bLiquidity =
+            typeof b.liquidity?.usd === "number" && Number.isFinite(b.liquidity.usd)
+              ? b.liquidity.usd
+              : 0;
+          return bLiquidity - aLiquidity;
+        });
 
       if (sorted.length === 0) return null;
 
-      return Number(sorted[0].priceUsd);
+      return parsePositiveDecimal(sorted[0].priceUsd);
     } catch (err) {
       console.warn(`[price-oracle] Failed to fetch price for ${tokenAddress}:`, err);
       return null;
