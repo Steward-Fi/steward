@@ -218,9 +218,10 @@ jobs:
           if [ "${{ matrix.package }}" = "scripts/__tests__" ]; then
             # scripts/ has no workspace package name to filter on, and its
             # tests import package *sources* directly. The one dist-resolving
-            # import in their closure is @stwd/shared (via
-            # packages/api/src/services/audit.ts).
-            bunx turbo run build --filter=@stwd/shared
+            # imports currently resolved through package exports are
+            # @stwd/shared and @stwd/attestation (the latter is exercised by
+            # the check-attestation subprocess tests).
+            bunx turbo run build --filter=@stwd/shared --filter=@stwd/attestation
           else
             PKG_NAME="@stwd/$(basename ${{ matrix.package }})"
             bunx turbo run build --filter="${PKG_NAME}..."
@@ -276,6 +277,35 @@ jobs:
       - name: Test packages/eliza-plugin
         working-directory: packages/eliza-plugin
         run: bun run test
+
+  unit-flutter:
+    # The Bun validator checks repository shape and required strings; only the
+    # Dart toolchain can prove the SDK and its security contract tests compile.
+    name: Unit Tests (packages/flutter)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1c5eb12d812966ca84680edc38353a0851c8fd56 # v2.14.0
+        with:
+          flutter-version: "3.19.6"
+          channel: stable
+
+      - name: Install Flutter dependencies
+        working-directory: packages/flutter
+        run: flutter pub get
+
+      - name: Analyze Flutter SDK
+        working-directory: packages/flutter
+        run: flutter analyze --fatal-infos
+
+      - name: Test Flutter SDK
+        working-directory: packages/flutter
+        run: flutter test
 
   unit-redis:
     name: Unit Tests (packages/redis)
