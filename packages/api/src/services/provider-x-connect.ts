@@ -43,6 +43,7 @@ import {
   sql,
   withTenantAuditedTransaction,
 } from "@stwd/db";
+import { isValidOAuthBearerToken, isValidOAuthOpaqueToken } from "@stwd/shared";
 import type { SecretVault } from "@stwd/vault";
 
 type DbBase = ReturnType<typeof getDb>;
@@ -581,7 +582,12 @@ async function exchangeAuthorizationCode(input: ExchangeInput): Promise<XTokenRe
     body: body.toString(),
   });
   const parsed = res.json as XTokenResponse | null;
-  if (!res.ok || !parsed || typeof parsed.access_token !== "string") {
+  if (
+    !res.ok ||
+    !parsed ||
+    !isValidOAuthBearerToken(parsed.access_token) ||
+    (parsed.refresh_token !== undefined && !isValidOAuthOpaqueToken(parsed.refresh_token))
+  ) {
     throw new XConnectError(
       "X_TOKEN_EXCHANGE_FAILED",
       502,
@@ -969,7 +975,24 @@ async function loadCredential(
   // Decrypt from the ALREADY-READ row so we do not issue a second getDb() read
   // that would block behind an outer transaction on single-connection PGLite.
   const decrypted = vault.decryptSecretRow(tenantId, row);
-  const payload = JSON.parse(decrypted) as XCredentialPayload;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(decrypted);
+  } catch {
+    throw new XConnectError("X_REFRESH_FAILED", 409, "credential payload invalid");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new XConnectError("X_REFRESH_FAILED", 409, "credential payload invalid");
+  }
+  const candidate = parsed as Record<string, unknown>;
+  if (
+    candidate.schemaVersion !== "steward.provider-x.credential.v1" ||
+    !isValidOAuthBearerToken(candidate.accessToken) ||
+    !(candidate.refreshToken === null || isValidOAuthOpaqueToken(candidate.refreshToken))
+  ) {
+    throw new XConnectError("X_REFRESH_FAILED", 409, "credential payload invalid");
+  }
+  const payload = candidate as unknown as XCredentialPayload;
   return {
     secretName: row.name,
     payload,
@@ -1019,7 +1042,11 @@ async function refreshUpstream(
     }
     throw new XConnectError("X_REFRESH_FAILED", 502, `X refresh failed (${res.status})`);
   }
-  if (!parsed || typeof parsed.access_token !== "string") {
+  if (
+    !parsed ||
+    !isValidOAuthBearerToken(parsed.access_token) ||
+    (parsed.refresh_token !== undefined && !isValidOAuthOpaqueToken(parsed.refresh_token))
+  ) {
     throw new XConnectError("X_REFRESH_FAILED", 502, "X refresh response missing access_token");
   }
   return {

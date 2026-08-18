@@ -9,7 +9,7 @@ import {
   secrets,
   withTenantAuditedTransaction,
 } from "@stwd/db";
-import { strictParseJson } from "@stwd/shared";
+import { isValidOAuthBearerToken, isValidOAuthOpaqueToken, strictParseJson } from "@stwd/shared";
 import type { SecretVault } from "@stwd/vault";
 
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -96,9 +96,7 @@ function parseEnvelope(value: string): GoogleCredentialEnvelope {
   const parsed = strictParseJson(value) as Record<string, unknown>;
   if (
     parsed.schemaVersion !== "steward.provider-google.credential.v1" ||
-    typeof parsed.refreshToken !== "string" ||
-    parsed.refreshToken.length < 1 ||
-    parsed.refreshToken.length > 16_384 ||
+    !isValidOAuthOpaqueToken(parsed.refreshToken) ||
     !Array.isArray(parsed.scopesGranted) ||
     parsed.scopesGranted.length < 1 ||
     parsed.scopesGranted.length > 64 ||
@@ -124,15 +122,8 @@ function validateResponse(
   }
   const response = raw as GoogleRefreshResponse;
   if (
-    typeof response.access_token !== "string" ||
-    response.access_token.length < 1 ||
-    response.access_token.length > 16_384 ||
-    !/^[A-Za-z0-9\-._~+/]+=*$/.test(response.access_token) ||
-    (response.refresh_token !== undefined &&
-      (typeof response.refresh_token !== "string" ||
-        response.refresh_token.length < 1 ||
-        response.refresh_token.length > 16_384 ||
-        !/^[A-Za-z0-9\-._~+/]+=*$/.test(response.refresh_token))) ||
+    !isValidOAuthBearerToken(response.access_token) ||
+    (response.refresh_token !== undefined && !isValidOAuthOpaqueToken(response.refresh_token)) ||
     (response.token_type !== undefined &&
       (typeof response.token_type !== "string" ||
         response.token_type.toLowerCase() !== "bearer")) ||
