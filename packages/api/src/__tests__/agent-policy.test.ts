@@ -272,6 +272,30 @@ describe("agent trade policy", () => {
     expect(Number(row?.leverageCap)).toBe(5);
   });
 
+  it("SEC-208: one stale attribution-only CAS loses deterministically", async () => {
+    const { buildAgentPolicyCompareAndSwapPredicate } = await import("../routes/agents");
+    const [expected] = await getDb()
+      .select()
+      .from(agentPolicies)
+      .where(eq(agentPolicies.agentId, agentId));
+    expect(expected).toBeDefined();
+    if (!expected) throw new Error("expected seeded agent policy");
+
+    // Both writes preserve every enforcement field, but claim a different
+    // reason. Only one may commit against this exact audit snapshot.
+    const results = await Promise.all(
+      ["first concurrent reason", "second concurrent reason"].map((reason) =>
+        getDb()
+          .update(agentPolicies)
+          .set({ updatedReason: reason })
+          .where(buildAgentPolicyCompareAndSwapPredicate(agentId, tenantId, expected))
+          .returning({ agentId: agentPolicies.agentId }),
+      ),
+    );
+
+    expect(results.map((rows) => rows.length).sort()).toEqual([0, 1]);
+  });
+
   it("rejects values exceeding Layer 1 ceilings", async () => {
     const res = await putPolicy({ dailyCap: 50_001, reason: "too high" });
 

@@ -934,6 +934,33 @@ function policyLooseningViolation(
   return null;
 }
 
+/**
+ * Exact policy compare-and-swap fence used after authorizing an agent-token
+ * tightening. The attribution fields are part of the expected snapshot too:
+ * two concurrent requests that produce identical limits but claim different
+ * reasons must not both commit against the same audit `before` state.
+ */
+export function buildAgentPolicyCompareAndSwapPredicate(
+  agentId: string,
+  tenantId: string,
+  expected: typeof agentPolicies.$inferSelect,
+) {
+  return and(
+    eq(agentPolicies.agentId, agentId),
+    eq(agentPolicies.tenantId, tenantId),
+    eq(agentPolicies.dailyCapUsd, expected.dailyCapUsd),
+    eq(agentPolicies.perOrderCapUsd, expected.perOrderCapUsd),
+    eq(agentPolicies.leverageCap, expected.leverageCap),
+    eq(agentPolicies.allowedAssets, expected.allowedAssets),
+    eq(agentPolicies.allowedVenues, expected.allowedVenues),
+    eq(agentPolicies.allowBuilderPerps, expected.allowBuilderPerps),
+    eq(agentPolicies.updatedBy, expected.updatedBy),
+    expected.updatedReason === null
+      ? isNull(agentPolicies.updatedReason)
+      : eq(agentPolicies.updatedReason, expected.updatedReason),
+  );
+}
+
 // ─── Create agent ─────────────────────────────────────────────────────────────
 
 agentRoutes.post("/", async (c) => {
@@ -1834,18 +1861,7 @@ agentRoutes.put("/:agentId/policy", async (c) => {
     [upserted] = await db
       .update(agentPolicies)
       .set(nextPolicyValues)
-      .where(
-        and(
-          eq(agentPolicies.agentId, agentId),
-          eq(agentPolicies.tenantId, tenantId),
-          eq(agentPolicies.dailyCapUsd, expected.dailyCapUsd),
-          eq(agentPolicies.perOrderCapUsd, expected.perOrderCapUsd),
-          eq(agentPolicies.leverageCap, expected.leverageCap),
-          eq(agentPolicies.allowedAssets, expected.allowedAssets),
-          eq(agentPolicies.allowedVenues, expected.allowedVenues),
-          eq(agentPolicies.allowBuilderPerps, expected.allowBuilderPerps),
-        ),
-      )
+      .where(buildAgentPolicyCompareAndSwapPredicate(agentId, tenantId, expected))
       .returning();
     if (!upserted) {
       return c.json<ApiResponse>(
