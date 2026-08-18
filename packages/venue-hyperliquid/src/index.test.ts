@@ -986,6 +986,40 @@ describe("Hyperliquid withdraw (user-signed action)", () => {
     });
     expect(seenSignal).toBe(callerSignal);
   });
+
+  test("rejects an HTTP-200 status err as a definite venue rejection", async () => {
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const adapter = new HyperliquidAdapter(
+      {
+        async signTypedData(i) {
+          return account.signTypedData({
+            domain: i.domain,
+            types: i.types,
+            primaryType: i.primaryType,
+            message: i.value,
+          });
+        },
+      },
+      "sol",
+      WALLET,
+      {
+        transport: {
+          fetch: async () =>
+            new Response(JSON.stringify({ status: "err", response: "insufficient balance" }), {
+              status: 200,
+            }),
+        },
+      },
+    );
+    const signed = await adapter.signWithdraw({
+      amount: "100",
+      destination: "0xABCDEF0123456789abcdef0123456789ABCDEF01",
+      time: NONCE,
+    });
+    await expect(adapter.submitWithdraw(signed)).rejects.toMatchObject({
+      name: "HyperliquidExchangeRejectedError",
+    });
+  });
 });
 
 describe("Hyperliquid close-all", () => {

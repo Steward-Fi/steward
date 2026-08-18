@@ -2642,6 +2642,7 @@ function sessionHasRecentFactorEnrollmentStepUp(
   const now = Date.now();
   if (
     typeof session.payload.mfaVerifiedAt === "number" &&
+    now - session.payload.mfaVerifiedAt >= 0 &&
     now - session.payload.mfaVerifiedAt <= FACTOR_ENROLLMENT_STEP_UP_MAX_AGE_MS
   ) {
     return true;
@@ -2651,6 +2652,8 @@ function sessionHasRecentFactorEnrollmentStepUp(
   }
   if (
     typeof session.payload.factorEnrollmentVerifiedAt === "number" &&
+    Number.isFinite(session.payload.factorEnrollmentVerifiedAt) &&
+    now - session.payload.factorEnrollmentVerifiedAt >= 0 &&
     now - session.payload.factorEnrollmentVerifiedAt <= FACTOR_ENROLLMENT_STEP_UP_MAX_AGE_MS
   ) {
     return true;

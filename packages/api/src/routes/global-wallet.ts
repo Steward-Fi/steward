@@ -432,7 +432,12 @@ function parseSendTransactionParams(value: unknown):
 
 function hasRecentMfa(c: Context<{ Variables: GlobalWalletVariables }>): boolean {
   const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return typeof verifiedAt === "number" && Date.now() - verifiedAt <= MFA_MAX_AGE_MS;
+  return (
+    typeof verifiedAt === "number" &&
+    Number.isFinite(verifiedAt) &&
+    Date.now() - verifiedAt >= 0 &&
+    Date.now() - verifiedAt <= MFA_MAX_AGE_MS
+  );
 }
 
 async function getEnabledAppClient(

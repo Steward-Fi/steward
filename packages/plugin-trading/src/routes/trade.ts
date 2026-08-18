@@ -256,10 +256,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     maxAgeMs = 5 * 60_000,
   ): boolean {
     const verifiedAt = c.get("sessionMfaVerifiedAt");
+    const ageMs = typeof verifiedAt === "number" ? Date.now() - verifiedAt : Number.NaN;
     return (
       typeof verifiedAt === "number" &&
       Number.isFinite(verifiedAt) &&
-      Date.now() - verifiedAt <= maxAgeMs
+      ageMs >= 0 &&
+      ageMs <= maxAgeMs
     );
   }
 
@@ -1404,12 +1406,14 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   }
 
   /**
-   * Notional USD for a Polymarket SELL, floored at the CLOB best bid. A FOK sell
+   * Conservative notional USD for a Polymarket SELL. A FOK sell
    * at limit 0.01 fills at the best bid (e.g. 0.90), so sizing caps on the
    * caller's limit would understate the real notional and defeat
-   * perOrderCapUsd/dailyCapUsd (the HL path guards the same trick via
-   * resolveSizingPx). FAIL CLOSED: a sell whose market price cannot be verified
-   * is rejected, never sized on the caller's limit alone.
+   * perOrderCapUsd/dailyCapUsd. A best-bid snapshot alone is not a safe upper
+   * bound: the bid can rise after the quote and before submission. Prediction
+   * shares settle in [0, 1] USD, so one dollar per share is the only stable
+   * pre-submit upper bound. This deliberately trades some capacity for a cap
+   * that cannot be bypassed by quote-to-submit price movement.
    */
   async function polymarketSellNotionalUsd(
     amount: number,
@@ -1417,12 +1421,14 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     tokenId: string,
     clobUrl?: string,
   ): Promise<number> {
+    // Keep the market read as a fail-closed liveness/market-existence check, but
+    // never treat its mutable price as the cap's upper bound.
     const [best] = await getPrices([{ tokenId, side: "sell" }], clobUrl ? { clobUrl } : undefined);
     const bestBid = Number(best?.price);
-    if (!Number.isFinite(bestBid) || bestBid <= 0) {
+    if (!Number.isFinite(bestBid) || bestBid <= 0 || bestBid > 1) {
       throw new Error("unable to resolve CLOB best bid for sell notional sizing");
     }
-    return amount * Math.max(price, bestBid);
+    return amount;
   }
 
   // Map a structured checkOrderAllowed reason to its HTTP status. Allowlist/cap

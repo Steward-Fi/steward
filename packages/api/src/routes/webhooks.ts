@@ -84,6 +84,7 @@ function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAge
   return (
     typeof verifiedAt === "number" &&
     Number.isFinite(verifiedAt) &&
+    Date.now() - verifiedAt >= 0 &&
     Date.now() - verifiedAt <= maxAgeMs
   );
 }
