@@ -53,48 +53,82 @@ const SLACK_OPERATION_EXACT_PATH = {
   "slack.conversations.list": "/api/conversations.list",
   "slack.users.info": "/api/users.info",
 } as const satisfies Readonly<Record<SlackOperationKey, string>>;
-const PROVIDER_OPERATION_ALLOWLIST: Readonly<
-  Record<string, Readonly<Record<string, "GET" | "POST" | "DELETE">>>
+type FixedAdapterOperationContract = Readonly<{
+  method: "GET" | "POST" | "DELETE";
+  host: string;
+  exactPath?: string;
+  minimumRiskClass?: ProviderRiskClass;
+  injectAs?: "header";
+  injectKey?: string;
+  injectFormat?: string;
+}>;
+const FIXED_ADAPTER_OPERATION_CONTRACTS: Readonly<
+  Record<string, Readonly<Record<string, FixedAdapterOperationContract>>>
 > = {
   github: {
-    "github.issue.list": "GET",
-    "github.pr.comment.create": "POST",
+    "github.issue.list": { method: "GET", host: "api.github.com", minimumRiskClass: "read" },
+    "github.pr.comment.create": {
+      method: "POST",
+      host: "api.github.com",
+      minimumRiskClass: "consequential",
+    },
+  },
+  google: {
+    "google.gmail.messages.send": {
+      method: "POST",
+      host: "gmail.googleapis.com",
+      exactPath: "/gmail/v1/users/me/messages/send",
+      minimumRiskClass: "consequential",
+      injectAs: "header",
+      injectKey: "authorization",
+      injectFormat: "Bearer {value}",
+    },
+    "google.calendar.events.list": {
+      method: "GET",
+      host: "www.googleapis.com",
+      exactPath: "/calendar/v3/calendars/primary/events",
+      minimumRiskClass: "read",
+      injectAs: "header",
+      injectKey: "authorization",
+      injectFormat: "Bearer {value}",
+    },
+    "google.calendar.events.insert": {
+      method: "POST",
+      host: "www.googleapis.com",
+      exactPath: "/calendar/v3/calendars/primary/events",
+      minimumRiskClass: "consequential",
+      injectAs: "header",
+      injectKey: "authorization",
+      injectFormat: "Bearer {value}",
+    },
   },
   x: {
-    "x.tweet.create": "POST",
-    "x.tweet.delete": "DELETE",
-    "x.user.me.read": "GET",
+    "x.tweet.create": { method: "POST", host: "api.x.com", minimumRiskClass: "consequential" },
+    "x.tweet.delete": { method: "DELETE", host: "api.x.com", minimumRiskClass: "write" },
+    "x.user.me.read": { method: "GET", host: "api.x.com", minimumRiskClass: "read" },
   },
-  slack: SLACK_OPERATION_METHOD,
-};
-const PROVIDER_OPERATION_MINIMUM_RISK: Readonly<
-  Record<string, Readonly<Record<string, ProviderRiskClass>>>
-> = {
-  github: {
-    "github.issue.list": "read",
-    "github.pr.comment.create": "write",
+  slack: {
+    "slack.chat.postMessage": {
+      method: SLACK_OPERATION_METHOD["slack.chat.postMessage"],
+      host: "slack.com",
+      exactPath: SLACK_OPERATION_EXACT_PATH["slack.chat.postMessage"],
+      minimumRiskClass: SLACK_OPERATION_RISK["slack.chat.postMessage"],
+    },
+    "slack.conversations.list": {
+      method: SLACK_OPERATION_METHOD["slack.conversations.list"],
+      host: "slack.com",
+      exactPath: SLACK_OPERATION_EXACT_PATH["slack.conversations.list"],
+      minimumRiskClass: SLACK_OPERATION_RISK["slack.conversations.list"],
+    },
+    "slack.users.info": {
+      method: SLACK_OPERATION_METHOD["slack.users.info"],
+      host: "slack.com",
+      exactPath: SLACK_OPERATION_EXACT_PATH["slack.users.info"],
+      minimumRiskClass: SLACK_OPERATION_RISK["slack.users.info"],
+    },
   },
-  x: {
-    "x.tweet.create": "write",
-    "x.tweet.delete": "write",
-    "x.user.me.read": "read",
-  },
-  slack: SLACK_OPERATION_RISK,
 };
-const PROVIDER_OPERATION_EXACT_PATH: Readonly<Record<string, Readonly<Record<string, string>>>> = {
-  slack: SLACK_OPERATION_EXACT_PATH,
-};
-const PROVIDER_RISK_RANK: Readonly<Record<ProviderRiskClass, number>> = {
-  read: 0,
-  write: 1,
-  consequential: 2,
-};
-const PROVIDER_HOST_ALLOWLIST: Readonly<Record<string, string>> = {
-  github: "api.github.com",
-  x: "api.x.com",
-  slack: "slack.com",
-};
-const REGISTERED_ADAPTER_KEYS = new Set(["github", "x", "slack", "generic-http"]);
+const REGISTERED_ADAPTER_KEYS = new Set(["github", "google", "x", "slack", "generic-http"]);
 const ENVIRONMENTS = new Set(["development", "staging", "production"]);
 const PRINCIPAL_TYPES = new Set(["human", "agent"]);
 const ROLES = new Set([
@@ -107,6 +141,11 @@ const ROLES = new Set([
 const RISK_CLASSES = new Set(["read", "write", "consequential"]);
 const BUDGET_DIMENSIONS = new Set(["count", "notional"]);
 const MAX_BUDGET_WINDOW_SECONDS = 30 * 24 * 60 * 60;
+const RISK_RANK: Readonly<Record<ProviderRiskClass, number>> = {
+  read: 0,
+  write: 1,
+  consequential: 2,
+};
 
 type DbBase = ReturnType<typeof getDb>;
 type DbExecutor = DbBase | Parameters<Parameters<DbBase["transaction"]>[0]>[0];
@@ -269,6 +308,42 @@ function operationIncluded(keys: string[], operationKey: string): boolean {
 function subset(candidate: string[], allowed: string[]): boolean {
   const set = new Set(allowed);
   return candidate.every((key) => set.has(key));
+}
+
+function fixedAdapterOperationContract(
+  adapterKey: string,
+  operationKey: string,
+): FixedAdapterOperationContract | null {
+  return FIXED_ADAPTER_OPERATION_CONTRACTS[adapterKey]?.[operationKey] ?? null;
+}
+
+function routeSatisfiesFixedContract(
+  route: {
+    hostPattern: string;
+    method: string | null;
+    pathPattern: string | null;
+    injectAs: string | null;
+    injectKey: string | null;
+    injectFormat: string | null;
+  },
+  contract: FixedAdapterOperationContract,
+): boolean {
+  const method = route.method?.toUpperCase();
+  if (route.hostPattern !== contract.host || !method || method !== contract.method) return false;
+  if (contract.exactPath) {
+    if (route.pathPattern !== contract.exactPath) return false;
+  } else if (!route.pathPattern || route.pathPattern.includes("*")) {
+    return false;
+  }
+  if (contract.injectAs && route.injectAs !== contract.injectAs) return false;
+  if (
+    contract.injectKey &&
+    route.injectKey?.trim().toLowerCase() !== contract.injectKey.trim().toLowerCase()
+  ) {
+    return false;
+  }
+  if (contract.injectFormat && route.injectFormat !== contract.injectFormat) return false;
+  return true;
 }
 
 export class ProviderAuthorityStore {
@@ -795,6 +870,7 @@ export class ProviderAuthorityStore {
     // make the registered adapter impossible to configure.
     if (account.adapterKey === "generic-http" && !OPERATION_KEY.test(operationKey))
       throw new ProviderAuthorityError("invalid operationKey", "bad_request", 400);
+    let fixedContract: FixedAdapterOperationContract | null = null;
     let allowedMethods: readonly string[];
     let genericDescriptor: ReturnType<typeof validateGenericHttpDescriptor> | undefined;
     if (account.adapterKey === "generic-http") {
@@ -815,22 +891,24 @@ export class ProviderAuthorityStore {
         );
       }
     } else {
-      const fixedMethod = PROVIDER_OPERATION_ALLOWLIST[account.adapterKey]?.[operationKey];
-      if (!fixedMethod)
+      fixedContract = fixedAdapterOperationContract(account.adapterKey, operationKey);
+      if (!fixedContract)
         throw new ProviderAuthorityError(
           "operation is not in the adapter allowlist",
           "forbidden",
           403,
         );
-      const minimumRisk = PROVIDER_OPERATION_MINIMUM_RISK[account.adapterKey]?.[operationKey];
-      if (!minimumRisk || PROVIDER_RISK_RANK[input.riskClass] < PROVIDER_RISK_RANK[minimumRisk]) {
+      allowedMethods = [fixedContract.method];
+      if (
+        fixedContract.minimumRiskClass &&
+        RISK_RANK[input.riskClass] < RISK_RANK[fixedContract.minimumRiskClass]
+      ) {
         throw new ProviderAuthorityError(
-          "riskClass understates the adapter operation risk",
-          "bad_request",
-          400,
+          "riskClass understates the adapter operation",
+          "forbidden",
+          403,
         );
       }
-      allowedMethods = [fixedMethod];
     }
     if (account.adapterKey === "generic-http" && !input.secretRouteId) {
       throw new ProviderAuthorityError(
@@ -859,27 +937,21 @@ export class ProviderAuthorityStore {
           ),
         )
         .limit(1);
-      const expectedHost = genericDescriptor
-        ? new URL(genericDescriptor.origin).hostname
-        : PROVIDER_HOST_ALLOWLIST[account.adapterKey];
-      const method = route?.method?.toUpperCase();
-      const pathAllowed = genericDescriptor
-        ? Boolean(
-            route?.pathPattern &&
-              genericDescriptorAllowsExactPath(genericDescriptor, route.pathPattern),
-          )
-        : PROVIDER_OPERATION_EXACT_PATH[account.adapterKey]?.[operationKey]
-          ? route?.pathPattern === PROVIDER_OPERATION_EXACT_PATH[account.adapterKey]?.[operationKey]
-          : Boolean(route?.pathPattern && !route.pathPattern.includes("*"));
+      const routeMatchesFixedContract =
+        route && fixedContract ? routeSatisfiesFixedContract(route, fixedContract) : false;
+      const pathAllowed =
+        route && genericDescriptor
+          ? Boolean(
+              route.pathPattern &&
+                genericDescriptorAllowsExactPath(genericDescriptor, route.pathPattern),
+            )
+          : routeMatchesFixedContract;
       if (
         !route ||
         route.secretId !== credentialSecretId ||
         !route.agentId ||
         route.authorityMode !== "legacy" ||
         route.providerOperationId !== null ||
-        route.hostPattern !== expectedHost ||
-        !method ||
-        !allowedMethods.includes(method) ||
         !pathAllowed
       ) {
         throw new ProviderAuthorityError(
@@ -890,7 +962,7 @@ export class ProviderAuthorityStore {
       }
       const promotedPath = genericDescriptor
         ? genericDescriptorGovernedRoutePattern(genericDescriptor)
-        : route.pathPattern;
+        : (fixedContract?.exactPath ?? route.pathPattern);
       // This early overlap check is only a fast rejection. The transaction below
       // repeats it after locking the agent's route namespace.
       const siblings = await this.db()
@@ -966,19 +1038,15 @@ export class ProviderAuthorityStore {
           )
           .limit(1);
         const credentialSecretId = account.credentialSecretId;
-        const expectedHost = genericDescriptor
-          ? new URL(genericDescriptor.origin).hostname
-          : PROVIDER_HOST_ALLOWLIST[account.adapterKey];
-        const method = route?.method?.toUpperCase();
-        const pathAllowed = genericDescriptor
-          ? Boolean(
-              route?.pathPattern &&
-                genericDescriptorAllowsExactPath(genericDescriptor, route.pathPattern),
-            )
-          : PROVIDER_OPERATION_EXACT_PATH[account.adapterKey]?.[operationKey]
-            ? route?.pathPattern ===
-              PROVIDER_OPERATION_EXACT_PATH[account.adapterKey]?.[operationKey]
-            : Boolean(route?.pathPattern && !route.pathPattern.includes("*"));
+        const routeMatchesFixedContract =
+          route && fixedContract ? routeSatisfiesFixedContract(route, fixedContract) : false;
+        const pathAllowed =
+          route && genericDescriptor
+            ? Boolean(
+                route.pathPattern &&
+                  genericDescriptorAllowsExactPath(genericDescriptor, route.pathPattern),
+              )
+            : routeMatchesFixedContract;
         if (
           !credentialSecretId ||
           !route ||
@@ -986,9 +1054,6 @@ export class ProviderAuthorityStore {
           route.secretId !== credentialSecretId ||
           route.authorityMode !== "legacy" ||
           route.providerOperationId !== null ||
-          route.hostPattern !== expectedHost ||
-          !method ||
-          !allowedMethods.includes(method) ||
           !pathAllowed
         ) {
           throw new ProviderAuthorityError(
@@ -1004,7 +1069,7 @@ export class ProviderAuthorityStore {
             authorityMode: "governed_v2",
             pathPattern: genericDescriptor
               ? genericDescriptorGovernedRoutePattern(genericDescriptor)
-              : route.pathPattern,
+              : (fixedContract?.exactPath ?? route.pathPattern),
           });
         } catch (error) {
           if (error instanceof SecretRouteAuthorityConflict) {

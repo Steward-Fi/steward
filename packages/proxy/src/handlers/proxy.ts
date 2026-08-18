@@ -154,24 +154,306 @@ function isSlackBotTokenCredential(value: string): boolean {
   return suffix.length >= 10 && !/[^A-Za-z0-9-]/.test(suffix);
 }
 
-export function extractProviderCredentialForHost(host: string, credential: string): string {
+interface GoogleCredentialEnvelope {
+  schemaVersion: "steward.provider-google.credential.v1";
+  accessToken: string;
+  refreshToken: string | null;
+  scopesGranted: string[];
+  googleUserId: string;
+  googleEmail: string;
+  obtainedAt: string;
+  expiresAt: string | null;
+}
+
+interface GoogleProxyRefreshConfig {
+  clientId: string;
+  clientSecret: string;
+}
+
+interface GoogleRefreshUpstreamResult {
+  revoked: boolean;
+  accessToken: string;
+  refreshToken?: string;
+  scopes?: string[];
+  expiresIn?: number;
+}
+
+interface GoogleRefreshRequest {
+  config: GoogleProxyRefreshConfig;
+  refreshToken: string;
+  allowedScopes: readonly string[];
+}
+
+type GoogleRefreshFetcher = (input: GoogleRefreshRequest) => Promise<GoogleRefreshUpstreamResult>;
+
+class GoogleCredentialResolutionError extends Error {
+  constructor(
+    message: string,
+    readonly governedCode: "EXEC_AUTH_ACCOUNT_DISABLED" | "EXEC_AUTH_STALE_SECRET" | null,
+  ) {
+    super(message);
+    this.name = "GoogleCredentialResolutionError";
+  }
+}
+
+const GOOGLE_PROVIDER_TOKEN_URL = "https://oauth2.googleapis.com/token";
+const GOOGLE_REFRESH_SKEW_MS = 5 * 60 * 1000;
+const GOOGLE_REFRESH_TIMEOUT_MS = 10_000;
+const GOOGLE_REFRESH_MAX_RESPONSE_BYTES = 1024 * 1024;
+
+function parseGoogleCredentialEnvelope(
+  host: string,
+  credential: string,
+): GoogleCredentialEnvelope | null {
   const parsed = safeJsonParseString<Record<string, unknown>>(credential);
   const googleHost = host === "gmail.googleapis.com" || host === "www.googleapis.com";
   if (parsed?.schemaVersion !== "steward.provider-google.credential.v1") {
     if (googleHost) throw new Error("invalid Google OAuth credential envelope");
-    return credential;
+    return null;
   }
-  // Bind the credential type to its intended provider. Merely transforming the
-  // envelope when the destination happens to be Google would let a misbound
-  // route forward the whole JSON value, including the server-held refresh token.
   if (!googleHost) throw new Error("Google OAuth credential used for a non-Google host");
+  const bounded = (v: unknown, max: number): v is string =>
+    typeof v === "string" && v.length > 0 && v.length <= max;
+  const validIso = (v: unknown): v is string => bounded(v, 64) && Number.isFinite(Date.parse(v));
   if (
-    typeof parsed.accessToken !== "string" ||
-    parsed.accessToken.length < 1 ||
-    parsed.accessToken.length > 16_384
-  )
+    !bounded(parsed.accessToken, 16_384) ||
+    !(parsed.refreshToken === null || bounded(parsed.refreshToken, 16_384)) ||
+    !Array.isArray(parsed.scopesGranted) ||
+    parsed.scopesGranted.length === 0 ||
+    parsed.scopesGranted.length > 64 ||
+    !parsed.scopesGranted.every((scope) => bounded(scope, 512)) ||
+    new Set(parsed.scopesGranted).size !== parsed.scopesGranted.length ||
+    !bounded(parsed.googleUserId, 512) ||
+    !bounded(parsed.googleEmail, 512) ||
+    !validIso(parsed.obtainedAt) ||
+    !(parsed.expiresAt === null || validIso(parsed.expiresAt))
+  ) {
     throw new Error("invalid Google OAuth credential envelope");
-  return parsed.accessToken;
+  }
+  return parsed as unknown as GoogleCredentialEnvelope;
+}
+
+function isNearGoogleExpiry(expiresAtIso: string | null): boolean {
+  if (!expiresAtIso) return true;
+  const expiresAt = new Date(expiresAtIso).getTime();
+  return Number.isNaN(expiresAt) || expiresAt - Date.now() <= GOOGLE_REFRESH_SKEW_MS;
+}
+
+function resolveGoogleProxyRefreshConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): GoogleProxyRefreshConfig {
+  const clientId = env.GOOGLE_PROVIDER_CLIENT_ID?.trim();
+  const clientSecret = env.GOOGLE_PROVIDER_CLIENT_SECRET?.trim();
+  if (!clientId || !clientSecret) {
+    throw new GoogleCredentialResolutionError(
+      "Google provider OAuth client configuration is missing",
+      null,
+    );
+  }
+  return { clientId, clientSecret };
+}
+
+async function readBoundedGoogleRefreshText(res: Response): Promise<string> {
+  const declaredLength = res.headers.get("content-length");
+  if (declaredLength) {
+    const length = Number(declaredLength);
+    if (!Number.isFinite(length) || length < 0 || length > GOOGLE_REFRESH_MAX_RESPONSE_BYTES) {
+      await res.body?.cancel().catch(() => {});
+      throw new GoogleCredentialResolutionError(
+        "Google refresh response exceeded maximum size",
+        null,
+      );
+    }
+  }
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > GOOGLE_REFRESH_MAX_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw new GoogleCredentialResolutionError(
+          "Google refresh response exceeded maximum size",
+          null,
+        );
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+function validateGoogleRefreshScopes(
+  scopes: readonly string[],
+  allowedScopes: readonly string[],
+): string[] {
+  if (scopes.length === 0 || scopes.length > allowedScopes.length) {
+    throw new GoogleCredentialResolutionError(
+      "Google refresh returned invalid scopes",
+      "EXEC_AUTH_STALE_SECRET",
+    );
+  }
+  const allowed = new Set(allowedScopes);
+  if (scopes.some((scope) => !allowed.has(scope))) {
+    throw new GoogleCredentialResolutionError(
+      "Google refresh broadened the granted scopes",
+      "EXEC_AUTH_STALE_SECRET",
+    );
+  }
+  return [...scopes];
+}
+
+function validateGoogleRefreshLifetime(expiresIn: number | undefined): number | undefined {
+  if (expiresIn === undefined) return undefined;
+  if (expiresIn * 1000 <= GOOGLE_REFRESH_SKEW_MS) {
+    throw new GoogleCredentialResolutionError(
+      "Google refresh returned an access token that expires too soon",
+      "EXEC_AUTH_STALE_SECRET",
+    );
+  }
+  return expiresIn;
+}
+
+async function defaultGoogleRefreshFetcher(
+  input: GoogleRefreshRequest,
+): Promise<GoogleRefreshUpstreamResult> {
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: input.refreshToken,
+    client_id: input.config.clientId,
+    client_secret: input.config.clientSecret,
+  });
+  const res = await fetch(GOOGLE_PROVIDER_TOKEN_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    },
+    body: body.toString(),
+    redirect: "error",
+    signal: AbortSignal.timeout(GOOGLE_REFRESH_TIMEOUT_MS),
+  });
+  const text = await readBoundedGoogleRefreshText(res);
+  const parsed = text.length > 0 ? safeJsonParseString<Record<string, unknown>>(text) : null;
+  if (!res.ok) {
+    if (parsed?.error === "invalid_grant") {
+      return { revoked: true, accessToken: "" };
+    }
+    throw new GoogleCredentialResolutionError(`Google refresh failed (${res.status})`, null);
+  }
+  if (
+    !parsed ||
+    typeof parsed.access_token !== "string" ||
+    parsed.access_token.length < 1 ||
+    parsed.access_token.length > 16_384
+  ) {
+    throw new GoogleCredentialResolutionError("Google refresh response missing access_token", null);
+  }
+  if (
+    parsed.refresh_token !== undefined &&
+    (typeof parsed.refresh_token !== "string" ||
+      parsed.refresh_token.length < 1 ||
+      parsed.refresh_token.length > 16_384)
+  ) {
+    throw new GoogleCredentialResolutionError(
+      "Google refresh returned an invalid refresh token",
+      null,
+    );
+  }
+  if (
+    parsed.scope !== undefined &&
+    (typeof parsed.scope !== "string" || parsed.scope.length > 32_768)
+  ) {
+    throw new GoogleCredentialResolutionError("Google refresh returned invalid scopes", null);
+  }
+  const expiresIn = parsed.expires_in;
+  if (expiresIn !== undefined && expiresIn !== null) {
+    if (
+      typeof expiresIn !== "number" ||
+      !Number.isSafeInteger(expiresIn) ||
+      expiresIn <= 0 ||
+      expiresIn > 30 * 24 * 60 * 60
+    ) {
+      throw new GoogleCredentialResolutionError(
+        "Google refresh returned an invalid expires_in",
+        null,
+      );
+    }
+  }
+  const scopes = parsed.scope
+    ? validateGoogleRefreshScopes(
+        [...new Set(parsed.scope.split(/\s+/).filter(Boolean))],
+        input.allowedScopes,
+      )
+    : undefined;
+  return {
+    revoked: false,
+    accessToken: parsed.access_token,
+    refreshToken: parsed.refresh_token as string | undefined,
+    scopes,
+    expiresIn: validateGoogleRefreshLifetime(expiresIn as number | undefined),
+  };
+}
+
+let googleRefreshFetcherForHandler: GoogleRefreshFetcher = defaultGoogleRefreshFetcher;
+
+export function __setGoogleRefreshFetcherForTests(fetcher: GoogleRefreshFetcher | null): void {
+  googleRefreshFetcherForHandler = fetcher ?? defaultGoogleRefreshFetcher;
+}
+
+export function extractProviderCredentialForHost(host: string, credential: string): string {
+  const envelope = parseGoogleCredentialEnvelope(host, credential);
+  return envelope ? envelope.accessToken : credential;
+}
+
+export async function resolveProviderCredentialForHost(
+  host: string,
+  credential: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<string> {
+  const envelope = parseGoogleCredentialEnvelope(host, credential);
+  if (!envelope) return credential;
+  if (!isNearGoogleExpiry(envelope.expiresAt)) return envelope.accessToken;
+  if (!envelope.refreshToken) {
+    throw new GoogleCredentialResolutionError(
+      "Google OAuth credential cannot mint a fresh access token",
+      "EXEC_AUTH_STALE_SECRET",
+    );
+  }
+  const refreshed = await googleRefreshFetcherForHandler({
+    config: resolveGoogleProxyRefreshConfig(env),
+    refreshToken: envelope.refreshToken,
+    allowedScopes: envelope.scopesGranted,
+  });
+  if (refreshed.revoked) {
+    throw new GoogleCredentialResolutionError(
+      "Google refresh token revoked",
+      "EXEC_AUTH_ACCOUNT_DISABLED",
+    );
+  }
+  if (refreshed.refreshToken !== undefined && refreshed.refreshToken !== envelope.refreshToken) {
+    throw new GoogleCredentialResolutionError(
+      "Google refresh rotated the credential during governed dispatch",
+      "EXEC_AUTH_STALE_SECRET",
+    );
+  }
+  if (refreshed.scopes) {
+    validateGoogleRefreshScopes(refreshed.scopes, envelope.scopesGranted);
+  }
+  validateGoogleRefreshLifetime(refreshed.expiresIn);
+  return refreshed.accessToken;
 }
 
 // ─── Credential injection ────────────────────────────────────────────────────
@@ -1836,8 +2118,21 @@ export async function handleProxy(c: Context): Promise<Response> {
     credential = await decryptSecret(tenantId, route.secretId);
     // Only Google's short-lived access token crosses the provider boundary.
     // Its refresh token remains server-side inside the encrypted envelope.
-    credential = extractProviderCredentialForHost(target.host, credential);
+    credential = await resolveProviderCredentialForHost(target.host, credential);
   } catch (err) {
+    if (
+      authorityMode === "governed_v2" &&
+      governedClaim &&
+      err instanceof GoogleCredentialResolutionError &&
+      err.governedCode
+    ) {
+      return denyGovernedAtDecryptBoundary(
+        err.governedCode,
+        err.governedCode === "EXEC_AUTH_ACCOUNT_DISABLED"
+          ? "governed-google-refresh-revoked"
+          : "governed-google-refresh-stale",
+      );
+    }
     console.error(`[proxy] Failed to decrypt secret ${route.secretId}:`, err);
     await recordAudit({
       agentId,

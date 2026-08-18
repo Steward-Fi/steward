@@ -9,12 +9,14 @@ import {
   providerGrants,
   providerOperations,
   providerRoleBindings,
+  secretRoutes,
   tenants,
   users,
   userTenants,
   workspaces,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { SecretVault } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import { type AuthorityAudit, ProviderAuthorityStore } from "../services/provider-authority-store";
 
@@ -32,6 +34,7 @@ const ACCOUNT_B = "30000000-0000-4000-8000-000000000002";
 const OP_A_READ = "40000000-0000-4000-8000-000000000001";
 const OP_A_WRITE = "40000000-0000-4000-8000-000000000002";
 const OP_B_READ = "40000000-0000-4000-8000-000000000003";
+const MASTER_PASSWORD = "provider-authority-google-route-test-master";
 const store = new ProviderAuthorityStore();
 const auditEvents: Array<{ action: string; resourceType: string }> = [];
 const audit: AuthorityAudit = async (event) => {
@@ -156,6 +159,7 @@ async function seedCore() {
 describe("provider authority foundation", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
+    process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => client.close());
     await seedCore();
@@ -164,6 +168,7 @@ describe("provider authority foundation", () => {
   afterAll(async () => {
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
+    delete process.env.STEWARD_MASTER_PASSWORD;
   });
 
   test("owner bootstrap transitions one way to explicit tenant authority", async () => {
@@ -468,6 +473,109 @@ describe("provider authority foundation", () => {
         })
       ).effect,
     ).toBe("deny");
+  });
+
+  test("Google governed operations require the exact host/path/Bearer route contract and no understated risk", async () => {
+    const vault = new SecretVault(MASTER_PASSWORD);
+    const [workspace] = await getDb()
+      .select()
+      .from(workspaces)
+      .where(eq(workspaces.id, WORKSPACE_A));
+    const secret = await vault.createSecret("tenant-main", `google-${crypto.randomUUID()}`, "stub");
+    const exactRoute = await vault.createRoute("tenant-main", secret.id, {
+      agentId: "agent-x",
+      hostPattern: "gmail.googleapis.com",
+      pathPattern: "/gmail/v1/users/me/messages/send",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "authorization",
+      injectFormat: "Bearer {value}",
+    });
+    const account = await store.createProviderAccount(
+      mutation({
+        actorUserId: ADMIN,
+        tenantRole: "admin",
+        expectedRevision: workspace.revision,
+      }),
+      {
+        workspaceId: WORKSPACE_A,
+        adapterKey: "google",
+        externalRef: `google-user-${crypto.randomUUID()}`,
+        displayName: "Google Account",
+        credentialSecretId: secret.id,
+        credentialVersion: secret.version,
+      },
+    );
+    const registered = await store.registerOperation(
+      mutation({
+        actorUserId: ADMIN,
+        tenantRole: "admin",
+        expectedRevision: account.revision,
+      }),
+      account.id,
+      {
+        operationKey: "google.gmail.messages.send",
+        riskClass: "consequential",
+        secretRouteId: exactRoute.id,
+      },
+    );
+    expect(registered.operationKey).toBe("google.gmail.messages.send");
+    const [promoted] = await getDb()
+      .select({
+        authorityMode: secretRoutes.authorityMode,
+        providerOperationId: secretRoutes.providerOperationId,
+      })
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, exactRoute.id));
+    expect(promoted.authorityMode).toBe("governed_v2");
+    expect(promoted.providerOperationId).toBe(registered.id);
+
+    const exactRoute2 = await vault.createRoute("tenant-main", secret.id, {
+      agentId: "agent-y",
+      hostPattern: "gmail.googleapis.com",
+      pathPattern: "/gmail/v1/users/me/messages/send",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "authorization",
+      injectFormat: "Token {value}",
+    });
+    const [liveAccount] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, account.id));
+    await expect(
+      store.registerOperation(
+        mutation({
+          actorUserId: ADMIN,
+          tenantRole: "admin",
+          expectedRevision: liveAccount.revision,
+        }),
+        account.id,
+        {
+          operationKey: "google.gmail.messages.send",
+          riskClass: "write",
+          secretRouteId: exactRoute2.id,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "forbidden" });
+    const [rejectedRoute] = await getDb()
+      .select({
+        authorityMode: secretRoutes.authorityMode,
+        providerOperationId: secretRoutes.providerOperationId,
+      })
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, exactRoute2.id));
+    expect(rejectedRoute.authorityMode).toBe("legacy");
+    expect(rejectedRoute.providerOperationId).toBeNull();
+    const operations = await getDb()
+      .select({
+        id: providerOperations.id,
+        operationKey: providerOperations.operationKey,
+      })
+      .from(providerOperations)
+      .where(eq(providerOperations.providerAccountId, account.id));
+    expect(operations).toHaveLength(1);
+    expect(operations[0]?.operationKey).toBe("google.gmail.messages.send");
   });
 
   test("Client A allow cannot be replayed against Client B or mixed identifiers", async () => {
