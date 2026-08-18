@@ -197,6 +197,23 @@ function moneroChecksum(payload: Uint8Array): Uint8Array {
   return keccak_256(payload).subarray(0, 4);
 }
 
+/**
+ * Monero public keys must be non-identity points in ed25519's prime-order
+ * subgroup. Merely accepting a canonical compressed encoding also accepts the
+ * identity, low-order torsion points, and points with a torsion component.
+ */
+function assertValidMoneroPublicKey(encoded: Uint8Array): void {
+  let point: typeof ed25519.ExtendedPoint.BASE;
+  try {
+    point = ed25519.ExtendedPoint.fromHex(encoded);
+  } catch {
+    throw new Error("Monero address embeds an invalid ed25519 public key");
+  }
+  if (point.is0() || point.isSmallOrder() || !point.isTorsionFree()) {
+    throw new Error("Monero public key is not in the prime-order ed25519 subgroup");
+  }
+}
+
 export interface GeneratedMoneroWallet {
   /** Private spend key, 64-hex (SECRET). */
   spendKey: string;
@@ -221,6 +238,8 @@ export function moneroAddressFromPublicKeys(
   if (!isMoneroKeyHex(publicSpendKey) || !isMoneroKeyHex(publicViewKey)) {
     throw new Error("Monero public keys must be 32-byte lowercase hex strings");
   }
+  assertValidMoneroPublicKey(decodeHex(publicSpendKey));
+  assertValidMoneroPublicKey(decodeHex(publicViewKey));
   const payload = new Uint8Array(69);
   payload[0] = ADDRESS_PREFIXES[network].standard;
   payload.set(decodeHex(publicSpendKey), 1);
@@ -316,15 +335,13 @@ export function decodeMoneroAddress(address: string): DecodedMoneroAddress {
   if (payload.length !== expectedLength) {
     throw new Error(`Monero ${kind} address has an invalid payload length`);
   }
-  const publicSpendKey = encodeHex(payload.subarray(1, 33));
-  const publicViewKey = encodeHex(payload.subarray(33, 65));
-  for (const key of [publicSpendKey, publicViewKey]) {
-    try {
-      ed25519.ExtendedPoint.fromHex(key);
-    } catch {
-      throw new Error("Monero address embeds an invalid ed25519 public key");
-    }
+  const publicSpendKeyBytes = payload.subarray(1, 33);
+  const publicViewKeyBytes = payload.subarray(33, 65);
+  for (const key of [publicSpendKeyBytes, publicViewKeyBytes]) {
+    assertValidMoneroPublicKey(key);
   }
+  const publicSpendKey = encodeHex(publicSpendKeyBytes);
+  const publicViewKey = encodeHex(publicViewKeyBytes);
   return {
     network,
     kind,

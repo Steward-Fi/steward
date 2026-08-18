@@ -134,6 +134,39 @@ describe("assertMoneroAddress", () => {
   const mainnetAddress = OFFICIAL_VECTORS[0].address;
   const stagenetAddress = OFFICIAL_VECTORS[3].address;
 
+  const INVALID_SUBGROUP_ADDRESSES = [
+    {
+      kind: "identity spend key",
+      address:
+        "41fJjQDhryD11111111111111111111111111111111116M6xLGByLYcTsbJzTVUuLSHxtbfgKyZJVBqPffpP8fm7BapnRj",
+    },
+    {
+      kind: "small-order/torsion spend key",
+      address:
+        "41d7FXjswpK11111111111111111111111111111111116M6xLGByLYcTsbJzTVUuLSHxtbfgKyZJVBqPffpP8fm7C8GNnw",
+    },
+    {
+      kind: "mixed-torsion spend key",
+      address:
+        "44k3tGVyLFA9efcSHz2Dk6UCpb99gwLnfijVWRfCuCWxgESWDDscFwacTsbJzTVUuLSHxtbfgKyZJVBqPffpP8fm784itQD",
+    },
+    {
+      kind: "identity view key",
+      address:
+        "45AmZ2FRjuqZts5NGzb7ZXSNRuwS9MUqEeakpyEeSHsB5gg2sUQdweP11111111111111111111111111111111113vBvjU",
+    },
+    {
+      kind: "small-order/torsion view key",
+      address:
+        "45AmZ2FRjuqZts5NGzb7ZXSNRuwS9MUqEeakpyEeSHsB5gdqPbvp2VV111111111111111111111111111111111179TEUy",
+    },
+    {
+      kind: "mixed-torsion view key",
+      address:
+        "45AmZ2FRjuqZts5NGzb7ZXSNRuwS9MUqEeakpyEeSHsB5jkn2LguQvL9efcSHz2Dk6UCpb99gwLnfijVWRfCuCWxTRobhDd",
+    },
+  ] as const;
+
   test("accepts standard and subaddress destinations on the right network", () => {
     expect(assertMoneroAddress(mainnetAddress, "mainnet").kind).toBe("standard");
     expect(assertMoneroAddress(OFFICIAL_VECTORS[0].subaddress, "mainnet").kind).toBe("subaddress");
@@ -155,6 +188,32 @@ describe("assertMoneroAddress", () => {
     expect(() => decodeMoneroAddress("")).toThrow();
     expect(() => decodeMoneroAddress("4".repeat(94))).toThrow();
     expect(() => decodeMoneroAddress("not-an-address")).toThrow();
+  });
+
+  test("rejects checksum-valid identity, small-order, and mixed-torsion public keys", () => {
+    for (const { kind, address } of INVALID_SUBGROUP_ADDRESSES) {
+      expect(() => decodeMoneroAddress(address), kind).toThrow(/prime-order ed25519 subgroup/);
+      expect(() => assertMoneroAddress(address, "mainnet"), kind).toThrow(
+        /prime-order ed25519 subgroup/,
+      );
+    }
+  });
+
+  test("refuses to construct addresses from invalid subgroup points", () => {
+    const valid = decodeMoneroAddress(mainnetAddress);
+    const badKeys = [
+      "0100000000000000000000000000000000000000000000000000000000000000", // identity
+      "0000000000000000000000000000000000000000000000000000000000000000", // order 4
+      "5252cc0a7f208133b620acbd4537eba2a4123bf0a8c2e4f980c3b31bb69765ea", // base + torsion
+    ];
+    for (const badKey of badKeys) {
+      expect(() => moneroAddressFromPublicKeys(badKey, valid.publicViewKey, "mainnet")).toThrow(
+        /prime-order ed25519 subgroup/,
+      );
+      expect(() => moneroAddressFromPublicKeys(valid.publicSpendKey, badKey, "mainnet")).toThrow(
+        /prime-order ed25519 subgroup/,
+      );
+    }
   });
 });
 
