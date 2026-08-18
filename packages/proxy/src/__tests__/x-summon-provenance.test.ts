@@ -115,10 +115,10 @@ describe("dispatch X summon provenance boundary", () => {
   test("allows truly absent provenance for non-summon-governed actions", () => {
     const absent = fixture();
     delete absent.requestEnvelope.xSummonAttestationDigest;
-    absent.requestHash = `sha256:${createHash("sha256")
-      .update(jcsStringify(absent.requestEnvelope))
-      .digest("hex")}`;
     absent.safeSummary = {};
+    // Summon validation is not the request-commitment verifier. An unrelated
+    // action with no summon evidence must proceed to the existing commitment
+    // checks, even when this fixture's request hash is intentionally stale.
     expect(verifyDispatchXSummonProvenance(absent)).toBe("absent");
   });
 });
