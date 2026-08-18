@@ -1,6 +1,6 @@
 {
   "name": "@stwd/eliza-plugin",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "ElizaOS integration for Steward-scoped wallet and provider capabilities",
   "license": "MIT",
   "type": "module",
