@@ -35,7 +35,9 @@ export async function POST(request: Request): Promise<Response> {
     return proxyJson(
       {
         ok: false,
-        error: typeof upstream.json?.error === "string" ? upstream.json.error : "Revoke failed",
+        // The upstream error body is deliberately not reflected because it may
+        // include credential material supplied in the revoke request.
+        error: "Revoke failed",
       },
       upstream.status >= 400 && upstream.status <= 599 ? upstream.status : 502,
       clearCookie,

@@ -200,6 +200,33 @@ describe("StewardAuth authProxyUrl (SEC-018: HttpOnly refresh-token custody)", (
     expect(proxyRequests("/auth/refresh")).toHaveLength(0);
   });
 
+  test("coalesces concurrent refreshes so a one-time token is never replayed", async () => {
+    await server?.close();
+    server = await startServer(async (req) => {
+      requests.push(req);
+      if (req.path === "/proxy/refresh") {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        return { json: { ok: true, token: fakeJwt({ userId: "user-2" }), expiresIn: 900 } };
+      }
+      return { json: { ok: true } };
+    });
+    const auth = new StewardAuth({
+      baseUrl: server.baseUrl,
+      storage,
+      authProxyUrl: `${server.baseUrl}/proxy`,
+    });
+    storage.setItem("steward_session_token", fakeJwt());
+
+    const sessions = await Promise.all([
+      auth.refreshSession(),
+      auth.refreshSession(),
+      auth.refreshSession(),
+    ]);
+
+    expect(sessions.every((session) => session?.userId === "user-2")).toBe(true);
+    expect(proxyRequests("/proxy/refresh", "POST")).toHaveLength(1);
+  });
+
   test("a 401 from the proxy refresh signs out and clears the proxy cookie", async () => {
     server?.close();
     server = await startServer((req) => {

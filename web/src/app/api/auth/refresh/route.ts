@@ -59,10 +59,9 @@ export async function POST(request: Request): Promise<Response> {
     return proxyJson(
       {
         ok: false,
-        error:
-          typeof upstream.json?.error === "string"
-            ? upstream.json.error
-            : "Refresh session rejected",
+        // Never reflect upstream-controlled strings: they can contain the
+        // submitted refresh token or other credential material.
+        error: "Refresh session rejected",
       },
       upstream.status,
       { "Set-Cookie": buildExpiredRefreshCookie(secure) },
@@ -72,7 +71,7 @@ export async function POST(request: Request): Promise<Response> {
     return proxyJson(
       {
         ok: false,
-        error: typeof upstream.json?.error === "string" ? upstream.json.error : "Refresh failed",
+        error: "Refresh failed",
       },
       upstream.status >= 400 && upstream.status <= 599 ? upstream.status : 502,
     );

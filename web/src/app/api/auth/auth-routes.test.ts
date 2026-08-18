@@ -230,7 +230,7 @@ describe("auth proxy route handlers (SEC-018)", () => {
         postJson("https://app.example.test/api/auth/refresh", {}, { cookie: "steward_rt=stale" }),
       );
       expect(res.status).toBe(429);
-      expect(await res.json()).toEqual({ ok: false, error: "Too many requests" });
+      expect(await res.json()).toEqual({ ok: false, error: "Refresh failed" });
     });
 
     test("revoke forwards the cookie token and always clears the cookie", async () => {

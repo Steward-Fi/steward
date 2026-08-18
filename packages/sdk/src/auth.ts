@@ -319,6 +319,7 @@ export class StewardAuth {
   private readonly tenantId: string | undefined;
   private readonly authProxyUrl: string | undefined;
   private readonly listeners: Array<(session: StewardSession | null) => void> = [];
+  private refreshPromise: Promise<StewardSession | null> | null = null;
 
   constructor({
     baseUrl,
@@ -582,8 +583,22 @@ export class StewardAuth {
    * Returns the new session, or null if the refresh token is missing or invalid.
    */
   async refreshSession(): Promise<StewardSession | null> {
+    // Refresh tokens rotate on every use and replay detection revokes the token
+    // family. Coalesce near-expiry callers so one client instance never sends
+    // the same one-time token more than once concurrently.
+    if (this.refreshPromise) return this.refreshPromise;
+    const refresh = this.refreshSessionOnce();
+    this.refreshPromise = refresh;
+    const clear = () => {
+      if (this.refreshPromise === refresh) this.refreshPromise = null;
+    };
+    void refresh.then(clear, clear);
+    return refresh;
+  }
+
+  private async refreshSessionOnce(): Promise<StewardSession | null> {
     if (this.authProxyUrl) {
-      return this.refreshViaProxy();
+      return this.refreshViaProxyWithBrowserLock();
     }
     const refreshToken = this.getRefreshToken();
     if (!refreshToken) return null;
@@ -2267,7 +2282,7 @@ export class StewardAuth {
    */
   async switchTenant(tenantId: string): Promise<StewardSession | null> {
     if (this.authProxyUrl) {
-      return this.refreshViaProxy(tenantId);
+      return this.refreshViaProxyWithBrowserLock(tenantId);
     }
     const refreshToken = this.getRefreshToken();
     if (!refreshToken) {
@@ -2324,6 +2339,19 @@ export class StewardAuth {
     const session = sessionFromToken(res.data.token);
     this.notifyListeners(session);
     return session;
+  }
+
+  /**
+   * Serialize cookie-backed token rotation across tabs in browsers that expose
+   * the Web Locks API. The lock is origin-scoped, matching the HttpOnly cookie;
+   * a waiting tab therefore sends the newly rotated cookie after its predecessor
+   * completes instead of replaying the predecessor's one-time token.
+   */
+  private async refreshViaProxyWithBrowserLock(tenantId?: string): Promise<StewardSession | null> {
+    if (isBrowser() && navigator.locks) {
+      return navigator.locks.request("steward-auth-refresh", () => this.refreshViaProxy(tenantId));
+    }
+    return this.refreshViaProxy(tenantId);
   }
 
   /**
