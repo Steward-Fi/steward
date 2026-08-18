@@ -8,6 +8,25 @@
  *  - operator-friendly label for the dashboard / audit log
  *
  * Mount: app.route("/agents/:agentId/session-signers", sessionSignerRoutes)
+ *
+ * ⚠️ INTENTIONALLY UNMOUNTED (SEC-211). This module mints delegated agent
+ * signing tokens, so it is not wired into app.ts/compose.ts/index.ts/
+ * worker.ts/embedded.ts today — only tests mount it. Before mounting it in any
+ * entrypoint you MUST re-verify the whole auth posture, because the route-level
+ * guards below are only half of the boundary:
+ *  1. The mount path MUST sit behind `tenantAuth` with
+ *     `{ requireTenantMatch: <agentId's tenant> }` (the in-route checks rely on
+ *     `tenantId`/`tenantRole`/`sessionMfaVerifiedAt` context variables set by
+ *     that middleware; mounted bare, `requireTenantAdminSession` fails closed
+ *     but every request 403s, and a future refactor of those checks would open
+ *     a token-minting surface).
+ *  2. Creation/listing/revocation require a human owner/admin SESSION
+ *     (`session-jwt`, never an api-key or agent token) with MFA verified within
+ *     the last 5 minutes — do not weaken `requireTenantAdminSession` /
+ *     `requireRecentAdminMfa` when mounting.
+ *  3. Minted tokens are agent JWTs trusted by `tenantAuth` for agent-scoped
+ *     signing; treat this as a credential-issuance surface (audit rollback on
+ *     issuance failure is mandatory — keep the blocking `writeAuditEvent`).
  */
 
 import { randomUUID } from "node:crypto";

@@ -331,8 +331,9 @@ describe("execution authorization service", () => {
       expect(normalizedKeys).not.toContain(forbiddenKey);
     }
 
-    // The HMAC signature is derived from STEWARD_JWT_SECRET, but the raw secret
-    // itself must never be persisted. Do not reject generic `0x` substrings:
+    // The HMAC signature is derived from STEWARD_EXECUTION_AUTH_SECRET (SEC-074,
+    // never from STEWARD_JWT_SECRET), but raw secret material must never be
+    // persisted. Do not reject generic `0x` substrings:
     // random UUID/HMAC/nonce values can contain those characters by chance.
     expect(JSON.stringify(row)).not.toContain(JWT_SECRET);
   });
@@ -368,5 +369,71 @@ describe("execution authorization service", () => {
       now: new Date(Date.now() - 61_000),
     });
     expect(() => verifyExecutionAuthorization(expired, expected)).toThrow("expired");
+  });
+
+  it("fails closed without STEWARD_EXECUTION_AUTH_SECRET — no JWT-secret fallback (SEC-074)", async () => {
+    const savedExecSecret = process.env.STEWARD_EXECUTION_AUTH_SECRET;
+    try {
+      // JWT secret remains set; the v1 mint must still refuse (X7 posture).
+      delete process.env.STEWARD_EXECUTION_AUTH_SECRET;
+      expect(process.env.STEWARD_JWT_SECRET).toBeString();
+      await expect(
+        mintExecutionAuthorization({
+          requestId: "tx-exec-auth-no-fallback",
+          tenantId: TENANT_ID,
+          agentId: AGENT_ID,
+          capability: "wallet.sign_transaction",
+          backend: "local-vault",
+          payloadDigest: "a".repeat(64),
+        }),
+      ).rejects.toThrow("STEWARD_EXECUTION_AUTH_SECRET is required");
+    } finally {
+      if (savedExecSecret === undefined) delete process.env.STEWARD_EXECUTION_AUTH_SECRET;
+      else process.env.STEWARD_EXECUTION_AUTH_SECRET = savedExecSecret;
+    }
+  });
+
+  it("rejects a weak dedicated execution-authorization secret", async () => {
+    const savedExecSecret = process.env.STEWARD_EXECUTION_AUTH_SECRET;
+    try {
+      process.env.STEWARD_EXECUTION_AUTH_SECRET = "weak";
+      await expect(
+        mintExecutionAuthorization({
+          requestId: "tx-exec-auth-weak-secret",
+          tenantId: TENANT_ID,
+          agentId: AGENT_ID,
+          capability: "wallet.sign_transaction",
+          backend: "local-vault",
+          payloadDigest: "a".repeat(64),
+        }),
+      ).rejects.toThrow("STEWARD_EXECUTION_AUTH_SECRET is required");
+    } finally {
+      if (savedExecSecret === undefined) delete process.env.STEWARD_EXECUTION_AUTH_SECRET;
+      else process.env.STEWARD_EXECUTION_AUTH_SECRET = savedExecSecret;
+    }
+  });
+
+  it("derives the v1 key from the execution-auth secret, not the JWT secret (SEC-074)", async () => {
+    const expected = {
+      tenantId: TENANT_ID,
+      agentId: AGENT_ID,
+      capability: "wallet.sign_transaction" as const,
+      backend: "local-vault" as const,
+      payloadDigest: "b".repeat(64),
+    };
+    const authorization = await mintExecutionAuthorization({
+      requestId: "tx-exec-auth-key-source",
+      ...expected,
+    });
+    // Rotating the JWT secret must not invalidate existing v1 authorizations —
+    // proof the JWT secret is no longer part of the derivation.
+    const savedJwt = process.env.STEWARD_JWT_SECRET;
+    try {
+      process.env.STEWARD_JWT_SECRET = `${savedJwt}-rotated`;
+      expect(() => verifyExecutionAuthorization(authorization, expected)).not.toThrow();
+    } finally {
+      if (savedJwt === undefined) delete process.env.STEWARD_JWT_SECRET;
+      else process.env.STEWARD_JWT_SECRET = savedJwt;
+    }
   });
 });

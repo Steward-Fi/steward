@@ -15,6 +15,11 @@ const securityHeadersSource = readFileSync(
   "utf8",
 );
 const tenantCorsSource = readFileSync(join(apiRoot, "middleware", "tenant-cors.ts"), "utf8");
+const globalRateLimitSource = readFileSync(
+  join(apiRoot, "middleware", "global-rate-limit.ts"),
+  "utf8",
+);
+const appSource = readFileSync(join(apiRoot, "app.ts"), "utf8");
 const contextSource = readFileSync(join(apiRoot, "services", "context.ts"), "utf8");
 const indexSource = readFileSync(join(apiRoot, "index.ts"), "utf8");
 const webRoot = join(import.meta.dir, "..", "..", "..", "..", "web", "src");
@@ -47,14 +52,29 @@ describe("middleware security hardening", () => {
   });
 
   it("fails closed for tenant CORS in production and rejects JWT/header tenant mismatch", () => {
-    expect(tenantCorsSource).toContain('process.env.NODE_ENV === "production"');
+    // Wildcard CORS requires an explicit non-production NODE_ENV (SEC-067):
+    // an unset NODE_ENV must fail closed like production.
+    expect(tenantCorsSource).toContain("function devWildcardAllowed()");
+    expect(tenantCorsSource).toContain('env === "development" || env === "test"');
     expect(tenantCorsSource).toContain("origins.length === 0");
     expect(tenantCorsSource).toContain("return c.newResponse(null, 403)");
     expect(tenantCorsSource).toContain("TENANT_ID_RE.test(tenantId)");
     expect(tenantCorsSource).toContain("MAX_CORS_CACHE_ENTRIES");
-    expect(tenantCorsSource).toContain("if (!row && clientRows.length === 0) return []");
+    // Bogus/unknown tenant headers are negative-cached briefly (SEC-067).
+    expect(tenantCorsSource).toContain("NEGATIVE_CACHE_TTL_MS");
+    expect(tenantCorsSource).toContain("if (!row && clientRows.length === 0) {");
     expect(tenantCorsSource).toContain("if (origins.includes(origin))");
     expect(tenantCorsSource).not.toContain('origins.includes("*")');
+    // ACAO depends on both Origin and the tenant header (SEC-067).
+    expect(tenantCorsSource).toContain('"Origin, X-Steward-Tenant"');
+    // Vary is established before DB lookups/early 403s so denied responses
+    // cannot poison a shared cache for another origin or tenant.
+    const tenantCorsBody = tenantCorsSource.slice(
+      tenantCorsSource.indexOf("export async function tenantCors"),
+    );
+    expect(tenantCorsBody.indexOf('c.header("Vary"')).toBeLessThan(
+      tenantCorsBody.indexOf("await getAllAllowedOrigins()"),
+    );
     expect(tenantCorsSource).toContain("X-Steward-Request-Timestamp");
     expect(tenantCorsSource).toContain("X-Steward-Request-Expires-At");
     expect(contextSource).toContain("headerTenant && headerTenant !== payload.tenantId");
@@ -69,6 +89,22 @@ describe("middleware security hardening", () => {
       "runtimeGate(request, server.requestIP(request)?.address ?? null) ?? app.fetch(request)",
     );
     expect(indexSource).not.toContain('app.use("*", async (c, next) => {');
+  });
+
+  it("mounts the shared Redis-backed global limiter on the Workers runtime (SEC-068)", () => {
+    expect(appSource).toContain("if (isWorkersRuntime) {");
+    expect(appSource).toContain('app.use("*", workersGlobalRateLimit)');
+    expect(globalRateLimitSource).toContain("checkAuthRateLimit(");
+    expect(globalRateLimitSource).toContain('c.req.path === "/health"');
+    expect(globalRateLimitSource).toContain('"Rate limit exceeded"');
+  });
+
+  it("trims /ready fingerprint detail unless a probe token is presented (SEC-071)", () => {
+    expect(indexSource).toContain("function readyProbeAuthorized(");
+    expect(indexSource).toContain("STEWARD_READY_PROBE_TOKEN");
+    expect(indexSource).toContain("timingSafeEqual");
+    expect(indexSource).toContain('"x-steward-probe-token"');
+    expect(indexSource).toContain("checks: verbose ? checks : publicChecks");
   });
 
   it("documents production security headers and dashboard CSP checks in source", () => {

@@ -15,6 +15,7 @@
  */
 
 import { createPGLiteDb, getDataDir, setPGLiteOverride } from "@stwd/db/pglite";
+import { loadOrCreateEmbeddedMasterPassword } from "./services/embedded-master-password";
 
 // Force PGLite/embedded mode
 process.env.STEWARD_DB_MODE = "pglite";
@@ -27,14 +28,17 @@ if (!process.env.DATABASE_URL) {
 }
 
 // Ensure STEWARD_MASTER_PASSWORD is set (context.ts requires it at module level).
-// Auto-generate a random one if not provided — the sidecar also generates one
-// and passes it via env, but standalone `bun run start:local` needs a fallback.
+// Auto-generate one if not provided — the sidecar also generates one and passes
+// it via env, but standalone `bun run start:local` needs a fallback.
+// SEC-147: a fresh random password per boot silently makes everything sealed
+// under it undecryptable after restart, so the generated password is persisted
+// to the data dir (mode 0600) and reused on subsequent boots.
 if (!process.env.STEWARD_MASTER_PASSWORD) {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  process.env.STEWARD_MASTER_PASSWORD = Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  process.env.STEWARD_MASTER_PASSWORD = loadOrCreateEmbeddedMasterPassword(getDataDir());
+  console.log(
+    "[embedded] Using the protected embedded master-password file (mode 0600).\n" +
+      "[embedded] Set STEWARD_MASTER_PASSWORD explicitly to manage it yourself.",
+  );
 }
 
 async function main() {

@@ -5,33 +5,17 @@ import {
 } from "@stwd/attestation";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
+import { checkAuthRateLimit } from "./auth";
 
 export const quoteRoutes = new Hono<{ Variables: AppVariables }>();
 
 // SEC-085: /quote is mounted unauthenticated, and every request drives two
 // blocking unix-socket round trips into the dstack guest agent (TDX quote
-// generation is non-trivial). Bound anonymous callers with a per-client-IP
-// fixed-window limiter so the guest agent cannot be exhausted.
+// generation is non-trivial). Bound anonymous callers with the shared
+// Redis-backed limiter (residual: replaces the wave-2 in-memory fixed-window
+// Map, which could not coordinate across isolates/replicas).
 const QUOTE_RATE_LIMIT_WINDOW_MS = 60_000;
 const QUOTE_RATE_LIMIT_MAX = 30;
-const QUOTE_RATE_BUCKET_CAP = 10_000;
-const quoteRateBuckets = new Map<string, { windowStart: number; count: number }>();
-
-function quoteRateLimitExceeded(clientKey: string, nowMs: number): boolean {
-  const bucket = quoteRateBuckets.get(clientKey);
-  if (!bucket || nowMs - bucket.windowStart >= QUOTE_RATE_LIMIT_WINDOW_MS) {
-    quoteRateBuckets.set(clientKey, { windowStart: nowMs, count: 1 });
-    if (quoteRateBuckets.size > QUOTE_RATE_BUCKET_CAP) {
-      // Bound the limiter map itself against spoofed-IP growth.
-      for (const [key, value] of quoteRateBuckets) {
-        if (nowMs - value.windowStart >= QUOTE_RATE_LIMIT_WINDOW_MS) quoteRateBuckets.delete(key);
-      }
-    }
-    return false;
-  }
-  bucket.count += 1;
-  return bucket.count > QUOTE_RATE_LIMIT_MAX;
-}
 
 /**
  * SEC-085: raw dstack evidence embeds `vm_config`, which contains the full
@@ -52,9 +36,16 @@ export function redactQuoteEvidence(value: unknown): unknown {
 }
 
 quoteRoutes.get("/", async (c) => {
-  const clientKey = c.req.header("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
-  if (quoteRateLimitExceeded(clientKey, Date.now())) {
-    return c.json({ error: "rate limit exceeded" }, 429);
+  const rl = await checkAuthRateLimit(
+    c,
+    "attestation-quote",
+    QUOTE_RATE_LIMIT_WINDOW_MS,
+    QUOTE_RATE_LIMIT_MAX,
+  );
+  if (!rl.allowed) {
+    return c.json({ error: "rate limit exceeded" }, 429, {
+      "Retry-After": String(rl.retryAfterSecs ?? 60),
+    });
   }
 
   const nonce = c.req.query("nonce") ?? crypto.randomUUID();

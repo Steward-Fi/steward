@@ -91,7 +91,12 @@ import { and, desc, eq, gte, ilike, inArray, isNull, ne, or, sql } from "drizzle
 import { type Context, Hono, type Next } from "hono";
 import { getAddress, verifyMessage as viemVerifyMessage } from "viem";
 import { writeAuditEvent } from "../services/audit";
-import { priceOracle, setNoStoreHeaders, verifySessionToken } from "../services/context";
+import {
+  priceOracle,
+  sanitizeErrorMessage,
+  setNoStoreHeaders,
+  verifySessionToken,
+} from "../services/context";
 import {
   publicGasSponsorshipState,
   readTenantGasSponsorshipConfig,
@@ -2935,30 +2940,21 @@ user.post("/me/accounts/oauth/:provider/token", async (c) => {
   try {
     oauthClient = new OAuthClient(getProviderConfig(providerName));
   } catch (err) {
-    return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Provider not configured" },
-      503,
-    );
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(err) }, 503);
   }
 
   let tokenResponse: Awaited<ReturnType<OAuthClient["exchangeCode"]>>;
   try {
     tokenResponse = await oauthClient.exchangeCode(code, redirectUri, codeVerifier || undefined);
   } catch (err) {
-    return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Token exchange failed" },
-      502,
-    );
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(err) }, 502);
   }
 
   let providerUser: Awaited<ReturnType<OAuthClient["getUserInfo"]>>;
   try {
     providerUser = await oauthClient.getUserInfo(tokenResponse.access_token);
   } catch (err) {
-    return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Failed to fetch user info" },
-      502,
-    );
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(err) }, 502);
   }
 
   if (!providerUser.id) {
@@ -3627,7 +3623,15 @@ user.delete("/me/accounts/:provider/:providerAccountId", async (c) => {
               : error.message === "Linked account changed during unlink"
                 ? 409
                 : 500;
-      return c.json<ApiResponse>({ ok: false, error: error.message }, status);
+      // SEC-210: known client-facing messages keep their detail; anything else
+      // is an internal failure and must not leak internals to the client.
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: status === 500 ? sanitizeErrorMessage(error) : error.message,
+        },
+        status,
+      );
     }
     throw error;
   }
@@ -3983,8 +3987,7 @@ user.get("/me/wallet", async (c) => {
       },
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Unknown error";
-    return c.json<ApiResponse>({ ok: false, error: msg }, 500);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
 
@@ -4033,8 +4036,10 @@ user.post("/me/wallet", async (c) => {
         walletIndex.value,
       );
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "Unknown error";
-      return c.json<ApiResponse>({ ok: false, error: `Failed to provision wallet: ${msg}` }, 500);
+      return c.json<ApiResponse>(
+        { ok: false, error: `Failed to provision wallet: ${sanitizeErrorMessage(e)}` },
+        500,
+      );
     }
   }
 
@@ -4271,8 +4276,10 @@ user.post("/me/wallet/claim-pregenerated", async (c) => {
       201,
     );
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Unknown error";
-    return c.json<ApiResponse>({ ok: false, error: `Failed to claim wallet: ${msg}` }, 500);
+    return c.json<ApiResponse>(
+      { ok: false, error: `Failed to claim wallet: ${sanitizeErrorMessage(e)}` },
+      500,
+    );
   }
 });
 
@@ -4406,9 +4413,11 @@ user.post("/me/wallet/recovery/setup", async (c) => {
       201,
     );
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Unknown error";
     console.error(`[UserWallet] recovery setup failed for user "${userId}":`, e);
-    return c.json<ApiResponse>({ ok: false, error: `Failed to set up recovery: ${msg}` }, 500);
+    return c.json<ApiResponse>(
+      { ok: false, error: `Failed to set up recovery: ${sanitizeErrorMessage(e)}` },
+      500,
+    );
   }
 });
 
@@ -4541,8 +4550,10 @@ user.post("/me/wallet/recovery/restore", async (c) => {
       wallet.restoredExisting ? 200 : 201,
     );
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Unknown error";
-    return c.json<ApiResponse>({ ok: false, error: `Failed to restore wallet: ${msg}` }, 409);
+    return c.json<ApiResponse>(
+      { ok: false, error: `Failed to restore wallet: ${sanitizeErrorMessage(e)}` },
+      409,
+    );
   }
 });
 
@@ -5231,7 +5242,9 @@ user.post("/me/wallet/sign", async (c) => {
     } catch (auditErr) {
       console.error(`[UserWallet] Failed to audit signing failure for user "${userId}":`, auditErr);
     }
-    return c.json<ApiResponse>({ ok: false, error: msg }, 500);
+    // SEC-210: the raw message stays in server-side logs/audit metadata only;
+    // the client gets the sanitized form.
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
 
@@ -5447,9 +5460,8 @@ user.post("/me/wallet/sign-message", async (c) => {
       data: { signature, address: wallet.walletAddress },
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Unknown error";
     console.error(`[UserWallet] sign-message failed for user "${userId}":`, e);
-    return c.json<ApiResponse>({ ok: false, error: msg }, 500);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
 
@@ -5733,9 +5745,8 @@ user.post("/me/wallet/import/submit", async (c) => {
       },
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Unknown error";
     console.error(`[UserWallet] encrypted import failed for user "${userId}":`, e);
-    return c.json<ApiResponse>({ ok: false, error: msg }, 500);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
 
@@ -5850,9 +5861,8 @@ user.post("/me/wallet/export", async (c) => {
       },
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Unknown error";
     console.error(`[UserWallet] export failed for user "${userId}":`, e);
-    return c.json<ApiResponse>({ ok: false, error: msg }, 500);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
 

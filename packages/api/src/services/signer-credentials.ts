@@ -7,7 +7,32 @@ const SCRYPT_PARALLELIZATION = 1;
 const SCRYPT_KEY_LENGTH = 32;
 
 function signerCredentialPepper(): string {
-  return process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER ?? "";
+  const pepper = process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER;
+  if (pepper && pepper.trim().length >= 32) return pepper;
+  if (pepper) {
+    throw new Error(
+      "STEWARD_SIGNER_CREDENTIAL_PEPPER must contain at least 32 characters of entropy. " +
+        "Generate with `openssl rand -hex 32`.",
+    );
+  }
+  // SEC-073: never silently degrade to an unpeppered hash — mirror the
+  // STEWARD_AUDIT_HMAC_KEY posture (services/audit.ts). The pepper is
+  // defense-in-depth against a DB-only attacker (scrypt+salt still applies),
+  // but losing it must be loud, not silent. Production fails closed; outside
+  // production the pepperless path requires the explicit dev opt-in.
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "STEWARD_SIGNER_CREDENTIAL_PEPPER is required in production. " +
+        "Generate with `openssl rand -hex 32`.",
+    );
+  }
+  if (process.env.STEWARD_ALLOW_DEV_SECRETS !== "true") {
+    throw new Error(
+      "STEWARD_SIGNER_CREDENTIAL_PEPPER is required. For local development only, set " +
+        "STEWARD_ALLOW_DEV_SECRETS=true to run without a pepper.",
+    );
+  }
+  return "";
 }
 
 function signerCredentialInput(secret: string): string {
