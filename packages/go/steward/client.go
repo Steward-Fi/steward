@@ -181,18 +181,16 @@ func NewClient(config Config) (*Client, error) {
 	// redirect policy behind Steward's mandatory origin boundary.
 	configuredRedirect := httpClient.CheckRedirect
 	httpClientCopy := *httpClient
+	// Anchor every hop to construction-time configuration, not to via[0]. A
+	// caller callback can retain and mutate a prior hop's request before a later
+	// callback; deriving the origin from that mutable chain would make a
+	// multi-hop redirect compare against attacker-controlled state.
+	redirectOrigin := *parsed
 	httpClientCopy.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if err := stewardRedirectPolicy(req, via); err != nil {
+		if err := stewardRedirectPolicyFromOrigin(req, &redirectOrigin, len(via)); err != nil {
 			return err
 		}
-		// Snapshot the trusted origin before invoking caller-controlled policy.
-		// The callback receives the mutable `via` requests as well as `req`; if we
-		// re-read via[0] afterwards it can rewrite both sides of the comparison and
-		// bypass the mandatory origin boundary.
-		var originalOrigin url.URL
-		if len(via) > 0 && via[0] != nil && via[0].URL != nil {
-			originalOrigin = *via[0].URL
-		} else {
+		if len(via) == 0 || via[0] == nil || via[0].URL == nil {
 			return errors.New("refusing redirect with missing origin metadata")
 		}
 		if configuredRedirect != nil {
@@ -203,7 +201,7 @@ func NewClient(config Config) (*Client, error) {
 		// A caller policy is allowed to mutate req. Re-enforce Steward's mandatory
 		// boundary after it runs so mutation cannot redirect credentials or turn
 		// the client into an SSRF primitive after the initial check.
-		return stewardRedirectPolicyFromOrigin(req, &originalOrigin, len(via))
+		return stewardRedirectPolicyFromOrigin(req, &redirectOrigin, len(via))
 	}
 	httpClient = &httpClientCopy
 	now := config.Now

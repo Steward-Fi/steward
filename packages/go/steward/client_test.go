@@ -287,6 +287,34 @@ func TestCustomRedirectPolicyCannotMutateOriginalAndTargetPastBoundary(t *testin
 	}
 }
 
+func TestCustomRedirectPolicyCannotPoisonOriginForLaterHop(t *testing.T) {
+	customCalls := 0
+	custom := &http.Client{CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+		customCalls++
+		if customCalls == 1 {
+			evil, _ := url.Parse("https://evil.example.test/poisoned-origin")
+			via[0].URL = evil
+		}
+		return nil
+	}}
+	client, err := NewClient(Config{BaseURL: "https://api.example.test", HTTPClient: custom})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, _ := http.NewRequest(http.MethodGet, "https://api.example.test/accounts", nil)
+	firstHop, _ := http.NewRequest(http.MethodGet, "https://api.example.test/other", nil)
+	if err := client.http.CheckRedirect(firstHop, []*http.Request{original}); err != nil {
+		t.Fatalf("same-origin first hop was rejected: %v", err)
+	}
+	secondHop, _ := http.NewRequest(http.MethodGet, "https://evil.example.test/harvest", nil)
+	if err := client.http.CheckRedirect(secondHop, []*http.Request{original, firstHop}); err == nil || !strings.Contains(err.Error(), "refusing cross-origin") {
+		t.Fatalf("poisoned prior hop became the redirect origin: %v", err)
+	}
+	if customCalls != 1 {
+		t.Fatalf("custom policy ran for rejected cross-origin second hop: %d calls", customCalls)
+	}
+}
+
 func TestRedirectPolicyRejectsMissingOriginMetadata(t *testing.T) {
 	original, _ := http.NewRequest(http.MethodGet, "https://api.example.test/accounts", nil)
 	if err := stewardRedirectPolicy(&http.Request{}, []*http.Request{original}); err == nil {
