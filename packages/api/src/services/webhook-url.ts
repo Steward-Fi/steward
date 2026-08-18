@@ -189,12 +189,13 @@ export type DnsResolver = (hostname: string) => Promise<DnsAnswer[]>;
 
 const defaultResolver: DnsResolver = (hostname) => lookup(hostname, { all: true, verbatim: true });
 
-function isNonPublicAddress(address: string): boolean {
+function isNonPublicAddress(address: string, family?: number): boolean {
   const normalized = address.toLowerCase();
   const version = isIP(normalized);
+  if (version === 0 || (family !== undefined && family !== version)) return true;
   if (version === 4) return isNonPublicIpv4(normalized);
   if (version === 6) return isNonPublicIpv6(normalized);
-  // Unexpected answer form — fail closed.
+  // Kept as an explicit fail-closed fallback if Node adds another family.
   return true;
 }
 
@@ -234,7 +235,7 @@ export async function validateWebhookUrlResolved(
   }
   if (answers.length === 0) return "url host could not be resolved";
   for (const answer of answers) {
-    if (isNonPublicAddress(answer.address)) {
+    if (isNonPublicAddress(answer.address, answer.family)) {
       return "url host must resolve to a public address";
     }
   }
