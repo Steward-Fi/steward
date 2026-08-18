@@ -32,7 +32,6 @@ export const DEFAULT_SECRET_ROUTE_HOSTS = [
   "slack.com",
   "gmail.googleapis.com",
   "www.googleapis.com",
-  "*.amazonaws.com",
 ] as const;
 
 /**
@@ -306,7 +305,14 @@ export function validateSecretRouteConfig(
     ) {
       return "hostPattern must not target localhost, private, or internal hosts";
     }
-    if (!configuredSecretRouteHosts().some((allowed) => hostAllowedByEntry(hostPattern, allowed))) {
+    const isBoundAwsSigV4Host =
+      strategy === "sigv4" &&
+      typeof input.injectionConfig?.region === "string" &&
+      hostPattern === `ec2.${input.injectionConfig.region}.amazonaws.com`;
+    if (
+      !isBoundAwsSigV4Host &&
+      !configuredSecretRouteHosts().some((allowed) => hostAllowedByEntry(hostPattern, allowed))
+    ) {
       return "hostPattern is not in the secret route allowlist";
     }
   }

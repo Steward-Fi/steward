@@ -34,6 +34,19 @@ describe("validateSecretRouteConfig — core rules", () => {
       injectionConfig: { service: "ec2", region: "us-west-2" },
     };
     expect(validateSecretRouteConfig(sigv4)).toBeNull();
+    expect(
+      validateSecretRouteConfig({
+        agentId: "agent-1",
+        hostPattern: "attacker.execute-api.us-west-2.amazonaws.com",
+        pathPattern: "/",
+        method: "POST",
+        injectAs: "header",
+        injectKey: "authorization",
+        injectionStrategy: "header",
+        injectionConfig: {},
+      }),
+    ).toContain("not in the secret route allowlist");
+    expect(DEFAULT_SECRET_ROUTE_HOSTS).not.toContain("*.amazonaws.com");
     expect(validateSecretRouteConfig({ ...sigv4, hostPattern: "*.amazonaws.com" })).toContain(
       "must be ec2.us-west-2.amazonaws.com",
     );

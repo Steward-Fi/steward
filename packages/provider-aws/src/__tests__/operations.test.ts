@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { CanonError, computeAwsActionDigest, serializeAwsEc2QueryBody } from "@stwd/shared";
+import {
+  CanonError,
+  computeAwsActionDigest,
+  computeProviderPolicyInputDigest,
+  jcsStringify,
+  serializeAwsEc2QueryBody,
+} from "@stwd/shared";
 import { buildAwsAction } from "../operations";
 
 describe("AWS governed operation adapter", () => {
@@ -43,6 +49,24 @@ describe("AWS governed operation adapter", () => {
     expect(serializeAwsEc2QueryBody(result.action)).toBe(
       "Action=StopInstances&DryRun=false&Force=true&InstanceId.1=i-12345678&Version=2016-11-15",
     );
+  });
+
+  test("StopInstances omits absent optional switches from strict policy and summary JSON", () => {
+    const result = buildAwsAction("aws.ec2.StopInstances", {
+      region: "us-west-2",
+      instanceIds: ["i-12345678"],
+    });
+    expect(result.policyArgs).toEqual({
+      region: "us-west-2",
+      instanceIds: ["i-12345678"],
+    });
+    expect(result.safeSummary).toEqual({
+      operation: "aws.ec2.StopInstances",
+      region: "us-west-2",
+      instanceIds: ["i-12345678"],
+    });
+    expect(() => computeProviderPolicyInputDigest(result.policyArgs)).not.toThrow();
+    expect(() => jcsStringify(result.safeSummary)).not.toThrow();
   });
 
   test("rejects unknown fields, duplicate ids, traversal-like ids, and invalid regions", () => {

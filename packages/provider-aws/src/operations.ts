@@ -105,12 +105,17 @@ export function buildAwsAction(operationKey: AwsOperationKey, raw: unknown): Aws
     if (force !== undefined) body.Force = force;
     if (hibernate !== undefined) body.Hibernate = hibernate;
     if (dryRun !== undefined) body.DryRun = dryRun;
+    const optionalArgs = {
+      ...(force !== undefined ? { force } : {}),
+      ...(hibernate !== undefined ? { hibernate } : {}),
+      ...(dryRun !== undefined ? { dryRun } : {}),
+    };
     return {
       operationKey,
       method: "POST",
       action: action(region, "StopInstances", body),
-      safeSummary: { operation: operationKey, region, instanceIds: ids, force, hibernate, dryRun },
-      policyArgs: { region, instanceIds: ids, force, hibernate, dryRun },
+      safeSummary: { operation: operationKey, region, instanceIds: ids, ...optionalArgs },
+      policyArgs: { region, instanceIds: ids, ...optionalArgs },
     };
   }
   throw new CanonError("CANON_PROFILE_UNSUPPORTED", `unknown operation '${String(operationKey)}'`);

@@ -76,7 +76,7 @@ describe("AWS provider authority registration", () => {
     headerRouteId = (
       await vault.createRoute(TENANT, secret.id, {
         agentId: AGENT,
-        hostPattern: "ec2.us-west-2.amazonaws.com",
+        hostPattern: "api.openai.com",
         pathPattern: "/",
         method: "GET",
         injectAs: "header",
