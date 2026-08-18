@@ -44,6 +44,12 @@ class StewardClientConfig:
     request_signing_secret: str | None = None
     request_signing_key_id: str | None = None
     timeout: float = 30.0
+    # WARNING: a custom transport replaces the default opener and its
+    # _StewardRedirectHandler, which strips credential headers on cross-host /
+    # HTTPS-downgrade redirects (SEC-125). A transport that follows redirects
+    # without re-applying that stripping silently re-enables credential
+    # exfiltration via open redirects — drop the Authorization / X-Steward-*
+    # headers on any host change or downgrade.
     transport: Transport | None = None
     # Appended to preserve the positional argument order of the published
     # config constructor. Permit plaintext non-loopback HTTP with a warning.

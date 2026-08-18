@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assertRedisUrlTls } from "@stwd/redis";
 import { Redis } from "ioredis";
 
 export const WEBHOOK_DELIVERY_REPLAY_TTL_MS = 10 * 60 * 1000;
@@ -182,6 +183,10 @@ export function createUpstashReplaySetClient(
 
 function defaultRedisFactory(kind: "redis" | "upstash", env: NodeJS.ProcessEnv): RedisSetNxPx {
   if (kind === "redis") {
+    // SEC-032: replay-protection state is enforcement data — route through the
+    // shared TLS assertion so production cannot run this store over cleartext
+    // redis:// to a remote host without the explicit insecure override.
+    assertRedisUrlTls(env.REDIS_URL as string, env);
     const client = new Redis(env.REDIS_URL as string, {
       enableReadyCheck: true,
       maxRetriesPerRequest: 3,

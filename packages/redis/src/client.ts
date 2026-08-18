@@ -17,7 +17,11 @@
  *               URL must use rediss:// (TLS) unless it points at localhost or
  *               STEWARD_ALLOW_INSECURE_REDIS=true is set (assertRedisUrlTls).
  *   - upstash : KV_REST_API_URL + KV_REST_API_TOKEN
- *               (or UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN)
+ *               (or UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN).
+ *               In production the REST URL must be https:// — the REST token
+ *               rides every request, so http:// exposes it cleartext — unless
+ *               it targets localhost or STEWARD_ALLOW_INSECURE_REDIS=true is
+ *               set (assertUpstashRestUrlTls).
  */
 
 import { Redis as UpstashRedis } from "@upstash/redis";
@@ -38,10 +42,10 @@ let shutdownRegistered = false;
  * deployments (logs a loud warning), matching the STEWARD_ALLOW_INSECURE_DB
  * posture in @stwd/db.
  */
-export function assertRedisUrlTls(url: string): void {
-  if (process.env.NODE_ENV !== "production") return;
+export function assertRedisUrlTls(url: string, env: NodeJS.ProcessEnv = process.env): void {
+  if (env.NODE_ENV !== "production") return;
 
-  const allowInsecure = process.env.STEWARD_ALLOW_INSECURE_REDIS === "true";
+  const allowInsecure = env.STEWARD_ALLOW_INSECURE_REDIS === "true";
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -74,6 +78,52 @@ export function assertRedisUrlTls(url: string): void {
 
   throw new Error(
     "REDIS_URL must use rediss:// (TLS) in production. " +
+      "Set STEWARD_ALLOW_INSECURE_REDIS=true to override for private-network deployments.",
+  );
+}
+
+/**
+ * SEC-032, upstash path: the Upstash REST token authenticates every request,
+ * so a cleartext http:// endpoint exposes it (and lets a network-positioned
+ * attacker read/tamper with spend-limit, rate-limit, and auth KV state) even
+ * though the ioredis path is TLS-asserted. In production require https://
+ * unless the endpoint is loopback; STEWARD_ALLOW_INSECURE_REDIS=true overrides
+ * (loud warning), matching assertRedisUrlTls.
+ */
+export function assertUpstashRestUrlTls(url: string, env: NodeJS.ProcessEnv = process.env): void {
+  const allowInsecure = env.STEWARD_ALLOW_INSECURE_REDIS === "true";
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(
+      "KV_REST_API_URL must be a valid URL so TLS settings can be verified in production",
+    );
+  }
+
+  if (parsed.protocol !== "http:") {
+    if (parsed.protocol !== "https:") {
+      throw new Error("KV_REST_API_URL must use the http:// or https:// scheme");
+    }
+    return;
+  }
+
+  if (env.NODE_ENV !== "production") return;
+  const host = parsed.hostname.toLowerCase();
+  // URL.hostname keeps the brackets on IPv6 literals ([::1]).
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]") return;
+
+  if (allowInsecure) {
+    console.warn(
+      "[steward:redis] WARNING: STEWARD_ALLOW_INSECURE_REDIS=true — Upstash REST URL is cleartext http://. " +
+        "The REST token crosses the network unencrypted. This is only safe on a private network. " +
+        "SOC2 CC6.7 requires encryption in transit.",
+    );
+    return;
+  }
+
+  throw new Error(
+    "KV_REST_API_URL must use https:// in production — the Upstash REST token would otherwise cross the network in cleartext. " +
       "Set STEWARD_ALLOW_INSECURE_REDIS=true to override for private-network deployments.",
   );
 }
@@ -132,6 +182,10 @@ function buildUpstash(): IoredisLike {
         "(or UPSTASH_REDIS_REST_URL/UPSTASH_REDIS_REST_TOKEN) to be set",
     );
   }
+
+  // SEC-032: same TLS posture as the ioredis path — the REST token rides every
+  // request, so a cleartext http:// endpoint in production is fail-closed.
+  assertUpstashRestUrlTls(url);
 
   const upstash = new UpstashRedis({ url, token });
   console.log("[steward:redis] using upstash REST adapter");
