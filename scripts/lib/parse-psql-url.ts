@@ -15,22 +15,49 @@ if (!raw || !passwordFile) {
   throw new Error("DATABASE_URL and STEWARD_PSQL_PASSWORD_FILE are required");
 }
 
-const url = new URL(raw);
-if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
+const schemeMatch = /^(postgres(?:ql)?):\/\//.exec(raw);
+if (!schemeMatch) {
   throw new Error("DATABASE_URL must use postgres:// or postgresql://");
 }
 
-if (url.hash) throw new Error("DATABASE_URL must not contain a fragment");
+if (/[\0\r\n]/.test(raw)) {
+  throw new Error("DATABASE_URL contains an unsupported control character");
+}
+if (raw.includes("#")) throw new Error("DATABASE_URL must not contain a fragment");
 
-let password = decodeURIComponent(url.password);
-url.password = "";
+const schemeEnd = schemeMatch[0].length;
+const rawQueryStart = raw.indexOf("?", schemeEnd);
+const hierarchyEnd = rawQueryStart === -1 ? raw.length : rawQueryStart;
+const hierarchy = raw.slice(0, hierarchyEnd);
+const authorityEndCandidate = hierarchy.indexOf("/", schemeEnd);
+const authorityEnd = authorityEndCandidate === -1 ? hierarchy.length : authorityEndCandidate;
+const authority = hierarchy.slice(schemeEnd, authorityEnd);
+
+// Do not feed the URI through WHATWG URL. Valid libpq URIs include multi-host
+// authorities and percent-encoded Unix-socket hosts, both of which WHATWG URL
+// rejects or normalizes. Instead, remove only the userinfo password and retain
+// every other byte for libpq itself to parse.
+const at = authority.indexOf("@");
+if (at !== authority.lastIndexOf("@")) {
+  throw new Error("DATABASE_URL contains ambiguous user information");
+}
+
+let password = "";
+let redactedAuthority = authority;
+if (at !== -1) {
+  const userInfo = authority.slice(0, at);
+  const passwordSeparator = userInfo.indexOf(":");
+  if (passwordSeparator !== -1) {
+    password = decodeURIComponent(userInfo.slice(passwordSeparator + 1));
+    redactedAuthority = `${userInfo.slice(0, passwordSeparator)}@${authority.slice(at + 1)}`;
+  }
+}
 
 // libpq accepts connection keywords in the URI query string. A query password
 // takes precedence over userinfo because it is parsed later by libpq. Preserve
 // every other query token byte-for-byte: WHATWG URLSearchParams would serialize
 // `%20` as `+`, but libpq URI parsing does not use HTML form-url-encoding and
 // may interpret that as a literal plus.
-const rawQueryStart = raw.indexOf("?");
 const rawQuery = rawQueryStart === -1 ? "" : raw.slice(rawQueryStart + 1);
 const retainedQueryParts: string[] = [];
 const queryPasswords: string[] = [];
@@ -58,7 +85,6 @@ if (/[\0\r\n]/.test(password)) {
 }
 
 writeFileSync(passwordFile, password, { mode: 0o600 });
-url.search = "";
-url.hash = "";
 const retainedQuery = retainedQueryParts.join("&");
-process.stdout.write(`${url.toString()}${retainedQuery ? `?${retainedQuery}` : ""}`);
+const redactedHierarchy = `${raw.slice(0, schemeEnd)}${redactedAuthority}${hierarchy.slice(authorityEnd)}`;
+process.stdout.write(`${redactedHierarchy}${retainedQuery ? `?${retainedQuery}` : ""}`);

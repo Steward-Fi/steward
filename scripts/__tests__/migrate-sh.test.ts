@@ -84,6 +84,24 @@ describe.serial("SEC-050 scripts/migrate.sh keeps the DB password out of psql ar
     expect(env).toBe("PGPASSWORD=a+b");
   });
 
+  test("preserves valid libpq multi-host authorities", () => {
+    const { argv, env } = runMigrate(
+      "postgresql://steward:multi%40secret@db-a.example:5432,db-b.example:5433/steward?target_session_attrs=read-write",
+    );
+    expect(argv).toContain(
+      "postgresql://steward@db-a.example:5432,db-b.example:5433/steward?target_session_attrs=read-write",
+    );
+    expect(env).toBe("PGPASSWORD=multi@secret");
+  });
+
+  test("preserves valid libpq percent-encoded Unix-socket hosts", () => {
+    const { argv, env } = runMigrate(
+      "postgresql://steward:socket-secret@%2Fvar%2Frun%2Fpostgresql/steward",
+    );
+    expect(argv).toContain("postgresql://steward@%2Fvar%2Frun%2Fpostgresql/steward");
+    expect(env).toBe("PGPASSWORD=socket-secret");
+  });
+
   test("query password takes precedence and neither credential reaches argv", () => {
     const { argv, env } = runMigrate(
       "postgresql://steward:userinfo-secret@db.example/steward?password=query-secret",
