@@ -95,7 +95,7 @@ describe("deriveActualFill", () => {
   test("BUY: takingAmount = shares, price = making/taking", () => {
     const r = deriveActualFill(
       "buy",
-      { makingAmount: "10", takingAmount: "20" },
+      { makingAmount: "10.0", takingAmount: "20.0" },
       // Order size context: a 20-share buy (10 USDC at 0.5). The fill can never
       // exceed the signed size, so 20 reads as human units.
       { amount: 20, price: 0.5 },
@@ -107,7 +107,7 @@ describe("deriveActualFill", () => {
   test("SELL: makingAmount = shares, price = taking/making", () => {
     const r = deriveActualFill(
       "sell",
-      { makingAmount: "20", takingAmount: "12" },
+      { makingAmount: "20.0", takingAmount: "12.0" },
       { amount: 20, price: 0.6 },
     );
     expect(r.actualAmount).toBe(20);
@@ -167,18 +167,18 @@ describe("deriveActualFill", () => {
     expect(r).toEqual({ actualAmount: 7, actualPrice: 0.42 });
   });
 
-  test("SEC-187: a genuine >=1M-share fill in human units is NOT shrunk by the magnitude heuristic", () => {
+  test("SEC-187: a genuine >=1M-share decimal-unit fill is not shrunk", () => {
     // 2,000,000-share order filled in full, reported in human units.
     const r = deriveActualFill(
       "buy",
-      { makingAmount: "1000000", takingAmount: "2000000" },
+      { makingAmount: "1000000.0", takingAmount: "2000000.0" },
       { amount: 2_000_000, price: 0.5 },
     );
     expect(r.actualAmount).toBe(2_000_000); // NOT 2
     expect(r.actualPrice).toBeCloseTo(0.5, 10);
   });
 
-  test("SEC-187: a sub-1e6 base-unit fill is scaled down via order-size context", () => {
+  test("SEC-187: a sub-1e6 integer fixed-math fill is scaled down", () => {
     // 0.5-share fill on a 1-share order, reported as 6-decimal base units —
     // below the old magnitude threshold yet still base units.
     const r = deriveActualFill(
@@ -187,6 +187,19 @@ describe("deriveActualFill", () => {
       { amount: 1, price: 0.5 },
     );
     expect(r.actualAmount).toBe(0.5); // NOT 500000
+    expect(r.actualPrice).toBeCloseTo(0.5, 10);
+  });
+
+  test("SEC-187: a sub-order-size fixed-math fill on a million-share order is still scaled", () => {
+    // Magnitude/order-size inference misclassified this as 500,000 human
+    // shares because it fits inside the signed order. Integer response strings
+    // are authoritatively fixed-math, so this is a 0.5-share fill.
+    const r = deriveActualFill(
+      "buy",
+      { makingAmount: "250000", takingAmount: "500000" },
+      { amount: 1_000_000, price: 0.5 },
+    );
+    expect(r.actualAmount).toBe(0.5);
     expect(r.actualPrice).toBeCloseTo(0.5, 10);
   });
 });

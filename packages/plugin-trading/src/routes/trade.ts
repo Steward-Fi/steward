@@ -345,15 +345,33 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     body: SubmitOrderBody,
   ): Promise<{
     conflict?: boolean;
+    pending?: boolean;
     response?: TradeIdempotencyResponse;
     store?: (response: TradeIdempotencyResponse) => Promise<void>;
+    claim?: () => Promise<{
+      conflict?: boolean;
+      pending?: boolean;
+      response?: TradeIdempotencyResponse;
+    }>;
   }> {
-    const check = await hlIdempotencyStore.check(
-      `${tenantId}:${agentId}`,
-      key,
-      hashBody({ ...body, idempotencyKey: undefined }),
-    );
-    return { conflict: check.conflict, response: check.record, store: check.store };
+    const scope = `${tenantId}:${agentId}`;
+    const bodyHash = hashBody({ ...body, idempotencyKey: undefined });
+    const check = await hlIdempotencyStore.check(scope, key, bodyHash);
+    const result: Awaited<ReturnType<typeof getIdempotency>> = {
+      conflict: check.conflict,
+      pending: check.pending,
+      response: check.record,
+    };
+    result.claim = async () => {
+      const claim = await hlIdempotencyStore.reserve(scope, key, bodyHash);
+      result.store = claim.store;
+      return {
+        conflict: claim.conflict,
+        pending: claim.pending,
+        response: claim.record,
+      };
+    };
+    return result;
   }
 
   async function resolvePolicyLimitPx(
@@ -445,6 +463,34 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       c.header(name, value);
     }
     return c.json(envelope.body, envelope.status);
+  }
+
+  function tradePendingResponse(c: Context<{ Variables: AppVariables }>) {
+    c.header("Retry-After", "1");
+    return c.json<ApiResponse>({ ok: false, error: "Idempotency key is already processing" }, 409);
+  }
+
+  async function claimTradeIdempotency(
+    c: Context<{ Variables: AppVariables }>,
+    idempotency: {
+      claim?: () => Promise<{
+        conflict?: boolean;
+        pending?: boolean;
+        response?: TradeIdempotencyResponse;
+      }>;
+    },
+  ): Promise<Response | null> {
+    const claim = await idempotency.claim?.();
+    if (!claim) return null;
+    if (claim.conflict) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency key reused with a different body" },
+        409,
+      );
+    }
+    if (claim.response) return tradeReplayResponse(c, claim.response);
+    if (claim.pending) return tradePendingResponse(c);
+    return null;
   }
 
   async function completeTradeIdempotencyBestEffort(
@@ -919,6 +965,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (idempotency.response) {
       return tradeReplayResponse(c, idempotency.response);
     }
+    if (idempotency.pending) return tradePendingResponse(c);
 
     const session = await getSessionManager().getActive(tenantId, body.sessionId);
     if (!session || session.agentId !== agentId || session.venue !== "hyperliquid") {
@@ -1048,6 +1095,13 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         policyLimitPx,
       );
     }
+
+    // Last safe boundary before spend reservation, leverage mutation, signing,
+    // and venue submission. SET NX makes concurrent replicas mutually
+    // exclusive; a crash leaves a durable processing marker that suppresses
+    // all retries for the idempotency window.
+    const claimResponse = await claimTradeIdempotency(c, idempotency);
+    if (claimResponse) return claimResponse;
 
     const walletAddress = session.walletId;
     const manager = getSessionManager();
@@ -1293,15 +1347,33 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     body: PmSubmitOrderBody,
   ): Promise<{
     conflict?: boolean;
+    pending?: boolean;
     response?: TradeIdempotencyResponse;
     store?: (response: TradeIdempotencyResponse) => Promise<void>;
+    claim?: () => Promise<{
+      conflict?: boolean;
+      pending?: boolean;
+      response?: TradeIdempotencyResponse;
+    }>;
   }> {
-    const check = await pmIdempotencyStore.check(
-      `${tenantId}:${agentId}`,
-      key,
-      hashBody({ ...body, idempotencyKey: undefined }),
-    );
-    return { conflict: check.conflict, response: check.record, store: check.store };
+    const scope = `${tenantId}:${agentId}`;
+    const bodyHash = hashBody({ ...body, idempotencyKey: undefined });
+    const check = await pmIdempotencyStore.check(scope, key, bodyHash);
+    const result: Awaited<ReturnType<typeof getPmIdempotency>> = {
+      conflict: check.conflict,
+      pending: check.pending,
+      response: check.record,
+    };
+    result.claim = async () => {
+      const claim = await pmIdempotencyStore.reserve(scope, key, bodyHash);
+      result.store = claim.store;
+      return {
+        conflict: claim.conflict,
+        pending: claim.pending,
+        response: claim.record,
+      };
+    };
+    return result;
   }
 
   async function enforcePolymarketOrderRateLimit(
@@ -1399,11 +1471,15 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     return key;
   }
 
-  function encryptPmCredsCacheValue(plaintext: string): string | null {
+  function encryptPmCredsCacheValue(plaintext: string, cacheKey: string): string | null {
     const key = pmCredsCacheEncryptionKey();
     if (!key) return null;
     const iv = randomBytes(12);
     const cipher = createCipheriv("aes-256-gcm", key, iv);
+    // Bind the ciphertext to its tenant/agent/wallet/endpoint cache key. A
+    // Redis reader-writer can copy opaque bytes but cannot transplant one
+    // agent's CLOB authority into another agent's cache slot.
+    cipher.setAAD(Buffer.from(cacheKey, "utf8"));
     let ciphertext = cipher.update(plaintext, "utf8", "hex");
     ciphertext += cipher.final("hex");
     return `${PM_CREDS_CACHE_PREFIX}${JSON.stringify({
@@ -1416,7 +1492,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   // Returns null for anything that is not a valid envelope for THIS key —
   // including legacy plaintext entries — so the caller treats it as a cache
   // miss, re-derives, and overwrites with an encrypted value.
-  function decryptPmCredsCacheValue(stored: string): string | null {
+  function decryptPmCredsCacheValue(stored: string, cacheKey: string): string | null {
     if (!stored.startsWith(PM_CREDS_CACHE_PREFIX)) return null;
     const key = pmCredsCacheEncryptionKey();
     if (!key) return null;
@@ -1427,6 +1503,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         tag: string;
       };
       const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(payload.iv, "hex"));
+      decipher.setAAD(Buffer.from(cacheKey, "utf8"));
       decipher.setAuthTag(Buffer.from(payload.tag, "hex"));
       let plaintext = decipher.update(payload.ciphertext, "hex", "utf8");
       plaintext += decipher.final("utf8");
@@ -1539,7 +1616,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (redis) {
       try {
         const cached = await redis.get(cacheKey);
-        const cachedPlaintext = cached ? decryptPmCredsCacheValue(cached) : null;
+        const cachedPlaintext = cached ? decryptPmCredsCacheValue(cached, cacheKey) : null;
         if (cachedPlaintext) {
           const parsed = clobApiCredentialsSchema.safeParse(JSON.parse(cachedPlaintext));
           if (parsed.success) {
@@ -1569,7 +1646,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (redis) {
       // Fail closed: without cache encryption key material, skip the write and
       // re-derive per order rather than ever storing the creds in plaintext.
-      const cacheValue = encryptPmCredsCacheValue(JSON.stringify(apiCredentials));
+      const cacheValue = encryptPmCredsCacheValue(JSON.stringify(apiCredentials), cacheKey);
       if (cacheValue) {
         await redis.setex(cacheKey, PM_CREDS_CACHE_TTL_SECONDS, cacheValue).catch(() => undefined);
       }
@@ -1683,6 +1760,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (idempotency.response) {
       return tradeReplayResponse(c, idempotency.response);
     }
+    if (idempotency.pending) return tradePendingResponse(c);
 
     // Validate price + amount as positive finite numbers up front (the policy gate
     // needs the notional; the adapter re-validates the (0,1) price range).
@@ -1728,6 +1806,8 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           status: 400,
           body: { code: "policy-violation", reason },
         };
+        const claimResponse = await claimTradeIdempotency(c, idempotency);
+        if (claimResponse) return claimResponse;
         await idempotency.store?.(envelope);
         return c.json(envelope.body, envelope.status);
       }
@@ -1788,6 +1868,8 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         status: 400,
         body: { code: "policy-violation", reason: check.reason },
       };
+      const claimResponse = await claimTradeIdempotency(c, idempotency);
+      if (claimResponse) return claimResponse;
       await idempotency.store?.(envelope);
       return c.json(envelope.body, envelope.status);
     }
@@ -1858,6 +1940,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       ...(body.tickSize ? { tickSize: body.tickSize } : {}),
       ...(typeof body.negRisk === "boolean" ? { negRisk: body.negRisk } : {}),
     };
+
+    // Last safe boundary before reserving session spend, signing, and posting
+    // the CLOB order. The durable processing claim suppresses concurrent and
+    // post-crash retries even when completion persistence later fails.
+    const claimResponse = await claimTradeIdempotency(c, idempotency);
+    if (claimResponse) return claimResponse;
 
     const manager = getSessionManager();
     // Fence reserve→submit against concurrent revocation (mirrors HL's

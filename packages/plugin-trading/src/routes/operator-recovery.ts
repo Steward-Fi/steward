@@ -230,20 +230,60 @@ export function createOperatorRecoveryRoutes(
     body: unknown,
   ): Promise<{
     conflict?: boolean;
+    pending?: boolean;
     entry?: OperatorIdempotencyRecord;
     store?: (response: unknown) => Promise<void>;
     storeFailure?: (errorBody: unknown) => Promise<void>;
+    claim?: () => Promise<{
+      conflict?: boolean;
+      pending?: boolean;
+      entry?: OperatorIdempotencyRecord;
+    }>;
   }> {
-    const check = await operatorIdempotencyStore.check(scope, key, JSON.stringify(body));
-    if (check.conflict || check.record) {
-      return { conflict: check.conflict, entry: check.record };
-    }
-    if (!check.store) return {};
-    const persist = check.store;
-    return {
-      store: (response: unknown) => persist({ status: 200, body: { ok: true, data: response } }),
-      storeFailure: (errorBody: unknown) => persist({ status: 502, body: errorBody }),
+    const bodyHash = JSON.stringify(body);
+    const check = await operatorIdempotencyStore.check(scope, key, bodyHash);
+    const result: Awaited<ReturnType<typeof getOperatorIdempotency>> = {
+      conflict: check.conflict,
+      pending: check.pending,
+      entry: check.record,
     };
+    result.claim = async () => {
+      const claim = await operatorIdempotencyStore.reserve(scope, key, bodyHash);
+      if (claim.store) {
+        const persist = claim.store;
+        result.store = (response: unknown) =>
+          persist({ status: 200, body: { ok: true, data: response } });
+        result.storeFailure = (errorBody: unknown) => persist({ status: 502, body: errorBody });
+      }
+      return {
+        conflict: claim.conflict,
+        pending: claim.pending,
+        entry: claim.record,
+      };
+    };
+    return result;
+  }
+
+  function operatorPendingResponse(c: Context<{ Variables: AppVariables }>) {
+    c.header("Retry-After", "1");
+    return c.json<ApiResponse>({ ok: false, error: "Idempotency key is already processing" }, 409);
+  }
+
+  async function claimOperatorIdempotency(
+    c: Context<{ Variables: AppVariables }>,
+    idempotency: Awaited<ReturnType<typeof getOperatorIdempotency>>,
+  ): Promise<Response | null> {
+    const claim = await idempotency.claim?.();
+    if (!claim) return null;
+    if (claim.conflict) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency key reused with a different body" },
+        409,
+      );
+    }
+    if (claim.entry) return c.json(claim.entry.body, claim.entry.status);
+    if (claim.pending) return operatorPendingResponse(c);
+    return null;
   }
 
   // ── Operator transfer rate limit (withdraw + usd-send) ────────────────────────
@@ -578,11 +618,14 @@ export function createOperatorRecoveryRoutes(
     if (idempotency.entry) {
       return c.json(idempotency.entry.body, idempotency.entry.status);
     }
+    if (idempotency.pending) return operatorPendingResponse(c);
 
     // Build the ERC-20 transfer(bridge, amount) calldata and have the vault sign +
     // broadcast it FROM the agent's venue wallet on Arbitrum. The raw key never
     // leaves the vault. venue is set so the vault selects the hyperliquid-scoped key.
     const data = encodeErc20Transfer(HYPERLIQUID_ARBITRUM_BRIDGE, amountBaseUnits);
+    const claimResponse = await claimOperatorIdempotency(c, idempotency);
+    if (claimResponse) return claimResponse;
     let txHash: string;
     try {
       txHash = await vault.signTransaction({
@@ -677,6 +720,7 @@ export function createOperatorRecoveryRoutes(
     if (idempotency.entry) {
       return c.json(idempotency.entry.body, idempotency.entry.status);
     }
+    if (idempotency.pending) return operatorPendingResponse(c);
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -701,6 +745,8 @@ export function createOperatorRecoveryRoutes(
       builderPerp,
     });
 
+    const claimResponse = await claimOperatorIdempotency(c, idempotency);
+    if (claimResponse) return claimResponse;
     let result: unknown;
     try {
       result = await adapter.updateLeverage({ coin, leverage: effectiveLeverage, isCross });
@@ -816,6 +862,7 @@ export function createOperatorRecoveryRoutes(
     if (idempotency.entry) {
       return c.json(idempotency.entry.body, idempotency.entry.status);
     }
+    if (idempotency.pending) return operatorPendingResponse(c);
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -838,6 +885,8 @@ export function createOperatorRecoveryRoutes(
       amountBaseUnits: amountBaseUnits.toString(),
     });
 
+    const claimResponse = await claimOperatorIdempotency(c, idempotency);
+    if (claimResponse) return claimResponse;
     let result: unknown;
     try {
       result = await adapter.addIsolatedMargin({ coin, amountUsdc: body.amountUsdc });
@@ -950,6 +999,7 @@ export function createOperatorRecoveryRoutes(
     if (idempotency.entry) {
       return c.json(idempotency.entry.body, idempotency.entry.status);
     }
+    if (idempotency.pending) return operatorPendingResponse(c);
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -993,6 +1043,8 @@ export function createOperatorRecoveryRoutes(
       amount,
     });
 
+    const claimResponse = await claimOperatorIdempotency(c, idempotency);
+    if (claimResponse) return claimResponse;
     let result: unknown;
     try {
       result = await adapter.usdSend({ destination, amount });
@@ -1071,6 +1123,7 @@ export function createOperatorRecoveryRoutes(
     if (idempotency.entry) {
       return c.json(idempotency.entry.body, idempotency.entry.status);
     }
+    if (idempotency.pending) return operatorPendingResponse(c);
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -1092,6 +1145,8 @@ export function createOperatorRecoveryRoutes(
       maxFeeRate,
     });
 
+    const claimResponse = await claimOperatorIdempotency(c, idempotency);
+    if (claimResponse) return claimResponse;
     let result: unknown;
     try {
       result = await adapter.approveBuilderFee({ builder, maxFeeRate });
@@ -1194,6 +1249,7 @@ export function createOperatorRecoveryRoutes(
     if (idempotency.entry) {
       return c.json(idempotency.entry.body, idempotency.entry.status);
     }
+    if (idempotency.pending) return operatorPendingResponse(c);
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -1241,6 +1297,8 @@ export function createOperatorRecoveryRoutes(
       return c.json<ApiResponse>({ ok: false, error: "Failed to sign collateral transfer" }, 502);
     }
 
+    const claimResponse = await claimOperatorIdempotency(c, idempotency);
+    if (claimResponse) return claimResponse;
     let result: unknown;
     const action: unknown = signed.action;
     try {
@@ -1313,6 +1371,7 @@ export function createOperatorRecoveryRoutes(
     if (idempotency.entry) {
       return c.json(idempotency.entry.body, idempotency.entry.status);
     }
+    if (idempotency.pending) return operatorPendingResponse(c);
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -1327,6 +1386,8 @@ export function createOperatorRecoveryRoutes(
 
     const adapter = buildAdapter(tenantId, agentId, walletAddress);
 
+    const claimResponse = await claimOperatorIdempotency(c, idempotency);
+    if (claimResponse) return claimResponse;
     let results: Awaited<ReturnType<HyperliquidAdapter["closeAllPositions"]>>;
     try {
       results = await adapter.closeAllPositions();
@@ -1438,6 +1499,7 @@ export function createOperatorRecoveryRoutes(
     if (idempotency.entry) {
       return c.json(idempotency.entry.body, idempotency.entry.status);
     }
+    if (idempotency.pending) return operatorPendingResponse(c);
 
     // Resolve amount after the idempotency cache lookup, so a retry for a
     // previous full-balance withdraw returns the cached success before reading a
@@ -1527,6 +1589,8 @@ export function createOperatorRecoveryRoutes(
       return c.json<ApiResponse>({ ok: false, error: "Failed to sign withdraw" }, 502);
     }
 
+    const claimResponse = await claimOperatorIdempotency(c, idempotency);
+    if (claimResponse) return claimResponse;
     let result: unknown;
     try {
       result = await adapter.submitWithdraw(signedWithdraw);

@@ -471,8 +471,8 @@ describe("POST /v1/trade/polymarket/order", () => {
       orderId: "pm-http-guard",
       status: "matched",
       success: true,
-      makingAmount: "10",
-      takingAmount: "20",
+      makingAmount: "10.0",
+      takingAmount: "20.0",
       actualAmount: 20,
       actualPrice: 0.5,
     } as Awaited<ReturnType<PolymarketExecutionAdapter["submitSignedOrder"]>>);
@@ -516,8 +516,8 @@ describe("POST /v1/trade/polymarket/order", () => {
       orderId: "pm-ok-1",
       status: "matched",
       success: true,
-      makingAmount: "10",
-      takingAmount: "20",
+      makingAmount: "10.0",
+      takingAmount: "20.0",
       actualAmount: 20,
       actualPrice: 0.5,
     } as Awaited<ReturnType<PolymarketExecutionAdapter["submitSignedOrder"]>>);
@@ -712,8 +712,8 @@ describe("POST /v1/trade/polymarket/order", () => {
       orderId: "pm-eoa-1",
       status: "matched",
       success: true,
-      makingAmount: "10",
-      takingAmount: "20",
+      makingAmount: "10.0",
+      takingAmount: "20.0",
       actualAmount: 20,
       actualPrice: 0.5,
     } as Awaited<ReturnType<PolymarketExecutionAdapter["submitSignedOrder"]>>);

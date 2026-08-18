@@ -1,37 +1,12 @@
 /**
- * idempotency.ts — durable idempotency backing for the trade + operator routes
- * (SEC-043).
+ * Durable, claim-before-execute idempotency for fund-moving trading routes.
  *
- * Wave-2 bounded the process-local maps (1_000 entries + expired-sweep) and
- * stored ambiguous-outcome 502 envelopes, but the maps were still per-process:
- * a restart or a second replica silently lost dedup, so a retried
- * withdraw/order could double-execute a fund movement.
- *
- * This store keeps the wave-2 semantics and adds a Redis-backed record when a
- * client is available (production always has one — durable stores are asserted
- * at startup), keyed `idempotency:<namespace>:<scope>:<key>` with the same 24h
- * TTL. Without Redis it falls back to the bounded process-local map (dev /
- * single-replica), exactly like the routes' rate limiters.
- *
- * Semantics (unchanged from wave-2):
- *   - same key + same body      -> replay the stored outcome (no re-execution)
- *   - same key + DIFFERENT body -> conflict (the routes answer 409)
- *   - missing/expired           -> fresh; `store` records the final outcome
- *                                  (success OR ambiguous 502) so retries replay
- *
- * Failure posture:
- *   - a Redis error on CHECK fails CLOSED (throws): executing without the
- *     dedup record risks a double fund-movement; the caller's retry replays
- *     once Redis recovers.
- *   - a Redis error on STORE is logged and swallowed: the movement already
- *     executed, so the caller must still see the real outcome. A later retry
- *     may re-execute — the same accepted residual as a crash between venue
- *     execution and persistence.
- *
- * Known residual (pre-existing, unchanged): two requests with the same key
- * in-flight CONCURRENTLY can both pass the check before either stores. This
- * store closes the sequential-retry / restart / multi-replica gaps the audit
- * flagged; claim-before-execute hardening is separate work.
+ * A lookup is intentionally separate from `reserve()`: callers can replay a
+ * completed response before consulting mutable session/venue state, then do
+ * all safe validation and policy work before atomically claiming the key at
+ * the last pre-execution boundary. Once claimed, the processing marker stays
+ * for the full 24-hour window. A concurrent request, process restart, crash,
+ * or failed completion write therefore fails closed instead of re-executing.
  */
 
 import type { IoredisLike } from "@stwd/redis";
@@ -43,22 +18,44 @@ export interface IdempotencyRecord {
 
 export interface IdempotencyCheck<TRecord extends IdempotencyRecord> {
   conflict?: boolean;
+  pending?: boolean;
   record?: TRecord;
   store?: (record: TRecord) => Promise<void>;
 }
 
+type StoredEntry<TRecord extends IdempotencyRecord> =
+  | {
+      bodyHash: string;
+      state: "processing";
+      claimId: string;
+      claimedAt: number;
+    }
+  | {
+      bodyHash: string;
+      state: "completed";
+      record: TRecord;
+    };
+
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_MEMORY_ENTRIES = 1_000;
 
+// Complete only the processing record created by this claimant. A stale owner
+// must never overwrite a newer claim after its TTL has elapsed.
+const COMPLETE_IF_OWNER_LUA = `
+local current = redis.call("GET", KEYS[1])
+if current ~= ARGV[1] then
+  return 0
+end
+redis.call("SET", KEYS[1], ARGV[2], "PX", ARGV[3])
+return 1
+`;
+
 export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
-  private readonly memory = new Map<
-    string,
-    { bodyHash: string; record: TRecord; expiresAt: number }
-  >();
+  private readonly memory = new Map<string, { entry: StoredEntry<TRecord>; expiresAt: number }>();
 
   constructor(
     private readonly options: {
-      /** Key prefix segment, e.g. "trade" or "trade:operator". */
+      /** Key prefix segment, e.g. "trade:hl" or "trade:operator". */
       namespace: string;
       getRedisClient: () => IoredisLike | null;
     },
@@ -66,6 +63,10 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
 
   private redisKey(scope: string, key: string): string {
     return `idempotency:${this.options.namespace}:${scope}:${key}`;
+  }
+
+  private memoryKey(scope: string, key: string): string {
+    return `${scope}:${key}`;
   }
 
   private sweepMemory(now: number): void {
@@ -77,64 +78,166 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
     }
   }
 
-  /**
-   * Look up `key` within `scope`. `bodyHash` is the caller-computed canonical
-   * body fingerprint; a mismatch on an existing entry is a conflict.
-   */
+  private parseStored(raw: string): StoredEntry<TRecord> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error("Durable idempotency record is malformed");
+    }
+    if (!parsed || typeof parsed !== "object") {
+      throw new Error("Durable idempotency record is malformed");
+    }
+    const value = parsed as Record<string, unknown>;
+    if (typeof value.bodyHash !== "string") {
+      throw new Error("Durable idempotency record is malformed");
+    }
+    if (
+      value.state === "processing" &&
+      typeof value.claimId === "string" &&
+      typeof value.claimedAt === "number" &&
+      Number.isFinite(value.claimedAt)
+    ) {
+      return value as StoredEntry<TRecord>;
+    }
+    if (value.state === "completed" && value.record && typeof value.record === "object") {
+      const record = value.record as Record<string, unknown>;
+      if (typeof record.status === "number" && Object.hasOwn(record, "body")) {
+        return value as StoredEntry<TRecord>;
+      }
+    }
+    throw new Error("Durable idempotency record is malformed");
+  }
+
+  private resultForExisting(
+    entry: StoredEntry<TRecord>,
+    bodyHash: string,
+  ): IdempotencyCheck<TRecord> {
+    if (entry.bodyHash !== bodyHash) return { conflict: true };
+    if (entry.state === "processing") return { pending: true };
+    return { record: entry.record };
+  }
+
+  /** Read an existing claim/outcome without claiming an absent key. */
   async check(
     scope: string,
     key: string | undefined,
     bodyHash: string,
   ): Promise<IdempotencyCheck<TRecord>> {
     if (!key) return {};
-    const now = Date.now();
     const redis = this.options.getRedisClient();
     if (redis) {
-      // Fail CLOSED on a Redis error (see the module doc).
+      // Redis errors and malformed records both fail closed. Neither condition
+      // can prove that a prior movement did not occur.
       const raw = await redis.get(this.redisKey(scope, key));
-      if (raw !== null) {
-        let existing: { bodyHash?: unknown; record?: unknown } | null = null;
-        try {
-          existing = JSON.parse(raw) as { bodyHash?: unknown; record?: unknown };
-        } catch {
-          existing = null;
+      return raw === null ? {} : this.resultForExisting(this.parseStored(raw), bodyHash);
+    }
+
+    const now = Date.now();
+    const mapKey = this.memoryKey(scope, key);
+    const existing = this.memory.get(mapKey);
+    if (!existing) return {};
+    if (existing.expiresAt <= now) {
+      this.memory.delete(mapKey);
+      return {};
+    }
+    return this.resultForExisting(existing.entry, bodyHash);
+  }
+
+  /** Atomically claim an absent key immediately before an external side effect. */
+  async reserve(
+    scope: string,
+    key: string | undefined,
+    bodyHash: string,
+  ): Promise<IdempotencyCheck<TRecord>> {
+    if (!key) return {};
+    const now = Date.now();
+    const claim: StoredEntry<TRecord> = {
+      bodyHash,
+      state: "processing",
+      claimId: crypto.randomUUID(),
+      claimedAt: now,
+    };
+    const claimPayload = JSON.stringify(claim);
+    const redis = this.options.getRedisClient();
+    if (redis) {
+      const redisKey = this.redisKey(scope, key);
+      const reserved = await redis.set(redisKey, claimPayload, "PX", IDEMPOTENCY_TTL_MS, "NX");
+      if (!reserved) {
+        // SET NX and GET are separate operations. If the key expires between
+        // them, retry the atomic reservation once; otherwise absence is
+        // ambiguous and must fail closed.
+        const raw = await redis.get(redisKey);
+        if (raw === null) {
+          const retried = await redis.set(redisKey, claimPayload, "PX", IDEMPOTENCY_TTL_MS, "NX");
+          if (!retried) {
+            const raced = await redis.get(redisKey);
+            if (raced === null) throw new Error("Durable idempotency reservation is ambiguous");
+            return this.resultForExisting(this.parseStored(raced), bodyHash);
+          }
+        } else {
+          return this.resultForExisting(this.parseStored(raw), bodyHash);
         }
-        if (typeof existing?.bodyHash === "string" && existing.record) {
-          if (existing.bodyHash !== bodyHash) return { conflict: true };
-          return { record: existing.record as TRecord };
-        }
-        // An unparsable entry cannot vouch for a prior execution — treat as
-        // absent and let store() overwrite it below.
       }
+
       return {
         store: async (record) => {
-          const payload = JSON.stringify({ bodyHash, record });
-          await redis
-            .set(this.redisKey(scope, key), payload, "PX", IDEMPOTENCY_TTL_MS)
-            .catch((err) => {
-              // The movement already executed; losing the record means a later
-              // retry re-executes. Log loudly — nothing safer remains.
+          const completedPayload = JSON.stringify({
+            bodyHash,
+            state: "completed",
+            record,
+          } satisfies StoredEntry<TRecord>);
+          try {
+            const completed = await redis.eval(
+              COMPLETE_IF_OWNER_LUA,
+              1,
+              redisKey,
+              claimPayload,
+              completedPayload,
+              IDEMPOTENCY_TTL_MS,
+            );
+            if (Number(completed) !== 1) {
               console.error(
-                "[idempotency] failed to persist the outcome record; a retry may re-execute:",
-                err,
+                "[idempotency] outcome was not persisted because claim ownership changed; retries remain fail-closed",
               );
-            });
+            }
+          } catch (err) {
+            // The durable processing marker was written before execution and
+            // remains in place. Return the real movement outcome, but keep all
+            // retries fail-closed rather than risk a duplicate.
+            console.error(
+              "[idempotency] failed to complete the outcome record; retries remain fail-closed:",
+              err,
+            );
+          }
         },
       };
     }
 
-    // Process-local fallback (dev / single-replica): bounded + swept, mirroring
-    // the wave-2 maps.
-    const mapKey = `${scope}:${key}`;
+    // Single-process fallback. JavaScript executes this check-and-set without
+    // an await, so concurrent requests cannot both claim the same key.
+    const mapKey = this.memoryKey(scope, key);
     const existing = this.memory.get(mapKey);
     if (existing && existing.expiresAt > now) {
-      if (existing.bodyHash !== bodyHash) return { conflict: true };
-      return { record: existing.record };
+      return this.resultForExisting(existing.entry, bodyHash);
     }
+    if (existing) this.memory.delete(mapKey);
+    this.sweepMemory(now);
+    this.memory.set(mapKey, { entry: claim, expiresAt: now + IDEMPOTENCY_TTL_MS });
     return {
       store: async (record) => {
-        this.sweepMemory(now);
-        this.memory.set(mapKey, { bodyHash, record, expiresAt: now + IDEMPOTENCY_TTL_MS });
+        const current = this.memory.get(mapKey);
+        if (
+          !current ||
+          current.entry.state !== "processing" ||
+          current.entry.claimId !== claim.claimId
+        ) {
+          return;
+        }
+        this.memory.set(mapKey, {
+          entry: { bodyHash, state: "completed", record },
+          expiresAt: Date.now() + IDEMPOTENCY_TTL_MS,
+        });
       },
     };
   }

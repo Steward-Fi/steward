@@ -37,9 +37,16 @@ const fakeRedis = {
   get: async (key: string) => redisStore.get(key) ?? null,
   // IoredisLike.set — the durable idempotency store (SEC-043) writes through
   // this with a PX TTL; the creds cache itself uses setex below.
-  set: async (key: string, value: string, _mode?: "PX", _ttlMs?: number) => {
+  set: async (key: string, value: string, _mode?: "PX", _ttlMs?: number, condition?: "NX") => {
+    if (condition === "NX" && redisStore.has(key)) return null;
     redisStore.set(key, value);
     return "OK";
+  },
+  eval: async (_script: string, _numKeys: number, ...args: Array<string | number>) => {
+    const [key, expected, replacement] = args as [string, string, string, number];
+    if (redisStore.get(key) !== expected) return 0;
+    redisStore.set(key, replacement);
+    return 1;
   },
   setex: async (key: string, _ttlSeconds: number, value: string) => {
     redisStore.set(key, value);
@@ -255,12 +262,48 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
       expect(second.status).toBe(200);
       expect(authKeyRequests).toHaveLength(1);
 
-      // 3) A legacy PLAINTEXT entry is not trusted: it is treated as a cache
+      // 3) An opaque ciphertext copied into another agent's cache slot does
+      // not authenticate there. AAD binds the blob to the full cache key, so
+      // the second agent must derive its own credentials.
+      const secondIdentity = await seedTenantAgent();
+      const secondWallet = await ctx.vault.createWallet({
+        agentId: secondIdentity.agentId,
+        venue: "polymarket",
+        chainType: "evm",
+      });
+      const secondSessionId = await seedSession(
+        secondIdentity.tenantId,
+        secondIdentity.agentId,
+        secondWallet.address,
+      );
+      const secondCacheKey = `pm:clob-l2:${secondIdentity.tenantId}:${secondIdentity.agentId}:${secondWallet.address.toLowerCase()}:${encodeURIComponent("https://clob.e2e.invalid")}`;
+      redisStore.set(secondCacheKey, storedRaw);
+      const transplanted = await makeApp(
+        secondIdentity.tenantId,
+        secondIdentity.agentId,
+        createTradeRoutes(ctx),
+      ).request("/v1/trade/polymarket/order", {
+        method: "POST",
+        headers: { "content-type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({
+          sessionId: secondSessionId,
+          tokenId: TOKEN_ID,
+          side: "buy",
+          amount: 10,
+          price: 0.5,
+          tickSize: "0.01",
+          negRisk: true,
+        }),
+      });
+      expect(transplanted.status).toBe(200);
+      expect(authKeyRequests).toHaveLength(2);
+
+      // 4) A legacy PLAINTEXT entry is not trusted: it is treated as a cache
       // miss (re-derive) and rewritten encrypted.
       redisStore.set(pmKeys[0] as string, JSON.stringify(DERIVED_CREDS));
       const third = await postOrder();
       expect(third.status).toBe(200);
-      expect(authKeyRequests).toHaveLength(2);
+      expect(authKeyRequests).toHaveLength(3);
       const rewritten = redisStore.get(pmKeys[0] as string) as string;
       expect(rewritten.startsWith("stwd_pmclob_v1:")).toBe(true);
       expect(rewritten.includes(DERIVED_CREDS.secret)).toBe(false);
