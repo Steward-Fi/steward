@@ -23,11 +23,12 @@ export function assertSecureBaseUrl(baseUrl: string, allowInsecureBaseUrl?: bool
   } catch {
     throw new Error("baseUrl must be a valid absolute URL");
   }
+  if (url.username || url.password) throw new Error("baseUrl must not embed credentials");
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("baseUrl must use HTTPS or HTTP");
+    throw new Error("baseUrl must use HTTP(S)");
   }
-  if (url.username || url.password) {
-    throw new Error("baseUrl must not embed credentials");
+  if (url.search || url.hash) {
+    throw new Error("baseUrl must not contain a query or fragment");
   }
   if (url.protocol === "https:" || (url.protocol === "http:" && isLoopbackHostname(url.hostname))) {
     return;

@@ -40,7 +40,7 @@ export interface EncryptedKey {
  *                data encrypted before domain separation existed.
  * - "signing-vault" / "secret-vault" → independent roots.
  */
-export type KeyStoreDomain = "signing-vault" | "secret-vault";
+export type KeyStoreDomain = "signing-vault" | "secret-vault" | "credential-lease";
 
 export class KeyStore {
   private masterKey: Buffer;

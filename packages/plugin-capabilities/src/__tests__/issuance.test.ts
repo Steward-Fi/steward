@@ -11,7 +11,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   type CapabilityAuditEvent,
-  capabilityTokenScope,
   clampTtlSeconds,
   DEFAULT_ISSUE_TTL_SECONDS,
   issueCapability,
@@ -114,7 +113,7 @@ describe("issueCapability", () => {
     });
   });
 
-  test("token mode: mints a short-lived capability-scoped token", async () => {
+  test("token mode: refuses to substitute an internal JWT for an upstream credential", async () => {
     const { events, sink } = collectAudit();
     const res = await issueCapability({
       tenantId: "t1",
@@ -125,26 +124,18 @@ describe("issueCapability", () => {
       mintToken: fakeMinter,
       emitAudit: sink,
     });
-    expect(res.ok).toBe(true);
-    if (!res.ok || res.mode !== "token") throw new Error("expected token mode");
-    expect(res.token).toBe("tok.ttl=60");
-    expect(res.ttlSeconds).toBe(60);
-    expect(res.jti).toBe("jti-123");
-    // Least privilege (SEC-033): the token carries ONLY the capability scope.
-    // Stamping the broad `agent` scope would make it a general agent credential
-    // for the whole tenant surface.
-    expect(res.scopes).toEqual([capabilityTokenScope("github:app:org")]);
-    expect(res.scopes).not.toContain("agent");
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected deny");
+    expect(res.code).toBe("upstream_issuer_required");
     expect(events[0]).toMatchObject({
       action: "capability.issue",
       mode: "token",
-      decision: "allow",
-      jti: "jti-123",
-      ttlSeconds: 60,
+      decision: "deny",
+      reason: "upstream issuer required",
     });
   });
 
-  test("token mode: rejects out-of-range ttl with deny audit", async () => {
+  test("token mode: requires upstream issuer before considering ttl", async () => {
     const { events, sink } = collectAudit();
     const res = await issueCapability({
       tenantId: "t1",
@@ -157,8 +148,8 @@ describe("issueCapability", () => {
     });
     expect(res.ok).toBe(false);
     if (res.ok) throw new Error("expected deny");
-    expect(res.code).toBe("ttl_out_of_range");
-    expect(events[0]).toMatchObject({ decision: "deny", reason: "requested ttl out of range" });
+    expect(res.code).toBe("upstream_issuer_required");
+    expect(events[0]).toMatchObject({ decision: "deny", reason: "upstream issuer required" });
   });
 
   test("revocation: unresolved (no live grant) denies", async () => {
@@ -191,13 +182,17 @@ describe("issueCapability", () => {
       mintToken: fakeMinter,
       emitAudit: sink,
     });
-    expect(res.ok).toBe(true);
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected deny");
+    expect(res.code).toBe("upstream_issuer_required");
     expect(events[0].action).toBe("capability.renew");
   });
 
-  test("mint failure denies (mint_failed) and never leaks", async () => {
+  test("generic token path never calls an injected internal minter", async () => {
     const { events, sink } = collectAudit();
+    let called = false;
     const failingMinter: ShortLivedTokenMinter = async () => {
+      called = true;
       throw new Error("hsm offline");
     };
     const res = await issueCapability({
@@ -210,9 +205,10 @@ describe("issueCapability", () => {
     });
     expect(res.ok).toBe(false);
     if (res.ok) throw new Error("expected deny");
-    expect(res.code).toBe("mint_failed");
+    expect(res.code).toBe("upstream_issuer_required");
+    expect(called).toBe(false);
     expect(res.error).not.toContain("hsm");
-    expect(events[0]).toMatchObject({ decision: "deny", reason: "token mint failed" });
+    expect(events[0]).toMatchObject({ decision: "deny", reason: "upstream issuer required" });
   });
 
   test("audit sink failure never changes the decision", async () => {
@@ -226,6 +222,6 @@ describe("issueCapability", () => {
         throw new Error("audit pipeline down");
       },
     });
-    expect(res.ok).toBe(true);
+    expect(res.ok).toBe(false);
   });
 });

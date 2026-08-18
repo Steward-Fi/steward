@@ -36,6 +36,7 @@ import { createManifestRoutes } from "./manifest-routes";
 import { createAgentCapabilityRoutes, createCapabilityRoutes } from "./routes";
 
 export type { StewardAppContext } from "./context";
+export { GitHubAppInstallationTokenIssuer } from "./github-app-issuer";
 export { createInvokeRoutes } from "./invoke";
 export {
   type CapabilityAuditAction,
@@ -80,6 +81,10 @@ export type {
 export { capabilities, capabilityGrants, capabilityInvocations } from "./schema";
 export type { CapabilitySpec } from "./store";
 export { AgentNotFoundError, CapabilityStore, GrantExistsError, isExpired } from "./store";
+export {
+  type LeaseAuditedTransaction,
+  recoverAllInterruptedUpstreamCredentialLeases,
+} from "./upstream-leases";
 export {
   createCapabilitySchema,
   createGrantSchema,
@@ -201,8 +206,8 @@ export const capabilitiesPlugin: StewardApiPlugin = {
 };
 
 /** the invoke subpath predicate: `/capabilities/<name>/invoke` (any single name segment). */
-const INVOKE_SUBPATH =
-  /\/(?:v1\/)?capabilities\/(?:manifest(?:\/[^/]+\/(?:issue|renew))?|[^/]+\/(?:invoke|openai\/v1\/(?:chat\/completions|models)))\/?$/;
+const AGENT_CAPABILITY_SUBPATH =
+  /\/(?:v1\/)?capabilities\/(?:manifest(?:\/[^/]+\/(?:issue|renew)|\/leases\/[^/]+\/(?:ack|revoke))?|[^/]+\/(?:invoke|openai\/v1\/(?:chat\/completions|models)))\/?$/;
 
 /**
  * Apply the operator tenant gate to a `/capabilities/*` request UNLESS it is an
@@ -216,6 +221,6 @@ async function tenantGateSkippingInvoke(
   next: Next,
   tenantAuth: StewardAppContext["tenantAuth"],
 ): Promise<void | Response> {
-  if (INVOKE_SUBPATH.test(c.req.path)) return next();
+  if (AGENT_CAPABILITY_SUBPATH.test(c.req.path)) return next();
   return tenantAuth(c, next);
 }
