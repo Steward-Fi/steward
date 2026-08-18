@@ -2398,6 +2398,10 @@ export const upstreamCredentialLeases = pgTable(
       table.agentId,
       table.idempotencyKeyHash,
     ),
+    tenantIdUnique: uniqueIndex("upstream_credential_leases_tenant_id_uniq").on(
+      table.tenantId,
+      table.id,
+    ),
     statusExpiryIdx: index("upstream_credential_leases_status_expiry_idx").on(
       table.status,
       table.expiresAt,
@@ -2438,6 +2442,11 @@ export const upstreamCredentialLeaseEvents = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    parentFk: foreignKey({
+      columns: [table.tenantId, table.leaseId],
+      foreignColumns: [upstreamCredentialLeases.tenantId, upstreamCredentialLeases.id],
+      name: "upstream_credential_lease_events_parent_fk",
+    }).onDelete("restrict"),
     leaseCreatedIdx: index("upstream_credential_lease_events_lease_created_idx").on(
       table.leaseId,
       table.createdAt,

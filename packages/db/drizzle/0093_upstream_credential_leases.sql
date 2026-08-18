@@ -30,6 +30,8 @@ CREATE TABLE "upstream_credential_leases" (
 --> statement-breakpoint
 CREATE UNIQUE INDEX "upstream_credential_leases_replay_uniq" ON "upstream_credential_leases" ("tenant_id", "agent_id", "idempotency_key_hash");
 --> statement-breakpoint
+CREATE UNIQUE INDEX "upstream_credential_leases_tenant_id_uniq" ON "upstream_credential_leases" ("tenant_id", "id");
+--> statement-breakpoint
 CREATE INDEX "upstream_credential_leases_status_expiry_idx" ON "upstream_credential_leases" ("status", "expires_at");
 --> statement-breakpoint
 CREATE INDEX "upstream_credential_leases_status_updated_idx" ON "upstream_credential_leases" ("status", "updated_at");
@@ -45,7 +47,8 @@ CREATE TABLE "upstream_credential_lease_events" (
   "action" varchar(64) NOT NULL,
   "decision" varchar(16) NOT NULL,
   "metadata" jsonb DEFAULT '{}'::jsonb NOT NULL,
-  "created_at" timestamptz DEFAULT now() NOT NULL
+  "created_at" timestamptz DEFAULT now() NOT NULL,
+  CONSTRAINT "upstream_credential_lease_events_parent_fk" FOREIGN KEY ("tenant_id", "lease_id") REFERENCES "upstream_credential_leases"("tenant_id", "id") ON DELETE RESTRICT
 );
 --> statement-breakpoint
 CREATE INDEX "upstream_credential_lease_events_lease_created_idx" ON "upstream_credential_lease_events" ("lease_id", "created_at");
