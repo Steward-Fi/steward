@@ -985,7 +985,7 @@ async function rotateRefreshTokenForUserSession(
       REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000,
     );
 
-    const [user] = await tx.select().from(users).where(eq(users.id, record.userId));
+    const [user] = await tx.select().from(users).where(eq(users.id, record.userId)).for("update");
     if (user?.deactivatedAt) {
       await tx.delete(refreshTokens).where(eq(refreshTokens.userId, record.userId));
       return { status: "deactivated", userId: record.userId, tenantId: record.tenantId };
@@ -995,7 +995,8 @@ async function rotateRefreshTokenForUserSession(
     const [membership] = await tx
       .select({ id: userTenants.id })
       .from(userTenants)
-      .where(and(eq(userTenants.userId, record.userId), eq(userTenants.tenantId, targetTenantId)));
+      .where(and(eq(userTenants.userId, record.userId), eq(userTenants.tenantId, targetTenantId)))
+      .for("update");
     if (!membership) {
       await tx
         .delete(refreshTokens)

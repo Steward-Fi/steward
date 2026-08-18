@@ -45,6 +45,7 @@ describe("auth refresh revocation race hardening", () => {
     expect(rotateRoute).toContain("requestedTenantId?: string");
     expect(rotateRoute).toContain("const targetTenantId = requestedTenantId ?? record.tenantId");
     expect(rotateRoute).toContain("eq(userTenants.tenantId, targetTenantId)");
+    expect(rotateRoute.match(/\.for\("update"\)/g)?.length).toBeGreaterThanOrEqual(2);
     expect(rotateRoute).toContain("createSessionToken(walletAddress, targetTenantId");
     expect(rotateRoute).toContain("tenantId: targetTenantId");
     expect(rotateRoute).toContain('status: "not_member"');
