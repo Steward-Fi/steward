@@ -84,12 +84,18 @@ test("Worker cron runs X lifecycle recovery when provider credentials are config
     {
       sweep: async () => {
         calls += 1;
-        return { processed: 2, adopted: 1, attention: 1, remaining: false };
+        return { processed: 2, adopted: 1, revoked: 0, attention: 1, remaining: false };
       },
     },
   );
   expect(calls).toBe(1);
-  expect(result).toEqual({ processed: 2, adopted: 1, attention: 1, remaining: false });
+  expect(result).toEqual({
+    processed: 2,
+    adopted: 1,
+    revoked: 0,
+    attention: 1,
+    remaining: false,
+  });
 });
 
 test("Worker X lifecycle recovery is inert when the provider is unavailable", async () => {

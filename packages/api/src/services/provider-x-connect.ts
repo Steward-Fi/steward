@@ -721,6 +721,7 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
               inArray(providerXCredentialLifecycles.state, [
                 "inflight",
                 "credential_staged",
+                "revocation_pending",
                 "needs_attention",
               ]),
             ),
@@ -994,13 +995,17 @@ export async function refreshXProviderCredential(input: RefreshInput): Promise<R
             inArray(providerXCredentialLifecycles.state, [
               "inflight",
               "credential_staged",
+              "revocation_pending",
               "needs_attention",
             ]),
           ),
         )
         .limit(1);
       if (activeLifecycle) {
-        if (activeLifecycle.state === "needs_attention") {
+        if (
+          activeLifecycle.state === "needs_attention" ||
+          activeLifecycle.state === "revocation_pending"
+        ) {
           throw new XConnectError(
             "X_CREDENTIAL_NEEDS_ATTENTION",
             409,
@@ -1080,7 +1085,11 @@ export async function refreshXProviderCredential(input: RefreshInput): Promise<R
           };
         }
       }
-      if (row?.state === "needs_attention" || row?.state === "revoked") {
+      if (
+        row?.state === "needs_attention" ||
+        row?.state === "revocation_pending" ||
+        row?.state === "revoked"
+      ) {
         throw new XConnectError(
           "X_CREDENTIAL_NEEDS_ATTENTION",
           409,
@@ -1247,6 +1256,7 @@ async function disableXAccountForLifecycle(
             inArray(providerXCredentialLifecycles.state, [
               "inflight",
               "credential_staged",
+              "revocation_pending",
               "needs_attention",
             ]),
           ),
@@ -1576,6 +1586,7 @@ async function readAdoptedXRefreshResult(
 export interface XCredentialLifecycleSweepResult {
   processed: number;
   adopted: number;
+  revoked: number;
   attention: number;
   remaining: boolean;
 }
@@ -1586,6 +1597,7 @@ const X_LIFECYCLE_STALE_AFTER_MS = X_FORWARD_TIMEOUT_MS + 5_000;
 /** Bounded all-tenant recovery for abandoned single-use X refresh rotations. */
 export async function runXCredentialLifecycleSweep(input: {
   vault: SecretVault;
+  config: XConnectConfig;
   limit?: number;
   now?: Date;
 }): Promise<XCredentialLifecycleSweepResult> {
@@ -1600,7 +1612,13 @@ export async function runXCredentialLifecycleSweep(input: {
     .from(providerXCredentialLifecycles)
     .where(
       and(
-        inArray(providerXCredentialLifecycles.state, ["inflight", "credential_staged"]),
+        inArray(providerXCredentialLifecycles.state, [
+          "inflight",
+          "credential_staged",
+          "revocation_pending",
+          "needs_attention",
+        ]),
+        sql`(${providerXCredentialLifecycles.state} IN ('inflight', 'credential_staged') OR ${providerXCredentialLifecycles.credentialSecretId} IS NOT NULL)`,
         lte(providerXCredentialLifecycles.updatedAt, staleBefore),
       ),
     )
@@ -1609,6 +1627,7 @@ export async function runXCredentialLifecycleSweep(input: {
   const result: XCredentialLifecycleSweepResult = {
     processed: 0,
     adopted: 0,
+    revoked: 0,
     attention: 0,
     remaining: false,
   };
@@ -1627,6 +1646,14 @@ export async function runXCredentialLifecycleSweep(input: {
       if (row.state === "credential_staged") {
         await reconcileXRefreshLifecycle(recoveryInput);
         result.adopted += 1;
+      } else if (row.state === "needs_attention" || row.state === "revocation_pending") {
+        const revoked = await reconcileStagedXRefreshRevocation({
+          ...recoveryInput,
+          config: input.config,
+          expectedUpdatedAt: row.updatedAt,
+        });
+        if (revoked) result.revoked += 1;
+        else result.attention += 1;
       } else {
         await disableXAccountForLifecycle(recoveryInput, row.id, "REFRESH_OUTCOME_UNKNOWN");
         result.attention += 1;
@@ -1637,6 +1664,149 @@ export async function runXCredentialLifecycleSweep(input: {
   }
   result.remaining = rows.length === limit && result.attention === 0;
   return result;
+}
+
+async function reconcileStagedXRefreshRevocation(
+  input: RefreshInput & { lifecycleId: string; expectedUpdatedAt: Date },
+): Promise<boolean> {
+  const claimed = await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
+    const tx = txRaw as DbExecutor;
+    const [lifecycle] = await tx
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+          eq(providerXCredentialLifecycles.id, input.lifecycleId),
+          eq(providerXCredentialLifecycles.workspaceId, input.workspaceId),
+          eq(providerXCredentialLifecycles.providerAccountId, input.accountId),
+          inArray(providerXCredentialLifecycles.state, ["needs_attention", "revocation_pending"]),
+          eq(providerXCredentialLifecycles.updatedAt, input.expectedUpdatedAt),
+          sql`${providerXCredentialLifecycles.credentialSecretId} IS NOT NULL`,
+        ),
+      )
+      .limit(1)
+      .for("update");
+    if (!lifecycle?.credentialSecretId) return null;
+    const claimedAt = new Date();
+    const [updated] = await tx
+      .update(providerXCredentialLifecycles)
+      .set({ state: "revocation_pending", updatedAt: claimedAt })
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+          eq(providerXCredentialLifecycles.id, lifecycle.id),
+          eq(providerXCredentialLifecycles.updatedAt, input.expectedUpdatedAt),
+        ),
+      )
+      .returning({ credentialSecretId: providerXCredentialLifecycles.credentialSecretId });
+    if (!updated?.credentialSecretId) return null;
+    await append({
+      tenantId: input.tenantId,
+      actorType: "system",
+      actorId: "system",
+      action: "provider.x.refresh.revocation_claimed",
+      resourceType: "provider_x_credential_lifecycle",
+      resourceId: lifecycle.id,
+      metadata: { providerAccountId: input.accountId, workspaceId: input.workspaceId },
+    });
+    return { credentialSecretId: updated.credentialSecretId, claimedAt };
+  });
+  if (!claimed) return false;
+
+  let accessToken: string | null = null;
+  let refreshToken: string | null = null;
+  try {
+    const [secret] = (await (getDb() as DbExecutor)
+      .select()
+      .from(secrets)
+      .where(and(eq(secrets.tenantId, input.tenantId), eq(secrets.id, claimed.credentialSecretId)))
+      .limit(1)) as Secret[];
+    if (!secret) throw new Error("staged secret missing");
+    const staged = JSON.parse(
+      input.vault.decryptSecretRow(input.tenantId, secret),
+    ) as XRefreshLifecycleSecret;
+    const token = staged?.token;
+    if (!token || typeof token !== "object" || Array.isArray(token)) {
+      throw new Error("staged token invalid");
+    }
+    const raw = token as Record<string, unknown>;
+    // Prefer the rotating refresh credential when X returned one. A malformed
+    // access token must not prevent us from revoking the exact valid refresh
+    // handle that was already durably staged.
+    accessToken = isValidOAuthBearerToken(raw.access_token) ? raw.access_token : null;
+    refreshToken = isValidOAuthOpaqueToken(raw.refresh_token) ? raw.refresh_token : null;
+    if (!accessToken && !refreshToken) throw new Error("no revocable staged token");
+  } catch {
+    await finishStagedXRefreshRevocation(input, claimed, false, "STAGED_REVOCATION_HANDLE_INVALID");
+    return false;
+  }
+
+  let revoked = false;
+  try {
+    revoked = await revokeUpstreamBestEffort(
+      input.config,
+      accessToken ?? (refreshToken as string),
+      refreshToken,
+    );
+  } catch {
+    revoked = false;
+  }
+  await finishStagedXRefreshRevocation(
+    input,
+    claimed,
+    revoked,
+    revoked ? "STAGED_CREDENTIAL_REVOKED" : "STAGED_REVOCATION_FAILED",
+  );
+  return revoked;
+}
+
+async function finishStagedXRefreshRevocation(
+  input: RefreshInput & { lifecycleId: string },
+  claimed: { credentialSecretId: string; claimedAt: Date },
+  revoked: boolean,
+  reason: string,
+): Promise<void> {
+  await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
+    const tx = txRaw as DbExecutor;
+    const [updated] = await tx
+      .update(providerXCredentialLifecycles)
+      .set({
+        state: revoked ? "revoked" : "needs_attention",
+        credentialSecretId: revoked ? null : claimed.credentialSecretId,
+        lastErrorCode: reason,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+          eq(providerXCredentialLifecycles.id, input.lifecycleId),
+          eq(providerXCredentialLifecycles.state, "revocation_pending"),
+          eq(providerXCredentialLifecycles.credentialSecretId, claimed.credentialSecretId),
+          eq(providerXCredentialLifecycles.updatedAt, claimed.claimedAt),
+        ),
+      )
+      .returning({ id: providerXCredentialLifecycles.id });
+    if (!updated) return;
+    if (revoked) {
+      await tx
+        .delete(secrets)
+        .where(
+          and(eq(secrets.tenantId, input.tenantId), eq(secrets.id, claimed.credentialSecretId)),
+        );
+    }
+    await append({
+      tenantId: input.tenantId,
+      actorType: "system",
+      actorId: "system",
+      action: revoked
+        ? "provider.x.refresh.staged_credential_revoked"
+        : "provider.x.refresh.staged_revocation_failed",
+      resourceType: "provider_x_credential_lifecycle",
+      resourceId: input.lifecycleId,
+      metadata: { providerAccountId: input.accountId, workspaceId: input.workspaceId, reason },
+    });
+  });
 }
 
 interface LoadedCredential {

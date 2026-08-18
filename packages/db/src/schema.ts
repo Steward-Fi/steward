@@ -2149,7 +2149,7 @@ export const providerXCredentialLifecycles = pgTable(
     }).onDelete("restrict"),
     stateCheck: check(
       "provider_x_lifecycle_state_check",
-      sql`${table.state} IN ('inflight', 'credential_staged', 'adopted', 'revoked', 'needs_attention', 'superseded')`,
+      sql`${table.state} IN ('inflight', 'credential_staged', 'revocation_pending', 'adopted', 'revoked', 'needs_attention', 'superseded')`,
     ),
     accountStateIdx: index("provider_x_lifecycle_account_state_idx").on(
       table.tenantId,
@@ -2158,7 +2158,9 @@ export const providerXCredentialLifecycles = pgTable(
     ),
     activeRefreshIdx: uniqueIndex("provider_x_lifecycle_active_refresh_idx")
       .on(table.tenantId, table.providerAccountId)
-      .where(sql`${table.state} IN ('inflight', 'credential_staged', 'needs_attention')`),
+      .where(
+        sql`${table.state} IN ('inflight', 'credential_staged', 'revocation_pending', 'needs_attention')`,
+      ),
   }),
 );
 

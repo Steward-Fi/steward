@@ -1,6 +1,7 @@
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { SecretVault } from "@stwd/vault";
 import {
+  resolveXConnectConfig,
   runXCredentialLifecycleSweep,
   type XCredentialLifecycleSweepResult,
 } from "./provider-x-connect";
@@ -24,7 +25,10 @@ function configuredInterval(): number {
 export async function runXCredentialLifecycleRecoverySweep(): Promise<XCredentialLifecycleSweepResult> {
   const password = process.env.STEWARD_MASTER_PASSWORD?.trim();
   if (!password) throw new Error("STEWARD_MASTER_PASSWORD is required for X OAuth recovery");
-  return runXCredentialLifecycleSweep({ vault: new SecretVault(password) });
+  return runXCredentialLifecycleSweep({
+    vault: new SecretVault(password),
+    config: resolveXConnectConfig(),
+  });
 }
 
 export function startXCredentialLifecycleScheduler(options?: {
@@ -47,7 +51,7 @@ export function startXCredentialLifecycleScheduler(options?: {
         if (result.processed > 0) {
           console.log(
             `[provider-x] reconciled ${result.processed} lifecycle(s): ` +
-              `${result.adopted} adopted, ${result.attention} attention`,
+              `${result.adopted} adopted, ${result.revoked} revoked, ${result.attention} attention`,
           );
         }
       })
