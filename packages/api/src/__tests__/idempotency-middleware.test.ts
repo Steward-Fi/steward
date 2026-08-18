@@ -310,12 +310,17 @@ describe("idempotencyMiddleware", () => {
       count += 1;
       return c.json({ ok: true, count, value: `supersecret-${count}` });
     });
+    app.post("/user/me/wallet/recovery/setup", async (c) => {
+      count += 1;
+      return c.json({ ok: true, count, recovery: { mnemonic: `word-${count} …` } });
+    });
 
     for (const [path, body] of [
       ["/vault/agent-1/export", {}],
       ["/user/me/wallet/export", {}],
       ["/v1/kms/keys/key-1/decrypt", { ciphertext_b64: "AA==" }],
       ["/secrets", { name: "n", value: "v" }],
+      ["/user/me/wallet/recovery/setup", {}],
     ] as const) {
       const init = {
         method: "POST",
@@ -337,7 +342,7 @@ describe("idempotencyMiddleware", () => {
         error: "Idempotency key has already been used",
       });
     }
-    expect(count).toBe(4);
+    expect(count).toBe(5);
   });
 
   it("uses a verified request signature as replay-safe auth material", async () => {
