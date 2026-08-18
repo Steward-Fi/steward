@@ -95,13 +95,21 @@ export type HyperliquidBuilderFee = z.infer<typeof builderFeeSchema>;
  * SEC-186: validate the HL builder-fee env config at startup (the trading
  * plugin calls this from `register`) so a malformed HL_BUILDER_ADDRESS /
  * HL_BUILDER_FEE_TENTHS_BP fails fast at boot instead of throwing from
- * `configuredBuilderFee()` at order time. Unset (or partially set — treated
- * as "not configured", same as `configuredBuilderFee`) is a no-op.
+ * `configuredBuilderFee()` at order time. Both unset is a no-op; setting only
+ * one half is an operator error and fails startup instead of silently disabling
+ * builder attribution.
  */
 export function validateBuilderFeeEnv(): void {
   const address = process.env.HL_BUILDER_ADDRESS;
   const rawFee = process.env.HL_BUILDER_FEE_TENTHS_BP;
-  if (!address || rawFee === undefined || rawFee === "") return;
+  const hasAddress = Boolean(address?.trim());
+  const hasFee = rawFee !== undefined && rawFee.trim() !== "";
+  if (!hasAddress && !hasFee) return;
+  if (!hasAddress || !hasFee) {
+    throw new Error(
+      "Invalid HL builder fee configuration: HL_BUILDER_ADDRESS and HL_BUILDER_FEE_TENTHS_BP must be set together",
+    );
+  }
   const result = builderFeeSchema.safeParse({ address, feeTenthsBps: Number(rawFee) });
   if (!result.success) {
     throw new Error(

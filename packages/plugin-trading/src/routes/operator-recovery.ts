@@ -218,32 +218,81 @@ export function createOperatorRecoveryRoutes(
   // fund movement. SEC-043: records are Redis-backed when a client is available
   // (multi-replica dedup survives restarts); without Redis the store falls back
   // to a bounded (1_000 entries, expired-sweep + oldest-evict) process-local map.
-  type OperatorIdempotencyRecord = { status: 200 | 502; body: unknown };
+  type OperatorIdempotencyRecord = { status: 200 | 409 | 502; body: unknown };
+  type OperatorIdempotency = {
+    conflict?: boolean;
+    inProgress?: boolean;
+    entry?: OperatorIdempotencyRecord;
+    claim?: () => Promise<OperatorIdempotency>;
+    store?: (response: unknown) => Promise<void>;
+    storeFailure?: (errorBody: unknown) => Promise<void>;
+    release?: () => Promise<void>;
+  };
   const operatorIdempotencyStore = new DurableIdempotencyStore<OperatorIdempotencyRecord>({
     namespace: "trade:operator",
     getRedisClient,
   });
 
+  function operatorIdempotency(
+    check: Awaited<ReturnType<typeof operatorIdempotencyStore.check>>,
+  ): OperatorIdempotency {
+    if (check.inProgress) {
+      return {
+        entry: {
+          status: 409,
+          body: { ok: false, error: "Request with this idempotency key is in progress" },
+        },
+      };
+    }
+    if (check.conflict || check.record) {
+      return {
+        conflict: check.conflict,
+        inProgress: check.inProgress,
+        entry: check.record,
+      };
+    }
+    return {
+      claim: check.claim ? async () => operatorIdempotency(await check.claim!()) : undefined,
+      store: check.store
+        ? (response: unknown) => check.store!({ status: 200, body: { ok: true, data: response } })
+        : undefined,
+      storeFailure: check.store
+        ? (errorBody: unknown) => check.store!({ status: 502, body: errorBody })
+        : undefined,
+      release: check.release,
+    };
+  }
+
   async function getOperatorIdempotency(
     scope: string,
     key: string | undefined,
     body: unknown,
-  ): Promise<{
-    conflict?: boolean;
-    entry?: OperatorIdempotencyRecord;
-    store?: (response: unknown) => Promise<void>;
-    storeFailure?: (errorBody: unknown) => Promise<void>;
-  }> {
+  ): Promise<OperatorIdempotency> {
     const check = await operatorIdempotencyStore.check(scope, key, JSON.stringify(body));
-    if (check.conflict || check.record) {
-      return { conflict: check.conflict, entry: check.record };
+    return operatorIdempotency(check);
+  }
+
+  function operatorIdempotencyResponse(
+    c: Context<{ Variables: AppVariables }>,
+    state: OperatorIdempotency,
+  ): Response | undefined {
+    if (state.conflict) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency key reused with a different body" },
+        409,
+      );
     }
-    if (!check.store) return {};
-    const persist = check.store;
-    return {
-      store: (response: unknown) => persist({ status: 200, body: { ok: true, data: response } }),
-      storeFailure: (errorBody: unknown) => persist({ status: 502, body: errorBody }),
-    };
+    if (state.entry) {
+      if (state.entry.status === 409) c.header("Retry-After", "1");
+      return c.json(state.entry.body, state.entry.status);
+    }
+    return undefined;
+  }
+
+  async function claimOperatorIdempotency(
+    state: OperatorIdempotency,
+  ): Promise<OperatorIdempotency> {
+    return state.claim ? state.claim() : state;
   }
 
   // ── Operator transfer rate limit (withdraw + usd-send) ────────────────────────
@@ -564,25 +613,21 @@ export function createOperatorRecoveryRoutes(
 
     // Idempotency keyed on (agent, amount). Computed BEFORE broadcast so a retried
     // deposit with the same key returns the original result instead of double-sending.
-    const idempotency = await getOperatorIdempotency(`${tenantId}:deposit`, body.idempotencyKey, {
+    let idempotency = await getOperatorIdempotency(`${tenantId}:deposit`, body.idempotencyKey, {
       agentId,
       venue,
       amount: amountBaseUnits.toString(),
     });
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.entry) {
-      return c.json(idempotency.entry.body, idempotency.entry.status);
-    }
+    const replayResponse = operatorIdempotencyResponse(c, idempotency);
+    if (replayResponse) return replayResponse;
 
     // Build the ERC-20 transfer(bridge, amount) calldata and have the vault sign +
     // broadcast it FROM the agent's venue wallet on Arbitrum. The raw key never
     // leaves the vault. venue is set so the vault selects the hyperliquid-scoped key.
     const data = encodeErc20Transfer(HYPERLIQUID_ARBITRUM_BRIDGE, amountBaseUnits);
+    idempotency = await claimOperatorIdempotency(idempotency);
+    const claimResponse = operatorIdempotencyResponse(c, idempotency);
+    if (claimResponse) return claimResponse;
     let txHash: string;
     try {
       txHash = await vault.signTransaction({
@@ -660,7 +705,7 @@ export function createOperatorRecoveryRoutes(
     const effectiveLeverage = builderPerp ? Math.min(body.leverage, 3) : body.leverage;
     const isCross = builderPerp ? false : (body.isCross ?? false);
 
-    const idempotency = await getOperatorIdempotency(`${tenantId}:leverage`, body.idempotencyKey, {
+    let idempotency = await getOperatorIdempotency(`${tenantId}:leverage`, body.idempotencyKey, {
       agentId,
       venue,
       coin,
@@ -668,15 +713,8 @@ export function createOperatorRecoveryRoutes(
       requestedLeverage: body.leverage,
       isCross,
     });
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.entry) {
-      return c.json(idempotency.entry.body, idempotency.entry.status);
-    }
+    const replayResponse = operatorIdempotencyResponse(c, idempotency);
+    if (replayResponse) return replayResponse;
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -701,6 +739,9 @@ export function createOperatorRecoveryRoutes(
       builderPerp,
     });
 
+    idempotency = await claimOperatorIdempotency(idempotency);
+    const claimResponse = operatorIdempotencyResponse(c, idempotency);
+    if (claimResponse) return claimResponse;
     let result: unknown;
     try {
       result = await adapter.updateLeverage({ coin, leverage: effectiveLeverage, isCross });
@@ -797,25 +838,14 @@ export function createOperatorRecoveryRoutes(
       );
     }
 
-    const idempotency = await getOperatorIdempotency(
-      `${tenantId}:add-margin`,
-      body.idempotencyKey,
-      {
-        agentId,
-        venue,
-        coin,
-        amount: amountBaseUnits.toString(),
-      },
-    );
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.entry) {
-      return c.json(idempotency.entry.body, idempotency.entry.status);
-    }
+    let idempotency = await getOperatorIdempotency(`${tenantId}:add-margin`, body.idempotencyKey, {
+      agentId,
+      venue,
+      coin,
+      amount: amountBaseUnits.toString(),
+    });
+    const replayResponse = operatorIdempotencyResponse(c, idempotency);
+    if (replayResponse) return replayResponse;
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -838,6 +868,9 @@ export function createOperatorRecoveryRoutes(
       amountBaseUnits: amountBaseUnits.toString(),
     });
 
+    idempotency = await claimOperatorIdempotency(idempotency);
+    const claimResponse = operatorIdempotencyResponse(c, idempotency);
+    if (claimResponse) return claimResponse;
     let result: unknown;
     try {
       result = await adapter.addIsolatedMargin({ coin, amountUsdc: body.amountUsdc });
@@ -935,21 +968,14 @@ export function createOperatorRecoveryRoutes(
       );
     }
 
-    const idempotency = await getOperatorIdempotency(`${tenantId}:usd-send`, body.idempotencyKey, {
+    let idempotency = await getOperatorIdempotency(`${tenantId}:usd-send`, body.idempotencyKey, {
       agentId,
       venue,
       destination,
       amount,
     });
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.entry) {
-      return c.json(idempotency.entry.body, idempotency.entry.status);
-    }
+    const replayResponse = operatorIdempotencyResponse(c, idempotency);
+    if (replayResponse) return replayResponse;
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -993,6 +1019,9 @@ export function createOperatorRecoveryRoutes(
       amount,
     });
 
+    idempotency = await claimOperatorIdempotency(idempotency);
+    const claimResponse = operatorIdempotencyResponse(c, idempotency);
+    if (claimResponse) return claimResponse;
     let result: unknown;
     try {
       result = await adapter.usdSend({ destination, amount });
@@ -1052,7 +1081,7 @@ export function createOperatorRecoveryRoutes(
     };
     const { agentId, builder, maxFeeRate } = body;
 
-    const idempotency = await getOperatorIdempotency(
+    let idempotency = await getOperatorIdempotency(
       `${tenantId}:approve-builder`,
       body.idempotencyKey,
       {
@@ -1062,15 +1091,8 @@ export function createOperatorRecoveryRoutes(
         maxFeeRate,
       },
     );
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.entry) {
-      return c.json(idempotency.entry.body, idempotency.entry.status);
-    }
+    const replayResponse = operatorIdempotencyResponse(c, idempotency);
+    if (replayResponse) return replayResponse;
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -1092,6 +1114,9 @@ export function createOperatorRecoveryRoutes(
       maxFeeRate,
     });
 
+    idempotency = await claimOperatorIdempotency(idempotency);
+    const claimResponse = operatorIdempotencyResponse(c, idempotency);
+    if (claimResponse) return claimResponse;
     let result: unknown;
     try {
       result = await adapter.approveBuilderFee({ builder, maxFeeRate });
@@ -1177,7 +1202,7 @@ export function createOperatorRecoveryRoutes(
       );
     }
 
-    const idempotency = await getOperatorIdempotency(`${tenantId}:transfer`, body.idempotencyKey, {
+    let idempotency = await getOperatorIdempotency(`${tenantId}:transfer`, body.idempotencyKey, {
       agentId,
       venue,
       sourceDex,
@@ -1185,15 +1210,8 @@ export function createOperatorRecoveryRoutes(
       amount: amountBaseUnits.toString(),
       token: body.token ?? null,
     });
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.entry) {
-      return c.json(idempotency.entry.body, idempotency.entry.status);
-    }
+    const replayResponse = operatorIdempotencyResponse(c, idempotency);
+    if (replayResponse) return replayResponse;
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -1220,6 +1238,9 @@ export function createOperatorRecoveryRoutes(
     // Signing is local (nothing reaches the venue), so a sign failure is safe to
     // retry and is NOT stored; a submit failure means the transfer may have
     // landed, so the ambiguous outcome IS stored and retries replay it.
+    idempotency = await claimOperatorIdempotency(idempotency);
+    const claimResponse = operatorIdempotencyResponse(c, idempotency);
+    if (claimResponse) return claimResponse;
     let signed: Awaited<ReturnType<HyperliquidAdapter["signSendAsset"]>>;
     try {
       signed = await adapter.signSendAsset({
@@ -1238,6 +1259,7 @@ export function createOperatorRecoveryRoutes(
         amountUsdc: String(body.amountUsdc),
         error: err instanceof Error ? err.message : String(err),
       });
+      await idempotency.release?.();
       return c.json<ApiResponse>({ ok: false, error: "Failed to sign collateral transfer" }, 502);
     }
 
@@ -1300,19 +1322,12 @@ export function createOperatorRecoveryRoutes(
     };
     const { agentId } = body;
 
-    const idempotency = await getOperatorIdempotency(`${tenantId}:close-all`, body.idempotencyKey, {
+    let idempotency = await getOperatorIdempotency(`${tenantId}:close-all`, body.idempotencyKey, {
       agentId,
       venue,
     });
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.entry) {
-      return c.json(idempotency.entry.body, idempotency.entry.status);
-    }
+    const replayResponse = operatorIdempotencyResponse(c, idempotency);
+    if (replayResponse) return replayResponse;
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -1327,6 +1342,9 @@ export function createOperatorRecoveryRoutes(
 
     const adapter = buildAdapter(tenantId, agentId, walletAddress);
 
+    idempotency = await claimOperatorIdempotency(idempotency);
+    const claimResponse = operatorIdempotencyResponse(c, idempotency);
+    if (claimResponse) return claimResponse;
     let results: Awaited<ReturnType<HyperliquidAdapter["closeAllPositions"]>>;
     try {
       results = await adapter.closeAllPositions();
@@ -1423,21 +1441,14 @@ export function createOperatorRecoveryRoutes(
 
     const explicitIdempotencyAmount =
       explicitAmountBaseUnits !== null ? explicitAmountBaseUnits.toString() : null;
-    const idempotency = await getOperatorIdempotency(`${tenantId}:withdraw`, body.idempotencyKey, {
+    let idempotency = await getOperatorIdempotency(`${tenantId}:withdraw`, body.idempotencyKey, {
       agentId,
       venue,
       destination,
       amount: explicitIdempotencyAmount,
     });
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.entry) {
-      return c.json(idempotency.entry.body, idempotency.entry.status);
-    }
+    const replayResponse = operatorIdempotencyResponse(c, idempotency);
+    if (replayResponse) return replayResponse;
 
     // Resolve amount after the idempotency cache lookup, so a retry for a
     // previous full-balance withdraw returns the cached success before reading a
@@ -1513,6 +1524,9 @@ export function createOperatorRecoveryRoutes(
     // retry and is NOT stored; a submit failure means the withdraw may have
     // landed, so the ambiguous outcome IS stored and retries replay it (mirrors
     // the HL order route's 502 "status unknown" envelope).
+    idempotency = await claimOperatorIdempotency(idempotency);
+    const claimResponse = operatorIdempotencyResponse(c, idempotency);
+    if (claimResponse) return claimResponse;
     let signedWithdraw: Awaited<ReturnType<HyperliquidAdapter["signWithdraw"]>>;
     try {
       signedWithdraw = await adapter.signWithdraw({ amount, destination });
@@ -1524,6 +1538,7 @@ export function createOperatorRecoveryRoutes(
         amount,
         error: err instanceof Error ? err.message : String(err),
       });
+      await idempotency.release?.();
       return c.json<ApiResponse>({ ok: false, error: "Failed to sign withdraw" }, 502);
     }
 

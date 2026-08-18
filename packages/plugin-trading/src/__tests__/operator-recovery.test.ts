@@ -27,6 +27,7 @@ const updateLeverageCalls: Array<{ coin: string; leverage: number; isCross?: boo
 const addIsolatedMarginCalls: Array<{ coin: string; amountUsdc: string | number }> = [];
 const approveBuilderFeeCalls: Array<{ builder: string; maxFeeRate: string }> = [];
 const usdSendCalls: Array<{ destination: string; amount: string }> = [];
+let closeAllPause: Promise<void> | null = null;
 
 class MockHyperliquidAdapter {
   constructor(
@@ -37,6 +38,7 @@ class MockHyperliquidAdapter {
 
   async closeAllPositions() {
     closeAllCalls.push(Date.now());
+    await closeAllPause;
     return [
       { coin: "BTC", result: { status: "filled", orderId: "1001" } },
       { coin: "ETH", result: { status: "filled", orderId: "1002" } },
@@ -437,6 +439,45 @@ describe("operator recovery close-all", () => {
     expect(body.ok).toBe(true);
     expect(body.data.closed).toHaveLength(2);
     expect(closeAllCalls.length).toBe(1);
+  });
+
+  it("admits only one concurrent request for the same idempotency key", async () => {
+    const tenantId = `tenant-close-concurrent-${crypto.randomUUID()}`;
+    const agentId = `agent-close-concurrent-${crypto.randomUUID()}`;
+    await seedAgent({ tenantId, agentId });
+    const app = await buildApp();
+    closeAllCalls.length = 0;
+
+    let releaseFirst!: () => void;
+    closeAllPause = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const request = () =>
+      app.request("/v1/trade/hyperliquid/close-all", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "X-Steward-Platform-Key": PLATFORM_KEY,
+          "X-Steward-Tenant": tenantId,
+          "Idempotency-Key": "same-concurrent-key",
+        },
+        body: JSON.stringify({ agentId }),
+      });
+
+    const first = request();
+    while (closeAllCalls.length === 0) await Bun.sleep(1);
+    const second = await request();
+    expect(second.status).toBe(409);
+    expect(second.headers.get("Retry-After")).toBe("1");
+    expect(await second.json()).toEqual({
+      ok: false,
+      error: "Request with this idempotency key is in progress",
+    });
+    expect(closeAllCalls).toHaveLength(1);
+
+    releaseFirst();
+    expect((await first).status).toBe(200);
+    closeAllPause = null;
   });
 });
 
