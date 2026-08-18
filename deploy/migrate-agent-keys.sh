@@ -84,6 +84,12 @@ else
   fi
 fi
 
+# curl expands a literal `-H "...${PK}"` into its process argv, even when PK
+# was populated by the remote shell. Put the header in a mode-0600 temporary
+# file and pass only that filename to curl so the key is absent from both the
+# local ssh argv and the remote curl argv.
+AUTH_HEADER_SNIPPET="AUTH_FILE=\$(mktemp); chmod 600 \"\${AUTH_FILE}\"; trap 'rm -f \"\${AUTH_FILE}\"' EXIT; printf 'X-Steward-Platform-Key: %s\\n' \"\${PK}\" > \"\${AUTH_FILE}\""
+
 echo "══════════════════════════════════════════════════════════════"
 echo "  Steward Agent Key Migration"
 echo "  Node: ${NODE_IP}"
@@ -153,9 +159,9 @@ while IFS= read -r CONTAINER; do
   echo "  Creating agent in Steward..."
   # The platform key is resolved on the REMOTE side (${PK_SNIPPET}) and never
   # placed on the remote curl argv (visible in the node's process list).
-  CREATE_RESP=$(printf '%s' "${PLATFORM_KEY}" | ${SSH_CMD} "${PK_SNIPPET}; curl -sf -X POST '${STEWARD_URL}/platform/tenants/${TENANT_ID}/agents' \
+  CREATE_RESP=$(printf '%s' "${PLATFORM_KEY}" | ${SSH_CMD} "${PK_SNIPPET}; ${AUTH_HEADER_SNIPPET}; curl -sf -X POST '${STEWARD_URL}/platform/tenants/${TENANT_ID}/agents' \
     -H 'Content-Type: application/json' \
-    -H \"X-Steward-Platform-Key: \${PK}\" \
+    -H \"@\${AUTH_FILE}\" \
     -d '{
       \"id\": \"${AGENT_UUID}\",
       \"name\": \"${AGENT_NAME}\",
@@ -175,9 +181,9 @@ while IFS= read -r CONTAINER; do
 
   # ── Set default policies ─────────────────────────────────────────────────
   echo "  Setting default policies..."
-  POLICY_RESP=$(printf '%s' "${PLATFORM_KEY}" | ${SSH_CMD} "${PK_SNIPPET}; curl -sf -X PUT '${STEWARD_URL}/platform/tenants/${TENANT_ID}/policies' \
+  POLICY_RESP=$(printf '%s' "${PLATFORM_KEY}" | ${SSH_CMD} "${PK_SNIPPET}; ${AUTH_HEADER_SNIPPET}; curl -sf -X PUT '${STEWARD_URL}/platform/tenants/${TENANT_ID}/policies' \
     -H 'Content-Type: application/json' \
-    -H \"X-Steward-Platform-Key: \${PK}\" \
+    -H \"@\${AUTH_FILE}\" \
     -d '{
       \"agentId\": \"${AGENT_UUID}\",
       \"policies\": [

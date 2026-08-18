@@ -181,9 +181,11 @@ call the API over localhost via the SSH channel (SEC-022):
 
 ```bash
 ssh root@${NODE_IP} "PK=\$(grep '^STEWARD_PLATFORM_KEYS=' /etc/steward/env | cut -d= -f2- | cut -d, -f1); \
+  AUTH_FILE=\$(mktemp); chmod 600 \"\${AUTH_FILE}\"; trap 'rm -f \"\${AUTH_FILE}\"' EXIT; \
+  printf 'X-Steward-Platform-Key: %s\\n' \"\${PK}\" > \"\${AUTH_FILE}\"; \
   curl -sf -X POST http://localhost:3200/platform/tenants \
   -H 'Content-Type: application/json' \
-  -H \"X-Steward-Platform-Key: \${PK}\" \
+  -H \"@\${AUTH_FILE}\" \
   -d '{\"id\": \"milady-cloud\", \"name\": \"Milady Cloud\"}'"
 ```
 
@@ -193,7 +195,10 @@ For any other platform-key operation, use an SSH tunnel from your workstation
 ```bash
 ssh -L 3200:localhost:3200 root@${NODE_IP}
 # then, locally:
-curl -sf http://localhost:3200/platform/tenants -H "X-Steward-Platform-Key: $PLATFORM_KEY"
+AUTH_FILE=$(mktemp); chmod 600 "$AUTH_FILE"
+printf 'X-Steward-Platform-Key: %s\n' "$PLATFORM_KEY" > "$AUTH_FILE"
+curl -sf http://localhost:3200/platform/tenants -H "@$AUTH_FILE"
+rm -f "$AUTH_FILE"
 ```
 
 ---
@@ -315,49 +320,51 @@ internet — the platform key and tenant keys would cross the network in
 cleartext (SEC-022).
 
 ```bash
-PK="<platform-key>"
+read -rsp "Platform key: " PK; printf '\n'
 BASE="http://localhost:3200"
+PLATFORM_HEADERS=$(mktemp); TENANT_HEADERS=$(mktemp); TOKEN_HEADERS=$(mktemp)
+chmod 600 "$PLATFORM_HEADERS" "$TENANT_HEADERS" "$TOKEN_HEADERS"
+trap 'rm -f "$PLATFORM_HEADERS" "$TENANT_HEADERS" "$TOKEN_HEADERS"' EXIT
+printf 'X-Steward-Platform-Key: %s\n' "$PK" > "$PLATFORM_HEADERS"
 
 # Create test tenant
 RESP=$(curl -sf -X POST $BASE/platform/tenants \
   -H "Content-Type: application/json" \
-  -H "X-Steward-Platform-Key: $PK" \
+  -H "@$PLATFORM_HEADERS" \
   -d '{"id":"smoke-test","name":"Smoke Test"}')
 API_KEY=$(echo $RESP | jq -r '.data.apiKey')
+printf 'X-Steward-Tenant: smoke-test\nX-Steward-Key: %s\n' "$API_KEY" > "$TENANT_HEADERS"
 
 # Create agent
 curl -sf -X POST $BASE/agents \
   -H "Content-Type: application/json" \
-  -H "X-Steward-Tenant: smoke-test" \
-  -H "X-Steward-Key: $API_KEY" \
+  -H "@$TENANT_HEADERS" \
   -d '{"id":"test-1","name":"Test Agent"}'
 
 # Set policies
 curl -sf -X PUT $BASE/agents/test-1/policies \
   -H "Content-Type: application/json" \
-  -H "X-Steward-Tenant: smoke-test" \
-  -H "X-Steward-Key: $API_KEY" \
+  -H "@$TENANT_HEADERS" \
   -d '[{"type":"spending-limit","enabled":true,"config":{"maxPerTx":"1000000000000000000","maxPerDay":"5000000000000000000"}}]'
 
 # Get JWT
 TOKEN=$(curl -sf -X POST $BASE/agents/test-1/token \
-  -H "X-Steward-Tenant: smoke-test" \
-  -H "X-Steward-Key: $API_KEY" | jq -r '.data.token')
+  -H "@$TENANT_HEADERS" | jq -r '.data.token')
+printf 'Authorization: Bearer %s\n' "$TOKEN" > "$TOKEN_HEADERS"
 
 # Check balance
 curl -sf $BASE/agents/test-1/balance \
-  -H "Authorization: Bearer $TOKEN"
+  -H "@$TOKEN_HEADERS"
 
 # Sign (no broadcast)
 curl -sf -X POST $BASE/vault/test-1/sign \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "@$TOKEN_HEADERS" \
   -d '{"to":"0x0000000000000000000000000000000000000001","value":"0","data":"0x","broadcast":false}'
 
 # Clean up
 curl -sf -X DELETE $BASE/agents/test-1 \
-  -H "X-Steward-Tenant: smoke-test" \
-  -H "X-Steward-Key: $API_KEY"
+  -H "@$TENANT_HEADERS"
 ```
 
 ---

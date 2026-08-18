@@ -6,7 +6,7 @@
  * that records its argv and environment; asserts the password travels via
  * PGPASSWORD and the connection string on argv carries no credentials.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,6 +14,11 @@ import { join } from "node:path";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const CAPTURE = "capture.txt";
+
+// The real migration script invokes the psql shim once per migration file.
+// Loaded CI runners can exceed Bun's 5s default even though each shim exits
+// immediately, so keep this behavioral suite deterministic.
+setDefaultTimeout(15_000);
 
 function runMigrate(databaseUrl: string): { argv: string; env: string } {
   const dir = mkdtempSync(join(tmpdir(), "migrate-sh-test-"));
@@ -40,7 +45,7 @@ function runMigrate(databaseUrl: string): { argv: string; env: string } {
   }
 }
 
-describe("SEC-050 scripts/migrate.sh keeps the DB password out of psql argv", () => {
+describe.serial("SEC-050 scripts/migrate.sh keeps the DB password out of psql argv", () => {
   test("password in DATABASE_URL is passed via PGPASSWORD, never argv", () => {
     const { argv, env } = runMigrate("postgresql://steward:s3cret-pw@db.example:5432/steward");
     expect(argv).not.toContain("s3cret-pw");
@@ -58,5 +63,24 @@ describe("SEC-050 scripts/migrate.sh keeps the DB password out of psql argv", ()
     const { argv, env } = runMigrate("postgresql://steward@db.example:5432/steward");
     expect(argv).toContain("postgresql://steward@db.example:5432/steward");
     expect(env).toBe("PGPASSWORD=");
+  });
+
+  test("libpq query-string password is removed from argv", () => {
+    const { argv, env } = runMigrate(
+      "postgresql://steward@db.example:5432/steward?sslmode=require&password=query%40secret",
+    );
+    expect(argv).not.toContain("query%40secret");
+    expect(argv).not.toContain("password=");
+    expect(argv).toContain("sslmode=require");
+    expect(env).toBe("PGPASSWORD=query@secret");
+  });
+
+  test("query password takes precedence and neither credential reaches argv", () => {
+    const { argv, env } = runMigrate(
+      "postgresql://steward:userinfo-secret@db.example/steward?password=query-secret",
+    );
+    expect(argv).not.toContain("userinfo-secret");
+    expect(argv).not.toContain("query-secret");
+    expect(env).toBe("PGPASSWORD=query-secret");
   });
 });

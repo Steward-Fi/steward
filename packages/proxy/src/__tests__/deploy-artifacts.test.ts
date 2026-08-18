@@ -283,6 +283,8 @@ describe("SEC-021 deploy/docker-compose.yml redis persists enforcement counters"
     expect(compose).toContain('"everysec"');
     expect(compose).toContain('"--maxmemory"');
     expect(compose).toContain('"--maxmemory-policy"');
+    expect(compose).toContain('"noeviction"');
+    expect(compose).not.toContain('"allkeys-lru"');
   });
 
   test("redis AOF data dir is on a named volume", () => {
@@ -302,7 +304,21 @@ describe("SEC-020 deploy/migrate-agent-keys.sh keeps the platform key off every 
     // The remote shell resolves the key itself (sed on the node's 0600 .env,
     // or cat from ssh stdin for the deprecated arg path).
     expect(script).toContain("sed -n 's/^STEWARD_PLATFORM_KEY=//p'");
-    expect(script).toContain("X-Steward-Platform-Key: \\${PK}");
+    expect(script).not.toContain("X-Steward-Platform-Key: \\${PK}");
+    expect(script).toContain("AUTH_HEADER_SNIPPET");
+    expect(script).toContain('-H \\"@\\${AUTH_FILE}\\"');
+  });
+
+  test("provisioning and operator docs also pass platform headers by file", () => {
+    const provision = read("provision-steward-node.sh");
+    const doc = read("DEPLOYMENT.md");
+    const readme = read("README.md");
+    expect(provision).not.toContain("X-Steward-Platform-Key: \\${PK}");
+    expect(provision).toContain('-H \\"@\\${AUTH_FILE}\\"');
+    expect(doc).not.toContain("X-Steward-Platform-Key: \\${PK}");
+    expect(doc).toContain('-H \\"@\\${AUTH_FILE}\\"');
+    expect(doc).not.toContain('-H "X-Steward-Platform-Key: $PK"');
+    expect(readme).not.toContain('-H "X-Steward-Platform-Key: $PLATFORM_KEY"');
   });
 
   test("agent tokens are written to a mode-0600 file, not echoed to stdout", () => {

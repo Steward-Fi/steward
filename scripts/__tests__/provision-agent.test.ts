@@ -13,6 +13,8 @@
  * workspace imports) so it is testable without a database.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { validateApiKey } from "../../packages/auth/src/api-keys";
 import {
   type DefaultTenantStore,
@@ -24,20 +26,23 @@ import {
 interface FakeStore extends DefaultTenantStore {
   inserted: Array<{ id: string; apiKeyHash: string }>;
   rotations: Array<{ tenantId: string; apiKeyHash: string }>;
+  rotationWins: boolean;
 }
 
-function fakeStore(existingHash: string | null): FakeStore {
+function fakeStore(existingHash: string | null, rotationWins = true): FakeStore {
   const store: FakeStore = {
     inserted: [],
     rotations: [],
+    rotationWins,
     async getApiKeyHash() {
       return existingHash;
     },
     async insertTenant(values) {
       store.inserted.push(values);
     },
-    async rotateApiKeyHash(tenantId, apiKeyHash) {
+    async rotateApiKeyHash(tenantId, _expectedApiKeyHash, apiKeyHash) {
       store.rotations.push({ tenantId, apiKeyHash });
+      return store.rotationWins;
     },
   };
   return store;
@@ -46,6 +51,14 @@ function fakeStore(existingHash: string | null): FakeStore {
 const ARGS = { tenantId: "default", tenantName: "Default Steward Tenant", ownerAddress: "0xabc" };
 
 describe("SEC-012 ensureDefaultTenant", () => {
+  test("root manifest declares provision-agent direct imports", () => {
+    const rootPackage = JSON.parse(
+      readFileSync(join(import.meta.dir, "..", "..", "package.json"), "utf8"),
+    ) as { dependencies?: Record<string, string> };
+    expect(rootPackage.dependencies?.["@stwd/db"]).toBe("workspace:*");
+    expect(rootPackage.dependencies?.["drizzle-orm"]).toBeDefined();
+  });
+
   test("creates a missing tenant with a random (non-derivable) key", async () => {
     const store = fakeStore(null);
     const result = await ensureDefaultTenant(store, ARGS);
@@ -82,6 +95,14 @@ describe("SEC-012 ensureDefaultTenant", () => {
     expect(result.status).toBe("existing");
     expect(store.inserted).toHaveLength(0);
     expect(store.rotations).toHaveLength(0);
+  });
+
+  test("does not overwrite or print a key when a concurrent rotation wins", async () => {
+    const store = fakeStore(LEGACY_DEFAULT_TENANT_API_KEY_HASH, false);
+    const result = await ensureDefaultTenant(store, ARGS);
+
+    expect(result).toEqual({ status: "existing" });
+    expect("apiKey" in result).toBe(false);
   });
 
   test("legacy hash constant matches the pre-fix derivation", () => {

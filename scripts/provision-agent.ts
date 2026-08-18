@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { resolve } from "node:path";
 import { getDb, tenants } from "@stwd/db";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { createAgentToken, DEFAULT_TENANT_ID, vault } from "../packages/api/src/services/context";
 import { TradeSessionManager } from "../packages/trade-sessions/src/index";
 import { type DefaultTenantStore, ensureDefaultTenant } from "./lib/default-tenant";
@@ -34,8 +34,13 @@ const defaultTenantStore: DefaultTenantStore = {
   async insertTenant(values) {
     await getDb().insert(tenants).values(values);
   },
-  async rotateApiKeyHash(tenantId, apiKeyHash) {
-    await getDb().update(tenants).set({ apiKeyHash }).where(eq(tenants.id, tenantId));
+  async rotateApiKeyHash(tenantId, expectedApiKeyHash, apiKeyHash) {
+    const updated = await getDb()
+      .update(tenants)
+      .set({ apiKeyHash })
+      .where(and(eq(tenants.id, tenantId), eq(tenants.apiKeyHash, expectedApiKeyHash)))
+      .returning({ id: tenants.id });
+    return updated.length === 1;
   },
 };
 
