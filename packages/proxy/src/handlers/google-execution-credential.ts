@@ -384,22 +384,75 @@ export async function mintGoogleExecutionAccessToken(
     throw error;
   }
 
-  if (raw.refresh_token === undefined) {
-    await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
+  const accountStillCurrent = await withTenantAuditedTransaction(
+    input.tenantId,
+    async (txRaw, append) => {
       const tx = txRaw as DbExecutor;
-      await tx
-        .update(providerGoogleCredentialLifecycles)
-        .set({ state: "adopted", credentialSecretId: null, updatedAt: new Date() })
+      const [account] = await tx
+        .select({ id: providerAccounts.id })
+        .from(providerAccounts)
         .where(
           and(
-            eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
-            eq(providerGoogleCredentialLifecycles.id, lifecycleId),
-            eq(providerGoogleCredentialLifecycles.credentialSecretId, stagedSecretId as string),
+            eq(providerAccounts.tenantId, input.tenantId),
+            eq(providerAccounts.workspaceId, input.workspaceId),
+            eq(providerAccounts.id, input.accountId),
+            eq(providerAccounts.revision, input.accountRevision),
+            eq(providerAccounts.status, "active"),
           ),
-        );
-      await tx
-        .delete(secrets)
-        .where(and(eq(secrets.tenantId, input.tenantId), eq(secrets.id, stagedSecretId as string)));
+        )
+        .limit(1)
+        .for("update");
+      if (!account) {
+        await tx
+          .update(providerGoogleCredentialLifecycles)
+          .set({
+            state: "revocation_pending",
+            lastErrorCode: "ACCOUNT_REVISION_CHANGED",
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+              eq(providerGoogleCredentialLifecycles.id, lifecycleId),
+              eq(providerGoogleCredentialLifecycles.state, "credential_staged"),
+            ),
+          );
+        await append({
+          tenantId: input.tenantId,
+          actorType: "system",
+          actorId: "credential-proxy",
+          action: "provider.google.refresh.needs_attention",
+          resourceType: "provider_account",
+          resourceId: input.accountId,
+          metadata: {
+            lifecycleId,
+            workspaceId: input.workspaceId,
+            reason: "ACCOUNT_REVISION_CHANGED",
+          },
+        });
+        return false;
+      }
+
+      if (raw.refresh_token === undefined) {
+        const [adopted] = await tx
+          .update(providerGoogleCredentialLifecycles)
+          .set({ state: "adopted", credentialSecretId: null, updatedAt: new Date() })
+          .where(
+            and(
+              eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+              eq(providerGoogleCredentialLifecycles.id, lifecycleId),
+              eq(providerGoogleCredentialLifecycles.credentialSecretId, stagedSecretId as string),
+              eq(providerGoogleCredentialLifecycles.state, "credential_staged"),
+            ),
+          )
+          .returning({ id: providerGoogleCredentialLifecycles.id });
+        if (!adopted) return false;
+        await tx
+          .delete(secrets)
+          .where(
+            and(eq(secrets.tenantId, input.tenantId), eq(secrets.id, stagedSecretId as string)),
+          );
+      }
       await append({
         tenantId: input.tenantId,
         actorType: "system",
@@ -409,7 +462,11 @@ export async function mintGoogleExecutionAccessToken(
         resourceId: input.accountId,
         metadata: { lifecycleId, workspaceId: input.workspaceId },
       });
-    });
+      return true;
+    },
+  );
+  if (!accountStillCurrent) {
+    throw new Error("Google provider account changed during token mint");
   }
 
   return raw.access_token;

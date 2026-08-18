@@ -602,13 +602,21 @@ describe("connect", () => {
     expect(JSON.stringify(encryptedHandle)).not.toContain("access-initial");
     expect(JSON.stringify(encryptedHandle)).not.toContain("refresh-initial");
     expect(await vault.decryptSecret(TENANT, encryptedHandle.id)).toContain("refresh-initial");
-    await expect(
+    const concurrentRecovery = await Promise.all([
       runGoogleCredentialLifecycleSweep({
         vault,
         config: CONFIG,
         now: new Date(Date.now() + 20_000),
       }),
-    ).resolves.toMatchObject({ processed: 1, revoked: 1, attention: 0 });
+      runGoogleCredentialLifecycleSweep({
+        vault,
+        config: CONFIG,
+        now: new Date(Date.now() + 20_000),
+      }),
+    ]);
+    expect(concurrentRecovery.reduce((sum, result) => sum + result.processed, 0)).toBe(1);
+    expect(concurrentRecovery.reduce((sum, result) => sum + result.revoked, 0)).toBe(1);
+    expect(concurrentRecovery.reduce((sum, result) => sum + result.attention, 0)).toBe(0);
     await expect(
       reconcileGoogleCredentialRevocation({
         tenantId: TENANT,

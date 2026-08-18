@@ -1954,6 +1954,29 @@ export interface GoogleCredentialLifecycleSweepResult {
   remaining: boolean;
 }
 
+export const GOOGLE_LIFECYCLE_SWEEP_BATCH_SIZE = 25;
+export const GOOGLE_LIFECYCLE_MAX_ATTEMPTS = 5;
+const GOOGLE_LIFECYCLE_BASE_BACKOFF_MS = 5_000;
+const GOOGLE_LIFECYCLE_MAX_BACKOFF_MS = 5 * 60_000;
+
+function googleLifecycleBackoffMs(attempts: number): number {
+  return Math.min(
+    GOOGLE_LIFECYCLE_MAX_BACKOFF_MS,
+    GOOGLE_LIFECYCLE_BASE_BACKOFF_MS * 2 ** Math.max(0, attempts - 1),
+  );
+}
+
+function googleLifecycleRetryableState(
+  state: string,
+): state is "inflight" | "credential_staged" | "revocation_pending" | "needs_attention" {
+  return (
+    state === "inflight" ||
+    state === "credential_staged" ||
+    state === "revocation_pending" ||
+    state === "needs_attention"
+  );
+}
+
 /**
  * Bounded all-tenant recovery pass for one-time Google OAuth responses.
  * Fresh inflight rows are left to their live caller; only rows older than the
@@ -1965,7 +1988,10 @@ export async function runGoogleCredentialLifecycleSweep(input: {
   limit?: number;
   now?: Date;
 }): Promise<GoogleCredentialLifecycleSweepResult> {
-  const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+  const limit = Math.min(
+    GOOGLE_LIFECYCLE_SWEEP_BATCH_SIZE,
+    Math.max(1, Math.floor(input.limit ?? GOOGLE_LIFECYCLE_SWEEP_BATCH_SIZE)),
+  );
   const now = input.now ?? new Date();
   const recoveryBefore = new Date(now.getTime() - GOOGLE_FORWARD_TIMEOUT_MS - 5_000);
   const staleInflightBefore = new Date(now.getTime() - GOOGLE_FORWARD_TIMEOUT_MS - 5_000);
@@ -1973,18 +1999,21 @@ export async function runGoogleCredentialLifecycleSweep(input: {
     .select()
     .from(providerGoogleCredentialLifecycles)
     .where(
-      or(
-        and(
-          inArray(providerGoogleCredentialLifecycles.state, [
-            "credential_staged",
-            "revocation_pending",
-            "needs_attention",
-          ]),
-          lte(providerGoogleCredentialLifecycles.updatedAt, recoveryBefore),
-        ),
-        and(
-          eq(providerGoogleCredentialLifecycles.state, "inflight"),
-          lte(providerGoogleCredentialLifecycles.updatedAt, staleInflightBefore),
+      and(
+        sql`${providerGoogleCredentialLifecycles.attempts} < ${GOOGLE_LIFECYCLE_MAX_ATTEMPTS}`,
+        or(
+          and(
+            inArray(providerGoogleCredentialLifecycles.state, [
+              "credential_staged",
+              "revocation_pending",
+              "needs_attention",
+            ]),
+            lte(providerGoogleCredentialLifecycles.updatedAt, recoveryBefore),
+          ),
+          and(
+            eq(providerGoogleCredentialLifecycles.state, "inflight"),
+            lte(providerGoogleCredentialLifecycles.updatedAt, staleInflightBefore),
+          ),
         ),
       ),
     )
@@ -1998,7 +2027,57 @@ export async function runGoogleCredentialLifecycleSweep(input: {
     attention: 0,
     remaining: false,
   };
-  for (const row of rows) {
+  for (const candidate of rows) {
+    const row = await withTenantAuditedTransaction(candidate.tenantId, async (txRaw, append) => {
+      const tx = txRaw as DbExecutor;
+      const [current] = await tx
+        .select()
+        .from(providerGoogleCredentialLifecycles)
+        .where(
+          and(
+            eq(providerGoogleCredentialLifecycles.tenantId, candidate.tenantId),
+            eq(providerGoogleCredentialLifecycles.id, candidate.id),
+          ),
+        )
+        .limit(1)
+        .for("update");
+      if (
+        !current ||
+        !googleLifecycleRetryableState(current.state) ||
+        current.attempts >= GOOGLE_LIFECYCLE_MAX_ATTEMPTS ||
+        current.attempts !== candidate.attempts ||
+        now.getTime() - current.updatedAt.getTime() < googleLifecycleBackoffMs(current.attempts)
+      ) {
+        return null;
+      }
+      const [claimed] = await tx
+        .update(providerGoogleCredentialLifecycles)
+        .set({ attempts: current.attempts + 1, updatedAt: new Date() })
+        .where(
+          and(
+            eq(providerGoogleCredentialLifecycles.tenantId, current.tenantId),
+            eq(providerGoogleCredentialLifecycles.id, current.id),
+            eq(providerGoogleCredentialLifecycles.attempts, current.attempts),
+          ),
+        )
+        .returning();
+      if (!claimed) return null;
+      await append({
+        tenantId: current.tenantId,
+        actorType: "system",
+        actorId: "system",
+        action: "provider.google.lifecycle.recovery_claimed",
+        resourceType: "provider_google_credential_lifecycle",
+        resourceId: current.id,
+        metadata: {
+          kind: current.kind,
+          attempts: claimed.attempts,
+          workspaceId: current.workspaceId,
+        },
+      });
+      return claimed;
+    });
+    if (!row) continue;
     result.processed += 1;
     try {
       if (row.kind === "connect_exchange") {
@@ -2045,7 +2124,7 @@ export async function runGoogleCredentialLifecycleSweep(input: {
   // Do not tight-loop a permanently failing revoker. Failed rows update their
   // timestamp and are retried on the next scheduled pass, while a clean full
   // page can be drained immediately.
-  result.remaining = rows.length === limit && result.attention === 0;
+  result.remaining = result.processed > 0 && rows.length === limit && result.attention === 0;
   return result;
 }
 

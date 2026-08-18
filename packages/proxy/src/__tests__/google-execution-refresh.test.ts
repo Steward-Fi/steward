@@ -263,4 +263,45 @@ describe("Google execution-time token mint", () => {
       .where(eq(providerGoogleCredentialLifecycles.providerAccountId, accountId));
     expect(rows.some((row) => row.state === "revocation_pending")).toBeTrue();
   });
+
+  test("never dispatches a token minted from a stale account revision", async () => {
+    await getDb()
+      .update(providerGoogleCredentialLifecycles)
+      .set({ state: "adopted", credentialSecretId: null })
+      .where(eq(providerGoogleCredentialLifecycles.providerAccountId, accountId));
+    const [account] = await getDb()
+      .update(providerAccounts)
+      .set({ status: "active", revision: 8 })
+      .where(eq(providerAccounts.id, accountId))
+      .returning();
+    __setGoogleExecutionTokenForwarderForTests(async () => {
+      await getDb()
+        .update(providerAccounts)
+        .set({ revision: 9 })
+        .where(eq(providerAccounts.id, accountId));
+      return Response.json({
+        access_token: "must-not-dispatch",
+        token_type: "Bearer",
+        scope: "openid email https://www.googleapis.com/auth/gmail.send",
+        expires_in: 3600,
+      });
+    });
+    await expect(
+      mintGoogleExecutionAccessToken({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId,
+        accountRevision: account.revision,
+        credential,
+        vault,
+        clientId: "provider-client",
+        clientSecret: "provider-secret",
+      }),
+    ).rejects.toThrow("changed during token mint");
+    const rows = await getDb()
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.providerAccountId, accountId));
+    expect(rows.some((row) => row.lastErrorCode === "ACCOUNT_REVISION_CHANGED")).toBeTrue();
+  });
 });
