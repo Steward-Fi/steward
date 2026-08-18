@@ -106,6 +106,7 @@
         "@node-saml/node-saml": "5.1.0",
         "@simplewebauthn/server": "^13",
         "@stwd/db": "workspace:*",
+        "@stwd/redis": "workspace:*",
         "@stwd/shared": "workspace:*",
         "hono": "^4.12.34",
         "ioredis": "^5.10.1",

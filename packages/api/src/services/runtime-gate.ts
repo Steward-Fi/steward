@@ -32,6 +32,24 @@
 
 export const DEFAULT_RATE_LIMIT_MAX_KEYS = 10_000;
 
+/**
+ * Key in the Hono `env` bag (app.fetch's second argument) through which a
+ * server entry point hands the app the socket peer it observed (Bun's
+ * `server.requestIP`). Unlike any request header, this value is set by the
+ * runtime and cannot be client-influenced, so downstream rate limiters may
+ * key on it when no trusted forwarding config exists (SEC-014 posture
+ * extended to the per-route auth limiter). Runtimes without a socket (e.g.
+ * Cloudflare Workers) simply never set it.
+ */
+export const SOCKET_PEER_ENV_KEY = "steward.socketPeer";
+
+/** Read the entry-injected socket peer from a Hono context's env bag. */
+export function socketPeerFromEnv(env: unknown): string | undefined {
+  if (typeof env !== "object" || env === null) return undefined;
+  const peer = (env as Record<string, unknown>)[SOCKET_PEER_ENV_KEY];
+  return typeof peer === "string" && peer.length > 0 ? peer : undefined;
+}
+
 export function parseNonNegativeInt(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback;
