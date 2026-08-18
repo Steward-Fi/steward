@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { GithubOperationKey } from "@stwd/provider-github";
+import type { SlackOperationKey } from "@stwd/provider-slack";
 import type { XOperationKey } from "@stwd/provider-x";
 import { parseGovernedCanonicalActionForDispatch } from "@stwd/proxy/src/handlers/governed-execution";
 import {
@@ -11,6 +12,7 @@ import {
   inspectProviderProfileConformance,
   jcsStringify,
   REGISTERED_PROFILES,
+  SLACK_PROVIDER_ACTION_PROFILE,
   strictParseJson,
   validateGenericHttpDescriptor,
   X_PROVIDER_ACTION_PROFILE,
@@ -35,6 +37,13 @@ const FIXTURES = {
     method: undefined,
     args: { tweetId: "1234567890" },
     traversalArgs: { tweetId: ".." },
+    traversalCode: "CANON_PATH_SEGMENT_INVALID",
+  },
+  [SLACK_PROVIDER_ACTION_PROFILE]: {
+    operationKey: "slack.users.info" as const,
+    method: undefined,
+    args: { user: "U12345678" },
+    traversalArgs: { user: ".." },
     traversalCode: "CANON_PATH_SEGMENT_INVALID",
   },
   [GENERIC_HTTP_PROVIDER_ACTION_PROFILE]: {
@@ -79,6 +88,20 @@ const OPERATION_FIXTURES = {
       args: {},
     },
   ],
+  [SLACK_PROVIDER_ACTION_PROFILE]: [
+    {
+      operationKey: "slack.chat.postMessage",
+      args: { channel: "C12345678", text: "hello world" },
+    },
+    {
+      operationKey: "slack.conversations.list",
+      args: {},
+    },
+    {
+      operationKey: "slack.users.info",
+      args: { user: "U12345678" },
+    },
+  ],
   [GENERIC_HTTP_PROVIDER_ACTION_PROFILE]: [
     {
       operationKey: "generic.items.list",
@@ -105,6 +128,8 @@ function buildFromProductionSpec(
       return spec.build(fixture.operationKey as GithubOperationKey, args);
     case X_PROVIDER_ACTION_PROFILE:
       return spec.build(fixture.operationKey as XOperationKey, args);
+    case SLACK_PROVIDER_ACTION_PROFILE:
+      return spec.build(fixture.operationKey as SlackOperationKey, args);
     case GENERIC_HTTP_PROVIDER_ACTION_PROFILE:
       return spec.build(
         fixture.operationKey,

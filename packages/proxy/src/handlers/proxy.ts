@@ -31,6 +31,7 @@ import {
   workspaces,
 } from "@stwd/db";
 import { getRedis, type SpendReservation, settleReservedSpend } from "@stwd/redis";
+import { strictParseJson } from "@stwd/shared";
 import { SecretVault } from "@stwd/vault";
 import type { Context } from "hono";
 import { boundedPositiveIntegerEnv, isProxyDevMode } from "../config";
@@ -63,6 +64,11 @@ function getSecretVault(): SecretVault {
     _secretVault = new SecretVault(masterPassword);
   }
   return _secretVault;
+}
+
+/** Reset the process-local vault cache between isolated test fixtures. */
+export function __resetSecretVaultForTests(): void {
+  _secretVault = null;
 }
 
 // ─── Route matching ──────────────────────────────────────────────────────────
@@ -133,6 +139,19 @@ async function findMatchingRoute(
  */
 async function decryptSecret(tenantId: string, secretId: string): Promise<string> {
   return getSecretVault().decryptSecret(tenantId, secretId);
+}
+
+/**
+ * Slack's governed routes are intentionally bot-token only. Secret routes are
+ * otherwise provider-neutral, so enforce the credential kind again at the last
+ * possible boundary: after decrypt and before it can enter an outbound header.
+ * This prevents a mistakenly stored user token (xoxp-) or arbitrary plaintext
+ * secret from inheriting the bot grant's authority.
+ */
+function isSlackBotTokenCredential(value: string): boolean {
+  if (!value.startsWith("xoxb-") || value.length > 512) return false;
+  const suffix = value.slice(5);
+  return suffix.length >= 10 && !/[^A-Za-z0-9-]/.test(suffix);
 }
 
 // ─── Credential injection ────────────────────────────────────────────────────
@@ -1734,6 +1753,27 @@ export async function handleProxy(c: Context): Promise<Response> {
     return c.json({ ok: false, error: "Failed to decrypt credential" }, 500);
   }
 
+  if (target.host === "slack.com" && !isSlackBotTokenCredential(credential)) {
+    // Do not include the credential (or any derivative of it) in the response,
+    // logs, or audit reason. The agent only learns that the configured grant is
+    // not an eligible Slack bot credential.
+    credential = "";
+    await recordRequiredAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: 403,
+      latencyMs: Date.now() - startTime,
+      reason: "slack-bot-credential-required",
+    });
+    await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
+    await releaseUnsafeProxyRequest(replayClaim);
+    proxySlot.release();
+    return c.json({ ok: false, error: "Slack route requires a bot credential" }, 403);
+  }
+
   // 4. Build outbound request
   //
   // Compose the client's query string onto the pinned upstream target. Target
@@ -1850,18 +1890,7 @@ export async function handleProxy(c: Context): Promise<Response> {
 
   const latencyMs = Date.now() - startTime;
 
-  // 7. Audit log
-  await recordAudit({
-    agentId,
-    tenantId,
-    targetHost: target.host,
-    targetPath: target.path,
-    method,
-    statusCode: response.status,
-    latencyMs,
-  });
-
-  // 7.5. Spend tracking for LLM API responses
+  // 7. Inspect provider-specific response semantics before recording an outcome.
   //
   // For known LLM hosts, we need to read the response body to extract token
   // usage for cost estimation. We buffer the response body, parse it, track
@@ -1871,6 +1900,42 @@ export async function handleProxy(c: Context): Promise<Response> {
   let responseBody: ReadableStream<Uint8Array> | ArrayBuffer | null = response.body;
   const contentType = response.headers.get("content-type") || "";
   const isJsonResponse = contentType.includes("application/json");
+  let slackSemanticFailure: string | null = null;
+
+  // Slack Web API encodes operation failures as HTTP 200 + {ok:false}. Treat
+  // that envelope as a failed dispatch, while retaining the buffered bytes for
+  // credential-reflection scanning below. A malformed/non-JSON 2xx response is
+  // also fail-closed: it cannot prove that the requested action succeeded.
+  if (target.host === "slack.com" && response.status >= 200 && response.status < 300) {
+    try {
+      const length = Number(response.headers.get("content-length") ?? "0");
+      if (Number.isFinite(length) && length > MAX_PROXY_RESPONSE_BYTES) {
+        throw new Error("Slack response too large");
+      }
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength > MAX_PROXY_RESPONSE_BYTES) throw new Error("Slack response too large");
+      responseBody = buffer;
+      slackSemanticFailure = classifySlackWebApiPayload(new TextDecoder().decode(buffer));
+    } catch {
+      slackSemanticFailure = "invalid_response";
+    }
+  }
+
+  // Slack can report failure in an HTTP 200 envelope. Do not persist a
+  // contradictory successful audit row before the semantic failure row below.
+  if (!slackSemanticFailure) {
+    await recordAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: response.status,
+      latencyMs,
+    });
+  }
+
+  // 7.5. Spend tracking for LLM API responses
   const isLLMHost =
     isProxyRedisAvailable() &&
     (target.host === "api.openai.com" || target.host === "api.anthropic.com");
@@ -2069,6 +2134,29 @@ export async function handleProxy(c: Context): Promise<Response> {
       return c.json({ ok: false, error: "Upstream response reflected injected credential" }, 502);
     }
   }
+  if (slackSemanticFailure) {
+    await recordAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: 502,
+      latencyMs: Date.now() - startTime,
+      reason: `slack-api-error:${slackSemanticFailure}`,
+    });
+    injectedCredentialValue = null;
+    sensitiveCredentialValues = [];
+    proxySlot.release();
+    return c.json(
+      {
+        ok: false,
+        error: "Slack upstream operation failed",
+        data: { providerError: slackSemanticFailure },
+      },
+      502,
+    );
+  }
   injectedCredentialValue = null;
   sensitiveCredentialValues = [];
 
@@ -2113,6 +2201,22 @@ export async function handleProxy(c: Context): Promise<Response> {
     statusText: response.statusText,
     headers: responseHeaders,
   });
+}
+
+/** Null means Slack explicitly attested success; any string is a safe failure code. */
+export function classifySlackWebApiPayload(bodyText: string): string | null {
+  try {
+    const parsed = strictParseJson(bodyText) as { ok?: unknown; error?: unknown };
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return "invalid_response";
+    }
+    if (parsed.ok === true) return null;
+    return typeof parsed.error === "string" && /^[a-z0-9_]{1,128}$/i.test(parsed.error)
+      ? parsed.error
+      : "invalid_response";
+  } catch {
+    return "invalid_response";
+  }
 }
 
 // ─── Exports for testing ─────────────────────────────────────────────────────

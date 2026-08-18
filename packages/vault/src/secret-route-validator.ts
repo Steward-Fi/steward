@@ -29,6 +29,7 @@ export const DEFAULT_SECRET_ROUTE_HOSTS = [
   "api.helius.xyz",
   "api.github.com",
   "api.x.com",
+  "slack.com",
 ] as const;
 
 /**
@@ -105,6 +106,11 @@ export const STRICT_HOSTS: Record<
   // and forbids "*" wildcards (a /2/* route would attach the OAuth token to
   // every X endpoint).
   "api.x.com": {
+    minPathSegments: 2,
+    requireExplicitMethod: true,
+    disallowPathWildcards: true,
+  },
+  "slack.com": {
     minPathSegments: 2,
     requireExplicitMethod: true,
     disallowPathWildcards: true,

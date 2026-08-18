@@ -15,6 +15,7 @@ import {
 } from "./provider-action.js";
 import { assertRegisteredProfile } from "./provider-profile-registry.js";
 import { containsSensitiveCredentialKey, isSensitiveCredentialKey } from "./sensitive-keys.js";
+import { SLACK_PROVIDER_ACTION_PROFILE } from "./slack-provider-action.js";
 import { X_PROVIDER_ACTION_PROFILE } from "./x-provider-action.js";
 
 export interface ConformanceCanonicalAction {
@@ -121,6 +122,64 @@ function validTweetBody(value: unknown): boolean {
   return true;
 }
 
+const SLACK_CHANNEL_RE = /^[CGD][A-Z0-9]{8,19}$/;
+const SLACK_USER_RE = /^[UW][A-Z0-9]{8,19}$/;
+const SLACK_THREAD_TS_RE = /^[0-9]{10,16}\.[0-9]{6}$/;
+const SLACK_CONVERSATION_TYPES = new Set(["public_channel", "private_channel", "mpim", "im"]);
+
+function validSlackPostMessageBody(value: unknown): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const body = value as Record<string, unknown>;
+  const keys = Object.keys(body).sort();
+  const allowed = new Set(["blocks", "channel", "text", "thread_ts"]);
+  if (keys.some((key) => !allowed.has(key))) return false;
+  if (!SLACK_CHANNEL_RE.test(typeof body.channel === "string" ? body.channel : "")) return false;
+  if (!("text" in body) && !("blocks" in body)) return false;
+  if ("text" in body) {
+    if (
+      typeof body.text !== "string" ||
+      [...body.text].length < 1 ||
+      [...body.text].length > 40000
+    ) {
+      return false;
+    }
+  }
+  if (
+    "blocks" in body &&
+    (!Array.isArray(body.blocks) || body.blocks.length < 1 || body.blocks.length > 50)
+  ) {
+    return false;
+  }
+  if (
+    "thread_ts" in body &&
+    !SLACK_THREAD_TS_RE.test(typeof body.thread_ts === "string" ? body.thread_ts : "")
+  ) {
+    return false;
+  }
+  return new TextEncoder().encode(JSON.stringify(body)).byteLength <= 200_000;
+}
+
+function validSlackConversationsQuery(pairs: Array<[string, string]>): boolean {
+  const values = new Map(pairs);
+  if (values.size !== pairs.length || !values.has("limit") || !values.has("types")) return false;
+  if ([...values.keys()].some((key) => !["cursor", "limit", "types"].includes(key))) return false;
+  if (!/^(?:[1-9]|[1-9][0-9]|1[0-9]{2}|200)$/.test(values.get("limit") ?? "")) return false;
+  const types = (values.get("types") ?? "").split(",");
+  if (
+    types.length < 1 ||
+    types.some((type) => !SLACK_CONVERSATION_TYPES.has(type)) ||
+    jcsStringify(types) !== jcsStringify([...new Set(types)].sort())
+  ) {
+    return false;
+  }
+  const cursor = values.get("cursor");
+  if (cursor !== undefined && !/^[A-Za-z0-9=_-]{1,512}$/.test(cursor)) return false;
+  return pairsEqual(
+    pairs,
+    [...values.entries()].sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
 /** Exact adapter-fixed reconstruction contract for every registered operation. */
 function fixedActionMatchesOperation(
   action: ConformanceCanonicalAction,
@@ -195,6 +254,37 @@ function fixedActionMatchesOperation(
         action.selectedHeaders.length === 0 &&
         action.canonicalBody === null
       );
+    case "slack.chat.postMessage":
+      return (
+        action.profile === SLACK_PROVIDER_ACTION_PROFILE &&
+        action.origin === "https://slack.com" &&
+        action.method === "POST" &&
+        action.normalizedPath === "/api/chat.postMessage" &&
+        action.orderedQueryPairs.length === 0 &&
+        pairsEqual(action.selectedHeaders, [["content-type", "application/json"]]) &&
+        validSlackPostMessageBody(action.canonicalBody)
+      );
+    case "slack.conversations.list":
+      return (
+        action.profile === SLACK_PROVIDER_ACTION_PROFILE &&
+        action.origin === "https://slack.com" &&
+        action.method === "GET" &&
+        action.normalizedPath === "/api/conversations.list" &&
+        validSlackConversationsQuery(action.orderedQueryPairs) &&
+        action.selectedHeaders.length === 0 &&
+        action.canonicalBody === null
+      );
+    case "slack.users.info":
+      return (
+        action.profile === SLACK_PROVIDER_ACTION_PROFILE &&
+        action.origin === "https://slack.com" &&
+        action.method === "GET" &&
+        action.normalizedPath === "/api/users.info" &&
+        pairsEqual(action.orderedQueryPairs, [["user", action.orderedQueryPairs[0]?.[1] ?? ""]]) &&
+        SLACK_USER_RE.test(action.orderedQueryPairs[0]?.[1] ?? "") &&
+        action.selectedHeaders.length === 0 &&
+        action.canonicalBody === null
+      );
     default:
       return false;
   }
@@ -238,6 +328,19 @@ export function inspectProviderOperationTargetConformance(
       exact("https://api.x.com", "DELETE", /^\/2\/tweets\/[0-9]{1,25}$/);
     } else if (context.operationKey === "x.user.me.read") {
       exact("https://api.x.com", "GET", "/2/users/me");
+    } else {
+      violations.push("operation-key-unsupported");
+    }
+    if (!fixedActionMatchesOperation(action, context.operationKey)) {
+      violations.push("operation-action-mismatch");
+    }
+  } else if (action.profile === SLACK_PROVIDER_ACTION_PROFILE) {
+    if (context.operationKey === "slack.chat.postMessage") {
+      exact("https://slack.com", "POST", "/api/chat.postMessage");
+    } else if (context.operationKey === "slack.conversations.list") {
+      exact("https://slack.com", "GET", "/api/conversations.list");
+    } else if (context.operationKey === "slack.users.info") {
+      exact("https://slack.com", "GET", "/api/users.info");
     } else {
       violations.push("operation-key-unsupported");
     }

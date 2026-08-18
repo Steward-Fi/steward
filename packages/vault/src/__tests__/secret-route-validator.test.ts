@@ -371,6 +371,36 @@ describe("STRICT_HOSTS — api.github.com narrowness", () => {
   });
 });
 
+describe("STRICT_HOSTS — slack.com narrowness", () => {
+  it("allows only a method-explicit, exact Slack API route", () => {
+    expect(STRICT_HOSTS["slack.com"]).toEqual({
+      minPathSegments: 2,
+      requireExplicitMethod: true,
+      disallowPathWildcards: true,
+    });
+    expect(DEFAULT_SECRET_ROUTE_HOSTS).toContain("slack.com");
+    expect(
+      validateSecretRouteConfig({
+        ...okBase,
+        hostPattern: "slack.com",
+        pathPattern: "/api/chat.postMessage",
+        method: "POST",
+      }),
+    ).toBeNull();
+  });
+
+  it("rejects a wildcard Slack API route", () => {
+    expect(
+      validateSecretRouteConfig({
+        ...okBase,
+        hostPattern: "slack.com",
+        pathPattern: "/api/*",
+        method: "POST",
+      }),
+    ).toContain('exact path (no "*" wildcards)');
+  });
+});
+
 // Parity net: both former call-path surfaces (the vault boundary and the api
 // route) now import the SAME exported validator. Asserting on the shared export
 // is therefore an assertion about both call sites at once. This matrix locks

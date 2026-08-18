@@ -5,6 +5,12 @@ import {
   type GithubOperationKey,
 } from "@stwd/provider-github";
 import {
+  buildSlackAction,
+  SLACK_OPERATION_KEYS,
+  type SlackActionBuild,
+  type SlackOperationKey,
+} from "@stwd/provider-slack";
+import {
   buildXAction,
   X_OPERATION_KEYS,
   type XActionBuild,
@@ -19,10 +25,11 @@ import {
   GITHUB_PROVIDER_ACTION_PROFILE,
   getProfileDescriptor,
   REGISTERED_PROFILES,
+  SLACK_PROVIDER_ACTION_PROFILE,
   X_PROVIDER_ACTION_PROFILE,
 } from "@stwd/shared";
 
-export type AdapterFixedActionBuild = GithubActionBuild | XActionBuild;
+export type AdapterFixedActionBuild = GithubActionBuild | SlackActionBuild | XActionBuild;
 
 function fixedProfileOrigins(profile: string): readonly string[] {
   const descriptor = getProfileDescriptor(profile);
@@ -39,6 +46,13 @@ export type ProductionProviderProfileSpec =
       readonly operationKeys: readonly GithubOperationKey[];
       readonly allowedOrigins: readonly string[];
       build(operationKey: GithubOperationKey, args: unknown): GithubActionBuild;
+    }
+  | {
+      readonly profile: typeof SLACK_PROVIDER_ACTION_PROFILE;
+      readonly kind: "adapter-fixed";
+      readonly operationKeys: readonly SlackOperationKey[];
+      readonly allowedOrigins: readonly string[];
+      build(operationKey: SlackOperationKey, args: unknown): SlackActionBuild;
     }
   | {
       readonly profile: typeof X_PROVIDER_ACTION_PROFILE;
@@ -76,6 +90,14 @@ const X_SPEC = Object.freeze({
   build: buildXAction,
 });
 
+const SLACK_SPEC = Object.freeze({
+  profile: SLACK_PROVIDER_ACTION_PROFILE,
+  kind: "adapter-fixed" as const,
+  operationKeys: Object.freeze([...SLACK_OPERATION_KEYS]),
+  allowedOrigins: fixedProfileOrigins(SLACK_PROVIDER_ACTION_PROFILE),
+  build: buildSlackAction,
+});
+
 const GENERIC_HTTP_SPEC = Object.freeze({
   profile: GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
   kind: "config-driven" as const,
@@ -96,7 +118,7 @@ const GENERIC_HTTP_SPEC = Object.freeze({
  * frozen list rather than exercising handwritten lookalikes.
  */
 export const PRODUCTION_PROVIDER_PROFILE_SPECS: readonly ProductionProviderProfileSpec[] =
-  Object.freeze([GITHUB_SPEC, X_SPEC, GENERIC_HTTP_SPEC]);
+  Object.freeze([GITHUB_SPEC, X_SPEC, SLACK_SPEC, GENERIC_HTTP_SPEC]);
 
 const SPEC_BY_PROFILE: ReadonlyMap<string, ProductionProviderProfileSpec> = new Map(
   PRODUCTION_PROVIDER_PROFILE_SPECS.map((spec) => [spec.profile, spec] as const),
@@ -155,6 +177,11 @@ export function buildAdapterFixedProviderAction(
     if (method !== undefined)
       throw new CanonError("CANON_UNKNOWN_FIELD", "method is adapter-fixed");
     return X_SPEC.build(operationKey as XOperationKey, args);
+  }
+  if ((SLACK_SPEC.operationKeys as readonly string[]).includes(operationKey)) {
+    if (method !== undefined)
+      throw new CanonError("CANON_UNKNOWN_FIELD", "method is adapter-fixed");
+    return SLACK_SPEC.build(operationKey as SlackOperationKey, args);
   }
   return undefined;
 }

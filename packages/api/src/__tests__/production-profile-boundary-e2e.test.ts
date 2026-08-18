@@ -36,6 +36,7 @@ import {
   GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
   GITHUB_PROVIDER_ACTION_PROFILE,
   REGISTERED_PROFILES,
+  SLACK_PROVIDER_ACTION_PROFILE,
   X_PROVIDER_ACTION_PROFILE,
 } from "@stwd/shared";
 import { KeyStore } from "@stwd/vault";
@@ -77,6 +78,16 @@ const PROFILES = [
     method: "POST",
     path: "/2/tweets",
     args: { text: "boundary proof", summoned: false },
+    requestProfile: {},
+  },
+  {
+    profile: SLACK_PROVIDER_ACTION_PROFILE,
+    adapterKey: "slack",
+    operationKey: "slack.chat.postMessage",
+    host: "slack.com",
+    method: "POST",
+    path: "/api/chat.postMessage",
+    args: { channel: "C12345678", text: "boundary proof" },
     requestProfile: {},
   },
   {
@@ -149,8 +160,9 @@ beforeAll(async () => {
   process.env.STEWARD_AUDIT_HMAC_KEY = "0".repeat(64);
   process.env.STEWARD_EXECUTION_AUTH_SECRET = "1".repeat(64);
   process.env.STEWARD_MASTER_PASSWORD = "profile-boundary-master-password";
-  process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS = "api.github.com,api.x.com,api.example.com";
-  process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.github.com,api.x.com,api.example.com";
+  process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS =
+    "api.github.com,api.x.com,slack.com,api.example.com";
+  process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.github.com,api.x.com,slack.com,api.example.com";
   process.env.STEWARD_JWT_SECRET = "profile-boundary-jwt-secret-0123456789abcdef0123456789";
   const signingKeys = generateKeyPairSync("ed25519");
   process.env.STEWARD_AUDIT_SIGNING_KEY = signingKeys.privateKey
@@ -180,8 +192,14 @@ beforeAll(async () => {
   resetCheckpointSignerCache();
   app = (await import("../app")).app as Hono<{ Variables: AppVariables }>;
   const proxy = await import("@stwd/proxy/src/handlers/proxy");
+  proxy.__resetSecretVaultForTests();
   ({ dispatchGovernedExecution } = await import("@stwd/proxy/src/handlers/governed-execution"));
   proxy.__setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
+  // The boundary proof is about canonical provider authority and exact
+  // credential injection, not Redis availability. Make the rate-limit seam
+  // deterministic so an unrelated process-local fallback cannot turn every
+  // dispatch into a 429 when this file runs in a larger suite.
+  proxy.__setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
   proxy.__setForwardProxyRequestForTests(async () => {
     forwardCount += 1;
     return new Response('{"ok":true}', { status: 201 });
@@ -235,7 +253,11 @@ async function runAuthenticatedBoundary(
     undefined,
     "secret-vault",
   );
-  const encrypted = vault.encrypt("profile-boundary-credential", {
+  const credential =
+    fixture.profile === SLACK_PROVIDER_ACTION_PROFILE
+      ? "xoxb-profile-boundary-credential"
+      : "profile-boundary-credential";
+  const encrypted = vault.encrypt(credential, {
     tenantId: F.TENANT,
     name: "github",
     version: 1,
@@ -409,6 +431,11 @@ describe("#220 real production profile boundaries", () => {
   }
 
   test("the identical authenticated runner rejects a malicious registered fixture pre-claim", async () => {
-    await runAuthenticatedBoundary(PROFILES[2], { maliciousOperationDescriptor: true });
+    const genericFixture = PROFILES.find(
+      ({ profile }) => profile === GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+    );
+    expect(genericFixture).toBeDefined();
+    if (!genericFixture) throw new Error("generic HTTP production fixture is missing");
+    await runAuthenticatedBoundary(genericFixture, { maliciousOperationDescriptor: true });
   });
 });
