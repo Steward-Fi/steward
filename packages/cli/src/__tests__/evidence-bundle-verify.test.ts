@@ -1,9 +1,19 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { evidenceBundleVerifierScript } from "../index";
+import { evidenceBundleVerifierScript, writeOwnerOnlyFile } from "../index";
 
 const CLI_ENTRY = join(dirname(dirname(fileURLToPath(import.meta.url))), "index.ts");
 
@@ -38,6 +48,10 @@ describe("evidence bundle offline verification", () => {
           "process.exit(0);\n",
       );
       const out = join(dir, "bundle.json");
+      // `mode` on writeFile only affects creation. Exercise replacement of a
+      // pre-existing permissive file, which must be tightened before data lands.
+      writeFileSync(out, "stale");
+      chmodSync(out, 0o644);
       const proc = Bun.spawn(
         [
           "bun",
@@ -67,4 +81,19 @@ describe("evidence bundle offline verification", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 15_000);
+
+  test("owner-only output refuses symlinks", () => {
+    const dir = mkdtempSync(join(tmpdir(), "steward-cli-output-"));
+    try {
+      const target = join(dir, "target");
+      const output = join(dir, "output");
+      writeFileSync(target, "untouched");
+      symlinkSync(target, output);
+
+      expect(() => writeOwnerOnlyFile(output, "sensitive")).toThrow();
+      expect(readFileSync(target, "utf8")).toBe("untouched");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

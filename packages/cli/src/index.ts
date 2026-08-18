@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import {
   closeSync,
   existsSync,
+  fchmodSync,
   constants as fsConstants,
   fstatSync,
   mkdirSync,
@@ -36,6 +37,30 @@ type ArchiveChunkReference = {
 const MAX_ARCHIVE_CHUNKS = 2_048;
 const MAX_ARCHIVE_MANIFEST_BYTES = 768 * 1024;
 const MAX_ARCHIVE_ENVELOPE_BYTES = 1024 * 1024;
+
+/** Write sensitive output without following symlinks and make an existing
+ * permissive file owner-only before any secret bytes are written. */
+export function writeOwnerOnlyFile(path: string, contents: string): void {
+  const fd = openSync(
+    path,
+    fsConstants.O_WRONLY |
+      fsConstants.O_CREAT |
+      fsConstants.O_TRUNC |
+      fsConstants.O_NOFOLLOW |
+      fsConstants.O_NONBLOCK,
+    0o600,
+  );
+  try {
+    if (!fstatSync(fd).isFile()) {
+      throw new Error(`Sensitive output is not a regular file: ${path}`);
+    }
+    // The open() mode is creation-only. Tighten reused output before writing.
+    fchmodSync(fd, 0o600);
+    writeFileSync(fd, contents, { encoding: "utf8" });
+  } finally {
+    closeSync(fd);
+  }
+}
 
 /** Read an untrusted archive file without following symlinks, blocking on
  * special files, or allocating beyond its validated size. */
@@ -561,7 +586,7 @@ async function auditCommand(action: string | undefined, ctx: CommandContext) {
   if (to !== undefined) params.set("to", String(to));
   const bundle = await ctx.api.request("GET", `/audit/bundle?${params}`);
   const out = stringFlag(ctx.flags, "out");
-  if (out) writeFileSync(out, JSON.stringify(bundle, null, 2), { mode: 0o600 });
+  if (out) writeOwnerOnlyFile(out, JSON.stringify(bundle, null, 2));
   if (boolFlag(ctx.flags, "verify")) {
     if (!out) throw new Error("--verify requires --out so the offline verifier has a file");
     const result = spawnSync(process.execPath, [evidenceBundleVerifierScript(), out], {
@@ -647,7 +672,7 @@ async function providerActionCommand(action: string | undefined, ctx: CommandCon
     // trusted key fingerprint (E7): --out bundle.json [--verify --fp <hex>].
     const bundle = await ctx.api.request("GET", `/v2/provider-actions/${id()}/evidence`);
     const out = stringFlag(ctx.flags, "out");
-    if (out) writeFileSync(out, JSON.stringify(bundle, null, 2), { mode: 0o600 });
+    if (out) writeOwnerOnlyFile(out, JSON.stringify(bundle, null, 2));
     if (boolFlag(ctx.flags, "verify")) {
       if (!out) throw new Error("--verify requires --out so the offline verifier has a file");
       const fp = stringFlag(ctx.flags, "fp") ?? stringFlag(ctx.flags, "expected-key-fingerprint");

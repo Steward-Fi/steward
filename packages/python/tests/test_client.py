@@ -140,6 +140,13 @@ class StewardClientTests(unittest.TestCase):
         self.assertIsNone(downgrade.get_header("X-steward-signature"))
         self.assertEqual(same_host.get_header("X-steward-key"), "tenant-key")
 
+        different_port = handler.redirect_request(
+            original, None, 302, "Found", {}, "https://api.example.test:444/harvest"
+        )
+        self.assertIsNone(different_port.get_header("Authorization"))
+        self.assertIsNone(different_port.get_header("X-steward-key"))
+        self.assertIsNone(different_port.get_header("X-steward-signature"))
+
     def test_path_parameters_are_url_encoded(self):
         # SEC-127: raw interpolation lets `/`, `?`, `#` in an id silently
         # alter the request path/query.

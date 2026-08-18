@@ -88,6 +88,21 @@ afterEach(() => {
 });
 
 describe("AgentClient — enroll (keypair-only boot)", () => {
+  test("refuses redirects for enrollment and authenticated requests", async () => {
+    const { client, server } = await setup();
+    const realFetch = server.fetch;
+    let requests = 0;
+    (client as unknown as { fetchImpl: typeof fetch }).fetchImpl = async (input, init) => {
+      requests += 1;
+      expect(init?.redirect).toBe("error");
+      return realFetch(input, init);
+    };
+
+    await client.enroll();
+    await client.manifest();
+    expect(requests).toBeGreaterThanOrEqual(3);
+  });
+
   test("boots with keypair only and gets a short-lived agent token", async () => {
     const { client, server } = await setup();
     const result = await client.enroll();

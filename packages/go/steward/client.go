@@ -124,15 +124,33 @@ func assertSecureBaseURL(base *url.URL, allowInsecure bool) error {
 	return errors.New("base URL must use HTTPS unless it targets loopback (http://localhost, http://127.0.0.1, http://[::1]); set AllowInsecureBaseURL to override on trusted private networks")
 }
 
+func effectivePort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return "443"
+	}
+	if strings.EqualFold(u.Scheme, "http") {
+		return "80"
+	}
+	return ""
+}
+
+func sameOrigin(a *url.URL, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectivePort(a) == effectivePort(b)
+}
+
 // stripStewardCredentialsOnCrossHostRedirect drops credential and signing
-// headers when a redirect targets a different host, so an open redirect or
+// headers when a redirect targets a different origin, so an open redirect or
 // hostile proxy cannot exfiltrate them (SEC-126).
 func stripStewardCredentialsOnCrossHostRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) == 0 {
 		return nil
 	}
-	if !strings.EqualFold(req.URL.Hostname(), via[0].URL.Hostname()) ||
-		(strings.EqualFold(via[0].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https")) {
+	if !sameOrigin(req.URL, via[0].URL) {
 		for _, header := range stewardCredentialHeaders {
 			req.Header.Del(header)
 		}
