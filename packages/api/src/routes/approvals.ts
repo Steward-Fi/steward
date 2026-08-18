@@ -191,15 +191,18 @@ function parseApprovalListParams(c: Context<{ Variables: AppVariables }>) {
     return { ok: false as const, error: "cursor pagination cannot be combined with offset" };
   }
 
-  let cursorRequestedAt: Date | undefined;
+  let cursorRequestedAt: string | undefined;
   if (rawCursorRequestedAt !== undefined && rawCursorId !== undefined) {
-    cursorRequestedAt = new Date(rawCursorRequestedAt);
+    const parsedCursorRequestedAt = new Date(rawCursorRequestedAt);
     if (
-      Number.isNaN(cursorRequestedAt.getTime()) ||
-      cursorRequestedAt.toISOString() !== rawCursorRequestedAt
+      Number.isNaN(parsedCursorRequestedAt.getTime()) ||
+      parsedCursorRequestedAt.toISOString() !== rawCursorRequestedAt
     ) {
       return { ok: false as const, error: "cursorRequestedAt must be an ISO 8601 timestamp" };
     }
+    // Keep the canonical wire representation. Passing a Date as a parameter to
+    // a raw SQL expression is driver-dependent and postgres.js expects a string.
+    cursorRequestedAt = rawCursorRequestedAt;
     if (
       rawCursorId.length === 0 ||
       rawCursorId.length > MAX_APPROVAL_CURSOR_ID_LENGTH ||
@@ -291,6 +294,9 @@ approvalRoutes.get("/", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: params.error }, 400);
   }
   const { status: statusFilter, limit, offset, agentId, cursorRequestedAt, cursorId } = params;
+  const cursorRequestedAtSql = cursorRequestedAt
+    ? sql<Date>`${cursorRequestedAt}::timestamptz`
+    : undefined;
 
   // Join approval_queue with agents to filter by tenant
   const results = await db
@@ -322,10 +328,10 @@ approvalRoutes.get("/", async (c) => {
         approvalTransactionMatchesQueue,
         agentId ? eq(approvalQueue.agentId, agentId) : undefined,
         statusFilter !== "all" ? eq(approvalQueue.status, statusFilter) : undefined,
-        cursorRequestedAt && cursorId
+        cursorRequestedAtSql && cursorId
           ? or(
-              lt(approvalRequestedAtMs, cursorRequestedAt),
-              and(eq(approvalRequestedAtMs, cursorRequestedAt), lt(approvalQueue.id, cursorId)),
+              lt(approvalRequestedAtMs, cursorRequestedAtSql),
+              and(eq(approvalRequestedAtMs, cursorRequestedAtSql), lt(approvalQueue.id, cursorId)),
             )
           : undefined,
       ),
