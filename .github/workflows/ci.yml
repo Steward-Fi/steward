@@ -223,6 +223,11 @@ jobs:
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
 
+      - name: RLS pool isolation proof (real Postgres)
+        run: bun test packages/db/src/__tests__/tenant-rls-postgres.test.ts
+        env:
+          DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
+
       - name: Start API test server
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
