@@ -37,9 +37,10 @@ describe("resolveClientIp (SEC-014)", () => {
     expect(resolveClientIp(spoofed, "3.3.3.3", 1)).toBe("2.2.2.2");
   });
 
-  it("uses the leftmost entry when the chain is shorter than the configured trust", () => {
+  it("rejects a short forwarded chain instead of trusting its spoofable leftmost entry", () => {
     const h = headers({ "x-forwarded-for": "1.1.1.1" });
-    expect(resolveClientIp(h, "2.2.2.2", 3)).toBe("1.1.1.1");
+    expect(resolveClientIp(h, "2.2.2.2", 3)).toBe("2.2.2.2");
+    expect(resolveClientIp(h, null, 3)).toBe("unknown");
   });
 
   it("never consults X-Real-IP, even with trusted proxy hops configured", () => {

@@ -436,7 +436,7 @@ const stewardSignatureHeader = headerParameter(
 );
 const signingKeyIdHeader = headerParameter(
   "X-Steward-Signing-Key-Id",
-  "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+  "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
 );
 const idempotencyKeyHeader = headerParameter(
   "Idempotency-Key",
@@ -6352,7 +6352,8 @@ function addHardeningInventory(spec: OpenApiSpec): OpenApiSpec {
           requiredWhen: "STEWARD_REQUIRE_AUTH_SIGNATURE=true",
           header: "X-Steward-Signature",
           schemes: ["v1=hmac-sha256", "p256=ecdsa-secp256r1"],
-          optionalSigningKeyHeader: "X-Steward-Signing-Key-Id",
+          managedTenantKeyHeader: "X-Steward-Signing-Key-Id",
+          requiredForManagedTenantKey: true,
         },
         idempotency: {
           header: "Idempotency-Key",
