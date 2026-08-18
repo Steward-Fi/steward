@@ -1272,6 +1272,88 @@ describe("refresh", () => {
     expect(fake.counters.refresh).toBe(0);
   });
 
+  test("a rotated response that cannot be staged disables the unchanged account", async () => {
+    const store = new MemoryConnectStore();
+    const { completed } = await connectHappy(store);
+    const fake = installFakeX();
+    const stagingFailureVault = new SecretVault(MASTER);
+    const createSecretWithinTx = stagingFailureVault.createSecretWithinTx.bind(stagingFailureVault);
+    stagingFailureVault.createSecretWithinTx = async (...args) => {
+      if (args[2].startsWith("provider-google-lifecycle:")) {
+        throw new Error("durable staging unavailable");
+      }
+      return createSecretWithinTx(...args);
+    };
+
+    await expect(
+      refreshGoogleProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        vault: stagingFailureVault,
+        config: CONFIG,
+        force: true,
+      }),
+    ).rejects.toThrow("durable staging unavailable");
+
+    const [account] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    const [lifecycle] = await getDb()
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.kind, "refresh_rotation"));
+    expect(account.status).toBe("disabled");
+    expect(lifecycle.state).toBe("needs_attention");
+    expect(lifecycle.lastErrorCode).toBe("REFRESH_RESPONSE_STAGING_FAILED");
+    expect(fake.counters.refresh).toBe(1);
+    fake.restore();
+  });
+
+  test("a stale invalid_grant cannot revoke a credential installed after refresh intent", async () => {
+    const store = new MemoryConnectStore();
+    const { completed } = await connectHappy(store);
+    const fake = installFakeX({
+      refreshResponses: [{ status: 400, body: { error: "invalid_grant" } }],
+    });
+    const restoreHook = __setGoogleRefreshIntentHookForTests(async () => {
+      const [account] = await getDb()
+        .select({ revision: providerAccounts.revision })
+        .from(providerAccounts)
+        .where(eq(providerAccounts.id, completed.providerAccountId));
+      await getDb()
+        .update(providerAccounts)
+        .set({ revision: account.revision + 1, status: "active" })
+        .where(eq(providerAccounts.id, completed.providerAccountId));
+    });
+
+    await expect(
+      refreshGoogleProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        vault,
+        config: CONFIG,
+        force: true,
+      }),
+    ).rejects.toMatchObject({ code: "GOOGLE_REFRESH_REVOKED" });
+    restoreHook();
+
+    const [account] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    const [lifecycle] = await getDb()
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.kind, "refresh_rotation"));
+    expect(account.status).toBe("active");
+    expect(lifecycle.state).toBe("revoked");
+    expect(fake.counters.refresh).toBe(1);
+    fake.restore();
+  });
+
   test("refresh scope widening is revoked and freezes the local account", async () => {
     const store = new MemoryConnectStore();
     const { completed } = await connectHappy(store);

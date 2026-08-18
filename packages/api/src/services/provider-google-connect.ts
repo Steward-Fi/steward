@@ -1413,7 +1413,23 @@ export async function refreshGoogleProviderCredential(input: RefreshInput): Prom
   }
   // Encrypt the provider response before any semantic parsing that can fail.
   // A malformed/widened scope must still leave a revocable, single-use handle.
-  const staged = await stageRefreshResponse(input, prepared.lifecycleId, tokenRes);
+  let staged: string;
+  try {
+    staged = await stageRefreshResponse(input, prepared.lifecycleId, tokenRes);
+  } catch (error) {
+    // The rotating provider call already completed, but we could not durably
+    // stage its one-time response. The old refresh token may now be invalid, so
+    // the account must stop serving immediately. Revision binding in the helper
+    // prevents this stale attempt from disabling a credential installed by a
+    // concurrent reconnect.
+    await disableGoogleAccountForLifecycle(
+      input,
+      prepared.lifecycleId,
+      "REFRESH_RESPONSE_STAGING_FAILED",
+    );
+    throw error;
+  }
+  await afterGoogleCredentialStageForTests?.();
   try {
     validateTokenEnvelope(tokenRes.raw, "GOOGLE_REFRESH_FAILED");
     const returnedScopes = parseGrantedScopes(
@@ -1505,7 +1521,6 @@ async function stageRefreshResponse(
       metadata: { providerAccountId: input.accountId },
     });
   });
-  await afterGoogleCredentialStageForTests?.();
   return lifecycleId;
 }
 
@@ -1516,19 +1531,42 @@ async function disableGoogleAccountForLifecycle(
 ): Promise<void> {
   await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
     const tx = txRaw as DbExecutor;
-    await tx
-      .update(providerAccounts)
-      .set({
-        status: "disabled",
-        revision: sql`${providerAccounts.revision} + 1`,
-        updatedAt: new Date(),
+    const [lifecycle] = await tx
+      .select({
+        expectedAccountRevision: providerGoogleCredentialLifecycles.expectedAccountRevision,
+        providerAccountId: providerGoogleCredentialLifecycles.providerAccountId,
       })
+      .from(providerGoogleCredentialLifecycles)
       .where(
         and(
-          eq(providerAccounts.tenantId, input.tenantId),
-          eq(providerAccounts.id, input.accountId),
+          eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+          eq(providerGoogleCredentialLifecycles.id, lifecycleId),
         ),
-      );
+      )
+      .limit(1)
+      .for("update");
+    let disabled: { id: string } | undefined;
+    if (
+      lifecycle?.providerAccountId === input.accountId &&
+      lifecycle.expectedAccountRevision !== null
+    ) {
+      [disabled] = await tx
+        .update(providerAccounts)
+        .set({
+          status: "disabled",
+          revision: sql`${providerAccounts.revision} + 1`,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(providerAccounts.tenantId, input.tenantId),
+            eq(providerAccounts.id, input.accountId),
+            eq(providerAccounts.workspaceId, input.workspaceId),
+            eq(providerAccounts.revision, lifecycle.expectedAccountRevision),
+          ),
+        )
+        .returning({ id: providerAccounts.id });
+    }
     await tx
       .update(providerGoogleCredentialLifecycles)
       .set({ state: "needs_attention", lastErrorCode: reason, updatedAt: new Date() })
@@ -1545,7 +1583,12 @@ async function disableGoogleAccountForLifecycle(
       action: "provider.google.refresh.needs_attention",
       resourceType: "provider_account",
       resourceId: input.accountId,
-      metadata: { lifecycleId, reason, workspaceId: input.workspaceId },
+      metadata: {
+        lifecycleId,
+        reason,
+        workspaceId: input.workspaceId,
+        accountDisabled: Boolean(disabled),
+      },
     });
   });
 }
@@ -1556,19 +1599,42 @@ async function revokeGoogleAccountForLifecycle(
 ): Promise<void> {
   await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
     const tx = txRaw as DbExecutor;
-    await tx
-      .update(providerAccounts)
-      .set({
-        status: "revoked",
-        revision: sql`${providerAccounts.revision} + 1`,
-        updatedAt: new Date(),
+    const [lifecycle] = await tx
+      .select({
+        expectedAccountRevision: providerGoogleCredentialLifecycles.expectedAccountRevision,
+        providerAccountId: providerGoogleCredentialLifecycles.providerAccountId,
       })
+      .from(providerGoogleCredentialLifecycles)
       .where(
         and(
-          eq(providerAccounts.tenantId, input.tenantId),
-          eq(providerAccounts.id, input.accountId),
+          eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+          eq(providerGoogleCredentialLifecycles.id, lifecycleId),
         ),
-      );
+      )
+      .limit(1)
+      .for("update");
+    let revoked: { id: string } | undefined;
+    if (
+      lifecycle?.providerAccountId === input.accountId &&
+      lifecycle.expectedAccountRevision !== null
+    ) {
+      [revoked] = await tx
+        .update(providerAccounts)
+        .set({
+          status: "revoked",
+          revision: sql`${providerAccounts.revision} + 1`,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(providerAccounts.tenantId, input.tenantId),
+            eq(providerAccounts.id, input.accountId),
+            eq(providerAccounts.workspaceId, input.workspaceId),
+            eq(providerAccounts.revision, lifecycle.expectedAccountRevision),
+          ),
+        )
+        .returning({ id: providerAccounts.id });
+    }
     await tx
       .update(providerGoogleCredentialLifecycles)
       .set({ state: "revoked", updatedAt: new Date() })
@@ -1585,7 +1651,11 @@ async function revokeGoogleAccountForLifecycle(
       action: "provider.google.refresh.revoked",
       resourceType: "provider_account",
       resourceId: input.accountId,
-      metadata: { lifecycleId, workspaceId: input.workspaceId },
+      metadata: {
+        lifecycleId,
+        workspaceId: input.workspaceId,
+        accountRevoked: Boolean(revoked),
+      },
     });
   });
 }
