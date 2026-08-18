@@ -1192,7 +1192,7 @@ export async function issueUpstreamCredentialLease(input: {
   const issuedLifetimeMs = issued.expiresAt.getTime() - now.getTime();
   if (
     !issued.token ||
-    Buffer.from(issued.token, "utf8").length > MAX_GITHUB_TOKEN_BYTES ||
+    new TextEncoder().encode(issued.token).length > MAX_GITHUB_TOKEN_BYTES ||
     !Number.isFinite(issued.expiresAt.getTime()) ||
     issuedLifetimeMs < MIN_GITHUB_ISSUED_TTL_MS ||
     issuedLifetimeMs > MAX_GITHUB_ISSUED_TTL_MS
