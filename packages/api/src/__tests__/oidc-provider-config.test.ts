@@ -40,4 +40,35 @@ describe("OIDC provider public destination validation", () => {
     expect(Array.isArray(result)).toBe(true);
     expect(Array.isArray(result) ? result[0] : null).toMatchObject(validProvider);
   });
+
+  it("rejects issuer query and fragment components", () => {
+    for (const issuer of [
+      "https://idp.example.com?tenant=attacker",
+      "https://idp.example.com#issuer",
+    ]) {
+      const result = normalizeOidcProviders([{ ...validProvider, issuer }]);
+      expect(result, issuer).toBe("issuer for provider enterprise must be a public https URL");
+    }
+  });
+
+  it("allows clientId-only direct-token providers for azp binding", () => {
+    const result = normalizeOidcProviders([
+      {
+        id: validProvider.id,
+        issuer: validProvider.issuer,
+        audience: validProvider.audience,
+        jwksUri: validProvider.jwksUri,
+        clientId: validProvider.clientId,
+      },
+    ]);
+    expect(Array.isArray(result)).toBe(true);
+    expect(Array.isArray(result) ? result[0]?.clientId : undefined).toBe(validProvider.clientId);
+  });
+
+  it("rejects legacy symmetric or unknown token algorithms", () => {
+    for (const allowedAlgs of [["HS256"], ["RS256", "none"]]) {
+      const result = normalizeOidcProviders([{ ...validProvider, allowedAlgs }]);
+      expect(result).toBe("allowedAlgs for provider enterprise may only include RS256 or ES256");
+    }
+  });
 });

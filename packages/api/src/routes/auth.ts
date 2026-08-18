@@ -148,7 +148,10 @@ import {
   verifyCaptchaToken,
 } from "../services/auth-abuse";
 import { verifyEip1271 } from "../services/eip1271";
-import { isAllowedOidcClientSecretEnv } from "../services/oidc-provider-config";
+import {
+  isAllowedOidcClientSecretEnv,
+  normalizeOidcProviders,
+} from "../services/oidc-provider-config";
 import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
 import { lockUserSession } from "../services/session-lock";
 import { testAccountOtpMatches } from "../services/test-account-credentials";
@@ -3393,7 +3396,11 @@ async function getTenantOidcProviders(tenantId: string): Promise<TenantOidcProvi
     .select({ oidcProviders: tenantConfigs.oidcProviders })
     .from(tenantConfigs)
     .where(eq(tenantConfigs.tenantId, tenantId));
-  return row?.oidcProviders ?? [];
+  // Revalidate persisted JSON on every trust-boundary read. Older rows can
+  // predate write-time validation; treating their TypeScript cast as trusted
+  // would re-enable unsafe algorithms or malformed endpoint configuration.
+  const normalized = normalizeOidcProviders(row?.oidcProviders ?? []);
+  return typeof normalized === "string" ? [] : normalized;
 }
 
 function selectOidcProvider(
@@ -4948,10 +4955,15 @@ auth.get("/oidc/:provider/callback", async (c) => {
   const errorParam = c.req.query("error");
 
   if (errorParam) {
-    return c.json<ApiResponse>({ ok: false, error: `OIDC error: ${errorParam}` }, 400);
+    // Provider-supplied query text is untrusted and may contain diagnostics or
+    // attacker-controlled markup. Do not reflect it to the browser.
+    return c.json<ApiResponse>({ ok: false, error: "OIDC authorization failed" }, 400);
   }
   if (!code || !state) {
     return c.json<ApiResponse>({ ok: false, error: "code and state are required" }, 400);
+  }
+  if (code.length > 4_096 || state.length > 256) {
+    return c.json<ApiResponse>({ ok: false, error: "code or state is too long" }, 400);
   }
 
   const stateKey = `oidc:${state}`;
@@ -10221,6 +10233,9 @@ async function postPublicOidcTokenEndpoint(
   const url = assertPublicHttpsEndpoint(tokenUrl, "OIDC token endpoint");
   assertPinnedDnsTransportSupported("OIDC token endpoint");
   const bodyText = body.toString();
+  if (new TextEncoder().encode(bodyText).length > 16 * 1024) {
+    throw new Error("OIDC token endpoint request is too large");
+  }
 
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -10250,6 +10265,12 @@ async function postPublicOidcTokenEndpoint(
           response.resume();
           return;
         }
+        const declaredLength = Number(response.headers["content-length"]);
+        if (Number.isFinite(declaredLength) && declaredLength > OIDC_TOKEN_EXCHANGE_MAX_BYTES) {
+          finish(reject, new Error("OIDC token endpoint response is too large"));
+          response.resume();
+          return;
+        }
         response.setEncoding("utf8");
         response.on("data", (chunk: string) => {
           bytes += new TextEncoder().encode(chunk).length;
@@ -10268,6 +10289,12 @@ async function postPublicOidcTokenEndpoint(
             status: response.statusCode ?? 0,
             text: responseText,
           });
+        });
+        response.on("aborted", () => {
+          finish(reject, new Error("OIDC token endpoint response was interrupted"));
+        });
+        response.on("error", () => {
+          finish(reject, new Error("OIDC token endpoint response failed"));
         });
       },
     );
@@ -10313,7 +10340,16 @@ async function exchangeOidcAuthorizationCode(opts: {
     body.set("client_secret", secret);
   }
 
-  const response = await postPublicOidcTokenEndpoint(provider.tokenUrl, body);
+  let response: Awaited<ReturnType<typeof postPublicOidcTokenEndpoint>>;
+  try {
+    response = await postPublicOidcTokenEndpoint(provider.tokenUrl, body);
+  } catch (error) {
+    // Keep resolver, TLS, socket, and certificate diagnostics server-side.
+    // They may contain configured hostnames or runtime network details and are
+    // not useful to an unauthenticated callback client.
+    console.warn("[OIDC] Token endpoint request failed:", error);
+    throw new Error("OIDC token endpoint request failed");
+  }
   const text = response.text;
   let payload: unknown;
   try {

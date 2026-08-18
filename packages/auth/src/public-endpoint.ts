@@ -34,6 +34,16 @@ function inIpv4Cidr(value: number, base: number, prefix: number): boolean {
   return (value & mask) === (base & mask);
 }
 
+function isValidDnsHostname(hostname: string): boolean {
+  if (hostname.length > 253) return false;
+  return hostname
+    .split(".")
+    .every(
+      (label) =>
+        label.length > 0 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label),
+    );
+}
+
 /**
  * Return true only for ordinary globally-routable IPv4 unicast space.
  *
@@ -183,6 +193,7 @@ export function assertPublicInternetAddress(
 export function assertPublicHttpsEndpoint(value: string, resource: string): URL {
   let url: URL;
   try {
+    if (value.length > 2_048 || /[\u0000-\u001f\u007f]/.test(value)) throw new Error();
     url = new URL(value);
   } catch {
     throw new Error(`${resource} must be a public https URL`);
@@ -195,10 +206,11 @@ export function assertPublicHttpsEndpoint(value: string, resource: string): URL 
     ipv4ToUint32(hostname) !== null ? 4 : expandIpv6Words(hostname) !== null ? 6 : 0;
   if (
     url.protocol !== "https:" ||
+    url.port === "0" ||
     url.username !== "" ||
     url.password !== "" ||
     !hostname ||
-    (literalFamily === 0 && !hostname.includes(".")) ||
+    (literalFamily === 0 && (!hostname.includes(".") || !isValidDnsHostname(hostname))) ||
     BLOCKED_PUBLIC_ENDPOINT_DNS_SUFFIXES.some(
       (suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`),
     ) ||

@@ -23,6 +23,7 @@ interface CachedJwks {
 const JWKS_CACHE = new Map<string, CachedJwks>();
 const JWKS_FETCH_TIMEOUT_MS = 5_000;
 const JWKS_MAX_BYTES = 256 * 1024;
+const JWKS_CACHE_MAX_ENTRIES = 256;
 // Hard ceiling on how long a remote JWKS set is cached before it is rebuilt.
 // jose's internal cooldown only limits how *often* it refetches on unknown-kid;
 // it never evicts known keys, so a process-lifetime cache would not pick up an
@@ -84,12 +85,23 @@ export async function assertPublicJwksDestination(jwksUri: string): Promise<void
 
   const addresses = await new Promise<Array<{ address: string; family: number }>>(
     (resolve, reject) => {
+      let settled = false;
+      const finish = <T>(fn: (value: T) => void, value: T) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        fn(value);
+      };
+      const deadline = setTimeout(
+        () => finish(reject, new Error("OIDC jwksUri DNS lookup timed out")),
+        JWKS_FETCH_TIMEOUT_MS,
+      );
       dnsLookup(hostname, { all: true, verbatim: true }, (error, resolved) => {
         if (error) {
-          reject(error);
+          finish(reject, new Error("OIDC jwksUri host did not resolve"));
           return;
         }
-        resolve(resolved);
+        finish(resolve, resolved);
       });
     },
   );
@@ -119,15 +131,21 @@ export async function getPublicRemoteJWKSet(
   assertPinnedDnsTransportSupported("OIDC jwksUri");
   const cached = JWKS_CACHE.get(cacheKey);
   if (cached && Date.now() - cached.createdAt <= JWKS_MAX_AGE_MS) {
+    // Refresh insertion order so the bounded map acts as an LRU cache.
+    JWKS_CACHE.delete(cacheKey);
+    JWKS_CACHE.set(cacheKey, cached);
     return cached.jwks;
   }
   const url = assertSafeJwksUri(jwksUri);
-  if (!allowTestJwksFetch()) {
-    await assertPublicJwksDestination(url.toString());
-  }
   const jwks = createRemoteJWKSet(url, {
     [customFetch]: (fetchUrl, init) => fetchPublicJwks(fetchUrl, init),
   });
+  JWKS_CACHE.delete(cacheKey);
+  while (JWKS_CACHE.size >= JWKS_CACHE_MAX_ENTRIES) {
+    const oldestKey = JWKS_CACHE.keys().next().value;
+    if (oldestKey === undefined) break;
+    JWKS_CACHE.delete(oldestKey);
+  }
   JWKS_CACHE.set(cacheKey, { jwks, createdAt: Date.now() });
   return jwks;
 }
@@ -139,8 +157,36 @@ async function fetchPublicJwks(url: string | URL, init?: RequestInit): Promise<R
     return fetch(jwksUrl, init);
   }
 
-  const body = await new Promise<Uint8Array>((resolve, reject) => {
-    const req = httpsRequest(
+  const result = await new Promise<{
+    body: Uint8Array;
+    headers: Headers;
+    status: number;
+  }>((resolve, reject) => {
+    let settled = false;
+    let req: ReturnType<typeof httpsRequest> | undefined;
+    const finish = <T>(fn: (value: T) => void, value: T) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      init?.signal?.removeEventListener("abort", abortRequest);
+      fn(value);
+    };
+    const abortRequest = () => {
+      req?.destroy();
+      finish(reject, new Error("OIDC JWKS request was aborted"));
+    };
+    const deadline = setTimeout(() => {
+      req?.destroy();
+      finish(reject, new Error("OIDC JWKS request timed out"));
+    }, JWKS_FETCH_TIMEOUT_MS);
+
+    if (init?.signal?.aborted) {
+      abortRequest();
+      return;
+    }
+    init?.signal?.addEventListener("abort", abortRequest, { once: true });
+
+    req = httpsRequest(
       jwksUrl,
       {
         headers: Object.fromEntries(new Headers(init?.headers).entries()),
@@ -150,7 +196,13 @@ async function fetchPublicJwks(url: string | URL, init?: RequestInit): Promise<R
       },
       (res) => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400) {
-          reject(new Error("OIDC jwksUri redirects are not allowed"));
+          finish(reject, new Error("OIDC jwksUri redirects are not allowed"));
+          res.resume();
+          return;
+        }
+        const declaredLength = Number(res.headers["content-length"]);
+        if (Number.isFinite(declaredLength) && declaredLength > JWKS_MAX_BYTES) {
+          finish(reject, new Error("OIDC JWKS response is too large"));
           res.resume();
           return;
         }
@@ -159,7 +211,8 @@ async function fetchPublicJwks(url: string | URL, init?: RequestInit): Promise<R
         res.on("data", (chunk: Uint8Array) => {
           size += chunk.byteLength;
           if (size > JWKS_MAX_BYTES) {
-            req.destroy(new Error("OIDC JWKS response is too large"));
+            req?.destroy();
+            finish(reject, new Error("OIDC JWKS response is too large"));
             return;
           }
           chunks.push(chunk);
@@ -171,19 +224,36 @@ async function fetchPublicJwks(url: string | URL, init?: RequestInit): Promise<R
             body.set(chunk, offset);
             offset += chunk.byteLength;
           }
-          resolve(body);
+          const headers = new Headers();
+          for (const [name, value] of Object.entries(res.headers)) {
+            if (Array.isArray(value)) {
+              for (const item of value) headers.append(name, item);
+            } else if (value !== undefined) {
+              headers.set(name, value);
+            }
+          }
+          const status =
+            res.statusCode && res.statusCode >= 200 && res.statusCode <= 599 ? res.statusCode : 502;
+          finish(resolve, { body, headers, status });
         });
+        res.on("aborted", () => finish(reject, new Error("OIDC JWKS response was interrupted")));
+        res.on("error", () => finish(reject, new Error("OIDC JWKS response failed")));
       },
     );
 
-    req.on("timeout", () => req.destroy(new Error("OIDC JWKS request timed out")));
-    req.on("error", reject);
+    req.on("timeout", () => {
+      req?.destroy();
+      finish(reject, new Error("OIDC JWKS request timed out"));
+    });
+    req.on("error", () => finish(reject, new Error("OIDC JWKS request failed")));
     req.end();
   });
 
-  const responseBody = new ArrayBuffer(body.byteLength);
-  new Uint8Array(responseBody).set(body);
-  return new Response(responseBody);
+  const responseBody =
+    result.body.byteLength === 0 && (result.status === 204 || result.status === 205)
+      ? null
+      : new Uint8Array(result.body);
+  return new Response(responseBody, { headers: result.headers, status: result.status });
 }
 
 export async function verifyOidcJwt(

@@ -40,6 +40,9 @@ describe("enterprise OIDC authorization-code SSO hardening", () => {
 
     expect(callbackRoute).toContain("await getChallengeStore().get(stateKey)");
     expect(callbackRoute).toContain("stateData.providerId !== providerId");
+    expect(callbackRoute).toContain("code.length > 4_096 || state.length > 256");
+    expect(callbackRoute).toContain('error: "OIDC authorization failed"');
+    expect(callbackRoute).not.toContain("`OIDC error: ${errorParam}`");
     expect(callbackRoute).toContain("exchangeOidcAuthorizationCode");
     expect(callbackRoute).toContain("verifyOidcJwt(stateData.tenantId, provider, idToken)");
     expect(callbackRoute).toContain("verified.claims.nonce !== stateData.nonce");
@@ -74,6 +77,10 @@ describe("enterprise OIDC authorization-code SSO hardening", () => {
     expect(source).toContain("OIDC token endpoint redirects are not allowed");
     expect(source).toContain("createPublicInternetLookup");
     expect(source).toContain("OIDC token endpoint did not return an id_token");
+    expect(source).toContain("OIDC token endpoint request is too large");
+    expect(source).toContain('response.headers["content-length"]');
+    expect(source).toContain('response.on("aborted"');
+    expect(source).toContain('throw new Error("OIDC token endpoint request failed")');
     expect(source).toContain("Direct JWT login is disabled for authorization-code OIDC providers");
   });
 
