@@ -27,7 +27,30 @@ async function runtimeSources(directory: string): Promise<string[]> {
   return paths;
 }
 
-function unsafeConsoleArguments(source: ts.SourceFile): string[] {
+function sinkName(expression: ts.LeftHandSideExpression): string {
+  if (ts.isIdentifier(expression)) return expression.text;
+  if (ts.isPropertyAccessExpression(expression)) return expression.name.text;
+  return "";
+}
+
+function isTelemetrySinkName(name: string): boolean {
+  return (
+    [
+      "logWarn",
+      "dispatchWebhook",
+      "trackAuditEvent",
+      "writeAuditEvent",
+      "auditWriter",
+      "recordAudit",
+      "recordRequiredAudit",
+      "appendRequiredAudit",
+    ].includes(name) ||
+    name.endsWith("Audit") ||
+    /^audit[A-Z]/.test(name)
+  );
+}
+
+function unsafeTelemetryArguments(source: ts.SourceFile): string[] {
   const failures: string[] = [];
   const caughtThrowables = new Set<string>();
   const visit = (node: ts.Node): void => {
@@ -46,9 +69,8 @@ function unsafeConsoleArguments(source: ts.SourceFile): string[] {
         ts.isIdentifier(node.expression.expression) &&
         node.expression.expression.text === "console" &&
         ["error", "warn", "log"].includes(node.expression.name.text);
-      const sinkName = ts.isIdentifier(node.expression) ? node.expression.text : "";
-      const isTelemetrySink =
-        sinkName === "logWarn" || /(?:audit|Audit|dispatchWebhook)$/.test(sinkName);
+      const name = sinkName(node.expression);
+      const isTelemetrySink = isTelemetrySinkName(name);
       if (!isConsoleSink && !isTelemetrySink) {
         ts.forEachChild(node, visit);
         return;
@@ -78,7 +100,68 @@ function unsafeConsoleArguments(source: ts.SourceFile): string[] {
   return failures;
 }
 
+function failuresForSnippet(text: string): string[] {
+  const source = ts.createSourceFile(
+    "snippet.ts",
+    text,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  return unsafeTelemetryArguments(source);
+}
+
 describe("runtime error logging", () => {
+  test("flags raw caught throwables across audit and webhook sink variants", () => {
+    expect(
+      failuresForSnippet(
+        `
+        async function f(ctx: { writeAuditEvent: (value: unknown) => Promise<void>; auditWriter: (value: unknown) => Promise<void> }) {
+          try {
+            doThing();
+          } catch (err) {
+            await writeAuditEvent({ metadata: { error: err.message } });
+            trackAuditEvent({ metadata: { error: String(err) } });
+            await ctx.writeAuditEvent({ metadata: { error: err.message } });
+            await ctx.auditWriter({ metadata: { error: err.message } });
+            await recordAudit({ reason: err.message });
+            await recordRequiredAudit({ reason: err.message });
+            await appendRequiredAudit({ reason: err.message });
+            await auditRecoveryEvent("tenant", { error: err.message });
+            dispatchWebhook("tenant", "agent", "tx_failed", { error: err.message });
+            logWarn("warn", { error: err.message });
+            console.error("oops", err.message);
+          }
+        }
+        `,
+      ).length,
+    ).toBeGreaterThan(0);
+  });
+
+  test("allows bounded classifiers at telemetry sinks", () => {
+    expect(
+      failuresForSnippet(
+        `
+        async function f(ctx: { writeAuditEvent: (value: unknown) => Promise<void> }) {
+          try {
+            doThing();
+          } catch (err) {
+            await writeAuditEvent({ metadata: { ...redactedThrownDiagnostics(err) } });
+            trackAuditEvent({ metadata: { ...redactedThrownDiagnostics(err) } });
+            await ctx.writeAuditEvent({ metadata: { ...redactedThrownDiagnostics(err) } });
+            dispatchWebhook("tenant", "agent", "tx_failed", {
+              error: "Transaction failed",
+              ...redactedThrownDiagnostics(err),
+            });
+            logWarn("warn", { ...redactedThrownDiagnostics(err) });
+            console.error("oops", redactedThrownDiagnostics(err));
+          }
+        }
+        `,
+      ),
+    ).toEqual([]);
+  });
+
   test("never passes raw throwables, messages, or stacks to console sinks", async () => {
     const failures: string[] = [];
     for (const root of RUNTIME_ROOTS) {
@@ -91,7 +174,7 @@ describe("runtime error logging", () => {
           true,
           ts.ScriptKind.TS,
         );
-        failures.push(...unsafeConsoleArguments(source));
+        failures.push(...unsafeTelemetryArguments(source));
       }
     }
     expect(failures).toEqual([]);
