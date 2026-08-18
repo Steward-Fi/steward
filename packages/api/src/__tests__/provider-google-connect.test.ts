@@ -589,49 +589,66 @@ describe("connect", () => {
     }
   });
 
-  test("reconnect preserves and rejects every unresolved staged refresh credential handle", async () => {
+  test("reconnect preserves every nonterminal refresh and its staged credential handle", async () => {
     const first = await connectHappy(new MemoryConnectStore());
     const db = getDb();
     const [beforeAccount] = await db
       .select()
       .from(providerAccounts)
       .where(eq(providerAccounts.id, first.completed.providerAccountId));
+    const lifecycleId = crypto.randomUUID();
     const strandedHandle = await vault.createSecret(
       TENANT,
-      `provider-google-lifecycle:${crypto.randomUUID()}`,
+      `provider-google-lifecycle:${lifecycleId}`,
       JSON.stringify({
         schemaVersion: "steward.provider-google.lifecycle.v1",
         token: { access_token: "stranded-access", refresh_token: "stranded-refresh" },
       }),
     );
-    const lifecycleId = crypto.randomUUID();
     await db.insert(providerGoogleCredentialLifecycles).values({
       id: lifecycleId,
       tenantId: TENANT,
       workspaceId: WORKSPACE,
       providerAccountId: beforeAccount.id,
       kind: "refresh_rotation",
-      state: "needs_attention",
-      credentialSecretId: strandedHandle.id,
+      state: "inflight",
+      credentialSecretId: null,
       expectedAccountRevision: beforeAccount.revision,
-      lastErrorCode: "REFRESH_OUTCOME_UNKNOWN",
     });
 
-    await expect(connectHappy(new MemoryConnectStore())).rejects.toMatchObject({
-      code: "GOOGLE_CREDENTIAL_NEEDS_ATTENTION",
-    });
+    for (const state of [
+      "inflight",
+      "credential_staged",
+      "revocation_pending",
+      "needs_attention",
+    ] as const) {
+      const credentialSecretId = state === "inflight" ? null : strandedHandle.id;
+      await db
+        .update(providerGoogleCredentialLifecycles)
+        .set({
+          state,
+          credentialSecretId,
+          lastErrorCode: state === "needs_attention" ? "REFRESH_OUTCOME_UNKNOWN" : null,
+        })
+        .where(eq(providerGoogleCredentialLifecycles.id, lifecycleId));
 
-    const [unchangedLifecycle] = await db
-      .select()
-      .from(providerGoogleCredentialLifecycles)
-      .where(eq(providerGoogleCredentialLifecycles.id, lifecycleId));
-    const [unchangedAccount] = await db
-      .select()
-      .from(providerAccounts)
-      .where(eq(providerAccounts.id, beforeAccount.id));
-    expect(unchangedLifecycle.state).toBe("needs_attention");
-    expect(unchangedLifecycle.credentialSecretId).toBe(strandedHandle.id);
-    expect(unchangedAccount.revision).toBe(beforeAccount.revision);
+      await expect(connectHappy(new MemoryConnectStore())).rejects.toMatchObject({
+        code: "GOOGLE_CREDENTIAL_NEEDS_ATTENTION",
+      });
+
+      const [unchangedLifecycle] = await db
+        .select()
+        .from(providerGoogleCredentialLifecycles)
+        .where(eq(providerGoogleCredentialLifecycles.id, lifecycleId));
+      const [unchangedAccount] = await db
+        .select()
+        .from(providerAccounts)
+        .where(eq(providerAccounts.id, beforeAccount.id));
+      expect(unchangedLifecycle.state).toBe(state);
+      expect(unchangedLifecycle.credentialSecretId).toBe(credentialSecretId);
+      expect(unchangedAccount.revision).toBe(beforeAccount.revision);
+    }
+
     expect(await vault.decryptSecret(TENANT, strandedHandle.id)).toContain("stranded-refresh");
   });
 
