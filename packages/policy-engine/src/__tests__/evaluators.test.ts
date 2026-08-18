@@ -658,6 +658,41 @@ describe("Spending Limit Policy", () => {
     expect(result.reason).toContain("daily spending limit");
   });
 
+  it("preserves untouched legacy dimensions when a canonical weekly cap is added", async () => {
+    const rule = makeSpendingRule({
+      maxAmount: "100",
+      period: "day",
+      maxPerWeek: "1000",
+    });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "20" },
+        spentToday: 90n,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily spending limit");
+  });
+
+  it("lets an explicit canonical dimension replace only its legacy counterpart", async () => {
+    const rule = makeSpendingRule({
+      maxAmount: "100",
+      period: "day",
+      maxPerTx: "200",
+    });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "150" },
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily spending limit");
+  });
+
   // ─── Per-tx boundary tests ─────────────────────────────────────────────
 
   it("passes when value is exactly at the per-tx limit (boundary)", async () => {

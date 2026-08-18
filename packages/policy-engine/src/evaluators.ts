@@ -354,24 +354,28 @@ function normalizeSpendingLimitConfig(config: Record<string, unknown>): Spending
   // as { maxPerDay, maxPerDayUsd } to take the USD-only branch and silently
   // discard maxPerDay.
   if (hasCanonicalWeiCap || hasUsdCap) {
-    // Legacy policies can legitimately contain `{ maxAmount, period }` plus a
-    // newer USD cap. Do not let the USD field erase that existing wei limit.
-    // Explicit canonical wei fields still take precedence over the legacy
-    // representation when both are present.
-    const weiCaps =
-      !hasCanonicalWeiCap && hasOwnDefined(config, "maxAmount")
-        ? simplifiedWeiCaps()
-        : {
-            maxPerTx: hasOwnDefined(config, "maxPerTx")
-              ? String(config.maxPerTx)
-              : MAX_UINT256_DECIMAL,
-            maxPerDay: hasOwnDefined(config, "maxPerDay")
-              ? String(config.maxPerDay)
-              : MAX_UINT256_DECIMAL,
-            maxPerWeek: hasOwnDefined(config, "maxPerWeek")
-              ? String(config.maxPerWeek)
-              : MAX_UINT256_DECIMAL,
-          };
+    // Legacy policies can legitimately gain canonical or USD fields one at a
+    // time. Preserve the legacy limits for every dimension that was not
+    // explicitly replaced; treating the first canonical wei field as a switch
+    // for the whole representation could silently erase the other legacy caps.
+    const inheritedWeiCaps = hasOwnDefined(config, "maxAmount")
+      ? simplifiedWeiCaps()
+      : {
+          maxPerTx: MAX_UINT256_DECIMAL,
+          maxPerDay: MAX_UINT256_DECIMAL,
+          maxPerWeek: MAX_UINT256_DECIMAL,
+        };
+    const weiCaps = {
+      maxPerTx: hasOwnDefined(config, "maxPerTx")
+        ? String(config.maxPerTx)
+        : inheritedWeiCaps.maxPerTx,
+      maxPerDay: hasOwnDefined(config, "maxPerDay")
+        ? String(config.maxPerDay)
+        : inheritedWeiCaps.maxPerDay,
+      maxPerWeek: hasOwnDefined(config, "maxPerWeek")
+        ? String(config.maxPerWeek)
+        : inheritedWeiCaps.maxPerWeek,
+    };
     return {
       ...weiCaps,
       maxPerTxUsd: hasOwnDefined(config, "maxPerTxUsd")
