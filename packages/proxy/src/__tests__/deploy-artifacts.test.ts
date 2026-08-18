@@ -329,6 +329,15 @@ describe("SEC-020 deploy/migrate-agent-keys.sh keeps the platform key off every 
     expect(output).toContain("platform keys are never accepted on argv");
   });
 
+  test("remote commands use an argv-safe ssh array and reject injectable metadata", () => {
+    expect(script).toContain("SSH_CMD=(ssh -o StrictHostKeyChecking=");
+    expect(script).toContain('"${SSH_CMD[@]}"');
+    expect(script).not.toMatch(/\$\{SSH_CMD\}\s+"/);
+    expect(script).toContain("Unsafe AGENT_NAME metadata ignored");
+    expect(script).toContain("Invalid tenant ID");
+    expect(script).toContain("Invalid daily limit");
+  });
+
   test("provisioning and operator docs also pass platform headers by file", () => {
     const provision = read("provision-steward-node.sh");
     const doc = read("DEPLOYMENT.md");
