@@ -85,6 +85,20 @@ function embeddedIpv4FromIpv6(hostname: string): string | null {
     words[5] === 0;
   if (isNat64WellKnown) return fromWords(words[6], words[7]);
 
+  // RFC 8215 IPv4-translated ::ffff:0:0/96 — distinct from the IPv4-mapped
+  // form (words[5] === 0xffff, handled by mappedIpv4FromIpv6). The IPv4 is
+  // embedded in the low 32 bits and reachable through NAT64/SIIT paths, so
+  // it must face the same non-public checks. Parity with the delivery-time
+  // dispatcher screen (SEC-178); registration should reject these up front.
+  const isIpv4Translated =
+    words[0] === 0 &&
+    words[1] === 0 &&
+    words[2] === 0 &&
+    words[3] === 0 &&
+    words[4] === 0xffff &&
+    words[5] === 0;
+  if (isIpv4Translated) return fromWords(words[6], words[7]);
+
   if (words[0] === 0x2002) return fromWords(words[1], words[2]);
 
   return null;
@@ -102,6 +116,11 @@ function isNonPublicIpv6(hostname: string): boolean {
   // Treat the entire non-globally-reachable prefix as non-public (matching the
   // OIDC screeners) instead of extracting a would-be /96 suffix.
   if (words?.[0] === 0x64 && words[1] === 0xff9b && words[2] === 1) return true;
+  // Deprecated IPv4-compatible ::/96 space is special-use, not a public
+  // webhook destination. Closes parser-dependent forms such as
+  // `[::127.0.0.1]` / `[::7f00:1]` (parity with the dispatcher screen).
+  if (words && words.slice(0, 6).every((word) => word === 0) && (words[6] !== 0 || words[7] !== 0))
+    return true;
   if (words?.[0] === 0x2001 && (words[1] === 0 || words[1] === 0xdb8)) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfe80) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfec0) return true;

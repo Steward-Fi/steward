@@ -85,9 +85,13 @@ describe("middleware security hardening", () => {
     expect(indexSource).toContain(
       "function runtimeGate(request: Request, peerAddress: string | null)",
     );
-    expect(indexSource).toContain(
-      "runtimeGate(request, server.requestIP(request)?.address ?? null) ?? app.fetch(request)",
-    );
+    expect(indexSource).toContain("const peerAddress = server.requestIP(request)?.address ?? null");
+    expect(indexSource).toContain("runtimeGate(request, peerAddress)");
+    // The runtime gate must run before Hono route dispatch.
+    const gateAt = indexSource.indexOf("runtimeGate(request, peerAddress)");
+    const fetchAt = indexSource.indexOf("app.fetch(request,");
+    expect(gateAt).toBeGreaterThanOrEqual(0);
+    expect(fetchAt).toBeGreaterThan(gateAt);
     expect(indexSource).not.toContain('app.use("*", async (c, next) => {');
   });
 
