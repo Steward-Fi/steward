@@ -8,6 +8,9 @@ or package publication:
 - an existing draft for the tag: continue draft recovery;
 - an existing published release: stop without publishing or replacing assets.
 
+The preflight also tombstones the known legacy `v0.3.16` draft, so pushing or
+rerunning that tag fails before any registry or release write.
+
 The release action is pinned to a full commit SHA. A published immutable
 release's tag, metadata, and assets are not an operator repair surface. Publish
 a new patch version instead.

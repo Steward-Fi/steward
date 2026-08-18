@@ -1,5 +1,6 @@
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const TAG_PATTERN = /^v[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const TOMBSTONED_DRAFTS = new Set(["Steward-Fi/steward@v0.3.16"]);
 
 export type ReleaseState = "missing" | "draft" | "published";
 
@@ -48,6 +49,9 @@ export async function checkReleaseRerun(
   if (!REPOSITORY_PATTERN.test(repository)) throw new Error("Invalid GITHUB_REPOSITORY");
   if (!TAG_PATTERN.test(tag)) throw new Error("Release tag must be a bounded v* tag");
   if (!token) throw new Error("GITHUB_TOKEN is required");
+  if (TOMBSTONED_DRAFTS.has(`${repository}@${tag}`)) {
+    throw new Error(`Release ${tag} is a tombstoned legacy draft and must not be reused`);
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10_000);
@@ -84,7 +88,8 @@ export async function checkReleaseRerun(
         throw new Error(`GitHub draft lookup failed with HTTP ${listResponse.status}`);
       }
       const payload = await readBoundedJson(listResponse);
-      if (!Array.isArray(payload)) throw new Error("GitHub release list returned an invalid response");
+      if (!Array.isArray(payload))
+        throw new Error("GitHub release list returned an invalid response");
       for (const item of payload) {
         if (!item || typeof item !== "object") {
           throw new Error("GitHub release list returned an invalid response");
@@ -105,6 +110,7 @@ export async function checkReleaseRerun(
 if (import.meta.main) {
   const repository = process.argv[2] ?? "";
   const tag = process.argv[3] ?? "";
+  // biome-ignore lint/suspicious/noUndeclaredEnvVars: this script runs directly in the release job, outside Turbo's cache.
   const state = await checkReleaseRerun(repository, tag, process.env.GITHUB_TOKEN ?? "");
   if (state === "published") {
     console.error(`Release ${tag} is already published; refusing a release-workflow rerun.`);

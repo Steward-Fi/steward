@@ -4,15 +4,15 @@ import { checkReleaseRerun, classifyReleaseResponse } from "../check-release-rer
 describe("release rerun preflight", () => {
   it("permits a missing release and recoverable draft", () => {
     expect(classifyReleaseResponse(404, undefined, "v1.2.3")).toBe("missing");
-    expect(
-      classifyReleaseResponse(200, { draft: true, tag_name: "v1.2.3" }, "v1.2.3"),
-    ).toBe("draft");
+    expect(classifyReleaseResponse(200, { draft: true, tag_name: "v1.2.3" }, "v1.2.3")).toBe(
+      "draft",
+    );
   });
 
   it("fails closed for an already-published release", () => {
-    expect(
-      classifyReleaseResponse(200, { draft: false, tag_name: "v1.2.3" }, "v1.2.3"),
-    ).toBe("published");
+    expect(classifyReleaseResponse(200, { draft: false, tag_name: "v1.2.3" }, "v1.2.3")).toBe(
+      "published",
+    );
   });
 
   it("rejects malformed, mismatched, and failed responses", () => {
@@ -26,17 +26,15 @@ describe("release rerun preflight", () => {
   it("finds a tagless draft through the bounded authenticated release list", async () => {
     const capturedUrls: string[] = [];
     let capturedAuthorization = "";
-    const state = await checkReleaseRerun(
-      "Steward-Fi/steward",
-      "v1.2.3",
-      "test-secret",
-      (async (input, init) => {
-        capturedUrls.push(String(input));
-        capturedAuthorization = new Headers(init?.headers).get("authorization") ?? "";
-        if (capturedUrls.length === 1) return new Response("not found", { status: 404 });
-        return Response.json([{ tag_name: "v1.2.3", draft: true }]);
-      }) as typeof fetch,
-    );
+    const state = await checkReleaseRerun("Steward-Fi/steward", "v1.2.3", "test-secret", (async (
+      input,
+      init,
+    ) => {
+      capturedUrls.push(String(input));
+      capturedAuthorization = new Headers(init?.headers).get("authorization") ?? "";
+      if (capturedUrls.length === 1) return new Response("not found", { status: 404 });
+      return Response.json([{ tag_name: "v1.2.3", draft: true }]);
+    }) as typeof fetch);
     expect(state).toBe("draft");
     expect(capturedUrls).toEqual([
       "https://api.github.com/repos/Steward-Fi/steward/releases/tags/v1.2.3",
@@ -53,9 +51,7 @@ describe("release rerun preflight", () => {
       "test-secret",
       (async () => {
         calls += 1;
-        return calls === 1
-          ? new Response("not found", { status: 404 })
-          : Response.json([]);
+        return calls === 1 ? new Response("not found", { status: 404 }) : Response.json([]);
       }) as typeof fetch,
     );
     expect(state).toBe("missing");
@@ -72,5 +68,14 @@ describe("release rerun preflight", () => {
     await expect(
       checkReleaseRerun("example/repo", "not-a-release", "token", neverFetch),
     ).rejects.toThrow("bounded v* tag");
+  });
+
+  it("refuses the repository's tombstoned legacy draft before fetch", async () => {
+    const neverFetch = (async () => {
+      throw new Error("fetch should not run");
+    }) as typeof fetch;
+    await expect(
+      checkReleaseRerun("Steward-Fi/steward", "v0.3.16", "token", neverFetch),
+    ).rejects.toThrow("tombstoned legacy draft");
   });
 });
