@@ -371,6 +371,19 @@ describe("measurement registry", () => {
         ["0".repeat(64)],
       ).ok,
     ).toBe(false);
+
+    const valid = signRegistry(basePayload());
+    expect(
+      verifyRegistrySignatures(
+        {
+          ...valid,
+          signatures: [valid.signatures[0], { ...valid.signatures[0], unexpected: true } as never],
+        },
+        1,
+        undefined,
+        registryFingerprints(valid),
+      ).ok,
+    ).toBe(false);
   });
 
   test("malformed pins and signatures fail closed", () => {

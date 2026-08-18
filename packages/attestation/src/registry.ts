@@ -349,27 +349,41 @@ export function verifyRegistrySignatures(
         "(or dangerouslyAllowUnpinned for local development only)",
     };
   }
-  const candidateSignatures: Array<{
+  const parsedSignatures: Array<{
     signature: MeasurementRegistrySignature;
     key: ReturnType<typeof createPublicKey>;
     fingerprint: string;
+    signatureBytes: Buffer;
   }> = [];
-  for (const value of registry.signatures as unknown[]) {
-    if (!isPlainObject(value)) continue;
-    const signature = value as unknown as MeasurementRegistrySignature;
-    if (
-      !hasOnlyKeys(value, new Set(["keyId", "algorithm", "publicKeyPem", "signatureBase64"])) ||
-      signature.algorithm !== "ed25519" ||
-      typeof signature.keyId !== "string" ||
-      !REGISTRY_ID_PATTERN.test(signature.keyId) ||
-      (trustedIds && !trustedIds.has(signature.keyId))
-    ) {
-      continue;
+  try {
+    for (const value of registry.signatures as unknown[]) {
+      if (!isPlainObject(value)) {
+        return { ok: false, reason: "registry has a malformed signature entry" };
+      }
+      const signature = value as unknown as MeasurementRegistrySignature;
+      if (
+        !hasOnlyKeys(value, new Set(["keyId", "algorithm", "publicKeyPem", "signatureBase64"])) ||
+        signature.algorithm !== "ed25519" ||
+        typeof signature.keyId !== "string" ||
+        !REGISTRY_ID_PATTERN.test(signature.keyId)
+      ) {
+        return { ok: false, reason: "registry has a malformed signature entry" };
+      }
+      const parsed = parseEd25519PublicKey(signature.publicKeyPem);
+      const signatureBytes = decodeEd25519Signature(signature.signatureBase64);
+      if (!parsed || !signatureBytes) {
+        return { ok: false, reason: "registry has a malformed signature entry" };
+      }
+      parsedSignatures.push({ signature, ...parsed, signatureBytes });
     }
-    const parsed = parseEd25519PublicKey(signature.publicKeyPem);
-    if (!parsed || (trustedFingerprints && !trustedFingerprints.has(parsed.fingerprint))) continue;
-    candidateSignatures.push({ signature, ...parsed });
+  } catch {
+    return { ok: false, reason: "registry has a malformed signature entry" };
   }
+  const candidateSignatures = parsedSignatures.filter(
+    ({ signature, fingerprint }) =>
+      (!trustedIds || trustedIds.has(signature.keyId)) &&
+      (!trustedFingerprints || trustedFingerprints.has(fingerprint)),
+  );
   if (candidateSignatures.length < requiredSignatureCount) {
     return {
       ok: false,
@@ -381,10 +395,8 @@ export function verifyRegistrySignatures(
   // signature pasted twice must not satisfy a two-person quorum.
   const validKeyFingerprints = new Set<string>();
   for (const candidate of candidateSignatures) {
-    const signatureBytes = decodeEd25519Signature(candidate.signature.signatureBase64);
-    if (!signatureBytes) continue;
     try {
-      const valid = verifySignature(null, payload, candidate.key, signatureBytes);
+      const valid = verifySignature(null, payload, candidate.key, candidate.signatureBytes);
       // Count the canonical SPKI key, not textual PEM formatting. Re-wrapping
       // one PEM must not turn one signing key into two quorum participants.
       if (valid) {
