@@ -10,6 +10,7 @@
  */
 
 import type { IoredisLike } from "@stwd/redis";
+import { createHash } from "node:crypto";
 
 export interface IdempotencyRecord {
   status: number;
@@ -61,12 +62,30 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
     },
   ) {}
 
+  private storageKey(scope: string, key: string): string {
+    const material = `${scope.length}:${scope}${key.length}:${key}`;
+    return createHash("sha256").update(material).digest("hex");
+  }
+
   private redisKey(scope: string, key: string): string {
-    return `idempotency:${this.options.namespace}:${scope}:${key}`;
+    return `idempotency:${this.options.namespace}:${this.storageKey(scope, key)}`;
   }
 
   private memoryKey(scope: string, key: string): string {
-    return `${scope}:${key}`;
+    return this.storageKey(scope, key);
+  }
+
+  private assertMemoryFallbackAllowed(): void {
+    if (
+      process.env.NODE_ENV === "production" &&
+      process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY !== "true"
+    ) {
+      throw new Error(
+        "Durable Redis idempotency is required for production trading routes. " +
+          "Configure Redis or explicitly acknowledge a single-instance deployment with " +
+          "STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY=true.",
+      );
+    }
   }
 
   private sweepMemory(now: number): void {
@@ -132,6 +151,7 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
       const raw = await redis.get(this.redisKey(scope, key));
       return raw === null ? {} : this.resultForExisting(this.parseStored(raw), bodyHash);
     }
+    this.assertMemoryFallbackAllowed();
 
     const now = Date.now();
     const mapKey = this.memoryKey(scope, key);
@@ -213,6 +233,7 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
         },
       };
     }
+    this.assertMemoryFallbackAllowed();
 
     // Single-process fallback. JavaScript executes this check-and-set without
     // an await, so concurrent requests cannot both claim the same key.

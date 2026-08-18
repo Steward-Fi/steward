@@ -91,13 +91,12 @@ describe("DurableIdempotencyStore (SEC-043)", () => {
     const { client, setCalls } = fakeRedis();
     const store = makeStore(client);
     await store.reserve("scope", "key-1", "hash-1");
-    expect(setCalls).toEqual([
-      {
-        key: "idempotency:trade:scope:key-1",
-        ttlMs: 24 * 60 * 60 * 1000,
-        condition: "NX",
-      },
-    ]);
+    expect(setCalls).toHaveLength(1);
+    expect(setCalls[0]).toMatchObject({
+      ttlMs: 24 * 60 * 60 * 1000,
+      condition: "NX",
+    });
+    expect(setCalls[0]?.key).toMatch(/^idempotency:trade:[a-f0-9]{64}$/);
   });
 
   it("fails closed on Redis read/reservation errors and malformed durable state", async () => {
@@ -121,14 +120,16 @@ describe("DurableIdempotencyStore (SEC-043)", () => {
     );
 
     const malformed = fakeRedis();
-    malformed.data.set("idempotency:trade:scope:key-1", "not-json");
+    await makeStore(malformed.client).reserve("scope", "key-1", "hash-1");
+    const malformedKey = malformed.setCalls[0]?.key;
+    malformed.data.set(malformedKey!, "not-json");
     await expect(makeStore(malformed.client).check("scope", "key-1", "hash-1")).rejects.toThrow(
       "malformed",
     );
   });
 
   it("leaves the processing marker in place when completion persistence fails", async () => {
-    const { client, data } = fakeRedis();
+    const { client, data, setCalls } = fakeRedis();
     const brokenCompletion = {
       ...client,
       eval: async () => {
@@ -138,7 +139,7 @@ describe("DurableIdempotencyStore (SEC-043)", () => {
     const store = makeStore(brokenCompletion);
     const claim = await store.reserve("scope", "key-1", "hash-1");
     await expect(claim.store?.({ status: 200, body: {} })).resolves.toBeUndefined();
-    expect(JSON.parse(data.get("idempotency:trade:scope:key-1") ?? "{}").state).toBe("processing");
+    expect(JSON.parse(data.get(setCalls[0]!.key) ?? "{}").state).toBe("processing");
     expect((await store.check("scope", "key-1", "hash-1")).pending).toBe(true);
   });
 
@@ -163,5 +164,39 @@ describe("DurableIdempotencyStore (SEC-043)", () => {
     const store = makeStore(client);
     expect(await store.check("scope", undefined, "hash-1")).toEqual({});
     expect(await store.reserve("scope", undefined, "hash-1")).toEqual({});
+  });
+
+  it("uses opaque collision-safe keys for delimiter-containing scopes", async () => {
+    const { client, setCalls } = fakeRedis();
+    const store = makeStore(client);
+    await store.reserve("tenant:a", "b:key", "hash-1");
+    await store.reserve("tenant", "a:b:key", "hash-2");
+    expect(setCalls).toHaveLength(2);
+    expect(setCalls[0]?.key).not.toBe(setCalls[1]?.key);
+    expect(setCalls[0]?.key).not.toContain("tenant");
+    expect(setCalls[0]?.key).not.toContain("b:key");
+  });
+
+  it("fails closed in production when durable Redis idempotency is unavailable", async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalAcknowledgement = process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+    process.env.NODE_ENV = "production";
+    delete process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+    try {
+      await expect(makeStore(null).check("scope", "key-1", "hash-1")).rejects.toThrow(
+        "Durable Redis idempotency is required",
+      );
+      await expect(makeStore(null).reserve("scope", "key-1", "hash-1")).rejects.toThrow(
+        "Durable Redis idempotency is required",
+      );
+    } finally {
+      if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = originalNodeEnv;
+      if (originalAcknowledgement === undefined) {
+        delete process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+      } else {
+        process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = originalAcknowledgement;
+      }
+    }
   });
 });

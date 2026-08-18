@@ -17,7 +17,8 @@ import { z } from "zod";
 // enabled, so nothing reaches out at import/test time.
 // ---------------------------------------------------------------------------
 
-export const builderConfigInputSchema = z.object({
+export const builderConfigInputSchema = z
+  .object({
   /** Master switch. Defaults OFF — inert until an operator enables it. */
   enabled: z.boolean().default(false),
   /** Builder fee-collecting Safe address (the receiver). Config, not hardcoded. */
@@ -30,8 +31,59 @@ export const builderConfigInputSchema = z.object({
   /** Remote signing-server URL that holds the builder key + stamps attribution. */
   signingServerUrl: z.string().url().optional(),
   /** Auth token for the signing server. */
-  signingServerToken: z.string().optional(),
-});
+    signingServerToken: z.string().trim().min(1).optional(),
+  })
+  .superRefine((config, ctx) => {
+    const configuredWhileDisabled =
+      !config.enabled &&
+      (config.receiver !== undefined ||
+        config.feeBps > 0 ||
+        config.signingServerUrl !== undefined ||
+        config.signingServerToken !== undefined);
+    if (configuredWhileDisabled) {
+      ctx.addIssue({
+        code: "custom",
+        message: "builder settings require enabled=true; partial disabled configuration is rejected",
+      });
+      return;
+    }
+    if (!config.enabled) return;
+    if (!config.receiver) {
+      ctx.addIssue({ code: "custom", path: ["receiver"], message: "enabled builder requires receiver" });
+    }
+    if (!config.signingServerUrl) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["signingServerUrl"],
+        message: "enabled builder requires signing server URL",
+      });
+    } else {
+      const url = new URL(config.signingServerUrl);
+      const loopback =
+        url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+      if (url.username || url.password) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["signingServerUrl"],
+          message: "builder signing server URL must not contain credentials",
+        });
+      }
+      if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["signingServerUrl"],
+          message: "builder signing server URL must use HTTPS (HTTP is allowed only on loopback)",
+        });
+      }
+    }
+    if (!config.signingServerToken) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["signingServerToken"],
+        message: "enabled builder requires signing server token",
+      });
+    }
+  });
 export type BuilderConfigInput = z.input<typeof builderConfigInputSchema>;
 export type ResolvedBuilderConfig = z.infer<typeof builderConfigInputSchema>;
 
@@ -60,9 +112,7 @@ export function resolveBuilderConfig(input?: BuilderConfigInput): ResolvedBuilde
 }
 
 export function isBuilderEnabled(config: ResolvedBuilderConfig): boolean {
-  // Enabled only when the switch is on AND a signing server is configured. A
-  // bare feeBps with no server is treated as off (can't attribute without it).
-  return config.enabled && !!config.signingServerUrl;
+  return config.enabled;
 }
 
 /**
