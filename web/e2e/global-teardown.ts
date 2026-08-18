@@ -1,11 +1,30 @@
-import { existsSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 
 const PID_FILE = join(__dirname, ".e2e-pids.json");
 const NEXT_BUILD_DIR = join(__dirname, "..", ".next");
 
+function validatedPid(value: unknown, name: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || (value as number) <= 1) {
+    throw new Error(`Invalid ${name} PID in e2e teardown state`);
+  }
+  return value as number;
+}
+
+function validatedDataDir(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new Error("Invalid dataDir in e2e teardown state");
+  const resolved = resolve(value);
+  if (dirname(resolved) !== resolve(tmpdir()) || !basename(resolved).startsWith("steward-e2e-")) {
+    throw new Error("Refusing to remove an unexpected e2e data directory");
+  }
+  return resolved;
+}
+
 function killPid(pid: number | undefined): void {
-  if (!pid) return;
+  if (pid === undefined) return;
   try {
     process.kill(pid, "SIGTERM");
   } catch {
@@ -31,23 +50,29 @@ async function removeDirWithRetry(path: string): Promise<void> {
  */
 export async function runGlobalTeardown(pidFile: string, nextBuildDir: string): Promise<void> {
   try {
-    // The PID file is written LAST in global-setup, so a failed setup can
-    // leave no file while still having produced a flag-built .next — process
-    // cleanup is best-effort and must not gate the artifact removal below.
+    // Setup persists state after each process spawn, but a failure before the
+    // first spawn can still leave no file after producing a flag-built .next.
+    // Process cleanup must therefore never gate artifact removal below.
     if (existsSync(pidFile)) {
-      const raw = JSON.parse(readFileSync(pidFile, "utf8")) as {
-        fakeOAuth?: number;
-        api?: number;
-        web?: number;
-        dataDir?: string;
-      };
-      killPid(raw.web);
-      killPid(raw.api);
-      killPid(raw.fakeOAuth);
-      if (raw.dataDir && existsSync(raw.dataDir)) {
-        await removeDirWithRetry(raw.dataDir);
+      try {
+        const stat = lstatSync(pidFile);
+        if (!stat.isFile() || stat.size > 16 * 1024) {
+          throw new Error("Invalid e2e teardown state file");
+        }
+        const raw = JSON.parse(readFileSync(pidFile, "utf8")) as Record<string, unknown>;
+        const web = validatedPid(raw.web, "web");
+        const api = validatedPid(raw.api, "api");
+        const fakeOAuth = validatedPid(raw.fakeOAuth, "fakeOAuth");
+        const dataDir = validatedDataDir(raw.dataDir);
+        killPid(web);
+        killPid(api);
+        killPid(fakeOAuth);
+        if (dataDir && existsSync(dataDir)) {
+          await removeDirWithRetry(dataDir);
+        }
+      } finally {
+        rmSync(pidFile, { force: true });
       }
-      rmSync(pidFile, { force: true });
     }
   } finally {
     // SEC-076: the harness builds .next with E2E_ALLOW_INSECURE_HTTP (no HSTS /

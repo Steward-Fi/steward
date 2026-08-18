@@ -518,7 +518,7 @@ describe("StewardAuth authProxyUrl (SEC-018: HttpOnly refresh-token custody)", (
   });
 
   test("a 401 from the proxy refresh signs out and clears the proxy cookie", async () => {
-    server?.close();
+    await server?.close();
     server = await startServer((req) => {
       requests.push(req);
       if (req.path === "/proxy/refresh") {
@@ -579,5 +579,32 @@ describe("StewardAuth authProxyUrl (SEC-018: HttpOnly refresh-token custody)", (
 
     expect(storage.getItem("steward_refresh_token")).toBe("rt-secret-1");
     expect(proxyRequests("/proxy/session")).toHaveLength(0);
+  });
+
+  test("clears a rejected single-flight promise so a later refresh can retry", async () => {
+    let lockAttempts = 0;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        locks: {
+          request: async (_name: string, callback: () => Promise<unknown>) => {
+            lockAttempts += 1;
+            if (lockAttempts === 1) throw new Error("synthetic lock failure");
+            return await callback();
+          },
+        },
+      },
+    });
+    const auth = new StewardAuth({
+      baseUrl: server!.baseUrl,
+      storage,
+      authProxyUrl: `${server!.baseUrl}/proxy`,
+    });
+    storage.setItem("steward_session_token", fakeJwt());
+
+    await expect(auth.refreshSession()).rejects.toThrow("synthetic lock failure");
+    expect((await auth.refreshSession())?.userId).toBe("user-2");
+    expect(lockAttempts).toBe(2);
+    expect(proxyRequests("/proxy/refresh")).toHaveLength(1);
   });
 });

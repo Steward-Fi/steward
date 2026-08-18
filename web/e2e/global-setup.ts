@@ -14,7 +14,7 @@
  */
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -167,6 +167,17 @@ async function clearPort(port: number): Promise<void> {
 export default async function globalSetup(_config: FullConfig): Promise<void> {
   if (existsSync(PID_FILE)) rmSync(PID_FILE, { force: true });
   mkdirSync(E2E_DATA_DIR, { recursive: true });
+  const processState: {
+    fakeOAuth?: number;
+    api?: number;
+    web?: number;
+    dataDir: string;
+  } = { dataDir: E2E_DATA_DIR };
+  const persistProcessState = () => {
+    const temporary = `${PID_FILE}.tmp`;
+    writeFileSync(temporary, JSON.stringify(processState), { mode: 0o600 });
+    renameSync(temporary, PID_FILE);
+  };
   const fakeOAuthOrigin = configuredOrigin(
     process.env.E2E_FAKE_OAUTH_URL,
     `http://localhost:${E2E_PORTS.fakeOAuth}`,
@@ -241,9 +252,13 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   const fakeOAuth = startProcess("bun", ["run", "scripts/fake-oauth-server.ts"], {
     FAKE_OAUTH_PORT: String(ports.fakeOAuth),
   });
+  processState.fakeOAuth = fakeOAuth.pid;
+  persistProcessState();
   await waitForUrl(`${fakeOAuthOrigin}/`, "fake-oauth-server");
 
   const api = startProcess("bun", ["run", "packages/api/src/embedded.ts"], apiEnv);
+  processState.api = api.pid;
+  persistProcessState();
   await waitForUrl(`${apiOrigin}/auth/providers`, "api");
 
   let web: ChildProcess;
@@ -286,23 +301,14 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       join(REPO_ROOT, "web"),
     );
   }
+  processState.web = web.pid;
+  persistProcessState();
   if (useNextDevServer) {
     await waitForTcp(webOrigin, "web", 60_000);
     await waitForUrl(`${webOrigin}/login`, "web", 120_000);
   } else {
     await waitForUrl(`${webOrigin}/login`, "web", 120_000);
   }
-
-  writeFileSync(
-    PID_FILE,
-    JSON.stringify({
-      fakeOAuth: fakeOAuth.pid,
-      api: api.pid,
-      web: web.pid,
-      dataDir: E2E_DATA_DIR,
-    }),
-  );
-
   process.env.E2E_API_URL = apiOrigin;
   process.env.E2E_WEB_URL = webOrigin;
   process.env.E2E_FAKE_OAUTH_URL = fakeOAuthOrigin;
