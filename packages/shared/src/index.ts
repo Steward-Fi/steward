@@ -338,14 +338,19 @@ export interface PolicyRule {
 }
 
 export interface SpendingLimitConfig {
-  // Wei-based (legacy/direct)
+  // Canonical wei-based limits. Wei values are decimal strings so conversion
+  // to bigint is exact across JSON and JavaScript runtimes.
   maxPerTx?: string;
   maxPerDay?: string;
   maxPerWeek?: string;
-  // USD-based (preferred — takes precedence when price oracle is available)
+  // USD limits are conjunctive with any canonical or legacy wei limits.
   maxPerTxUsd?: number;
   maxPerDayUsd?: number;
   maxPerWeekUsd?: number;
+  // Legacy simplified representation retained for persisted-policy and API
+  // compatibility. A missing period means "day".
+  maxAmount?: string;
+  period?: "tx" | "transaction" | "day" | "daily" | "week" | "weekly";
 }
 
 export interface ApprovedAddressesConfig {

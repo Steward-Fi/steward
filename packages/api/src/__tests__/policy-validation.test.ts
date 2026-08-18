@@ -332,6 +332,39 @@ describe("policy rule validation", () => {
     ).toContain("wei strings");
   });
 
+  it("accepts canonical, mixed, and legacy spending-limit write contracts", () => {
+    for (const config of [
+      { maxPerTx: "0" },
+      { maxPerDay: "100", maxPerWeekUsd: 0 },
+      { maxPerWeek: "1000", maxPerDayUsd: 25 },
+      { maxAmount: "500", period: "day" },
+      { maxAmount: "500" },
+      { maxAmount: "500", period: "week", maxPerTxUsd: 10 },
+    ]) {
+      expect(
+        getPolicyRulesValidationError([
+          { id: "spend", type: "spending-limit", enabled: true, config },
+        ]),
+        JSON.stringify(config),
+      ).toBeNull();
+    }
+  });
+
+  it("rejects ambiguous legacy spending-limit write contracts", () => {
+    for (const config of [
+      { maxAmount: 500, period: "day" },
+      { maxAmount: "500", period: "month" },
+      { period: "day" },
+    ]) {
+      expect(
+        getPolicyRulesValidationError([
+          { id: "spend", type: "spending-limit", enabled: true, config },
+        ]),
+        JSON.stringify(config),
+      ).not.toBeNull();
+    }
+  });
+
   it("rejects oversized policy lists before deep validation", () => {
     expect(
       getPolicyRulesValidationError(

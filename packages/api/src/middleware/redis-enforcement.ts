@@ -64,29 +64,27 @@ export function extractSpendLimitPolicy(
 
   const config = slPolicy.config as Record<string, unknown>;
 
-  // Handle both canonical and simplified formats
-  if (config.maxPerDay !== undefined) {
-    return {
-      maxPerDay: String(config.maxPerDay),
-      maxPerWeek: String(config.maxPerWeek ?? config.maxPerDay),
-    };
-  }
-
-  // Simplified format: maxAmount/period
-  const maxAmount = String(config.maxAmount ?? "0");
-  const period = String(config.period ?? "day").toLowerCase();
-
   const MAX = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
-  switch (period) {
-    case "day":
-    case "daily":
-      return { maxPerDay: maxAmount, maxPerWeek: MAX };
-    case "week":
-    case "weekly":
-      return { maxPerDay: MAX, maxPerWeek: maxAmount };
-    default:
-      return { maxPerDay: maxAmount, maxPerWeek: MAX };
+  let legacyDaily = MAX;
+  let legacyWeekly = MAX;
+  const hasLegacy = typeof config.maxAmount === "string";
+  if (hasLegacy) {
+    const period = typeof config.period === "string" ? config.period.toLowerCase() : "day";
+    if (period === "week" || period === "weekly") legacyWeekly = config.maxAmount as string;
+    else if (period !== "tx" && period !== "transaction") legacyDaily = config.maxAmount as string;
   }
+
+  const hasDaily = typeof config.maxPerDay === "string";
+  const hasWeekly = typeof config.maxPerWeek === "string";
+  // Per-transaction-only and pure-USD policies have no rolling wei cap for
+  // this helper to extract. In particular, do not turn them into a zero daily
+  // cap by falling through the legacy default.
+  if (!hasDaily && !hasWeekly && !hasLegacy) return null;
+
+  return {
+    maxPerDay: hasDaily ? (config.maxPerDay as string) : legacyDaily,
+    maxPerWeek: hasWeekly ? (config.maxPerWeek as string) : legacyWeekly,
+  };
 }
 
 // ─── Pre-signing checks ──────────────────────────────────────────────────────
