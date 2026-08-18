@@ -241,6 +241,157 @@ function decodeEd25519Signature(signatureBase64: unknown): Buffer | null {
 
 class RegistryPayloadLimitError extends Error {}
 
+class RegistryJsonError extends SyntaxError {}
+
+/**
+ * Validate JSON grammar and reject duplicate decoded object names before
+ * JSON.parse can apply last-key-wins semantics. Property names are decoded
+ * with the platform parser, so raw and escape-equivalent spellings compare as
+ * the same key.
+ */
+function assertUnambiguousRegistryJson(text: string): void {
+  let offset = 0;
+  let structuralTokens = 0;
+  const fail = (message: string): never => {
+    throw new RegistryJsonError(message);
+  };
+  const countToken = (): void => {
+    structuralTokens += 1;
+    if (structuralTokens > MAX_REGISTRY_JSON_STRUCTURAL_TOKENS) {
+      fail("measurement registry JSON exceeded the structural token limit");
+    }
+  };
+  const skipWhitespace = (): void => {
+    while (/^[\u0009\u000a\u000d\u0020]$/.test(text[offset] ?? "")) offset += 1;
+  };
+  const parseString = (): string => {
+    const start = offset;
+    if (text[offset] !== '"') fail("measurement registry file is not valid JSON");
+    countToken();
+    offset += 1;
+    while (offset < text.length) {
+      const codeUnit = text.charCodeAt(offset);
+      if (text[offset] === '"') {
+        offset += 1;
+        try {
+          return JSON.parse(text.slice(start, offset)) as string;
+        } catch {
+          return fail("measurement registry file is not valid JSON");
+        }
+      }
+      if (codeUnit <= 0x1f) fail("measurement registry file is not valid JSON");
+      if (text[offset] === "\\") {
+        offset += 1;
+        const escape = text[offset];
+        if (escape === "u") {
+          if (!/^[0-9a-fA-F]{4}$/.test(text.slice(offset + 1, offset + 5))) {
+            fail("measurement registry file is not valid JSON");
+          }
+          offset += 5;
+          continue;
+        }
+        if (!escape || !'"\\/bfnrt'.includes(escape)) {
+          fail("measurement registry file is not valid JSON");
+        }
+      }
+      offset += 1;
+    }
+    return fail("measurement registry file is not valid JSON");
+  };
+  const parseNumber = (): void => {
+    if (text[offset] === "-") offset += 1;
+    if (text[offset] === "0") {
+      offset += 1;
+    } else {
+      if (!/^[1-9]$/.test(text[offset] ?? "")) fail("measurement registry file is not valid JSON");
+      while (/^[0-9]$/.test(text[offset] ?? "")) offset += 1;
+    }
+    if (text[offset] === ".") {
+      offset += 1;
+      if (!/^[0-9]$/.test(text[offset] ?? "")) fail("measurement registry file is not valid JSON");
+      while (/^[0-9]$/.test(text[offset] ?? "")) offset += 1;
+    }
+    if (text[offset] === "e" || text[offset] === "E") {
+      offset += 1;
+      if (text[offset] === "+" || text[offset] === "-") offset += 1;
+      if (!/^[0-9]$/.test(text[offset] ?? "")) fail("measurement registry file is not valid JSON");
+      while (/^[0-9]$/.test(text[offset] ?? "")) offset += 1;
+    }
+  };
+  const parseValue = (containerDepth: number): void => {
+    skipWhitespace();
+    const token = text[offset];
+    if (token === '"') {
+      parseString();
+      return;
+    }
+    if (token === "{" || token === "[") {
+      if (containerDepth >= MAX_REGISTRY_JSON_DEPTH) {
+        fail(`measurement registry JSON exceeded the maximum depth of ${MAX_REGISTRY_JSON_DEPTH}`);
+      }
+      countToken();
+      offset += 1;
+      skipWhitespace();
+      if (token === "{") {
+        const keys = new Set<string>();
+        if (text[offset] === "}") {
+          offset += 1;
+          return;
+        }
+        while (true) {
+          skipWhitespace();
+          const key = parseString();
+          if (keys.has(key)) fail("measurement registry JSON contains a duplicate object key");
+          keys.add(key);
+          skipWhitespace();
+          if (text[offset] !== ":") fail("measurement registry file is not valid JSON");
+          countToken();
+          offset += 1;
+          parseValue(containerDepth + 1);
+          skipWhitespace();
+          if (text[offset] === "}") {
+            offset += 1;
+            return;
+          }
+          if (text[offset] !== ",") fail("measurement registry file is not valid JSON");
+          countToken();
+          offset += 1;
+        }
+      }
+      if (text[offset] === "]") {
+        offset += 1;
+        return;
+      }
+      while (true) {
+        parseValue(containerDepth + 1);
+        skipWhitespace();
+        if (text[offset] === "]") {
+          offset += 1;
+          return;
+        }
+        if (text[offset] !== ",") fail("measurement registry file is not valid JSON");
+        countToken();
+        offset += 1;
+      }
+    }
+    if (token === "-" || /^[0-9]$/.test(token ?? "")) {
+      parseNumber();
+      return;
+    }
+    for (const literal of ["true", "false", "null"]) {
+      if (text.startsWith(literal, offset)) {
+        offset += literal.length;
+        return;
+      }
+    }
+    fail("measurement registry file is not valid JSON");
+  };
+
+  parseValue(0);
+  skipWhitespace();
+  if (offset !== text.length) fail("measurement registry file is not valid JSON");
+}
+
 /** Parse a registry file through the same byte and complexity limits as the verifier. */
 export function parseMeasurementRegistryJson(bytes: Uint8Array): MeasurementRegistryFile {
   if (bytes.byteLength > MAX_MEASUREMENT_REGISTRY_FILE_BYTES) {
@@ -254,45 +405,7 @@ export function parseMeasurementRegistryJson(bytes: Uint8Array): MeasurementRegi
     throw new Error("measurement registry file is not valid UTF-8 JSON");
   }
 
-  let depth = 0;
-  let structuralTokens = 0;
-  let inString = false;
-  let escaped = false;
-  for (let index = 0; index < text.length; index += 1) {
-    const character = text[index];
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (character === "\\") {
-        escaped = true;
-      } else if (character === '"') {
-        inString = false;
-      }
-      continue;
-    }
-    if (character === '"') {
-      inString = true;
-      structuralTokens += 1;
-    } else if (character === "{" || character === "[") {
-      depth += 1;
-      structuralTokens += 1;
-      if (depth > MAX_REGISTRY_JSON_DEPTH) {
-        throw new Error(
-          `measurement registry JSON exceeded the maximum depth of ${MAX_REGISTRY_JSON_DEPTH}`,
-        );
-      }
-    } else if (character === "}" || character === "]") {
-      depth -= 1;
-      if (depth < 0) throw new Error("measurement registry file is not valid JSON");
-    } else if (character === ":" || character === ",") {
-      structuralTokens += 1;
-    }
-    if (structuralTokens > MAX_REGISTRY_JSON_STRUCTURAL_TOKENS) {
-      throw new Error("measurement registry JSON exceeded the structural token limit");
-    }
-  }
-
-  if (inString || depth !== 0) throw new Error("measurement registry file is not valid JSON");
+  assertUnambiguousRegistryJson(text);
   try {
     return JSON.parse(text) as MeasurementRegistryFile;
   } catch {

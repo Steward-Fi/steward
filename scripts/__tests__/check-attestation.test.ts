@@ -73,6 +73,35 @@ describe("check-attestation bounded registry ingestion", () => {
     }
   });
 
+  test.each([
+    ['{"payload":{},"payload":{},"signatures":[]}', "top-level duplicate"],
+    [
+      '{"payload":{"registryId":"test","\\u0072egistryId":"other"},"signatures":[]}',
+      "escape-equivalent duplicate",
+    ],
+    ['{"payload":{},"signatures":[{"keyId":"one","keyId":"two"}]}', "nested duplicate"],
+  ])("rejects ambiguous registry JSON before network access (%s)", (contents) => {
+    const directory = mkdtempSync(join(tmpdir(), "steward-attestation-"));
+    const registryPath = join(directory, "duplicate-key.json");
+    try {
+      writeFileSync(registryPath, contents);
+      const result = Bun.spawnSync([process.execPath, "scripts/check-attestation.ts"], {
+        cwd: ROOT,
+        env: cliEnv(registryPath, "http://127.0.0.1:1/never-requested"),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr.toString()).toContain(
+        "measurement registry JSON contains a duplicate object key",
+      );
+      expect(result.stderr.toString()).not.toContain("fetch");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("cancels a streamed quote response over the decoded byte limit", async () => {
     const server = Bun.serve({
       hostname: "127.0.0.1",

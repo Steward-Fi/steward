@@ -603,6 +603,25 @@ describe("measurement registry", () => {
     );
   });
 
+  test.each([
+    ['{"payload":{},"payload":{},"signatures":[]}', "literal duplicate"],
+    [
+      '{"payload":{"registryId":"test","\\u0072egistryId":"other"},"signatures":[]}',
+      "escape-equivalent duplicate",
+    ],
+    ['{"payload":{},"signatures":[{"keyId":"one","keyId":"two"}]}', "nested duplicate"],
+  ])("rejects %s before JSON.parse (%s)", (json) => {
+    expect(() => parseMeasurementRegistryJson(Buffer.from(json))).toThrow(
+      "measurement registry JSON contains a duplicate object key",
+    );
+  });
+
+  test("allows the same decoded key in separate object scopes", () => {
+    expect(
+      parseMeasurementRegistryJson(Buffer.from('{"payload":{"id":1},"other":{"id":2}}')),
+    ).toEqual({ payload: { id: 1 }, other: { id: 2 } });
+  });
+
   test("counts canonical UTF-8 bytes, escaped bytes, keys, and nodes", () => {
     expect(() => canonicalizeJson({ value: "\u0000".repeat(200_000) })).toThrow(
       "registry payload exceeded the 1 MiB limit",
