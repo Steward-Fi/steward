@@ -591,15 +591,24 @@ describe("0082 profile-CHECK widening: X admitted, unknown profiles still reject
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("X governed provider-action E2E (unblocked by 0082 CHECK widening, PR4)", () => {
+  let priorExecutionAuthSecret: string | undefined;
+
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY ||= "0".repeat(64);
+    priorExecutionAuthSecret = process.env.STEWARD_EXECUTION_AUTH_SECRET;
+    process.env.STEWARD_EXECUTION_AUTH_SECRET = "k1:x-governed-e2e-secret-with-enough-entropy";
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => client.close());
   });
   afterAll(async () => {
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
+    if (priorExecutionAuthSecret === undefined) {
+      delete process.env.STEWARD_EXECUTION_AUTH_SECRET;
+    } else {
+      process.env.STEWARD_EXECUTION_AUTH_SECRET = priorExecutionAuthSecret;
+    }
   });
   beforeEach(async () => {
     await wipe();

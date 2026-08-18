@@ -170,6 +170,53 @@ describe("x narrow credential route (integration)", () => {
     expect(text).not.toContain(X_ACCESS_TOKEN);
   });
 
+  it("unwraps an OAuth-connect envelope without forwarding its refresh token", async () => {
+    captured = null;
+    const tenantId = `tenant-x-envelope-${crypto.randomUUID()}`;
+    const agentId = `agent-x-envelope-${crypto.randomUUID()}`;
+    await ensureTenant(tenantId);
+    await ensureAgent(tenantId, agentId);
+
+    const refreshCanary = "x-refresh-token-MUST-NOT-CROSS-PROXY";
+    const envelope = JSON.stringify({
+      schemaVersion: "steward.provider-x.credential.v1",
+      accessToken: X_ACCESS_TOKEN,
+      refreshToken: refreshCanary,
+      scopesGranted: ["tweet.read", "tweet.write", "offline.access"],
+      xUserId: "12345",
+      xUsername: "steward",
+      obtainedAt: new Date().toISOString(),
+      expiresAt: null,
+    });
+    const vault = new SecretVault(MASTER_PASSWORD);
+    const secret = await vault.createSecret(tenantId, "x-oauth-envelope", envelope);
+    await vault.createRoute(tenantId, secret.id, {
+      agentId,
+      hostPattern: "api.x.com",
+      pathPattern: "/2/tweets",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "authorization",
+      injectFormat: "Bearer {value}",
+    });
+
+    const token = await signAgentToken({ agentId, tenantId, scopes: ["agent", PROXY_SCOPE] }, "1h");
+    const res = await buildApp().request("/x/2/tweets", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "idempotency-key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({ text: "safe envelope extraction" }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(captured?.headers.authorization).toBe(`Bearer ${X_ACCESS_TOKEN}`);
+    expect(JSON.stringify(captured)).not.toContain(refreshCanary);
+    expect(await res.text()).not.toContain(refreshCanary);
+  });
+
   it("MUTATION: a route/endpoint mismatch fails closed; the Bearer is NEVER injected or leaked", async () => {
     // A route for /2/users/me must NOT inject on a POST /2/tweets request: the
     // credential is pinned to one exact endpoint+verb. With only that route

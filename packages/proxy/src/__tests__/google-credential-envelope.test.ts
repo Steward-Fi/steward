@@ -36,3 +36,37 @@ describe("Google OAuth credential envelope", () => {
     ).toThrow();
   });
 });
+
+describe("X OAuth credential envelope", () => {
+  const value = JSON.stringify({
+    schemaVersion: "steward.provider-x.credential.v1",
+    accessToken: "x-access-canary",
+    refreshToken: "x-refresh-canary",
+  });
+
+  it("injects only the X access token and never the refresh token", () => {
+    expect(extractProviderCredentialForHost("api.x.com", value)).toBe("x-access-canary");
+    expect(extractProviderCredentialForHost("api.x.com", value)).not.toContain("x-refresh-canary");
+  });
+
+  it("never forwards an X envelope to another host", () => {
+    expect(() => extractProviderCredentialForHost("api.openai.com", value)).toThrow(
+      "X OAuth credential used for a non-X host",
+    );
+  });
+
+  it("fails closed for malformed X envelopes while preserving legacy raw tokens", () => {
+    expect(() =>
+      extractProviderCredentialForHost(
+        "api.x.com",
+        JSON.stringify({ schemaVersion: "steward.provider-x.credential.v1" }),
+      ),
+    ).toThrow("invalid X OAuth credential envelope");
+    expect(() =>
+      extractProviderCredentialForHost("api.x.com", JSON.stringify({ accessToken: "x" })),
+    ).toThrow("invalid X OAuth credential envelope");
+    expect(extractProviderCredentialForHost("api.x.com", "legacy-raw-x-access-token")).toBe(
+      "legacy-raw-x-access-token",
+    );
+  });
+});

@@ -157,20 +157,35 @@ function isSlackBotTokenCredential(value: string): boolean {
 export function extractProviderCredentialForHost(host: string, credential: string): string {
   const parsed = safeJsonParseString<Record<string, unknown>>(credential);
   const googleHost = host === "gmail.googleapis.com" || host === "www.googleapis.com";
-  if (parsed?.schemaVersion !== "steward.provider-google.credential.v1") {
+  const xHost = host === "api.x.com";
+  const schemaVersion = parsed?.schemaVersion;
+  if (schemaVersion === "steward.provider-google.credential.v1") {
+    // Bind the credential type to its intended provider. Merely transforming the
+    // envelope when the destination happens to be Google would let a misbound
+    // route forward the whole JSON value, including the server-held refresh token.
+    if (!googleHost) throw new Error("Google OAuth credential used for a non-Google host");
+  } else if (schemaVersion === "steward.provider-x.credential.v1") {
+    // X connect stores access + refresh tokens together. Only the access token
+    // may cross the proxy boundary; the refresh token remains server-side.
+    if (!xHost) throw new Error("X OAuth credential used for a non-X host");
+  } else {
     if (googleHost) throw new Error("invalid Google OAuth credential envelope");
+    // A parseable object at the X boundary is an envelope, not a legacy raw
+    // token. Unknown/malformed envelopes must never be formatted into a header.
+    if (xHost && parsed !== null) throw new Error("invalid X OAuth credential envelope");
     return credential;
   }
-  // Bind the credential type to its intended provider. Merely transforming the
-  // envelope when the destination happens to be Google would let a misbound
-  // route forward the whole JSON value, including the server-held refresh token.
-  if (!googleHost) throw new Error("Google OAuth credential used for a non-Google host");
+  if (!parsed) throw new Error("invalid provider OAuth credential envelope");
   if (
     typeof parsed.accessToken !== "string" ||
     parsed.accessToken.length < 1 ||
     parsed.accessToken.length > 16_384
   )
-    throw new Error("invalid Google OAuth credential envelope");
+    throw new Error(
+      googleHost
+        ? "invalid Google OAuth credential envelope"
+        : "invalid X OAuth credential envelope",
+    );
   return parsed.accessToken;
 }
 
