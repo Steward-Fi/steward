@@ -93,7 +93,7 @@ describeWithDatabase("POST /tenants legacy creation route", () => {
     expect(body.data.id).toBe(TENANT_ID);
   });
 
-  it("rejects SSRF-prone legacy webhook URLs", async () => {
+  it("rejects the retired legacy webhook field with an explicit migration path", async () => {
     const res = await app.request("/tenants", {
       method: "POST",
       headers: {
@@ -108,9 +108,9 @@ describeWithDatabase("POST /tenants legacy creation route", () => {
       }),
     });
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(410);
     const body = (await res.json()) as { ok: boolean; error: string };
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("public");
+    expect(body.error).toContain("POST /webhooks");
   });
 });

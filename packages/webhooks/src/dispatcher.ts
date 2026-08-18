@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { LookupAddress } from "node:dns";
 import type { RequestOptions } from "node:http";
 import { isIP, type LookupFunction } from "node:net";
@@ -178,11 +178,21 @@ function embeddedIpv4FromIpv6(address: string): string | null {
 
 function isNonPublicIpv6(address: string): boolean {
   const normalized = address.toLowerCase();
+  const words = expandIpv6Words(normalized);
+  // RFC 8215's 64:ff9b:1::/48 is explicitly a local-use translation prefix.
+  // Block the whole prefix: allowing an address merely because its embedded
+  // IPv4 happens to be public still lets a webhook traverse an operator-local
+  // translator and defeats the public-destination boundary.
+  if (words?.[0] === 0x0064 && words[1] === 0xff9b && words[2] === 0x0001) return true;
+  // Deprecated IPv4-compatible ::/96 space is special-use, not a public IPv6
+  // webhook destination. This also closes parser-dependent forms such as
+  // `[::127.0.0.1]` / `[::7f00:1]`.
+  if (words && words.slice(0, 6).every((word) => word === 0) && (words[6] !== 0 || words[7] !== 0))
+    return true;
   const ipv4Mapped = mappedIpv4FromIpv6(normalized);
   if (ipv4Mapped) return isNonPublicIpv4(ipv4Mapped);
   const ipv4Embedded = embeddedIpv4FromIpv6(normalized);
   if (ipv4Embedded) return isNonPublicIpv4(ipv4Embedded);
-  const words = expandIpv6Words(normalized);
   if (words?.[0] === 0x2001 && (words[1] === 0 || words[1] === 0xdb8)) return true;
   // 2001:2::/48 benchmarking (RFC 5180) — documentation/special-use, never a
   // public webhook target (SEC-178).
@@ -382,35 +392,21 @@ async function postWebhook(
   });
 }
 
-/**
- * SEC-101: the bare-URL (legacy) form carries no per-tenant secret, so the
- * process-wide STEWARD_WEBHOOK_SECRET used to sign every tenant's legacy
- * endpoint directly — one key compromise forged events for ALL of them. Derive
- * a per-tenant signing key from the master secret instead: a captured derived
- * key is scoped to a single tenant's legacy endpoint. (Receivers on this path
- * were never provisioned a key, so verification there was never possible; the
- * derivation bounds blast radius without changing the wire scheme.)
- */
-function deriveLegacyWebhookSecret(masterSecret: string, tenantId: string): string {
-  return createHmac("sha256", masterSecret)
-    .update(`steward-legacy-webhook-secret:${tenantId}`)
-    .digest("hex");
-}
-
-function normalizeWebhook(webhook: WebhookConfig | string, tenantId: string): WebhookConfig {
+/** Fail closed on the retired bare-URL form, which cannot carry a receiver-known secret. */
+function normalizeWebhook(webhook: WebhookConfig | string): WebhookConfig {
   if (typeof webhook !== "string") {
+    if (typeof webhook.secret !== "string" || !webhook.secret.trim()) {
+      throw new WebhookValidationError("Webhook secret must not be empty");
+    }
     return webhook;
   }
-
-  const masterSecret = (globalThis as { process?: { env?: Record<string, string | undefined> } })
-    .process?.env?.STEWARD_WEBHOOK_SECRET;
-  if (!masterSecret) {
-    throw new Error(
-      "Webhook secret is required. Pass a WebhookConfig or set STEWARD_WEBHOOK_SECRET.",
-    );
-  }
-
-  return { url: webhook, secret: deriveLegacyWebhookSecret(masterSecret, tenantId) };
+  // A bare URL has no receiver-provisioned tenant secret. Server-side key
+  // derivation silently produces a key the receiver cannot know, while the old
+  // process-wide key lets one disclosure forge every tenant. Require the
+  // persisted per-endpoint configuration instead.
+  throw new WebhookValidationError(
+    "Legacy string webhook configuration is not supported; pass a WebhookConfig with a per-endpoint secret",
+  );
 }
 
 export class WebhookDispatcher {
@@ -444,7 +440,7 @@ export class WebhookDispatcher {
     event: WebhookEvent,
     webhook: WebhookConfig | string,
   ): Promise<WebhookDeliveryResult> {
-    const config = normalizeWebhook(webhook, event.tenantId);
+    const config = normalizeWebhook(webhook);
 
     // An empty events array means "subscribe to all" everywhere else
     // (acceptsConfiguredWebhookEvent, persistent-queue) — a truthy [] must

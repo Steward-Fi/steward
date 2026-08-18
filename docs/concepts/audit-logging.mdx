@@ -68,19 +68,21 @@ Transaction records include:
 
 ## Webhooks
 
-Steward dispatches webhooks for key events. Configure your webhook URL per-tenant:
+Steward dispatches signed webhooks for key events. Create an endpoint through the webhook API and store the one-time secret returned in the response:
 
 ```typescript
-await fetch("http://localhost:3200/tenants/your-tenant/webhook", {
-  method: "PUT",
+const response = await fetch("http://localhost:3200/webhooks", {
+  method: "POST",
   headers: {
     "X-Steward-Key": "your-key",
     "Content-Type": "application/json",
   },
   body: JSON.stringify({
-    webhookUrl: "https://your-server.com/steward-webhooks",
+    url: "https://your-server.com/steward-webhooks",
   }),
 });
+const { data } = await response.json();
+// Persist data.secret in the receiver now; Steward returns it only once.
 ```
 
 Webhook events:

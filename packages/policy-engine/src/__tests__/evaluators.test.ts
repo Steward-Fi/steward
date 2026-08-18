@@ -547,6 +547,152 @@ describe("Spending Limit Policy", () => {
     expect(result.passed).toBe(true);
   });
 
+  it("enforces a mixed daily wei cap when maxPerTx is omitted", async () => {
+    const rule = makeSpendingRule({
+      maxPerDay: "1000000000000000000", // 1 ETH
+      maxPerDayUsd: 5000,
+    });
+
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "200000000000000000" }, // 0.2 ETH
+        spentToday: BigInt("900000000000000000"), // 0.9 ETH
+        priceOracle: ethPriceOracle,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily spending limit");
+  });
+
+  it("enforces a canonical daily wei cap without requiring maxPerTx", async () => {
+    const rule = makeSpendingRule({ maxPerDay: "1000" });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "200" },
+        spentToday: 900n,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily spending limit");
+  });
+
+  it("enforces a mixed weekly wei cap when per-tx and daily caps are omitted", async () => {
+    const rule = makeSpendingRule({
+      maxPerWeek: "1000000000000000000", // 1 ETH
+      maxPerWeekUsd: 5000,
+    });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "200000000000000000" },
+        spentThisWeek: BigInt("900000000000000000"),
+        priceOracle: ethPriceOracle,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("weekly spending limit");
+  });
+
+  it("preserves a legacy maxAmount cap when a USD cap is added", async () => {
+    const rule = makeSpendingRule({
+      maxAmount: "1000000000000000000", // 1 ETH daily and per transaction
+      period: "day",
+      maxPerDayUsd: 5000,
+    });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "200000000000000000" }, // 0.2 ETH
+        spentToday: BigInt("900000000000000000"), // 0.9 ETH
+        priceOracle: ethPriceOracle,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily spending limit");
+  });
+
+  it("fails closed without throwing on non-record spending configs", async () => {
+    for (const config of [null, [], "1000"]) {
+      const rule = makeSpendingRule(config as never);
+      const result = await evaluatePolicy(rule, makeContext());
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("non-empty canonical or legacy limit config");
+    }
+  });
+
+  it("fails closed for an empty spending config even on a zero-value request", async () => {
+    const result = await evaluatePolicy(
+      makeSpendingRule({}),
+      makeContext({ request: { ...makeContext().request, value: "0" } }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("non-empty canonical or legacy limit config");
+  });
+
+  it("ignores inherited canonical fields that would erase a legacy daily cap", async () => {
+    const config = Object.assign(
+      Object.create({
+        maxPerTx: "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+      }),
+      {
+        maxAmount: "1000",
+        period: "day",
+      },
+    ) as Record<string, unknown>;
+    const result = await evaluatePolicy(
+      makeSpendingRule(config),
+      makeContext({
+        request: { ...makeContext().request, value: "200" },
+        spentToday: 900n,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily spending limit");
+  });
+
+  it("preserves untouched legacy dimensions when a canonical weekly cap is added", async () => {
+    const rule = makeSpendingRule({
+      maxAmount: "100",
+      period: "day",
+      maxPerWeek: "1000",
+    });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "20" },
+        spentToday: 90n,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily spending limit");
+  });
+
+  it("lets an explicit canonical dimension replace only its legacy counterpart", async () => {
+    const rule = makeSpendingRule({
+      maxAmount: "100",
+      period: "day",
+      maxPerTx: "200",
+    });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "150" },
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily spending limit");
+  });
+
   // ─── Per-tx boundary tests ─────────────────────────────────────────────
 
   it("passes when value is exactly at the per-tx limit (boundary)", async () => {
@@ -1192,7 +1338,7 @@ describe("Time Window Policy", () => {
     // Combine a never-matching window with an always-matching one
     const rule = makeTimeWindowRule({
       allowedHours: [
-        { start: 24, end: 25 }, // never matches
+        { start: 23, end: 23 }, // valid but zero-length, never matches
         { start: 0, end: 24 }, // always matches
       ],
       allowedDays: [],
@@ -1823,6 +1969,18 @@ describe("Malformed evaluator config fails closed instead of throwing (SEC-105)"
     }
   });
 
+  it("time-window with malformed nested windows returns a structured deny", async () => {
+    for (const config of [
+      { allowedDays: [], allowedHours: [null] },
+      { allowedDays: ["monday"], allowedHours: [] },
+      { allowedDays: [], allowedHours: [{ start: 9, end: "17" }] },
+    ]) {
+      const result = await evaluatePolicy(makeTimeWindowRule(config as never), makeContext());
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("must be arrays");
+    }
+  });
+
   it("allowed-chains with a non-array chains config returns a structured deny", async () => {
     const rule: PolicyRule = {
       id: "chains-bad",
@@ -1842,5 +2000,18 @@ describe("Malformed evaluator config fails closed instead of throwing (SEC-105)"
     );
     expect(result.passed).toBe(false);
     expect(result.reason).toContain("must be an array");
+  });
+
+  it("approved-addresses rejects malformed entries and mode without throwing", async () => {
+    for (const config of [
+      { addresses: [null], mode: "whitelist" },
+      { addresses: ["not-an-address"], mode: "blacklist" },
+      { addresses: ["0x1234567890123456789012345678901234567890"] },
+      { addresses: ["0x1234567890123456789012345678901234567890"], mode: "unknown" },
+    ]) {
+      const result = await evaluatePolicy(makeAddressRule(config as never), makeContext());
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("array of EVM addresses");
+    }
   });
 });

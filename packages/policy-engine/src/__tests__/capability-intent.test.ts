@@ -218,6 +218,23 @@ describe("capability-intent — argMatches constraint", () => {
     expect(r.passed).toBe(false);
     expect(r.reason).toContain("match input cap");
   });
+
+  it("evaluates a short catastrophic-backtracking pattern in bounded time via RE2", () => {
+    const r = evaluateCapabilityIntent(
+      rule({ ...base, constraints: { argMatches: { branch: "(a+)+" } } }),
+      makeContext({ capability: cap({ args: { branch: `${"a".repeat(8_191)}!` } }) }),
+    );
+    expect(r.passed).toBe(false);
+  });
+
+  it("rejects backreferences unsupported by the linear-time policy regex dialect", () => {
+    const r = evaluateCapabilityIntent(
+      rule({ ...base, constraints: { argMatches: { branch: "(a+)\\1" } } }),
+      makeContext({ capability: cap({ args: { branch: "aaaa" } }) }),
+    );
+    expect(r.passed).toBe(false);
+    expect(r.reason).toContain("invalid regex");
+  });
 });
 
 describe("capability-intent — maxCallsPerHour constraint (fail closed)", () => {

@@ -31,6 +31,14 @@ const MAX_UINT256_DECIMAL =
   "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 const MAX_UINT256_DECIMAL_DIGITS = 78;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isEvmAddress(value: unknown): value is string {
+  return typeof value === "string" && /^0x[a-f0-9]{40}$/i.test(value);
+}
+
 export interface EvaluatorContext {
   request: SignRequest;
   recentTxCount24h: number;
@@ -294,65 +302,104 @@ function evaluateRawSigningChain(rule: PolicyRule, ctx: EvaluatorContext): Polic
  * Normalize spending-limit config to the canonical format (maxPerTx/maxPerDay/maxPerWeek).
  * Accepts both the canonical format and the simplified maxAmount/period format.
  */
-function normalizeSpendingLimitConfig(config: Record<string, unknown>): SpendingLimitConfig {
-  // If already in canonical format (has any of the standard fields), fill in missing with MAX_UINT
-  if (config.maxPerTx !== undefined || config.maxPerTxUsd !== undefined) {
-    return {
-      maxPerTx: config.maxPerTx !== undefined ? String(config.maxPerTx) : MAX_UINT256_DECIMAL,
-      maxPerDay: config.maxPerDay !== undefined ? String(config.maxPerDay) : MAX_UINT256_DECIMAL,
-      maxPerWeek: config.maxPerWeek !== undefined ? String(config.maxPerWeek) : MAX_UINT256_DECIMAL,
-      maxPerTxUsd: config.maxPerTxUsd as number | undefined,
-      maxPerDayUsd: config.maxPerDayUsd as number | undefined,
-      maxPerWeekUsd: config.maxPerWeekUsd as number | undefined,
-    };
-  }
+function hasOwnDefined(record: Record<string, unknown>, key: string): boolean {
+  return Object.hasOwn(record, key) && record[key] !== undefined;
+}
 
-  // Also check if any USD field is present
-  if (config.maxPerDayUsd !== undefined || config.maxPerWeekUsd !== undefined) {
+function normalizeSpendingLimitConfig(config: Record<string, unknown>): SpendingLimitConfig {
+  const simplifiedWeiCaps = (): Pick<
+    SpendingLimitConfig,
+    "maxPerTx" | "maxPerDay" | "maxPerWeek"
+  > => {
+    const maxAmount = String(config.maxAmount ?? "0");
+    const period = String(config.period ?? "day").toLowerCase();
+
+    switch (period) {
+      case "tx":
+      case "transaction":
+        return {
+          maxPerTx: maxAmount,
+          maxPerDay: MAX_UINT256_DECIMAL,
+          maxPerWeek: MAX_UINT256_DECIMAL,
+        };
+      case "day":
+      case "daily":
+        return {
+          maxPerTx: maxAmount,
+          maxPerDay: maxAmount,
+          maxPerWeek: MAX_UINT256_DECIMAL,
+        };
+      case "week":
+      case "weekly":
+        return {
+          maxPerTx: maxAmount,
+          maxPerDay: MAX_UINT256_DECIMAL,
+          maxPerWeek: maxAmount,
+        };
+      default:
+        // Preserve the historical fail-safe fallback: an unknown period is
+        // treated as a per-transaction cap rather than as unbounded spend.
+        return {
+          maxPerTx: maxAmount,
+          maxPerDay: MAX_UINT256_DECIMAL,
+          maxPerWeek: MAX_UINT256_DECIMAL,
+        };
+    }
+  };
+
+  const hasCanonicalWeiCap =
+    hasOwnDefined(config, "maxPerTx") ||
+    hasOwnDefined(config, "maxPerDay") ||
+    hasOwnDefined(config, "maxPerWeek");
+  const hasUsdCap =
+    hasOwnDefined(config, "maxPerTxUsd") ||
+    hasOwnDefined(config, "maxPerDayUsd") ||
+    hasOwnDefined(config, "maxPerWeekUsd");
+
+  // Any canonical wei or USD field selects the canonical format. Missing wei
+  // caps are unbounded, but every explicitly declared cap must survive
+  // normalization. Checking only the per-tx fields caused a mixed config such
+  // as { maxPerDay, maxPerDayUsd } to take the USD-only branch and silently
+  // discard maxPerDay.
+  if (hasCanonicalWeiCap || hasUsdCap) {
+    // Legacy policies can legitimately gain canonical or USD fields one at a
+    // time. Preserve the legacy limits for every dimension that was not
+    // explicitly replaced; treating the first canonical wei field as a switch
+    // for the whole representation could silently erase the other legacy caps.
+    const inheritedWeiCaps = hasOwnDefined(config, "maxAmount")
+      ? simplifiedWeiCaps()
+      : {
+          maxPerTx: MAX_UINT256_DECIMAL,
+          maxPerDay: MAX_UINT256_DECIMAL,
+          maxPerWeek: MAX_UINT256_DECIMAL,
+        };
+    const weiCaps = {
+      maxPerTx: hasOwnDefined(config, "maxPerTx")
+        ? String(config.maxPerTx)
+        : inheritedWeiCaps.maxPerTx,
+      maxPerDay: hasOwnDefined(config, "maxPerDay")
+        ? String(config.maxPerDay)
+        : inheritedWeiCaps.maxPerDay,
+      maxPerWeek: hasOwnDefined(config, "maxPerWeek")
+        ? String(config.maxPerWeek)
+        : inheritedWeiCaps.maxPerWeek,
+    };
     return {
-      maxPerTx: MAX_UINT256_DECIMAL,
-      maxPerDay: MAX_UINT256_DECIMAL,
-      maxPerWeek: MAX_UINT256_DECIMAL,
-      maxPerTxUsd: config.maxPerTxUsd as number | undefined,
-      maxPerDayUsd: config.maxPerDayUsd as number | undefined,
-      maxPerWeekUsd: config.maxPerWeekUsd as number | undefined,
+      ...weiCaps,
+      maxPerTxUsd: hasOwnDefined(config, "maxPerTxUsd")
+        ? (config.maxPerTxUsd as number)
+        : undefined,
+      maxPerDayUsd: hasOwnDefined(config, "maxPerDayUsd")
+        ? (config.maxPerDayUsd as number)
+        : undefined,
+      maxPerWeekUsd: hasOwnDefined(config, "maxPerWeekUsd")
+        ? (config.maxPerWeekUsd as number)
+        : undefined,
     };
   }
 
   // Convert from maxAmount/period format
-  const maxAmount = String(config.maxAmount ?? "0");
-  const period = String(config.period ?? "day").toLowerCase();
-
-  switch (period) {
-    case "tx":
-    case "transaction":
-      return {
-        maxPerTx: maxAmount,
-        maxPerDay: MAX_UINT256_DECIMAL,
-        maxPerWeek: MAX_UINT256_DECIMAL,
-      };
-    case "day":
-    case "daily":
-      return {
-        maxPerTx: maxAmount,
-        maxPerDay: maxAmount,
-        maxPerWeek: MAX_UINT256_DECIMAL,
-      };
-    case "week":
-    case "weekly":
-      return {
-        maxPerTx: maxAmount,
-        maxPerDay: MAX_UINT256_DECIMAL,
-        maxPerWeek: maxAmount,
-      };
-    default:
-      // Fallback: treat as per-tx limit
-      return {
-        maxPerTx: maxAmount,
-        maxPerDay: MAX_UINT256_DECIMAL,
-        maxPerWeek: MAX_UINT256_DECIMAL,
-      };
-  }
+  return simplifiedWeiCaps();
 }
 
 /**
@@ -383,8 +430,34 @@ async function evaluateSpendingLimit(
   rule: PolicyRule,
   ctx: EvaluatorContext,
 ): Promise<PolicyResult> {
-  const config = normalizeSpendingLimitConfig(rule.config);
   const base = { policyId: rule.id, type: rule.type } as const;
+  const rawConfig: unknown = rule.config;
+  if (typeof rawConfig !== "object" || rawConfig === null || Array.isArray(rawConfig)) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Spending limit requires a non-empty canonical or legacy limit config",
+    };
+  }
+  const configRecord = rawConfig as Record<string, unknown>;
+  if (
+    ![
+      "maxPerTx",
+      "maxPerDay",
+      "maxPerWeek",
+      "maxPerTxUsd",
+      "maxPerDayUsd",
+      "maxPerWeekUsd",
+      "maxAmount",
+    ].some((field) => hasOwnDefined(configRecord, field))
+  ) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Spending limit requires a non-empty canonical or legacy limit config",
+    };
+  }
+  const config = normalizeSpendingLimitConfig(configRecord);
   const txValue = parseUint256Decimal(ctx.request.value);
   if (txValue === null) {
     return {
@@ -475,9 +548,10 @@ async function evaluateSpendingLimit(
     // unenforced (SEC-037). Fall through to the wei evaluation — undeclared
     // wei fields normalize to MAX_UINT256, so only explicit caps bite.
     if (
-      rule.config.maxPerTx === undefined &&
-      rule.config.maxPerDay === undefined &&
-      rule.config.maxPerWeek === undefined
+      !hasOwnDefined(configRecord, "maxPerTx") &&
+      !hasOwnDefined(configRecord, "maxPerDay") &&
+      !hasOwnDefined(configRecord, "maxPerWeek") &&
+      !hasOwnDefined(configRecord, "maxAmount")
     ) {
       return { ...base, passed: true };
     }
@@ -531,18 +605,25 @@ async function evaluateSpendingLimit(
 }
 
 function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
-  const config = rule.config as unknown as ApprovedAddressesConfig;
+  const rawConfig: unknown = rule.config;
   const base = { policyId: rule.id, type: rule.type } as const;
 
-  // Fail closed with a structured deny on malformed config instead of throwing
-  // on `.map` (SEC-105).
-  if (!Array.isArray(config.addresses)) {
+  // Validate the complete runtime shape, not just the outer array: a hand-edited
+  // row containing `null`/numbers used to throw in `.toLowerCase()`, while an
+  // unknown mode silently fell into blacklist semantics and could pass.
+  if (
+    !isRecord(rawConfig) ||
+    !Array.isArray(rawConfig.addresses) ||
+    !rawConfig.addresses.every(isEvmAddress) ||
+    (rawConfig.mode !== "whitelist" && rawConfig.mode !== "blacklist")
+  ) {
     return {
       ...base,
       passed: false,
-      reason: "Approved addresses must be an array",
+      reason: "Approved addresses must be an array of EVM addresses with a valid mode",
     };
   }
+  const config = rawConfig as unknown as ApprovedAddressesConfig;
 
   const targetAddress = getApprovedAddressTarget(ctx.request);
   if (!targetAddress) {
@@ -555,7 +636,7 @@ function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): Pol
 
   const target = targetAddress.toLowerCase();
   const listed = config.addresses.map((a) => a.toLowerCase());
-  const mode = config.mode ?? "whitelist";
+  const mode = config.mode;
 
   if (mode === "whitelist") {
     if (!listed.includes(target)) {
@@ -697,18 +778,39 @@ function evaluateRateLimit(rule: PolicyRule, ctx: EvaluatorContext): PolicyResul
 }
 
 function evaluateTimeWindow(rule: PolicyRule, _ctx: EvaluatorContext): PolicyResult {
-  const config = rule.config as unknown as TimeWindowConfig;
+  const rawConfig: unknown = rule.config;
   const base = { policyId: rule.id, type: rule.type } as const;
 
-  // Fail closed with a structured deny on malformed config instead of throwing
-  // on `.length` (SEC-105) — consistent with the other defensive evaluators.
-  if (!Array.isArray(config.allowedDays) || !Array.isArray(config.allowedHours)) {
+  // Validate the nested runtime shape as well as the arrays. Otherwise a
+  // hand-edited `allowedHours: [null]` throws inside `.some()` and bypasses the
+  // structured-deny contract.
+  if (
+    !isRecord(rawConfig) ||
+    !Array.isArray(rawConfig.allowedDays) ||
+    !rawConfig.allowedDays.every(
+      (day) => typeof day === "number" && Number.isInteger(day) && day >= 0 && day <= 6,
+    ) ||
+    !Array.isArray(rawConfig.allowedHours) ||
+    !rawConfig.allowedHours.every(
+      (window) =>
+        isRecord(window) &&
+        typeof window.start === "number" &&
+        Number.isInteger(window.start) &&
+        window.start >= 0 &&
+        window.start <= 23 &&
+        typeof window.end === "number" &&
+        Number.isInteger(window.end) &&
+        window.end >= 0 &&
+        window.end <= 24,
+    )
+  ) {
     return {
       ...base,
       passed: false,
-      reason: "Time-window allowedDays and allowedHours must be arrays",
+      reason: "Time-window allowedDays and allowedHours must be arrays of valid windows",
     };
   }
+  const config = rawConfig as unknown as TimeWindowConfig;
 
   // An enabled time-window rule with NO windows at all is a misconfigured
   // no-op that would pass everything — fail closed instead (SEC-180),
@@ -752,19 +854,22 @@ function evaluateTimeWindow(rule: PolicyRule, _ctx: EvaluatorContext): PolicyRes
  * Allowed-chains policy: restricts transactions to a set of permitted CAIP-2 chain identifiers.
  */
 function evaluateAllowedChains(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
-  const config = rule.config as unknown as AllowedChainsConfig;
+  const rawConfig: unknown = rule.config;
   const base = { policyId: rule.id, type: rule.type } as const;
   const chainId = ctx.request.chainId;
 
-  // Fail closed with a structured deny on malformed config instead of throwing
-  // on `.includes` (SEC-105).
-  if (!Array.isArray(config.chains)) {
+  if (
+    !isRecord(rawConfig) ||
+    !Array.isArray(rawConfig.chains) ||
+    !rawConfig.chains.every((chain) => typeof chain === "string" && chain.length > 0)
+  ) {
     return {
       ...base,
       passed: false,
       reason: "Allowed chains must be an array of CAIP-2 identifiers",
     };
   }
+  const config = rawConfig as unknown as AllowedChainsConfig;
 
   if (!Number.isSafeInteger(chainId) || chainId <= 0) {
     return {

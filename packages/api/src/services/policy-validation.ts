@@ -154,7 +154,9 @@ function validatePolicyConfig(policy: PolicyRule): string | null {
             Number(window.start) >= 0 &&
             Number(window.start) <= 23 &&
             Number(window.end) >= 0 &&
-            Number(window.end) <= 23,
+            // End is exclusive, so 24 is the only way to represent a window
+            // that includes the 23:00-23:59 UTC hour.
+            Number(window.end) <= 24,
         )
       ) {
         return "time-window.allowedHours must contain UTC hour windows";

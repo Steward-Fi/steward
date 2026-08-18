@@ -101,6 +101,69 @@ describe("price oracle", () => {
     );
   });
 
+  it("handles large scientific-notation inputs without a Number-to-BigInt overflow", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          pairs: [{ chainId: "base", priceUsd: "1", liquidity: { usd: 100 } }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+
+    const result = await createPriceOracle({ cacheTtlMs: 0 }).usdToWei(Number.MAX_VALUE, 8453);
+    expect(result).not.toBeNull();
+    expect(result).toHaveLength(327);
+    expect(result?.startsWith("17976931348623157")).toBe(true);
+    expect(result?.endsWith("0".repeat(310))).toBe(true);
+  });
+
+  it("rejects a non-finite upstream price instead of throwing during BigInt conversion", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          pairs: [{ chainId: "base", priceUsd: "1e309", liquidity: { usd: 100 } }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+
+    await expect(createPriceOracle({ cacheTtlMs: 0 }).usdToWei(1, 8453)).resolves.toBeNull();
+  });
+
+  it("rejects JavaScript-only numeric syntaxes in upstream decimal prices", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          pairs: [
+            { chainId: "base", priceUsd: "0x10", liquidity: { usd: 1_000_000 } },
+            { chainId: "base", priceUsd: "0b10", liquidity: { usd: 100_000 } },
+            { chainId: "base", priceUsd: "2.5", liquidity: { usd: 100 } },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+
+    // Number("0x10") is 16, but a USD oracle must only accept the documented
+    // decimal grammar. The genuine decimal pair remains eligible.
+    await expect(createPriceOracle({ cacheTtlMs: 0 }).getNativeUsdPrice(8453)).resolves.toBe(2.5);
+  });
+
+  it("fails closed on an oversized chunked oracle response", async () => {
+    const oversized = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(2 * 1024 * 1024));
+        controller.enqueue(new Uint8Array([0]));
+        controller.close();
+      },
+    });
+    globalThis.fetch = (async () =>
+      new Response(oversized, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+
+    await expect(createPriceOracle({ cacheTtlMs: 0 }).getNativeUsdPrice(8453)).resolves.toBeNull();
+  });
+
   it("fails closed for unknown chains/tokens instead of assuming 18 decimals (SEC-190)", async () => {
     globalThis.fetch = (async () =>
       new Response(

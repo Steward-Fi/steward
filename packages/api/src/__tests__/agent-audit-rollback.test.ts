@@ -12,6 +12,27 @@ function functionBody(marker: string, endMarker = "\n}\n\nagentRoutes.") {
 }
 
 describe("agent audit rollback hardening", () => {
+  it("commits trade-policy mutations only with their required audit event", () => {
+    const policyStart = routeSource.indexOf('agentRoutes.put("/:agentId/policy"');
+    expect(policyStart).toBeGreaterThanOrEqual(0);
+    const policyRoute = routeSource.slice(
+      policyStart,
+      routeSource.indexOf('agentRoutes.get("/:agentId"', policyStart),
+    );
+
+    expect(policyRoute).toContain("withTenantAuditedTransaction(");
+    expect(policyRoute).toContain("async (txRaw, appendRequiredAudit) =>");
+    const transaction = policyRoute.indexOf("withTenantAuditedTransaction(");
+    const update = policyRoute.indexOf(".update(agentPolicies)", transaction);
+    const insert = policyRoute.indexOf(".insert(agentPolicies)", transaction);
+    const audit = policyRoute.indexOf("await appendRequiredAudit({", transaction);
+    expect(update).toBeGreaterThan(transaction);
+    expect(insert).toBeGreaterThan(transaction);
+    expect(audit).toBeGreaterThan(update);
+    expect(audit).toBeGreaterThan(insert);
+    expect(policyRoute).not.toContain("await writeAuditEvent({");
+  });
+
   it("removes newly persisted agent and wallet rows when final audit writes fail", () => {
     expect(routeSource).toContain("async function deleteAgentRows");
     expect(routeSource).toContain("async function deleteAgentWalletRows");

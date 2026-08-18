@@ -59,6 +59,104 @@ export interface RegistryVerificationOptions {
 const MAX_REGISTRY_SIGNATURES = 64;
 const MAX_REGISTRY_PAYLOAD_BYTES = 1024 * 1024;
 const MAX_PUBLIC_KEY_PEM_BYTES = 16 * 1024;
+export const MAX_MEASUREMENT_REGISTRY_FILE_BYTES = 3 * 1024 * 1024;
+const MAX_REGISTRY_DEPLOYMENTS = 1024;
+const REGISTRY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const PROVIDER_IDS = new Set<AttestationProviderId>([
+  "dstack-tdx",
+  "noop-dev",
+  "aws-nitro",
+  "amd-sev-snp",
+]);
+const DEPLOYMENT_STATUSES = new Set(["active", "pending", "retired"]);
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isBoundedText(value: unknown, maxBytes: number, allowEmpty = false): value is string {
+  return (
+    typeof value === "string" &&
+    (allowEmpty || value.length > 0) &&
+    Buffer.byteLength(value, "utf8") <= maxBytes
+  );
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>): boolean {
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function validateRegistryPayload(payload: unknown): string | null {
+  if (!isPlainObject(payload)) return "registry payload must be an object";
+  if (!hasOnlyKeys(payload, new Set(["schemaVersion", "registryId", "updatedAt", "deployments"])))
+    return "registry payload has unknown fields";
+  if (payload.schemaVersion !== 1) return "unsupported registry schema";
+  if (typeof payload.registryId !== "string" || !REGISTRY_ID_PATTERN.test(payload.registryId))
+    return "registryId is invalid";
+  if (!isBoundedText(payload.updatedAt, 64)) return "registry updatedAt is invalid";
+  const updatedAt = Date.parse(payload.updatedAt);
+  if (!Number.isFinite(updatedAt) || new Date(updatedAt).toISOString() !== payload.updatedAt)
+    return "registry updatedAt must be a canonical ISO timestamp";
+  if (!isPlainObject(payload.deployments)) return "registry deployments must be an object";
+  const deployments = Object.entries(payload.deployments);
+  if (deployments.length > MAX_REGISTRY_DEPLOYMENTS)
+    return `registry has too many deployments (max ${MAX_REGISTRY_DEPLOYMENTS})`;
+
+  let estimatedBytes = 256;
+  const addText = (value: string) => {
+    estimatedBytes += Buffer.byteLength(JSON.stringify(value), "utf8") + 16;
+    return estimatedBytes <= MAX_REGISTRY_PAYLOAD_BYTES;
+  };
+  for (const [deploymentId, rawEntry] of deployments) {
+    if (!REGISTRY_ID_PATTERN.test(deploymentId) || !addText(deploymentId))
+      return "registry deployment id is invalid or payload is too large";
+    if (!isPlainObject(rawEntry)) return `deployment ${deploymentId} must be an object`;
+    if (!hasOnlyKeys(rawEntry, new Set(["provider", "measurement", "endpoint", "status", "notes"])))
+      return `deployment ${deploymentId} has unknown fields`;
+    if (!PROVIDER_IDS.has(rawEntry.provider as AttestationProviderId))
+      return `deployment ${deploymentId} has an invalid provider`;
+    if (!DEPLOYMENT_STATUSES.has(rawEntry.status as string))
+      return `deployment ${deploymentId} has an invalid status`;
+    if (!isPlainObject(rawEntry.measurement))
+      return `deployment ${deploymentId} measurement must be an object`;
+    if (!hasOnlyKeys(rawEntry.measurement, new Set(["imageDigest", "configHash"])))
+      return `deployment ${deploymentId} measurement has unknown fields`;
+    if (
+      !isBoundedText(rawEntry.measurement.imageDigest, 1024) ||
+      !isBoundedText(rawEntry.measurement.configHash, 1024) ||
+      !addText(rawEntry.measurement.imageDigest) ||
+      !addText(rawEntry.measurement.configHash)
+    )
+      return `deployment ${deploymentId} measurement is invalid or payload is too large`;
+    if (
+      rawEntry.endpoint !== undefined &&
+      (!isBoundedText(rawEntry.endpoint, 2048) || !addText(rawEntry.endpoint))
+    )
+      return `deployment ${deploymentId} endpoint is invalid or payload is too large`;
+    if (
+      rawEntry.notes !== undefined &&
+      (!isBoundedText(rawEntry.notes, 4096, true) || !addText(rawEntry.notes))
+    )
+      return `deployment ${deploymentId} notes are invalid or payload is too large`;
+  }
+  return null;
+}
 
 function parseEd25519PublicKey(publicKeyPem: unknown): {
   key: ReturnType<typeof createPublicKey>;
@@ -99,12 +197,54 @@ function decodeEd25519Signature(signatureBase64: unknown): Buffer | null {
 }
 
 export function canonicalizeJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map((entry) => canonicalizeJson(entry)).join(",")}]`;
-  return `{${Object.entries(value as Record<string, unknown>)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalizeJson(entry)}`)
-    .join(",")}}`;
+  const ancestors = new Set<object>();
+  const visit = (entry: unknown, depth: number): string => {
+    if (depth > 64) throw new Error("JSON nesting exceeds canonicalization limit");
+    if (entry === null || typeof entry === "boolean") return JSON.stringify(entry);
+    if (typeof entry === "string") {
+      if (!isWellFormedUnicode(entry)) throw new Error("JSON string contains a lone surrogate");
+      return JSON.stringify(entry);
+    }
+    if (typeof entry === "number") {
+      if (!Number.isFinite(entry)) throw new Error("non-finite JSON number");
+      return JSON.stringify(entry);
+    }
+    if (typeof entry !== "object") throw new Error("value is not JSON-serializable");
+    if (ancestors.has(entry)) throw new Error("cyclic JSON value");
+    ancestors.add(entry);
+    try {
+      if (Array.isArray(entry)) {
+        const ownKeys = Reflect.ownKeys(entry);
+        if (ownKeys.length !== entry.length + 1 || !ownKeys.includes("length"))
+          throw new Error("sparse or decorated JSON array");
+        const items = Array.from({ length: entry.length }, (_, index) => {
+          const descriptor = Object.getOwnPropertyDescriptor(entry, String(index));
+          if (!descriptor?.enumerable || !("value" in descriptor))
+            throw new Error("sparse or decorated JSON array");
+          return visit(descriptor.value, depth + 1);
+        });
+        return `[${items.join(",")}]`;
+      }
+      if (!isPlainObject(entry)) throw new Error("value is not a plain JSON object");
+      const entries = Reflect.ownKeys(entry).map((key): [string, unknown] => {
+        if (typeof key !== "string" || !isWellFormedUnicode(key))
+          throw new Error("JSON object has a non-JSON property key");
+        const descriptor = Object.getOwnPropertyDescriptor(entry, key);
+        if (!descriptor?.enumerable || !("value" in descriptor))
+          throw new Error("JSON object has a non-JSON property");
+        return [key, descriptor.value];
+      });
+      return `{${entries
+        // RFC 8785/JCS orders property names by UTF-16 code units, not the
+        // process locale. localeCompare can produce different signed bytes.
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([key, item]) => `${JSON.stringify(key)}:${visit(item, depth + 1)}`)
+        .join(",")}}`;
+    } finally {
+      ancestors.delete(entry);
+    }
+  };
+  return visit(value, 0);
 }
 
 export function registryPayloadDigest(payload: MeasurementRegistryPayload): string {
@@ -119,8 +259,8 @@ export function verifyRegistrySignatures(
   options?: RegistryVerificationOptions,
 ): RegistryVerificationResult {
   if (
-    !registry ||
-    typeof registry !== "object" ||
+    !isPlainObject(registry) ||
+    !hasOnlyKeys(registry, new Set(["payload", "signatures"])) ||
     !registry.payload ||
     typeof registry.payload !== "object" ||
     !Array.isArray(registry.signatures)
@@ -142,8 +282,22 @@ export function verifyRegistrySignatures(
       reason: `invalid requiredSignatureCount: ${requiredSignatureCount} (must be an integer >= 1)`,
     };
   }
-  if (registry.payload.schemaVersion !== 1)
-    return { ok: false, reason: "unsupported registry schema" };
+  let payloadError: string | null;
+  try {
+    payloadError = validateRegistryPayload(registry.payload);
+  } catch {
+    return { ok: false, reason: "malformed measurement registry payload" };
+  }
+  if (payloadError) return { ok: false, reason: payloadError };
+  let payload: Buffer;
+  try {
+    payload = Buffer.from(canonicalizeJson(registry.payload));
+  } catch {
+    return { ok: false, reason: "registry payload is not canonicalizable JSON" };
+  }
+  if (payload.byteLength > MAX_REGISTRY_PAYLOAD_BYTES) {
+    return { ok: false, reason: "registry payload exceeded the 1 MiB limit" };
+  }
 
   // SEC-086: bind registry metadata so signed files cannot be swapped across
   // environments or replayed to roll back retired measurements.
@@ -195,25 +349,41 @@ export function verifyRegistrySignatures(
         "(or dangerouslyAllowUnpinned for local development only)",
     };
   }
-  const candidateSignatures: Array<{
+  const parsedSignatures: Array<{
     signature: MeasurementRegistrySignature;
     key: ReturnType<typeof createPublicKey>;
     fingerprint: string;
+    signatureBytes: Buffer;
   }> = [];
-  for (const value of registry.signatures as unknown[]) {
-    if (!value || typeof value !== "object") continue;
-    const signature = value as MeasurementRegistrySignature;
-    if (
-      signature.algorithm !== "ed25519" ||
-      typeof signature.keyId !== "string" ||
-      (trustedIds && !trustedIds.has(signature.keyId))
-    ) {
-      continue;
+  try {
+    for (const value of registry.signatures as unknown[]) {
+      if (!isPlainObject(value)) {
+        return { ok: false, reason: "registry has a malformed signature entry" };
+      }
+      const signature = value as unknown as MeasurementRegistrySignature;
+      if (
+        !hasOnlyKeys(value, new Set(["keyId", "algorithm", "publicKeyPem", "signatureBase64"])) ||
+        signature.algorithm !== "ed25519" ||
+        typeof signature.keyId !== "string" ||
+        !REGISTRY_ID_PATTERN.test(signature.keyId)
+      ) {
+        return { ok: false, reason: "registry has a malformed signature entry" };
+      }
+      const parsed = parseEd25519PublicKey(signature.publicKeyPem);
+      const signatureBytes = decodeEd25519Signature(signature.signatureBase64);
+      if (!parsed || !signatureBytes) {
+        return { ok: false, reason: "registry has a malformed signature entry" };
+      }
+      parsedSignatures.push({ signature, ...parsed, signatureBytes });
     }
-    const parsed = parseEd25519PublicKey(signature.publicKeyPem);
-    if (!parsed || (trustedFingerprints && !trustedFingerprints.has(parsed.fingerprint))) continue;
-    candidateSignatures.push({ signature, ...parsed });
+  } catch {
+    return { ok: false, reason: "registry has a malformed signature entry" };
   }
+  const candidateSignatures = parsedSignatures.filter(
+    ({ signature, fingerprint }) =>
+      (!trustedIds || trustedIds.has(signature.keyId)) &&
+      (!trustedFingerprints || trustedFingerprints.has(fingerprint)),
+  );
   if (candidateSignatures.length < requiredSignatureCount) {
     return {
       ok: false,
@@ -221,23 +391,12 @@ export function verifyRegistrySignatures(
     };
   }
 
-  let payload: Buffer;
-  try {
-    payload = Buffer.from(canonicalizeJson(registry.payload));
-  } catch {
-    return { ok: false, reason: "registry payload is not canonicalizable JSON" };
-  }
-  if (payload.byteLength > MAX_REGISTRY_PAYLOAD_BYTES) {
-    return { ok: false, reason: "registry payload exceeded the 1 MiB limit" };
-  }
   // SEC-008: count DISTINCT keys, not signature array entries — the same
   // signature pasted twice must not satisfy a two-person quorum.
   const validKeyFingerprints = new Set<string>();
   for (const candidate of candidateSignatures) {
-    const signatureBytes = decodeEd25519Signature(candidate.signature.signatureBase64);
-    if (!signatureBytes) continue;
     try {
-      const valid = verifySignature(null, payload, candidate.key, signatureBytes);
+      const valid = verifySignature(null, payload, candidate.key, candidate.signatureBytes);
       // Count the canonical SPKI key, not textual PEM formatting. Re-wrapping
       // one PEM must not turn one signing key into two quorum participants.
       if (valid) {
@@ -270,7 +429,35 @@ export function verifyQuoteAgainstRegistry(
   registry: MeasurementRegistryFile,
   deployment: string,
 ): RegistryVerificationResult {
-  const entry = registry.payload.deployments[deployment];
+  let payloadError: string | null;
+  try {
+    payloadError = validateRegistryPayload(registry?.payload);
+  } catch {
+    return { ok: false, reason: "malformed measurement registry payload" };
+  }
+  if (payloadError) return { ok: false, reason: payloadError };
+  let malformedQuote: boolean;
+  try {
+    const timestamp = isPlainObject(quote) && quote.timestamp;
+    malformedQuote =
+      !isPlainObject(quote) ||
+      typeof quote.verified !== "boolean" ||
+      !PROVIDER_IDS.has(quote.provider as AttestationProviderId) ||
+      !isPlainObject(quote.measurement) ||
+      !isBoundedText(quote.measurement.imageDigest, 1024) ||
+      !isBoundedText(quote.measurement.configHash, 1024) ||
+      !isBoundedText(timestamp, 64) ||
+      !Number.isFinite(Date.parse(timestamp)) ||
+      new Date(timestamp).toISOString() !== timestamp;
+  } catch {
+    return { ok: false, reason: "malformed attestation quote" };
+  }
+  if (malformedQuote) return { ok: false, reason: "malformed attestation quote" };
+  if (typeof deployment !== "string" || !REGISTRY_ID_PATTERN.test(deployment))
+    return { ok: false, reason: "malformed deployment id" };
+  const entry = Object.hasOwn(registry.payload.deployments, deployment)
+    ? registry.payload.deployments[deployment]
+    : undefined;
   if (!entry) return { ok: false, reason: `unknown deployment: ${deployment}` };
   if (entry.status !== "active")
     return { ok: false, reason: `deployment ${deployment} is ${entry.status}` };

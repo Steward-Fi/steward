@@ -7,8 +7,8 @@
  * does NOT re-implement credential injection, policy evaluation, or the grant
  * lifecycle — it maps a per-agent MANIFEST entry to an issuance decision:
  *
- *   • token mode  → mint a SHORT-LIVED, SCOPED agent token (@stwd/auth
- *                   signAgentToken, minute-scale TTL) the agent uses directly.
+ *   • token mode  → is handled by upstream-leases.ts. This module must never
+ *                   substitute a Steward JWT for a provider credential.
  *   • broker mode → return a DELEGATION descriptor telling the agent to invoke
  *                   through Steward's existing broker endpoint
  *                   (POST /capabilities/:name/invoke); the credential never
@@ -130,7 +130,8 @@ export type IssuanceDenyCode =
   | "invalid_manifest"
   | "not_granted"
   | "ttl_out_of_range"
-  | "mint_failed";
+  | "mint_failed"
+  | "upstream_issuer_required";
 
 /** Clamp a requested TTL into the honest short-lived range. */
 export function clampTtlSeconds(requested: number | undefined): number | null {
@@ -143,10 +144,7 @@ export function clampTtlSeconds(requested: number | undefined): number | null {
 
 /** The scope string a token-mode capability token carries. Namespaced by the
  * manifest identifier so a minted token authorizes EXACTLY this capability and
- * nothing else (least privilege). A capability token carries ONLY this scope —
- * never the broad `agent` scope, which the tenant surface would accept as a
- * general agent credential (the tenant gate also refuses any token carrying a
- * `cap:` scope, so the two halves fail closed together). */
+ * nothing else (least privilege). */
 export function capabilityTokenScope(manifest: string): string {
   return `cap:${manifest}`;
 }
@@ -222,69 +220,20 @@ export async function issueCapability(args: {
     };
   }
 
-  // token mode: mint a short-lived, capability-scoped token.
-  const ttl = clampTtlSeconds(args.ttlSeconds);
-  if (ttl === null) {
-    await audit({
-      tenantId: args.tenantId,
-      agentId: args.agentId,
-      manifest: args.manifest,
-      capabilityId: capability.id,
-      mode: "token",
-      decision: "deny",
-      reason: "requested ttl out of range",
-    });
-    return {
-      ok: false,
-      error: `ttl must be 1-${MAX_ISSUE_TTL_SECONDS} seconds`,
-      code: "ttl_out_of_range",
-    };
-  }
-
-  // Least privilege: ONLY the capability scope. Adding the broad `agent`
-  // scope here would make the token a general agent credential for up to its
-  // TTL (trade-session self-management, token-status reads, ...).
-  const scopes = [capabilityTokenScope(args.manifest)];
-  let minted: { token: string; jti: string };
-  try {
-    minted = await args.mintToken({
-      agentId: args.agentId,
-      tenantId: args.tenantId,
-      scopes,
-      ttlSeconds: ttl,
-    });
-  } catch {
-    await audit({
-      tenantId: args.tenantId,
-      agentId: args.agentId,
-      manifest: args.manifest,
-      capabilityId: capability.id,
-      mode: "token",
-      decision: "deny",
-      reason: "token mint failed",
-    });
-    return { ok: false, error: "token issuance failed", code: "mint_failed" };
-  }
-
+  // A Steward JWT is not a GitHub credential. The real token-mode route is the
+  // durable upstream lease path; fail closed if this generic helper is called.
   await audit({
     tenantId: args.tenantId,
     agentId: args.agentId,
     manifest: args.manifest,
     capabilityId: capability.id,
     mode: "token",
-    decision: "allow",
-    jti: minted.jti,
-    ttlSeconds: ttl,
+    decision: "deny",
+    reason: "upstream issuer required",
   });
-
   return {
-    ok: true,
-    mode: "token",
-    token: minted.token,
-    jti: minted.jti,
-    ttlSeconds: ttl,
-    scopes,
-    manifest: args.manifest,
-    capabilityId: capability.id,
+    ok: false,
+    error: "provider token mode requires a configured upstream issuer",
+    code: "upstream_issuer_required",
   };
 }
