@@ -905,6 +905,7 @@ class ProviderActionService {
         const verification = verifyXSummonAttestation(
           input.summonAttestation,
           {
+            audience: process.env.STEWARD_X_SUMMON_ATTESTATION_AUDIENCE ?? "",
             tenantId,
             workspaceId: input.workspaceId,
             actorAgentId,
@@ -2624,6 +2625,7 @@ class ProviderActionService {
         authenticatedXSummoned = verifyXSummonAttestation(
           args.safeSummary.xSummonAttestation,
           {
+            audience: process.env.STEWARD_X_SUMMON_ATTESTATION_AUDIENCE ?? "",
             tenantId: args.tenantId,
             workspaceId: args.workspaceId,
             actorAgentId: args.actorAgentId,

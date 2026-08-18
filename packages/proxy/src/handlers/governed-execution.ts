@@ -171,6 +171,7 @@ interface LoadedGovernedExecution {
  * valid for actions whose policy did not require summon provenance; a one-sided
  * or invalid persisted record is always a deny. */
 export function verifyDispatchXSummonProvenance(input: {
+  audience: string;
   tenantId: string;
   workspaceId: string;
   actorAgentId: string;
@@ -200,6 +201,7 @@ export function verifyDispatchXSummonProvenance(input: {
   const verification = verifyXSummonAttestation(
     persistedAttestation,
     {
+      audience: input.audience,
       tenantId: input.tenantId,
       workspaceId: input.workspaceId,
       actorAgentId: input.actorAgentId,
@@ -419,6 +421,7 @@ export async function dispatchGovernedExecution(
   // current expiry before any claim or credential decrypt.
   const summonProvenance = verifyDispatchXSummonProvenance({
     ...loaded,
+    audience: process.env.STEWARD_X_SUMMON_ATTESTATION_AUDIENCE ?? "",
     keysJson: process.env.STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS,
   });
   if (summonProvenance === "invalid") {

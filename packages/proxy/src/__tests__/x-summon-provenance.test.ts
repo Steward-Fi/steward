@@ -13,11 +13,13 @@ const rawPublic = pair.publicKey.export({ format: "der", type: "spki" }).subarra
 const keysJson = JSON.stringify({ dispatch: rawPublic.toString("base64url") });
 const now = new Date("2026-08-18T01:00:00.000Z");
 const idempotencyKeyHash = `sha256:${"c".repeat(64)}`;
+const audience = "steward-prod-us";
 
 function signed(): XSummonAttestationV1 {
   const a: XSummonAttestationV1 = {
     schemaVersion: "steward.x-summon-attestation.v1",
     keyId: "dispatch",
+    audience,
     tenantId: "tenant-a",
     workspaceId: "22000000-0000-4000-8000-000000000001",
     actorAgentId: "agent-a",
@@ -57,6 +59,7 @@ function fixture() {
     nonce: "nonce",
   };
   return {
+    audience,
     tenantId: "tenant-a",
     workspaceId: "22000000-0000-4000-8000-000000000001",
     actorAgentId: "agent-a",
@@ -104,6 +107,9 @@ describe("dispatch X summon provenance boundary", () => {
     const tampered = fixture();
     tampered.requestEnvelope.workspaceId = "22000000-0000-4000-8000-000000000002";
     expect(verifyDispatchXSummonProvenance(tampered)).toBe("invalid");
+    expect(
+      verifyDispatchXSummonProvenance({ ...fixture(), audience: "steward-staging" }),
+    ).toBe("invalid");
   });
 
   test("allows truly absent provenance for non-summon-governed actions", () => {

@@ -11,6 +11,7 @@ const rawPublicKey = publicKey.export({ format: "der", type: "spki" }).subarray(
 const keysJson = JSON.stringify({ "adapter-2026-08": rawPublicKey.toString("base64url") });
 const now = new Date("2026-08-18T01:00:00.000Z");
 const expected = {
+  audience: "steward-prod-us",
   tenantId: "tenant-a",
   workspaceId: "22000000-0000-4000-8000-000000000001",
   actorAgentId: "agent-a",
@@ -47,6 +48,7 @@ describe("authenticated X summon provenance", () => {
   });
 
   test.each([
+    ["deployment audience", { audience: "steward-staging" }],
     ["tenant", { tenantId: "tenant-b" }],
     ["workspace", { workspaceId: "22000000-0000-4000-8000-000000000002" }],
     ["agent", { actorAgentId: "agent-b" }],
@@ -83,6 +85,14 @@ describe("authenticated X summon provenance", () => {
     expect(
       verifyXSummonAttestation(attestation({ keyId: "retired" }), expected, keysJson, now),
     ).toEqual({ ok: false, reason: "unknown_key" });
+    expect(
+      verifyXSummonAttestation(
+        attestation({ attestedAt: "2026-02-31T00:59:30.000Z" }),
+        expected,
+        keysJson,
+        now,
+      ),
+    ).toEqual({ ok: false, reason: "stale" });
   });
 
   test("rejects unknown fields and missing key configuration", () => {
@@ -92,6 +102,32 @@ describe("authenticated X summon provenance", () => {
     expect(verifyXSummonAttestation(attestation(), expected, undefined, now)).toEqual({
       ok: false,
       reason: "unknown_key",
+    });
+  });
+
+  test("rejects inherited key ids and non-canonical signature encodings without throwing", () => {
+    expect(
+      verifyXSummonAttestation(
+        attestation({ keyId: "toString" }),
+        expected,
+        keysJson,
+        now,
+      ),
+    ).toEqual({ ok: false, reason: "unknown_key" });
+
+    const nonCanonical = attestation();
+    const last = nonCanonical.signature.at(-1) ?? "";
+    // An Ed25519 signature's 86th base64url character has four unused bits.
+    // Flip only those bits so decoding yields the same 64 signature bytes.
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const index = alphabet.indexOf(last);
+    nonCanonical.signature = `${nonCanonical.signature.slice(0, -1)}${alphabet[index ^ 1]}`;
+    expect(Buffer.from(nonCanonical.signature, "base64url")).toEqual(
+      Buffer.from(attestation().signature, "base64url"),
+    );
+    expect(verifyXSummonAttestation(nonCanonical, expected, keysJson, now)).toEqual({
+      ok: false,
+      reason: "signature_invalid",
     });
   });
 });

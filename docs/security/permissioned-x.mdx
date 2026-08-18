@@ -105,8 +105,12 @@ provenance can produce authoritative `summoned: true`.
 The optional top-level `summonAttestation` is a strict
 `steward.x-summon-attestation.v1` document signed with Ed25519. Configure trusted
 raw public keys in `STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS` as a JSON object
-from key id to unpadded base64url. The signature is domain-separated and binds:
+from key id to unpadded base64url. Set a unique deployment audience in
+`STEWARD_X_SUMMON_ATTESTATION_AUDIENCE` (and configure the adapter to sign that
+same audience); verification fails closed when it is absent or different. The
+signature is domain-separated and binds:
 
+- the deployment audience, preventing staging-to-production replay;
 - tenant, workspace, actor agent, and provider account;
 - the fixed `x.tweet.create` operation and canonical reply source post id;
 - the hash of the request's idempotency key;

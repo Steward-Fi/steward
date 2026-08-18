@@ -277,6 +277,7 @@ function signedSummonAttestation(seedStr: string, sourcePostId: string) {
   const a: XSummonAttestationV1 = {
     schemaVersion: "steward.x-summon-attestation.v1",
     keyId: SUMMON_KEY_ID,
+    audience: "steward-test",
     tenantId: P.TENANT,
     workspaceId: P.WORKSPACE,
     actorAgentId: P.AGENT,
@@ -329,6 +330,7 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
     process.env.STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS = JSON.stringify({
       [SUMMON_KEY_ID]: summonPublicRaw.toString("base64url"),
     });
+    process.env.STEWARD_X_SUMMON_ATTESTATION_AUDIENCE = "steward-test";
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => client.close());
   });
@@ -336,6 +338,7 @@ describe("Permissioned-X full-chain E2E (authority plane, PGLite)", () => {
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS;
+    delete process.env.STEWARD_X_SUMMON_ATTESTATION_AUDIENCE;
   });
   beforeEach(async () => {
     await wipe();

@@ -8,6 +8,7 @@ const MAX_FUTURE_SKEW_MS = 30_000;
 const EXACT_KEYS = new Set([
   "schemaVersion",
   "keyId",
+  "audience",
   "tenantId",
   "workspaceId",
   "actorAgentId",
@@ -27,6 +28,8 @@ const B64URL_32 = /^[A-Za-z0-9_-]{43}$/;
 export interface XSummonAttestationV1 {
   schemaVersion: typeof X_SUMMON_ATTESTATION_SCHEMA;
   keyId: string;
+  /** Deployment-specific verifier audience (for example, steward-prod-us). */
+  audience: string;
   tenantId: string;
   workspaceId: string;
   actorAgentId: string;
@@ -41,6 +44,7 @@ export interface XSummonAttestationV1 {
 }
 
 export interface XSummonAttestationExpected {
+  audience: string;
   tenantId: string;
   workspaceId: string;
   actorAgentId: string;
@@ -53,6 +57,7 @@ function canonicalClaims(a: XSummonAttestationV1): Record<string, unknown> {
   return {
     schemaVersion: a.schemaVersion,
     keyId: a.keyId,
+    audience: a.audience,
     tenantId: a.tenantId,
     workspaceId: a.workspaceId,
     actorAgentId: a.actorAgentId,
@@ -86,6 +91,8 @@ function parseAttestation(value: unknown): XSummonAttestationV1 | null {
     a.schemaVersion !== X_SUMMON_ATTESTATION_SCHEMA ||
     typeof a.keyId !== "string" ||
     !/^[A-Za-z0-9._-]{1,64}$/.test(a.keyId) ||
+    typeof a.audience !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(a.audience) ||
     typeof a.tenantId !== "string" ||
     typeof a.workspaceId !== "string" ||
     typeof a.actorAgentId !== "string" ||
@@ -122,8 +129,13 @@ function readKey(keysJson: string | undefined, keyId: string): Uint8Array | null
     if (!/^[A-Za-z0-9._-]{1,64}$/.test(id) || typeof value !== "string" || !B64URL_32.test(value))
       return null;
   }
+  if (!Object.hasOwn(parsed, keyId)) return null;
   const encoded = (parsed as Record<string, string>)[keyId];
-  return encoded ? new Uint8Array(Buffer.from(encoded, "base64url")) : null;
+  if (!encoded) return null;
+  const decoded = Buffer.from(encoded, "base64url");
+  // Reject alternate encodings with non-zero unused bits. Otherwise the same
+  // key/signature bytes can have multiple textual digests.
+  return decoded.toString("base64url") === encoded ? new Uint8Array(decoded) : null;
 }
 
 export type XSummonAttestationVerification =
@@ -139,6 +151,7 @@ export function verifyXSummonAttestation(
   const a = parseAttestation(value);
   if (!a) return { ok: false, reason: "malformed" };
   if (
+    a.audience !== expected.audience ||
     a.tenantId !== expected.tenantId ||
     a.workspaceId !== expected.workspaceId ||
     a.actorAgentId !== expected.actorAgentId ||
@@ -152,6 +165,8 @@ export function verifyXSummonAttestation(
   if (
     !Number.isFinite(attestedAt) ||
     !Number.isFinite(expiresAt) ||
+    new Date(attestedAt).toISOString() !== a.attestedAt ||
+    new Date(expiresAt).toISOString() !== a.expiresAt ||
     expiresAt <= attestedAt ||
     expiresAt - attestedAt > MAX_VALIDITY_MS ||
     attestedAt > now.getTime() + MAX_FUTURE_SKEW_MS ||
@@ -167,11 +182,14 @@ export function verifyXSummonAttestation(
       format: "der",
       type: "spki",
     });
+    const signature = Buffer.from(a.signature, "base64url");
+    if (signature.toString("base64url") !== a.signature)
+      return { ok: false, reason: "signature_invalid" };
     const valid = verify(
       null,
       Buffer.from(xSummonAttestationSignatureInput(a), "utf8"),
       publicKey,
-      Buffer.from(a.signature, "base64url"),
+      signature,
     );
     return valid
       ? { ok: true, attestation: a, digest: computeXSummonAttestationDigest(a) }
