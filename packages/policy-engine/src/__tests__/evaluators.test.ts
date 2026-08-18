@@ -617,6 +617,47 @@ describe("Spending Limit Policy", () => {
     expect(result.reason).toContain("daily spending limit");
   });
 
+  it("fails closed without throwing on non-record spending configs", async () => {
+    for (const config of [null, [], "1000"]) {
+      const rule = makeSpendingRule(config as never);
+      const result = await evaluatePolicy(rule, makeContext());
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("non-empty canonical or legacy limit config");
+    }
+  });
+
+  it("fails closed for an empty spending config even on a zero-value request", async () => {
+    const result = await evaluatePolicy(
+      makeSpendingRule({}),
+      makeContext({ request: { ...makeContext().request, value: "0" } }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("non-empty canonical or legacy limit config");
+  });
+
+  it("ignores inherited canonical fields that would erase a legacy daily cap", async () => {
+    const config = Object.assign(
+      Object.create({
+        maxPerTx: "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+      }),
+      {
+        maxAmount: "1000",
+        period: "day",
+      },
+    ) as Record<string, unknown>;
+    const result = await evaluatePolicy(
+      makeSpendingRule(config),
+      makeContext({
+        request: { ...makeContext().request, value: "200" },
+        spentToday: 900n,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily spending limit");
+  });
+
   // ─── Per-tx boundary tests ─────────────────────────────────────────────
 
   it("passes when value is exactly at the per-tx limit (boundary)", async () => {

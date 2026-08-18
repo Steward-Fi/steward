@@ -31,6 +31,10 @@ const MAX_UINT256_DECIMAL =
   "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 const MAX_UINT256_DECIMAL_DIGITS = 78;
 
+function hasOwnDefined(record: Record<string, unknown>, key: string): boolean {
+  return Object.hasOwn(record, key) && record[key] !== undefined;
+}
+
 export interface EvaluatorContext {
   request: SignRequest;
   recentTxCount24h: number;
@@ -336,13 +340,13 @@ function normalizeSpendingLimitConfig(config: Record<string, unknown>): Spending
   };
 
   const hasCanonicalWeiCap =
-    config.maxPerTx !== undefined ||
-    config.maxPerDay !== undefined ||
-    config.maxPerWeek !== undefined;
+    hasOwnDefined(config, "maxPerTx") ||
+    hasOwnDefined(config, "maxPerDay") ||
+    hasOwnDefined(config, "maxPerWeek");
   const hasUsdCap =
-    config.maxPerTxUsd !== undefined ||
-    config.maxPerDayUsd !== undefined ||
-    config.maxPerWeekUsd !== undefined;
+    hasOwnDefined(config, "maxPerTxUsd") ||
+    hasOwnDefined(config, "maxPerDayUsd") ||
+    hasOwnDefined(config, "maxPerWeekUsd");
 
   // Any canonical wei or USD field selects the canonical format. Missing wei
   // caps are unbounded, but every explicitly declared cap must survive
@@ -355,20 +359,30 @@ function normalizeSpendingLimitConfig(config: Record<string, unknown>): Spending
     // Explicit canonical wei fields still take precedence over the legacy
     // representation when both are present.
     const weiCaps =
-      !hasCanonicalWeiCap && config.maxAmount !== undefined
+      !hasCanonicalWeiCap && hasOwnDefined(config, "maxAmount")
         ? simplifiedWeiCaps()
         : {
-            maxPerTx: config.maxPerTx !== undefined ? String(config.maxPerTx) : MAX_UINT256_DECIMAL,
-            maxPerDay:
-              config.maxPerDay !== undefined ? String(config.maxPerDay) : MAX_UINT256_DECIMAL,
-            maxPerWeek:
-              config.maxPerWeek !== undefined ? String(config.maxPerWeek) : MAX_UINT256_DECIMAL,
+            maxPerTx: hasOwnDefined(config, "maxPerTx")
+              ? String(config.maxPerTx)
+              : MAX_UINT256_DECIMAL,
+            maxPerDay: hasOwnDefined(config, "maxPerDay")
+              ? String(config.maxPerDay)
+              : MAX_UINT256_DECIMAL,
+            maxPerWeek: hasOwnDefined(config, "maxPerWeek")
+              ? String(config.maxPerWeek)
+              : MAX_UINT256_DECIMAL,
           };
     return {
       ...weiCaps,
-      maxPerTxUsd: config.maxPerTxUsd as number | undefined,
-      maxPerDayUsd: config.maxPerDayUsd as number | undefined,
-      maxPerWeekUsd: config.maxPerWeekUsd as number | undefined,
+      maxPerTxUsd: hasOwnDefined(config, "maxPerTxUsd")
+        ? (config.maxPerTxUsd as number)
+        : undefined,
+      maxPerDayUsd: hasOwnDefined(config, "maxPerDayUsd")
+        ? (config.maxPerDayUsd as number)
+        : undefined,
+      maxPerWeekUsd: hasOwnDefined(config, "maxPerWeekUsd")
+        ? (config.maxPerWeekUsd as number)
+        : undefined,
     };
   }
 
@@ -404,8 +418,34 @@ async function evaluateSpendingLimit(
   rule: PolicyRule,
   ctx: EvaluatorContext,
 ): Promise<PolicyResult> {
-  const config = normalizeSpendingLimitConfig(rule.config);
   const base = { policyId: rule.id, type: rule.type } as const;
+  const rawConfig: unknown = rule.config;
+  if (typeof rawConfig !== "object" || rawConfig === null || Array.isArray(rawConfig)) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Spending limit requires a non-empty canonical or legacy limit config",
+    };
+  }
+  const configRecord = rawConfig as Record<string, unknown>;
+  if (
+    ![
+      "maxPerTx",
+      "maxPerDay",
+      "maxPerWeek",
+      "maxPerTxUsd",
+      "maxPerDayUsd",
+      "maxPerWeekUsd",
+      "maxAmount",
+    ].some((field) => hasOwnDefined(configRecord, field))
+  ) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Spending limit requires a non-empty canonical or legacy limit config",
+    };
+  }
+  const config = normalizeSpendingLimitConfig(configRecord);
   const txValue = parseUint256Decimal(ctx.request.value);
   if (txValue === null) {
     return {
@@ -496,10 +536,10 @@ async function evaluateSpendingLimit(
     // unenforced (SEC-037). Fall through to the wei evaluation — undeclared
     // wei fields normalize to MAX_UINT256, so only explicit caps bite.
     if (
-      rule.config.maxPerTx === undefined &&
-      rule.config.maxPerDay === undefined &&
-      rule.config.maxPerWeek === undefined &&
-      rule.config.maxAmount === undefined
+      !hasOwnDefined(configRecord, "maxPerTx") &&
+      !hasOwnDefined(configRecord, "maxPerDay") &&
+      !hasOwnDefined(configRecord, "maxPerWeek") &&
+      !hasOwnDefined(configRecord, "maxAmount")
     ) {
       return { ...base, passed: true };
     }
