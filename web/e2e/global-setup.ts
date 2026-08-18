@@ -14,6 +14,7 @@
  */
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
@@ -31,6 +32,27 @@ export const E2E_PORTS = {
 
 const E2E_DATA_DIR = join(tmpdir(), `steward-e2e-${process.pid}`);
 const DEV_SERVER_SPECS = new Set(["intents-reviewer-mfa.spec.ts"]);
+
+type ProcessIdentity = { pid: number; startedAt: string; command: string };
+
+function captureProcessIdentity(child: ChildProcess, name: string): ProcessIdentity {
+  const pid = child.pid;
+  if (!Number.isSafeInteger(pid) || (pid ?? 0) <= 1) {
+    child.kill("SIGTERM");
+    throw new Error(`Could not capture ${name} process id`);
+  }
+  const startedAt = spawnSync("ps", ["-p", String(pid), "-o", "lstart="], {
+    encoding: "utf8",
+  }).stdout.trim();
+  const command = spawnSync("ps", ["-p", String(pid), "-o", "command="], {
+    encoding: "utf8",
+  }).stdout.trim();
+  if (!startedAt || !command) {
+    child.kill("SIGTERM");
+    throw new Error(`Could not capture ${name} process identity`);
+  }
+  return { pid: pid as number, startedAt, command };
+}
 
 function shouldUseNextDevServer(): boolean {
   if (process.env.E2E_NEXT_DEV === "true") return true;
@@ -168,15 +190,33 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   if (existsSync(PID_FILE)) rmSync(PID_FILE, { force: true });
   mkdirSync(E2E_DATA_DIR, { recursive: true });
   const processState: {
-    fakeOAuth?: number;
-    api?: number;
-    web?: number;
+    fakeOAuth?: ProcessIdentity;
+    api?: ProcessIdentity;
+    web?: ProcessIdentity;
     dataDir: string;
   } = { dataDir: E2E_DATA_DIR };
   const persistProcessState = () => {
-    const temporary = `${PID_FILE}.tmp`;
-    writeFileSync(temporary, JSON.stringify(processState), { mode: 0o600 });
-    renameSync(temporary, PID_FILE);
+    const temporary = `${PID_FILE}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      // wx maps to O_CREAT|O_EXCL, so even a pre-planted symlink cannot be
+      // followed or truncate another file before the atomic rename.
+      writeFileSync(temporary, JSON.stringify(processState), { mode: 0o600, flag: "wx" });
+      renameSync(temporary, PID_FILE);
+    } finally {
+      rmSync(temporary, { force: true });
+    }
+  };
+  const trackProcess = (name: "fakeOAuth" | "api" | "web", label: string, child: ChildProcess) => {
+    processState[name] = captureProcessIdentity(child, label);
+    try {
+      persistProcessState();
+    } catch (error) {
+      // This process is not yet represented by durable state. Stop it now;
+      // previously persisted siblings remain available to global teardown.
+      child.kill("SIGTERM");
+      delete processState[name];
+      throw error;
+    }
   };
   const fakeOAuthOrigin = configuredOrigin(
     process.env.E2E_FAKE_OAUTH_URL,
@@ -252,13 +292,11 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   const fakeOAuth = startProcess("bun", ["run", "scripts/fake-oauth-server.ts"], {
     FAKE_OAUTH_PORT: String(ports.fakeOAuth),
   });
-  processState.fakeOAuth = fakeOAuth.pid;
-  persistProcessState();
+  trackProcess("fakeOAuth", "fake OAuth", fakeOAuth);
   await waitForUrl(`${fakeOAuthOrigin}/`, "fake-oauth-server");
 
   const api = startProcess("bun", ["run", "packages/api/src/embedded.ts"], apiEnv);
-  processState.api = api.pid;
-  persistProcessState();
+  trackProcess("api", "API", api);
   await waitForUrl(`${apiOrigin}/auth/providers`, "api");
 
   let web: ChildProcess;
@@ -301,8 +339,7 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       join(REPO_ROOT, "web"),
     );
   }
-  processState.web = web.pid;
-  persistProcessState();
+  trackProcess("web", "web", web);
   if (useNextDevServer) {
     await waitForTcp(webOrigin, "web", 60_000);
     await waitForUrl(`${webOrigin}/login`, "web", 120_000);

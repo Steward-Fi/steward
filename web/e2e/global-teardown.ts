@@ -1,16 +1,40 @@
-import { existsSync, lstatSync, readFileSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  openSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 const PID_FILE = join(__dirname, ".e2e-pids.json");
 const NEXT_BUILD_DIR = join(__dirname, "..", ".next");
 
-function validatedPid(value: unknown, name: string): number | undefined {
+type ProcessIdentity = { pid: number; startedAt: string; command: string };
+
+function validatedProcess(value: unknown, name: string): ProcessIdentity | undefined {
   if (value === undefined) return undefined;
-  if (!Number.isSafeInteger(value) || (value as number) <= 1) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`Invalid ${name} PID in e2e teardown state`);
   }
-  return value as number;
+  const record = value as Record<string, unknown>;
+  if (
+    !Number.isSafeInteger(record.pid) ||
+    (record.pid as number) <= 1 ||
+    typeof record.startedAt !== "string" ||
+    record.startedAt.length === 0 ||
+    record.startedAt.length > 128 ||
+    typeof record.command !== "string" ||
+    record.command.length === 0 ||
+    record.command.length > 4096
+  ) {
+    throw new Error(`Invalid ${name} PID in e2e teardown state`);
+  }
+  return record as unknown as ProcessIdentity;
 }
 
 function validatedDataDir(value: unknown): string | undefined {
@@ -23,8 +47,19 @@ function validatedDataDir(value: unknown): string | undefined {
   return resolved;
 }
 
-function killPid(pid: number | undefined): void {
-  if (pid === undefined) return;
+function killProcess(processIdentity: ProcessIdentity | undefined, name: string): void {
+  if (processIdentity === undefined) return;
+  const { pid, startedAt, command } = processIdentity;
+  const currentStartedAt = spawnSync("ps", ["-p", String(pid), "-o", "lstart="], {
+    encoding: "utf8",
+  }).stdout.trim();
+  if (!currentStartedAt) return;
+  const currentCommand = spawnSync("ps", ["-p", String(pid), "-o", "command="], {
+    encoding: "utf8",
+  }).stdout.trim();
+  if (currentStartedAt !== startedAt || currentCommand !== command) {
+    throw new Error(`Refusing to signal reused ${name} PID`);
+  }
   try {
     process.kill(pid, "SIGTERM");
   } catch {
@@ -53,24 +88,50 @@ export async function runGlobalTeardown(pidFile: string, nextBuildDir: string): 
     // Setup persists state after each process spawn, but a failure before the
     // first spawn can still leave no file after producing a flag-built .next.
     // Process cleanup must therefore never gate artifact removal below.
-    if (existsSync(pidFile)) {
+    let stateFd: number | undefined;
+    try {
+      stateFd = openSync(pidFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        rmSync(pidFile, { force: true });
+        throw new Error("Invalid e2e teardown state file", { cause: error });
+      }
+    }
+    if (stateFd !== undefined) {
       try {
-        const stat = lstatSync(pidFile);
+        const stat = fstatSync(stateFd);
         if (!stat.isFile() || stat.size > 16 * 1024) {
           throw new Error("Invalid e2e teardown state file");
         }
-        const raw = JSON.parse(readFileSync(pidFile, "utf8")) as Record<string, unknown>;
-        const web = validatedPid(raw.web, "web");
-        const api = validatedPid(raw.api, "api");
-        const fakeOAuth = validatedPid(raw.fakeOAuth, "fakeOAuth");
+        const raw = JSON.parse(readFileSync(stateFd, "utf8")) as Record<string, unknown>;
+        const web = validatedProcess(raw.web, "web");
+        const api = validatedProcess(raw.api, "api");
+        const fakeOAuth = validatedProcess(raw.fakeOAuth, "fakeOAuth");
         const dataDir = validatedDataDir(raw.dataDir);
-        killPid(web);
-        killPid(api);
-        killPid(fakeOAuth);
-        if (dataDir && existsSync(dataDir)) {
-          await removeDirWithRetry(dataDir);
+        let cleanupError: unknown;
+        for (const [identity, name] of [
+          [web, "web"],
+          [api, "api"],
+          [fakeOAuth, "fakeOAuth"],
+        ] as const) {
+          try {
+            killProcess(identity, name);
+          } catch (error) {
+            cleanupError ??= error;
+          }
+        }
+        try {
+          if (dataDir && existsSync(dataDir)) {
+            await removeDirWithRetry(dataDir);
+          }
+        } catch (error) {
+          cleanupError ??= error;
+        }
+        if (cleanupError) {
+          throw cleanupError;
         }
       } finally {
+        closeSync(stateFd);
         rmSync(pidFile, { force: true });
       }
     }

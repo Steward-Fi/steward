@@ -29,6 +29,12 @@ function makeNextDir(): string {
 }
 
 describe("e2e global teardown (SEC-076)", () => {
+  const goneProcess = (pid: number) => ({
+    pid,
+    startedAt: "Mon Jan  1 00:00:00 2001",
+    command: "steward-e2e-process",
+  });
+
   test("removes .next when setup failed before its first state write", async () => {
     const nextDir = makeNextDir();
 
@@ -41,8 +47,11 @@ describe("e2e global teardown (SEC-076)", () => {
     const nextDir = makeNextDir();
     const dataDir = mkdtempSync(join(tmpdir(), "steward-e2e-"));
     const pidFile = join(workDir, ".e2e-pids.json");
-    // Bogus pids: killPid swallows ESRCH for already-gone processes.
-    writeFileSync(pidFile, JSON.stringify({ web: 999999, api: 999998, dataDir }));
+    // Bogus pids represent processes that are already gone.
+    writeFileSync(
+      pidFile,
+      JSON.stringify({ web: goneProcess(999999), api: goneProcess(999998), dataDir }),
+    );
 
     await runGlobalTeardown(pidFile, nextDir);
 
@@ -65,8 +74,17 @@ describe("e2e global teardown (SEC-076)", () => {
   test("rejects dangerous process ids without signaling them", async () => {
     const nextDir = makeNextDir();
     const pidFile = join(workDir, ".e2e-pids.json");
-    writeFileSync(pidFile, JSON.stringify({ web: -1 }));
+    writeFileSync(pidFile, JSON.stringify({ web: { ...goneProcess(999999), pid: -1 } }));
     await expect(runGlobalTeardown(pidFile, nextDir)).rejects.toThrow(/Invalid web PID/);
+    expect(existsSync(nextDir)).toBe(false);
+    expect(existsSync(pidFile)).toBe(false);
+  });
+
+  test("refuses a reused PID whose process identity no longer matches", async () => {
+    const nextDir = makeNextDir();
+    const pidFile = join(workDir, ".e2e-pids.json");
+    writeFileSync(pidFile, JSON.stringify({ web: goneProcess(process.pid) }));
+    await expect(runGlobalTeardown(pidFile, nextDir)).rejects.toThrow(/reused web PID/);
     expect(existsSync(nextDir)).toBe(false);
     expect(existsSync(pidFile)).toBe(false);
   });
