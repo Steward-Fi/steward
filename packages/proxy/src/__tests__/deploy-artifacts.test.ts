@@ -159,6 +159,92 @@ describe("SEC-081 enterprise backup service keeps the DSN out of container env a
   test("dumps are written owner-only (umask 077)", () => {
     expect(backup).toContain("umask 077");
   });
+
+  test("pg_dump argv carries no password — DSN userinfo is stripped, PGPASSWORD used (SEC-050)", () => {
+    // Re-audit: pg_dump "$dsn" with the password inside the DSN re-exposed it
+    // in the HOST process list (/proc/<pid>/cmdline). The command must strip
+    // user:password@ from the DSN and authenticate via PGPASSWORD instead
+    // (same pattern as scripts/migrate.sh), BEFORE pg_dump is invoked.
+    expect(backup).toContain("PGPASSWORD");
+    expect(backup).toContain("pg_pw=");
+    expect(backup).toContain("unset PGPASSWORD");
+    expect(backup).not.toMatch(/pg_dump\s+"\$\$\{?DATABASE_URL/);
+    const stripAt = backup.indexOf("PGPASSWORD=");
+    const dumpAt = backup.indexOf('pg_dump "$$dsn"');
+    expect(stripAt).toBeGreaterThanOrEqual(0);
+    expect(dumpAt).toBeGreaterThanOrEqual(0);
+    expect(stripAt).toBeLessThan(dumpAt);
+    expect(backup).toContain("unset DATABASE_URL POSTGRES_PASSWORD");
+    expect(backup.indexOf("unset DATABASE_URL POSTGRES_PASSWORD")).toBeLessThan(dumpAt);
+    expect(backup).toContain("Invalid percent escape in DATABASE_URL password");
+    expect(backup).toContain("NUL is not allowed in DATABASE_URL password");
+  });
+
+  test("DSN stripping is confined to authority userinfo", () => {
+    const parserStart = backup.indexOf('        dsn="');
+    const parserEnd = backup.indexOf('        pg_dump "$$dsn"');
+    expect(parserStart).toBeGreaterThanOrEqual(0);
+    expect(parserEnd).toBeGreaterThan(parserStart);
+    const parser = backup
+      .slice(parserStart, parserEnd)
+      .split("\n")
+      .map((line) => line.replace(/^ {8}/, ""))
+      .join("\n")
+      .replaceAll("$$", "$");
+    const runParser = (databaseUrl: string) =>
+      Bun.spawnSync(["sh", "-c", `${parser}\nprintf '%s\\n%s' "$dsn" "\${PGPASSWORD-}"`], {
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          DATABASE_URL: databaseUrl,
+          POSTGRES_PASSWORD: "fallback",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+    const parse = (databaseUrl: string): [string, string] => {
+      const result = runParser(databaseUrl);
+      expect(result.exitCode).toBe(0);
+      return result.stdout.toString().split("\n") as [string, string];
+    };
+
+    expect(
+      parse("postgresql://steward:p%40ss%3Aword@postgres:5432/steward?sslmode=require"),
+    ).toEqual(["postgresql://steward@postgres:5432/steward?sslmode=require", "p@ss:word"]);
+
+    expect(
+      parse("postgresql://steward@postgres:5432/steward?user=alice&password=query%40secret"),
+    ).toEqual(["postgresql://steward@postgres:5432/steward?user=alice", "query@secret"]);
+
+    // libpq keyword names are case-insensitive and may be percent-encoded;
+    // neither spelling may leave the password on pg_dump's argv.
+    expect(
+      parse("postgresql://steward@postgres:5432/steward?%70ASSWORD=encoded%2Fsecret&user=alice"),
+    ).toEqual(["postgresql://steward@postgres:5432/steward?user=alice", "encoded/secret"]);
+
+    expect(
+      parse(
+        "postgresql://steward@postgres:5432/steward?password=first&password=&PASSWORD=last%2Bsecret",
+      ),
+    ).toEqual(["postgresql://steward@postgres:5432/steward", "last+secret"]);
+    // An @ in a query is not userinfo, and an IPv6 host colon is not a
+    // username/password separator. Both DSNs must pass through byte-for-byte.
+    for (const passwordless of [
+      "postgresql://postgres:5432/steward?application_name=a@b",
+      "postgresql://[::1]:5432/steward?x=a@b",
+    ]) {
+      expect(parse(passwordless)).toEqual([passwordless, ""]);
+    }
+
+    for (const malformed of [
+      "postgresql://steward:p%ZZword@postgres:5432/steward",
+      "postgresql://steward:p%00word@postgres:5432/steward",
+      "postgresql://steward@postgres:5432/steward?password=bad%ZZsecret",
+    ]) {
+      const result = runParser(malformed);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr.toString()).not.toContain(malformed);
+    }
+  });
 });
 
 describe("SEC-158 shipped nginx rate limiting and WebSocket map", () => {
@@ -299,7 +385,7 @@ describe("SEC-021 deploy/docker-compose.yml redis persists enforcement counters"
   });
 });
 
-describe("SEC-020 deploy/migrate-agent-keys.sh keeps the platform key off every argv", () => {
+describe("SEC-020 deploy scripts keep the platform key off every argv", () => {
   const script = read("migrate-agent-keys.sh");
 
   test("platform key is read on the remote side, never interpolated into ssh/curl argv", () => {
@@ -315,6 +401,7 @@ describe("SEC-020 deploy/migrate-agent-keys.sh keeps the platform key off every 
     expect(script).not.toContain("X-Steward-Platform-Key: \\${PK}");
     expect(script).toContain("AUTH_HEADER_SNIPPET");
     expect(script).toContain('-H \\"@\\${AUTH_FILE}\\"');
+    expect(script).toContain("*[!A-Za-z0-9._~-]*");
   });
 
   test("legacy positional key input is rejected without echoing the credential", () => {
@@ -344,13 +431,20 @@ describe("SEC-020 deploy/migrate-agent-keys.sh keeps the platform key off every 
     const readme = read("README.md");
     expect(provision).not.toContain("X-Steward-Platform-Key: \\${PK}");
     expect(provision).toContain('-H \\"@\\${AUTH_FILE}\\"');
+    expect(provision).toContain("*[!A-Za-z0-9._~-]*");
+    expect(provision).toContain('SSH_CMD=("${SSH_BASE[@]}" "root@${NODE_IP}")');
+    expect(provision).toContain('"${SSH_CMD[@]}"');
+    expect(provision).not.toMatch(/\$\{SSH_CMD\}\s+"/);
+    expect(provision).toContain("must be a single-line value");
     expect(doc).not.toContain("X-Steward-Platform-Key: \\${PK}");
     expect(doc).toContain('-H \\"@\\${AUTH_FILE}\\"');
+    expect(doc).toContain("*[!A-Za-z0-9._~-]*");
     expect(doc).not.toContain('-H "X-Steward-Platform-Key: $PK"');
     expect(doc).not.toContain("X-Steward-Platform-Key: <key>");
     expect(doc).not.toContain('-H "X-Steward-Key: $API_KEY"');
     expect(doc).toContain('> "$WEBHOOK_RESPONSE"');
     expect(readme).not.toContain('-H "X-Steward-Platform-Key: $PLATFORM_KEY"');
+    expect(readme).toContain("*[!A-Za-z0-9._~-]*");
   });
 
   test("agent tokens are written to a mode-0600 file, not echoed to stdout", () => {

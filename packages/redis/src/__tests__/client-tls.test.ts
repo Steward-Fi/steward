@@ -6,7 +6,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { assertRedisUrlTls } from "../client";
+import { assertRedisUrlTls, assertUpstashRestUrlTls } from "../client";
 
 const originalNodeEnv = process.env.NODE_ENV;
 const originalOverride = process.env.STEWARD_ALLOW_INSECURE_REDIS;
@@ -62,5 +62,70 @@ describe("redis transport security (SEC-032)", () => {
     process.env.NODE_ENV = "development";
     delete process.env.STEWARD_ALLOW_INSECURE_REDIS;
     expect(() => assertRedisUrlTls("redis://redis.example.internal:6379")).not.toThrow();
+  });
+});
+
+describe("upstash REST transport security (SEC-032)", () => {
+  test("rejects cleartext http:// to a remote host in production", () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.STEWARD_ALLOW_INSECURE_REDIS;
+    expect(() => assertUpstashRestUrlTls("http://us1-example.upstash.io")).toThrow("https://");
+  });
+
+  test("accepts https:// in production", () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.STEWARD_ALLOW_INSECURE_REDIS;
+    expect(() => assertUpstashRestUrlTls("https://us1-example.upstash.io")).not.toThrow();
+  });
+
+  test("exempts loopback http:// even in production", () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.STEWARD_ALLOW_INSECURE_REDIS;
+    expect(() => assertUpstashRestUrlTls("http://localhost:8079")).not.toThrow();
+    expect(() => assertUpstashRestUrlTls("http://127.0.0.1:8079")).not.toThrow();
+    expect(() => assertUpstashRestUrlTls("http://[::1]:8079")).not.toThrow();
+  });
+
+  test("honors the explicit insecure override with a warning", () => {
+    process.env.NODE_ENV = "production";
+    process.env.STEWARD_ALLOW_INSECURE_REDIS = "true";
+    expect(() => assertUpstashRestUrlTls("http://us1-example.upstash.io")).not.toThrow();
+  });
+
+  test("fails closed when a production URL cannot be parsed", () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.STEWARD_ALLOW_INSECURE_REDIS;
+    expect(() => assertUpstashRestUrlTls("not a url")).toThrow("valid URL");
+  });
+
+  test("invalid URLs remain invalid even with the insecure override", () => {
+    process.env.NODE_ENV = "production";
+    process.env.STEWARD_ALLOW_INSECURE_REDIS = "true";
+    expect(() => assertUpstashRestUrlTls("not a url")).toThrow("valid URL");
+  });
+
+  test("rejects non-HTTP schemes even with the insecure override", () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.STEWARD_ALLOW_INSECURE_REDIS;
+    expect(() => assertUpstashRestUrlTls("redis://us1-example.upstash.io")).toThrow("scheme");
+    process.env.STEWARD_ALLOW_INSECURE_REDIS = "true";
+    expect(() => assertUpstashRestUrlTls("ftp://us1-example.upstash.io")).toThrow("scheme");
+  });
+
+  test("does not restrict non-production environments", () => {
+    process.env.NODE_ENV = "development";
+    delete process.env.STEWARD_ALLOW_INSECURE_REDIS;
+    expect(() => assertUpstashRestUrlTls("http://us1-example.upstash.io")).not.toThrow();
+    expect(() => assertUpstashRestUrlTls("ftp://us1-example.upstash.io")).toThrow("scheme");
+  });
+
+  test("uses the caller-provided environment instead of ambient process state", () => {
+    process.env.NODE_ENV = "development";
+    expect(() =>
+      assertUpstashRestUrlTls("http://us1-example.upstash.io", { NODE_ENV: "production" }),
+    ).toThrow("https://");
+    expect(() =>
+      assertRedisUrlTls("redis://redis.example.internal:6379", { NODE_ENV: "production" }),
+    ).toThrow("rediss://");
   });
 });

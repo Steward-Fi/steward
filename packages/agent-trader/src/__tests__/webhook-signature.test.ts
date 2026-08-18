@@ -445,6 +445,45 @@ describe("agent trader webhook receiver signatures", () => {
     ).toBeUndefined();
   });
 
+  it("rejects cleartext redis:// replay storage in production (SEC-032)", () => {
+    // The default factory builds a raw ioredis client; it must route through
+    // the shared assertRedisUrlTls so a remote cleartext REDIS_URL fails
+    // closed in production. The assertion throws before any socket opens.
+    const previousEnv = process.env.NODE_ENV;
+    const previousOverride = process.env.STEWARD_ALLOW_INSECURE_REDIS;
+    process.env.NODE_ENV = "production";
+    delete process.env.STEWARD_ALLOW_INSECURE_REDIS;
+    try {
+      expect(() =>
+        createConfiguredWebhookDeliveryStore({
+          NODE_ENV: "production",
+          REDIS_URL: "redis://redis.example.internal:6379",
+        }),
+      ).toThrow("rediss://");
+    } finally {
+      if (previousEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousEnv;
+      if (previousOverride === undefined) delete process.env.STEWARD_ALLOW_INSECURE_REDIS;
+      else process.env.STEWARD_ALLOW_INSECURE_REDIS = previousOverride;
+    }
+  });
+
+  it("uses the supplied environment for replay-store TLS policy", () => {
+    const previousEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "development";
+    try {
+      expect(() =>
+        createConfiguredWebhookDeliveryStore({
+          NODE_ENV: "production",
+          REDIS_URL: "redis://redis.example.internal:6379",
+        }),
+      ).toThrow("rediss://");
+    } finally {
+      if (previousEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousEnv;
+    }
+  });
+
   it("times out and aborts a stalled Upstash replay claim with a sanitized error", async () => {
     let aborted = false;
     const stalledFetch = ((_input: unknown, init?: RequestInit) =>

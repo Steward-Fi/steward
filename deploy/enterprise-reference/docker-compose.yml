@@ -194,6 +194,11 @@ services:
     # SEC-081:
     #  - The DSN is sourced from the mounted env FILE, not container env, so
     #    the DB password no longer appears in `docker inspect`.
+    #  - SEC-050: pg_dump's argv is visible in the HOST process list
+    #    (/proc/<pid>/cmdline), so the password must not ride inside the DSN
+    #    either. The command below strips both userinfo and libpq query-string
+    #    passwords from the DSN and authenticates via PGPASSWORD (same pattern
+    #    as scripts/migrate.sh).
     #  - umask 077: dumps contain tenant PII, audit events, and encrypted key
     #    blobs in PLAINTEXT — they are written mode 0600. Keep ./backups
     #    mode 0700 on the host (or on encrypted storage), restrict it to the
@@ -202,7 +207,160 @@ services:
       - |
         set -a; . /run/steward/env; set +a
         umask 077
+        # Never inherit a separately supplied password into pg_dump. The only
+        # credential allowed below is one decoded from DATABASE_URL itself.
+        unset PGPASSWORD
         dsn="$${DATABASE_URL:-postgresql://steward:$${POSTGRES_PASSWORD:?}@postgres:5432/steward}"
+        # Strip user:password@ and ?password= from the DSN; pass the password
+        # via PGPASSWORD so it never appears on pg_dump's argv (SEC-050). A
+        # passwordless DSN is passed through unchanged. Query keywords are
+        # case-insensitive in libpq and may percent-encode their names, so
+        # decode keys before matching and fail closed on malformed escapes.
+        case "$$dsn" in
+          postgres://*|postgresql://*)
+            pg_scheme="$${dsn%%://*}"
+            pg_rest="$${dsn#*://}"
+            # Isolate the authority before looking for userinfo. Matching a
+            # colon and @ across the whole DSN mistakes host ports plus an @
+            # in a path/query value for credentials and corrupts the target.
+            pg_authority="$$(printf '%s' "$$pg_rest" | sed 's|[/?#].*||')"
+            pg_suffix="$${pg_rest#"$$pg_authority"}"
+            case "$$pg_authority" in
+              *:*@*)
+                pg_userinfo="$${pg_authority%%@*}"
+                pg_host="$${pg_authority#*@}"
+                pg_user="$${pg_userinfo%%:*}"
+                pg_pw="$${pg_userinfo#*:}"
+                dsn="$${pg_scheme}://$${pg_user}@$${pg_host}$${pg_suffix}"
+                # Percent-decode the password component (PGPASSWORD is literal).
+                # Reject malformed escapes and NUL, which cannot be represented
+                # in an environment and must never be silently truncated.
+                case "$$(printf '%s' "$$pg_pw" | sed 's/%[0-9A-Fa-f][0-9A-Fa-f]//g')" in
+                  *%*) echo 'Invalid percent escape in DATABASE_URL password' >&2; exit 1 ;;
+                esac
+                case "$$pg_pw" in *%00*) echo 'NUL is not allowed in DATABASE_URL password' >&2; exit 1 ;; esac
+                pg_pw="$$(printf '%s' "$$pg_pw" | sed 's/%/\\x/g')"
+                PGPASSWORD="$$(printf '%b' "$$pg_pw")"
+                export PGPASSWORD
+                ;;
+            esac
+        esac
+        pg_url_decode() {
+          pg_encoded="$$1"
+          if printf '%s' "$$pg_encoded" | grep -q '[[:cntrl:]]'; then
+            return 1
+          fi
+          # A malformed escape can make our redacted URI differ from libpq's
+          # interpretation. Refuse it instead of passing an ambiguous DSN to
+          # pg_dump.
+          case "$$(printf '%s' "$$pg_encoded" | sed 's/%[0-9A-Fa-f][0-9A-Fa-f]//g')" in
+            *%*) return 1 ;;
+          esac
+          pg_decoded=
+          while [ -n "$$pg_encoded" ]; do
+            pg_char="$${pg_encoded%"$${pg_encoded#?}"}"
+            pg_encoded="$${pg_encoded#?}"
+            if [ "$$pg_char" = '%' ]; then
+              pg_hex="$${pg_encoded%"$${pg_encoded#??}"}"
+              pg_encoded="$${pg_encoded#??}"
+              case "$$pg_hex" in
+                00|0a|0A|0d|0D) return 1 ;; # NUL/CR/LF cannot be env data
+                [0-9A-Fa-f][0-9A-Fa-f]) ;;
+                *) return 1 ;;
+              esac
+              pg_oct="$$(printf '%03o' "$$((0x$$pg_hex))")"
+              pg_char="$$(printf "\\$$pg_oct")"
+            fi
+            pg_decoded="$$pg_decoded$$pg_char"
+          done
+          printf '%s' "$$pg_decoded"
+        }
+        pg_query_password=
+        pg_query_password_found=
+        # Query parameters are part of the DSN passed to pg_dump, so remove
+        # every password keyword before the invocation. Retain all unrelated
+        # query bytes byte-for-byte (including user= and ordering).
+        case "$$dsn" in
+          *\?*)
+            pg_query_base="$${dsn%%\?*}"
+            pg_query="$${dsn#*\?}"
+            pg_retained_query=
+            pg_retained_query_started=
+            pg_query_done=
+            pg_query_candidate=
+            while :; do
+              case "$$pg_query" in
+                *\&*)
+                  pg_part="$${pg_query%%\&*}"
+                  pg_query="$${pg_query#*\&}"
+                  ;;
+                *)
+                  pg_part="$$pg_query"
+                  pg_query=
+                  pg_query_done=1
+                  ;;
+              esac
+              case "$$pg_part" in
+                *=*)
+                  pg_raw_key="$${pg_part%%=*}"
+                  pg_raw_value="$${pg_part#*=}"
+                  ;;
+                *)
+                  pg_raw_key="$$pg_part"
+                  pg_raw_value=
+                  ;;
+              esac
+              if ! pg_query_key="$$(pg_url_decode "$$pg_raw_key")"; then
+                echo 'Invalid percent escape in DATABASE_URL query' >&2
+                exit 1
+              fi
+              # Validate values even when they are not passwords; otherwise a
+              # malformed escape could be interpreted differently by libpq.
+              if ! pg_url_decode "$$pg_raw_value" >/dev/null; then
+                echo 'Invalid percent escape in DATABASE_URL query' >&2
+                exit 1
+              fi
+              case "$$pg_query_key" in
+                [Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd])
+                  if [ -n "$$pg_raw_value" ]; then
+                    if ! pg_query_candidate="$$(pg_url_decode "$$pg_raw_value")"; then
+                      echo 'Invalid percent escape in DATABASE_URL password' >&2
+                      exit 1
+                    fi
+                    if [ -n "$$pg_query_candidate" ]; then
+                      pg_query_password="$$pg_query_candidate"
+                      pg_query_password_found=1
+                    fi
+                  fi
+                  ;;
+                *)
+                  if [ -n "$$pg_retained_query_started" ]; then
+                    pg_retained_query="$$pg_retained_query&$$pg_part"
+                  else
+                    pg_retained_query="$$pg_part"
+                    pg_retained_query_started=1
+                  fi
+                  ;;
+              esac
+              [ -n "$$pg_query_done" ] && break
+            done
+            dsn="$$pg_query_base"
+            if [ -n "$$pg_retained_query_started" ]; then
+              dsn="$$dsn?$$pg_retained_query"
+            fi
+            if [ -n "$$pg_query_password_found" ]; then
+              PGPASSWORD="$$pg_query_password"
+              export PGPASSWORD
+            fi
+            ;;
+        esac
+        # The env file was sourced with `set -a`; remove original
+        # password-bearing variables before execing pg_dump so its process
+        # environment does not undo the argv hardening above.
+        unset DATABASE_URL POSTGRES_PASSWORD pg_pw pg_rest pg_userinfo pg_authority \
+          pg_query pg_query_candidate pg_query_password pg_raw_value pg_encoded \
+          pg_decoded pg_char pg_hex pg_oct pg_query_key pg_raw_key pg_part \
+          pg_query_base pg_retained_query pg_retained_query_started pg_query_done
         pg_dump "$$dsn" > "/backups/steward-$$(date -u +%Y%m%dT%H%M%SZ).sql"
     volumes:
       - ./backups:/backups

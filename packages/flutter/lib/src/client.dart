@@ -39,6 +39,15 @@ class StewardClientConfig {
   /// required by default so credentials never travel cleartext off-loopback
   /// (SEC-200).
   final bool allowInsecureBaseUrl;
+
+  /// Optional custom HTTP client. WARNING: requests are sent with
+  /// `followRedirects = false` because package:http forwards all headers —
+  /// including X-Steward-* credentials and signatures — to the redirect
+  /// target (SEC-126). A custom client whose `send` ignores `followRedirects`
+  /// (e.g. BrowserClient, or a wrapper that follows redirects itself)
+  /// silently bypasses that protection and can leak credentials to a redirect
+  /// target; such a client must strip the Authorization / X-Steward-* headers
+  /// on any cross-host or HTTPS-downgrade redirect.
   final http.Client? httpClient;
   final StewardIdFactory? idFactory;
 }

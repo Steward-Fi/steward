@@ -10,6 +10,7 @@ export {
 } from "./aggregation-tracker.js";
 export {
   assertRedisUrlTls,
+  assertUpstashRestUrlTls,
   disconnectRedis,
   getRedis,
   getRedisDriver,

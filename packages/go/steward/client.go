@@ -33,9 +33,17 @@ type Config struct {
 	// construction). HTTPS is required by default so credentials never travel
 	// cleartext off-loopback (SEC-200).
 	AllowInsecureBaseURL bool
-	HTTPClient           *http.Client
-	Now                  func() time.Time
-	NewID                func() string
+	// HTTPClient, when set, REPLACES the default client — including its
+	// CheckRedirect hook, which strips Authorization / X-Steward-* credential
+	// and signing headers on cross-host or HTTPS-downgrade redirects
+	// (SEC-126). A custom client whose CheckRedirect does not re-apply that
+	// stripping silently re-enables credential exfiltration via open
+	// redirects / hostile proxies: net/http copies X-Steward-* headers to
+	// any redirect target. Either disable redirects or strip those headers
+	// on any host change (see stripStewardCredentialsOnCrossHostRedirect).
+	HTTPClient *http.Client
+	Now        func() time.Time
+	NewID      func() string
 }
 
 type Client struct {

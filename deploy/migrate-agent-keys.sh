@@ -79,8 +79,11 @@ fi
 # curl expands a literal `-H "...${PK}"` into its process argv, even when PK
 # was populated by the remote shell. Put the header in a mode-0600 temporary
 # file and pass only that filename to curl so the key is absent from both the
-# local ssh argv and the remote curl argv.
-AUTH_HEADER_SNIPPET="AUTH_FILE=\$(mktemp); chmod 600 \"\${AUTH_FILE}\"; trap 'rm -f \"\${AUTH_FILE}\"' EXIT; printf 'X-Steward-Platform-Key: %s\\n' \"\${PK}\" > \"\${AUTH_FILE}\""
+# local ssh argv and the remote curl argv. Before writing it, reject anything
+# outside the documented URL-safe token alphabet so CR/LF cannot inject a
+# second header and quotes/backslashes cannot become config syntax if this is
+# ever migrated back to `curl -K`.
+AUTH_HEADER_SNIPPET="case \"\${PK}\" in ''|*[!A-Za-z0-9._~-]*) exit 1;; esac; [ \"\${#PK}\" -le 512 ] || exit 1; AUTH_FILE=\$(mktemp); chmod 600 \"\${AUTH_FILE}\"; trap 'rm -f \"\${AUTH_FILE}\"' EXIT; printf 'X-Steward-Platform-Key: %s\\n' \"\${PK}\" > \"\${AUTH_FILE}\""
 
 echo "══════════════════════════════════════════════════════════════"
 echo "  Steward Agent Key Migration"

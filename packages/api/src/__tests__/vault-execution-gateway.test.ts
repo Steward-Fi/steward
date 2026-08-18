@@ -36,8 +36,10 @@ import { getConfiguredVault } from "../services/vault-factory";
 const TENANT_ID = `gateway-tenant-${Date.now()}`;
 const AGENT_ID = `gateway-agent-${Date.now()}`;
 const USER_ID = "00000000-0000-4000-8000-000000000123";
+const SOLANA_RECIPIENT = "11111111111111111111111111111111";
 const ORIGINAL_REDIS_URL = process.env.REDIS_URL;
 const ORIGINAL_REDIS_REQUIRED = process.env.REDIS_REQUIRED;
+const ORIGINAL_EXECUTION_AUTH_SECRET = process.env.STEWARD_EXECUTION_AUTH_SECRET;
 setDefaultTimeout(30_000);
 
 async function makeApp() {
@@ -62,6 +64,7 @@ describe("vault EVM execution gateway", () => {
     process.env.STEWARD_MASTER_PASSWORD = "gateway-test-master-password";
     process.env.STEWARD_JWT_SECRET = "gateway-test-jwt-secret-with-enough-entropy-0123456789";
     process.env.STEWARD_AUDIT_HMAC_KEY = "b".repeat(64);
+    process.env.STEWARD_EXECUTION_AUTH_SECRET = `gateway-test:${"e".repeat(48)}`;
     process.env.STEWARD_ALLOW_UNSAFE_CONTRACT_CALL_SIGNING = "true";
     delete process.env.REDIS_URL;
     delete process.env.REDIS_REQUIRED;
@@ -100,7 +103,7 @@ describe("vault EVM execution gateway", () => {
         enabled: true,
         config: {
           mode: "whitelist",
-          addresses: ["0x1111111111111111111111111111111111111111"],
+          addresses: ["0x1111111111111111111111111111111111111111", SOLANA_RECIPIENT],
         },
       });
   });
@@ -111,6 +114,11 @@ describe("vault EVM execution gateway", () => {
     else process.env.REDIS_URL = ORIGINAL_REDIS_URL;
     if (ORIGINAL_REDIS_REQUIRED === undefined) delete process.env.REDIS_REQUIRED;
     else process.env.REDIS_REQUIRED = ORIGINAL_REDIS_REQUIRED;
+    if (ORIGINAL_EXECUTION_AUTH_SECRET === undefined) {
+      delete process.env.STEWARD_EXECUTION_AUTH_SECRET;
+    } else {
+      process.env.STEWARD_EXECUTION_AUTH_SECRET = ORIGINAL_EXECUTION_AUTH_SECRET;
+    }
     await closeDb();
   });
 
@@ -164,7 +172,7 @@ describe("vault EVM execution gateway", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          to: "0x1111111111111111111111111111111111111111",
+          to: SOLANA_RECIPIENT,
           value: "1",
           data: "0x12345678",
           chainId: 101,

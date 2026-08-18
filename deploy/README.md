@@ -37,6 +37,7 @@ curl http://localhost:8080/health   # {"ok":true,"service":"steward-proxy",...}
 # Read your STEWARD_PLATFORM_KEYS value without putting it in shell history or
 # curl argv. curl reads the header from an owner-only temporary file.
 read -rsp "Platform key: " PLATFORM_KEY; printf '\n'
+case "$PLATFORM_KEY" in ''|*[!A-Za-z0-9._~-]*) echo "Invalid platform key" >&2; exit 1;; esac
 AUTH_FILE=$(mktemp); chmod 600 "$AUTH_FILE"
 trap 'rm -f "$AUTH_FILE"' EXIT
 printf 'X-Steward-Platform-Key: %s\n' "$PLATFORM_KEY" > "$AUTH_FILE"

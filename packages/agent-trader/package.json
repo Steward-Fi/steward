@@ -9,6 +9,7 @@
     "build": "tsc --noEmit"
   },
   "dependencies": {
+    "@stwd/redis": "workspace:*",
     "@stwd/sdk": "workspace:*",
     "@stwd/shared": "workspace:*",
     "ioredis": "^5.10.1",

@@ -27,6 +27,13 @@ namespace Steward
         /// required by default so credentials never travel cleartext off-loopback (SEC-200).</summary>
         public bool AllowInsecureBaseUrl { get; set; }
         public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(30);
+        /// <summary>Optional custom transport. WARNING: the default transport disables
+        /// auto-redirect (<c>AllowAutoRedirect = false</c>) because HttpClient would copy the
+        /// X-Steward-* credential/signing headers to the redirect target (it strips only
+        /// Authorization), so an open redirect or hostile proxy could exfiltrate them
+        /// (SEC-126). A custom Transport takes over redirect handling entirely: it must not
+        /// follow a redirect to a different host (or an HTTPS→HTTP downgrade) without first
+        /// stripping the Authorization / X-Steward-* headers.</summary>
         public StewardTransport? Transport { get; set; }
         public Func<DateTimeOffset> Now { get; set; } = () => DateTimeOffset.UtcNow;
         public Func<string> NewId { get; set; } = () => Guid.NewGuid().ToString();

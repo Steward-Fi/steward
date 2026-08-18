@@ -50,13 +50,16 @@ Steward runs as two **systemd services** on each Milady node, built from source 
 ### Step 1: Sync source code
 
 ```bash
-# From your workstation (where you have the steward-fi repo)
+# From your workstation (where you have the steward repo)
 NODE_IP="<node-ip>"
+# Path to your local clone of THIS repo — keep real checkout paths out of
+# committed docs.
+STEWARD_SRC="/path/to/your/local/steward-checkout"
 rsync -az --delete \
   --exclude='.git' --exclude='node_modules' --exclude='.next' \
   --exclude='web' --exclude='.turbo' \
   -e "ssh -o StrictHostKeyChecking=accept-new" \
-  /home/shad0w/projects/steward-fi/ root@${NODE_IP}:/opt/steward/
+  "${STEWARD_SRC}/" root@${NODE_IP}:/opt/steward/
 ```
 
 ### Step 2: Install dependencies
@@ -177,10 +180,13 @@ ssh root@${NODE_IP} "curl -sf http://172.18.0.1:8080/health"
 
 The platform key must never appear on a command line (local ps/history,
 remote process list). Read it on the node from the mode-0600 env file and
-call the API over localhost via the SSH channel (SEC-022):
+call the API over localhost via the SSH channel; the credential header reaches
+curl through a mode-0600 temporary header file, never as an argv-expansible
+`-H "X-Steward-Platform-Key: ${PK}"` (SEC-020/SEC-022):
 
 ```bash
 ssh root@${NODE_IP} "PK=\$(grep '^STEWARD_PLATFORM_KEYS=' /etc/steward/env | cut -d= -f2- | cut -d, -f1); \
+  case \"\${PK}\" in ''|*[!A-Za-z0-9._~-]*) exit 1;; esac; [ \"\${#PK}\" -le 512 ] || exit 1; \
   AUTH_FILE=\$(mktemp); chmod 600 \"\${AUTH_FILE}\"; trap 'rm -f \"\${AUTH_FILE}\"' EXIT; \
   printf 'X-Steward-Platform-Key: %s\\n' \"\${PK}\" > \"\${AUTH_FILE}\"; \
   curl -sf -X POST http://localhost:3200/platform/tenants \
@@ -195,6 +201,7 @@ For any other platform-key operation, use an SSH tunnel from your workstation
 ```bash
 ssh -L 3200:localhost:3200 root@${NODE_IP}
 # then, locally:
+case "$PLATFORM_KEY" in ''|*[!A-Za-z0-9._~-]*) echo "Invalid platform key" >&2; exit 1;; esac
 AUTH_FILE=$(mktemp); chmod 600 "$AUTH_FILE"
 printf 'X-Steward-Platform-Key: %s\n' "$PLATFORM_KEY" > "$AUTH_FILE"
 curl -sf http://localhost:3200/platform/tenants -H "@$AUTH_FILE"
@@ -209,13 +216,14 @@ rm -f "$AUTH_FILE"
 
 ```bash
 NODE_IP="<node-ip>"  # from your operator-local inventory (never committed — see Node Inventory)
+STEWARD_SRC="/path/to/your/local/steward-checkout"  # your local clone of THIS repo
 
 # 1. Sync updated source
 rsync -az --delete \
   --exclude='.git' --exclude='node_modules' --exclude='.next' \
   --exclude='web' --exclude='.turbo' \
   -e "ssh -o StrictHostKeyChecking=accept-new" \
-  /home/shad0w/projects/steward-fi/ root@${NODE_IP}:/opt/steward/
+  "${STEWARD_SRC}/" root@${NODE_IP}:/opt/steward/
 
 # 2. Install any new dependencies
 ssh root@${NODE_IP} "cd /opt/steward && bun install"
@@ -233,6 +241,7 @@ ssh root@${NODE_IP} "curl -sf http://localhost:3200/health"
 # Node IPs come from your operator-local inventory — the same one
 # scripts/deploy-all.sh reads (STEWARD_NODES or scripts/deploy-nodes.local.conf).
 NODES="<node-ip-1> <node-ip-2> <node-ip-3>"
+STEWARD_SRC="/path/to/your/local/steward-checkout"  # your local clone of THIS repo
 
 for NODE in $NODES; do
   echo "=== Updating ${NODE} ==="
@@ -240,7 +249,7 @@ for NODE in $NODES; do
     --exclude='.git' --exclude='node_modules' --exclude='.next' \
     --exclude='web' --exclude='.turbo' \
     -e "ssh -o StrictHostKeyChecking=accept-new" \
-    /home/shad0w/projects/steward-fi/ root@${NODE}:/opt/steward/
+    "${STEWARD_SRC}/" root@${NODE}:/opt/steward/
   ssh -o StrictHostKeyChecking=accept-new root@${NODE} "cd /opt/steward && bun install && systemctl restart steward"
   sleep 2
   ssh -o StrictHostKeyChecking=accept-new root@${NODE} "curl -sf http://localhost:3200/health"
@@ -321,6 +330,7 @@ cleartext (SEC-022).
 
 ```bash
 read -rsp "Platform key: " PK; printf '\n'
+case "$PK" in ''|*[!A-Za-z0-9._~-]*) echo "Invalid platform key" >&2; exit 1;; esac
 BASE="http://localhost:3200"
 PLATFORM_HEADERS=$(mktemp); TENANT_HEADERS=$(mktemp); TOKEN_HEADERS=$(mktemp)
 chmod 600 "$PLATFORM_HEADERS" "$TENANT_HEADERS" "$TOKEN_HEADERS"
@@ -596,6 +606,19 @@ Redis is used for:
 
 In **production** (`NODE_ENV=production`) the proxy treats Redis as **required** and fails **closed** without it: `checkProxyRateLimit`/`checkProxySpendLimit` reject requests (429/402/503) unless you explicitly set `STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL=true`. The compose deploy therefore ships a `redis` service and sets `REDIS_URL`. Only in non-production (or with the soft-fail override) do rate-limit/spend counters fall back to in-memory and reset on restart.
 
+### Eviction policy (SEC-021 follow-up)
+
+The shipped production compose stacks (`docker-compose.yml` and
+`deploy/docker-compose.yml`) set `--maxmemory-policy noeviction`. Under memory
+pressure, Redis therefore fails writes instead of silently evicting spend and
+rate counters; Steward's enforcement path treats those failures as closed.
+Alert on `used_memory` well below `maxmemory` so availability problems are
+handled before the fail-closed boundary is reached. The enterprise-reference
+stack and any externally managed or custom Redis must be configured and
+verified separately: use `noeviction` for enforcement counters (or document a
+deliberate financial-control risk acceptance), isolate them from cache
+workloads, and never assume an eviction policy such as `allkeys-lru` is safe.
+
 ---
 
 ## Webhook Configuration
@@ -628,6 +651,20 @@ echo "Webhook config and one-time secret saved to $WEBHOOK_RESPONSE (mode 0600)"
 field is only returned on creation and is used to verify
 `X-Steward-Signature` on incoming events; do not print it into terminal or CI
 logs.
+
+> **At-rest encryption and legacy plaintext rows (SEC-088):** webhook secrets
+> are encrypted at rest (AES-256-GCM; key from
+> `STEWARD_WEBHOOK_SECRET_ENCRYPTION_KEY`/`STEWARD_MASTER_PASSWORD`). Configs
+> written before encryption shipped may still hold **plaintext** secrets.
+> There is deliberately **no eager mass re-encryption at boot** — a boot-time
+> rewrite would need the encryption key during migrations and would race
+> concurrently booting replicas. Instead each config row is upgraded lazily,
+> via a compare-and-swap on the stored value, the next time that webhook
+> fires or is re-saved (see `packages/api/src/services/webhook-dispatch.ts`),
+> and new delivery rows only ever snapshot the encrypted form. Until a legacy
+> config fires or is re-saved, its plaintext secret stays recoverable by
+> anyone with DB read access (backup leak, read replica). **After upgrading,
+> rotate or re-save pre-existing webhooks to force immediate re-encryption.**
 
 ### Verify webhook delivery
 
