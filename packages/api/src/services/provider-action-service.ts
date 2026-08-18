@@ -3067,10 +3067,11 @@ class ProviderActionService {
         if (reservationReconciliationFaultForTests === "after_apply")
           throw new Error("injected crash after reservation reconciliation");
       } catch (error) {
-        const message = (error instanceof Error ? error.message : String(error)).slice(0, 1000);
-        await this.recordReservationFailure(row, claimId, message, false);
+        const failure = "reservation reconciliation failed";
+        await this.recordReservationFailure(row, claimId, failure, false);
         console.error(
-          `[provider-reservations] reconciliation failed intent=${row.intentId} generation=${handles.generation}: ${message}`,
+          `[provider-reservations] reconciliation failed intent=${row.intentId} generation=${handles.generation}`,
+          redactedThrownDiagnostics(error),
         );
         continue;
       }

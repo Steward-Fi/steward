@@ -7024,7 +7024,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
     const frozen = frozenSigningResponse(c, e);
     if (frozen) return frozen;
     const requestId = c.get("requestId") || "unknown";
-    const rawMessage = e instanceof Error ? e.message : "Unknown error";
+    const failureMessage = "Typed data signing failed";
     console.error(
       `[${requestId}] Sign typed data failed for agent ${agentId}`,
       redactedThrownDiagnostics(e),
@@ -7032,7 +7032,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
 
     dispatchWebhook(tenantId, agentId, "tx_failed", {
       txId,
-      error: rawMessage,
+      error: failureMessage,
       requestId,
     });
 

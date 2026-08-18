@@ -1823,7 +1823,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       try {
         notionalUsd = await polymarketSellNotionalUsd(amount, price, body.tokenId, clobUrl);
       } catch (err) {
-        const reason = err instanceof Error ? err.message : "unable to size sell notional";
+        const reason = "unable to size sell notional";
         await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
           venue: "polymarket",
           tokenId: body.tokenId,
@@ -1831,6 +1831,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           amount,
           price,
           reason,
+          ...redactedThrownDiagnostics(err),
         });
         const envelope: TradeIdempotencyResponse = {
           status: 400,

@@ -808,7 +808,7 @@ describeRedis("#206 cumulativeSpend cap - full-chain E2E (real service + real Re
       .where(eq(providerActionReservationGenerations.intentId, out.intentId));
     expect(crashed.state).toBe("pending");
     expect(crashed.attempts).toBe(1);
-    expect(crashed.lastError).toContain("injected crash");
+    expect(crashed.lastError).toBe("reservation reconciliation failed");
     expect(crashed.nextRetryAt).not.toBeNull();
     expect(crashed.handles).toMatchObject({
       schemaVersion: "steward.provider-policy-reservations.v2",

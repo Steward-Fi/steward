@@ -6,6 +6,7 @@
  * - Graceful degradation: returns null on failure so callers can fall back to wei comparison
  */
 
+import { redactedThrownDiagnostics } from "./safe-error.js";
 import {
   getNativeDecimalsStrict,
   getTokenDecimalsStrict,
@@ -251,7 +252,10 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
 
       return parsePositiveDecimal(sorted[0].priceUsd);
     } catch (err) {
-      console.warn(`[price-oracle] Failed to fetch price for ${tokenAddress}:`, err);
+      console.warn(
+        `[price-oracle] Failed to fetch price for ${tokenAddress}`,
+        redactedThrownDiagnostics(err),
+      );
       return null;
     }
   }

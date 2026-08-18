@@ -186,4 +186,26 @@ describe("price oracle", () => {
       oracle.weiToUsd("1000000", 8453, "0x2222222222222222222222222222222222222222"),
     ).resolves.toBeNull();
   });
+
+  it("does not log exception text from a failed price transport", async () => {
+    const canary = "api_key=price-oracle-secret";
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    globalThis.fetch = (async () => {
+      throw new Error(canary);
+    }) as typeof fetch;
+
+    try {
+      await expect(
+        createPriceOracle({ cacheTtlMs: 0 }).getNativeUsdPrice(8453),
+      ).resolves.toBeNull();
+      expect(JSON.stringify(warnings)).not.toContain(canary);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]?.[0]).toContain("Failed to fetch price");
+      expect(warnings[0]?.[1]).toEqual({ errorClass: "Error", errorCode: null });
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
 });

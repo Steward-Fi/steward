@@ -1,7 +1,8 @@
-import type {
+import {
   PolicyResult,
   PolicyRule,
   PriceOracle,
+  redactedThrownDiagnostics,
   SignRequest,
   TypedDataDomain,
   TypedDataField,
@@ -326,7 +327,7 @@ export class PolicyEngine {
       this.auditHookFailureCount += 1;
       console.warn(
         `[steward] policy audit hook failed (${this.auditHookFailureCount} since engine start); policy.evaluated events are being dropped`,
-        err,
+        redactedThrownDiagnostics(err),
       );
     }
   }

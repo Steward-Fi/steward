@@ -44,10 +44,13 @@ export interface SweepResult {
 
 export interface RetentionSweepOptions {
   auditWriter?: typeof writeAuditEvent;
+  /** Overrides tenant archive execution for deterministic scheduler tests. */
+  auditRetentionRunner?: typeof runTenantAuditRetention;
 }
 
 interface RetentionSweepContext {
   auditWriter: typeof writeAuditEvent;
+  auditRetentionRunner: typeof runTenantAuditRetention;
 }
 
 class RetentionAuthorizationAuditError extends Error {
@@ -172,11 +175,10 @@ async function sweepAuditEvents(ctx: RetentionSweepContext): Promise<SweepResult
   const failures: Array<{ tenantId: string; error: string }> = [];
   for (const policy of policies) {
     try {
-      const result = await runTenantAuditRetention(policy.tenant_id);
+      const result = await ctx.auditRetentionRunner(policy.tenant_id);
       deleted += result.deleted;
     } catch (error) {
-      const message = error instanceof Error ? error.message : "unknown retention failure";
-      failures.push({ tenantId: policy.tenant_id, error: message });
+      failures.push({ tenantId: policy.tenant_id, error: "audit retention failed" });
       console.error(
         `[retention] audit retention failed for tenant ${policy.tenant_id}`,
         redactedThrownDiagnostics(error),
@@ -283,6 +285,7 @@ export async function runRetentionSweep(
   const results: SweepResult[] = [];
   const ctx: RetentionSweepContext = {
     auditWriter: options.auditWriter ?? writeAuditEvent,
+    auditRetentionRunner: options.auditRetentionRunner ?? runTenantAuditRetention,
   };
 
   const sweepers: Array<(context: RetentionSweepContext) => Promise<SweepResult | null>> = [
