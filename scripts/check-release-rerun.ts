@@ -10,10 +10,13 @@ type ReleasePayload = {
 };
 
 async function readBoundedJson(response: Response): Promise<unknown> {
-  const maxBytes = 64 * 1024;
+  // GitHub's list representation includes release bodies, authors, and asset
+  // metadata. This repository's current 21-release response is already about
+  // 52 KiB, so 64 KiB would make ordinary release-note growth an outage.
+  const maxBytes = 2 * 1024 * 1024;
   const contentLength = Number(response.headers.get("content-length") ?? "0");
   if (Number.isFinite(contentLength) && contentLength > maxBytes) {
-    throw new Error("GitHub release lookup response exceeded 64 KiB");
+    throw new Error("GitHub release lookup response exceeded 2 MiB");
   }
 
   const reader = response.body?.getReader();
@@ -27,7 +30,7 @@ async function readBoundedJson(response: Response): Promise<unknown> {
       totalBytes += value.byteLength;
       if (totalBytes > maxBytes) {
         await reader.cancel();
-        throw new Error("GitHub release lookup response exceeded 64 KiB");
+        throw new Error("GitHub release lookup response exceeded 2 MiB");
       }
       chunks.push(value);
     }

@@ -34,7 +34,7 @@ describe("release rerun preflight", () => {
   it("rejects an oversized chunked response before parsing it", async () => {
     const oversized = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(new TextEncoder().encode(`{"padding":"${"x".repeat(64 * 1024)}`));
+        controller.enqueue(new TextEncoder().encode(`{"padding":"${"x".repeat(2 * 1024 * 1024)}`));
         controller.enqueue(new TextEncoder().encode('"}'));
         controller.close();
       },
@@ -46,7 +46,22 @@ describe("release rerun preflight", () => {
         "token",
         (async () => new Response(oversized, { status: 200 })) as typeof fetch,
       ),
-    ).rejects.toThrow("exceeded 64 KiB");
+    ).rejects.toThrow("exceeded 2 MiB");
+  });
+
+  it("rejects an oversized Content-Length before reading the body", async () => {
+    await expect(
+      checkReleaseRerun(
+        "Steward-Fi/steward",
+        "v1.2.3",
+        "token",
+        (async () =>
+          new Response("{}", {
+            status: 200,
+            headers: { "Content-Length": String(2 * 1024 * 1024 + 1) },
+          })) as typeof fetch,
+      ),
+    ).rejects.toThrow("exceeded 2 MiB");
   });
 
   it("finds a tagless draft through the bounded authenticated release list", async () => {
@@ -82,6 +97,58 @@ describe("release rerun preflight", () => {
     );
     expect(state).toBe("missing");
     expect(calls).toBe(2);
+  });
+
+  it("continues through full release-list pages and finds a later draft", async () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({
+      tag_name: `v1.0.${index}`,
+      draft: false,
+    }));
+    const requestedUrls: string[] = [];
+    const state = await checkReleaseRerun("Steward-Fi/steward", "v2.0.0", "token", (async (
+      input,
+    ) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (requestedUrls.length === 1) return new Response("not found", { status: 404 });
+      if (url.endsWith("page=1")) return Response.json(firstPage);
+      return Response.json([{ tag_name: "v2.0.0", draft: true }]);
+    }) as typeof fetch);
+    expect(state).toBe("draft");
+    expect(requestedUrls.at(-1)).toEndWith("page=2");
+  });
+
+  it("fails closed when authenticated draft listing is unauthorized or malformed", async () => {
+    for (const listResponse of [
+      new Response("forbidden", { status: 403 }),
+      Response.json({ tag_name: "v1.2.3", draft: true }),
+    ]) {
+      let calls = 0;
+      await expect(
+        checkReleaseRerun("Steward-Fi/steward", "v1.2.3", "token", (async () => {
+          calls += 1;
+          return calls === 1 ? new Response("not found", { status: 404 }) : listResponse;
+        }) as typeof fetch),
+      ).rejects.toThrow();
+    }
+  });
+
+  it("runs the preflight before dependency installation and publication writes", async () => {
+    const workflow = await Bun.file(
+      new URL("../../.github/workflows/release.yml", import.meta.url),
+    ).text();
+    const preflight = workflow.indexOf("Verify release tag is unpublished");
+    expect(preflight).toBeGreaterThan(0);
+    for (const laterStep of [
+      "Install dependencies",
+      "Publish @stwd/sdk",
+      "Publish @stwd/react",
+      "Publish @stwd/eliza-plugin",
+      "Create GitHub Release",
+    ]) {
+      expect(workflow.indexOf(laterStep)).toBeGreaterThan(preflight);
+    }
+    expect(workflow).toContain("permissions:\n      contents: write");
   });
 
   it("rejects attacker-controlled repository and tag inputs before fetch", async () => {

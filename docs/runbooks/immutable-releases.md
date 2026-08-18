@@ -15,6 +15,13 @@ The release action is pinned to a full commit SHA. A published immutable
 release's tag, metadata, and assets are not an operator repair surface. Publish
 a new patch version instead.
 
+GitHub applies this setting only to releases published after it was enabled.
+The existing Steward releases through `v0.4.2` currently report
+`isImmutable: false`; enabling the setting does not retroactively lock them.
+Treat those legacy releases as historical artifacts and do not edit, delete,
+or move their tags. The first release published after enablement is the first
+one expected to report `isImmutable: true`.
+
 Release workflow runs are serialized per tag with cancellation disabled. A
 manual rerun waits for an in-progress publication and then repeats the
 published-release preflight; it must not execute registry writes concurrently
@@ -60,5 +67,7 @@ move/delete its tag; fix the cause and publish a new patch tag.
 
 Disabling the repository setting is an incident escalation, not a routine
 rollback. It requires repository-administrator approval, a recorded reason and
-time window, and immediate re-enablement and API verification. Existing
-immutable releases remain immutable even if the setting is later disabled.
+time window, and immediate re-enablement and API verification. Releases that
+were published as immutable remain immutable even if the setting is later
+disabled; legacy releases published before enablement do not gain that
+protection retroactively.
