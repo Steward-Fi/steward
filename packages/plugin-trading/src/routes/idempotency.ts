@@ -8,6 +8,7 @@
  * with token-checked Lua CAS operations.
  */
 
+import { createHash } from "node:crypto";
 import type { IoredisLike } from "@stwd/redis";
 
 export interface IdempotencyRecord {
@@ -74,8 +75,17 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
     },
   ) {}
 
+  private storageKey(scope: string, key: string): string {
+    // Length-prefix before hashing so ambiguous tuples ("a:b", "c") and
+    // ("a", "b:c") cannot alias. Hashing also keeps attacker-controlled
+    // idempotency keys opaque and bounded in Redis and memory.
+    return createHash("sha256")
+      .update(`${scope.length}:${scope}${key.length}:${key}`, "utf8")
+      .digest("hex");
+  }
+
   private redisKey(scope: string, key: string): string {
-    return `idempotency:${this.options.namespace}:${scope}:${key}`;
+    return `idempotency:${this.options.namespace}:${this.storageKey(scope, key)}`;
   }
 
   private sweepMemory(now: number): void {
@@ -207,7 +217,16 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
       return { claim: () => this.claimRedis(redis, redisKey, bodyHash) };
     }
 
-    const mapKey = `${scope}:${key}`;
+    if (
+      (process.env.NODE_ENV === "production" || process.env.CF_PAGES === "1") &&
+      process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY !== "true"
+    ) {
+      throw new Error(
+        "Trading idempotency requires Redis in production; set STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY=true only for an explicitly single-instance deployment",
+      );
+    }
+
+    const mapKey = this.storageKey(scope, key);
     const existing = this.memory.get(mapKey);
     if (existing && existing.expiresAt > now) {
       if (existing.bodyHash !== bodyHash) return { conflict: true };

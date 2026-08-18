@@ -231,8 +231,8 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
           orderID: "pm-cache-order-1",
           status: "matched",
           success: true,
-          makingAmount: "10000000",
-          takingAmount: "20000000",
+          makingAmount: "10",
+          takingAmount: "20",
         };
       }
       throw new Error(`unexpected CLOB POST ${path}`);
@@ -272,12 +272,48 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
       expect(second.status).toBe(200);
       expect(authKeyRequests).toHaveLength(1);
 
-      // 3) A legacy PLAINTEXT entry is not trusted: it is treated as a cache
+      // 3) Ciphertext copied into another agent's cache slot does not
+      // authenticate there: AES-GCM AAD binds it to the full cache key.
+      const secondIdentity = await seedTenantAgent();
+      const secondWallet = await ctx.vault.createWallet({
+        tenantId: secondIdentity.tenantId,
+        agentId: secondIdentity.agentId,
+        venue: "polymarket",
+        chainType: "evm",
+      });
+      const secondSessionId = await seedSession(
+        secondIdentity.tenantId,
+        secondIdentity.agentId,
+        secondWallet.address,
+      );
+      const secondCacheKey = `pm:clob-l2:${secondIdentity.tenantId}:${secondIdentity.agentId}:${secondWallet.address.toLowerCase()}:${encodeURIComponent("https://clob.e2e.invalid")}`;
+      redisStore.set(secondCacheKey, storedRaw);
+      const transplanted = await makeApp(
+        secondIdentity.tenantId,
+        secondIdentity.agentId,
+        createTradeRoutes(ctx),
+      ).request("/v1/trade/polymarket/order", {
+        method: "POST",
+        headers: { "content-type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({
+          sessionId: secondSessionId,
+          tokenId: TOKEN_ID,
+          side: "buy",
+          amount: 10,
+          price: 0.5,
+          tickSize: "0.01",
+          negRisk: true,
+        }),
+      });
+      expect(transplanted.status).toBe(200);
+      expect(authKeyRequests).toHaveLength(2);
+
+      // 4) A legacy PLAINTEXT entry is not trusted: it is treated as a cache
       // miss (re-derive) and rewritten encrypted.
       redisStore.set(pmKeys[0] as string, JSON.stringify(DERIVED_CREDS));
       const third = await postOrder();
       expect(third.status).toBe(200);
-      expect(authKeyRequests).toHaveLength(2);
+      expect(authKeyRequests).toHaveLength(3);
       const rewritten = redisStore.get(pmKeys[0] as string) as string;
       expect(rewritten.startsWith("stwd_pmclob_v1:")).toBe(true);
       expect(rewritten.includes(DERIVED_CREDS.secret)).toBe(false);
@@ -331,8 +367,8 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
           orderID: "pm-cache-order-2",
           status: "matched",
           success: true,
-          makingAmount: "10000000",
-          takingAmount: "20000000",
+          makingAmount: "10",
+          takingAmount: "20",
         };
       }
       throw new Error(`unexpected CLOB POST ${path}`);

@@ -285,12 +285,13 @@ describe("builder attribution defaults OFF", () => {
     expect(await createPolymarketBuilderConfig(cfg)).toBeNull();
   });
 
-  test("explicit input is respected but still off without signing server", () => {
-    const cfg = resolveBuilderConfig({ enabled: true, feeBps: 10, receiver: FUNDER });
-    expect(cfg.enabled).toBe(true);
-    expect(cfg.feeBps).toBe(10);
-    // No signing server -> still treated as off (can't attribute without it).
-    expect(isBuilderEnabled(cfg)).toBe(false);
+  test("rejects enabled or disabled partial builder configuration", () => {
+    expect(() => resolveBuilderConfig({ enabled: true, feeBps: 10, receiver: FUNDER })).toThrow(
+      "enabled builder requires signing server URL",
+    );
+    expect(() => resolveBuilderConfig({ enabled: false, receiver: FUNDER })).toThrow(
+      "partial disabled configuration is rejected",
+    );
   });
 
   test("enabled WITH signing server flips on", () => {
@@ -302,6 +303,27 @@ describe("builder attribution defaults OFF", () => {
       signingServerToken: "tok",
     });
     expect(isBuilderEnabled(cfg)).toBe(true);
+  });
+
+  test("rejects signing-token transport over public HTTP and URL credentials", () => {
+    expect(() =>
+      resolveBuilderConfig({
+        enabled: true,
+        feeBps: 10,
+        receiver: FUNDER,
+        signingServerUrl: "http://signer.example.com/sign",
+        signingServerToken: "tok",
+      }),
+    ).toThrow("must use HTTPS");
+    expect(() =>
+      resolveBuilderConfig({
+        enabled: true,
+        feeBps: 10,
+        receiver: FUNDER,
+        signingServerUrl: "https://user:password@signer.example.com/sign",
+        signingServerToken: "tok",
+      }),
+    ).toThrow("must not contain credentials");
   });
 });
 

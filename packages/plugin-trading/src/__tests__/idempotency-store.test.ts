@@ -207,14 +207,57 @@ describe("DurableIdempotencyStore (SEC-043)", () => {
   });
 
   it("fails closed on a malformed durable record instead of overwriting it", async () => {
-    const { client, data } = fakeRedis();
-    data.set("idempotency:trade:scope:key-1", "not-json");
+    const { client, data, setCalls } = fakeRedis();
     const store = new DurableIdempotencyStore<TestRecord>({
       namespace: "trade",
       getRedisClient: () => client,
     });
+    const initial = await store.check("scope", "key-1", "hash-1");
+    await initial.claim?.();
+    const durableKey = setCalls[0]?.key;
+    expect(durableKey).toMatch(/^idempotency:trade:[a-f0-9]{64}$/);
+    data.set(durableKey!, "not-json");
     await expect(store.check("scope", "key-1", "hash-1")).rejects.toThrow(
       "Malformed durable idempotency record",
     );
+  });
+
+  it("uses collision-safe opaque keys for delimiter-containing tenant scopes", async () => {
+    const { client, setCalls } = fakeRedis();
+    const store = new DurableIdempotencyStore<TestRecord>({
+      namespace: "trade",
+      getRedisClient: () => client,
+    });
+    await (await store.check("tenant:a", "b:key", "hash-1")).claim?.();
+    await (await store.check("tenant", "a:b:key", "hash-2")).claim?.();
+    expect(setCalls).toHaveLength(2);
+    expect(setCalls[0]?.key).not.toBe(setCalls[1]?.key);
+    expect(setCalls[0]?.key).toMatch(/^idempotency:trade:[a-f0-9]{64}$/);
+    expect(setCalls[0]?.key).not.toContain("tenant");
+    expect(setCalls[0]?.key).not.toContain("b:key");
+  });
+
+  it("fails closed in production when durable Redis idempotency is unavailable", async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalAcknowledgement = process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+    process.env.NODE_ENV = "production";
+    delete process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+    try {
+      const store = new DurableIdempotencyStore<TestRecord>({
+        namespace: "trade",
+        getRedisClient: () => null,
+      });
+      await expect(store.check("scope", "key-1", "hash-1")).rejects.toThrow(
+        "Trading idempotency requires Redis in production",
+      );
+    } finally {
+      if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = originalNodeEnv;
+      if (originalAcknowledgement === undefined) {
+        delete process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+      } else {
+        process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = originalAcknowledgement;
+      }
+    }
   });
 });

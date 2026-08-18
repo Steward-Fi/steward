@@ -1473,11 +1473,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     return key;
   }
 
-  function encryptPmCredsCacheValue(plaintext: string): string | null {
+  function encryptPmCredsCacheValue(plaintext: string, cacheKey: string): string | null {
     const key = pmCredsCacheEncryptionKey();
     if (!key) return null;
     const iv = randomBytes(12);
     const cipher = createCipheriv("aes-256-gcm", key, iv);
+    cipher.setAAD(Buffer.from(cacheKey, "utf8"));
     let ciphertext = cipher.update(plaintext, "utf8", "hex");
     ciphertext += cipher.final("hex");
     return `${PM_CREDS_CACHE_PREFIX}${JSON.stringify({
@@ -1490,7 +1491,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   // Returns null for anything that is not a valid envelope for THIS key —
   // including legacy plaintext entries — so the caller treats it as a cache
   // miss, re-derives, and overwrites with an encrypted value.
-  function decryptPmCredsCacheValue(stored: string): string | null {
+  function decryptPmCredsCacheValue(stored: string, cacheKey: string): string | null {
     if (!stored.startsWith(PM_CREDS_CACHE_PREFIX)) return null;
     const key = pmCredsCacheEncryptionKey();
     if (!key) return null;
@@ -1501,6 +1502,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         tag: string;
       };
       const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(payload.iv, "hex"));
+      decipher.setAAD(Buffer.from(cacheKey, "utf8"));
       decipher.setAuthTag(Buffer.from(payload.tag, "hex"));
       let plaintext = decipher.update(payload.ciphertext, "hex", "utf8");
       plaintext += decipher.final("utf8");
@@ -1613,7 +1615,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (redis) {
       try {
         const cached = await redis.get(cacheKey);
-        const cachedPlaintext = cached ? decryptPmCredsCacheValue(cached) : null;
+        const cachedPlaintext = cached ? decryptPmCredsCacheValue(cached, cacheKey) : null;
         if (cachedPlaintext) {
           const parsed = clobApiCredentialsSchema.safeParse(JSON.parse(cachedPlaintext));
           if (parsed.success) {
@@ -1643,7 +1645,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (redis) {
       // Fail closed: without cache encryption key material, skip the write and
       // re-derive per order rather than ever storing the creds in plaintext.
-      const cacheValue = encryptPmCredsCacheValue(JSON.stringify(apiCredentials));
+      const cacheValue = encryptPmCredsCacheValue(JSON.stringify(apiCredentials), cacheKey);
       if (cacheValue) {
         await redis.setex(cacheKey, PM_CREDS_CACHE_TTL_SECONDS, cacheValue).catch(() => undefined);
       }
