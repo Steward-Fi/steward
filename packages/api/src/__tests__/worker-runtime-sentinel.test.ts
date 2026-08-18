@@ -3,6 +3,7 @@ import {
   hydrateProcessEnv,
   runWorkerGoogleCredentialLifecycleSweep,
   runWorkerUpstreamCredentialLeaseSweep,
+  runWorkerXCredentialLifecycleSweep,
 } from "../worker";
 
 test("Worker hydration cannot be overridden by a STEWARD_RUNTIME binding", () => {
@@ -69,4 +70,42 @@ test("Worker cron runs Google lifecycle recovery when provider credentials are c
   );
   expect(calls).toBe(1);
   expect(result).toEqual({ processed: 2, adopted: 1, revoked: 1, attention: 0, remaining: false });
+});
+
+test("Worker cron runs X lifecycle recovery when provider credentials are configured", async () => {
+  let calls = 0;
+  const result = await runWorkerXCredentialLifecycleSweep(
+    {
+      DATABASE_URL: "postgresql://worker.invalid/steward",
+      X_CLIENT_ID: "provider-client",
+      X_CLIENT_SECRET: "provider-secret",
+      STEWARD_MASTER_PASSWORD: "worker-master",
+    },
+    {
+      sweep: async () => {
+        calls += 1;
+        return { processed: 2, adopted: 1, attention: 1, remaining: false };
+      },
+    },
+  );
+  expect(calls).toBe(1);
+  expect(result).toEqual({ processed: 2, adopted: 1, attention: 1, remaining: false });
+});
+
+test("Worker X lifecycle recovery is inert when the provider is unavailable", async () => {
+  let calls = 0;
+  const result = await runWorkerXCredentialLifecycleSweep(
+    {
+      DATABASE_URL: "postgresql://worker.invalid/steward",
+      STEWARD_MASTER_PASSWORD: "worker-master",
+    },
+    {
+      sweep: async () => {
+        calls += 1;
+        return {};
+      },
+    },
+  );
+  expect(calls).toBe(0);
+  expect(result).toBeNull();
 });
