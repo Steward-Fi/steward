@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,6 +14,15 @@ import {
 describe("CI test inventory", () => {
   test("the repository workflows cover every test-bearing workspace package", () => {
     expect(() => checkCiTestInventory()).not.toThrow();
+  });
+
+  test("direct Bun test-file commands use explicit relative paths", () => {
+    for (const workflow of [".github/workflows/ci.yml", ".github/workflows/pr.yml"]) {
+      const source = readFileSync(workflow, "utf8");
+      expect(source.match(/\bbun test packages\/[^\s]+\.(?:test|spec)\.[cm]?[jt]sx?/g) ?? []).toEqual(
+        [],
+      );
+    }
   });
 
   test("a future unlisted test package fails closed", () => {

@@ -490,12 +490,12 @@ jobs:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
 
       - name: RLS pool isolation proof (real Postgres)
-        run: bun test packages/db/src/__tests__/tenant-rls-postgres.test.ts
+        run: bun test ./packages/db/src/__tests__/tenant-rls-postgres.test.ts
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
 
       - name: Vault custody transition race proof (real Postgres)
-        run: bun test packages/vault/src/__tests__/custody-transition-race.real-pg.test.ts
+        run: bun test ./packages/vault/src/__tests__/custody-transition-race.real-pg.test.ts
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
 
@@ -602,7 +602,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Verify Redis revocation monotonicity
-        run: bun test packages/auth/src/__tests__/redis-revocation.integration.test.ts
+        run: bun test ./packages/auth/src/__tests__/redis-revocation.integration.test.ts
 
       - name: Start embedded API
         env:
