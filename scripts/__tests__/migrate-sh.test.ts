@@ -59,6 +59,15 @@ describe.serial("SEC-050 scripts/migrate.sh keeps the DB password out of psql ar
     expect(env).toBe("PGPASSWORD=p@ss/w0rd");
   });
 
+  test("raw question mark in libpq userinfo never reaches argv", () => {
+    const { argv, env } = runMigrate(
+      "postgresql://steward:sec?ret@db.example/steward?sslmode=require",
+    );
+    expect(argv).toContain("postgresql://steward@db.example/steward?sslmode=require");
+    expect(argv).not.toContain("sec?ret");
+    expect(env).toBe("PGPASSWORD=sec?ret");
+  });
+
   test("passwordless URL still works with an empty PGPASSWORD", () => {
     const { argv, env } = runMigrate("postgresql://steward@db.example:5432/steward");
     expect(argv).toContain("postgresql://steward@db.example:5432/steward");
@@ -82,6 +91,15 @@ describe.serial("SEC-050 scripts/migrate.sh keeps the DB password out of psql ar
     expect(argv).toContain("options=-c%20statement_timeout%3D5s");
     expect(argv).not.toContain("password=");
     expect(env).toBe("PGPASSWORD=a+b");
+  });
+
+  test("preserves an at sign in a non-password query value", () => {
+    const { argv, env } = runMigrate(
+      "postgresql://db.example/steward?application_name=ops@steward&password=query-secret",
+    );
+    expect(argv).toContain("application_name=ops@steward");
+    expect(argv).not.toContain("query-secret");
+    expect(env).toBe("PGPASSWORD=query-secret");
   });
 
   test("preserves valid libpq multi-host authorities", () => {

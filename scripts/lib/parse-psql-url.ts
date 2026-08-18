@@ -26,7 +26,38 @@ if (/[\0\r\n]/.test(raw)) {
 if (raw.includes("#")) throw new Error("DATABASE_URL must not contain a fragment");
 
 const schemeEnd = schemeMatch[0].length;
-const rawQueryStart = raw.indexOf("?", schemeEnd);
+// libpq accepts a raw `?` inside userinfo even though RFC 3986 normally
+// requires it to be percent-encoded. Do not mistake that byte for the query
+// delimiter: only search for the query after the userinfo terminator. Limit
+// the search for `@` to the pre-path authority candidate so an `@` in a normal
+// query value cannot be promoted to a credential delimiter.
+const pathStart = raw.indexOf("/", schemeEnd);
+const prePathEnd = pathStart === -1 ? raw.length : pathStart;
+const prePath = raw.slice(schemeEnd, prePathEnd);
+const prePathQuestion = prePath.indexOf("?");
+const prePathAt = prePath.indexOf("@");
+let userInfoTerminator = -1;
+if (prePathAt !== -1 && (prePathQuestion === -1 || prePathAt < prePathQuestion)) {
+  userInfoTerminator = schemeEnd + prePathAt;
+} else if (prePathAt > prePathQuestion) {
+  const possibleUserInfo = prePath.slice(0, prePathAt);
+  const passwordSeparator = possibleUserInfo.indexOf(":");
+  const ambiguousTail = prePath.slice(prePathQuestion + 1, prePathAt);
+  if (passwordSeparator !== -1 && passwordSeparator < prePathQuestion) {
+    // `=` or `&` makes this indistinguishable from a pre-path query containing
+    // `@`. Reject rather than risk placing either interpretation's credential
+    // bytes in argv.
+    if (/[=&]/.test(ambiguousTail)) {
+      throw new Error("DATABASE_URL contains ambiguous user information");
+    }
+    userInfoTerminator = schemeEnd + prePathAt;
+  }
+}
+
+const rawQueryStart = raw.indexOf(
+  "?",
+  userInfoTerminator === -1 ? schemeEnd : userInfoTerminator + 1,
+);
 const hierarchyEnd = rawQueryStart === -1 ? raw.length : rawQueryStart;
 const hierarchy = raw.slice(0, hierarchyEnd);
 const authorityEndCandidate = hierarchy.indexOf("/", schemeEnd);
