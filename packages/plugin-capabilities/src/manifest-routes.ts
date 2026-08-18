@@ -20,8 +20,6 @@
  * agent's next renewal. The short TTL bounds the window (<5min, Pillar-A green).
  */
 
-import { randomUUID } from "node:crypto";
-import { signAgentToken } from "@stwd/auth";
 import type { ApiResponse, AppVariables } from "@stwd/shared";
 import type { Context } from "hono";
 import { Hono } from "hono";
@@ -37,17 +35,17 @@ import { listAgentManifest, resolveManifestEntry } from "./manifest";
 import { enforceCapabilityRateLimit } from "./rate-limit";
 import { CapabilityStore } from "./store";
 
-/** Mint a short-lived agent token carrying the given scopes; pre-generate the jti
- * so we can return it (for out-of-band revocation) and audit it. */
-const mintShortLivedToken: ShortLivedTokenMinter = async ({
-  agentId,
-  tenantId,
-  scopes,
-  ttlSeconds,
-}) => {
-  const jti = randomUUID();
-  const token = await signAgentToken({ agentId, tenantId, scopes, jti }, `${ttlSeconds}s`);
-  return { token, jti };
+/**
+ * Fail closed until a provider-native token exchange is implemented.
+ *
+ * A Steward agent JWT is authentication for Steward itself; it is not a
+ * provider credential and must never be returned as one.  Keeping the
+ * production route wired to an unavailable minter also makes a future registry
+ * edit from `broker` to `token` safe by default: the request fails rather than
+ * silently leaking a Steward session token to provider-facing client code.
+ */
+const mintProviderNativeToken: ShortLivedTokenMinter = async () => {
+  throw new Error("provider-native token issuance is not implemented");
 };
 
 /** Build the audit sink from the injected core audit writer. Maps the structured
@@ -153,7 +151,7 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
         resolved,
         ttlSeconds: parseTtl(body),
         isRenewal,
-        mintToken: mintShortLivedToken,
+        mintToken: mintProviderNativeToken,
         emitAudit,
       });
 
