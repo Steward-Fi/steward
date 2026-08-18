@@ -2135,6 +2135,22 @@ describe("Malformed evaluator config fails closed instead of throwing (SEC-105)"
     }
   });
 
+  it("accepts checksum-valid Bitcoin and Monero addresses on their own networks", async () => {
+    for (const [address, chainId] of [
+      ["tb1q50rtrmj2f8vl9tem8qpfw36ylw5jg9j20l03x8", 202],
+      [
+        "49wsWmQA1WyM4gNpPkx1cRUCAamWaSBbMMmiGWNWGfWZRiXUH9DdMMi5ZJUM98K2xk62AEX3C6pCDMp1iXt2PLqX54LVKjA",
+        301,
+      ],
+    ] as const) {
+      const result = await evaluatePolicy(
+        makeAddressRule({ addresses: [address], mode: "whitelist" }),
+        makeContext({ request: { ...makeContext().request, to: address, chainId } }),
+      );
+      expect(result.passed).toBe(true);
+    }
+  });
+
   it("rejects malformed decoded lengths and tampered Monero checksums", async () => {
     const monero =
       "45AmZ2FRjuqZts5NGzb7ZXSNRuwS9MUqEeakpyEeSHsB5mywLwBzzq2cTsbJzTVUuLSHxtbfgKyZJVBqPffpP8fm79sjAcK";
