@@ -16,6 +16,7 @@ import { Hono } from "hono";
 import type { StewardAppContext } from "../context";
 import type { CapabilityAuditEvent } from "../issuance";
 import { createManifestRoutes } from "../manifest-routes";
+import { PROVIDER_MODES } from "../provider-modes";
 import { CapabilityStore } from "../store";
 import { validateCapabilitySpec } from "../validate";
 import { ensureAgent, ensureSecret, ensureTenant, type Harness, makeHarness } from "./_harness";
@@ -148,6 +149,39 @@ describe("manifest routes", () => {
         (e) => e.action === "capability.issue" && e.decision === "allow" && e.mode === "broker",
       ),
     ).toBe(true);
+  });
+
+  test("fails closed if GitHub is classified as token before a native minter exists", async () => {
+    await seedManifestCapability("gh-comment", "github:app:org");
+    const github = PROVIDER_MODES.find((entry) => entry.provider === "github");
+    if (!github) throw new Error("github provider mode is missing");
+    const mutable = github as { mode: "broker" | "token" };
+    const original = mutable.mode;
+    try {
+      // Model a future one-line registry edit. Production must not fall back to
+      // returning a Steward agent JWT as though it were a GitHub credential.
+      mutable.mode = "token";
+      const app = buildApp(harness!.db, { agent: true });
+      const res = await app.request("/capabilities/manifest/github:app:org/issue", {
+        method: "POST",
+      });
+      expect(res.status).toBe(500);
+      const body = (await res.json()) as { ok: boolean; data?: { token?: string }; error?: string };
+      expect(body.ok).toBe(false);
+      expect(body.data?.token).toBeUndefined();
+      expect(body.error).toBe("token issuance failed");
+      expect(
+        auditLog.some(
+          (event) =>
+            event.action === "capability.issue" &&
+            event.mode === "token" &&
+            event.decision === "deny" &&
+            event.reason === "token mint failed",
+        ),
+      ).toBe(true);
+    } finally {
+      mutable.mode = original;
+    }
   });
 
   test("broker mode: discord issue returns a delegation, no token", async () => {
