@@ -547,6 +547,57 @@ describe("Spending Limit Policy", () => {
     expect(result.passed).toBe(true);
   });
 
+  it("enforces a mixed daily wei cap when maxPerTx is omitted", async () => {
+    const rule = makeSpendingRule({
+      maxPerDay: "1000000000000000000", // 1 ETH
+      maxPerDayUsd: 5000,
+    });
+
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "200000000000000000" }, // 0.2 ETH
+        spentToday: BigInt("900000000000000000"), // 0.9 ETH
+        priceOracle: ethPriceOracle,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily spending limit");
+  });
+
+  it("enforces a canonical daily wei cap without requiring maxPerTx", async () => {
+    const rule = makeSpendingRule({ maxPerDay: "1000" });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "200" },
+        spentToday: 900n,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily spending limit");
+  });
+
+  it("enforces a mixed weekly wei cap when per-tx and daily caps are omitted", async () => {
+    const rule = makeSpendingRule({
+      maxPerWeek: "1000000000000000000", // 1 ETH
+      maxPerWeekUsd: 5000,
+    });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "200000000000000000" },
+        spentThisWeek: BigInt("900000000000000000"),
+        priceOracle: ethPriceOracle,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("weekly spending limit");
+  });
+
   // ─── Per-tx boundary tests ─────────────────────────────────────────────
 
   it("passes when value is exactly at the per-tx limit (boundary)", async () => {

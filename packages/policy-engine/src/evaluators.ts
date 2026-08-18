@@ -295,24 +295,23 @@ function evaluateRawSigningChain(rule: PolicyRule, ctx: EvaluatorContext): Polic
  * Accepts both the canonical format and the simplified maxAmount/period format.
  */
 function normalizeSpendingLimitConfig(config: Record<string, unknown>): SpendingLimitConfig {
-  // If already in canonical format (has any of the standard fields), fill in missing with MAX_UINT
-  if (config.maxPerTx !== undefined || config.maxPerTxUsd !== undefined) {
+  // Any canonical wei or USD field selects the canonical format. Missing wei
+  // caps are unbounded, but every explicitly declared cap must survive
+  // normalization. Checking only the per-tx fields caused a mixed config such
+  // as { maxPerDay, maxPerDayUsd } to take the USD-only branch and silently
+  // discard maxPerDay.
+  if (
+    config.maxPerTx !== undefined ||
+    config.maxPerDay !== undefined ||
+    config.maxPerWeek !== undefined ||
+    config.maxPerTxUsd !== undefined ||
+    config.maxPerDayUsd !== undefined ||
+    config.maxPerWeekUsd !== undefined
+  ) {
     return {
       maxPerTx: config.maxPerTx !== undefined ? String(config.maxPerTx) : MAX_UINT256_DECIMAL,
       maxPerDay: config.maxPerDay !== undefined ? String(config.maxPerDay) : MAX_UINT256_DECIMAL,
       maxPerWeek: config.maxPerWeek !== undefined ? String(config.maxPerWeek) : MAX_UINT256_DECIMAL,
-      maxPerTxUsd: config.maxPerTxUsd as number | undefined,
-      maxPerDayUsd: config.maxPerDayUsd as number | undefined,
-      maxPerWeekUsd: config.maxPerWeekUsd as number | undefined,
-    };
-  }
-
-  // Also check if any USD field is present
-  if (config.maxPerDayUsd !== undefined || config.maxPerWeekUsd !== undefined) {
-    return {
-      maxPerTx: MAX_UINT256_DECIMAL,
-      maxPerDay: MAX_UINT256_DECIMAL,
-      maxPerWeek: MAX_UINT256_DECIMAL,
       maxPerTxUsd: config.maxPerTxUsd as number | undefined,
       maxPerDayUsd: config.maxPerDayUsd as number | undefined,
       maxPerWeekUsd: config.maxPerWeekUsd as number | undefined,
