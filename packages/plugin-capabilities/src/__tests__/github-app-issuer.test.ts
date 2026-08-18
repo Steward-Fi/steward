@@ -88,6 +88,32 @@ describe("GitHub App upstream issuer transport", () => {
     expect(error.message).not.toContain("secret provider cancellation diagnostic");
   });
 
+  test("uses the remaining lifecycle budget instead of restarting its full timeout", async () => {
+    let calls = 0;
+    const issuer = new GitHubAppInstallationTokenIssuer(
+      ((_url, init) => {
+        calls += 1;
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      }) as typeof fetch,
+      5_000,
+    );
+    const startedAt = Date.now();
+    await expect(issuer.issue(request, { deadlineAt: Date.now() + 30 })).rejects.toThrow(
+      "GitHub request timed out",
+    );
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    await expect(issuer.revoke("token", { deadlineAt: Date.now() - 1 })).rejects.toThrow(
+      "GitHub request timed out",
+    );
+    expect(calls).toBe(1);
+  });
+
   test("bounds stalled response bodies and contains hostile cancel rejection", async () => {
     let cancelCalled = false;
     const issuer = new GitHubAppInstallationTokenIssuer(

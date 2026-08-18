@@ -25,7 +25,7 @@
 import { createHmac } from "node:crypto";
 import { observeSecurityAuditEvent } from "@stwd/shared";
 import { sql } from "drizzle-orm";
-import { getDb } from "./client";
+import { DatabaseDeadlineExceededError, getDb } from "./client";
 
 const ZERO_HASH = new Uint8Array(32);
 
@@ -263,21 +263,51 @@ const tenantAuditQueues = new Map<string, Promise<void>>();
  * guarantee and also gates the real-Postgres advisory-lock acquisition so
  * concurrent appends within one process cannot interleave the seq read/insert.
  */
-export async function withTenantAuditQueue<T>(tenantId: string, fn: () => Promise<T>): Promise<T> {
+export async function withTenantAuditQueue<T>(
+  tenantId: string,
+  fn: () => Promise<T>,
+  deadlineAt?: number,
+): Promise<T> {
   const prior = tenantAuditQueues.get(tenantId) ?? Promise.resolve();
-  const run = prior.catch(() => undefined).then(fn);
+  let cancelled = false;
+  const run = prior
+    .catch(() => undefined)
+    .then(() => {
+      if (cancelled || (deadlineAt !== undefined && Date.now() >= deadlineAt)) {
+        throw new DatabaseDeadlineExceededError();
+      }
+      return fn();
+    });
   const tail = run.then(
     () => undefined,
     () => undefined,
   );
   tenantAuditQueues.set(tenantId, tail);
-
-  try {
-    return await run;
-  } finally {
+  void tail.then(() => {
     if (tenantAuditQueues.get(tenantId) === tail) {
       tenantAuditQueues.delete(tenantId);
     }
+  });
+  if (deadlineAt === undefined) return run;
+
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) {
+    cancelled = true;
+    throw new DatabaseDeadlineExceededError();
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      cancelled = true;
+      reject(new DatabaseDeadlineExceededError());
+    }, remainingMs);
+  });
+  try {
+    // Racing is safe here: cancellation is checked before `fn` begins, so no
+    // database work is abandoned after it starts.
+    return await Promise.race([run, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -531,10 +561,5 @@ export async function withTenantAuditedTransactionOnDb<T>(
     throw new Error("withTenantAuditedTransaction: exhausted retries");
   };
 
-  // A deadline-bound network handle must not sit behind an uncancellable
-  // process-local queue. PostgreSQL's transaction advisory lock is the source
-  // of truth and is covered by lock_timeout; the queue remains necessary for
-  // PGLite, which has no advisory locks.
-  if (deadlineAt !== undefined && !isPGLiteRuntime()) return execute();
-  return withTenantAuditQueue(tenantId, execute);
+  return withTenantAuditQueue(tenantId, execute, deadlineAt);
 }

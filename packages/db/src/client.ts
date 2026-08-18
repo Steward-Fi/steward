@@ -188,6 +188,8 @@ function isDatabaseDeadlineError(error: unknown): boolean {
     const candidate = current as { code?: unknown; name?: unknown; cause?: unknown };
     if (
       candidate.code === "57014" ||
+      candidate.code === "55P03" ||
+      candidate.code === "25P03" ||
       candidate.code === "CONNECT_TIMEOUT" ||
       candidate.name === "AbortError" ||
       candidate.name === "TimeoutError"

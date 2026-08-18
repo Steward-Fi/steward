@@ -46,13 +46,16 @@ export interface GitHubAppLeaseConfig {
 }
 
 export interface UpstreamTokenIssuer {
-  issue(input: {
-    appId: string;
-    installationId: string;
-    privateKeyPem: string;
-    resource: GitHubLeaseResource;
-  }): Promise<{ token: string; expiresAt: Date }>;
-  revoke(token: string): Promise<void>;
+  issue(
+    input: {
+      appId: string;
+      installationId: string;
+      privateKeyPem: string;
+      resource: GitHubLeaseResource;
+    },
+    options?: { deadlineAt?: number },
+  ): Promise<{ token: string; expiresAt: Date }>;
+  revoke(token: string, options?: { deadlineAt?: number }): Promise<void>;
 }
 
 export type ExerciseCredentialSecret = <T>(
@@ -103,11 +106,11 @@ function deadlineAwareIssuer(issuer: UpstreamTokenIssuer, deadlineAt: number): U
   return {
     issue: async (input) => {
       requireLeaseBudget(deadlineAt, MIN_PROVIDER_AND_FINALIZE_MS);
-      return issuer.issue(input);
+      return issuer.issue(input, { deadlineAt });
     },
     revoke: async (token) => {
       requireLeaseBudget(deadlineAt, MIN_PROVIDER_AND_FINALIZE_MS);
-      return issuer.revoke(token);
+      return issuer.revoke(token, { deadlineAt });
     },
   };
 }

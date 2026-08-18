@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
-import { DATABASE_DEADLINE_EXCEEDED_MESSAGE, withDatabaseDeadline } from "../client";
+import { withTenantAuditQueue } from "../audit-chain";
+import {
+  DATABASE_DEADLINE_EXCEEDED_MESSAGE,
+  DatabaseDeadlineExceededError,
+  withDatabaseDeadline,
+} from "../client";
 
 const originalDriver = process.env.DATABASE_DRIVER;
 const originalUrl = process.env.DATABASE_URL;
@@ -18,6 +23,37 @@ afterEach(() => {
 });
 
 describe("cancel-safe database deadlines", () => {
+  test("a timed-out audit queue waiter never begins later in the background", async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const firstEntered = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const first = withTenantAuditQueue("deadline-queue", async () => {
+      entered();
+      await blocked;
+    });
+    await firstEntered;
+
+    let lateMutation = false;
+    await expect(
+      withTenantAuditQueue(
+        "deadline-queue",
+        async () => {
+          lateMutation = true;
+        },
+        Date.now() + 30,
+      ),
+    ).rejects.toBeInstanceOf(DatabaseDeadlineExceededError);
+    release();
+    await first;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(lateMutation).toBe(false);
+  });
+
   test("aborts a stalled Neon fetch and exposes only the normalized error", async () => {
     process.env.DATABASE_DRIVER = "neon-http";
     process.env.DATABASE_URL = "postgresql://lease:secret@deadline.invalid/steward";
