@@ -8,6 +8,26 @@ describe("assertPublicJwksDestination SSRF guard", () => {
     await expect(assertPublicJwksDestination("https://[::ffff:a00:1]/jwks")).rejects.toThrow();
   });
 
+  it("rejects IPv4-compatible and translated IPv6 literals", async () => {
+    await expect(assertPublicJwksDestination("https://[::127.0.0.1]/jwks")).rejects.toThrow();
+    await expect(assertPublicJwksDestination("https://[::7f00:1]/jwks")).rejects.toThrow();
+    await expect(
+      assertPublicJwksDestination("https://[::ffff:0:127.0.0.1]/jwks"),
+    ).rejects.toThrow();
+  });
+
+  it("rejects special-purpose IPv4 and IPv6 literals", async () => {
+    for (const uri of [
+      "https://192.0.2.1/jwks",
+      "https://198.51.100.1/jwks",
+      "https://203.0.113.1/jwks",
+      "https://[100::1]/jwks",
+      "https://[3fff::1]/jwks",
+    ]) {
+      await expect(assertPublicJwksDestination(uri), uri).rejects.toThrow();
+    }
+  });
+
   it("rejects NAT64 literals that embed private IPv4 targets", async () => {
     // 64:ff9b::/96 well-known prefix — 10.0.0.1 and 169.254.169.254 embedded.
     await expect(assertPublicJwksDestination("https://[64:ff9b::a00:1]/jwks")).rejects.toThrow();
