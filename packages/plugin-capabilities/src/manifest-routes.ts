@@ -41,6 +41,7 @@ import {
   GITHUB_APP_LEASE_ISSUER,
   type GitHubLeaseResource,
   issueUpstreamCredentialLease,
+  MAX_UPSTREAM_LEASE_SWEEP_INTERVAL_MS,
   recoverInterruptedUpstreamCredentialLeases,
   revokeUpstreamCredentialLease,
 } from "./upstream-leases";
@@ -49,7 +50,20 @@ export function upstreamLeaseIssuanceAvailableInRuntime(): boolean {
   // The Workers entry has no timer/queue/scheduled handler that can honor the
   // 30-second delivery recovery contract. Do not expose live provider tokens
   // from a runtime that cannot autonomously revoke abandoned delivery.
-  return process.env.STEWARD_RUNTIME !== "workers";
+  if (
+    process.env.STEWARD_RUNTIME === "workers" ||
+    process.env.STEWARD_UPSTREAM_LEASE_SWEEPER === "false"
+  ) {
+    return false;
+  }
+  const configured = process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS;
+  if (configured === undefined) return true;
+  const intervalMs = Number(configured);
+  return (
+    Number.isSafeInteger(intervalMs) &&
+    intervalMs >= 1_000 &&
+    intervalMs <= MAX_UPSTREAM_LEASE_SWEEP_INTERVAL_MS
+  );
 }
 
 const denyInternalTokenMint: ShortLivedTokenMinter = async () => {

@@ -16,7 +16,7 @@ import type { AppVariables } from "@stwd/shared";
 import { Hono } from "hono";
 import type { StewardAppContext } from "../context";
 import type { CapabilityAuditEvent } from "../issuance";
-import { createManifestRoutes } from "../manifest-routes";
+import { createManifestRoutes, upstreamLeaseIssuanceAvailableInRuntime } from "../manifest-routes";
 import { CapabilityStore } from "../store";
 import { validateCapabilitySpec } from "../validate";
 import { ensureAgent, ensureSecret, ensureTenant, type Harness, makeHarness } from "./_harness";
@@ -156,6 +156,31 @@ describe("manifest routes", () => {
     } finally {
       if (previousRuntime === undefined) delete process.env.STEWARD_RUNTIME;
       else process.env.STEWARD_RUNTIME = previousRuntime;
+    }
+  });
+
+  test("server issuance cannot configure away timely autonomous recovery", async () => {
+    const previousRuntime = process.env.STEWARD_RUNTIME;
+    const previousSweeper = process.env.STEWARD_UPSTREAM_LEASE_SWEEPER;
+    const previousInterval = process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS;
+    process.env.STEWARD_RUNTIME = "bun";
+    try {
+      process.env.STEWARD_UPSTREAM_LEASE_SWEEPER = "false";
+      delete process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS;
+      expect(upstreamLeaseIssuanceAvailableInRuntime()).toBe(false);
+      process.env.STEWARD_UPSTREAM_LEASE_SWEEPER = "true";
+      process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS = "30000";
+      expect(upstreamLeaseIssuanceAvailableInRuntime()).toBe(false);
+      process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS = "15000";
+      expect(upstreamLeaseIssuanceAvailableInRuntime()).toBe(true);
+    } finally {
+      if (previousRuntime === undefined) delete process.env.STEWARD_RUNTIME;
+      else process.env.STEWARD_RUNTIME = previousRuntime;
+      if (previousSweeper === undefined) delete process.env.STEWARD_UPSTREAM_LEASE_SWEEPER;
+      else process.env.STEWARD_UPSTREAM_LEASE_SWEEPER = previousSweeper;
+      if (previousInterval === undefined)
+        delete process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS;
+      else process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS = previousInterval;
     }
   });
 

@@ -55,3 +55,18 @@ test("lease scheduler advances its tenant cursor and waits for an in-flight swee
   await stopping;
   expect(cursors).toEqual([undefined, "tenant-100"]);
 });
+
+test("lease scheduler rejects a production interval that cannot honor the ACK deadline", async () => {
+  const previous = process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS;
+  process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS = "30000";
+  try {
+    await expect(
+      startUpstreamCredentialLeaseScheduler({
+        sweep: async () => ({ unknown: 0, revoked: 0, attention: 0, expired: 0 }),
+      }),
+    ).rejects.toThrow("must be between 1000 and 15000");
+  } finally {
+    if (previous === undefined) delete process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS;
+    else process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS = previous;
+  }
+});

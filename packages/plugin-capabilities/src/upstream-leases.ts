@@ -21,6 +21,7 @@ const MIN_GITHUB_ISSUED_TTL_MS = 55 * 60 * 1000;
 const MAX_GITHUB_ISSUED_TTL_MS = (GITHUB_INSTALLATION_TOKEN_TTL_SECONDS + 30) * 1000;
 const REVOCATION_CLAIM_TIMEOUT_MS = 30_000;
 export const DELIVERY_ACK_TIMEOUT_MS = 30_000;
+export const MAX_UPSTREAM_LEASE_SWEEP_INTERVAL_MS = DELIVERY_ACK_TIMEOUT_MS / 2;
 
 export interface GitHubLeaseResource {
   repositories: string[];
@@ -1679,12 +1680,18 @@ export async function revokeUpstreamLeasesForAuthority(input: {
   let firstError: string | undefined;
   for (const lease of leases) {
     const now = input.now ?? new Date();
-    const result = await revokeExactSealedLease({
-      ...input,
-      lease,
-      now,
-      mode: "authority_teardown",
-    });
+    let result: Awaited<ReturnType<typeof revokeExactSealedLease>>;
+    try {
+      result = await revokeExactSealedLease({
+        ...input,
+        lease,
+        now,
+        mode: "authority_teardown",
+      });
+    } catch (error) {
+      firstError ??= error instanceof Error ? error.message : "lease revocation persistence failed";
+      continue;
+    }
     if (!result.ok) {
       firstError ??= result.error;
       continue;

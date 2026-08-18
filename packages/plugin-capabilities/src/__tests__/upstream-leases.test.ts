@@ -1215,6 +1215,41 @@ describe("upstream credential leases", () => {
     expect(issuer.revokeCalls).toBe(3);
   });
 
+  test("a thrown first-sibling audit failure does not block later authority revocation", async () => {
+    const issuer = new FakeIssuer();
+    const first = await issueUpstreamCredentialLease(
+      issueArgs(issuer, "idempotency-authority-thrown-audit-first"),
+    );
+    const second = await issueUpstreamCredentialLease(
+      issueArgs(issuer, "idempotency-authority-thrown-audit-second"),
+    );
+    if (!first.ok || !second.ok) throw new Error("expected issuance");
+    expect(await acknowledge(first)).toEqual({ ok: true });
+    expect(await acknowledge(second)).toEqual({ ok: true });
+    issuer.revokeFailuresRemaining = 1;
+    let auditCalls = 0;
+    const result = await revokeUpstreamLeasesForAuthority({
+      db: harness.db,
+      tenantId: TENANT,
+      capabilityId: CAPABILITY,
+      issuer,
+      exerciseToken,
+      auditedTransaction: auditedTransaction(async () => {
+        auditCalls += 1;
+        if (auditCalls === 1) throw new Error("audit store unavailable");
+      }),
+      now: NOW,
+    });
+    expect(result).toMatchObject({ ok: false, error: "audit store unavailable" });
+    const rows = await harness.db.select().from(upstreamCredentialLeases);
+    expect(rows.map((row: { status: string }) => row.status).sort()).toEqual([
+      "revoked",
+      "revoking",
+    ]);
+    expect(issuer.revokeCalls).toBe(2);
+    expect(auditCalls).toBe(2);
+  });
+
   test("authority revoke audit failure leaves an exact recoverable claim", async () => {
     const issuer = new FakeIssuer();
     const issued = await issueUpstreamCredentialLease(

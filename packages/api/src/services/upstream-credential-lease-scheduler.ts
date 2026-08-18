@@ -1,10 +1,19 @@
 import { buildPluginContext } from "../plugin";
 
 const DEFAULT_INTERVAL_MS = 15_000;
+const MAX_INTERVAL_MS = 15_000;
 
 function configuredInterval(): number {
+  if (process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS === undefined) {
+    return DEFAULT_INTERVAL_MS;
+  }
   const parsed = Number(process.env.STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS);
-  return Number.isSafeInteger(parsed) && parsed >= 1_000 ? parsed : DEFAULT_INTERVAL_MS;
+  if (!Number.isSafeInteger(parsed) || parsed < 1_000 || parsed > MAX_INTERVAL_MS) {
+    throw new Error(
+      `STEWARD_UPSTREAM_LEASE_SWEEP_INTERVAL_MS must be between 1000 and ${MAX_INTERVAL_MS}`,
+    );
+  }
+  return parsed;
 }
 
 /**

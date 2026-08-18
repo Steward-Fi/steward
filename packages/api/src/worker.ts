@@ -93,13 +93,13 @@ export interface Env {
  */
 const hydratedEnvKeys = new Set<string>();
 
-function hydrateProcessEnv(env: Env): void {
+export function hydrateProcessEnv(env: Env): void {
   const target = (globalThis as any).process?.env;
   if (!target) return;
 
-  target.STEWARD_RUNTIME = "workers";
   const present = new Set<string>();
   for (const key of Object.keys(env)) {
+    if (key === "STEWARD_RUNTIME") continue;
     const value = env[key];
     if (typeof value === "string") {
       target[key] = value;
@@ -111,6 +111,7 @@ function hydrateProcessEnv(env: Env): void {
   }
   hydratedEnvKeys.clear();
   for (const key of present) hydratedEnvKeys.add(key);
+  target.STEWARD_RUNTIME = "workers";
 }
 
 let workerInit: Promise<void> | null = null;

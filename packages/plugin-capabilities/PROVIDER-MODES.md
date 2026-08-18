@@ -67,7 +67,9 @@ Every terminal or `needs_attention` transition and its core audit record commit
 atomically; an audit failure leaves the prior recoverable state for a later
 exact-CAS retry rather than creating an unaudited terminal outcome.
 The shipped Cloudflare Workers profile has no scheduled/queue recovery handler,
-so token-mode issuance fails closed there; broker mode remains available.
+so token-mode issuance fails closed there; broker mode remains available. The
+long-lived server also refuses token-mode issuance when the sweeper is disabled
+or configured above 15 seconds (half of the delivery acknowledgement window).
 
 ### broker mode
 ```
