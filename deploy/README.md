@@ -34,12 +34,16 @@ curl http://localhost:8080/health   # {"ok":true,"service":"steward-proxy",...}
 ### First-run: create a tenant
 
 ```bash
-# Replace with your STEWARD_PLATFORM_KEYS value
-PLATFORM_KEY="your_platform_key"
+# Read your STEWARD_PLATFORM_KEYS value without putting it in shell history or
+# curl argv. curl reads the header from an owner-only temporary file.
+read -rsp "Platform key: " PLATFORM_KEY; printf '\n'
+AUTH_FILE=$(mktemp); chmod 600 "$AUTH_FILE"
+trap 'rm -f "$AUTH_FILE"' EXIT
+printf 'X-Steward-Platform-Key: %s\n' "$PLATFORM_KEY" > "$AUTH_FILE"
 
 curl -s -X POST http://localhost:3200/platform/tenants \
   -H "Content-Type: application/json" \
-  -H "X-Steward-Platform-Key: $PLATFORM_KEY" \
+  -H "@$AUTH_FILE" \
   -d '{"id": "default", "name": "Default Tenant"}' | jq .
 
 # Save the returned apiKey — that is your tenant API key

@@ -15,6 +15,10 @@ set -euo pipefail
 # =============================================================================
 
 DRY_RUN=false
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PSQL_PASSWORD_FILE=""
+MIGRATE_LOG=""
+trap 'rm -f "${PSQL_PASSWORD_FILE:-}" "${MIGRATE_LOG:-}"' EXIT
 
 for arg in "$@"; do
   case "$arg" in
@@ -58,18 +62,15 @@ fi
 # /proc/*/cmdline for the duration of every migration file. Strip the
 # password from the URL and pass it via the PGPASSWORD environment instead.
 # ---------------------------------------------------------------------------
-PSQL_URL="$DATABASE_URL"
-PSQL_PASSWORD=""
-if [[ "$DATABASE_URL" =~ ^(postgres(ql)?://)([^:@/]+):([^@]+)@(.+)$ ]]; then
-  PSQL_URL="${BASH_REMATCH[1]}${BASH_REMATCH[3]}@${BASH_REMATCH[5]}"
-  # Percent-decode the password component (PGPASSWORD is used literally).
-  PSQL_PASSWORD="$(printf '%b' "${BASH_REMATCH[4]//%/\\x}")"
-fi
+PSQL_PASSWORD_FILE="$(mktemp -t steward-psql-password.XXXXXX)"
+PSQL_URL="$(STEWARD_PSQL_PASSWORD_FILE="$PSQL_PASSWORD_FILE" bun "$SCRIPT_DIR/lib/parse-psql-url.ts")"
+PSQL_PASSWORD="$(<"$PSQL_PASSWORD_FILE")"
+rm -f "$PSQL_PASSWORD_FILE"
+PSQL_PASSWORD_FILE=""
 
 # ---------------------------------------------------------------------------
 # Find migration directory (relative to repo root or /opt/steward)
 # ---------------------------------------------------------------------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 MIGRATION_DIR="$REPO_ROOT/packages/db/drizzle"
 
@@ -102,7 +103,6 @@ FAILED=0
 
 # SEC-201: mktemp instead of a predictable /tmp path (symlink-safe on shared hosts)
 MIGRATE_LOG="$(mktemp -t steward-migrate.XXXXXX)"
-trap 'rm -f "$MIGRATE_LOG"' EXIT
 
 for sql_file in "${MIGRATIONS[@]}"; do
   name="$(basename "$sql_file")"

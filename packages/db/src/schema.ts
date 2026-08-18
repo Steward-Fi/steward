@@ -45,10 +45,11 @@ import {
 // drops the tenant predicate is a cross-tenant data leak; the database would
 // not catch it.
 //
-// RLS as defense-in-depth for the highest-value tables (`secrets`,
-// `encrypted_keys`, `accounts`) is a deliberate DEFERRED decision, not an
-// oversight. Enabling it safely requires all of the following, and shipping
-// half of it is worse than none:
+// RLS activation is tracked by SEC-169. The executable transaction-context
+// primitive, complete policy inventory, and rollout gates live in
+// `tenant-rls-context.ts`, `rls-inventory.ts`, and
+// `docs/security/database-rls-rollout.mdx`. Enabling it safely requires all of
+// the following, and shipping half of it is worse than none:
 //   1. a per-request `SET LOCAL app.tenant_id` inside EVERY transaction (the
 //      pooled postgres-js role is shared by all tenants, so the GUC must be
 //      set on the checked-out connection for exactly the unit of work);
@@ -2346,6 +2347,119 @@ export const providerAgentBudgets = pgTable(
 );
 
 export type ProviderAgentBudget = typeof providerAgentBudgets.$inferSelect;
+
+/**
+ * One-time, upstream-derived credential deliveries. The credential itself is
+ * deliberately absent: only its SHA-256 digest and the immutable authority
+ * binding survive the response boundary.
+ */
+export const upstreamCredentialLeases = pgTable(
+  "upstream_credential_leases",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    agentId: varchar("agent_id", { length: 64 }).notNull(),
+    grantId: uuid("grant_id").notNull(),
+    capabilityId: uuid("capability_id").notNull(),
+    issuer: varchar("issuer", { length: 64 }).notNull(),
+    resource: jsonb("resource").$type<Record<string, unknown>>().notNull(),
+    resourceHash: varchar("resource_hash", { length: 64 }).notNull(),
+    authorityDigest: varchar("authority_digest", { length: 64 }).notNull(),
+    idempotencyKeyHash: varchar("idempotency_key_hash", { length: 64 }).notNull(),
+    tokenHash: varchar("token_hash", { length: 64 }),
+    tokenCiphertext: text("token_ciphertext"),
+    tokenIv: text("token_iv"),
+    tokenAuthTag: text("token_auth_tag"),
+    tokenSalt: text("token_salt"),
+    status: varchar("status", { length: 24 }).notNull().default("issuing"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    authorityCheckedAt: timestamp("authority_checked_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    agentFk: foreignKey({
+      columns: [table.tenantId, table.agentId],
+      foreignColumns: [agents.tenantId, agents.id],
+      name: "upstream_credential_leases_agent_fk",
+    }).onDelete("restrict"),
+    workspaceFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId],
+      foreignColumns: [workspaces.tenantId, workspaces.id],
+      name: "upstream_credential_leases_workspace_fk",
+    }).onDelete("restrict"),
+    replayUnique: uniqueIndex("upstream_credential_leases_replay_uniq").on(
+      table.tenantId,
+      table.agentId,
+      table.idempotencyKeyHash,
+    ),
+    tenantIdUnique: uniqueIndex("upstream_credential_leases_tenant_id_uniq").on(
+      table.tenantId,
+      table.id,
+    ),
+    statusExpiryIdx: index("upstream_credential_leases_status_expiry_idx").on(
+      table.status,
+      table.expiresAt,
+    ),
+    statusUpdatedIdx: index("upstream_credential_leases_status_updated_idx").on(
+      table.status,
+      table.updatedAt,
+    ),
+    statusAuthorityCheckedIdx: index("upstream_credential_leases_status_authority_checked_idx").on(
+      table.status,
+      table.authorityCheckedAt,
+    ),
+    bindingIdx: index("upstream_credential_leases_binding_idx").on(
+      table.tenantId,
+      table.workspaceId,
+      table.agentId,
+      table.grantId,
+    ),
+    statusCheck: check(
+      "upstream_credential_leases_status_check",
+      sql`${table.status} IN ('issuing','delivery_pending','acknowledging','active','revoking','revoked','expired','failed','needs_attention')`,
+    ),
+  }),
+);
+
+export type UpstreamCredentialLease = typeof upstreamCredentialLeases.$inferSelect;
+
+/** Durable, secret-free lifecycle evidence for upstream credential leases. */
+export const upstreamCredentialLeaseEvents = pgTable(
+  "upstream_credential_lease_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    leaseId: uuid("lease_id").notNull(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    action: varchar("action", { length: 64 }).notNull(),
+    decision: varchar("decision", { length: 16 }).notNull(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    parentFk: foreignKey({
+      columns: [table.tenantId, table.leaseId],
+      foreignColumns: [upstreamCredentialLeases.tenantId, upstreamCredentialLeases.id],
+      name: "upstream_credential_lease_events_parent_fk",
+    }).onDelete("restrict"),
+    leaseCreatedIdx: index("upstream_credential_lease_events_lease_created_idx").on(
+      table.leaseId,
+      table.createdAt,
+    ),
+    tenantCreatedIdx: index("upstream_credential_lease_events_tenant_created_idx").on(
+      table.tenantId,
+      table.createdAt,
+    ),
+  }),
+);
+
+export type UpstreamCredentialLeaseEvent = typeof upstreamCredentialLeaseEvents.$inferSelect;
 
 /** Append-only reservation identities. Mutable reconciliation metadata is
  * isolated from the immutable generation payload and claimed with SKIP LOCKED. */

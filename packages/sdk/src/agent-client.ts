@@ -85,9 +85,17 @@ export interface ManifestEntry {
 export interface TokenCapability {
   mode: "token";
   token: string;
-  jti: string;
-  ttlSeconds: number;
-  scopes: string[];
+  /** Upstream lease identity. Present for real provider-token mode. */
+  leaseId?: string;
+  issuer?: string;
+  /** Upstream leases remain delivery-pending until the holder proves receipt. */
+  acknowledgementRequired?: boolean;
+  acknowledgementDeadlineSeconds?: number;
+  resource?: { repositories: string[]; permissions: Record<string, "read" | "write" | "admin"> };
+  /** @deprecated legacy Steward-JWT fields; not present on upstream leases. */
+  jti?: string;
+  ttlSeconds?: number;
+  scopes?: string[];
   manifest: string;
   capabilityId: string;
   /** epoch ms at which this capability token expires. */
@@ -103,6 +111,15 @@ export interface BrokerCapability {
 }
 
 export type IssuedCapability = TokenCapability | BrokerCapability;
+
+export interface CapabilityIssueOptions {
+  ttlSeconds?: number;
+  /** Required by upstream token-mode providers. */
+  workspaceId?: string;
+  resource?: TokenCapability["resource"];
+  /** Required for one-time provider-token delivery; never reused for renewal. */
+  idempotencyKey?: string;
+}
 
 /**
  * 202 approval-pending is a FIRST-CLASS state, not an exception: a broker invoke
@@ -155,6 +172,8 @@ export interface AgentClientConfig {
   now?: () => number;
   /** injectable fetch (tests / custom transport). */
   fetchImpl?: typeof fetch;
+  /** Per-header and per-body transport deadline in ms. Default 10000. */
+  requestTimeoutMs?: number;
   /**
    * Tolerance (seconds) applied when reading a token's `exp` claim, to absorb
    * modest client/server clock skew when scheduling renewal. Default 30s.
@@ -197,6 +216,7 @@ export class AgentClient {
   private readonly now: () => number;
   private readonly fetchImpl: typeof fetch;
   private readonly clockSkewToleranceMs: number;
+  private readonly requestTimeoutMs: number;
 
   private token: string | null = null;
   private tenantId: string | null = null;
@@ -224,6 +244,14 @@ export class AgentClient {
     this.now = config.now ?? (() => Date.now());
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.clockSkewToleranceMs = (config.clockSkewToleranceSeconds ?? 30) * 1000;
+    this.requestTimeoutMs = config.requestTimeoutMs ?? 10_000;
+    if (
+      !Number.isSafeInteger(this.requestTimeoutMs) ||
+      this.requestTimeoutMs < 10 ||
+      this.requestTimeoutMs > 60_000
+    ) {
+      throw new Error("requestTimeoutMs must be an integer from 10 to 60000");
+    }
   }
 
   // ── observability ───────────────────────────────────────────────────────────
@@ -400,20 +428,20 @@ export class AgentClient {
    * Issue a capability by manifest id. token-mode returns a short-lived scoped
    * token; broker-mode returns a delegation descriptor (exercise via invoke()).
    */
-  async issue(manifestId: string, opts?: { ttlSeconds?: number }): Promise<IssuedCapability> {
+  async issue(manifestId: string, opts?: CapabilityIssueOptions): Promise<IssuedCapability> {
     return this.issueOrRenew(manifestId, false, opts);
   }
 
   /** Renew a capability (identical security path; refreshes a token-mode token,
    * re-checks a broker grant). Revocation lands here: a revoked grant → 403. */
-  async renew(manifestId: string, opts?: { ttlSeconds?: number }): Promise<IssuedCapability> {
+  async renew(manifestId: string, opts?: CapabilityIssueOptions): Promise<IssuedCapability> {
     return this.issueOrRenew(manifestId, true, opts);
   }
 
   private async issueOrRenew(
     manifestId: string,
     isRenewal: boolean,
-    opts?: { ttlSeconds?: number },
+    opts?: CapabilityIssueOptions,
   ): Promise<IssuedCapability> {
     const path = `/capabilities/manifest/${encodeURIComponent(manifestId)}/${
       isRenewal ? "renew" : "issue"
@@ -428,6 +456,12 @@ export class AgentClient {
           scopes: string[];
           manifest: string;
           capabilityId: string;
+          leaseId?: string;
+          issuer?: string;
+          acknowledgementRequired?: boolean;
+          acknowledgementDeadlineSeconds?: number;
+          expiresAt?: string;
+          resource?: TokenCapability["resource"];
         }
       | {
           ok: true;
@@ -436,17 +470,31 @@ export class AgentClient {
           manifest: string;
           capabilityId: string;
         }
-    >(path, opts?.ttlSeconds !== undefined ? { ttlSeconds: opts.ttlSeconds } : {});
+    >(
+      path,
+      opts
+        ? { ttlSeconds: opts.ttlSeconds, workspaceId: opts.workspaceId, resource: opts.resource }
+        : {},
+      opts?.idempotencyKey ? { "Idempotency-Key": opts.idempotencyKey } : undefined,
+    );
 
     if (raw.mode === "token") {
       const expFromJwt = readJwtExpMs(raw.token);
-      const expiresAt = expFromJwt ?? this.now() + raw.ttlSeconds * 1000;
+      const upstreamExpiry = raw.expiresAt ? Date.parse(raw.expiresAt) : Number.NaN;
+      const expiresAt = Number.isFinite(upstreamExpiry)
+        ? upstreamExpiry
+        : (expFromJwt ?? this.now() + raw.ttlSeconds * 1000);
       return {
         mode: "token",
         token: raw.token,
         jti: raw.jti,
         ttlSeconds: raw.ttlSeconds,
         scopes: raw.scopes,
+        leaseId: raw.leaseId,
+        issuer: raw.issuer,
+        acknowledgementRequired: raw.acknowledgementRequired,
+        acknowledgementDeadlineSeconds: raw.acknowledgementDeadlineSeconds,
+        resource: raw.resource,
         manifest: raw.manifest,
         capabilityId: raw.capabilityId,
         expiresAt,
@@ -458,6 +506,23 @@ export class AgentClient {
       manifest: raw.manifest,
       capabilityId: raw.capabilityId,
     };
+  }
+
+  /** Revoke a one-time upstream lease. The token is supplied as proof because
+   * Steward deliberately persists only its digest. */
+  async revokeLease(leaseId: string, token: string): Promise<void> {
+    await this.postAuthed(`/capabilities/manifest/leases/${encodeURIComponent(leaseId)}/revoke`, {
+      token,
+    });
+  }
+
+  /** Confirm that a one-time upstream token reached its intended holder. Call
+   * only after the caller has accepted custody; unacknowledged deliveries are
+   * revoked by Steward's bounded recovery sweep. */
+  async acknowledgeLease(leaseId: string, token: string): Promise<void> {
+    await this.postAuthed(`/capabilities/manifest/leases/${encodeURIComponent(leaseId)}/ack`, {
+      token,
+    });
   }
 
   // ── broker invoke ─────────────────────────────────────────────────────────────
@@ -474,7 +539,7 @@ export class AgentClient {
     if (!this.isEnrolled() || !this.token) {
       throw new NotEnrolledError();
     }
-    const res = await this.fetchImpl(
+    const res = await this.request(
       `${this.baseUrl}/capabilities/${encodeURIComponent(name)}/invoke`,
       {
         method: "POST",
@@ -485,9 +550,7 @@ export class AgentClient {
         },
         body: JSON.stringify(payload ?? {}),
       },
-    ).catch((e: unknown) => {
-      throw new AgentClientError(e instanceof Error ? e.message : "network error", 0);
-    });
+    );
 
     // 202 approval-pending: A1 returns { ok:true, data:{ approvalId, status:"pending" } }.
     if (res.status === 202) {
@@ -523,12 +586,10 @@ export class AgentClient {
 
   // ── transport ─────────────────────────────────────────────────────────────────
   private async postPublic<T>(path: string, body: unknown): Promise<T> {
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+    const res = await this.request(`${this.baseUrl}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify(body),
-    }).catch((e: unknown) => {
-      throw new AgentClientError(e instanceof Error ? e.message : "network error", 0);
     });
     return this.unwrap<T>(res);
   }
@@ -536,22 +597,30 @@ export class AgentClient {
   private async getAuthed<T>(path: string): Promise<T> {
     return this.authed<T>(path, "GET");
   }
-  private async postAuthed<T>(path: string, body: unknown): Promise<T> {
-    return this.authed<T>(path, "POST", body);
+  private async postAuthed<T>(
+    path: string,
+    body: unknown,
+    headers?: Record<string, string>,
+  ): Promise<T> {
+    return this.authed<T>(path, "POST", body, headers);
   }
 
-  private async authed<T>(path: string, method: "GET" | "POST", body?: unknown): Promise<T> {
+  private async authed<T>(
+    path: string,
+    method: "GET" | "POST",
+    body?: unknown,
+    extraHeaders?: Record<string, string>,
+  ): Promise<T> {
     if (!this.isEnrolled() || !this.token) throw new NotEnrolledError();
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+    const res = await this.request(`${this.baseUrl}${path}`, {
       method,
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json",
         Authorization: `Bearer ${this.token}`,
+        ...extraHeaders,
       },
       body: method === "POST" ? JSON.stringify(body ?? {}) : undefined,
-    }).catch((e: unknown) => {
-      throw new AgentClientError(e instanceof Error ? e.message : "network error", 0);
     });
     if (res.status === 401) {
       this.failClosed("authed request rejected with 401 (token revoked or expired)");
@@ -571,13 +640,83 @@ export class AgentClient {
   }
 
   private async safeJson(res: Response): Promise<Record<string, unknown> | null> {
-    const text = await res.text().catch(() => "");
+    const maxBytes = 1024 * 1024;
+    const declared = res.headers.get("content-length");
+    if (declared !== null) {
+      const length = Number(declared);
+      if (!Number.isSafeInteger(length) || length < 0 || length > maxBytes) {
+        void res.body?.cancel().catch(() => undefined);
+        throw new AgentClientError("response exceeded maximum size", res.status);
+      }
+    }
+    if (!res.body) return null;
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new AgentClientError("response body timed out", 0));
+        void Promise.resolve(reader.cancel()).catch(() => undefined);
+      }, this.requestTimeoutMs);
+    });
+    try {
+      while (true) {
+        const { done, value } = await Promise.race([reader.read(), deadline]);
+        if (done) break;
+        total += value.byteLength;
+        if (total > maxBytes) {
+          void Promise.resolve(reader.cancel()).catch(() => undefined);
+          throw new AgentClientError("response exceeded maximum size", res.status);
+        }
+        chunks.push(value);
+      }
+    } catch (error) {
+      if (error instanceof AgentClientError) throw error;
+      throw new AgentClientError("response body could not be read", 0);
+    } finally {
+      if (timer) clearTimeout(timer);
+      try {
+        reader.releaseLock();
+      } catch {
+        // Cancellation must not replace the fixed transport error.
+      }
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const text = new TextDecoder().decode(bytes);
     if (!text) return null;
     try {
       const parsed = JSON.parse(text);
       return isRecord(parsed) ? parsed : { data: parsed };
     } catch {
       return null;
+    }
+  }
+
+  private async request(url: string, init: RequestInit): Promise<Response> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new AgentClientError("network request timed out", 0));
+        controller.abort();
+      }, this.requestTimeoutMs);
+    });
+    try {
+      return await Promise.race([
+        this.fetchImpl(url, { ...init, redirect: "error", signal: controller.signal }),
+        deadline,
+      ]);
+    } catch (error) {
+      if (error instanceof AgentClientError) throw error;
+      throw new AgentClientError("network request failed", 0);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 }

@@ -72,6 +72,7 @@ import {
 } from "@stwd/policy-engine";
 import type { PluginMigrationSource, StewardPlugin } from "@stwd/shared";
 import { WebhookEventRegistry } from "@stwd/shared";
+import { KeyStore, SecretVault } from "@stwd/vault";
 import type { Hono } from "hono";
 import {
   requireAgentJwt,
@@ -88,6 +89,7 @@ import {
   ensureAgentForTenant,
   getPolicySet,
   isValidAnyAddress,
+  MASTER_PASSWORD,
   policyEngine,
   priceOracle,
   safeJsonParse,
@@ -185,6 +187,22 @@ export interface StewardAppContext {
   withTenantAuditedTransaction: typeof withTenantAuditedTransaction;
   getAgentTokenStatus: typeof getAgentTokenStatus;
   getRedisClient: typeof getRedisClient;
+  exerciseCredentialSecret<T>(
+    tenantId: string,
+    secretId: string,
+    use: (plaintext: string) => Promise<T>,
+  ): Promise<T>;
+  sealCredentialLeaseToken(
+    tenantId: string,
+    leaseId: string,
+    token: string,
+  ): Promise<{ ciphertext: string; iv: string; tag: string; salt: string }>;
+  exerciseCredentialLeaseToken<T>(
+    tenantId: string,
+    leaseId: string,
+    sealed: { ciphertext: string; iv: string; tag: string; salt: string },
+    use: (token: string) => Promise<T>,
+  ): Promise<T>;
   requireAgentJwt: typeof requireAgentJwt;
   /**
    * Capability-surface authenticator: verifies the agent JWT and installs the
@@ -229,6 +247,8 @@ export type StewardApiPlugin = StewardPlugin<StewardApp, StewardAppContext, Eval
  * root and passed to {@link registerPlugin}.
  */
 export function buildPluginContext(): StewardAppContext {
+  const credentialVault = new SecretVault(MASTER_PASSWORD);
+  const leaseKeyStore = new KeyStore(MASTER_PASSWORD, undefined, "credential-lease");
   return {
     db,
     vault,
@@ -242,6 +262,18 @@ export function buildPluginContext(): StewardAppContext {
     withTenantAuditedTransaction,
     getAgentTokenStatus,
     getRedisClient,
+    exerciseCredentialSecret: (tenantId, secretId, use) =>
+      credentialVault.exerciseSecret(tenantId, secretId, use),
+    sealCredentialLeaseToken: async (tenantId, leaseId, token) =>
+      leaseKeyStore.encrypt(token, { tenantId, name: `upstream-lease:${leaseId}`, version: 1 }),
+    exerciseCredentialLeaseToken: async (tenantId, leaseId, sealed, use) => {
+      const token = leaseKeyStore.decrypt(sealed, {
+        tenantId,
+        name: `upstream-lease:${leaseId}`,
+        version: 1,
+      });
+      return use(token);
+    },
     requireAgentJwt,
     requireCapabilityAgentJwt,
     requireProviderAgentJwt,

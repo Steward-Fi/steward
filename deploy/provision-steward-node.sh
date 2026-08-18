@@ -163,9 +163,11 @@ echo "▸ Step 7: Creating milady-cloud tenant..."
 # (PK=$(...)) so the secret is never placed on the local->remote command line
 # nor printed to this script's stdout / CI logs.
 TENANT_RESP=$(${SSH_CMD} "set -e; PK=\$(sed -n 's/^STEWARD_PLATFORM_KEY=//p' ${REMOTE_DIR}/deploy/.env | head -n1); \
+AUTH_FILE=\$(mktemp); chmod 600 \"\${AUTH_FILE}\"; trap 'rm -f \"\${AUTH_FILE}\"' EXIT; \
+printf 'X-Steward-Platform-Key: %s\\n' \"\${PK}\" > \"\${AUTH_FILE}\"; \
 curl -sf -X POST http://localhost:3200/platform/tenants \
   -H 'Content-Type: application/json' \
-  -H \"X-Steward-Platform-Key: \${PK}\" \
+  -H \"@\${AUTH_FILE}\" \
   -d '{\"id\": \"milady-cloud\", \"name\": \"Milady Cloud\"}'" 2>&1 || true)
 
 if echo "${TENANT_RESP}" | grep -q '"ok":true'; then

@@ -6,6 +6,13 @@ on:
   push:
     tags: ["v*"]
 
+# A second run for the same tag must wait for the first run to publish its
+# release. It will then fail the immutable-release preflight instead of racing
+# through the same registry writes.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -32,6 +39,13 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
           scope: "@stwd"
+
+      # Refuse reruns after a release is published before any registry writes.
+      # Drafts remain recoverable; a missing release is the normal first run.
+      - name: Verify release tag is unpublished
+        run: bun scripts/check-release-rerun.ts "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # Install all monorepo dependencies
       - name: Install dependencies

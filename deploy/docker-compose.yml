@@ -130,7 +130,10 @@ services:
       - "--maxmemory"
       - "256mb"
       - "--maxmemory-policy"
-      - "allkeys-lru"
+      # Enforcement counters must never be silently evicted. When the bound is
+      # reached, noeviction makes writes fail and the production proxy's
+      # Redis-required path fails closed.
+      - "noeviction"
     volumes:
       - steward-redis-data:/data
     healthcheck:
