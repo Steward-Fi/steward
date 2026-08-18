@@ -856,7 +856,7 @@ describe("refresh", () => {
     expect(reconnected.completed.reconnected).toBe(true);
   });
 
-  test("failed staged revocation retains the exact handle and retries without refresh", async () => {
+  test("non-200 2xx revocation retains the exact handle and retries without refresh", async () => {
     const { completed } = await connectHappy(new MemoryConnectStore());
     const invalid = installFakeX({
       refreshResponses: [
@@ -869,7 +869,7 @@ describe("refresh", () => {
           },
         },
       ],
-      revokeStatuses: [503, 200],
+      revokeStatuses: [202, 200],
     });
     await expect(
       refreshXProviderCredential({
@@ -1357,11 +1357,14 @@ test("XConnectError carries code + http status", () => {
 
 test("real X transport rejects oversized provider responses before parsing", async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () =>
-    new Response("{}", {
+  let redirect: RequestRedirect | undefined;
+  globalThis.fetch = (async (_input, init) => {
+    redirect = init?.redirect;
+    return new Response("{}", {
       status: 200,
       headers: { "content-type": "application/json", "content-length": "1048577" },
-    })) as typeof fetch;
+    });
+  }) as typeof fetch;
   try {
     await expect(
       __runDefaultXForwardForTests({
@@ -1370,6 +1373,7 @@ test("real X transport rejects oversized provider responses before parsing", asy
         headers: { accept: "application/json" },
       }),
     ).rejects.toThrow("X provider response exceeded maximum size");
+    expect(redirect).toBe("error");
   } finally {
     globalThis.fetch = originalFetch;
   }

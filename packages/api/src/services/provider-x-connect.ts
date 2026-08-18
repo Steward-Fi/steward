@@ -201,6 +201,9 @@ async function defaultForward(req: XForwardRequest): Promise<XForwardResponse> {
     method: req.method,
     headers: req.headers,
     body: req.body,
+    // OAuth requests carry credentials in both headers and bodies. Never let a
+    // provider redirect replay them to a different endpoint or origin.
+    redirect: "error",
     signal: AbortSignal.timeout(X_FORWARD_TIMEOUT_MS),
   });
   const text = await readBoundedXResponse(res);
@@ -2035,7 +2038,10 @@ async function revokeUpstreamBestEffort(
     },
     body: body.toString(),
   });
-  return res.ok;
+  // RFC 7009 specifies HTTP 200 for a processed revocation request, including
+  // an already-invalid token. Do not treat an arbitrary 2xx (especially an
+  // asynchronous 202) as proof strong enough to destroy our only staged handle.
+  return res.status === 200;
 }
 
 // re-export sql for callers/tests that need raw predicates
