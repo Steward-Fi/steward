@@ -149,7 +149,11 @@ beforeEach(() => {
   clearAgentTokenStatusForTests?.();
 });
 
-async function latestTokenAudit(action: "agent.token.expiring" | "agent.token.expired") {
+async function latestTokenAudit(
+  action: "agent.token.expiring" | "agent.token.expired",
+  expectedAgentId: string,
+  expectedExp: number,
+) {
   // Production telemetry uses fire-and-forget `trackAuditEvent`, so observe the
   // real durable sink instead of globally mocking the audit module. A global
   // module mock leaked into sibling test files in the same Bun worker and made
@@ -161,7 +165,13 @@ async function latestTokenAudit(action: "agent.token.expiring" | "agent.token.ex
       .where(and(eq(auditEvents.tenantId, TENANT_ID), eq(auditEvents.action, action)))
       .orderBy(desc(auditEvents.seq))
       .limit(1);
-    if (event) return event;
+    if (
+      event?.actorId === expectedAgentId &&
+      event.metadata?.agentId === expectedAgentId &&
+      event.metadata?.exp === expectedExp
+    ) {
+      return event;
+    }
     await Bun.sleep(10);
   }
   return undefined;
@@ -232,7 +242,7 @@ describe("agent trade token expiry monitoring", () => {
     });
 
     expect(res.status).toBe(200);
-    const event = await latestTokenAudit("agent.token.expiring");
+    const event = await latestTokenAudit("agent.token.expiring", AGENT_ID, exp);
     expect(event?.actorId).toBe(AGENT_ID);
     expect(event?.metadata?.agentId).toBe(AGENT_ID);
     expect(event?.metadata?.exp).toBe(exp);
@@ -254,7 +264,7 @@ describe("agent trade token expiry monitoring", () => {
     });
 
     expect(res.status).toBe(401);
-    const event = await latestTokenAudit("agent.token.expired");
+    const event = await latestTokenAudit("agent.token.expired", AGENT_ID, exp);
     expect(event?.actorId).toBe(AGENT_ID);
     expect(event?.metadata?.agentId).toBe(AGENT_ID);
     expect(event?.metadata?.exp).toBe(exp);
