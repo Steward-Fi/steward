@@ -1,12 +1,8 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { closeDb, getDb, tenantRequestSigningKeys, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { KeyStore } from "@stwd/vault";
 import { Hono } from "hono";
-import {
-  authorizationSignature,
-  createAuthorizationSignature,
-} from "../middleware/authorization-signature";
 import type { AppVariables } from "../services/context";
 
 // SEC-010 re-audit regression: the authorization-signature middleware is mounted
@@ -23,6 +19,10 @@ const STATIC_SECRET = "request-signing-secret-with-enough-entropy";
 const PATH = "/vault/agent-1/sign";
 const BODY = JSON.stringify({ value: "1000" });
 const FRESH_TS = () => String(Math.floor(Date.now() / 1000));
+let tenantKeyKdfCount = 0;
+let authorizationSignature: typeof import("../middleware/authorization-signature")["authorizationSignature"];
+let createAuthorizationSignature: typeof import("../middleware/authorization-signature")["createAuthorizationSignature"];
+let __setTenantKeyKdfObserverForTests: typeof import("../middleware/authorization-signature")["__setTenantKeyKdfObserverForTests"];
 
 function makeApp() {
   const app = new Hono<{ Variables: AppVariables }>();
@@ -63,6 +63,8 @@ beforeAll(async () => {
   setPGLiteOverride(db, async () => {
     await client.close();
   });
+  ({ authorizationSignature, createAuthorizationSignature, __setTenantKeyKdfObserverForTests } =
+    await import("../middleware/authorization-signature"));
 
   await getDb()
     .insert(tenants)
@@ -94,6 +96,17 @@ afterAll(async () => {
   await closeDb();
 });
 
+beforeEach(() => {
+  tenantKeyKdfCount = 0;
+  __setTenantKeyKdfObserverForTests(() => {
+    tenantKeyKdfCount += 1;
+  });
+});
+
+afterEach(() => {
+  __setTenantKeyKdfObserverForTests(null);
+});
+
 describe("authorizationSignature tenant signing keys", () => {
   it("verifies a request signed with a named tenant signing key", async () => {
     const app = makeApp();
@@ -106,6 +119,7 @@ describe("authorizationSignature tenant signing keys", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, verified: true });
+    expect(tenantKeyKdfCount).toBe(1);
   });
 
   it("rejects an unknown (well-formed) signing key id without decrypt work", async () => {
@@ -121,6 +135,7 @@ describe("authorizationSignature tenant signing keys", () => {
 
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ ok: false, error: "Invalid signing key id" });
+    expect(tenantKeyKdfCount).toBe(0);
   });
 
   it("rejects a malformed signing key id cheaply (no uuid DB error)", async () => {
@@ -136,6 +151,7 @@ describe("authorizationSignature tenant signing keys", () => {
 
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ ok: false, error: "Invalid signing key id" });
+    expect(tenantKeyKdfCount).toBe(0);
   });
 
   it("does not use tenant signing keys when no key id is named", async () => {
@@ -152,6 +168,7 @@ describe("authorizationSignature tenant signing keys", () => {
 
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ ok: false, error: "Invalid request signature" });
+    expect(tenantKeyKdfCount).toBe(0);
   });
 
   it("still verifies key-id-less requests signed with a configured static secret", async () => {
@@ -165,5 +182,6 @@ describe("authorizationSignature tenant signing keys", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, verified: true });
+    expect(tenantKeyKdfCount).toBe(0);
   });
 });
