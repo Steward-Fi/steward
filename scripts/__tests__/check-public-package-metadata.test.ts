@@ -65,6 +65,7 @@ describe("public package metadata check", () => {
     expect(isStrictSemverIncrease("1.0.0", "1.0.1")).toBe(true);
     expect(isStrictSemverIncrease("1.0.0", "2.0")).toBe(false);
     expect(isStrictSemverIncrease("1.0.0-1", "1.0.0-01")).toBe(false);
+    expect(isStrictSemverIncrease("1.0.0", `${"9".repeat(257)}.0.0`)).toBe(false);
   });
 
   test("rejects malformed or ref-like SHA inputs before invoking git", () => {

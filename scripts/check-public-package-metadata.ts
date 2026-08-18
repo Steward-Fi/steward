@@ -43,11 +43,19 @@ function comparePrerelease(left: string | undefined, right: string | undefined):
 
 export function isStrictSemverIncrease(base: string | null, head: string | null): boolean {
   if (base === null || head === null) return false;
+  // package.json is PR-controlled input. Bound parsing/BigInt work so an
+  // absurdly long numeric version cannot turn this required check into a CI
+  // memory/CPU denial of service.
+  if (base.length > 256 || head.length > 256) return false;
   const before = SEMVER.exec(base);
   const after = SEMVER.exec(head);
   if (!before || !after) return false;
   for (const prerelease of [before[4], after[4]]) {
-    if (prerelease?.split(".").some((part) => /^\d+$/.test(part) && part.length > 1 && part[0] === "0")) {
+    if (
+      prerelease
+        ?.split(".")
+        .some((part) => /^\d+$/.test(part) && part.length > 1 && part[0] === "0")
+    ) {
       return false;
     }
   }
