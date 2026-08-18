@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from 
 import { agentWallets, encryptedChainKeys, eq, getDb, tenants, transactions } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and } from "drizzle-orm";
+import { generatePrivateKey } from "viem/accounts";
 import type {
   ExternalKeyCustodyProvider,
   ExternalKeyHandleImportRequest,
@@ -687,6 +688,98 @@ describe("external key custody seam", () => {
       .from(transactions)
       .where(eq(transactions.id, "toctou-mismatch-1"));
     expect(rows).toHaveLength(0);
+  });
+
+  test("fails closed when an external-custody-bound sign re-resolves to the legacy encrypted_keys fallback", async () => {
+    const provider = new TestExternalKeyProvider("provider-signing", async () => {
+      // If this ever runs, the guard failed: an external-custody-bound
+      // authorization fell through to local key material.
+      throw new Error("provider must not be reached for a legacy-fallback sign");
+    });
+    vault = await freshVault(provider);
+    const legacyPrivateKey = generatePrivateKey();
+    await vault.importKey(TENANT_ID, "agent-legacy", legacyPrivateKey, "evm");
+    // Simulate a pre-multi-chain legacy agent: the EVM key lives ONLY in the
+    // legacy encrypted_keys table (no encrypted_chain_keys / agent_wallets).
+    await getDb()
+      .delete(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, "agent-legacy"),
+          eq(encryptedChainKeys.chainFamily, "evm"),
+        ),
+      );
+    await getDb()
+      .delete(agentWallets)
+      .where(and(eq(agentWallets.agentId, "agent-legacy"), eq(agentWallets.chainFamily, "evm")));
+
+    let error: unknown;
+    try {
+      await vault.signTransaction(
+        {
+          tenantId: TENANT_ID,
+          agentId: "agent-legacy",
+          chainId: 8453,
+          to: "0x2222222222222222222222222222222222222222",
+          value: "1",
+          data: "0x",
+          broadcast: false,
+        },
+        { txId: "toctou-legacy-fallback-1", expectedBackend: "external-custody" },
+      );
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error).toBeInstanceOf(BackendBindingMismatchError);
+    expect((error as BackendBindingMismatchError).code).toBe("backend_binding_mismatch");
+    expect((error as BackendBindingMismatchError).expectedBackend).toBe("external-custody");
+    expect((error as BackendBindingMismatchError).resolvedBackend).toBe("local-vault");
+    // The provider signer was NEVER invoked.
+    expect(provider.signCalls).toHaveLength(0);
+
+    // No transaction row was written for the refused sign.
+    const rows = await getDb()
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, "toctou-legacy-fallback-1"));
+    expect(rows).toHaveLength(0);
+  });
+
+  test("a local-vault-bound sign still reaches the legacy encrypted_keys fallback", async () => {
+    vault = await freshVault();
+    const legacyPrivateKey = generatePrivateKey();
+    await vault.importKey(TENANT_ID, "agent-legacy", legacyPrivateKey, "evm");
+    await getDb()
+      .delete(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, "agent-legacy"),
+          eq(encryptedChainKeys.chainFamily, "evm"),
+        ),
+      );
+    await getDb()
+      .delete(agentWallets)
+      .where(and(eq(agentWallets.agentId, "agent-legacy"), eq(agentWallets.chainFamily, "evm")));
+
+    // The new guard must let local-vault-bound callers through: the request
+    // gets past custody resolution, decrypts the legacy key, and fails only at
+    // the deterministic address check (deliberately mismatched, so no RPC).
+    await expect(
+      vault.signTransaction(
+        {
+          tenantId: TENANT_ID,
+          agentId: "agent-legacy",
+          chainId: 8453,
+          to: "0x2222222222222222222222222222222222222222",
+          value: "1",
+          data: "0x",
+          walletAddress: "0x3333333333333333333333333333333333333333",
+          broadcast: false,
+        },
+        { txId: "toctou-legacy-fallback-2", expectedBackend: "local-vault" },
+      ),
+    ).rejects.toThrow(/Wallet address mismatch/);
   });
 
   test("blocks external custody before the provider when the caller has no backend binding", async () => {

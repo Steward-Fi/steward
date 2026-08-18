@@ -9,15 +9,17 @@
 //!           Trusted-dealer keygen. Writes DIR/group.json (public) and
 //!           DIR/share-<id>.json (secret share per participant).
 //!
-//!   share   --share-file FILE --port P [--auth-token TOKEN]
+//!   share   --share-file FILE --port P
 //!           Runs an HTTP service holding ONE secret share. Endpoints:
 //!             GET  /health
 //!             POST /commit  { }                      -> round1 commitments (public)
 //!             POST /sign    { signing_package, nonces_id } -> round2 sig share
 //!           The share never leaves this process.
 //!           Every endpoint except GET /health requires
-//!           `Authorization: Bearer TOKEN` (flag or FROST_SHARE_AUTH_TOKEN);
-//!           the service refuses to start without one (SEC-025). Shares must
+//!           `Authorization: Bearer TOKEN` (`FROST_SHARE_AUTH_TOKEN`);
+//!           the service refuses to start without a strong token (SEC-025).
+//!           Tokens are not accepted on the command line because process
+//!           arguments are commonly visible to other local users. Shares must
 //!           never share a network namespace with untrusted code.
 //!
 //!   aggregate (offline helper for tests) reads a signing package + shares from
@@ -149,8 +151,10 @@ struct ShareState {
     key_package: KeyPackage,
     pubkey_package: PublicKeyPackage,
     identifier: Identifier,
-    // Nonces are single-use and kept per commit round, keyed by nonce id.
-    nonces: BTreeMap<String, frost::round1::SigningNonces>,
+    // Nonces are single-use and kept per commit round, keyed by the numeric
+    // nonce counter (nonce ids on the wire are "n<counter>"). BTreeMap order
+    // is ascending counter, so the front entry is the oldest parked round.
+    nonces: BTreeMap<u64, frost::round1::SigningNonces>,
     next_nonce_id: u64,
     // SEC-025: per-share bearer token authenticating the coordinator.
     auth_token: String,
@@ -262,8 +266,8 @@ fn cmd_share(share_file: &str, port: u16, auth_token: String) {
                 .iter()
                 .any(|h| h.field.equiv("authorization") && h.value.as_str() == expected);
             if !authorized {
-                let response =
-                    tiny_http::Response::from_string(err_json("unauthorized")).with_status_code(401);
+                let response = tiny_http::Response::from_string(err_json("unauthorized"))
+                    .with_status_code(401);
                 let _ = request.respond(response);
                 continue;
             }
@@ -296,18 +300,29 @@ fn handle(state: &mut ShareState, method: &str, url: &str, body: &str) -> (u16, 
                 .to_string(),
         ),
         ("POST", "/commit") => {
+            // SEC-083 bounds the map; the re-audit follow-up: a hard 429 at
+            // the cap let an authenticated coordinator park 1024 rounds
+            // forever and wedge the signer (availability). Evict the oldest
+            // parked round instead — its /sign will fail closed with
+            // "unknown or reused nonce_id", and an evicted unused nonce is
+            // never signed with, so FROST nonce-reuse safety is preserved.
+            // Never wrap the wire-id counter: wrapping could alias and
+            // overwrite a still-parked nonce, violating single-use safety.
+            let nonce_id = state.next_nonce_id;
+            let Some(next_nonce_id) = nonce_id.checked_add(1) else {
+                return (503, err_json("nonce id space exhausted"));
+            };
             if state.nonces.len() >= MAX_PENDING_NONCES {
-                return (429, err_json("too many outstanding commit rounds"));
+                state.nonces.pop_first();
             }
             let mut rng = OsRng;
             let (nonces, commitments) =
                 frost::round1::commit(state.key_package.signing_share(), &mut rng);
-            let nonce_id = format!("n{}", state.next_nonce_id);
-            state.next_nonce_id += 1;
-            state.nonces.insert(nonce_id.clone(), nonces);
+            state.next_nonce_id = next_nonce_id;
+            state.nonces.insert(nonce_id, nonces);
             let resp = CommitResponse {
                 identifier_hex: hex::encode(state.identifier.serialize()),
-                nonce_id,
+                nonce_id: format!("n{nonce_id}"),
                 commitments_hex: hex::encode(commitments.serialize().expect("ser commitments")),
             };
             (200, serde_json::to_string(&resp).unwrap())
@@ -347,7 +362,14 @@ fn handle(state: &mut ShareState, method: &str, url: &str, body: &str) -> (u16, 
                 Ok(r) => r,
                 Err(e) => return (400, err_json(&format!("bad /sign body: {e}"))),
             };
-            let nonces = match state.nonces.remove(&req.nonce_id) {
+            let nonce_key = req
+                .nonce_id
+                .strip_prefix('n')
+                .and_then(|suffix| suffix.parse::<u64>().ok())
+                // Preserve the original exact wire identity. Numeric aliases
+                // such as n01 must not be able to consume the nonce named n1.
+                .filter(|key| req.nonce_id == format!("n{key}"));
+            let nonces = match nonce_key.and_then(|key| state.nonces.remove(&key)) {
                 Some(n) => n,
                 None => return (400, err_json("unknown or reused nonce_id")),
             };
@@ -452,6 +474,21 @@ fn arg(args: &[String], key: &str) -> Option<String> {
         .cloned()
 }
 
+fn validate_share_auth_token(token: String) -> Result<String, &'static str> {
+    // SEC-025: an empty/short token turns the loopback bearer check into a
+    // guessable credential. Require a 32-byte floor and instruct operators to
+    // encode at least 32 random bytes (for example, as 64 hex characters).
+    // Supply the token through the environment, never through argv.
+    if token.len() < 32
+        || token
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+    {
+        return Err("FROST_SHARE_AUTH_TOKEN must contain at least 32 non-whitespace bytes");
+    }
+    Ok(token)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(String::as_str).unwrap_or("");
@@ -475,15 +512,14 @@ fn main() {
                 .expect("--port required")
                 .parse()
                 .expect("port");
-            // SEC-025: the share service refuses to run unauthenticated —
-            // require a per-share bearer token via flag or environment.
-            let auth_token = arg(&args, "--auth-token")
-                .or_else(|| std::env::var("FROST_SHARE_AUTH_TOKEN").ok())
-                .unwrap_or_else(|| {
-                    eprintln!(
-                        "--auth-token or FROST_SHARE_AUTH_TOKEN is required: \
-                         the share service refuses to run unauthenticated"
-                    );
+            // SEC-025: require a strong per-share bearer token via the
+            // environment. Command-line tokens are intentionally unsupported:
+            // argv is commonly exposed by process inspection tools.
+            let auth_token = std::env::var("FROST_SHARE_AUTH_TOKEN")
+                .map_err(|_| "FROST_SHARE_AUTH_TOKEN is required")
+                .and_then(validate_share_auth_token)
+                .unwrap_or_else(|message| {
+                    eprintln!("{message}: the share service refuses to run unauthenticated");
                     std::process::exit(2);
                 });
             cmd_share(&share_file, port, auth_token);
@@ -492,5 +528,138 @@ fn main() {
             eprintln!("usage: frost-signer <keygen|share> ...");
             std::process::exit(2);
         }
+    }
+}
+
+// --------------------------------- tests ------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_state() -> ShareState {
+        let rng = OsRng;
+        let (shares, pubkey_package) =
+            frost::keys::generate_with_dealer(2, 2, frost::keys::IdentifierList::Default, rng)
+                .expect("trusted-dealer keygen");
+        let (identifier, secret_share) = shares.into_iter().next().expect("one share");
+        let key_package = KeyPackage::try_from(secret_share).expect("share -> key package");
+        ShareState {
+            key_package,
+            pubkey_package,
+            identifier,
+            nonces: BTreeMap::new(),
+            next_nonce_id: 0,
+            auth_token: "test-token".to_string(),
+        }
+    }
+
+    fn commit(state: &mut ShareState) -> (u16, String) {
+        let (code, payload) = handle(state, "POST", "/commit", "");
+        let nonce_id = serde_json::from_str::<serde_json::Value>(&payload)
+            .expect("commit response json")["nonce_id"]
+            .as_str()
+            .expect("nonce_id string")
+            .to_string();
+        (code, nonce_id)
+    }
+
+    // Re-audit: the bare 429 cap let an authenticated coordinator park
+    // MAX_PENDING_NONCES rounds forever and wedge the share service. /commit
+    // must evict the oldest parked round instead of refusing new rounds.
+    #[test]
+    fn commit_evicts_oldest_parked_round_at_the_cap() {
+        let mut state = test_state();
+        for expected in 0..MAX_PENDING_NONCES {
+            let (code, nonce_id) = commit(&mut state);
+            assert_eq!(code, 200);
+            assert_eq!(nonce_id, format!("n{expected}"));
+        }
+        assert_eq!(state.nonces.len(), MAX_PENDING_NONCES);
+
+        // One more commit: succeeds, evicts the oldest round ("n0"), keeps the
+        // map bounded at the cap.
+        let (code, nonce_id) = commit(&mut state);
+        assert_eq!(code, 200);
+        assert_eq!(nonce_id, format!("n{}", MAX_PENDING_NONCES));
+        assert_eq!(state.nonces.len(), MAX_PENDING_NONCES);
+        assert!(!state.nonces.contains_key(&0));
+        assert!(state.nonces.contains_key(&(MAX_PENDING_NONCES as u64)));
+
+        // The evicted round fails closed if the coordinator tries to use it.
+        let (code, payload) = handle(
+            &mut state,
+            "POST",
+            "/sign",
+            &serde_json::json!({ "signing_package_hex": "00", "nonce_id": "n0" }).to_string(),
+        );
+        assert_eq!(code, 400);
+        assert!(payload.contains("unknown or reused nonce_id"));
+    }
+
+    // The nonce id wire format ("n<counter>") round-trips: a parked round is
+    // consumed exactly once by /sign, and unknown or malformed ids fail closed.
+    #[test]
+    fn sign_consumes_a_parked_round_exactly_once() {
+        let mut state = test_state();
+        let (code, nonce_id) = commit(&mut state);
+        assert_eq!(code, 200);
+        assert_eq!(nonce_id, "n0");
+
+        for bad_id in ["n9", "n00", "n01", "n+1", "garbage", ""] {
+            let (code, payload) = handle(
+                &mut state,
+                "POST",
+                "/sign",
+                &serde_json::json!({ "signing_package_hex": "00", "nonce_id": bad_id }).to_string(),
+            );
+            assert_eq!(code, 400, "nonce id {bad_id:?} must fail closed");
+            assert!(payload.contains("unknown or reused nonce_id"));
+        }
+
+        // The parked round is consumed on first use (here failing only on the
+        // deliberately invalid package, AFTER the nonce lookup succeeded) and
+        // cannot be replayed.
+        let (code, payload) = handle(
+            &mut state,
+            "POST",
+            "/sign",
+            &serde_json::json!({ "signing_package_hex": "00", "nonce_id": "n0" }).to_string(),
+        );
+        assert_eq!(code, 400);
+        assert!(payload.contains("bad signing_package_hex"));
+        assert!(!state.nonces.contains_key(&0));
+
+        let (code, payload) = handle(
+            &mut state,
+            "POST",
+            "/sign",
+            &serde_json::json!({ "signing_package_hex": "00", "nonce_id": "n0" }).to_string(),
+        );
+        assert_eq!(code, 400);
+        assert!(payload.contains("unknown or reused nonce_id"));
+    }
+
+    #[test]
+    fn commit_fails_closed_before_nonce_counter_overflow() {
+        let mut state = test_state();
+        state.next_nonce_id = u64::MAX;
+        let before = state.nonces.len();
+
+        let (code, payload) = handle(&mut state, "POST", "/commit", "");
+
+        assert_eq!(code, 503);
+        assert!(payload.contains("nonce id space exhausted"));
+        assert_eq!(state.next_nonce_id, u64::MAX);
+        assert_eq!(state.nonces.len(), before);
+    }
+
+    #[test]
+    fn share_auth_token_rejects_missing_strength() {
+        for weak in ["", "short", "                                "] {
+            assert!(validate_share_auth_token(weak.to_string()).is_err());
+        }
+        let strong = "0123456789abcdef0123456789abcdef".to_string();
+        assert_eq!(validate_share_auth_token(strong.clone()), Ok(strong));
     }
 }

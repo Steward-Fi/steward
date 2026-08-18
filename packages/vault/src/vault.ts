@@ -510,6 +510,33 @@ export class BackendBindingMismatchError extends Error {
   }
 }
 
+/**
+ * Lock scope for custody-affecting writes (importKey / importExternalKeyHandle):
+ * one (agent, chain family, venue) tuple. importKey always operates on the
+ * venue-less scope, matching the legacy/unscoped key rows it writes.
+ */
+function custodyTransitionLockKey(
+  tenantId: string,
+  agentId: string,
+  chainFamily: string,
+  venue: string | null,
+): string {
+  // JSON array encoding preserves tuple boundaries even when operator-defined
+  // ids/venues contain colons. Include tenant identity explicitly rather than
+  // relying on the current globally-unique agent-id schema forever.
+  return JSON.stringify(["vault-custody-v1", tenantId, agentId, chainFamily, venue]);
+}
+
+/**
+ * PGlite (tests, desktop mode) is a single-connection harness where
+ * transactions already serialize; the repo convention is to skip advisory
+ * locks there. Production Postgres takes the xact lock so concurrent custody
+ * transitions across replicas/connections cannot interleave check-then-act.
+ */
+function usesCustodyAdvisoryLock(): boolean {
+  return process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true";
+}
+
 interface MnemonicWalletMaterial {
   evmPrivateKey: `0x${string}`;
   evmAddress: string;
@@ -1214,6 +1241,16 @@ export class Vault {
       (wallet) => wallet.chainFamily === "solana" && wallet.venue === null,
     );
 
+    // A recovery phrase proves the local key identity, but it does not grant
+    // permission to silently switch a wallet that is explicitly routed to an
+    // external custodian back to server-managed custody.
+    if (
+      (evmWallet && isExternalKeyWalletMetadata(evmWallet.metadata)) ||
+      (solanaWallet && isExternalKeyWalletMetadata(solanaWallet.metadata))
+    ) {
+      throw new Error("Cannot restore local mnemonic keys over an external-custody wallet");
+    }
+
     if (existingAgent.walletAddress.toLowerCase() !== material.evmAddress.toLowerCase()) {
       throw new Error("Mnemonic does not match the existing wallet identity");
     }
@@ -1239,6 +1276,31 @@ export class Vault {
     const now = new Date();
 
     await db.transaction(async (tx) => {
+      // Restore writes both venue-less key families. Join the same
+      // custody-transition fence as importKey/importExternalKeyHandle in a
+      // deterministic order, then repeat the guard under the locks so a
+      // concurrent handle import cannot commit between the check and writes.
+      if (usesCustodyAdvisoryLock()) {
+        for (const family of ["evm", "solana"] as const) {
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(tenantId, agentId, family, null)}, 0))`,
+          );
+        }
+      }
+      const lockedWallets = await tx
+        .select({ metadata: agentWallets.metadata })
+        .from(agentWallets)
+        .where(
+          and(
+            eq(agentWallets.agentId, agentId),
+            inArray(agentWallets.chainFamily, ["evm", "solana"]),
+            isNull(agentWallets.venue),
+          ),
+        );
+      if (lockedWallets.some((wallet) => isExternalKeyWalletMetadata(wallet.metadata))) {
+        throw new Error("Cannot restore local mnemonic keys over an external-custody wallet");
+      }
+
       await tx
         .update(agents)
         .set({
@@ -1698,7 +1760,15 @@ export class Vault {
       if (venue) {
         throw missingSigningKeyError(request.agentId, chainFamilyToUse, venue);
       }
-      // Fallback: legacy encrypted_keys table (EVM only)
+      // Fallback: legacy encrypted_keys table (EVM only).
+      // Same backend-binding guard as the encryptedChainKeys branch above:
+      // an external-custody-bound authorization must never fall through to
+      // local key material — if the wallet flipped custody after the gateway
+      // precheck, signing with a stale legacy key would bypass the bound
+      // provider. Fail closed before reading any key material.
+      if (options.expectedBackend === "external-custody") {
+        throw new BackendBindingMismatchError("external-custody", "local-vault");
+      }
       const [legacyKey] = await db
         .select()
         .from(encryptedKeys)
@@ -2063,28 +2133,42 @@ export class Vault {
       .from(agents)
       .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
 
-    // SEC-024: refuse to silently convert an external-custody wallet back to
-    // server custody — the reverse guard of importExternalKeyHandle. A local
-    // chain key here would shadow the HSM on every future sign while the DB
-    // still claims external custody.
-    const [externalWallet] = await db
-      .select({ metadata: agentWallets.metadata })
-      .from(agentWallets)
-      .where(
-        and(
-          eq(agentWallets.agentId, agentId),
-          eq(agentWallets.chainFamily, chainType),
-          isNull(agentWallets.venue),
-        ),
-      );
-    if (externalWallet && isExternalKeyWalletMetadata(externalWallet.metadata)) {
-      throw new Error(
-        `Cannot import a server-managed key over the external-custody ${chainType} wallet of agent ${agentId}`,
-      );
-    }
-
     // Wrap all writes atomically - roll back on any failure
     await db.transaction(async (tx) => {
+      // Re-audit: the SEC-024 custody guard below used to run BEFORE this
+      // transaction — check-then-act with no DB serialization. A concurrent
+      // importExternalKeyHandle for the same (agent, chain family) could
+      // interleave between the check and these writes, leaving both a
+      // server-managed key and an external-custody wallet row. Serialize
+      // custody transitions per scope and run the guard INSIDE the lock so
+      // the interleave fails closed. Skipped on single-connection PGlite,
+      // where transactions already serialize.
+      if (usesCustodyAdvisoryLock()) {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(tenantId, agentId, chainType, null)}, 0))`,
+        );
+      }
+
+      // SEC-024: refuse to silently convert an external-custody wallet back to
+      // server custody — the reverse guard of importExternalKeyHandle. A local
+      // chain key here would shadow the HSM on every future sign while the DB
+      // still claims external custody.
+      const [externalWallet] = await tx
+        .select({ metadata: agentWallets.metadata })
+        .from(agentWallets)
+        .where(
+          and(
+            eq(agentWallets.agentId, agentId),
+            eq(agentWallets.chainFamily, chainType),
+            isNull(agentWallets.venue),
+          ),
+        );
+      if (externalWallet && isExternalKeyWalletMetadata(externalWallet.metadata)) {
+        throw new Error(
+          `Cannot import a server-managed key over the external-custody ${chainType} wallet of agent ${agentId}`,
+        );
+      }
+
       if (existingAgent) {
         // Update wallet address and replace encrypted key
         await tx
@@ -2212,6 +2296,8 @@ export class Vault {
       throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
     }
 
+    // Fast-fail before the provider round-trip on the common rejection; the
+    // authoritative re-check happens inside the locked transaction below.
     if (!request.venue && detectChainType(agentRow.walletAddress) === request.chainFamily) {
       const [legacyKey] = await db
         .select({ agentId: encryptedKeys.agentId })
@@ -2222,30 +2308,25 @@ export class Vault {
       }
     }
 
-    const registration = normalizeExternalKeyHandleRegistration(
-      request,
-      await this.externalKeyCustodyProvider.registerKeyHandle(request),
-    );
-    const metadata = toExternalKeyWalletMetadata(registration) as Record<string, unknown>;
+    // Non-authoritative fast-fail checks keep a request that is already known
+    // to conflict with local custody from reaching the external provider. All
+    // checks are repeated under the transaction-scoped lock below because a
+    // concurrent writer can change them after this read.
     const venue = request.venue ?? null;
-    const now = new Date();
-
-    const [existingEncryptedKey] = await db
+    const scope = and(
+      eq(encryptedChainKeys.agentId, request.agentId),
+      eq(encryptedChainKeys.chainFamily, request.chainFamily),
+      venue ? eq(encryptedChainKeys.venue, venue) : isNull(encryptedChainKeys.venue),
+    );
+    const [preexistingEncryptedKey] = await db
       .select({ id: encryptedChainKeys.id })
       .from(encryptedChainKeys)
-      .where(
-        and(
-          eq(encryptedChainKeys.agentId, request.agentId),
-          eq(encryptedChainKeys.chainFamily, request.chainFamily),
-          venue ? eq(encryptedChainKeys.venue, venue) : isNull(encryptedChainKeys.venue),
-        ),
-      );
-    if (existingEncryptedKey) {
+      .where(scope);
+    if (preexistingEncryptedKey) {
       throw new Error("Cannot register external key handle over a server-managed signing key");
     }
-
-    const [existingWallet] = await db
-      .select({ id: agentWallets.id, metadata: agentWallets.metadata })
+    const [preexistingWallet] = await db
+      .select({ metadata: agentWallets.metadata })
       .from(agentWallets)
       .where(
         and(
@@ -2254,30 +2335,94 @@ export class Vault {
           venue ? eq(agentWallets.venue, venue) : isNull(agentWallets.venue),
         ),
       );
-    if (existingWallet && !isExternalKeyWalletMetadata(existingWallet.metadata)) {
+    if (preexistingWallet && !isExternalKeyWalletMetadata(preexistingWallet.metadata)) {
       throw new Error("Cannot register external key handle over a server-managed wallet");
     }
 
-    if (existingWallet) {
-      await db
-        .update(agentWallets)
-        .set({
-          address: registration.address,
+    // Provider registration is read-only public-handle validation (no custody
+    // state changes) and stays OUTSIDE the lock: network I/O must never hold
+    // a transaction-scoped advisory lock.
+    const registration = normalizeExternalKeyHandleRegistration(
+      request,
+      await this.externalKeyCustodyProvider.registerKeyHandle(request),
+    );
+    const metadata = toExternalKeyWalletMetadata(registration) as Record<string, unknown>;
+    const now = new Date();
+
+    await db.transaction(async (tx) => {
+      // Re-audit: the custody guards below were check-then-act with no DB
+      // serialization — a concurrent importKey (or a second handle import)
+      // for the same (agent, chain family, venue) scope could interleave
+      // between the checks and the wallet write, leaving both a
+      // server-managed key and an external-custody wallet row. Serialize
+      // custody transitions per scope and run every guard INSIDE the lock so
+      // the interleave fails closed. Skipped on single-connection PGlite,
+      // where transactions already serialize.
+      if (usesCustodyAdvisoryLock()) {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(request.tenantId, request.agentId, request.chainFamily, venue)}, 0))`,
+        );
+      }
+
+      if (!venue && detectChainType(agentRow.walletAddress) === request.chainFamily) {
+        const [legacyKey] = await tx
+          .select({ agentId: encryptedKeys.agentId })
+          .from(encryptedKeys)
+          .where(eq(encryptedKeys.agentId, request.agentId));
+        if (legacyKey) {
+          throw new Error("Cannot register external key handle over a legacy server-managed key");
+        }
+      }
+
+      const [existingEncryptedKey] = await tx
+        .select({ id: encryptedChainKeys.id })
+        .from(encryptedChainKeys)
+        .where(
+          and(
+            eq(encryptedChainKeys.agentId, request.agentId),
+            eq(encryptedChainKeys.chainFamily, request.chainFamily),
+            venue ? eq(encryptedChainKeys.venue, venue) : isNull(encryptedChainKeys.venue),
+          ),
+        );
+      if (existingEncryptedKey) {
+        throw new Error("Cannot register external key handle over a server-managed signing key");
+      }
+
+      const [existingWallet] = await tx
+        .select({ id: agentWallets.id, metadata: agentWallets.metadata })
+        .from(agentWallets)
+        .where(
+          and(
+            eq(agentWallets.agentId, request.agentId),
+            eq(agentWallets.chainFamily, request.chainFamily),
+            venue ? eq(agentWallets.venue, venue) : isNull(agentWallets.venue),
+          ),
+        );
+      if (existingWallet && !isExternalKeyWalletMetadata(existingWallet.metadata)) {
+        throw new Error("Cannot register external key handle over a server-managed wallet");
+      }
+
+      if (existingWallet) {
+        await tx
+          .update(agentWallets)
+          .set({
+            address: registration.address,
+            purpose: registration.purpose,
+            metadata,
+          })
+          .where(eq(agentWallets.id, existingWallet.id));
+      } else {
+        await tx.insert(agentWallets).values({
+          agentId: registration.agentId,
+          chainFamily: registration.chainFamily,
+          venue,
           purpose: registration.purpose,
+          address: registration.address,
           metadata,
-        })
-        .where(eq(agentWallets.id, existingWallet.id));
-    } else {
-      await db.insert(agentWallets).values({
-        agentId: registration.agentId,
-        chainFamily: registration.chainFamily,
-        venue,
-        purpose: registration.purpose,
-        address: registration.address,
-        metadata,
-        createdAt: now,
-      });
-    }
+          createdAt: now,
+        });
+      }
+    });
 
     return registration;
   }

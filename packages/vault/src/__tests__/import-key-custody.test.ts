@@ -9,6 +9,8 @@
 // custody while the metadata kept claiming external custody.
 
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { Keypair } from "@solana/web3.js";
 import {
   agentWallets,
@@ -22,6 +24,11 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { generatePrivateKey } from "viem/accounts";
+import type {
+  ExternalKeyCustodyProvider,
+  ExternalKeyHandleImportRequest,
+  ExternalKeyHandleRegistration,
+} from "../external-key-custody";
 import { Vault } from "../vault";
 
 setDefaultTimeout(30000);
@@ -31,7 +38,7 @@ const TENANT_ID = "import-tenant";
 
 const openClients: Array<{ close: () => Promise<void> }> = [];
 
-async function freshVault(): Promise<Vault> {
+async function freshVault(provider?: ExternalKeyCustodyProvider): Promise<Vault> {
   const { db, client } = await createPGLiteDb("memory://");
   openClients.push(client);
   setPGLiteOverride(db as never, async () => {
@@ -44,11 +51,37 @@ async function freshVault(): Promise<Vault> {
     apiKeyHash: "import-hash",
   });
 
-  return new Vault({ masterPassword: MASTER_PASSWORD });
+  return new Vault({ masterPassword: MASTER_PASSWORD, externalKeyCustodyProvider: provider });
 }
 
 function solanaKeyHex(): string {
   return Buffer.from(Keypair.generate().secretKey).toString("hex");
+}
+
+class RaceTestProvider implements ExternalKeyCustodyProvider {
+  id = "race-test-provider";
+  readonly contractVersion = 1 as const;
+  registrationCalls = 0;
+
+  async registerKeyHandle(
+    request: ExternalKeyHandleImportRequest,
+  ): Promise<ExternalKeyHandleRegistration> {
+    this.registrationCalls += 1;
+    return {
+      custody: "external",
+      tenantId: request.tenantId,
+      agentId: request.agentId,
+      chainFamily: request.chainFamily,
+      address: request.address,
+      handle: request.handle,
+      venue: request.venue ?? null,
+      purpose: request.purpose ?? null,
+      metadata: request.metadata ?? {},
+      registeredAt: new Date("2026-06-05T00:00:00.000Z"),
+      exportablePrivateKey: false,
+      signingAvailability: "not-supported",
+    };
+  }
 }
 
 describe("Vault.importKey custody hardening", () => {
@@ -191,5 +224,129 @@ describe("Vault.importKey custody hardening", () => {
     await expect(vault.importKey(TENANT_ID, agentId, solanaKeyHex(), "solana")).rejects.toThrow(
       /external-custody/,
     );
+  });
+
+  // Re-audit: the importKey / importExternalKeyHandle custody guards were
+  // check-then-act with no DB-level serialization — two concurrent admin
+  // custody ops for the same scope could interleave and BOTH commit, leaving
+  // a server-managed key shadowing an external-custody wallet. The guards now
+  // run inside a per-scope advisory-locked transaction, so exactly one
+  // transition can commit and the loser fails closed.
+  test("concurrent importKey and importExternalKeyHandle cannot both win a custody transition", async () => {
+    vault = await freshVault(new RaceTestProvider());
+    const agentId = "race-agent";
+    await vault.createAgent(TENANT_ID, agentId, "Race Agent");
+    // Bare agent: strip the server-managed rows createAgent provisioned so
+    // both custody transitions start from an empty (evm, venue-less) scope.
+    await getDb()
+      .delete(encryptedChainKeys)
+      .where(
+        and(eq(encryptedChainKeys.agentId, agentId), eq(encryptedChainKeys.chainFamily, "evm")),
+      );
+    await getDb()
+      .delete(agentWallets)
+      .where(and(eq(agentWallets.agentId, agentId), eq(agentWallets.chainFamily, "evm")));
+
+    const results = await Promise.allSettled([
+      vault.importKey(TENANT_ID, agentId, generatePrivateKey(), "evm"),
+      vault.importExternalKeyHandle({
+        tenantId: TENANT_ID,
+        agentId,
+        chainFamily: "evm",
+        address: "0x1111111111111111111111111111111111111111",
+        handle: { providerId: "race-hsm", keyId: "key-1" },
+      }),
+    ]);
+
+    // Exactly one custody transition may commit; the loser must fail closed.
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((r) => r.status === "rejected")).toHaveLength(1);
+
+    // Final state must be consistent: never both a server-managed key AND an
+    // external-custody wallet row in the same scope.
+    const [chainKey] = await getDb()
+      .select({ id: encryptedChainKeys.id })
+      .from(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, agentId),
+          eq(encryptedChainKeys.chainFamily, "evm"),
+          isNull(encryptedChainKeys.venue),
+        ),
+      );
+    const [wallet] = await getDb()
+      .select({ metadata: agentWallets.metadata })
+      .from(agentWallets)
+      .where(
+        and(
+          eq(agentWallets.agentId, agentId),
+          eq(agentWallets.chainFamily, "evm"),
+          isNull(agentWallets.venue),
+        ),
+      );
+    const walletIsExternal =
+      wallet?.metadata != null &&
+      typeof wallet.metadata === "object" &&
+      (wallet.metadata as Record<string, unknown>).custody === "external";
+    expect(chainKey != null && walletIsExternal).toBe(false);
+  });
+
+  test("rejects known local-custody conflicts before contacting the external provider", async () => {
+    const provider = new RaceTestProvider();
+    vault = await freshVault(provider);
+    const agentId = "provider-precheck-agent";
+    await vault.createAgent(TENANT_ID, agentId, "Provider Precheck Agent");
+    // Exercise the multi-chain-key fast-fail specifically, not the older
+    // legacy-key precheck. The local encrypted_chain_keys/wallet rows remain.
+    await getDb().delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
+
+    await expect(
+      vault.importExternalKeyHandle({
+        tenantId: TENANT_ID,
+        agentId,
+        chainFamily: "evm",
+        address: "0x1111111111111111111111111111111111111111",
+        handle: { providerId: "race-hsm", keyId: "must-not-be-disclosed" },
+      }),
+    ).rejects.toThrow(/server-managed/);
+    expect(provider.registrationCalls).toBe(0);
+  });
+
+  // Structural guard (PGlite serializes transactions, so the lock itself is
+  // exercised but cannot interleave here): both custody transitions must take
+  // the advisory lock INSIDE their transaction, before any custody check or
+  // write, and the provider call must stay outside the lock.
+  test("custody transitions lock before their guards (source structure)", () => {
+    const source = readFileSync(join(import.meta.dir, "..", "vault.ts"), "utf8");
+
+    const importKeyBody = source.slice(
+      source.indexOf("async importKey("),
+      source.indexOf("async importExternalKeyHandle("),
+    );
+    const ikTx = importKeyBody.indexOf("await db.transaction(");
+    const ikLock = importKeyBody.indexOf("pg_advisory_xact_lock");
+    const ikGuard = importKeyBody.indexOf("isExternalKeyWalletMetadata(externalWallet.metadata)");
+    expect(ikTx).toBeGreaterThanOrEqual(0);
+    expect(ikLock).toBeGreaterThan(ikTx);
+    expect(ikGuard).toBeGreaterThan(ikLock);
+    expect(importKeyBody).toContain("custodyTransitionLockKey(tenantId, agentId, chainType, null)");
+    expect(importKeyBody).toContain("hashtextextended");
+
+    const importExternalBody = source.slice(
+      source.indexOf("async importExternalKeyHandle("),
+      source.indexOf("async registerExternalKeyHandle("),
+    );
+    const ieTx = importExternalBody.indexOf("await db.transaction(");
+    const ieLock = importExternalBody.indexOf("pg_advisory_xact_lock");
+    const ieGuard = importExternalBody.indexOf("over a server-managed signing key", ieLock);
+    const ieWrite = importExternalBody.indexOf(".insert(agentWallets)");
+    const ieProvider = importExternalBody.indexOf("registerKeyHandle(request)");
+    expect(ieTx).toBeGreaterThanOrEqual(0);
+    expect(ieLock).toBeGreaterThan(ieTx);
+    expect(ieGuard).toBeGreaterThan(ieLock);
+    expect(ieWrite).toBeGreaterThan(ieLock);
+    expect(ieProvider).toBeGreaterThanOrEqual(0);
+    expect(ieProvider).toBeLessThan(ieTx);
+    expect(importExternalBody).toContain("hashtextextended");
   });
 });
