@@ -172,6 +172,52 @@ describe("DurableIdempotencyStore (SEC-043)", () => {
     expect(await store.check("scope", undefined, "hash-1")).toEqual({});
   });
 
+  it("fails closed instead of evicting live records when the memory fallback is saturated", async () => {
+    const store = new DurableIdempotencyStore<TestRecord>({
+      namespace: "trade",
+      getRedisClient: () => null,
+    });
+    // Fill the fallback map to the 1_000-entry cap with LIVE records.
+    for (let i = 0; i < 1_000; i++) {
+      const checked = await store.check("scope", `flood-${i}`, `hash-${i}`);
+      const claim = await checked.claim?.();
+      await claim?.store?.({ status: 200, body: { ok: true, i } });
+    }
+    // A new key must be refused — shedding the oldest live record would
+    // silently re-enable a duplicate fund movement on its retry.
+    const overflow = await store.check("scope", "flood-overflow", "hash-overflow");
+    await expect(overflow.claim?.()).rejects.toThrow("saturated with live records");
+
+    // …and the oldest record is still intact: its retry replays, never re-executes.
+    const replay = await store.check("scope", "flood-0", "hash-0");
+    expect(replay.record).toEqual({ status: 200, body: { ok: true, i: 0 } });
+  });
+
+  it("still sweeps expired entries before refusing a new claim", async () => {
+    const realNow = Date.now;
+    const t0 = realNow();
+    let fakeNow = t0;
+    Date.now = () => fakeNow;
+    try {
+      const store = new DurableIdempotencyStore<TestRecord>({
+        namespace: "trade",
+        getRedisClient: () => null,
+      });
+      for (let i = 0; i < 1_000; i++) {
+        const checked = await store.check("scope", `old-${i}`, `hash-${i}`);
+        await (await checked.claim?.())?.store?.({ status: 200, body: { i } });
+      }
+      // 25h later every entry is past the 24h TTL; the expired-only sweep must
+      // free the map so a new claim succeeds (no false saturation).
+      fakeNow = t0 + 25 * 60 * 60 * 1000;
+      const checked = await store.check("scope", "new-key", "new-hash");
+      const claim = await checked.claim?.();
+      expect(claim?.store).toBeDefined();
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
   it("atomically admits only one concurrent replica for the same key", async () => {
     const { client } = fakeRedis();
     const replicaA = new DurableIdempotencyStore<TestRecord>({
