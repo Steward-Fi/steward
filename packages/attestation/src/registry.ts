@@ -76,6 +76,20 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
+function isWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function isBoundedText(value: unknown, maxBytes: number, allowEmpty = false): value is string {
   return (
     typeof value === "string" &&
@@ -186,8 +200,11 @@ export function canonicalizeJson(value: unknown): string {
   const ancestors = new Set<object>();
   const visit = (entry: unknown, depth: number): string => {
     if (depth > 64) throw new Error("JSON nesting exceeds canonicalization limit");
-    if (entry === null || typeof entry === "string" || typeof entry === "boolean")
+    if (entry === null || typeof entry === "boolean") return JSON.stringify(entry);
+    if (typeof entry === "string") {
+      if (!isWellFormedUnicode(entry)) throw new Error("JSON string contains a lone surrogate");
       return JSON.stringify(entry);
+    }
     if (typeof entry === "number") {
       if (!Number.isFinite(entry)) throw new Error("non-finite JSON number");
       return JSON.stringify(entry);
@@ -197,17 +214,27 @@ export function canonicalizeJson(value: unknown): string {
     ancestors.add(entry);
     try {
       if (Array.isArray(entry)) {
-        if (
-          Object.keys(entry).length !== entry.length ||
-          !Array.from({ length: entry.length }, (_, index) => Object.hasOwn(entry, index)).every(
-            Boolean,
-          )
-        )
+        const ownKeys = Reflect.ownKeys(entry);
+        if (ownKeys.length !== entry.length + 1 || !ownKeys.includes("length"))
           throw new Error("sparse or decorated JSON array");
-        return `[${entry.map((item) => visit(item, depth + 1)).join(",")}]`;
+        const items = Array.from({ length: entry.length }, (_, index) => {
+          const descriptor = Object.getOwnPropertyDescriptor(entry, String(index));
+          if (!descriptor?.enumerable || !("value" in descriptor))
+            throw new Error("sparse or decorated JSON array");
+          return visit(descriptor.value, depth + 1);
+        });
+        return `[${items.join(",")}]`;
       }
       if (!isPlainObject(entry)) throw new Error("value is not a plain JSON object");
-      return `{${Object.entries(entry)
+      const entries = Reflect.ownKeys(entry).map((key): [string, unknown] => {
+        if (typeof key !== "string" || !isWellFormedUnicode(key))
+          throw new Error("JSON object has a non-JSON property key");
+        const descriptor = Object.getOwnPropertyDescriptor(entry, key);
+        if (!descriptor?.enumerable || !("value" in descriptor))
+          throw new Error("JSON object has a non-JSON property");
+        return [key, descriptor.value];
+      });
+      return `{${entries
         // RFC 8785/JCS orders property names by UTF-16 code units, not the
         // process locale. localeCompare can produce different signed bytes.
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
@@ -232,8 +259,8 @@ export function verifyRegistrySignatures(
   options?: RegistryVerificationOptions,
 ): RegistryVerificationResult {
   if (
-    !registry ||
-    typeof registry !== "object" ||
+    !isPlainObject(registry) ||
+    !hasOnlyKeys(registry, new Set(["payload", "signatures"])) ||
     !registry.payload ||
     typeof registry.payload !== "object" ||
     !Array.isArray(registry.signatures)
@@ -397,9 +424,28 @@ export function verifyQuoteAgainstRegistry(
     return { ok: false, reason: "malformed measurement registry payload" };
   }
   if (payloadError) return { ok: false, reason: payloadError };
-  if (!quote || typeof quote !== "object" || !isPlainObject(quote.measurement))
+  let malformedQuote: boolean;
+  try {
+    const timestamp = isPlainObject(quote) && quote.timestamp;
+    malformedQuote =
+      !isPlainObject(quote) ||
+      typeof quote.verified !== "boolean" ||
+      !PROVIDER_IDS.has(quote.provider as AttestationProviderId) ||
+      !isPlainObject(quote.measurement) ||
+      !isBoundedText(quote.measurement.imageDigest, 1024) ||
+      !isBoundedText(quote.measurement.configHash, 1024) ||
+      !isBoundedText(timestamp, 64) ||
+      !Number.isFinite(Date.parse(timestamp)) ||
+      new Date(timestamp).toISOString() !== timestamp;
+  } catch {
     return { ok: false, reason: "malformed attestation quote" };
-  const entry = registry.payload.deployments[deployment];
+  }
+  if (malformedQuote) return { ok: false, reason: "malformed attestation quote" };
+  if (typeof deployment !== "string" || !REGISTRY_ID_PATTERN.test(deployment))
+    return { ok: false, reason: "malformed deployment id" };
+  const entry = Object.hasOwn(registry.payload.deployments, deployment)
+    ? registry.payload.deployments[deployment]
+    : undefined;
   if (!entry) return { ok: false, reason: `unknown deployment: ${deployment}` };
   if (entry.status !== "active")
     return { ok: false, reason: `deployment ${deployment} is ${entry.status}` };

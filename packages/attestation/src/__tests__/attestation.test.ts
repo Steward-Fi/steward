@@ -436,6 +436,8 @@ describe("measurement registry", () => {
 
     expect(() => canonicalizeJson({ value: Number.NaN })).toThrow();
     expect(() => canonicalizeJson({ value: undefined })).toThrow();
+    expect(() => canonicalizeJson({ value: "\ud800" })).toThrow();
+    expect(() => canonicalizeJson({ "\udc00": true })).toThrow();
     const decoratedArray = [1];
     Object.assign(decoratedArray, { extra: true });
     expect(() => canonicalizeJson(decoratedArray)).toThrow();
@@ -443,6 +445,12 @@ describe("measurement registry", () => {
     disguisedSparseArray[1] = 1;
     Object.assign(disguisedSparseArray, { extra: true });
     expect(() => canonicalizeJson(disguisedSparseArray)).toThrow();
+    const symbolDecorated = { value: 1 };
+    Object.assign(symbolDecorated, { [Symbol("extra")]: true });
+    expect(() => canonicalizeJson(symbolDecorated)).toThrow();
+    const accessorDecorated = {};
+    Object.defineProperty(accessorDecorated, "value", { enumerable: true, get: () => 1 });
+    expect(() => canonicalizeJson(accessorDecorated)).toThrow();
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
     expect(() => canonicalizeJson(cyclic)).toThrow();
@@ -451,6 +459,50 @@ describe("measurement registry", () => {
       verifyQuoteAgainstRegistry({ verified: true, measurement: null } as never, registry, "prod");
     expect(malformedQuote).not.toThrow();
     expect(malformedQuote().ok).toBe(false);
+    expect(
+      verifyQuoteAgainstRegistry(
+        {
+          provider: "dstack-tdx",
+          measurement: { imageDigest: "sha256:img", configHash: "compose" },
+          timestamp: new Date().toISOString(),
+          verified: "true",
+          raw: {},
+        } as never,
+        registry,
+        "prod",
+      ).ok,
+    ).toBe(false);
+    expect(
+      verifyQuoteAgainstRegistry(
+        {
+          provider: "dstack-tdx",
+          measurement: { imageDigest: "sha256:img", configHash: "compose" },
+          timestamp: 42,
+          verified: true,
+          raw: {},
+        } as never,
+        registry,
+        "prod",
+      ).ok,
+    ).toBe(false);
+    const throwingQuote = Object.defineProperty({}, "timestamp", {
+      enumerable: true,
+      get() {
+        throw new Error("hostile accessor");
+      },
+    });
+    expect(() =>
+      verifyQuoteAgainstRegistry(throwingQuote as never, registry, "prod"),
+    ).not.toThrow();
+    expect(verifyQuoteAgainstRegistry(throwingQuote as never, registry, "prod").ok).toBe(false);
+    expect(
+      verifyRegistrySignatures(
+        { ...registry, unsignedMetadata: "misleading" } as never,
+        1,
+        undefined,
+        registryFingerprints(registry),
+      ).ok,
+    ).toBe(false);
   });
 });
 
