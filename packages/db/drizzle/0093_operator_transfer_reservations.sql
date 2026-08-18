@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS "operator_transfer_reservations" (
   CONSTRAINT "operator_transfer_reservation_status_chk" CHECK ("status" in ('pending', 'final', 'released'))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS "operator_transfer_reservation_request_uidx"
-  ON "operator_transfer_reservations" ("tenant_id", "rail", "idempotency_key");
+  ON "operator_transfer_reservations" ("tenant_id", "rail", "idempotency_key")
+  WHERE "status" in ('pending', 'final');
 CREATE INDEX IF NOT EXISTS "operator_transfer_reservation_agent_created_idx"
   ON "operator_transfer_reservations" ("tenant_id", "agent_id", "created_at");

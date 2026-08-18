@@ -977,11 +977,9 @@ export const operatorTransferReservations = pgTable(
     finalizedAt: timestamp("finalized_at", { withTimezone: true }),
   },
   (table) => ({
-    requestUnique: uniqueIndex("operator_transfer_reservation_request_uidx").on(
-      table.tenantId,
-      table.rail,
-      table.idempotencyKey,
-    ),
+    requestUnique: uniqueIndex("operator_transfer_reservation_request_uidx")
+      .on(table.tenantId, table.rail, table.idempotencyKey)
+      .where(sql`${table.status} in ('pending', 'final')`),
     agentCreatedIdx: index("operator_transfer_reservation_agent_created_idx").on(
       table.tenantId,
       table.agentId,

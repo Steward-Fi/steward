@@ -75,7 +75,11 @@ class MockHyperliquidAdapter {
     return { status: "ok", raw: { response: { type: "default" } } };
   }
 
-  async usdSend(params: { destination: string; amount: string }) {
+  async signUsdSend(params: { destination: string; amount: string }) {
+    return params;
+  }
+
+  async submitUsdSend(params: { destination: string; amount: string }) {
     usdSendCalls.push(params);
     return { status: "ok", raw: { response: { type: "default" } } };
   }

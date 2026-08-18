@@ -972,6 +972,7 @@ function hasRecentMfaStepUp(session: UserSessionPayload, maxAgeMs = 5 * 60_000):
   return (
     typeof session.mfaVerifiedAt === "number" &&
     Number.isFinite(session.mfaVerifiedAt) &&
+    Date.now() - session.mfaVerifiedAt >= 0 &&
     Date.now() - session.mfaVerifiedAt <= maxAgeMs
   );
 }

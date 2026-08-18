@@ -49,6 +49,12 @@ const signWithdrawCalls: Array<{ amount: string | number; destination: string }>
 const submitWithdrawCalls: unknown[] = [];
 const usdSendCalls: Array<{ destination: string; amount: string }> = [];
 let failNextSubmitWithdraw = false;
+let rejectNextSubmitWithdraw = false;
+let failNextSignUsdSend = false;
+
+class MockHyperliquidExchangeRejectedError extends Error {
+  readonly name = "HyperliquidExchangeRejectedError";
+}
 
 class MockHyperliquidAdapter {
   constructor(
@@ -72,10 +78,22 @@ class MockHyperliquidAdapter {
       failNextSubmitWithdraw = false;
       throw new Error("simulated submit failure (may have landed)");
     }
+    if (rejectNextSubmitWithdraw) {
+      rejectNextSubmitWithdraw = false;
+      throw new MockHyperliquidExchangeRejectedError("definite venue rejection");
+    }
     return { status: "ok", response: { type: "default" } };
   }
 
-  async usdSend(params: { destination: string; amount: string }) {
+  async signUsdSend(params: { destination: string; amount: string }) {
+    if (failNextSignUsdSend) {
+      failNextSignUsdSend = false;
+      throw new Error("definite local signing failure");
+    }
+    return params;
+  }
+
+  async submitUsdSend(params: { destination: string; amount: string }) {
     usdSendCalls.push(params);
     return { status: "ok", raw: { response: { type: "default" } } };
   }
@@ -380,6 +398,97 @@ describe("SEC-042: withdraw policy evaluation is real", () => {
 });
 
 describe("SEC-043: operator idempotency stores ambiguous outcomes", () => {
+  it("releases a usd-send reservation after a definite local signing failure", async () => {
+    const { tenantId, agentId } = await seedAgent({
+      policies: [
+        { type: "approved-addresses", config: { mode: "whitelist", addresses: [DEST_A] } },
+        { type: "spending-limit", config: { maxPerDayUsd: 100 } },
+      ],
+    });
+    const app = await buildApp({ priceOracle: stubPriceOracle });
+    failNextSignUsdSend = true;
+    const key = crypto.randomUUID();
+    const failed = await postTransfer(
+      app,
+      "usd-send",
+      tenantId,
+      { agentId, destination: DEST_A, amount: "60" },
+      key,
+    );
+    expect(failed.status).toBe(502);
+
+    const retry = await postTransfer(
+      app,
+      "usd-send",
+      tenantId,
+      { agentId, destination: DEST_A, amount: "60" },
+      key,
+    );
+    expect(retry.status).toBe(200);
+    const rows = await getDb()
+      .select({ status: operatorTransferReservations.status })
+      .from(operatorTransferReservations)
+      .where(eq(operatorTransferReservations.tenantId, tenantId));
+    expect(rows.map((row) => row.status).sort()).toEqual(["final", "released"]);
+  });
+
+  it("releases a withdraw reservation after a definite venue rejection", async () => {
+    const { tenantId, agentId } = await seedAgent({
+      policies: [
+        { type: "approved-addresses", config: { mode: "whitelist", addresses: [DEST_A] } },
+        { type: "spending-limit", config: { maxPerDayUsd: 100 } },
+      ],
+    });
+    const app = await buildApp({ priceOracle: stubPriceOracle });
+    rejectNextSubmitWithdraw = true;
+    const key = crypto.randomUUID();
+    const failed = await postTransfer(
+      app,
+      "withdraw",
+      tenantId,
+      { agentId, destination: DEST_A, amount: "60" },
+      key,
+    );
+    expect(failed.status).toBe(502);
+    const retry = await postTransfer(
+      app,
+      "withdraw",
+      tenantId,
+      { agentId, destination: DEST_A, amount: "60" },
+      key,
+    );
+    expect(retry.status).toBe(200);
+  });
+
+  it("enforces the durable combined 10/minute ceiling from reservation rows", async () => {
+    const { tenantId, agentId } = await seedAgent({
+      policies: [
+        { type: "approved-addresses", config: { mode: "whitelist", addresses: [DEST_A] } },
+      ],
+    });
+    await getDb()
+      .insert(operatorTransferReservations)
+      .values(
+        Array.from({ length: 10 }, (_, index) => ({
+          tenantId,
+          agentId,
+          rail: index % 2 === 0 ? "withdraw" : "usd-send",
+          idempotencyKey: `durable-rate-${index}`,
+          destination: DEST_A,
+          amountBaseUnits: "1",
+          status: "final",
+        })),
+      );
+    const app = await buildApp();
+    const blocked = await postTransfer(app, "withdraw", tenantId, {
+      agentId,
+      destination: DEST_A,
+      amount: "1",
+    });
+    expect(blocked.status).toBe(400);
+    expect(((await blocked.json()) as { reason: string }).reason).toContain("rate limit");
+  });
+
   it("replays the stored 502 for a possibly-landed withdraw instead of re-submitting", async () => {
     const { tenantId, agentId } = await seedAgent({
       policies: [
