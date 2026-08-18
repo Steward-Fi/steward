@@ -15,6 +15,7 @@ import {
   withTenantAuditedTransaction,
   workspaces,
 } from "@stwd/db";
+import type { GoogleOperationKey } from "@stwd/provider-google";
 import { SLACK_OPERATION_RISK, type SlackOperationKey } from "@stwd/provider-slack";
 import {
   GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
@@ -53,6 +54,26 @@ const SLACK_OPERATION_EXACT_PATH = {
   "slack.conversations.list": "/api/conversations.list",
   "slack.users.info": "/api/users.info",
 } as const satisfies Readonly<Record<SlackOperationKey, string>>;
+const GOOGLE_OPERATION_METHOD = {
+  "google.gmail.messages.send": "POST",
+  "google.calendar.events.list": "GET",
+  "google.calendar.events.insert": "POST",
+} as const satisfies Readonly<Record<GoogleOperationKey, "GET" | "POST" | "DELETE">>;
+const GOOGLE_OPERATION_MINIMUM_RISK = {
+  "google.gmail.messages.send": "write",
+  "google.calendar.events.list": "read",
+  "google.calendar.events.insert": "write",
+} as const satisfies Readonly<Record<GoogleOperationKey, ProviderRiskClass>>;
+const GOOGLE_OPERATION_EXACT_PATH = {
+  "google.gmail.messages.send": "/gmail/v1/users/me/messages/send",
+  "google.calendar.events.list": "/calendar/v3/calendars/primary/events",
+  "google.calendar.events.insert": "/calendar/v3/calendars/primary/events",
+} as const satisfies Readonly<Record<GoogleOperationKey, string>>;
+const GOOGLE_OPERATION_HOST = {
+  "google.gmail.messages.send": "gmail.googleapis.com",
+  "google.calendar.events.list": "www.googleapis.com",
+  "google.calendar.events.insert": "www.googleapis.com",
+} as const satisfies Readonly<Record<GoogleOperationKey, string>>;
 const PROVIDER_OPERATION_ALLOWLIST: Readonly<
   Record<string, Readonly<Record<string, "GET" | "POST" | "DELETE">>>
 > = {
@@ -66,6 +87,7 @@ const PROVIDER_OPERATION_ALLOWLIST: Readonly<
     "x.user.me.read": "GET",
   },
   slack: SLACK_OPERATION_METHOD,
+  google: GOOGLE_OPERATION_METHOD,
 };
 const PROVIDER_OPERATION_MINIMUM_RISK: Readonly<
   Record<string, Readonly<Record<string, ProviderRiskClass>>>
@@ -80,9 +102,11 @@ const PROVIDER_OPERATION_MINIMUM_RISK: Readonly<
     "x.user.me.read": "read",
   },
   slack: SLACK_OPERATION_RISK,
+  google: GOOGLE_OPERATION_MINIMUM_RISK,
 };
 const PROVIDER_OPERATION_EXACT_PATH: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   slack: SLACK_OPERATION_EXACT_PATH,
+  google: GOOGLE_OPERATION_EXACT_PATH,
 };
 const PROVIDER_RISK_RANK: Readonly<Record<ProviderRiskClass, number>> = {
   read: 0,
@@ -94,7 +118,7 @@ const PROVIDER_HOST_ALLOWLIST: Readonly<Record<string, string>> = {
   x: "api.x.com",
   slack: "slack.com",
 };
-const REGISTERED_ADAPTER_KEY_LIST = ["github", "x", "slack", "generic-http"] as const;
+const REGISTERED_ADAPTER_KEY_LIST = ["github", "x", "slack", "google", "generic-http"] as const;
 type RegisteredAdapterKey = (typeof REGISTERED_ADAPTER_KEY_LIST)[number];
 type FixedProviderAdapterKey = Exclude<RegisteredAdapterKey, "generic-http">;
 const BEARER_ROUTE_INJECTION = {
@@ -108,6 +132,7 @@ const FIXED_PROVIDER_ROUTE_INJECTION = {
   github: BEARER_ROUTE_INJECTION,
   x: BEARER_ROUTE_INJECTION,
   slack: BEARER_ROUTE_INJECTION,
+  google: BEARER_ROUTE_INJECTION,
 } as const satisfies Readonly<Record<FixedProviderAdapterKey, typeof BEARER_ROUTE_INJECTION>>;
 const REGISTERED_ADAPTER_KEYS = new Set<string>(REGISTERED_ADAPTER_KEY_LIST);
 const ENVIRONMENTS = new Set(["development", "staging", "production"]);
@@ -122,6 +147,13 @@ const ROLES = new Set([
 const RISK_CLASSES = new Set(["read", "write", "consequential"]);
 const BUDGET_DIMENSIONS = new Set(["count", "notional"]);
 const MAX_BUDGET_WINDOW_SECONDS = 30 * 24 * 60 * 60;
+
+function fixedProviderHost(adapterKey: string, operationKey: string): string | undefined {
+  if (adapterKey === "google") {
+    return GOOGLE_OPERATION_HOST[operationKey as GoogleOperationKey];
+  }
+  return PROVIDER_HOST_ALLOWLIST[adapterKey];
+}
 
 type DbBase = ReturnType<typeof getDb>;
 type DbExecutor = DbBase | Parameters<Parameters<DbBase["transaction"]>[0]>[0];
@@ -901,7 +933,7 @@ export class ProviderAuthorityStore {
         .limit(1);
       const expectedHost = genericDescriptor
         ? new URL(genericDescriptor.origin).hostname
-        : PROVIDER_HOST_ALLOWLIST[account.adapterKey];
+        : fixedProviderHost(account.adapterKey, operationKey);
       const method = route?.method?.toUpperCase();
       const pathAllowed = genericDescriptor
         ? Boolean(
@@ -1010,7 +1042,7 @@ export class ProviderAuthorityStore {
         const credentialSecretId = account.credentialSecretId;
         const expectedHost = genericDescriptor
           ? new URL(genericDescriptor.origin).hostname
-          : PROVIDER_HOST_ALLOWLIST[account.adapterKey];
+          : fixedProviderHost(account.adapterKey, operationKey);
         const method = route?.method?.toUpperCase();
         const pathAllowed = genericDescriptor
           ? Boolean(

@@ -33,12 +33,16 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   and,
+  asc,
   eq,
   getDb,
   inArray,
+  lte,
+  or,
   providerAccounts,
   providerGoogleCredentialLifecycles,
   type Secret,
+  secretRoutes,
   secrets,
   sql,
   withTenantAuditedTransaction,
@@ -1783,6 +1787,19 @@ export async function reconcileGoogleRefreshLifecycle(
         current.secretName,
         JSON.stringify(payload),
       );
+      // Keep every credential route on the same versioned lineage. Rotating
+      // only provider_accounts would leave governed routes decrypting the
+      // superseded secret. Bumping route revision intentionally invalidates
+      // already-minted execution authorizations.
+      await tx
+        .update(secretRoutes)
+        .set({ secretId: meta.id })
+        .where(
+          and(
+            eq(secretRoutes.tenantId, input.tenantId),
+            eq(secretRoutes.secretId, account.credentialSecretId),
+          ),
+        );
       const [updated] = await tx
         .update(providerAccounts)
         .set({
@@ -1859,6 +1876,109 @@ export async function reconcileGoogleRefreshLifecycle(
     }
     throw error;
   }
+}
+
+export interface GoogleCredentialLifecycleSweepResult {
+  processed: number;
+  adopted: number;
+  revoked: number;
+  attention: number;
+  remaining: boolean;
+}
+
+/**
+ * Bounded all-tenant recovery pass for one-time Google OAuth responses.
+ * Fresh inflight rows are left to their live caller; only rows older than the
+ * provider timeout are classified outcome-unknown and failed closed.
+ */
+export async function runGoogleCredentialLifecycleSweep(input: {
+  vault: SecretVault;
+  config: GoogleConnectConfig;
+  limit?: number;
+  now?: Date;
+}): Promise<GoogleCredentialLifecycleSweepResult> {
+  const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+  const now = input.now ?? new Date();
+  const recoveryBefore = new Date(now.getTime() - GOOGLE_FORWARD_TIMEOUT_MS - 5_000);
+  const staleInflightBefore = new Date(now.getTime() - GOOGLE_FORWARD_TIMEOUT_MS - 5_000);
+  const rows = await (getDb() as DbExecutor)
+    .select()
+    .from(providerGoogleCredentialLifecycles)
+    .where(
+      or(
+        and(
+          inArray(providerGoogleCredentialLifecycles.state, [
+            "credential_staged",
+            "revocation_pending",
+            "needs_attention",
+          ]),
+          lte(providerGoogleCredentialLifecycles.updatedAt, recoveryBefore),
+        ),
+        and(
+          eq(providerGoogleCredentialLifecycles.state, "inflight"),
+          lte(providerGoogleCredentialLifecycles.updatedAt, staleInflightBefore),
+        ),
+      ),
+    )
+    .orderBy(asc(providerGoogleCredentialLifecycles.updatedAt))
+    .limit(limit);
+
+  const result: GoogleCredentialLifecycleSweepResult = {
+    processed: 0,
+    adopted: 0,
+    revoked: 0,
+    attention: 0,
+    remaining: false,
+  };
+  for (const row of rows) {
+    result.processed += 1;
+    try {
+      if (row.kind === "connect_exchange") {
+        const outcome = await reconcileGoogleCredentialRevocation({
+          tenantId: row.tenantId,
+          lifecycleId: row.id,
+          vault: input.vault,
+          config: input.config,
+        });
+        if (outcome === "revoked") result.revoked += 1;
+        else if (outcome === "needs_attention") result.attention += 1;
+        continue;
+      }
+      if (!row.providerAccountId) {
+        await setGoogleLifecycleState(row.tenantId, row.id, "needs_attention", "MISSING_ACCOUNT");
+        result.attention += 1;
+        continue;
+      }
+      if (row.state === "credential_staged" || row.state === "inflight") {
+        await reconcileGoogleRefreshLifecycle({
+          tenantId: row.tenantId,
+          workspaceId: row.workspaceId,
+          accountId: row.providerAccountId,
+          lifecycleId: row.id,
+          vault: input.vault,
+          config: input.config,
+          force: true,
+        });
+        result.adopted += 1;
+        continue;
+      }
+      const outcome = await reconcileGoogleCredentialRevocation({
+        tenantId: row.tenantId,
+        lifecycleId: row.id,
+        vault: input.vault,
+        config: input.config,
+      });
+      if (outcome === "revoked") result.revoked += 1;
+      else result.attention += 1;
+    } catch {
+      result.attention += 1;
+    }
+  }
+  // Do not tight-loop a permanently failing revoker. Failed rows update their
+  // timestamp and are retried on the next scheduled pass, while a clean full
+  // page can be drained immediately.
+  result.remaining = rows.length === limit && result.attention === 0;
+  return result;
 }
 
 interface LoadedCredential {

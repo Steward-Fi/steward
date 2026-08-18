@@ -47,8 +47,14 @@ import {
 } from "../middleware/redis-enforcement";
 import { resolveTarget } from "./alias";
 import { holdProxyApprovalRequest } from "./approvals";
+import {
+  __setGoogleExecutionTokenForwarderForTests,
+  mintGoogleExecutionAccessToken,
+} from "./google-execution-credential";
 import { compareRouteMatchSpecificity, matchHost, matchPath } from "./matching";
 import { applyGovernedQuery, extractRawQuery } from "./query-forwarding";
+
+export { __setGoogleExecutionTokenForwarderForTests };
 
 // ─── Secret Vault singleton ──────────────────────────────────────────────────
 
@@ -1235,6 +1241,7 @@ export function __resetProxyHandlerTestHooksForTests(): void {
   checkProxyRateLimitForHandler = checkProxyRateLimit;
   resolveProxyHostForHandler = dnsLookup;
   forwardProxyRequestForHandler = forwardWithVettedDns;
+  __setGoogleExecutionTokenForwarderForTests(null);
 }
 
 // ─── Main proxy handler ──────────────────────────────────────────────────────
@@ -1781,6 +1788,7 @@ export async function handleProxy(c: Context): Promise<Response> {
       : c.json({ ok: false, error }, 409);
   };
 
+  let governedLiveAccountRevision: number | null = null;
   if (authorityMode === "governed_v2" && governedClaim) {
     const db = getDb();
     const [liveWorkspace] = await db
@@ -1838,6 +1846,7 @@ export async function handleProxy(c: Context): Promise<Response> {
         "governed-operation-revision-stale",
       );
     }
+    governedLiveAccountRevision = liveAccount.revision;
     const [liveSecret] = await db
       .select({ version: secrets.version })
       .from(secrets)
@@ -1854,9 +1863,28 @@ export async function handleProxy(c: Context): Promise<Response> {
   let credential: string;
   try {
     credential = await decryptSecret(tenantId, route.secretId);
-    // Only Google's short-lived access token crosses the provider boundary.
-    // Its refresh token remains server-side inside the encrypted envelope.
-    credential = extractProviderCredentialForHost(target.host, credential);
+    const googleHost =
+      target.host === "gmail.googleapis.com" || target.host === "www.googleapis.com";
+    if (googleHost) {
+      if (!governedClaim || governedLiveAccountRevision === null) {
+        throw new Error("Google OAuth credentials require governed execution");
+      }
+      const clientId = process.env.GOOGLE_PROVIDER_CLIENT_ID?.trim();
+      const clientSecret = process.env.GOOGLE_PROVIDER_CLIENT_SECRET?.trim();
+      if (!clientId || !clientSecret) throw new Error("Google provider OAuth is not configured");
+      credential = await mintGoogleExecutionAccessToken({
+        tenantId,
+        workspaceId: governedClaim.workspaceId as string,
+        accountId: governedClaim.providerAccountId as string,
+        accountRevision: governedLiveAccountRevision,
+        credential,
+        vault: getSecretVault(),
+        clientId,
+        clientSecret,
+      });
+    } else {
+      credential = extractProviderCredentialForHost(target.host, credential);
+    }
   } catch (err) {
     console.error(`[proxy] Failed to decrypt secret ${route.secretId}:`, err);
     await recordAudit({
