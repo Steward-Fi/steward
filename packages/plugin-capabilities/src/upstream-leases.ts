@@ -21,6 +21,11 @@ const MIN_GITHUB_ISSUED_TTL_MS = 55 * 60 * 1000;
 const MAX_GITHUB_ISSUED_TTL_MS = (GITHUB_INSTALLATION_TOKEN_TTL_SECONDS + 30) * 1000;
 const REVOCATION_CLAIM_TIMEOUT_MS = 30_000;
 export const DELIVERY_ACK_TIMEOUT_MS = 30_000;
+export const UPSTREAM_LEASE_LIFECYCLE_DEADLINE_MS = 25_000;
+const MIN_DATABASE_PHASE_MS = 1_000;
+const MIN_PROVIDER_AND_FINALIZE_MS = 12_000;
+const POST_ISSUE_DURABLE_RESERVE_MS = 13_000;
+const MIN_ISSUER_START_MS = 23_000;
 export const MAX_UPSTREAM_LEASE_SWEEP_INTERVAL_MS = DELIVERY_ACK_TIMEOUT_MS / 2;
 export const UPSTREAM_LEASE_AUTHORITY_RECHECK_INTERVAL_MS = MAX_UPSTREAM_LEASE_SWEEP_INTERVAL_MS;
 const MAX_GITHUB_PERMISSION_COUNT = 100;
@@ -43,13 +48,16 @@ export interface GitHubAppLeaseConfig {
 }
 
 export interface UpstreamTokenIssuer {
-  issue(input: {
-    appId: string;
-    installationId: string;
-    privateKeyPem: string;
-    resource: GitHubLeaseResource;
-  }): Promise<{ token: string; expiresAt: Date }>;
-  revoke(token: string): Promise<void>;
+  issue(
+    input: {
+      appId: string;
+      installationId: string;
+      privateKeyPem: string;
+      resource: GitHubLeaseResource;
+    },
+    options?: { deadlineAt?: number },
+  ): Promise<{ token: string; expiresAt: Date }>;
+  revoke(token: string, options?: { deadlineAt?: number }): Promise<void>;
 }
 
 export type ExerciseCredentialSecret = <T>(
@@ -78,6 +86,81 @@ export type LeaseAuditedTransaction = <T>(
   tenantId: string,
   fn: (tx: Db, appendRequiredAudit: AppendRequiredAudit) => Promise<T>,
 ) => Promise<T>;
+export type LeaseDatabaseDeadline = <T>(
+  deadlineAt: number,
+  use: (db: Db, auditedTransaction: LeaseAuditedTransaction) => Promise<T>,
+) => Promise<T>;
+const LEASE_DEADLINE_BOUND = Symbol("lease-deadline-bound");
+
+interface LeaseDeadlineInput {
+  deadlineAt?: number;
+  withDatabaseDeadline?: LeaseDatabaseDeadline;
+  [LEASE_DEADLINE_BOUND]?: true;
+}
+
+function requireLeaseBudget(deadlineAt: number | undefined, minimumMs: number): void {
+  if (deadlineAt !== undefined && deadlineAt - Date.now() < minimumMs) {
+    throw new Error("credential lease lifecycle timed out");
+  }
+}
+
+function deadlineAwareIssuer(issuer: UpstreamTokenIssuer, deadlineAt: number): UpstreamTokenIssuer {
+  return {
+    issue: async (input) => {
+      // A mint can create a live upstream secret. Reserve a full provider call
+      // plus durable DB cleanup after the issuance deadline, so
+      // even the worst-case successful mint still has time to escrow/revoke.
+      requireLeaseBudget(deadlineAt, MIN_ISSUER_START_MS);
+      return issuer.issue(input, { deadlineAt: deadlineAt - POST_ISSUE_DURABLE_RESERVE_MS });
+    },
+    revoke: async (token) => {
+      requireLeaseBudget(deadlineAt, MIN_PROVIDER_AND_FINALIZE_MS);
+      return issuer.revoke(token, { deadlineAt: deadlineAt - MIN_DATABASE_PHASE_MS });
+    },
+  };
+}
+
+async function bindLeaseDeadline<
+  T extends LeaseDeadlineInput & {
+    db: Db;
+    auditedTransaction: LeaseAuditedTransaction;
+    issuer?: UpstreamTokenIssuer;
+  },
+  R,
+>(input: T, run: (bound: T) => Promise<R>): Promise<R> {
+  const deadlineAt = input.deadlineAt ?? Date.now() + UPSTREAM_LEASE_LIFECYCLE_DEADLINE_MS;
+  requireLeaseBudget(deadlineAt, MIN_DATABASE_PHASE_MS);
+  if (!input.withDatabaseDeadline || input[LEASE_DEADLINE_BOUND]) {
+    return run({
+      ...input,
+      deadlineAt,
+      [LEASE_DEADLINE_BOUND]: true,
+      issuer: input.issuer ? deadlineAwareIssuer(input.issuer, deadlineAt) : undefined,
+    });
+  }
+  return input.withDatabaseDeadline(deadlineAt, (db, auditedTransaction) =>
+    run({
+      ...input,
+      db,
+      auditedTransaction,
+      deadlineAt,
+      [LEASE_DEADLINE_BOUND]: true,
+      issuer: input.issuer ? deadlineAwareIssuer(input.issuer, deadlineAt) : undefined,
+    }),
+  );
+}
+
+async function withLeaseDatabasePhase<T>(
+  input: LeaseDeadlineInput & { db: Db; auditedTransaction: LeaseAuditedTransaction },
+  deadlineAt: number,
+  use: (db: Db, auditedTransaction: LeaseAuditedTransaction) => Promise<T>,
+): Promise<T> {
+  requireLeaseBudget(deadlineAt, MIN_DATABASE_PHASE_MS);
+  if (input.withDatabaseDeadline) {
+    return input.withDatabaseDeadline(deadlineAt, use);
+  }
+  return use(input.db, input.auditedTransaction);
+}
 
 type Db = any;
 
@@ -304,7 +387,21 @@ async function recordFailure(
   await auditedTransaction(tenantId, async (tx: Db, appendRequiredAudit) => {
     const updated = await tx
       .update(upstreamCredentialLeases)
-      .set({ status, lastError: error.slice(0, 500), updatedAt: new Date() })
+      .set({
+        status,
+        lastError: error.slice(0, 500),
+        updatedAt: new Date(),
+        ...(status === "failed"
+          ? {
+              tokenHash: null,
+              tokenCiphertext: null,
+              tokenIv: null,
+              tokenAuthTag: null,
+              tokenSalt: null,
+              expiresAt: null,
+            }
+          : {}),
+      })
       .where(
         and(
           eq(upstreamCredentialLeases.id, leaseId),
@@ -458,7 +555,15 @@ export async function expireUpstreamCredentialLeases(input: {
     for (const row of due) {
       const updated = await tx
         .update(upstreamCredentialLeases)
-        .set({ status: "expired", updatedAt: now })
+        .set({
+          status: "expired",
+          tokenHash: null,
+          tokenCiphertext: null,
+          tokenIv: null,
+          tokenAuthTag: null,
+          tokenSalt: null,
+          updatedAt: now,
+        })
         .where(
           and(
             eq(upstreamCredentialLeases.id, row.id),
@@ -490,15 +595,20 @@ export async function expireUpstreamCredentialLeases(input: {
  * provider outcome and is escalated truthfully. A delivery that was never ACKed
  * retains an encrypted revocation handle and is revoked after the bounded ACK
  * window. */
-export async function recoverInterruptedUpstreamCredentialLeases(input: {
-  db: Db;
-  tenantId: string;
-  issuer: UpstreamTokenIssuer;
-  exerciseToken: ExerciseLeaseToken;
-  auditedTransaction: LeaseAuditedTransaction;
-  now?: Date;
-  limit?: number;
-}): Promise<{ unknown: number; revoked: number; attention: number }> {
+export async function recoverInterruptedUpstreamCredentialLeases(
+  input: {
+    db: Db;
+    tenantId: string;
+    issuer: UpstreamTokenIssuer;
+    exerciseToken: ExerciseLeaseToken;
+    auditedTransaction: LeaseAuditedTransaction;
+    now?: Date;
+    limit?: number;
+  } & LeaseDeadlineInput,
+): Promise<{ unknown: number; revoked: number; attention: number }> {
+  if (!input[LEASE_DEADLINE_BOUND]) {
+    return bindLeaseDeadline(input, recoverInterruptedUpstreamCredentialLeases);
+  }
   const now = input.now ?? new Date();
   const cutoff = new Date(now.getTime() - DELIVERY_ACK_TIMEOUT_MS);
   const limit = Math.max(1, Math.min(input.limit ?? 100, 500));
@@ -593,7 +703,7 @@ export async function recoverInterruptedUpstreamCredentialLeases(input: {
     .limit(limit);
   let unknown = 0;
   for (const lease of stale) {
-    if (lease.status === "issuing") {
+    if (lease.status === "issuing" && !sealedTokenFromLease(lease)) {
       const changed = await input.auditedTransaction(
         input.tenantId,
         async (tx: Db, appendRequiredAudit) => {
@@ -671,7 +781,7 @@ async function recoverOneDueLease(input: {
   cutoff: Date;
 }): Promise<RecoveryTotals> {
   const { lease } = input;
-  if (lease.status === "issuing") {
+  if (lease.status === "issuing" && !sealedTokenFromLease(lease)) {
     const changed = await input.auditedTransaction(
       lease.tenantId,
       async (tx: Db, appendRequiredAudit) => {
@@ -789,7 +899,15 @@ async function expireOneActiveLease(input: {
   return input.auditedTransaction(input.lease.tenantId, async (tx: Db, appendRequiredAudit) => {
     const updated = await tx
       .update(upstreamCredentialLeases)
-      .set({ status: "expired", updatedAt: input.now })
+      .set({
+        status: "expired",
+        tokenHash: null,
+        tokenCiphertext: null,
+        tokenIv: null,
+        tokenAuthTag: null,
+        tokenSalt: null,
+        updatedAt: input.now,
+      })
       .where(
         and(
           eq(upstreamCredentialLeases.id, input.lease.id),
@@ -821,12 +939,13 @@ async function mapWithDeadline<T>(input: {
   items: T[];
   concurrency: number;
   deadlineAt: number;
+  minimumRemainingMs: number;
   run: (item: T) => Promise<void>;
 }): Promise<number> {
   let cursor = 0;
   let started = 0;
   const worker = async () => {
-    while (Date.now() < input.deadlineAt) {
+    while (input.deadlineAt - Date.now() >= input.minimumRemainingMs) {
       const index = cursor++;
       const item = input.items[index];
       if (item === undefined) return;
@@ -843,19 +962,21 @@ async function mapWithDeadline<T>(input: {
 /** Process-bounded autonomous sweep entrypoint. Deadline-due leases are read
  * globally from durable state and handled by a bounded worker pool, so neither
  * tenant-id pagination nor one slow provider call can starve another tenant. */
-export async function recoverAllInterruptedUpstreamCredentialLeases(input: {
-  db: Db;
-  issuer: UpstreamTokenIssuer;
-  exerciseToken: ExerciseLeaseToken;
-  auditedTransaction: LeaseAuditedTransaction;
-  now?: Date;
-  /** Global work cap. Ordering is by the oldest recovery deadline, never tenant id. */
-  workLimit?: number;
-  /** Provider calls are isolated behind a bounded pool so one tenant cannot block another. */
-  concurrency?: number;
-  /** Stop claiming new work after this wall-clock budget; already claimed work is awaited. */
-  runDeadlineMs?: number;
-}): Promise<{
+export async function recoverAllInterruptedUpstreamCredentialLeases(
+  input: {
+    db: Db;
+    issuer: UpstreamTokenIssuer;
+    exerciseToken: ExerciseLeaseToken;
+    auditedTransaction: LeaseAuditedTransaction;
+    now?: Date;
+    /** Global work cap. Ordering is by the oldest recovery deadline, never tenant id. */
+    workLimit?: number;
+    /** Provider calls are isolated behind a bounded pool so one tenant cannot block another. */
+    concurrency?: number;
+    /** Stop claiming new work after this wall-clock budget; already claimed work is awaited. */
+    runDeadlineMs?: number;
+  } & LeaseDeadlineInput,
+): Promise<{
   tenants: number;
   unknown: number;
   revoked: number;
@@ -863,13 +984,25 @@ export async function recoverAllInterruptedUpstreamCredentialLeases(input: {
   expired: number;
   remaining: boolean;
 }> {
+  if (!input[LEASE_DEADLINE_BOUND]) {
+    const runDeadlineMs = Math.max(
+      MIN_DATABASE_PHASE_MS,
+      Math.min(
+        input.runDeadlineMs ?? UPSTREAM_LEASE_LIFECYCLE_DEADLINE_MS,
+        UPSTREAM_LEASE_LIFECYCLE_DEADLINE_MS,
+      ),
+    );
+    return bindLeaseDeadline(
+      { ...input, deadlineAt: input.deadlineAt ?? Date.now() + runDeadlineMs },
+      recoverAllInterruptedUpstreamCredentialLeases,
+    );
+  }
   const now = input.now ?? new Date();
   const cutoff = new Date(now.getTime() - DELIVERY_ACK_TIMEOUT_MS);
   const authorityCutoff = new Date(now.getTime() - UPSTREAM_LEASE_AUTHORITY_RECHECK_INTERVAL_MS);
   const workLimit = Math.max(1, Math.min(input.workLimit ?? 500, 2_000));
   const concurrency = Math.max(1, Math.min(input.concurrency ?? 16, 64));
-  const runDeadlineMs = Math.max(100, Math.min(input.runDeadlineMs ?? 5_000, 10_000));
-  const deadlineAt = Date.now() + runDeadlineMs;
+  const deadlineAt = input.deadlineAt as number;
   // Pull at most one global page from each independently indexed deadline
   // class, then merge them by their actual recovery deadline. Fetching
   // workLimit + 1 from each class is sufficient to identify the global first
@@ -965,6 +1098,7 @@ export async function recoverAllInterruptedUpstreamCredentialLeases(input: {
     items: candidates,
     concurrency,
     deadlineAt,
+    minimumRemainingMs: MIN_PROVIDER_AND_FINALIZE_MS,
     run: async (candidate) => {
       const { lease } = candidate;
       touchedTenants.add(lease.tenantId);
@@ -995,24 +1129,29 @@ export async function recoverAllInterruptedUpstreamCredentialLeases(input: {
   return totals;
 }
 
-export async function issueUpstreamCredentialLease(input: {
-  db: Db;
-  tenantId: string;
-  agentId: string;
-  workspaceId: string;
-  idempotencyKey: string;
-  ttlSeconds: number;
-  resource: GitHubLeaseResource;
-  resolved: {
-    capability: { id: string; tenantId: string; secretId: string; constraints: unknown };
-    grant: { id: string; tenantId: string; agentId: string; capabilityId: string };
-  };
-  exerciseSecret: ExerciseCredentialSecret;
-  sealToken: SealLeaseToken;
-  auditedTransaction: LeaseAuditedTransaction;
-  issuer: UpstreamTokenIssuer;
-  now?: Date;
-}): Promise<LeaseIssueResult> {
+export async function issueUpstreamCredentialLease(
+  input: {
+    db: Db;
+    tenantId: string;
+    agentId: string;
+    workspaceId: string;
+    idempotencyKey: string;
+    ttlSeconds: number;
+    resource: GitHubLeaseResource;
+    resolved: {
+      capability: { id: string; tenantId: string; secretId: string; constraints: unknown };
+      grant: { id: string; tenantId: string; agentId: string; capabilityId: string };
+    };
+    exerciseSecret: ExerciseCredentialSecret;
+    sealToken: SealLeaseToken;
+    auditedTransaction: LeaseAuditedTransaction;
+    issuer: UpstreamTokenIssuer;
+    now?: Date;
+  } & LeaseDeadlineInput,
+): Promise<LeaseIssueResult> {
+  if (!input[LEASE_DEADLINE_BOUND]) {
+    return bindLeaseDeadline(input, issueUpstreamCredentialLease);
+  }
   try {
     await expireUpstreamCredentialLeases({
       db: input.db,
@@ -1178,6 +1317,72 @@ export async function issueUpstreamCredentialLease(input: {
       "credential escrow failed",
       revoked ? "failed" : "needs_attention",
     );
+    return {
+      ok: false,
+      status: 503,
+      code: "lease_finalization_failed",
+      error: "credential delivery was aborted",
+    };
+  }
+
+  // Once the provider has minted a token, persist its exact encrypted recovery
+  // handle before any authority/audit finalization that can block. Give this
+  // checkpoint an earlier hard deadline so failure still leaves the full
+  // provider-revocation reserve. The row remains `issuing`; interrupted-lease
+  // recovery owns exact-token cleanup until the audited delivery transition
+  // commits.
+  try {
+    const checkpointDeadlineAt =
+      (input.deadlineAt ?? Date.now() + UPSTREAM_LEASE_LIFECYCLE_DEADLINE_MS) -
+      MIN_PROVIDER_AND_FINALIZE_MS;
+    await withLeaseDatabasePhase(input, checkpointDeadlineAt, async (checkpointDb) => {
+      const checkpointed = await checkpointDb
+        .update(upstreamCredentialLeases)
+        .set({
+          tokenHash: sha256(issued.token),
+          tokenCiphertext: sealed.ciphertext,
+          tokenIv: sealed.iv,
+          tokenAuthTag: sealed.tag,
+          tokenSalt: sealed.salt,
+          expiresAt: Number.isFinite(issued.expiresAt.getTime()) ? issued.expiresAt : null,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(upstreamCredentialLeases.id, claim.id),
+            eq(upstreamCredentialLeases.tenantId, input.tenantId),
+            eq(upstreamCredentialLeases.status, "issuing"),
+          ),
+        )
+        .returning({ id: upstreamCredentialLeases.id });
+      if (checkpointed.length !== 1) throw new Error("lease issuance claim was lost");
+    });
+  } catch {
+    const revoked = await input.issuer.revoke(issued.token).then(
+      () => true,
+      () => false,
+    );
+    if (revoked) {
+      await recordFailure(
+        input.auditedTransaction,
+        claim.id,
+        input.tenantId,
+        "credential recovery checkpoint failed after provider issuance",
+        "failed",
+      ).catch(() => undefined);
+    } else {
+      await recordRecoverableSealedFailure({
+        db: input.db,
+        auditedTransaction: input.auditedTransaction,
+        leaseId: claim.id,
+        tenantId: input.tenantId,
+        token: issued.token,
+        sealed,
+        expiresAt: Number.isFinite(issued.expiresAt.getTime()) ? issued.expiresAt : null,
+        error: "credential recovery checkpoint and provider revocation outcomes unknown",
+        now: new Date(),
+      }).catch(() => undefined);
+    }
     return {
       ok: false,
       status: 503,
@@ -1449,15 +1654,20 @@ export async function issueUpstreamCredentialLease(input: {
   };
 }
 
-export async function acknowledgeUpstreamCredentialLease(input: {
-  db: Db;
-  tenantId: string;
-  agentId: string;
-  leaseId: string;
-  token: string;
-  auditedTransaction: LeaseAuditedTransaction;
-  now?: Date;
-}): Promise<{ ok: true } | { ok: false; status: 403 | 404 | 409 | 503; error: string }> {
+export async function acknowledgeUpstreamCredentialLease(
+  input: {
+    db: Db;
+    tenantId: string;
+    agentId: string;
+    leaseId: string;
+    token: string;
+    auditedTransaction: LeaseAuditedTransaction;
+    now?: Date;
+  } & LeaseDeadlineInput,
+): Promise<{ ok: true } | { ok: false; status: 403 | 404 | 409 | 503; error: string }> {
+  if (!input[LEASE_DEADLINE_BOUND]) {
+    return bindLeaseDeadline(input, acknowledgeUpstreamCredentialLease);
+  }
   const now = input.now ?? new Date();
   const [lease] = await input.db
     .select()
@@ -1556,16 +1766,21 @@ function equalHash(left: string | null, token: string): boolean {
   return timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(sha256(token), "hex"));
 }
 
-export async function revokeUpstreamCredentialLease(input: {
-  db: Db;
-  tenantId: string;
-  agentId: string;
-  leaseId: string;
-  token: string;
-  issuer: UpstreamTokenIssuer;
-  auditedTransaction: LeaseAuditedTransaction;
-  now?: Date;
-}): Promise<{ ok: true } | { ok: false; status: 403 | 404 | 409 | 503; error: string }> {
+export async function revokeUpstreamCredentialLease(
+  input: {
+    db: Db;
+    tenantId: string;
+    agentId: string;
+    leaseId: string;
+    token: string;
+    issuer: UpstreamTokenIssuer;
+    auditedTransaction: LeaseAuditedTransaction;
+    now?: Date;
+  } & LeaseDeadlineInput,
+): Promise<{ ok: true } | { ok: false; status: 403 | 404 | 409 | 503; error: string }> {
+  if (!input[LEASE_DEADLINE_BOUND]) {
+    return bindLeaseDeadline(input, revokeUpstreamCredentialLease);
+  }
   const now = input.now ?? new Date();
   const [lease] = await input.db
     .select()
@@ -1595,7 +1810,15 @@ export async function revokeUpstreamCredentialLease(input: {
     await input.auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {
       const expired = await tx
         .update(upstreamCredentialLeases)
-        .set({ status: "expired", updatedAt: now })
+        .set({
+          status: "expired",
+          tokenHash: null,
+          tokenCiphertext: null,
+          tokenIv: null,
+          tokenAuthTag: null,
+          tokenSalt: null,
+          updatedAt: now,
+        })
         .where(
           and(
             eq(upstreamCredentialLeases.id, lease.id),
@@ -1696,7 +1919,17 @@ export async function revokeUpstreamCredentialLease(input: {
     await input.auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {
       const finalized = await tx
         .update(upstreamCredentialLeases)
-        .set({ status: "revoked", revokedAt: now, lastError: null, updatedAt: now })
+        .set({
+          status: "revoked",
+          tokenHash: null,
+          tokenCiphertext: null,
+          tokenIv: null,
+          tokenAuthTag: null,
+          tokenSalt: null,
+          revokedAt: now,
+          lastError: null,
+          updatedAt: now,
+        })
         .where(
           and(
             eq(upstreamCredentialLeases.id, lease.id),
@@ -1884,7 +2117,17 @@ async function revokeExactSealedLease(input: {
     await input.auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {
       const finalized = await tx
         .update(upstreamCredentialLeases)
-        .set({ status: "revoked", revokedAt: input.now, lastError: null, updatedAt: input.now })
+        .set({
+          status: "revoked",
+          tokenHash: null,
+          tokenCiphertext: null,
+          tokenIv: null,
+          tokenAuthTag: null,
+          tokenSalt: null,
+          revokedAt: input.now,
+          lastError: null,
+          updatedAt: input.now,
+        })
         .where(
           and(
             eq(upstreamCredentialLeases.id, input.lease.id),
@@ -1956,16 +2199,21 @@ async function revokeExactSealedLease(input: {
  * changed. Provider failures are durable `needs_attention` outcomes and make the
  * operator mutation fail closed so authority cannot appear fully revoked while
  * a known-live credential remains usable. */
-export async function revokeUpstreamLeasesForAuthority(input: {
-  db: Db;
-  tenantId: string;
-  issuer: UpstreamTokenIssuer;
-  exerciseToken: ExerciseLeaseToken;
-  auditedTransaction: LeaseAuditedTransaction;
-  grantId?: string;
-  capabilityId?: string;
-  now?: Date;
-}): Promise<{ ok: true; revoked: number } | { ok: false; error: string }> {
+export async function revokeUpstreamLeasesForAuthority(
+  input: {
+    db: Db;
+    tenantId: string;
+    issuer: UpstreamTokenIssuer;
+    exerciseToken: ExerciseLeaseToken;
+    auditedTransaction: LeaseAuditedTransaction;
+    grantId?: string;
+    capabilityId?: string;
+    now?: Date;
+  } & LeaseDeadlineInput,
+): Promise<{ ok: true; revoked: number } | { ok: false; error: string }> {
+  if (!input[LEASE_DEADLINE_BOUND]) {
+    return bindLeaseDeadline(input, revokeUpstreamLeasesForAuthority);
+  }
   if (!input.grantId && !input.capabilityId)
     return { ok: false, error: "authority binding required" };
   const bindings = [eq(upstreamCredentialLeases.tenantId, input.tenantId)];

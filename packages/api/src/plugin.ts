@@ -63,7 +63,14 @@
  */
 
 import { type AdapterCategory, AdapterRegistry, adapterRegistry } from "@stwd/adapters";
-import { pluginMigrationsTable, runPluginMigrations, withTenantAuditedTransaction } from "@stwd/db";
+import {
+  getDb,
+  pluginMigrationsTable,
+  runPluginMigrations,
+  withDatabaseDeadline,
+  withTenantAuditedTransaction,
+  withTenantAuditedTransactionOnDb,
+} from "@stwd/db";
 import {
   type EvaluatorContext,
   type PolicyRuleRegistry,
@@ -185,6 +192,13 @@ export interface StewardAppContext {
   isValidAnyAddress: typeof isValidAnyAddress;
   writeAuditEvent: typeof writeAuditEvent;
   withTenantAuditedTransaction: typeof withTenantAuditedTransaction;
+  withCredentialLeaseDatabaseDeadline<T>(
+    deadlineAt: number,
+    use: (
+      db: ReturnType<typeof getDb>,
+      auditedTransaction: typeof withTenantAuditedTransaction,
+    ) => Promise<T>,
+  ): Promise<T>;
   getAgentTokenStatus: typeof getAgentTokenStatus;
   getRedisClient: typeof getRedisClient;
   exerciseCredentialSecret<T>(
@@ -260,6 +274,12 @@ export function buildPluginContext(): StewardAppContext {
     isValidAnyAddress,
     writeAuditEvent,
     withTenantAuditedTransaction,
+    withCredentialLeaseDatabaseDeadline: (deadlineAt, use) =>
+      withDatabaseDeadline(deadlineAt, (deadlineDb) =>
+        use(deadlineDb, (tenantId, fn) =>
+          withTenantAuditedTransactionOnDb(deadlineDb, tenantId, fn, deadlineAt),
+        ),
+      ),
     getAgentTokenStatus,
     getRedisClient,
     exerciseCredentialSecret: (tenantId, secretId, use) =>

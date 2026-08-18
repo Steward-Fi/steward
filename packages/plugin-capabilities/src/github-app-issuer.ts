@@ -77,7 +77,15 @@ export class GitHubAppInstallationTokenIssuer implements UpstreamTokenIssuer {
     }
   }
 
-  private async withDeadline<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  private async withDeadline<T>(
+    run: (signal: AbortSignal) => Promise<T>,
+    deadlineAt?: number,
+  ): Promise<T> {
+    const remainingMs = deadlineAt === undefined ? this.requestTimeoutMs : deadlineAt - Date.now();
+    if (!Number.isFinite(remainingMs) || remainingMs < 10) {
+      throw new Error("GitHub request timed out");
+    }
+    const timeoutMs = Math.min(this.requestTimeoutMs, Math.floor(remainingMs));
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
@@ -86,7 +94,7 @@ export class GitHubAppInstallationTokenIssuer implements UpstreamTokenIssuer {
         timedOut = true;
         controller.abort();
         reject(new Error("GitHub request timed out"));
-      }, this.requestTimeoutMs);
+      }, timeoutMs);
     });
     try {
       return await Promise.race([run(controller.signal), deadline]);
@@ -101,7 +109,10 @@ export class GitHubAppInstallationTokenIssuer implements UpstreamTokenIssuer {
     }
   }
 
-  async issue(input: Parameters<UpstreamTokenIssuer["issue"]>[0]) {
+  async issue(
+    input: Parameters<UpstreamTokenIssuer["issue"]>[0],
+    options?: { deadlineAt?: number },
+  ) {
     return this.withDeadline(async (signal) => {
       const key = await importPKCS8(input.privateKeyPem, "RS256");
       const now = Math.floor(Date.now() / 1000);
@@ -149,10 +160,10 @@ export class GitHubAppInstallationTokenIssuer implements UpstreamTokenIssuer {
       const expiresAt = new Date(body.expires_at);
       if (!Number.isFinite(expiresAt.getTime())) throw new Error("GitHub token expiry was invalid");
       return { token: body.token, expiresAt };
-    });
+    }, options?.deadlineAt);
   }
 
-  async revoke(token: string): Promise<void> {
+  async revoke(token: string, options?: { deadlineAt?: number }): Promise<void> {
     await this.withDeadline(async (signal) => {
       const response = await this.fetchImpl(`${GITHUB_API}/installation/token`, {
         method: "DELETE",
@@ -174,6 +185,6 @@ export class GitHubAppInstallationTokenIssuer implements UpstreamTokenIssuer {
         throw new Error(`GitHub installation-token revocation failed (${response.status})`);
       }
       void response.body?.cancel().catch(() => {});
-    });
+    }, options?.deadlineAt);
   }
 }

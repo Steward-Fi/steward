@@ -28,6 +28,7 @@ test("lease scheduler runs at startup, repeats, and stops cleanly", async () => 
 
 test("lease scheduler immediately drains remaining work and waits for an in-flight sweep on stop", async () => {
   let calls = 0;
+  let durableMutations = 0;
   let release!: () => void;
   const blocked = new Promise<void>((resolve) => {
     release = resolve;
@@ -43,6 +44,7 @@ test("lease scheduler immediately drains remaining work and waits for an in-flig
       if (calls === 1) return { unknown: 0, revoked: 0, attention: 0, expired: 0, remaining: true };
       entered();
       await blocked;
+      durableMutations += 1;
       return { unknown: 0, revoked: 0, attention: 0, expired: 0, remaining: false };
     },
   });
@@ -56,6 +58,9 @@ test("lease scheduler immediately drains remaining work and waits for an in-flig
   release();
   await stopping;
   expect(calls).toBe(2);
+  expect(durableMutations).toBe(1);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(durableMutations).toBe(1);
 });
 
 test("lease scheduler rejects a production interval that cannot honor the ACK deadline", async () => {

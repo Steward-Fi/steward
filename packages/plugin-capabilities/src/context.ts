@@ -84,6 +84,13 @@ export interface StewardAppContext {
     tenantId: string,
     fn: (tx: unknown, appendRequiredAudit: AppendRequiredAudit) => Promise<T>,
   ): Promise<T>;
+  withCredentialLeaseDatabaseDeadline?<T>(
+    deadlineAt: number,
+    use: (
+      db: DbHandle,
+      auditedTransaction: StewardAppContext["withTenantAuditedTransaction"],
+    ) => Promise<T>,
+  ): Promise<T>;
   getAgentTokenStatus(agentId: string): Promise<AgentTokenStatus | null>;
 
   // ── redis (from @stwd/api middleware/redis) ───────────────────────────────

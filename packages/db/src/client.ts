@@ -139,6 +139,140 @@ export function createPostgresClient(connectionString = getDatabaseUrl()) {
   });
 }
 
+export const DATABASE_DEADLINE_EXCEEDED_MESSAGE = "database operation deadline exceeded";
+const DATABASE_DEADLINE_CLEANUP_GRACE_MS = 100;
+
+export class DatabaseDeadlineExceededError extends Error {
+  constructor() {
+    super(DATABASE_DEADLINE_EXCEEDED_MESSAGE);
+    this.name = "DatabaseDeadlineExceededError";
+  }
+}
+
+function deadlineMilliseconds(deadlineAt: number): number {
+  if (!Number.isSafeInteger(deadlineAt)) throw new Error("database deadline must be an integer");
+  const remaining = deadlineAt - Date.now();
+  if (remaining < 1_000) throw new DatabaseDeadlineExceededError();
+  return remaining;
+}
+
+function serverDeadlineConnectionParameters(remainingMs: number) {
+  // Let PostgreSQL cancel first. The driver-level timer below is the hard stop
+  // for connect/acquisition stalls and retains a small window for the server's
+  // cancellation response to reach the client before its socket is destroyed.
+  const serverMs = Math.max(1, remainingMs - DATABASE_DEADLINE_CLEANUP_GRACE_MS);
+  return {
+    statement_timeout: serverMs,
+    lock_timeout: serverMs,
+    idle_in_transaction_session_timeout: serverMs,
+  };
+}
+
+function withServerDeadlineInUrl(connectionString: string, remainingMs: number): string {
+  const parsed = new URL(connectionString);
+  const existing = parsed.searchParams.get("options")?.trim();
+  const serverMs = Math.max(1, remainingMs - DATABASE_DEADLINE_CLEANUP_GRACE_MS);
+  const limits = [
+    `-c statement_timeout=${serverMs}`,
+    `-c lock_timeout=${serverMs}`,
+    `-c idle_in_transaction_session_timeout=${serverMs}`,
+  ].join(" ");
+  parsed.searchParams.set("options", existing ? `${existing} ${limits}` : limits);
+  return parsed.toString();
+}
+
+function isDatabaseDeadlineError(error: unknown): boolean {
+  if (error instanceof DatabaseDeadlineExceededError) return true;
+  let current = error;
+  for (let depth = 0; depth < 5 && current && typeof current === "object"; depth += 1) {
+    const candidate = current as { code?: unknown; name?: unknown; cause?: unknown };
+    if (
+      candidate.code === "57014" ||
+      candidate.code === "55P03" ||
+      candidate.code === "25P03" ||
+      candidate.code === "CONNECT_TIMEOUT" ||
+      candidate.name === "AbortError" ||
+      candidate.name === "TimeoutError"
+    ) {
+      return true;
+    }
+    current = candidate.cause;
+  }
+  return false;
+}
+
+/**
+ * Run one database unit of work under an absolute, cancel-safe deadline.
+ *
+ * postgres-js uses a fresh max=1 client: there is no unbounded shared-pool
+ * queue, connect_timeout covers DNS/TCP/TLS/authentication, PostgreSQL enforces
+ * statement/lock/idle-in-transaction limits, and the absolute timer closes the
+ * driver connection. postgres-js settles active queries only after that close,
+ * so an open transaction is rolled back before this function rejects.
+ *
+ * neon-http uses a per-call AbortSignal and the same server parameters. Its HTTP
+ * response can stall independently of PostgreSQL, so the fetch abort is the hard
+ * transport bound while the earlier server limit protects transaction atomicity.
+ */
+export async function withDatabaseDeadline<T>(
+  deadlineAt: number,
+  use: (db: ReturnType<typeof createDb>["db"]) => Promise<T>,
+): Promise<T> {
+  const remainingMs = deadlineMilliseconds(deadlineAt);
+
+  if (pgliteOverride) {
+    // Embedded PGLite has no network/pool and no cancel API. Keep the same
+    // phase-start contract without pretending that WASM execution is abortable.
+    return use(pgliteOverride.db as ReturnType<typeof createDb>["db"]);
+  }
+
+  if (getDatabaseDriver() === "neon-http") {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), remainingMs);
+    try {
+      const { db } = createNeonHttpDb(withServerDeadlineInUrl(getDatabaseUrl(), remainingMs), {
+        signal: controller.signal,
+      });
+      return await use(db as unknown as ReturnType<typeof createDb>["db"]);
+    } catch (error) {
+      if (controller.signal.aborted || isDatabaseDeadlineError(error)) {
+        throw new DatabaseDeadlineExceededError();
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  const client = postgres(getDatabaseUrl(), {
+    max: 1,
+    prepare: false,
+    connect_timeout: Math.max(1, Math.floor(remainingMs / 1_000)),
+    connection: serverDeadlineConnectionParameters(remainingMs),
+  });
+  const db = drizzlePostgres(client, { schema: FULL_SCHEMA });
+  let deadlineClose: Promise<void> | undefined;
+  const timer = setTimeout(() => {
+    // This is driver cancellation, not an abandoned Promise.race. Destroying
+    // the sole connection makes PostgreSQL roll back any open transaction and
+    // rejects its query before `use` can settle.
+    deadlineClose = client.end({ timeout: 0 });
+  }, remainingMs);
+  try {
+    return await use(db);
+  } catch (error) {
+    if (deadlineClose || Date.now() >= deadlineAt || isDatabaseDeadlineError(error)) {
+      if (deadlineClose) await deadlineClose.catch(() => undefined);
+      throw new DatabaseDeadlineExceededError();
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    if (deadlineClose) await deadlineClose.catch(() => undefined);
+    else await client.end({ timeout: 0 });
+  }
+}
+
 // ─── postgres-js (Bun/Node) ───────────────────────────────────────────────────
 
 export function createDb(connectionString = getDatabaseUrl()) {
@@ -157,12 +291,19 @@ export function createDb(connectionString = getDatabaseUrl()) {
  * Each call returns a fresh client; for per-request use this is intentional —
  * the underlying transport is HTTP, so there is no TCP connection to reuse.
  */
-export function createNeonHttpDb(connectionString = getDatabaseUrl()) {
+export function createNeonHttpDb(
+  connectionString = getDatabaseUrl(),
+  options: { signal?: AbortSignal } = {},
+) {
   assertDatabaseUrlTls(connectionString);
   // Lazy-require so Bun/Node entry points don't pull @neondatabase/serverless
   // into their bundle when the postgres-js driver is in use.
-  const { neon } = require("@neondatabase/serverless") as { neon: (url: string) => any };
-  const client = neon(connectionString);
+  const { neon } = require("@neondatabase/serverless") as {
+    neon: (url: string, options?: Record<string, unknown>) => any;
+  };
+  const client = neon(connectionString, {
+    fetchOptions: options.signal ? { signal: options.signal } : undefined,
+  });
   const db = drizzleNeon(client, { schema: FULL_SCHEMA });
   return { client, db };
 }
