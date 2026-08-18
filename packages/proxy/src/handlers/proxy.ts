@@ -1896,7 +1896,17 @@ export async function handleProxy(c: Context): Promise<Response> {
       credential = extractProviderCredentialForHost(target.host, credential);
     }
   } catch (err) {
-    console.error(`[proxy] Failed to decrypt secret ${route.secretId}:`, err);
+    const errorCode =
+      typeof err === "object" &&
+      err !== null &&
+      "code" in err &&
+      typeof (err as { code?: unknown }).code === "string"
+        ? ((err as { code: string }).code ?? null)
+        : null;
+    console.error("[proxy] Failed to resolve provider credential", {
+      errorClass: err instanceof Error ? err.name : typeof err,
+      errorCode,
+    });
     await recordAudit({
       agentId,
       tenantId,

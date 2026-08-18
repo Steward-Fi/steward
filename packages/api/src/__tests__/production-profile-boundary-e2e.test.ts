@@ -28,6 +28,7 @@ import {
   providerActionBindings,
   providerGrants,
   providerOperations,
+  proxyAuditLog,
   secretRoutes,
   secrets,
 } from "@stwd/db";
@@ -59,6 +60,7 @@ let app: Hono<{ Variables: AppVariables }>;
 let jwksServer: Server;
 let agentPrivateKey: KeyLike;
 let dispatchGovernedExecution: typeof import("@stwd/proxy/src/handlers/governed-execution")["dispatchGovernedExecution"];
+let proxy: typeof import("@stwd/proxy/src/handlers/proxy");
 let forwardCount = 0;
 
 const PROFILES = [
@@ -221,7 +223,7 @@ beforeAll(async () => {
   const { resetCheckpointSignerCache } = await import("../services/audit-checkpoint");
   resetCheckpointSignerCache();
   app = (await import("../app")).app as Hono<{ Variables: AppVariables }>;
-  const proxy = await import("@stwd/proxy/src/handlers/proxy");
+  proxy = await import("@stwd/proxy/src/handlers/proxy");
   proxy.__resetSecretVaultForTests();
   ({ dispatchGovernedExecution } = await import("@stwd/proxy/src/handlers/governed-execution"));
   proxy.__setCheckProxyRateLimitForTests(async () => ({
@@ -245,14 +247,7 @@ beforeAll(async () => {
     forwardCount += 1;
     return new Response('{"ok":true}', { status: 201 });
   });
-  proxy.__setGoogleExecutionTokenForwarderForTests(async () =>
-    Response.json({
-      access_token: "profile-boundary-ephemeral-access",
-      token_type: "Bearer",
-      scope: "openid email https://www.googleapis.com/auth/calendar.readonly",
-      expires_in: 3600,
-    }),
-  );
+  resetGoogleExecutionTokenForwarder();
 });
 
 beforeEach(async () => {
@@ -261,6 +256,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  resetGoogleExecutionTokenForwarder();
   await getDb()
     .update(secretRoutes)
     .set({ authorityMode: "legacy", providerOperationId: null })
@@ -290,10 +286,21 @@ afterAll(async () => {
 
 type BoundaryFixture = (typeof PROFILES)[number];
 
-async function runAuthenticatedBoundary(
+function resetGoogleExecutionTokenForwarder(): void {
+  proxy.__setGoogleExecutionTokenForwarderForTests(async () =>
+    Response.json({
+      access_token: "profile-boundary-ephemeral-access",
+      token_type: "Bearer",
+      scope: "openid email https://www.googleapis.com/auth/calendar.readonly",
+      expires_in: 3600,
+    }),
+  );
+}
+
+async function prepareAuthenticatedBoundary(
   fixture: BoundaryFixture,
   options: { maliciousOperationDescriptor?: boolean } = {},
-): Promise<void> {
+): Promise<{ actionId: string }> {
   const requestProfile = {
     ...fixture.requestProfile,
     policyRules: approvalRules(fixture.operationKey),
@@ -461,7 +468,16 @@ async function runAuthenticatedBoundary(
     await db.execute(sql`UPDATE provider_operations SET revision = 1 WHERE id = ${F.OP}`);
   }
 
-  const dispatch = await dispatchGovernedExecution(action.id, F.TENANT);
+  return { actionId: action.id };
+}
+
+async function runAuthenticatedBoundary(
+  fixture: BoundaryFixture,
+  options: { maliciousOperationDescriptor?: boolean } = {},
+): Promise<void> {
+  const { actionId } = await prepareAuthenticatedBoundary(fixture, options);
+
+  const dispatch = await dispatchGovernedExecution(actionId, F.TENANT);
   if (options.maliciousOperationDescriptor) {
     expect(dispatch).toMatchObject({
       ok: false,
@@ -476,16 +492,16 @@ async function runAuthenticatedBoundary(
 
   const admin = await sessionToken(F.APPROVER_2);
   const humanHeaders = { authorization: `Bearer ${admin}`, "x-steward-tenant": F.TENANT };
-  const caseResponse = await app.request(`/v2/provider-actions/${action.id}/case`, {
+  const caseResponse = await app.request(`/v2/provider-actions/${actionId}/case`, {
     headers: humanHeaders,
   });
   expect(caseResponse.status).toBe(200);
   expect(await caseResponse.json()).toMatchObject({
-    caseId: action.id,
+    caseId: actionId,
     operation: { key: fixture.operationKey, canonicalProfile: fixture.profile },
     terminalState: options.maliciousOperationDescriptor ? "execution_ready" : "succeeded",
   });
-  const evidenceResponse = await app.request(`/v2/provider-actions/${action.id}/evidence`, {
+  const evidenceResponse = await app.request(`/v2/provider-actions/${actionId}/evidence`, {
     headers: humanHeaders,
   });
   expect(evidenceResponse.status).toBe(200);
@@ -494,7 +510,7 @@ async function runAuthenticatedBoundary(
     bundle: { events: unknown[] };
   };
   expect(evidence.manifest).toMatchObject({
-    caseId: action.id,
+    caseId: actionId,
     operation: { canonicalProfile: fixture.profile },
   });
   expect(evidence.bundle.events.length).toBeGreaterThan(0);
@@ -518,5 +534,44 @@ describe("#220 real production profile boundaries", () => {
     expect(genericFixture).toBeDefined();
     if (!genericFixture) throw new Error("generic HTTP production fixture is missing");
     await runAuthenticatedBoundary(genericFixture, { maliciousOperationDescriptor: true });
+  });
+
+  test("google governed dispatch redacts thrown execution-token canaries from logs, response, and audit", async () => {
+    const googleFixture = PROFILES.find(
+      ({ profile }) => profile === GOOGLE_PROVIDER_ACTION_PROFILE,
+    );
+    expect(googleFixture).toBeDefined();
+    if (!googleFixture) throw new Error("google production fixture is missing");
+    const canary = "profile-boundary-refresh-canary profile-boundary-error-canary";
+    const logged: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(
+        args.map((value) => (typeof value === "string" ? value : JSON.stringify(value))).join(" "),
+      );
+    };
+    proxy.__setGoogleExecutionTokenForwarderForTests(async () => {
+      const error = Object.assign(new Error(canary), { code: "ECONNRESET" });
+      throw error;
+    });
+    try {
+      const { actionId } = await prepareAuthenticatedBoundary(googleFixture);
+      const dispatch = await dispatchGovernedExecution(actionId, F.TENANT);
+      expect(dispatch).toMatchObject({ ok: false });
+      expect(JSON.stringify(dispatch)).not.toContain(canary);
+      expect(forwardCount).toBe(0);
+    } finally {
+      console.error = originalError;
+      resetGoogleExecutionTokenForwarder();
+    }
+    const audits = await getDb()
+      .select()
+      .from(proxyAuditLog)
+      .where(eq(proxyAuditLog.tenantId, F.TENANT));
+    expect(audits.some((audit) => audit.reason === "credential-decrypt-failed")).toBeTrue();
+    expect(JSON.stringify(audits)).not.toContain(canary);
+    expect(logged.join("\n")).toContain('"errorClass":"Error"');
+    expect(logged.join("\n")).toContain('"errorCode":"ECONNRESET"');
+    expect(logged.join("\n")).not.toContain(canary);
   });
 });

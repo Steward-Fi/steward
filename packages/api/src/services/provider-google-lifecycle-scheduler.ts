@@ -9,6 +9,21 @@ const DEFAULT_INTERVAL_MS = 60_000;
 const MIN_INTERVAL_MS = 5_000;
 const MAX_INTERVAL_MS = 5 * 60_000;
 
+function classifySweepFailure(error: unknown): {
+  errorClass: string;
+  errorCode: string | null;
+} {
+  const errorClass = error instanceof Error ? error.name : typeof error;
+  const errorCode =
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof (error as { code?: unknown }).code === "string"
+      ? ((error as { code: string }).code ?? null)
+      : null;
+  return { errorClass, errorCode };
+}
+
 function configuredInterval(): number {
   const raw = process.env.STEWARD_GOOGLE_LIFECYCLE_SWEEP_INTERVAL_MS;
   if (raw === undefined) return DEFAULT_INTERVAL_MS;
@@ -55,7 +70,13 @@ export function startGoogleCredentialLifecycleScheduler(options?: {
           );
         }
       })
-      .catch((error) => console.error("[provider-google] lifecycle sweep failed:", error))
+      .catch((error) => {
+        const classified = classifySweepFailure(error);
+        console.error("[provider-google] lifecycle sweep failed", {
+          errorClass: classified.errorClass,
+          errorCode: classified.errorCode,
+        });
+      })
       .finally(() => {
         active = undefined;
         if (rerunRequested && !stopped) {
