@@ -3435,7 +3435,7 @@ async function getTenantOidcProviders(tenantId: string): Promise<TenantOidcProvi
   // Revalidate persisted JSON on every trust-boundary read. Older rows can
   // predate write-time validation; treating their TypeScript cast as trusted
   // would re-enable unsafe algorithms or malformed endpoint configuration.
-  const normalized = normalizeOidcProviders(row?.oidcProviders ?? []);
+  const normalized = normalizeOidcProviders(row?.oidcProviders ?? [], tenantId);
   return typeof normalized === "string" ? [] : normalized;
 }
 
