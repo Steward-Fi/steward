@@ -16,6 +16,7 @@ import {
   users,
   userTenants,
 } from "@stwd/db";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
@@ -527,7 +528,10 @@ async function writeAccountAudit(input: Parameters<typeof writeAuditEvent>[0]) {
   try {
     await writeAuditEvent(input);
   } catch (error) {
-    console.error("[accounts] Failed to write account audit event:", error);
+    console.error(
+      "[accounts] Failed to write account audit event",
+      redactedThrownDiagnostics(error),
+    );
   }
 }
 

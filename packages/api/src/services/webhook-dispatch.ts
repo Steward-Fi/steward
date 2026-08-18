@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, webhookConfigs, webhookDeliveries } from "@stwd/db";
-import type { WebhookEvent } from "@stwd/shared";
+import { redactedThrownDiagnostics, type WebhookEvent } from "@stwd/shared";
 import {
   decryptWebhookSecret,
   encryptWebhookSecret,
@@ -53,7 +53,10 @@ export function dispatchWebhook(
   };
   void dispatchConfiguredWebhooks(event, configuredType, isPluginEvent ? type : null).catch(
     (error) => {
-      console.error("[webhooks] Failed to dispatch configured webhooks:", error);
+      console.error(
+        "[webhooks] Failed to dispatch configured webhooks",
+        redactedThrownDiagnostics(error),
+      );
     },
   );
 

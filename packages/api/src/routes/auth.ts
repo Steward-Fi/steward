@@ -124,13 +124,14 @@ import {
   users,
   userTenants,
 } from "@stwd/db";
-import type {
-  ApiResponse,
-  SsoDiscoveryResult,
-  TenantAuthAbuseConfig,
-  TenantOidcProviderConfig,
-  TenantSamlSsoConfig,
-  TenantTestAccountConfig,
+import {
+  type ApiResponse,
+  redactedThrownDiagnostics,
+  type SsoDiscoveryResult,
+  type TenantAuthAbuseConfig,
+  type TenantOidcProviderConfig,
+  type TenantSamlSsoConfig,
+  type TenantTestAccountConfig,
 } from "@stwd/shared";
 import { KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import bs58 from "bs58";
@@ -3593,7 +3594,10 @@ async function provisionOidcUser(opts: {
       const wallet = await provisionWalletForUser(user.id, syntheticEmail);
       walletAddress = wallet.walletAddress;
     } catch (err) {
-      console.error(`[OidcAuth:${provider.id}] Wallet provision failed:`, err);
+      console.error(
+        `[OidcAuth:${provider.id}] Wallet provision failed`,
+        redactedThrownDiagnostics(err),
+      );
       return { ok: false, status: 500, error: "Wallet provisioning failed" };
     }
     const verifiedEmail = emailVerified === true ? email : undefined;
@@ -3646,10 +3650,13 @@ async function provisionOidcUser(opts: {
       ),
     };
   } catch (err) {
-    console.error(`[OidcAuth:${provider.id}] provisionOidcUser failed:`, err);
+    console.error(
+      `[OidcAuth:${provider.id}] provisionOidcUser failed`,
+      redactedThrownDiagnostics(err),
+    );
     return {
       ok: false,
-      error: err instanceof Error ? err.message : "Internal server error",
+      error: "Internal server error",
     };
   }
 }
@@ -3736,7 +3743,7 @@ async function provisionSamlUser(opts: {
       const wallet = await provisionWalletForUser(user.id, email);
       walletAddress = wallet.walletAddress;
     } catch (err) {
-      console.error("[SamlAuth] Wallet provision failed:", err);
+      console.error("[SamlAuth] Wallet provision failed", redactedThrownDiagnostics(err));
       return { ok: false, status: 500, error: "Wallet provisioning failed" };
     }
 
@@ -3775,8 +3782,8 @@ async function provisionSamlUser(opts: {
       ),
     };
   } catch (err) {
-    console.error("[SamlAuth] provisionSamlUser failed:", err);
-    return { ok: false, error: err instanceof Error ? err.message : "Internal server error" };
+    console.error("[SamlAuth] provisionSamlUser failed", redactedThrownDiagnostics(err));
+    return { ok: false, error: "Internal server error" };
   }
 }
 
@@ -3840,7 +3847,7 @@ async function completeEmailAuth(
     const w = await provisionWalletForUser(user.id, email);
     walletAddress = w.walletAddress;
   } catch (err) {
-    console.error("[EmailAuth] Wallet provision failed:", err);
+    console.error("[EmailAuth] Wallet provision failed", redactedThrownDiagnostics(err));
   }
 
   // Resolve requesting tenant and link user.
@@ -4530,7 +4537,7 @@ auth.post("/telegram/verify", async (c) => {
       const wallet = await provisionWalletForUser(user.id, `telegram:${telegramUser.id}`);
       walletAddress = wallet.walletAddress;
     } catch (err) {
-      console.error("[TelegramAuth] Wallet provision failed:", err);
+      console.error("[TelegramAuth] Wallet provision failed", redactedThrownDiagnostics(err));
     }
 
     const tenantResult = await resolveAndValidateTenant(c, user.id, requestedTenantId);
@@ -4573,11 +4580,8 @@ auth.post("/telegram/verify", async (c) => {
     );
     return authExchangeJson(c, response);
   } catch (error) {
-    console.error("[TelegramAuth] verify failed:", error);
-    return c.json<ApiResponse>(
-      { ok: false, error: error instanceof Error ? error.message : "Telegram login failed" },
-      500,
-    );
+    console.error("[TelegramAuth] verify failed", redactedThrownDiagnostics(error));
+    return c.json<ApiResponse>({ ok: false, error: "Telegram login failed" }, 500);
   }
 });
 
@@ -4675,7 +4679,7 @@ auth.post("/farcaster/verify", async (c) => {
       const wallet = await provisionWalletForUser(user.id, `farcaster:${providerAccountId}`);
       walletAddress = wallet.walletAddress;
     } catch (err) {
-      console.error("[FarcasterAuth] Wallet provision failed:", err);
+      console.error("[FarcasterAuth] Wallet provision failed", redactedThrownDiagnostics(err));
     }
 
     const tenantResult = await resolveAndValidateTenant(c, user.id, requestedTenantId);
@@ -4717,11 +4721,8 @@ auth.post("/farcaster/verify", async (c) => {
     );
     return authExchangeJson(c, response);
   } catch (error) {
-    console.error("[FarcasterAuth] verify failed:", error);
-    return c.json<ApiResponse>(
-      { ok: false, error: error instanceof Error ? error.message : "Farcaster login failed" },
-      500,
-    );
+    console.error("[FarcasterAuth] verify failed", redactedThrownDiagnostics(error));
+    return c.json<ApiResponse>({ ok: false, error: "Farcaster login failed" }, 500);
   }
 });
 
@@ -8087,7 +8088,7 @@ auth.post("/passkey/register/verify", async (c) => {
       body.response as unknown as Parameters<PasskeyAuth["verifyRegistration"]>[1],
     );
   } catch (err) {
-    console.warn("[PasskeyAuth] Registration failed:", err);
+    console.warn("[PasskeyAuth] Registration failed", redactedThrownDiagnostics(err));
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -8136,7 +8137,10 @@ auth.post("/passkey/register/verify", async (c) => {
     const w = await provisionWalletForUser(user.id, email);
     walletAddress = w.walletAddress;
   } catch (err) {
-    console.error("[PasskeyAuth] Wallet provision failed on register:", err);
+    console.error(
+      "[PasskeyAuth] Wallet provision failed on register",
+      redactedThrownDiagnostics(err),
+    );
   }
 
   // Link the user only after tenant authorization has been validated.
@@ -8284,7 +8288,7 @@ auth.post("/passkey/login/verify", async (c) => {
       cred.counter,
     );
   } catch (err) {
-    console.warn("[PasskeyAuth] Authentication failed:", err);
+    console.warn("[PasskeyAuth] Authentication failed", redactedThrownDiagnostics(err));
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -8327,7 +8331,10 @@ auth.post("/passkey/login/verify", async (c) => {
       const w = await provisionWalletForUser(user.id, email);
       walletAddress = w.walletAddress;
     } catch (err) {
-      console.error("[PasskeyAuth] Wallet provision failed on login:", err);
+      console.error(
+        "[PasskeyAuth] Wallet provision failed on login",
+        redactedThrownDiagnostics(err),
+      );
     }
   } else {
     // Wallet exists — still ensure personal tenant is in place
@@ -8984,7 +8991,7 @@ auth.post("/guest", async (c) => {
     const provisioned = await provisionWalletForUser(guest.id, `guest-${guest.id}`);
     walletAddress = provisioned.walletAddress;
   } catch (err) {
-    console.error("[GuestAuth] Wallet provision failed:", err);
+    console.error("[GuestAuth] Wallet provision failed", redactedThrownDiagnostics(err));
   }
 
   const sessionClaims: Record<string, unknown> = {
@@ -10207,7 +10214,10 @@ async function provisionOAuthUser(opts: {
       const w = await provisionWalletForUser(user.id, email);
       walletAddress = w.walletAddress;
     } catch (err) {
-      console.error(`[OAuthAuth:${providerName}] Wallet provision failed:`, err);
+      console.error(
+        `[OAuthAuth:${providerName}] Wallet provision failed`,
+        redactedThrownDiagnostics(err),
+      );
     }
 
     // 4. Link user to the already-authorized requesting tenant.
@@ -10235,10 +10245,13 @@ async function provisionOAuthUser(opts: {
       ),
     };
   } catch (err) {
-    console.error(`[OAuthAuth:${providerName}] provisionOAuthUser failed:`, err);
+    console.error(
+      `[OAuthAuth:${providerName}] provisionOAuthUser failed`,
+      redactedThrownDiagnostics(err),
+    );
     return {
       ok: false,
-      error: err instanceof Error ? err.message : "Internal server error",
+      error: "Internal server error",
     };
   }
 }
@@ -10399,7 +10412,7 @@ async function exchangeOidcAuthorizationCode(opts: {
     // Keep resolver, TLS, socket, and certificate diagnostics server-side.
     // They may contain configured hostnames or runtime network details and are
     // not useful to an unauthenticated callback client.
-    console.warn("[OIDC] Token endpoint request failed:", error);
+    console.warn("[OIDC] Token endpoint request failed", redactedThrownDiagnostics(error));
     throw new Error("OIDC token endpoint request failed");
   }
   const text = response.text;
@@ -10410,9 +10423,8 @@ async function exchangeOidcAuthorizationCode(opts: {
     throw new Error("OIDC token endpoint returned invalid JSON");
   }
   if (!response.ok) {
-    // SEC-139: the IdP-supplied `error` string is untrusted text. Log it
-    // server-side for operators, but never echo it into the client-facing
-    // 502 response.
+    // SEC-139: the IdP-supplied `error` string is untrusted text. Do not echo
+    // it into logs or the client-facing 502 response.
     const idpError =
       payload &&
       typeof payload === "object" &&
@@ -10421,7 +10433,7 @@ async function exchangeOidcAuthorizationCode(opts: {
         ? payload.error
         : undefined;
     if (idpError) {
-      console.warn("[OIDC] Token endpoint rejected authorization code:", idpError);
+      console.warn("[OIDC] Token endpoint rejected authorization code");
     }
     throw new Error("OIDC token endpoint rejected authorization code");
   }

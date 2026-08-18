@@ -36,6 +36,7 @@
  */
 
 import { platformAuthMiddleware } from "@stwd/auth";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { authorizationSignature } from "./middleware/authorization-signature";
@@ -108,7 +109,7 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
       return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
     }
 
-    console.error(`[${requestId}] Unhandled API error:`, err);
+    console.error(`[${requestId}] Unhandled API error`, redactedThrownDiagnostics(err));
     return c.json<ApiResponse>({ ok: false, error: "Internal server error" }, 500);
   });
 

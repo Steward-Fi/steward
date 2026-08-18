@@ -6,7 +6,7 @@
 
 import { randomBytes } from "node:crypto";
 import { tenantConfigs as tenantConfigsTable } from "@stwd/db";
-import type { TenantAuthAbuseConfig } from "@stwd/shared";
+import { redactedThrownDiagnostics, type TenantAuthAbuseConfig } from "@stwd/shared";
 import { encryptWebhookSecret } from "@stwd/webhooks";
 import { and, count, desc, eq, or, type SQL, sql } from "drizzle-orm";
 import { Hono } from "hono";
@@ -800,8 +800,8 @@ webhookRoutes.post("/:id/test", async (c) => {
     });
   } catch (error) {
     console.error(
-      `[webhooks] Test webhook ${delivery.id} was dispatched but final audit failed:`,
-      error,
+      `[webhooks] Test webhook ${delivery.id} was dispatched but final audit failed`,
+      redactedThrownDiagnostics(error),
     );
     return c.json<ApiResponse>(
       {
@@ -1035,8 +1035,8 @@ webhookRoutes.post("/deliveries/:id/replay", async (c) => {
     });
   } catch (error) {
     console.error(
-      `[webhooks] Replay webhook ${replayed.id} was dispatched but final audit failed:`,
-      error,
+      `[webhooks] Replay webhook ${replayed.id} was dispatched but final audit failed`,
+      redactedThrownDiagnostics(error),
     );
     return c.json<ApiResponse>(
       {

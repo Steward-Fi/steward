@@ -9,6 +9,7 @@
  */
 
 import { assertRedisUrlTls } from "@stwd/redis";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { Redis } from "ioredis";
 import { MONOTONIC_REVOCATION_SCRIPT } from "./revocation-script";
 
@@ -153,7 +154,7 @@ class RedisRevocationStore implements RevocationStore {
         enableReadyCheck: true,
       });
       this.redis.on("error", (err) => {
-        console.warn("[steward:auth] Redis revocation unavailable:", err.message);
+        console.warn("[steward:auth] Redis revocation unavailable", redactedThrownDiagnostics(err));
       });
     }
     return this.redis;

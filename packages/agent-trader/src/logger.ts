@@ -5,6 +5,8 @@
  * grep, and jq can consume the output without any parsing logic.
  */
 
+import { redactedThrownDiagnostics } from "@stwd/shared";
+
 export type LogLevel = "info" | "warn" | "error" | "debug";
 
 export interface DecisionLog {
@@ -57,7 +59,12 @@ export function logDecision(entry: Omit<DecisionLog, "timestamp">): void {
 export function logSubmission(entry: Omit<SubmissionLog, "timestamp">): void {
   const level: LogLevel =
     entry.status === "error" || entry.status === "rejected" ? "error" : "info";
-  emit(level, "submission", { timestamp: new Date().toISOString(), ...entry });
+  const { error, ...safeEntry } = entry;
+  emit(level, "submission", {
+    timestamp: new Date().toISOString(),
+    ...safeEntry,
+    ...(error === undefined ? {} : { error: "operation failed" }),
+  });
 }
 
 /**
@@ -78,6 +85,8 @@ const SENSITIVE_WEBHOOK_FIELDS = [
   "signature",
 ];
 
+const FAILURE_TEXT_FIELDS = new Set(["error", "errormessage", "errorraw", "stack"]);
+
 function redactWebhookValue(value: unknown): unknown {
   // SEC-110: recurse into arrays too — batch-shaped payloads carry objects
   // inside arrays (e.g. `items: [{ apiKey: ... }]`) and must get the same
@@ -93,7 +102,10 @@ function redactWebhookData(data: Record<string, unknown>): Record<string, unknow
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(data)) {
     const normalized = key.toLowerCase().replace(/[_-]/g, "");
-    if (SENSITIVE_WEBHOOK_FIELDS.some((f) => normalized.includes(f))) {
+    if (
+      FAILURE_TEXT_FIELDS.has(normalized) ||
+      SENSITIVE_WEBHOOK_FIELDS.some((f) => normalized.includes(f))
+    ) {
       out[key] = "[redacted]";
     } else {
       out[key] = redactWebhookValue(value);
@@ -114,7 +126,7 @@ export function logInfo(message: string, meta?: Record<string, unknown>): void {
   emit("info", "info", {
     timestamp: new Date().toISOString(),
     message,
-    ...meta,
+    ...redactWebhookData(meta ?? {}),
   });
 }
 
@@ -122,21 +134,16 @@ export function logWarn(message: string, meta?: Record<string, unknown>): void {
   emit("warn", "warn", {
     timestamp: new Date().toISOString(),
     message,
-    ...meta,
+    ...redactWebhookData(meta ?? {}),
   });
 }
 
 export function logError(message: string, error?: unknown, meta?: Record<string, unknown>): void {
-  const errMeta =
-    error instanceof Error
-      ? { errorMessage: error.message, stack: error.stack }
-      : error
-        ? { errorRaw: String(error) }
-        : {};
+  const errMeta = error === undefined ? {} : redactedThrownDiagnostics(error);
   emit("error", "error", {
     timestamp: new Date().toISOString(),
     message,
     ...errMeta,
-    ...meta,
+    ...redactWebhookData(meta ?? {}),
   });
 }

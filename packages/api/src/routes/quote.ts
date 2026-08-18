@@ -3,6 +3,7 @@ import {
   createDstackTdxProvider,
   createNoopDevProvider,
 } from "@stwd/attestation";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 import { checkAuthRateLimit } from "./auth";
@@ -69,7 +70,7 @@ quoteRoutes.get("/", async (c) => {
   } catch (error) {
     // SEC-085: provider failures (guest agent unreachable, misconfigured
     // provider) must not leak internals to anonymous callers.
-    console.error("attestation quote generation failed:", error);
+    console.error("attestation quote generation failed", redactedThrownDiagnostics(error));
     return c.json({ error: "attestation unavailable" }, 503);
   }
 });

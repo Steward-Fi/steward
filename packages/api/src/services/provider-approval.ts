@@ -45,6 +45,7 @@ import {
   PROVIDER_APPROVAL_AUDIT_SCHEMA,
   type ProviderApprovalAuditPayloadV1,
   type ProviderApprovalCommitmentV1,
+  redactedThrownDiagnostics,
   sha256HexPrefixed,
   verifyProviderExecutionPolicyEvidence,
 } from "@stwd/shared";
@@ -2289,8 +2290,8 @@ class ProviderApprovalService {
           .releasePolicyReservationHandles(executionHandlesToRelease, input.tenantId)
           .catch((releaseError) =>
             console.error(
-              "[provider-approval] failed to release rolled-back reservation:",
-              releaseError,
+              "[provider-approval] failed to release rolled-back reservation",
+              redactedThrownDiagnostics(releaseError),
             ),
           );
       }
@@ -2304,7 +2305,7 @@ class ProviderApprovalService {
         if (e.code === "EXEC_AUTH_KEY_UNAVAILABLE") return fail("EXEC_AUTH_KEY_UNAVAILABLE", 503);
         return fail("RESUME_PREPARATION_FAILED", 503);
       }
-      console.error("[provider-approval] resume preparation failed:", e);
+      console.error("[provider-approval] resume preparation failed", redactedThrownDiagnostics(e));
       return fail("RESUME_PREPARATION_FAILED", 503);
     }
   }

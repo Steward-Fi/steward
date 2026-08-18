@@ -673,7 +673,10 @@ export async function signAuditBundle(
           { cause: err },
         );
       }
-      console.error(`[audit] checkpoint persistence failed for tenant ${tenantId}:`, err);
+      console.error(
+        `[audit] checkpoint persistence failed for tenant ${tenantId}`,
+        redactedThrownDiagnostics(err),
+      );
     }
   }
 

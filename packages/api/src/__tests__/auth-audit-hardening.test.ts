@@ -269,7 +269,9 @@ describe("auth and audit hardening", () => {
     expect(catchStart).toBeGreaterThanOrEqual(0);
     const catchSource = routeSource.slice(catchStart, routeSource.indexOf("}", catchStart + 1));
     expect(catchSource).not.toContain("err.message");
-    expect(catchSource).toContain('console.warn("[PasskeyAuth] Registration failed:", err)');
+    expect(catchSource).toContain(
+      'console.warn("[PasskeyAuth] Registration failed", redactedThrownDiagnostics(err))',
+    );
     expect(catchSource).toContain('error: "Registration verification failed"');
   });
 

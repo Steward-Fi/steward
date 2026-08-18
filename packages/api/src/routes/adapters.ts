@@ -38,6 +38,7 @@ import {
   evaluateTradeOrder,
   perOrderCapEvaluator,
 } from "@stwd/policy-engine";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { z } from "zod";
@@ -283,7 +284,7 @@ function handleAdapterError(c: Context<{ Variables: AppVariables }>, err: unknow
   const { status, message } = adapterErrorStatus(err);
   if (status === 500) {
     const requestId = c.get("requestId") ?? "unknown";
-    console.error(`[${requestId}] adapter route error:`, err);
+    console.error(`[${requestId}] adapter route error`, redactedThrownDiagnostics(err));
   }
   return c.json<ApiResponse>({ ok: false, error: message }, status);
 }

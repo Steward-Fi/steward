@@ -5,7 +5,7 @@
  */
 
 import { toPersistedPolicyRule, users, userTenants } from "@stwd/db";
-import type { PolicyRule } from "@stwd/shared";
+import { type PolicyRule, redactedThrownDiagnostics } from "@stwd/shared";
 import { and, desc, eq, inArray, type SQL, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { enforceRateLimit, recordVaultSpend } from "../middleware/redis-enforcement";
@@ -627,22 +627,29 @@ async function executeTransferIntent(row: typeof intents.$inferSelect) {
         .where(eq(transactions.id, txId));
       if (request.broadcast !== false) {
         recordVaultSpend(request.agentId, row.tenantId, request.value, request.chainId).catch(
-          (error) => console.error("[intents] Failed to record transfer intent spend:", error),
+          (error) =>
+            console.error(
+              "[intents] Failed to record transfer intent spend",
+              redactedThrownDiagnostics(error),
+            ),
         );
       }
       return completedResult;
     } catch (error) {
       if (completedResult) {
-        console.error("[intents] Post-transfer intent bookkeeping failed after signing:", error);
+        console.error(
+          "[intents] Post-transfer intent bookkeeping failed after signing",
+          redactedThrownDiagnostics(error),
+        );
         return completedResult;
       }
-      const message = error instanceof Error ? error.message : "Transfer execution failed";
       dispatchWebhook(row.tenantId, request.agentId, "wallet_action.transfer.failed", {
         actionId: txId,
         intent_id: row.id,
-        error: message,
+        error: "Transfer execution failed",
+        ...redactedThrownDiagnostics(error),
       });
-      throw new IntentExecutionError(message, 502);
+      throw new IntentExecutionError("Transfer execution failed", 502);
     }
   });
 }
@@ -759,7 +766,11 @@ async function executeSendCallsIntent(row: typeof intents.$inferSelect) {
       }
       if (request.broadcast) {
         recordVaultSpend(request.agentId, row.tenantId, request.totalValue, request.chainId).catch(
-          (error) => console.error("[intents] Failed to record send-calls intent spend:", error),
+          (error) =>
+            console.error(
+              "[intents] Failed to record send-calls intent spend",
+              redactedThrownDiagnostics(error),
+            ),
         );
       }
       return {
@@ -773,13 +784,13 @@ async function executeSendCallsIntent(row: typeof intents.$inferSelect) {
         signedCalls,
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Batch call execution failed";
       dispatchWebhook(row.tenantId, request.agentId, "wallet_action.send_calls.failed", {
         actionId: row.id,
         intent_id: row.id,
-        error: message,
+        error: "Batch call execution failed",
+        ...redactedThrownDiagnostics(error),
       });
-      throw new IntentExecutionError(message, 502);
+      throw new IntentExecutionError("Batch call execution failed", 502);
     }
   });
 }

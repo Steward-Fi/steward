@@ -189,7 +189,7 @@ export async function runTick(
         amount: decision.amount,
         slippageBps: slippageBps ?? 100,
         priceConfidence: state.priceConfidence,
-        reason: err.message,
+        reason: "unsafe-swap-configuration",
       });
       return;
     }

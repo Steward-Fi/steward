@@ -46,14 +46,15 @@ import {
   userTenants,
   vaultSigningFreezes,
 } from "@stwd/db";
-import type {
-  AgentIdentity,
-  ApiResponse,
-  PolicyRule,
-  SponsoredGasSpendSummary,
-  TenantAuthAbuseConfig,
-  TenantOidcProviderConfig,
-  TenantTestAccountConfig,
+import {
+  type AgentIdentity,
+  type ApiResponse,
+  type PolicyRule,
+  redactedThrownDiagnostics,
+  type SponsoredGasSpendSummary,
+  type TenantAuthAbuseConfig,
+  type TenantOidcProviderConfig,
+  type TenantTestAccountConfig,
 } from "@stwd/shared";
 import { KeyStore, Vault } from "@stwd/vault";
 import { and, count, eq, ilike, inArray, isNull, ne, or, type SQL, sql } from "drizzle-orm";
@@ -2499,7 +2500,10 @@ platform.post("/tenants/:id/agents/:agentId/token", async (c) => {
       data: { token, agentId, tenantId, scope: "agent", scopes },
     });
   } catch (e: unknown) {
-    console.error(`[platform] Failed to generate agent token for ${agentId}:`, e);
+    console.error(
+      `[platform] Failed to generate agent token for ${agentId}`,
+      redactedThrownDiagnostics(e),
+    );
     return c.json<ApiResponse>({ ok: false, error: "Failed to generate token" }, 500);
   }
 });
@@ -4526,7 +4530,7 @@ platform.post("/tenants/:id/invitations", async (c) => {
       await emailAuth.sendTenantInvitation(email, { tenantId, token, expiresAt });
       emailSent = true;
     } catch (error) {
-      console.error("[TenantInvitation] Email delivery failed:", error);
+      console.error("[TenantInvitation] Email delivery failed", redactedThrownDiagnostics(error));
     }
   }
 

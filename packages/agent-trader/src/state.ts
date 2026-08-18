@@ -22,7 +22,7 @@
  */
 
 import type { StewardClient } from "@stwd/sdk";
-import { createPriceOracle, type PriceOracle } from "@stwd/shared";
+import { createPriceOracle, type PriceOracle, redactedThrownDiagnostics } from "@stwd/shared";
 import type { PublicClient } from "viem";
 import { createPublicClient, http } from "viem";
 import { base } from "viem/chains";
@@ -190,7 +190,7 @@ async function getTokenPrice(tokenAddress: string, chainId: number): Promise<Pri
     } catch (err) {
       logWarn("DEX reserve price lookup failed", {
         tokenAddress,
-        error: err instanceof Error ? err.message : String(err),
+        ...redactedThrownDiagnostics(err),
       });
     }
   }
@@ -226,7 +226,7 @@ async function getHardenedOracleQuote(
   } catch (err) {
     logWarn("Hardened price oracle lookup failed, falling back", {
       tokenAddress,
-      error: err instanceof Error ? err.message : String(err),
+      ...redactedThrownDiagnostics(err),
     });
     return null;
   }
@@ -258,28 +258,28 @@ export async function fetchAgentState(
     getNativeBalance(walletAddress, chainId).catch((err) => {
       logWarn("Failed to fetch native balance", {
         agentId: agentConfig.agentId,
-        error: String(err),
+        ...redactedThrownDiagnostics(err),
       });
       return 0n;
     }),
     getTokenBalance(walletAddress, agentConfig.tokenAddress, chainId).catch((err) => {
       logWarn("Failed to fetch token balance", {
         agentId: agentConfig.agentId,
-        error: String(err),
+        ...redactedThrownDiagnostics(err),
       });
       return 0n;
     }),
     getTokenPrice(agentConfig.tokenAddress, chainId).catch((err): PricedQuote => {
       logWarn("Failed to fetch token price", {
         agentId: agentConfig.agentId,
-        error: String(err),
+        ...redactedThrownDiagnostics(err),
       });
       return NO_PRICE;
     }),
     steward.getHistory(agentConfig.agentId).catch((err) => {
       logWarn("Failed to fetch Steward history", {
         agentId: agentConfig.agentId,
-        error: String(err),
+        ...redactedThrownDiagnostics(err),
       });
       return [];
     }),

@@ -14,6 +14,7 @@
  *   const store = new ChallengeStore({ backend: new RedisBackend(redisClient) });
  */
 
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import type { StoreBackend } from "./store-backends";
 import { MemoryBackend } from "./store-backends";
 
@@ -80,7 +81,10 @@ export class ChallengeStore {
     try {
       await this.backend.delete(key);
     } catch (err) {
-      console.warn("[ChallengeStore] delete failed; entry will expire via TTL:", err);
+      console.warn(
+        "[ChallengeStore] delete failed; entry will expire via TTL",
+        redactedThrownDiagnostics(err),
+      );
     }
   }
 

@@ -7,6 +7,7 @@
 import { hashSha256Hex, importP256PublicKey, revocationStore } from "@stwd/auth";
 import { agentPolicies, toPersistedPolicyRule } from "@stwd/db";
 import { getSpend, getSpendByHost, invalidateCache, type SpendPeriod } from "@stwd/redis";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { isRedisAvailable } from "../middleware/redis";
@@ -453,7 +454,7 @@ async function invalidateAgentPolicyCache(agentId: string, tenantId: string): Pr
   try {
     await invalidateCache(agentId, tenantId);
   } catch (err) {
-    console.error("[policy] Failed to invalidate policy cache:", err);
+    console.error("[policy] Failed to invalidate policy cache", redactedThrownDiagnostics(err));
   }
 }
 
@@ -1484,7 +1485,10 @@ agentRoutes.post("/:agentId/token", async (c) => {
     });
   } catch (e: unknown) {
     const requestId = c.get("requestId") || "unknown";
-    console.error(`[${requestId}] Failed to generate agent token for ${agentId}:`, e);
+    console.error(
+      `[${requestId}] Failed to generate agent token for ${agentId}`,
+      redactedThrownDiagnostics(e),
+    );
     return c.json<ApiResponse>({ ok: false, error: "Failed to generate token" }, 500);
   }
 });
@@ -2036,7 +2040,7 @@ agentRoutes.delete("/:agentId", async (c) => {
       });
     }
     const requestId = c.get("requestId") || "unknown";
-    console.error(`[${requestId}] Failed to delete agent ${agentId}:`, e);
+    console.error(`[${requestId}] Failed to delete agent ${agentId}`, redactedThrownDiagnostics(e));
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });

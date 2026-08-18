@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 
 import { hashSha256Hex } from "./crypto";
 import type { EmailDeliveryReceipt, EmailProvider } from "./email-provider";
@@ -378,10 +379,7 @@ export class EmailAuth {
         replyTo: this.replyTo,
       });
     } catch (err) {
-      console.error(
-        "[steward:auth] email provider rejected send:",
-        err instanceof Error ? err.name : typeof err,
-      );
+      console.error("[steward:auth] email provider rejected send", redactedThrownDiagnostics(err));
       await invalidate().catch(() => {});
       throw new EmailDeliveryError();
     }

@@ -21,6 +21,7 @@ import {
   type SpendReservation,
   settleReservedSpend,
 } from "@stwd/redis";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq } from "drizzle-orm";
 import { boundedPositiveIntegerEnv, isProxyDevMode } from "../config";
 
@@ -48,7 +49,7 @@ export async function initProxyRedis(): Promise<boolean> {
     return true;
   } catch (err) {
     redisAvailable = false;
-    console.warn("[proxy:redis] Failed to connect:", (err as Error).message);
+    console.warn("[proxy:redis] Failed to connect", redactedThrownDiagnostics(err));
     return false;
   }
 }
@@ -122,7 +123,7 @@ export async function checkProxyRateLimit(
     const key = `ratelimit:proxy:${agentId}:${host}:${windowMs}`;
     return await checkRateLimit(key, windowMs, maxRequests);
   } catch (err) {
-    console.error("[proxy:redis] Rate limit check failed:", (err as Error).message);
+    console.error("[proxy:redis] Rate limit check failed", redactedThrownDiagnostics(err));
     if (isRedisRequired()) {
       return {
         allowed: false,
@@ -174,7 +175,7 @@ export async function trackProxySpend(
     }
     return cost;
   } catch (err) {
-    console.error("[proxy:redis] Spend tracking failed:", (err as Error).message);
+    console.error("[proxy:redis] Spend tracking failed", redactedThrownDiagnostics(err));
     return 0;
   }
 }
@@ -454,7 +455,7 @@ export async function checkProxySpendLimit(
       }
     );
   } catch (err) {
-    console.error("[proxy:redis] Spend limit check failed:", (err as Error).message);
+    console.error("[proxy:redis] Spend limit check failed", redactedThrownDiagnostics(err));
     if (isRedisRequired()) {
       return {
         allowed: false,
