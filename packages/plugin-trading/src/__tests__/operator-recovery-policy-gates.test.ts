@@ -310,6 +310,67 @@ describe("SEC-004: usd-send policy gate + caps", () => {
     expect(res.status).toBe(429);
     expect(usdSendCalls).toHaveLength(10);
   });
+
+  it("fails closed (429) when the process-local rate-limit map is saturated with live windows", async () => {
+    // The fallback map caps at 1_000 keys. Under a distinct-agent flood the
+    // limiter must deny new keys instead of growing unbounded or resetting
+    // live budgets. Agent existence is checked first, so seed the distinct
+    // principals that exercise the fallback instead of relying on unknown
+    // request identities to mutate limiter state.
+    const { tenantId, agentId } = await seedAgent({
+      policies: [
+        { type: "approved-addresses", config: { mode: "whitelist", addresses: [DEST_A] } },
+      ],
+    });
+    usdSendCalls.length = 0;
+    const app = await buildApp();
+
+    await getDb()
+      .insert(agents)
+      .values(
+        Array.from({ length: 1_000 }, (_, i) => ({
+          id: i === 999 ? "flood-agent-overflow" : `flood-agent-${i}`,
+          tenantId,
+          name: `Flood Agent ${i}`,
+          walletAddress: "0x1111111111111111111111111111111111111111",
+        })),
+      );
+
+    // One real call so the agent has a LIVE window recorded.
+    const first = await postTransfer(app, "usd-send", tenantId, {
+      agentId,
+      destination: DEST_A,
+      amount: "1",
+    });
+    expect(first.status).toBe(200);
+
+    // Fill the remaining 999 slots with distinct keys.
+    for (let i = 0; i < 999; i++) {
+      await postTransfer(app, "usd-send", tenantId, {
+        agentId: `flood-agent-${i}`,
+        destination: DEST_A,
+        amount: "1",
+      });
+    }
+
+    // The real agent's live window survived the flood: its next call is
+    // counted, not reset or dropped.
+    const second = await postTransfer(app, "usd-send", tenantId, {
+      agentId,
+      destination: DEST_A,
+      amount: "1",
+    });
+    expect(second.status).toBe(200);
+
+    // A NEW key beyond the cap is denied (fail closed), not tracked.
+    const overflow = await postTransfer(app, "usd-send", tenantId, {
+      agentId: "flood-agent-overflow",
+      destination: DEST_A,
+      amount: "1",
+    });
+    expect(overflow.status).toBe(429);
+    expect(usdSendCalls).toHaveLength(2);
+  });
 });
 
 describe("SEC-042: withdraw policy evaluation is real", () => {

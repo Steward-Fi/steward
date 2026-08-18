@@ -219,7 +219,9 @@ export function createOperatorRecoveryRoutes(
   // REPLAYS the recorded outcome instead of re-executing a possibly-completed
   // fund movement. SEC-043: records are Redis-backed when a client is available
   // (multi-replica dedup survives restarts); without Redis the store falls back
-  // to a bounded (1_000 entries, expired-sweep + oldest-evict) process-local map.
+  // to a bounded (1_000 entries, expired-only sweep) process-local map. When
+  // that map is full of live records, new claims fail closed rather than
+  // evicting replay protection for an earlier fund movement.
   type OperatorIdempotencyRecord = { status: 200 | 409 | 502; body: unknown };
   type OperatorIdempotency = {
     conflict?: boolean;
@@ -326,14 +328,17 @@ export function createOperatorRecoveryRoutes(
     const current = operatorTransferRateLimit.get(key);
     if (!current || current.resetAt <= now) {
       if (operatorTransferRateLimit.size >= 1_000) {
+        // Expired-sweep ONLY: evicting a live window under pressure would
+        // silently reset that agent's budget. When the map stays full of live
+        // windows, fail closed (deny as rate-limited) instead of growing the
+        // process-local map without bound — a flooded distinct key always
+        // getting a fresh budget is precisely the loop this limiter exists to
+        // close when Redis is unconfigured.
         for (const [k, v] of operatorTransferRateLimit) {
           if (v.resetAt <= now) operatorTransferRateLimit.delete(k);
         }
-        // All entries may still be live. Keep the fallback strictly bounded;
-        // Map iteration order makes this an oldest-entry eviction.
         if (operatorTransferRateLimit.size >= 1_000) {
-          const oldest = operatorTransferRateLimit.keys().next().value;
-          if (oldest !== undefined) operatorTransferRateLimit.delete(oldest);
+          return { allowed: false, resetMs: OPERATOR_TRANSFER_RATE_WINDOW_MS };
         }
       }
       operatorTransferRateLimit.set(key, {
@@ -751,6 +756,12 @@ export function createOperatorRecoveryRoutes(
       ...parsed.data,
       idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
     };
+    if (!body.idempotencyKey || body.idempotencyKey.length > 256) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency-Key is required and must be at most 256 characters" },
+        400,
+      );
+    }
     const { agentId } = body;
 
     // Parse + validate the USDC amount.
@@ -1000,6 +1011,12 @@ export function createOperatorRecoveryRoutes(
       ...parsed.data,
       idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
     };
+    if (!body.idempotencyKey || body.idempotencyKey.length > 256) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency-Key is required and must be at most 256 characters" },
+        400,
+      );
+    }
     const { agentId, coin } = body;
 
     if (hasTooManyUsdcDecimals(body.amountUsdc)) {
@@ -1418,6 +1435,12 @@ export function createOperatorRecoveryRoutes(
       ...parsed.data,
       idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
     };
+    if (!body.idempotencyKey || body.idempotencyKey.length > 256) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency-Key is required and must be at most 256 characters" },
+        400,
+      );
+    }
     const { agentId, sourceDex, destinationDex } = body;
 
     if (hasTooManyUsdcDecimals(body.amountUsdc)) {

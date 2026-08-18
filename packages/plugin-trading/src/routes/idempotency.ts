@@ -89,11 +89,13 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
   }
 
   private sweepMemory(now: number): void {
+    // Evict EXPIRED entries only. Previously this also evicted live records
+    // oldest-first once the map hit the cap, which silently dropped replay
+    // protection for in-flight fund movements under key flooding: a retried
+    // request whose record was evicted would re-execute. Saturation with live
+    // records is handled by the claim path failing closed instead.
     for (const [entryKey, entry] of this.memory) {
-      if (entry.expiresAt <= now || this.memory.size >= MAX_MEMORY_ENTRIES) {
-        this.memory.delete(entryKey);
-      }
-      if (this.memory.size < MAX_MEMORY_ENTRIES) break;
+      if (entry.expiresAt <= now) this.memory.delete(entryKey);
     }
   }
 
@@ -245,6 +247,15 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
           return { record: raced.record } as IdempotencyCheck<TRecord>;
         }
         this.sweepMemory(claimNow);
+        if (this.memory.size >= MAX_MEMORY_ENTRIES) {
+          // Full of LIVE records: shedding an existing entry would silently
+          // drop replay protection for an in-flight fund movement, and
+          // admitting the new key anyway would let a flood grow the map
+          // without bound. Fail closed — refuse the new claim.
+          throw new Error(
+            "Trading idempotency memory fallback is saturated with live records; refusing a new claim — configure Redis or retry after existing records expire",
+          );
+        }
         const claimToken = crypto.randomUUID();
         this.memory.set(mapKey, {
           bodyHash,
