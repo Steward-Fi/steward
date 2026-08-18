@@ -1072,6 +1072,36 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
       .limit(1)
       .for("update");
 
+    // Do not compare provider_accounts.updatedAt with this lifecycle. Account
+    // timestamps are supplied by application replicas while lifecycle
+    // timestamps are database-owned, so clock skew can let an older staged
+    // response overwrite a reconnect. The adopted connect journal gives us a
+    // database-ordered lineage marker under the account lock instead.
+    const [newerConnectAdoption] = account
+      ? await tx
+          .select({ id: providerXCredentialLifecycles.id })
+          .from(providerXCredentialLifecycles)
+          .where(
+            and(
+              eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+              eq(providerXCredentialLifecycles.workspaceId, input.workspaceId),
+              eq(providerXCredentialLifecycles.providerAccountId, account.id),
+              eq(providerXCredentialLifecycles.kind, "connect_exchange"),
+              eq(providerXCredentialLifecycles.state, "adopted"),
+              sql`${providerXCredentialLifecycles.createdAt} > ${connectLifecycle.createdAt}`,
+            ),
+          )
+          .limit(1)
+          .for("update")
+      : [];
+    if (newerConnectAdoption) {
+      throw new XConnectError(
+        "X_CREDENTIAL_NEEDS_ATTENTION",
+        409,
+        "a newer X credential already superseded this staged connect response",
+      );
+    }
+
     const unresolvedLifecycles = account
       ? await tx
           .select({
