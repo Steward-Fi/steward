@@ -36,6 +36,9 @@ let authMiddleware: typeof import("@stwd/proxy/src/middleware/auth")["authMiddle
 let handleProxy: typeof import("@stwd/proxy/src/handlers/proxy")["handleProxy"];
 let setForwardProxyRequestForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setForwardProxyRequestForTests"];
 let setResolveProxyHostForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setResolveProxyHostForTests"];
+let setCheckProxyRateLimitForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setCheckProxyRateLimitForTests"];
+let setCheckProxySpendLimitForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setCheckProxySpendLimitForTests"];
+let resetProxyHandlerTestHooks: typeof import("@stwd/proxy/src/handlers/proxy")["__resetProxyHandlerTestHooksForTests"];
 
 // Capture what the proxy tried to forward upstream.
 interface ForwardedCapture {
@@ -69,7 +72,22 @@ beforeAll(async () => {
     handleProxy,
     __setForwardProxyRequestForTests: setForwardProxyRequestForTests,
     __setResolveProxyHostForTests: setResolveProxyHostForTests,
+    __setCheckProxyRateLimitForTests: setCheckProxyRateLimitForTests,
+    __setCheckProxySpendLimitForTests: setCheckProxySpendLimitForTests,
+    __resetProxyHandlerTestHooksForTests: resetProxyHandlerTestHooks,
   } = await import("@stwd/proxy/src/handlers/proxy"));
+
+  // This suite proves client signing, credential injection, and response
+  // scrubbing without a shared Redis service. Keep the production default-deny
+  // enforcement intact outside this fixture and restore every exact handler
+  // dependency after the test.
+  setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
+  setCheckProxySpendLimitForTests(async () => ({
+    allowed: true,
+    configured: false,
+    spent: 0,
+    remaining: Number.POSITIVE_INFINITY,
+  }));
 
   // Hermeticity: the proxy resolves the target host via DNS BEFORE it calls the
   // (stubbed) forwarder, and rejects private/reserved addresses. In a
@@ -94,6 +112,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  resetProxyHandlerTestHooks();
   await closeDb().catch(() => {});
   delete process.env.STEWARD_PGLITE_MEMORY;
   delete process.env.STEWARD_MASTER_PASSWORD;
