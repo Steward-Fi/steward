@@ -94,12 +94,22 @@ const PROVIDER_HOST_ALLOWLIST: Readonly<Record<string, string>> = {
   x: "api.x.com",
   slack: "slack.com",
 };
-const FIXED_PROVIDER_ROUTE_INJECTION = {
+const REGISTERED_ADAPTER_KEY_LIST = ["github", "x", "slack", "generic-http"] as const;
+type RegisteredAdapterKey = (typeof REGISTERED_ADAPTER_KEY_LIST)[number];
+type FixedProviderAdapterKey = Exclude<RegisteredAdapterKey, "generic-http">;
+const BEARER_ROUTE_INJECTION = {
   injectAs: "header",
   injectKey: "authorization",
   injectFormat: "Bearer {value}",
 } as const;
-const REGISTERED_ADAPTER_KEYS = new Set(["github", "x", "slack", "generic-http"]);
+// Keep every fixed adapter explicit. Adding one to the registered list without
+// defining its credential injection contract is a compile-time failure.
+const FIXED_PROVIDER_ROUTE_INJECTION = {
+  github: BEARER_ROUTE_INJECTION,
+  x: BEARER_ROUTE_INJECTION,
+  slack: BEARER_ROUTE_INJECTION,
+} as const satisfies Readonly<Record<FixedProviderAdapterKey, typeof BEARER_ROUTE_INJECTION>>;
+const REGISTERED_ADAPTER_KEYS = new Set<string>(REGISTERED_ADAPTER_KEY_LIST);
 const ENVIRONMENTS = new Set(["development", "staging", "production"]);
 const PRINCIPAL_TYPES = new Set(["human", "agent"]);
 const ROLES = new Set([
@@ -277,6 +287,7 @@ function subset(candidate: string[], allowed: string[]): boolean {
 }
 
 function hasExactFixedProviderRouteInjection(
+  adapterKey: string,
   route:
     | {
         injectAs?: string | null;
@@ -285,10 +296,16 @@ function hasExactFixedProviderRouteInjection(
       }
     | undefined,
 ): boolean {
+  const expected = FIXED_PROVIDER_ROUTE_INJECTION[adapterKey as FixedProviderAdapterKey];
+  if (!expected || typeof route?.injectKey !== "string") return false;
+  // Header names are case-insensitive, but surrounding whitespace is not part
+  // of a header name and must not be normalized away at this trust boundary.
+  const injectKey = route.injectKey;
   return (
-    route?.injectAs === FIXED_PROVIDER_ROUTE_INJECTION.injectAs &&
-    route.injectKey?.trim().toLowerCase() === FIXED_PROVIDER_ROUTE_INJECTION.injectKey &&
-    route.injectFormat === FIXED_PROVIDER_ROUTE_INJECTION.injectFormat
+    route.injectAs === expected.injectAs &&
+    injectKey === injectKey.trim() &&
+    injectKey.toLowerCase() === expected.injectKey &&
+    route.injectFormat === expected.injectFormat
   );
 }
 
@@ -297,7 +314,9 @@ export class ProviderAuthorityStore {
     private readonly runAuditedTransaction: typeof withTenantAuditedTransaction = withTenantAuditedTransaction,
   ) {}
   /** Test-only race hooks. Runtime callers never set these. */
-  faultHooks: Partial<Record<"afterBudgetPreflight", () => void | Promise<void>>> = {};
+  faultHooks: Partial<
+    Record<"afterBudgetPreflight" | "afterOperationRoutePreflight", () => void | Promise<void>>
+  > = {};
 
   private db() {
     return getDb();
@@ -901,7 +920,7 @@ export class ProviderAuthorityStore {
         route.hostPattern !== expectedHost ||
         !method ||
         !allowedMethods.includes(method) ||
-        (!genericDescriptor && !hasExactFixedProviderRouteInjection(route)) ||
+        (!genericDescriptor && !hasExactFixedProviderRouteInjection(account.adapterKey, route)) ||
         !pathAllowed
       ) {
         throw new ProviderAuthorityError(
@@ -910,6 +929,7 @@ export class ProviderAuthorityStore {
           403,
         );
       }
+      await this.faultHooks.afterOperationRoutePreflight?.();
       const promotedPath = genericDescriptor
         ? genericDescriptorGovernedRoutePattern(genericDescriptor)
         : route.pathPattern;
@@ -1011,7 +1031,7 @@ export class ProviderAuthorityStore {
           route.hostPattern !== expectedHost ||
           !method ||
           !allowedMethods.includes(method) ||
-          (!genericDescriptor && !hasExactFixedProviderRouteInjection(route)) ||
+          (!genericDescriptor && !hasExactFixedProviderRouteInjection(account.adapterKey, route)) ||
           !pathAllowed
         ) {
           throw new ProviderAuthorityError(
