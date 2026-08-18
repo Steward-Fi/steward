@@ -1,3 +1,5 @@
+import { redactSensitiveText } from "./format";
+
 export type ApiClientOptions = {
   baseUrl?: string;
   tenantId?: string;
@@ -29,6 +31,19 @@ const API_REQUEST_TIMEOUT_MS = 10_000;
 const API_ARCHIVE_REQUEST_TIMEOUT_MS = 60_000;
 const API_RESPONSE_MAX_BYTES = 1024 * 1024;
 const API_ARCHIVE_CHUNK_MAX_BYTES = 25 * 1024 * 1024;
+const SENSITIVE_BODY_KEY =
+  /(token|secret|password|credential|api.?key|private.?key|mnemonic|value)/i;
+
+function sensitiveBodyValues(value: unknown): string[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const found: string[] = [];
+  for (const [key, candidate] of Object.entries(value as Record<string, unknown>)) {
+    if (SENSITIVE_BODY_KEY.test(key) && typeof candidate === "string" && candidate.length > 0) {
+      found.push(candidate);
+    }
+  }
+  return found;
+}
 
 function responseLimitLabel(maxBytes: number): string {
   return maxBytes === API_RESPONSE_MAX_BYTES ? "1 MiB" : `${maxBytes} byte`;
@@ -145,7 +160,16 @@ export class StewardApiClient {
         parsed && typeof parsed === "object" && "error" in parsed
           ? String((parsed as { error: unknown }).error)
           : `${method} ${path} failed with HTTP ${res.status}`;
-      throw new ApiError(message, res.status, parsed ?? text);
+      throw new ApiError(
+        redactSensitiveText(message, [
+          this.token,
+          this.platformKey,
+          this.tenantKey,
+          ...sensitiveBodyValues(body),
+        ]),
+        res.status,
+        parsed ?? text,
+      );
     }
     if (parsed && typeof parsed === "object" && "ok" in parsed && "data" in parsed) {
       return (parsed as { data: T }).data;
@@ -202,7 +226,11 @@ export class StewardApiClient {
         parsed && typeof parsed === "object" && "error" in parsed
           ? String((parsed as { error: unknown }).error)
           : `${method} ${path} failed with HTTP ${res.status}`;
-      throw new ApiError(message, res.status, parsed ?? text);
+      throw new ApiError(
+        redactSensitiveText(message, [this.token, this.platformKey, this.tenantKey]),
+        res.status,
+        parsed ?? text,
+      );
     }
     if (parsed && typeof parsed === "object" && "ok" in parsed && "data" in parsed) {
       return (parsed as { data: T }).data;

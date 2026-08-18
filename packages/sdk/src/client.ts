@@ -4939,6 +4939,7 @@ export class StewardClient {
     try {
       response = await fetch(url, {
         headers: this.buildHeaders({ Accept: "text/csv" }),
+        redirect: "error",
       });
     } catch (error) {
       throw new StewardApiError(
@@ -5431,7 +5432,7 @@ export class StewardClient {
     const url = `${this.baseUrl}/audit/export${qs ? `?${qs}` : ""}`;
     let response: Response;
     try {
-      response = await fetch(url, { headers: this.buildHeaders() });
+      response = await fetch(url, { headers: this.buildHeaders(), redirect: "error" });
     } catch (error) {
       throw new StewardApiError(
         error instanceof Error ? error.message : "Network request failed",
@@ -5542,7 +5543,7 @@ export class StewardClient {
     const url = `${this.baseUrl}/user/me/tenants/${encodeURIComponent(tenantId)}/users/export${qs ? `?${qs}` : ""}`;
     let response: Response;
     try {
-      response = await fetch(url, { headers: this.buildHeaders() });
+      response = await fetch(url, { headers: this.buildHeaders(), redirect: "error" });
     } catch (error) {
       throw new StewardApiError(
         error instanceof Error ? error.message : "Network request failed",
@@ -5884,6 +5885,7 @@ export class StewardClient {
       const response = await fetch(`${this.baseUrl}${path}`, {
         ...init,
         headers,
+        redirect: "error",
         signal: controller.signal,
       });
       const payload = await this.parseJson<T>(response, controller.signal);

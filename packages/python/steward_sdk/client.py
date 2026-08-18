@@ -75,43 +75,30 @@ SENSITIVE_SIGNED_PREFIXES = (
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
-# Headers that carry credentials or signing material. urllib capitalizes header
-# names ("X-steward-key"), so comparisons must be case-insensitive.
-_CREDENTIAL_HEADERS = frozenset(
-    name.lower()
-    for name in (
-        "Authorization",
-        "X-Steward-Key",
-        "X-Steward-Platform-Key",
-        "X-Steward-App-Id",
-        "X-Steward-Signature",
-        "X-Steward-Signing-Key-Id",
-        "X-Steward-Request-Timestamp",
-        "Idempotency-Key",
-    )
-)
-
-
 class _StewardRedirectHandler(HTTPRedirectHandler):
-    """Follow redirects, but never forward credential headers to a different
-    host. urllib's default handler converts 301/302/303 POSTs to GET yet copies
-    every header — including API keys and HMAC signatures — to the redirect
-    target, so an open redirect or hostile proxy would exfiltrate them
-    (SEC-125)."""
+    """Follow only same-origin redirects without embedded URL credentials.
+
+    Header stripping alone still lets a hostile Location turn a server-side
+    SDK caller into an SSRF primitive, so cross-origin redirects fail closed.
+    """
 
     def redirect_request(self, req: Request, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Request | None:
         new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new_req is None:
             return None
-        old_host = (urlparse(req.full_url).hostname or "").lower()
-        new_host = (urlparse(new_req.full_url).hostname or "").lower()
-        old_scheme = urlparse(req.full_url).scheme.lower()
-        new_scheme = urlparse(new_req.full_url).scheme.lower()
-        if new_host != old_host or (old_scheme == "https" and new_scheme != "https"):
-            for store in (new_req.headers, new_req.unredirected_hdrs):
-                for name in [key for key in store if key.lower() in _CREDENTIAL_HEADERS]:
-                    del store[name]
+        parsed = urlparse(new_req.full_url)
+        if parsed.username is not None or parsed.password is not None:
+            return None
+        if _origin(new_req.full_url) != _origin(req.full_url):
+            return None
         return new_req
+
+
+def _origin(raw_url: str) -> tuple[str, str, int | None]:
+    parsed = urlparse(raw_url)
+    scheme = parsed.scheme.lower()
+    default_port = 443 if scheme == "https" else 80 if scheme == "http" else None
+    return (scheme, (parsed.hostname or "").lower(), parsed.port or default_port)
 
 
 _default_opener = build_opener(_StewardRedirectHandler())

@@ -110,9 +110,9 @@ class StewardClientTests(unittest.TestCase):
                 f"unsigned mutation: {path}",
             )
 
-    def test_redirect_strips_credential_headers_cross_host(self):
-        # SEC-125: urllib's default redirect handling copies every header to
-        # the redirect target; an open redirect must not receive credentials.
+    def test_redirect_refuses_cross_origin_and_embedded_credentials(self):
+        # SEC-125: stripping headers is insufficient because following an open
+        # redirect would still expose server-side SDK callers to SSRF.
         handler = _StewardRedirectHandler()
         original = Request(
             "https://api.example.test/accounts",
@@ -126,19 +126,24 @@ class StewardClientTests(unittest.TestCase):
         )
 
         cross = handler.redirect_request(original, None, 302, "Found", {}, "https://evil.example/harvest")
-        self.assertIsNone(cross.get_header("Authorization"))
-        self.assertIsNone(cross.get_header("X-steward-key"))
-        self.assertIsNone(cross.get_header("X-steward-platform-key"))
-        self.assertIsNone(cross.get_header("X-steward-signature"))
+        self.assertIsNone(cross)
 
         same_host = handler.redirect_request(original, None, 302, "Found", {}, "https://api.example.test/other")
         self.assertEqual(same_host.get_header("Authorization"), "Bearer user-token")
 
         downgrade = handler.redirect_request(original, None, 302, "Found", {}, "http://api.example.test/other")
-        self.assertIsNone(downgrade.get_header("Authorization"))
-        self.assertIsNone(downgrade.get_header("X-steward-key"))
-        self.assertIsNone(downgrade.get_header("X-steward-signature"))
+        self.assertIsNone(downgrade)
         self.assertEqual(same_host.get_header("X-steward-key"), "tenant-key")
+
+        different_port = handler.redirect_request(
+            original, None, 302, "Found", {}, "https://api.example.test:444/harvest"
+        )
+        self.assertIsNone(different_port)
+
+        credential_target = handler.redirect_request(
+            original, None, 302, "Found", {}, "https://user:password@api.example.test/other"
+        )
+        self.assertIsNone(credential_target)
 
     def test_path_parameters_are_url_encoded(self):
         # SEC-127: raw interpolation lets `/`, `?`, `#` in an id silently

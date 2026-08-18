@@ -776,6 +776,7 @@ export class StewardAuth {
         device_code: input.deviceCode,
         ...(input.clientId ? { client_id: input.clientId } : {}),
       }),
+      redirect: "error",
     }).catch((err) => {
       throw new StewardApiError(err instanceof Error ? err.message : "Network request failed", 0);
     });
