@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 
 const SKIP = !process.env.DATABASE_URL;
 
@@ -14,6 +14,7 @@ import {
   users,
   userTenants,
 } from "@stwd/db";
+import { GovernedVault, Vault } from "@stwd/vault";
 import { and, eq, inArray } from "drizzle-orm";
 
 const unique = crypto.randomUUID();
@@ -27,6 +28,9 @@ let app: { request: (input: string | Request, init?: RequestInit) => Promise<Res
 let requesterToken: string;
 let approverToken: string;
 let queuedTxId: string;
+let restoreRpc: (() => void) | undefined;
+let restoreGovernedSign: (() => void) | undefined;
+let governedSignCalls = 0;
 
 beforeAll(async () => {
   if (SKIP) return;
@@ -42,6 +46,22 @@ beforeAll(async () => {
     import("../routes/vault"),
   ]);
   const { tenantAuth, vault } = contextModule;
+  // Keep this principal/queue test hermetic across the native-transfer guard:
+  // the read-only lookup proves the recipient is an EOA without public RPC.
+  const rpcSpy = spyOn(Vault.prototype, "rpcPassthrough").mockResolvedValue({
+    jsonrpc: "2.0",
+    id: 1,
+    result: "0x",
+  } as Awaited<ReturnType<Vault["rpcPassthrough"]>>);
+  restoreRpc = () => rpcSpy.mockRestore();
+  const governedSignSpy = spyOn(
+    GovernedVault.prototype,
+    "signTransactionAuthorized",
+  ).mockImplementation(async () => {
+    governedSignCalls += 1;
+    return `0x${"ab".repeat(32)}`;
+  });
+  restoreGovernedSign = () => governedSignSpy.mockRestore();
   const testApp = new Hono();
   testApp.use("/vault/*", (c, next) => tenantAuth(c, next));
   testApp.use("/approvals", (c, next) => tenantAuth(c, next));
@@ -108,6 +128,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (SKIP) return;
+
+  restoreRpc?.();
+  restoreGovernedSign?.();
 
   const db = getDb();
   await db.delete(approvalQueue).where(eq(approvalQueue.agentId, TEST_AGENT));
@@ -186,6 +209,7 @@ describe.skipIf(SKIP)("approval principal tracking and 4-eyes enforcement", () =
     const body = await res.json();
     expect(body.ok).toBe(true);
     expect(body.data.txId).toBe(queuedTxId);
+    expect(governedSignCalls).toBe(1);
 
     const db = getDb();
     const [approval] = await db
