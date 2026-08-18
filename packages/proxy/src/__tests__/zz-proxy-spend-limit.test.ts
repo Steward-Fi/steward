@@ -28,6 +28,8 @@ const route = {
   injectAs: "header",
   injectKey: "x-api-key",
   injectFormat: "Bearer {value}",
+  injectionStrategy: "header",
+  injectionConfig: {},
   priority: 0,
   enabled: true,
   createdAt: new Date(),
@@ -62,6 +64,14 @@ mock.module("@stwd/db", () => {
   };
   const secrets = { id: "id" };
   const providerAccounts = { id: "id" };
+  const providerGoogleCredentialLifecycles = {
+    id: "id",
+    tenantId: "tenantId",
+    providerAccountId: "providerAccountId",
+    kind: "kind",
+    state: "state",
+    credentialSecretId: "credentialSecretId",
+  };
   const providerOperations = { id: "id" };
   const workspaces = { id: "id" };
   const policies = {
@@ -104,10 +114,14 @@ mock.module("@stwd/db", () => {
     secretRoutes,
     secrets,
     providerAccounts,
+    providerGoogleCredentialLifecycles,
     providerOperations,
     workspaces,
     policies,
     proxyAuditLog,
+    withTenantAuditedTransaction: async () => {
+      throw new Error("unexpected audited transaction in proxy spend-limit fixture");
+    },
     getDb: () => ({
       select: () => ({
         from: (table: unknown) => ({

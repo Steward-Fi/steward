@@ -105,6 +105,7 @@ jobs:
           - packages/plugin-capabilities
           - packages/plugin-example
           - packages/plugin-sdk
+          - packages/provider-aws
           - packages/provider-github
           - packages/provider-google
           - packages/provider-slack
