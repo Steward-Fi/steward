@@ -34371,14 +34371,17 @@ export interface paths {
         };
         /**
          * List manual approval queue entries
-         * @description Requires an owner/admin browser session with recent MFA. Tenant API keys and agent tokens cannot review or mutate manual approvals. Supports status, limit, and offset filters.
+         * @description Requires an owner/admin browser session with recent MFA. Tenant API keys and agent tokens cannot review or mutate manual approvals. Supports status and tenant-scoped agent filters before stable (requestedAt, id) keyset pagination.
          */
         get: {
             parameters: {
                 query?: {
                     status?: "pending" | "approved" | "rejected" | "all";
+                    agentId?: string;
                     limit?: number;
                     offset?: number;
+                    cursorRequestedAt?: string;
+                    cursorId?: string;
                 };
                 header?: never;
                 path?: never;

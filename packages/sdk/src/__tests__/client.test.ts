@@ -5085,3 +5085,31 @@ describe("StewardClient proxy approvals", () => {
     expect(lastCapture?.url).toEndWith("/approvals/proxy/p1");
   });
 });
+
+describe("StewardClient tenant approvals", () => {
+  it("sends the agent filter with pagination parameters", async () => {
+    installMockFetch({ ok: true, data: [] });
+
+    await makeClient().listApprovals({
+      status: "pending",
+      agentId: "agent with spaces",
+      limit: 200,
+      cursorRequestedAt: "2026-01-01T00:00:00.000Z",
+      cursorId: "approval-200",
+    });
+
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/approvals?status=pending&agentId=agent+with+spaces&limit=200&cursorRequestedAt=2026-01-01T00%3A00%3A00.000Z&cursorId=approval-200",
+    );
+  });
+
+  it("does not silently drop explicitly invalid filter and pagination values", async () => {
+    installMockFetch({ ok: true, data: [] });
+
+    await makeClient().listApprovals({ agentId: "", limit: 0, offset: 0 });
+
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/approvals?agentId=&limit=0&offset=0",
+    );
+  });
+});

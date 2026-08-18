@@ -75913,7 +75913,7 @@
           "Approvals"
         ],
         "summary": "List manual approval queue entries",
-        "description": "Requires an owner/admin browser session with recent MFA. Tenant API keys and agent tokens cannot review or mutate manual approvals. Supports status, limit, and offset filters.",
+        "description": "Requires an owner/admin browser session with recent MFA. Tenant API keys and agent tokens cannot review or mutate manual approvals. Supports status and tenant-scoped agent filters before stable (requestedAt, id) keyset pagination.",
         "security": [
           {
             "bearerAuth": []
@@ -75935,6 +75935,16 @@
             }
           },
           {
+            "name": "agentId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -75952,6 +75962,25 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 10000
+            }
+          },
+          {
+            "name": "cursorRequestedAt",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "cursorId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
             }
           }
         ],

@@ -14,7 +14,7 @@ import {
   users,
   userTenants,
 } from "@stwd/db";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { createSessionToken } from "../routes/auth";
 
 const TEST_PORT = parseInt(process.env.PORT || "3200", 10);
@@ -26,10 +26,14 @@ const TEST_TX_APPROVE = `test-tx-approve-${RUN_ID}`;
 const TEST_TX_DENY = `test-tx-deny-${RUN_ID}`;
 const TEST_APPROVAL_APPROVE = `test-approval-approve-${RUN_ID}`;
 const TEST_APPROVAL_DENY = `test-approval-deny-${RUN_ID}`;
+const PAGINATION_OTHER_AGENT = `approval-page-other-${RUN_ID}`;
+const PAGINATION_TARGET_TX = `approval-page-target-tx-${RUN_ID}`;
+const PAGINATION_TARGET_APPROVAL = `approval-page-target-${RUN_ID}`;
 const OWNER_USER_ID = crypto.randomUUID();
 
 let validApiKey: string;
 let adminToken: string;
+let futureMfaToken: string;
 
 // ─── Setup ────────────────────────────────────────────────────────────────
 
@@ -64,6 +68,16 @@ beforeAll(async () => {
     mfaVerifiedAt: Date.now(),
     mfaMethod: "totp",
   });
+  futureMfaToken = await createSessionToken(
+    "0x0000000000000000000000000000000000000001",
+    TEST_TENANT,
+    {
+      userId: OWNER_USER_ID,
+      email: `approvals-${RUN_ID}@example.test`,
+      mfaVerifiedAt: Date.now() + 24 * 60 * 60_000,
+      mfaMethod: "totp",
+    },
+  );
 
   await db
     .insert(agents)
@@ -110,15 +124,61 @@ beforeAll(async () => {
       status: "pending",
     })
     .onConflictDoNothing();
+
+  await db.insert(agents).values({
+    id: PAGINATION_OTHER_AGENT,
+    tenantId: TEST_TENANT,
+    name: "Pagination Noise Agent",
+    walletAddress: "0x2234567890123456789012345678901234567890",
+  });
+  await db.insert(transactions).values({
+    id: PAGINATION_TARGET_TX,
+    agentId: TEST_AGENT,
+    status: "pending",
+    toAddress: "0x0000000000000000000000000000000000000001",
+    value: "1",
+    chainId: 84532,
+    createdAt: new Date("2025-01-01T00:00:00.000Z"),
+  });
+  await db.insert(approvalQueue).values({
+    id: PAGINATION_TARGET_APPROVAL,
+    txId: PAGINATION_TARGET_TX,
+    agentId: TEST_AGENT,
+    status: "pending",
+    requestedAt: new Date("2025-01-01T00:00:00.000Z"),
+  });
+
+  const noiseTransactions = Array.from({ length: 51 }, (_, index) => ({
+    id: `approval-noise-tx-${RUN_ID}-${index}`,
+    agentId: PAGINATION_OTHER_AGENT,
+    status: "pending" as const,
+    toAddress: "0x0000000000000000000000000000000000000002",
+    value: "1",
+    chainId: 84532,
+    createdAt: new Date(`2026-01-01T00:${String(index).padStart(2, "0")}:00.000Z`),
+  }));
+  await db.insert(transactions).values(noiseTransactions);
+  await db.insert(approvalQueue).values(
+    noiseTransactions.map((transaction, index) => ({
+      id: `approval-noise-${RUN_ID}-${index}`,
+      txId: transaction.id,
+      agentId: PAGINATION_OTHER_AGENT,
+      status: "pending" as const,
+      requestedAt: transaction.createdAt,
+    })),
+  );
 });
 
 afterAll(async () => {
   if (SKIP) return;
   const db = getDb();
+  await db.delete(approvalQueue).where(eq(approvalQueue.agentId, PAGINATION_OTHER_AGENT));
+  await db.delete(transactions).where(eq(transactions.agentId, PAGINATION_OTHER_AGENT));
   await db.delete(approvalQueue).where(eq(approvalQueue.agentId, TEST_AGENT));
   await db.delete(transactions).where(eq(transactions.agentId, TEST_AGENT));
   await db.delete(autoApprovalRules).where(eq(autoApprovalRules.tenantId, TEST_TENANT));
   await db.delete(agents).where(eq(agents.id, TEST_AGENT));
+  await db.delete(agents).where(eq(agents.id, PAGINATION_OTHER_AGENT));
   await db.delete(userTenants).where(eq(userTenants.tenantId, TEST_TENANT));
   await db.delete(users).where(eq(users.id, OWNER_USER_ID));
   await db.delete(tenants).where(eq(tenants.id, TEST_TENANT));
@@ -144,6 +204,27 @@ function adminHeaders() {
 
 describe.skipIf(SKIP)("Approval Workflow API", () => {
   describe("GET /approvals", () => {
+    it("rejects API-key access even when an agent filter is supplied", async () => {
+      const res = await fetch(`${BASE_URL}/approvals?agentId=${encodeURIComponent(TEST_AGENT)}`, {
+        headers: authHeaders(),
+      });
+
+      expect(res.status).toBe(403);
+      const body = await res.json();
+      expect(body.error).toContain("owner or admin user session");
+    });
+
+    it("rejects a future-dated MFA assertion", async () => {
+      const res = await fetch(`${BASE_URL}/approvals`, {
+        headers: {
+          ...adminHeaders(),
+          Authorization: `Bearer ${futureMfaToken}`,
+        },
+      });
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toContain("recent MFA");
+    });
+
     it("lists pending approvals for tenant", async () => {
       const res = await fetch(`${BASE_URL}/approvals`, {
         headers: adminHeaders(),
@@ -167,6 +248,120 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
       expect(body.ok).toBe(true);
       // No approvals should be approved yet
       expect(body.data.length).toBe(0);
+    });
+
+    it("filters by agent before pagination when 51 newer mixed-agent rows exist", async () => {
+      const unfiltered = await fetch(`${BASE_URL}/approvals?status=pending&limit=50`, {
+        headers: adminHeaders(),
+      });
+      expect(unfiltered.status).toBe(200);
+      const unfilteredBody = await unfiltered.json();
+      expect(unfilteredBody.data).toHaveLength(50);
+      expect(
+        unfilteredBody.data.some(
+          (entry: { id: string }) => entry.id === PAGINATION_TARGET_APPROVAL,
+        ),
+      ).toBe(false);
+
+      const filtered = await fetch(
+        `${BASE_URL}/approvals?status=pending&agentId=${encodeURIComponent(TEST_AGENT)}&limit=50`,
+        { headers: adminHeaders() },
+      );
+      expect(filtered.status).toBe(200);
+      const filteredBody = await filtered.json();
+      expect(filteredBody.data.length).toBeGreaterThanOrEqual(1);
+      expect(
+        filteredBody.data.every((entry: { agentId: string }) => entry.agentId === TEST_AGENT),
+      ).toBe(true);
+      expect(
+        filteredBody.data.some((entry: { id: string }) => entry.id === PAGINATION_TARGET_APPROVAL),
+      ).toBe(true);
+    });
+
+    it("rejects empty, padded, overlong, and control-byte agent filters", async () => {
+      for (const agentId of ["", ` ${TEST_AGENT}`, "x".repeat(65), `${TEST_AGENT}\0`]) {
+        const res = await fetch(`${BASE_URL}/approvals?agentId=${encodeURIComponent(agentId)}`, {
+          headers: adminHeaders(),
+        });
+        expect(res.status).toBe(400);
+        const body = await res.json();
+        expect(body.error).toContain("agentId must be a non-empty string of at most 64 characters");
+      }
+    });
+
+    it("paginates by the stable requestedAt and id keyset", async () => {
+      const first = await fetch(
+        `${BASE_URL}/approvals?status=pending&agentId=${encodeURIComponent(TEST_AGENT)}&limit=1`,
+        { headers: adminHeaders() },
+      );
+      expect(first.status).toBe(200);
+      const firstBody = await first.json();
+      expect(firstBody.data).toHaveLength(1);
+      const boundary = firstBody.data[0] as { id: string; requestedAt: string };
+
+      const second = await fetch(
+        `${BASE_URL}/approvals?status=pending&agentId=${encodeURIComponent(TEST_AGENT)}&limit=50&cursorRequestedAt=${encodeURIComponent(boundary.requestedAt)}&cursorId=${encodeURIComponent(boundary.id)}`,
+        { headers: adminHeaders() },
+      );
+      expect(second.status).toBe(200);
+      const secondBody = await second.json();
+      expect(secondBody.data.every((entry: { id: string }) => entry.id !== boundary.id)).toBe(true);
+    });
+
+    it("does not skip approvals whose database timestamps differ below JSON precision", async () => {
+      const db = getDb();
+      // Put the lexically smaller ID later at microsecond precision. The API
+      // serializes both values as .123Z, so a correct keyset must deliberately
+      // order and compare at that same precision and then use ID as its tie.
+      await db.execute(sql`
+        UPDATE approval_queue
+        SET requested_at = CASE id
+          WHEN ${TEST_APPROVAL_APPROVE} THEN TIMESTAMPTZ '2030-01-01 00:00:00.123900+00'
+          WHEN ${TEST_APPROVAL_DENY} THEN TIMESTAMPTZ '2030-01-01 00:00:00.123100+00'
+        END
+        WHERE id IN (${TEST_APPROVAL_APPROVE}, ${TEST_APPROVAL_DENY})
+      `);
+
+      const first = await fetch(
+        `${BASE_URL}/approvals?status=pending&agentId=${encodeURIComponent(TEST_AGENT)}&limit=1`,
+        { headers: adminHeaders() },
+      );
+      expect(first.status).toBe(200);
+      const firstBody = await first.json();
+      const boundary = firstBody.data[0] as { id: string; requestedAt: string };
+
+      const second = await fetch(
+        `${BASE_URL}/approvals?status=pending&agentId=${encodeURIComponent(TEST_AGENT)}&limit=1&cursorRequestedAt=${encodeURIComponent(boundary.requestedAt)}&cursorId=${encodeURIComponent(boundary.id)}`,
+        { headers: adminHeaders() },
+      );
+      expect(second.status).toBe(200);
+      const secondBody = await second.json();
+      expect(secondBody.data).toHaveLength(1);
+      expect(new Set([boundary.id, secondBody.data[0]?.id])).toEqual(
+        new Set([TEST_APPROVAL_APPROVE, TEST_APPROVAL_DENY]),
+      );
+    });
+
+    it("rejects partial, malformed, and offset-combined cursors", async () => {
+      for (const query of [
+        "cursorId=approval-1",
+        "cursorRequestedAt=not-a-date&cursorId=approval-1",
+        "cursorRequestedAt=2026-01-01T00%3A00%3A00.000Z&cursorId=approval-1&offset=1",
+        "cursorRequestedAt=0000-01-01T00%3A00%3A00.000Z&cursorId=approval-1",
+        "cursorRequestedAt=%2B010000-01-01T00%3A00%3A00.000Z&cursorId=approval-1",
+        "cursorRequestedAt=2026-01-01T00%3A00%3A00.000Z&cursorId=approval%00bad",
+        `cursorRequestedAt=2026-01-01T00%3A00%3A00.000Z&cursorId=${"x".repeat(65)}`,
+      ]) {
+        const res = await fetch(`${BASE_URL}/approvals?${query}`, { headers: adminHeaders() });
+        expect(res.status).toBe(400);
+      }
+    });
+
+    it("rejects explicitly empty status, limit, and offset parameters", async () => {
+      for (const query of ["status=", "limit=", "offset="]) {
+        const res = await fetch(`${BASE_URL}/approvals?${query}`, { headers: adminHeaders() });
+        expect(res.status).toBe(400);
+      }
     });
   });
 

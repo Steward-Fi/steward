@@ -2,6 +2,7 @@ import type { ApprovalQueueEntry as SdkApprovalQueueEntry } from "@stwd/sdk";
 import { useCallback, useEffect, useState } from "react";
 import { useStewardContext } from "../provider.js";
 import type { ApprovalQueueEntry } from "../types.js";
+import { getAllPendingApprovals } from "../utils/approvals.js";
 
 /**
  * Map the SDK tenant-level approval entry onto the dashboard shape. The
@@ -51,8 +52,12 @@ export function useApprovals(refreshInterval?: number) {
 
   const fetchApprovals = useCallback(async () => {
     try {
-      // Tenant-scoped list; narrow to this provider's agent client-side.
-      const entries = await client.listApprovals({ status: "pending" });
+      // Filter at the server before pagination. Filtering a tenant-wide first
+      // page client-side can silently hide this agent's approvals when another
+      // agent owns the newest 50 queue entries.
+      const entries = await getAllPendingApprovals(client, agentId);
+      // Keep the local check as defense in depth against a mismatched or older
+      // server, but correctness no longer depends on tenant-wide pagination.
       setPending(entries.filter((e) => e.agentId === agentId).map(toQueueEntry));
       setError(null);
     } catch (err) {

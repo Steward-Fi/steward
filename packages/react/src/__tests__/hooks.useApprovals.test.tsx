@@ -14,7 +14,10 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import * as React from "react";
 import { renderToString } from "react-dom/server";
 
-const listApprovalsMock = mock(async (_opts?: { status?: string }) => [] as any[]);
+const listApprovalsMock = mock(
+  async (_opts?: { status?: string; agentId?: string; limit?: number; offset?: number }) =>
+    [] as any[],
+);
 const approveVaultTransactionMock = mock(async (_agentId: string, _txId: string) => ({}) as any);
 const denyTransactionMock = mock(async (_txId: string, _reason: string) => ({}) as any);
 
@@ -87,9 +90,43 @@ describe("useApprovals()", () => {
     const api = captureHook();
     await api.refetch();
     expect(listApprovalsMock).toHaveBeenCalledTimes(1);
-    expect(listApprovalsMock).toHaveBeenCalledWith({ status: "pending" });
+    expect(listApprovalsMock).toHaveBeenCalledWith({
+      status: "pending",
+      agentId: "agent x",
+      limit: 200,
+    });
     // SEC-195: no credential-less raw fetch on any path.
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("asks the server to filter before the tenant-wide first page", async () => {
+    const otherAgentPage = Array.from({ length: 50 }, (_, index) => ({
+      id: `other-${index}`,
+      txId: `other-tx-${index}`,
+      agentId: "other-agent",
+      status: "pending",
+      requestedAt: new Date(),
+    }));
+    const targetApproval = {
+      id: "target-approval",
+      txId: "target-tx",
+      agentId: "agent x",
+      status: "pending",
+      requestedAt: new Date(),
+    };
+    listApprovalsMock.mockImplementation(async (opts) =>
+      opts?.agentId === "agent x" ? [targetApproval] : otherAgentPage,
+    );
+
+    const api = captureHook();
+    await api.refetch();
+
+    expect(listApprovalsMock).toHaveBeenCalledWith({
+      status: "pending",
+      agentId: "agent x",
+      limit: 200,
+    });
+    expect(listApprovalsMock.mock.results[0]?.value).resolves.toEqual([targetApproval]);
   });
 
   test("approve() goes through the credentialed client", async () => {

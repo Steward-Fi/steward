@@ -4624,13 +4624,20 @@ export class StewardClient {
   /** List approval queue entries for the tenant. */
   async listApprovals(opts?: {
     status?: string;
+    agentId?: string;
     limit?: number;
     offset?: number;
+    cursorRequestedAt?: string;
+    cursorId?: string;
   }): Promise<ApprovalQueueEntry[]> {
     const params = new URLSearchParams();
     if (opts?.status) params.set("status", opts.status);
-    if (opts?.limit) params.set("limit", String(opts.limit));
-    if (opts?.offset) params.set("offset", String(opts.offset));
+    if (opts?.agentId !== undefined) params.set("agentId", opts.agentId);
+    if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+    if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
+    if (opts?.cursorRequestedAt !== undefined)
+      params.set("cursorRequestedAt", opts.cursorRequestedAt);
+    if (opts?.cursorId !== undefined) params.set("cursorId", opts.cursorId);
     const qs = params.toString();
     const response = await this.request<ApprovalQueueEntry[], StewardErrorResponse>(
       `/approvals${qs ? `?${qs}` : ""}`,

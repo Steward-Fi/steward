@@ -1185,6 +1185,12 @@ export const approvalQueue = pgTable(
   (table) => ({
     txIdUniqueIdx: uniqueIndex("approval_queue_tx_id_idx").on(table.txId),
     statusIdx: index("approval_queue_status_idx").on(table.status),
+    agentStatusRequestedIdx: index("approval_queue_agent_status_requested_idx").on(
+      table.agentId,
+      table.status,
+      table.requestedAt.desc(),
+      table.id.desc(),
+    ),
   }),
 );
 
