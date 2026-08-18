@@ -65,10 +65,10 @@ jobs:
           # Compare the immutable commits captured by the pull_request event.
           # The base branch can advance while this job runs; diffing its live
           # remote tip would then attribute unrelated merged changes to the PR.
-          # The helper validates both values as full commit IDs, verifies/fetches
-          # missing objects independently (fork heads are normally already
-          # parents of the checked-out PR merge commit), and consumes Git's
-          # NUL-delimited filename output so hostile filenames cannot bypass the
+          # checkout uses fetch-depth: 0 and the pull_request merge ref, so both
+          # immutable parent commits are already present. The helper validates
+          # the object IDs and commit types without refetching fork objects, then
+          # consumes NUL-delimited filenames so hostile names cannot bypass the
           # package check.
           bun test scripts/__tests__/check-public-package-metadata.test.ts
           bun scripts/check-public-package-metadata.ts "$BASE_SHA" "$HEAD_SHA"

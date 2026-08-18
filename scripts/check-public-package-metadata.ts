@@ -5,7 +5,7 @@
  *
  * Security properties:
  * - only full SHA-1 object IDs are accepted (no attacker-controlled refspecs),
- * - a fork head already present through refs/pull/... is not fetched again,
+ * - fork commits are verified locally and never fetched by raw object ID,
  * - filenames are read with `-z` (newlines and other metacharacters are data),
  * - merely touching package.json is not called a version bump.
  */
@@ -50,9 +50,9 @@ export function evaluatePublicPackageMetadata(input: PackageMetadataInput): stri
   return errors;
 }
 
-function git(args: string[], allowFailure = false): Uint8Array {
+function git(args: string[]): Uint8Array {
   const result = Bun.spawnSync(["git", ...args], { stdout: "pipe", stderr: "pipe" });
-  if (result.exitCode !== 0 && !allowFailure) {
+  if (result.exitCode !== 0) {
     const detail = new TextDecoder().decode(result.stderr).trim();
     throw new Error(`git ${args[0] ?? "command"} failed${detail ? `: ${detail}` : ""}`);
   }
@@ -69,11 +69,9 @@ function hasCommit(sha: string): boolean {
 }
 
 function ensureCommit(sha: string): void {
-  if (hasCommit(sha)) return;
-  // A missing object may occur with a shallow checkout. Fetch the validated
-  // immutable ID alone; never combine an untrusted value into a refspec.
-  git(["fetch", "--no-tags", "origin", sha]);
-  if (!hasCommit(sha)) throw new Error(`fetched object is not a commit: ${sha}`);
+  if (!hasCommit(sha)) {
+    throw new Error(`pull request commit is not present in the checkout: ${sha}`);
+  }
 }
 
 function readVersion(commit: string, pkg: string): string | null {
