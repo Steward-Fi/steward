@@ -2170,6 +2170,16 @@ describe("Malformed evaluator config fails closed instead of throwing (SEC-105)"
     }
   });
 
+  it("rejects Bitcoin regtest addresses on the testnet policy chain", async () => {
+    const regtest = "bcrt1q50rtrmj2f8vl9tem8qpfw36ylw5jg9j2qzhx4";
+    const result = await evaluatePolicy(
+      makeAddressRule({ addresses: [regtest], mode: "whitelist" }),
+      makeContext({ request: { ...makeContext().request, to: regtest, chainId: 202 } }),
+    );
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("address family");
+  });
+
   it("binds Bitcoin and Monero policy addresses to the request network", async () => {
     const bitcoinMainnet = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT";
     const moneroMainnet =
@@ -2217,6 +2227,19 @@ describe("Malformed evaluator config fails closed instead of throwing (SEC-105)"
       expect(result.passed).toBe(false);
       expect(result.reason).toContain("address family");
     }
+  });
+
+  it("rejects a checksum-valid Monero address with a non-canonical public key", async () => {
+    const moneroWithZeroSpendKey =
+      "41a6wB6x6y171M4XwwjJ4F3cfT4qMmkZaM3vR2n5nhQwfoSqoFktSX9HEjQppn8ewfo9fz4hPWWfknP4jM8w14iA5GZyG6s";
+    const result = await evaluatePolicy(
+      makeAddressRule({ addresses: [moneroWithZeroSpendKey], mode: "whitelist" }),
+      makeContext({
+        request: { ...makeContext().request, to: moneroWithZeroSpendKey, chainId: 301 },
+      }),
+    );
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("address family");
   });
 
   it("filters valid mixed-family policy entries to the request chain", async () => {

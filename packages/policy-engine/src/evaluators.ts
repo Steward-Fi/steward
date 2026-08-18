@@ -1,3 +1,4 @@
+import { ed25519 } from "@noble/curves/ed25519";
 import { keccak_256 } from "@noble/hashes/sha3";
 import { sha256 } from "@noble/hashes/sha256";
 import {
@@ -164,7 +165,7 @@ function decodeBech32Address(
 
 function isBitcoinAddress(value: string, testnet: boolean): boolean {
   const bech32 = decodeBech32Address(value);
-  if (bech32) return testnet ? bech32.hrp === "tb" || bech32.hrp === "bcrt" : bech32.hrp === "bc";
+  if (bech32) return testnet ? bech32.hrp === "tb" : bech32.hrp === "bc";
   if (!/^[123mn2][1-9A-HJ-NP-Za-km-z]{25,34}$/.test(value)) return false;
   const decoded = decodeBase58(value);
   if (!decoded || decoded.length !== 25) return false;
@@ -220,7 +221,14 @@ function isMoneroAddress(value: string, stagenet: boolean): boolean {
   const prefix = decoded[0] as number;
   if (!standardPrefixes.includes(prefix)) return false;
   const integrated = prefix === (stagenet ? 25 : 19);
-  return decoded.length === (integrated ? 77 : 69);
+  if (decoded.length !== (integrated ? 77 : 69)) return false;
+  try {
+    ed25519.ExtendedPoint.fromHex(decoded.subarray(1, 33));
+    ed25519.ExtendedPoint.fromHex(decoded.subarray(33, 65));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isPolicyAddressForChain(value: unknown, chainId: number): value is string {
