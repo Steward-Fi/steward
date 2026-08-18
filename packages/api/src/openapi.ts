@@ -1991,6 +1991,8 @@ const secretRouteSchema: JsonSchema = {
     "method",
     "injectAs",
     "injectKey",
+    "injectionStrategy",
+    "injectionConfig",
     "enabled",
   ],
   properties: {
@@ -2007,6 +2009,12 @@ const secretRouteSchema: JsonSchema = {
     injectAs: { type: "string", enum: ["header"] },
     injectKey: stringSchema,
     injectFormat: nullableStringSchema,
+    injectionStrategy: { type: "string", enum: ["header", "sigv4"] },
+    injectionConfig: {
+      type: "object",
+      properties: { service: { type: "string", enum: ["ec2"] }, region: stringSchema },
+      additionalProperties: false,
+    },
     priority: { type: "integer", minimum: 0, maximum: 1000000 },
     enabled: { type: "boolean" },
     createdAt: dateTimeSchema,
@@ -2025,6 +2033,12 @@ const secretRouteMutationProperties: Record<string, JsonSchema> = {
   injectAs: { type: "string", enum: ["header"] },
   injectKey: stringSchema,
   injectFormat: stringSchema,
+  injectionStrategy: { type: "string", enum: ["header", "sigv4"] },
+  injectionConfig: {
+    type: "object",
+    properties: { service: { type: "string", enum: ["ec2"] }, region: stringSchema },
+    additionalProperties: false,
+  },
   priority: { type: "integer", minimum: 0, maximum: 1000000 },
   enabled: { type: "boolean" },
 };

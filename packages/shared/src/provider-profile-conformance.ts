@@ -1,4 +1,9 @@
 import {
+  AWS_PROVIDER_ACTION_PROFILE,
+  type AwsCanonicalActionV1,
+  serializeAwsEc2QueryBody,
+} from "./aws-provider-action.js";
+import {
   buildGenericHttpAction,
   GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
   type GenericHttpOperationDescriptorV1,
@@ -121,6 +126,48 @@ function validTweetBody(value: unknown): boolean {
     if (!/^[0-9]{1,25}$/.test(value.reply.in_reply_to_tweet_id)) return false;
   }
   return true;
+}
+
+function validAwsEc2Action(action: ConformanceCanonicalAction, operationKey: string): boolean {
+  if (
+    action.profile !== AWS_PROVIDER_ACTION_PROFILE ||
+    action.method !== "POST" ||
+    action.normalizedPath !== "/" ||
+    action.orderedQueryPairs.length !== 0 ||
+    !pairsEqual(action.selectedHeaders, [
+      ["content-type", "application/x-www-form-urlencoded; charset=UTF-8"],
+    ]) ||
+    !/^https:\/\/ec2\.[a-z]{2}(?:-[a-z0-9]+){1,3}-[1-9][0-9]?\.amazonaws\.com$/.test(action.origin)
+  ) {
+    return false;
+  }
+  try {
+    const body = action.canonicalBody as Record<string, unknown>;
+    if (operationKey === "aws.ec2.DescribeInstances" && body?.Action !== "DescribeInstances") {
+      return false;
+    }
+    if (operationKey === "aws.ec2.StopInstances" && body?.Action !== "StopInstances") {
+      return false;
+    }
+    if (!operationKey.startsWith("aws.ec2.")) return false;
+    const ids = body?.InstanceIds;
+    if (
+      ids !== undefined &&
+      (!Array.isArray(ids) ||
+        ids.length > 100 ||
+        ids.some((id) => typeof id !== "string" || !/^i-[0-9a-f]{8,17}$/.test(id)) ||
+        new Set(ids).size !== ids.length)
+    ) {
+      return false;
+    }
+    if (operationKey === "aws.ec2.StopInstances" && (!Array.isArray(ids) || ids.length === 0)) {
+      return false;
+    }
+    serializeAwsEc2QueryBody(action as AwsCanonicalActionV1);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const SLACK_CHANNEL_RE = /^[CGD][A-Z0-9]{8,19}$/;
@@ -293,6 +340,9 @@ function fixedActionMatchesOperation(
     ["x-github-api-version", "2022-11-28"],
   ];
   switch (operationKey) {
+    case "aws.ec2.DescribeInstances":
+    case "aws.ec2.StopInstances":
+      return validAwsEc2Action(action, operationKey);
     case "github.issue.list":
       return (
         action.profile === GITHUB_PROVIDER_ACTION_PROFILE &&
@@ -443,7 +493,17 @@ export function inspectProviderOperationTargetConformance(
     }
   };
 
-  if (action.profile === GITHUB_PROVIDER_ACTION_PROFILE) {
+  if (action.profile === AWS_PROVIDER_ACTION_PROFILE) {
+    if (
+      context.operationKey !== "aws.ec2.DescribeInstances" &&
+      context.operationKey !== "aws.ec2.StopInstances"
+    ) {
+      violations.push("operation-key-unsupported");
+    }
+    if (!fixedActionMatchesOperation(action, context.operationKey)) {
+      violations.push("operation-action-mismatch");
+    }
+  } else if (action.profile === GITHUB_PROVIDER_ACTION_PROFILE) {
     if (context.operationKey === "github.issue.list") {
       exact("https://api.github.com", "GET", /^\/repos\/[^/]+\/[^/]+\/issues$/);
     } else if (context.operationKey === "github.pr.comment.create") {
@@ -704,10 +764,17 @@ export function inspectProviderProfileConformance(
   if (action.canonicalBody !== null && headerNames.has("content-type") === false) {
     violations.push("body-content-type-missing");
   }
+  const contentTypes = action.selectedHeaders
+    .filter(([name]) => name.toLowerCase() === "content-type")
+    .map(([, value]) => value);
   if (
-    headerNames.has("content-type") &&
-    !action.selectedHeaders.some(
-      ([name, value]) => name.toLowerCase() === "content-type" && value === "application/json",
+    contentTypes.some(
+      (value) =>
+        value !== "application/json" &&
+        !(
+          action.profile === AWS_PROVIDER_ACTION_PROFILE &&
+          value === "application/x-www-form-urlencoded; charset=UTF-8"
+        ),
     )
   ) {
     violations.push("content-type-unsupported");

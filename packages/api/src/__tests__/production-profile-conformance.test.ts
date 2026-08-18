@@ -1,10 +1,12 @@
 import { describe, expect, it } from "bun:test";
+import type { AwsOperationKey } from "@stwd/provider-aws";
 import type { GithubOperationKey } from "@stwd/provider-github";
 import type { GoogleOperationKey } from "@stwd/provider-google";
 import type { SlackOperationKey } from "@stwd/provider-slack";
 import type { XOperationKey } from "@stwd/provider-x";
 import { parseGovernedCanonicalActionForDispatch } from "@stwd/proxy/src/handlers/governed-execution";
 import {
+  AWS_PROVIDER_ACTION_PROFILE,
   buildGenericHttpAction,
   CanonError,
   GENERIC_GOLDEN_DESCRIPTOR_A,
@@ -27,6 +29,13 @@ import {
 const GENERIC_DESCRIPTOR = validateGenericHttpDescriptor(GENERIC_GOLDEN_DESCRIPTOR_A);
 
 const FIXTURES = {
+  [AWS_PROVIDER_ACTION_PROFILE]: {
+    operationKey: "aws.ec2.DescribeInstances" as const,
+    method: undefined,
+    args: { region: "us-east-1", instanceIds: ["i-12345678"] },
+    traversalArgs: { region: ".." },
+    traversalCode: "CANON_FIELD_TYPE_INVALID",
+  },
   [GITHUB_PROVIDER_ACTION_PROFILE]: {
     operationKey: "github.issue.list" as const,
     method: undefined,
@@ -73,6 +82,16 @@ const FIXTURES = {
 } as const;
 
 const OPERATION_FIXTURES = {
+  [AWS_PROVIDER_ACTION_PROFILE]: [
+    {
+      operationKey: "aws.ec2.DescribeInstances",
+      args: { region: "us-east-1", instanceIds: ["i-12345678"] },
+    },
+    {
+      operationKey: "aws.ec2.StopInstances",
+      args: { region: "eu-central-1", instanceIds: ["i-abcdef01234567890"], dryRun: true },
+    },
+  ],
   [GITHUB_PROVIDER_ACTION_PROFILE]: [
     {
       operationKey: "github.issue.list",
@@ -152,6 +171,8 @@ function buildFromProductionSpec(
   fixture: OperationFixture = FIXTURES[spec.profile],
 ) {
   switch (spec.profile) {
+    case AWS_PROVIDER_ACTION_PROFILE:
+      return spec.build(fixture.operationKey as AwsOperationKey, args);
     case GITHUB_PROVIDER_ACTION_PROFILE:
       return spec.build(fixture.operationKey as GithubOperationKey, args);
     case X_PROVIDER_ACTION_PROFILE:
@@ -170,10 +191,13 @@ function buildFromProductionSpec(
   }
 }
 
-function allowedOriginsFromProductionSpec(spec: ProductionProviderProfileSpec): readonly string[] {
-  return spec.kind === "config-driven"
-    ? spec.allowedOrigins(GENERIC_DESCRIPTOR)
-    : spec.allowedOrigins;
+function allowedOriginsFromProductionSpec(
+  spec: ProductionProviderProfileSpec,
+  action = buildFromProductionSpec(spec, { ...FIXTURES[spec.profile].args }).action,
+): readonly string[] {
+  if (spec.kind === "config-driven") return spec.allowedOrigins(GENERIC_DESCRIPTOR);
+  if (spec.profile === AWS_PROVIDER_ACTION_PROFILE) return spec.allowedOriginsForAction(action);
+  return spec.allowedOrigins;
 }
 
 function operationContext(spec: ProductionProviderProfileSpec) {
@@ -211,7 +235,7 @@ function runCanonicalBoundaryConformance(
 ): string[] {
   const built = buildFromProductionSpec(spec, { ...FIXTURES[spec.profile].args });
   const apiAction = mutate ? mutate(built.action) : built.action;
-  const allowedOrigins = allowedOriginsFromProductionSpec(spec);
+  const allowedOrigins = allowedOriginsFromProductionSpec(spec, apiAction);
   const apiViolations = inspectProviderProfileConformance(spec.profile, allowedOrigins, apiAction, [
     "registered-malicious-canary",
   ]);
@@ -262,7 +286,7 @@ describe("#220 executable provider profile conformance", () => {
           parseGovernedCanonicalActionForDispatch(
             new TextEncoder().encode(jcsStringify(action)),
             spec.profile,
-            spec.allowedOrigins,
+            allowedOriginsFromProductionSpec(spec, built.action),
             { operationKey: fixture.operationKey, requestProfile: { profile: spec.profile } },
           );
 
@@ -381,7 +405,7 @@ describe("#220 executable provider profile conformance", () => {
         expect(
           inspectProviderProfileConformance(
             spec.profile,
-            allowedOriginsFromProductionSpec(spec),
+            allowedOriginsFromProductionSpec(spec, first.action),
             first.action,
           ),
         ).toEqual([]);
@@ -513,7 +537,7 @@ describe("#220 executable provider profile conformance", () => {
           parseGovernedCanonicalActionForDispatch(
             new TextEncoder().encode(jcsStringify(action)),
             spec.profile,
-            allowedOriginsFromProductionSpec(spec),
+            allowedOriginsFromProductionSpec(spec, built.action),
             operation,
           );
         expect(parse(built.action)).toEqual(built.action);
@@ -594,10 +618,14 @@ describe("#220 executable provider profile conformance", () => {
       "%2525255c",
     ]) {
       expect(
-        inspectProviderProfileConformance(spec.profile, allowedOriginsFromProductionSpec(spec), {
-          ...built.action,
-          normalizedPath: `/repos/${segment}/hello/issues`,
-        }),
+        inspectProviderProfileConformance(
+          spec.profile,
+          allowedOriginsFromProductionSpec(spec, built.action),
+          {
+            ...built.action,
+            normalizedPath: `/repos/${segment}/hello/issues`,
+          },
+        ),
       ).toContain("path-traversal");
     }
   });

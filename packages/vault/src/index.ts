@@ -130,7 +130,11 @@ export {
   SecretRouteAuthorityConflict,
   secretRouteAuthorityPatternsOverlap,
 } from "./secret-route-authority";
-export type { SecretRouteConfigInput } from "./secret-route-validator";
+export type {
+  CredentialInjectionConfig,
+  CredentialInjectionStrategy,
+  SecretRouteConfigInput,
+} from "./secret-route-validator";
 export {
   configuredSecretRouteHosts,
   DEFAULT_SECRET_ROUTE_HOSTS,

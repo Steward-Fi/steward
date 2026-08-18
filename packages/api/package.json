@@ -36,6 +36,7 @@
     "@stwd/plugin-trading": "workspace:*",
     "@stwd/plugin-wxmr": "workspace:*",
     "@stwd/policy-engine": "workspace:*",
+    "@stwd/provider-aws": "workspace:*",
     "@stwd/provider-github": "workspace:*",
     "@stwd/provider-slack": "workspace:*",
     "@stwd/provider-google": "workspace:*",

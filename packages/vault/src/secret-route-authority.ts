@@ -20,6 +20,8 @@ const GOVERNED_ROUTE_TARGET_FIELDS = [
   "injectAs",
   "injectKey",
   "injectFormat",
+  "injectionStrategy",
+  "injectionConfig",
 ] as const;
 
 type RouteAuthorityCandidate = Pick<
@@ -51,6 +53,8 @@ export function assertGovernedRouteUpdateIsSafe(
       | "injectAs"
       | "injectKey"
       | "injectFormat"
+      | "injectionStrategy"
+      | "injectionConfig"
       | "enabled"
     >
   >,

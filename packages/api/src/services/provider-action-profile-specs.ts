@@ -1,4 +1,10 @@
 import {
+  AWS_OPERATION_KEYS,
+  type AwsActionBuild,
+  type AwsOperationKey,
+  buildAwsAction,
+} from "@stwd/provider-aws";
+import {
   buildGithubAction,
   GITHUB_OPERATION_KEYS,
   type GithubActionBuild,
@@ -23,6 +29,8 @@ import {
   type XOperationKey,
 } from "@stwd/provider-x";
 import {
+  AWS_PROVIDER_ACTION_PROFILE,
+  awsEc2Origin,
   buildGenericHttpAction,
   CanonError,
   GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
@@ -37,6 +45,7 @@ import {
 } from "@stwd/shared";
 
 export type AdapterFixedActionBuild =
+  | AwsActionBuild
   | GithubActionBuild
   | SlackActionBuild
   | GoogleActionBuild
@@ -51,6 +60,13 @@ function fixedProfileOrigins(profile: string): readonly string[] {
 }
 
 export type ProductionProviderProfileSpec =
+  | {
+      readonly profile: typeof AWS_PROVIDER_ACTION_PROFILE;
+      readonly kind: "adapter-fixed";
+      readonly operationKeys: readonly AwsOperationKey[];
+      allowedOriginsForAction(action: AwsActionBuild["action"]): readonly string[];
+      build(operationKey: AwsOperationKey, args: unknown): AwsActionBuild;
+    }
   | {
       readonly profile: typeof GITHUB_PROVIDER_ACTION_PROFILE;
       readonly kind: "adapter-fixed";
@@ -100,6 +116,19 @@ const GITHUB_SPEC = Object.freeze({
   build: buildGithubAction,
 });
 
+const AWS_SPEC = Object.freeze({
+  profile: AWS_PROVIDER_ACTION_PROFILE,
+  kind: "adapter-fixed" as const,
+  operationKeys: Object.freeze([...AWS_OPERATION_KEYS]),
+  allowedOriginsForAction: (action: AwsActionBuild["action"]) => {
+    const match = /^https:\/\/ec2\.([a-z]{2}(?:-[a-z0-9]+){1,3}-[1-9][0-9]?)\.amazonaws\.com$/.exec(
+      action.origin,
+    );
+    return Object.freeze(match ? [awsEc2Origin(match[1])] : []);
+  },
+  build: buildAwsAction,
+});
+
 const X_SPEC = Object.freeze({
   profile: X_PROVIDER_ACTION_PROFILE,
   kind: "adapter-fixed" as const,
@@ -144,7 +173,7 @@ const GENERIC_HTTP_SPEC = Object.freeze({
  * frozen list rather than exercising handwritten lookalikes.
  */
 export const PRODUCTION_PROVIDER_PROFILE_SPECS: readonly ProductionProviderProfileSpec[] =
-  Object.freeze([GITHUB_SPEC, X_SPEC, SLACK_SPEC, GOOGLE_SPEC, GENERIC_HTTP_SPEC]);
+  Object.freeze([AWS_SPEC, GITHUB_SPEC, X_SPEC, SLACK_SPEC, GOOGLE_SPEC, GENERIC_HTTP_SPEC]);
 
 const SPEC_BY_PROFILE: ReadonlyMap<string, ProductionProviderProfileSpec> = new Map(
   PRODUCTION_PROVIDER_PROFILE_SPECS.map((spec) => [spec.profile, spec] as const),
@@ -194,6 +223,11 @@ export function buildAdapterFixedProviderAction(
   args: unknown,
   method: unknown,
 ): AdapterFixedActionBuild | undefined {
+  if ((AWS_SPEC.operationKeys as readonly string[]).includes(operationKey)) {
+    if (method !== undefined)
+      throw new CanonError("CANON_UNKNOWN_FIELD", "method is adapter-fixed");
+    return AWS_SPEC.build(operationKey as AwsOperationKey, args);
+  }
   if ((GITHUB_SPEC.operationKeys as readonly string[]).includes(operationKey)) {
     if (method !== undefined)
       throw new CanonError("CANON_UNKNOWN_FIELD", "method is adapter-fixed");

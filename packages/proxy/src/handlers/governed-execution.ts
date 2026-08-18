@@ -41,7 +41,10 @@ import {
   workspaces,
 } from "@stwd/db";
 import {
+  AWS_PROVIDER_ACTION_PROFILE,
+  type AwsCanonicalActionV1,
   assertRegisteredProfile,
+  awsEc2AllowedOriginFromCanonicalBytes,
   buildProviderExecutionCommitmentV2,
   CanonError,
   computeActionDigest,
@@ -56,6 +59,7 @@ import {
   observeNonceClaimContention,
   type ProviderApprovalCommitmentV1,
   parseCanonicalProviderActionBytes,
+  serializeAwsEc2QueryBody,
   serializeCanonicalOutboundQuery,
   validateGenericHttpDescriptor,
   verifyProviderExecutionCommitmentV2,
@@ -292,7 +296,14 @@ async function loadGovernedExecution(
   if (!profileDescriptor) return null;
   let allowedOrigins: readonly string[];
   if (profileDescriptor.kind === "adapter-fixed") {
-    allowedOrigins = profileDescriptor.allowedOrigins;
+    allowedOrigins =
+      profileDescriptor.dynamicOriginPolicy === "aws-ec2-region"
+        ? [
+            awsEc2AllowedOriginFromCanonicalBytes(
+              new Uint8Array(binding.canonicalActionBytes as Uint8Array),
+            ),
+          ]
+        : profileDescriptor.allowedOrigins;
   } else {
     if (operation.requestProfile.profile !== profile) {
       throw new CanonError("CANON_JSON_SHAPE_INVALID", "operation profile does not match binding");
@@ -965,14 +976,16 @@ async function dispatchOnce(
   // guarantee JCS key ordering (e.g. integer-like keys sort differently), so it
   // could send bytes that were never authorized. jcsStringify(canonicalBody) is
   // byte-identical to what canonicalActionBytes committed.
-  const bodyBytes =
+  const body =
     loaded.canonicalAction.canonicalBody === null
       ? undefined
-      : new TextEncoder().encode(jcsStringify(loaded.canonicalAction.canonicalBody));
+      : (loaded.canonicalAction.profile as string) === AWS_PROVIDER_ACTION_PROFILE
+        ? serializeAwsEc2QueryBody(loaded.canonicalAction as unknown as AwsCanonicalActionV1)
+        : jcsStringify(loaded.canonicalAction.canonicalBody);
   const request = new Request(url, {
     method,
     headers,
-    body: method === "GET" || method === "HEAD" ? undefined : bodyBytes,
+    body: method === "GET" || method === "HEAD" ? undefined : body,
   });
 
   const responseHeaders = new Headers();

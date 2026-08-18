@@ -1,0 +1,15 @@
+{
+  "name": "@stwd/provider-aws",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@stwd/shared": "workspace:*"
+  },
+  "description": "AWS governed provider-action adapter"
+}

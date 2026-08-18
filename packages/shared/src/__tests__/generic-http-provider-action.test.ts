@@ -17,6 +17,7 @@
 
 import { describe, expect, it } from "bun:test";
 import {
+  AWS_PROVIDER_ACTION_PROFILE,
   assertRegisteredProfile,
   buildGenericHttpAction,
   CanonError,
@@ -132,9 +133,10 @@ describe("generic-http golden corpus", () => {
 // ─── Registry (fail-closed at every consumption entry) ─────────────────────────
 
 describe("profile registry", () => {
-  it("registers exactly github, x, Slack, Google, generic-http", () => {
+  it("registers exactly AWS, github, x, Slack, Google, generic-http", () => {
     expect([...REGISTERED_PROFILES].sort()).toEqual(
       [
+        AWS_PROVIDER_ACTION_PROFILE,
         GITHUB_PROVIDER_ACTION_PROFILE,
         X_PROVIDER_ACTION_PROFILE,
         SLACK_PROVIDER_ACTION_PROFILE,
@@ -145,6 +147,7 @@ describe("profile registry", () => {
   });
 
   it("isRegisteredProfile accepts registered, rejects unknown / non-string", () => {
+    expect(isRegisteredProfile(AWS_PROVIDER_ACTION_PROFILE)).toBe(true);
     expect(isRegisteredProfile(GITHUB_PROVIDER_ACTION_PROFILE)).toBe(true);
     expect(isRegisteredProfile(X_PROVIDER_ACTION_PROFILE)).toBe(true);
     expect(isRegisteredProfile(SLACK_PROVIDER_ACTION_PROFILE)).toBe(true);

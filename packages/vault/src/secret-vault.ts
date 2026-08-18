@@ -618,6 +618,8 @@ export class SecretVault {
       injectAs: string;
       injectKey: string;
       injectFormat?: string;
+      injectionStrategy?: "header" | "sigv4";
+      injectionConfig?: { service?: string; region?: string };
       priority?: number;
       enabled?: boolean;
       requiresApproval?: boolean;
@@ -640,6 +642,8 @@ export class SecretVault {
       injectAs: string;
       injectKey: string;
       injectFormat?: string;
+      injectionStrategy?: "header" | "sigv4";
+      injectionConfig?: { service?: string; region?: string };
       priority?: number;
       enabled?: boolean;
       requiresApproval?: boolean;
@@ -653,6 +657,8 @@ export class SecretVault {
       method: config.method?.trim().toUpperCase() ?? "GET",
       injectKey: config.injectKey.trim(),
       injectFormat: config.injectFormat ?? "{value}",
+      injectionStrategy: config.injectionStrategy ?? "header",
+      injectionConfig: config.injectionConfig ?? {},
       priority: config.priority ?? 0,
     };
     const validationError = validateSecretRouteConfig(normalizedConfig);
@@ -698,6 +704,8 @@ export class SecretVault {
         injectAs: normalizedConfig.injectAs,
         injectKey: normalizedConfig.injectKey,
         injectFormat: normalizedConfig.injectFormat,
+        injectionStrategy: normalizedConfig.injectionStrategy,
+        injectionConfig: normalizedConfig.injectionConfig,
         priority: normalizedConfig.priority,
         enabled: config.enabled ?? true,
         requiresApproval: config.requiresApproval ?? false,
@@ -742,6 +750,8 @@ export class SecretVault {
       injectAs: string;
       injectKey: string;
       injectFormat: string;
+      injectionStrategy: "header" | "sigv4";
+      injectionConfig: { service?: string; region?: string };
       priority: number;
       enabled: boolean;
       requiresApproval: boolean;
@@ -764,6 +774,8 @@ export class SecretVault {
       injectAs: string;
       injectKey: string;
       injectFormat: string;
+      injectionStrategy: "header" | "sigv4";
+      injectionConfig: { service?: string; region?: string };
       priority: number;
       enabled: boolean;
       requiresApproval: boolean;
@@ -779,6 +791,8 @@ export class SecretVault {
       "injectAs",
       "injectKey",
       "injectFormat",
+      "injectionStrategy",
+      "injectionConfig",
       "priority",
       "enabled",
       "requiresApproval",
@@ -846,6 +860,9 @@ export class SecretVault {
         injectAs: allowedUpdates.injectAs ?? current.injectAs ?? undefined,
         injectKey: allowedUpdates.injectKey ?? current.injectKey ?? undefined,
         injectFormat: allowedUpdates.injectFormat ?? current.injectFormat ?? undefined,
+        injectionStrategy:
+          allowedUpdates.injectionStrategy ?? current.injectionStrategy ?? undefined,
+        injectionConfig: allowedUpdates.injectionConfig ?? current.injectionConfig ?? undefined,
       });
       if (mergedValidationError) throw new Error(mergedValidationError);
     }

@@ -18,6 +18,8 @@ export interface MatchedRoute {
   injectAs: string;
   injectKey: string;
   injectFormat: string;
+  injectionStrategy: "header" | "sigv4";
+  injectionConfig: { service?: string; region?: string };
 }
 
 /**
@@ -129,6 +131,8 @@ export async function findMatchingRoutes(
       injectAs: route.injectAs,
       injectKey: route.injectKey,
       injectFormat: route.injectFormat ?? "{value}",
+      injectionStrategy: route.injectionStrategy as "header" | "sigv4",
+      injectionConfig: route.injectionConfig,
     });
   }
 

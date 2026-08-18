@@ -29,7 +29,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -166,7 +166,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -321,7 +321,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -479,7 +479,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -636,7 +636,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -789,7 +789,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -957,7 +957,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -1112,7 +1112,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -1274,7 +1274,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -1431,7 +1431,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -1587,7 +1587,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -1741,7 +1741,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -1887,7 +1887,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -2046,7 +2046,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -2205,7 +2205,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -2343,7 +2343,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -2499,7 +2499,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -2637,7 +2637,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -2905,7 +2905,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                 };
                 path?: never;
@@ -3063,7 +3063,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                 };
                 path: {
@@ -3314,7 +3314,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                 };
                 path?: never;
@@ -3472,7 +3472,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                 };
                 path: {
@@ -3727,7 +3727,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                 };
                 path: {
@@ -3978,7 +3978,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                 };
                 path?: never;
@@ -4136,7 +4136,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                 };
                 path: {
@@ -4387,7 +4387,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                 };
                 path?: never;
@@ -4545,7 +4545,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                 };
                 path: {
@@ -5034,7 +5034,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -5189,7 +5189,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -5861,7 +5861,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -6256,7 +6256,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -6377,7 +6377,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -6923,7 +6923,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -7205,7 +7205,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -7498,7 +7498,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -7893,7 +7893,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -8014,7 +8014,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -8560,7 +8560,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -8842,7 +8842,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -9081,7 +9081,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -9234,7 +9234,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -9515,7 +9515,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -9656,7 +9656,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -9790,7 +9790,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -10036,7 +10036,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -10189,7 +10189,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -10470,7 +10470,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -10611,7 +10611,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -10745,7 +10745,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -10995,7 +10995,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -11255,7 +11255,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -11373,7 +11373,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -11636,7 +11636,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -11777,7 +11777,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -12040,7 +12040,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -12159,7 +12159,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -12419,7 +12419,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -12679,7 +12679,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -12797,7 +12797,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -13060,7 +13060,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -13201,7 +13201,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -13464,7 +13464,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -13583,7 +13583,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -13866,7 +13866,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -14086,7 +14086,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -14237,7 +14237,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -14538,7 +14538,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -14707,7 +14707,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -14845,7 +14845,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -15139,7 +15139,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -15359,7 +15359,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -15510,7 +15510,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -15811,7 +15811,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -15980,7 +15980,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -16118,7 +16118,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -16434,7 +16434,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -16806,7 +16806,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -17005,7 +17005,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -17201,7 +17201,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -17397,7 +17397,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -17593,7 +17593,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -17789,7 +17789,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -17985,7 +17985,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -19889,7 +19889,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -20048,7 +20048,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -20331,7 +20331,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -20519,7 +20519,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -21377,7 +21377,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -21542,7 +21542,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -21817,7 +21817,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -21994,7 +21994,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -22421,7 +22421,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -22576,7 +22576,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -22731,7 +22731,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -22920,7 +22920,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -23136,7 +23136,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -23458,7 +23458,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -23854,7 +23854,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -24004,7 +24004,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -24159,7 +24159,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -24432,7 +24432,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -24588,7 +24588,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -24745,7 +24745,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -24906,7 +24906,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -25044,7 +25044,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -25436,7 +25436,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -25688,7 +25688,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -25865,7 +25865,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -26292,7 +26292,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -26447,7 +26447,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -26602,7 +26602,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -26791,7 +26791,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -27007,7 +27007,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -27329,7 +27329,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -27725,7 +27725,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -27875,7 +27875,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -28030,7 +28030,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -28303,7 +28303,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -28459,7 +28459,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -28616,7 +28616,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -28777,7 +28777,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -28915,7 +28915,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -29307,7 +29307,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -29668,7 +29668,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -29807,7 +29807,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -30075,7 +30075,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -30222,7 +30222,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -30376,7 +30376,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -30665,7 +30665,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -31480,7 +31480,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -31845,7 +31845,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -32023,6 +32023,13 @@ export interface paths {
                                 injectAs: "header";
                                 injectKey: string;
                                 injectFormat?: string | null;
+                                /** @enum {string} */
+                                injectionStrategy: "header" | "sigv4";
+                                injectionConfig: {
+                                    /** @enum {string} */
+                                    service?: "ec2";
+                                    region?: string;
+                                };
                                 priority?: number;
                                 enabled: boolean;
                                 /** Format: date-time */
@@ -32115,7 +32122,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -32135,6 +32142,13 @@ export interface paths {
                         injectAs: "header";
                         injectKey: string;
                         injectFormat?: string;
+                        /** @enum {string} */
+                        injectionStrategy?: "header" | "sigv4";
+                        injectionConfig?: {
+                            /** @enum {string} */
+                            service?: "ec2";
+                            region?: string;
+                        };
                         priority?: number;
                         enabled?: boolean;
                         secretId: string;
@@ -32164,6 +32178,13 @@ export interface paths {
                                 injectAs: "header";
                                 injectKey: string;
                                 injectFormat?: string | null;
+                                /** @enum {string} */
+                                injectionStrategy: "header" | "sigv4";
+                                injectionConfig: {
+                                    /** @enum {string} */
+                                    service?: "ec2";
+                                    region?: string;
+                                };
                                 priority?: number;
                                 enabled: boolean;
                                 /** Format: date-time */
@@ -32284,7 +32305,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -32306,6 +32327,13 @@ export interface paths {
                         injectAs?: "header";
                         injectKey?: string;
                         injectFormat?: string;
+                        /** @enum {string} */
+                        injectionStrategy?: "header" | "sigv4";
+                        injectionConfig?: {
+                            /** @enum {string} */
+                            service?: "ec2";
+                            region?: string;
+                        };
                         priority?: number;
                         enabled?: boolean;
                     };
@@ -32334,6 +32362,13 @@ export interface paths {
                                 injectAs: "header";
                                 injectKey: string;
                                 injectFormat?: string | null;
+                                /** @enum {string} */
+                                injectionStrategy: "header" | "sigv4";
+                                injectionConfig: {
+                                    /** @enum {string} */
+                                    service?: "ec2";
+                                    region?: string;
+                                };
                                 priority?: number;
                                 enabled: boolean;
                                 /** Format: date-time */
@@ -32439,7 +32474,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -32683,7 +32718,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -32824,7 +32859,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -32961,7 +32996,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -33224,7 +33259,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -33387,7 +33422,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -33535,7 +33570,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -33673,7 +33708,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -34085,7 +34120,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -34236,7 +34271,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -34636,7 +34671,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -34799,7 +34834,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -35064,7 +35099,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -35406,7 +35441,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -35725,7 +35760,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -35888,7 +35923,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -36048,7 +36083,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -36225,7 +36260,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -36488,7 +36523,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -36781,7 +36816,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -36919,7 +36954,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -37091,7 +37126,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -37256,7 +37291,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -37419,7 +37454,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -37591,7 +37626,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -37758,7 +37793,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -37926,7 +37961,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -38201,7 +38236,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -38494,7 +38529,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -38632,7 +38667,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -38804,7 +38839,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -38969,7 +39004,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -39132,7 +39167,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -39304,7 +39339,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -39471,7 +39506,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -39639,7 +39674,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -40095,7 +40130,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -40439,7 +40474,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -40690,7 +40725,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -41302,7 +41337,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -41465,7 +41500,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -41723,7 +41758,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -41878,7 +41913,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -42000,7 +42035,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -42264,7 +42299,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -42437,7 +42472,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -42568,7 +42603,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -42863,7 +42898,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -43029,7 +43064,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -43174,7 +43209,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -43340,7 +43375,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -43830,7 +43865,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -44089,7 +44124,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -44247,7 +44282,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -44402,7 +44437,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -44629,7 +44664,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -44864,7 +44899,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -45147,7 +45182,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -45527,7 +45562,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;
@@ -45813,7 +45848,7 @@ export interface paths {
                     "X-Steward-Request-Expires-At"?: string;
                     /** @description Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>. */
                     "X-Steward-Signature"?: string;
-                    /** @description Optional tenant request-signing key id used to select a managed HMAC signing key. */
+                    /** @description Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets. */
                     "X-Steward-Signing-Key-Id"?: string;
                     /** @description Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts. */
                     "Idempotency-Key"?: string;

@@ -65,6 +65,7 @@
         "@stwd/plugin-trading": "workspace:*",
         "@stwd/plugin-wxmr": "workspace:*",
         "@stwd/policy-engine": "workspace:*",
+        "@stwd/provider-aws": "workspace:*",
         "@stwd/provider-github": "workspace:*",
         "@stwd/provider-slack": "workspace:*",
         "@stwd/provider-google": "workspace:*",
@@ -313,6 +314,13 @@
         "@noble/hashes": "^1.7.0",
         "@stwd/shared": "workspace:*",
         "re2-wasm": "1.0.2",
+      },
+    },
+    "packages/provider-aws": {
+      "name": "@stwd/provider-aws",
+      "version": "0.1.0",
+      "dependencies": {
+        "@stwd/shared": "workspace:*",
       },
     },
     "packages/provider-github": {
@@ -1775,6 +1783,8 @@
     "@stwd/plugin-wxmr": ["@stwd/plugin-wxmr@workspace:packages/plugin-wxmr"],
 
     "@stwd/policy-engine": ["@stwd/policy-engine@workspace:packages/policy-engine"],
+
+    "@stwd/provider-aws": ["@stwd/provider-aws@workspace:packages/provider-aws"],
 
     "@stwd/provider-github": ["@stwd/provider-github@workspace:packages/provider-github"],
 

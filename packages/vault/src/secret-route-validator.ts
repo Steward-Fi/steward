@@ -129,6 +129,9 @@ export const STRICT_HOSTS: Record<
   },
 };
 
+export type CredentialInjectionStrategy = "header" | "sigv4";
+export type CredentialInjectionConfig = { service?: string; region?: string };
+
 export type SecretRouteConfigInput = {
   agentId?: string;
   hostPattern?: string;
@@ -137,6 +140,8 @@ export type SecretRouteConfigInput = {
   injectAs?: string;
   injectKey?: string;
   injectFormat?: string;
+  injectionStrategy?: CredentialInjectionStrategy | string;
+  injectionConfig?: CredentialInjectionConfig | Record<string, unknown>;
   priority?: number;
   requiresApproval?: boolean;
   approvalConfig?: Record<string, unknown>;
@@ -241,6 +246,48 @@ export function validateSecretRouteConfig(
   options?: ValidateSecretRouteOptions,
 ): string | null {
   const enforceStrictHosts = options?.enforceStrictHosts ?? true;
+  const isPartialPatch = options?.enforceStrictHosts === false;
+  const strategy = input.injectionStrategy ?? "header";
+  if (strategy !== "header" && strategy !== "sigv4") {
+    return "injectionStrategy must be one of: header, sigv4";
+  }
+  if (isPartialPatch && input.injectionStrategy === undefined) {
+    // Cross-field strategy/config validation happens against the merged route
+    // in SecretVault.updateRoute. A partial config-only patch has no strategy.
+  } else if (strategy === "header") {
+    if (input.injectionConfig && Object.keys(input.injectionConfig).length > 0) {
+      return "header injectionStrategy requires an empty injectionConfig";
+    }
+  } else {
+    const config = input.injectionConfig;
+    if (!config || typeof config !== "object" || Array.isArray(config)) {
+      return "sigv4 injectionStrategy requires injectionConfig";
+    }
+    const keys = Object.keys(config);
+    if (keys.some((key) => key !== "service" && key !== "region")) {
+      return "sigv4 injectionConfig contains an unknown field";
+    }
+    if (config.service !== "ec2") return "sigv4 injectionConfig.service must be ec2";
+    if (
+      typeof config.region !== "string" ||
+      !/^[a-z]{2}(?:-[a-z0-9]+){1,3}-[1-9][0-9]?$/.test(config.region)
+    ) {
+      return "sigv4 injectionConfig.region is invalid";
+    }
+    const expectedHost = `ec2.${config.region}.amazonaws.com`;
+    if (
+      input.hostPattern !== undefined &&
+      input.hostPattern.trim().toLowerCase() !== expectedHost
+    ) {
+      return `sigv4 route hostPattern must be ${expectedHost}`;
+    }
+    if (input.pathPattern !== undefined && input.pathPattern.trim() !== "/") {
+      return "sigv4 EC2 route pathPattern must be /";
+    }
+    if (input.method !== undefined && input.method.trim().toUpperCase() !== "POST") {
+      return "sigv4 EC2 route method must be POST";
+    }
+  }
   if (input.agentId !== undefined && !input.agentId.trim()) return "agentId is invalid";
 
   if (input.hostPattern !== undefined) {
@@ -258,7 +305,14 @@ export function validateSecretRouteConfig(
     ) {
       return "hostPattern must not target localhost, private, or internal hosts";
     }
-    if (!configuredSecretRouteHosts().some((allowed) => hostAllowedByEntry(hostPattern, allowed))) {
+    const isBoundAwsSigV4Host =
+      strategy === "sigv4" &&
+      typeof input.injectionConfig?.region === "string" &&
+      hostPattern === `ec2.${input.injectionConfig.region}.amazonaws.com`;
+    if (
+      !isBoundAwsSigV4Host &&
+      !configuredSecretRouteHosts().some((allowed) => hostAllowedByEntry(hostPattern, allowed))
+    ) {
       return "hostPattern is not in the secret route allowlist";
     }
   }
