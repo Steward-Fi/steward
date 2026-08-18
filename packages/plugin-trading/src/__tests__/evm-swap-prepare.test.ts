@@ -25,14 +25,15 @@ process.env.STEWARD_PGLITE_MEMORY = "true";
 process.env.STEWARD_DB_MODE = "pglite";
 process.env.STEWARD_MASTER_PASSWORD = "evm-swap-master-password";
 process.env.STEWARD_AUDIT_HMAC_KEY = "evm-swap-audit-hmac-key-with-enough-entropy";
-process.env.ELIZA_CLOUD_JWKS_URL = "https://jwks.example.test/.well-known/jwks.json";
-
 setDefaultTimeout(30000);
 
 const TENANT_ID = "evm-swap-tenant";
 const AGENT_ID = "evm-swap-agent";
 const OTHER_AGENT_ID = "evm-swap-other-agent";
 const KID = "evm-swap-kid";
+const TEST_JWKS_URL = "https://jwks.example.test/.well-known/jwks.json";
+const originalJwksUrl = process.env.ELIZA_CLOUD_JWKS_URL;
+const originalFetch = globalThis.fetch;
 const TARGET = "0x00000000000000000000000000000000000000bb";
 const FROM_TOKEN = "0x00000000000000000000000000000000000000cc";
 const TO_TOKEN = "0x00000000000000000000000000000000000000dd";
@@ -259,6 +260,7 @@ async function postPrepare(
 }
 
 beforeAll(async () => {
+  process.env.ELIZA_CLOUD_JWKS_URL = TEST_JWKS_URL;
   const { createPGLiteDb, setPGLiteOverride } = await import("@stwd/db/pglite");
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
@@ -277,9 +279,10 @@ beforeAll(async () => {
   publicJwk.kid = KID;
   publicJwk.alg = "RS256";
   publicJwk.use = "sig";
-  globalThis.fetch = mock(async () =>
-    Response.json({ keys: [publicJwk] }),
-  ) as unknown as typeof fetch;
+  globalThis.fetch = mock(async (input) => {
+    if (String(input) !== TEST_JWKS_URL) throw new Error(`Unexpected JWKS URL: ${String(input)}`);
+    return Response.json({ keys: [publicJwk] });
+  }) as unknown as typeof fetch;
 
   ({ requireAgentJwt, clearAgentJwksCacheForTests } = await import(
     "../../../api/src/middleware/agent-jwt"
@@ -294,6 +297,12 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  globalThis.fetch = originalFetch;
+  if (originalJwksUrl === undefined) {
+    delete process.env.ELIZA_CLOUD_JWKS_URL;
+  } else {
+    process.env.ELIZA_CLOUD_JWKS_URL = originalJwksUrl;
+  }
   mock.restore();
   await closeDb();
 });

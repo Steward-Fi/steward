@@ -898,6 +898,7 @@ describe("user wallet recovery setup", () => {
     expect(response.headers.get("Cache-Control")).toContain("no-store");
     const text = await response.text();
     expect(text).not.toContain(mnemonic);
+    expect(text).not.toContain("not mnemonic-recoverable");
     expect(JSON.parse(text)).toEqual({
       ok: false,
       error: "Failed to restore wallet: Internal server error",

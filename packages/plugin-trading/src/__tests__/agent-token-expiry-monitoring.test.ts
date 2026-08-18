@@ -14,8 +14,6 @@ import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
-process.env.ELIZA_CLOUD_JWKS_URL = "https://jwks.example.test/.well-known/jwks.json";
-
 setDefaultTimeout(30_000);
 
 const TENANT_ID = "test-agent-token-expiry";
@@ -24,6 +22,9 @@ const AGENT_ID = "test-token-watch-agent";
 const OTHER_TENANT_ID = "test-agent-token-expiry-other";
 const FOREIGN_AGENT_ID = "test-token-watch-foreign";
 const KID = "test-agent-token-kid";
+const TEST_JWKS_URL = "https://jwks.example.test/.well-known/jwks.json";
+const originalJwksUrl = process.env.ELIZA_CLOUD_JWKS_URL;
+const originalFetch = globalThis.fetch;
 
 const auditEvents: Array<{ action: string; metadata?: Record<string, unknown>; actorId?: string }> =
   [];
@@ -55,6 +56,7 @@ let tradeRoutes: Hono;
 let tenantAuth: typeof import("../../../api/src/services/context")["tenantAuth"];
 
 beforeAll(async () => {
+  process.env.ELIZA_CLOUD_JWKS_URL = TEST_JWKS_URL;
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.DATABASE_URL ??= "postgres://test:test@localhost:5432/test";
   process.env.STEWARD_MASTER_PASSWORD ??= "test-master-password";
@@ -74,9 +76,10 @@ beforeAll(async () => {
   publicJwk.alg = "RS256";
   publicJwk.use = "sig";
 
-  globalThis.fetch = mock(async () =>
-    Response.json({ keys: [publicJwk] }),
-  ) as unknown as typeof fetch;
+  globalThis.fetch = mock(async (input) => {
+    if (String(input) !== TEST_JWKS_URL) throw new Error(`Unexpected JWKS URL: ${String(input)}`);
+    return Response.json({ keys: [publicJwk] });
+  }) as unknown as typeof fetch;
 
   ({ requireAgentJwt, clearAgentJwksCacheForTests } = await import(
     "../../../api/src/middleware/agent-jwt"
@@ -124,6 +127,12 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  globalThis.fetch = originalFetch;
+  if (originalJwksUrl === undefined) {
+    delete process.env.ELIZA_CLOUD_JWKS_URL;
+  } else {
+    process.env.ELIZA_CLOUD_JWKS_URL = originalJwksUrl;
+  }
   await closeDb();
 });
 
