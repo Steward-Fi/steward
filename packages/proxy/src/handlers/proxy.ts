@@ -358,6 +358,9 @@ const MAX_PROXY_RESPONSE_BYTES = boundedPositiveIntegerEnv(
   25 * 1024 * 1024,
   100 * 1024 * 1024,
 );
+// Credential-bearing responses are buffered for reflection inspection. Keep
+// this security boundary independent from the much larger generic proxy cap.
+const MAX_CREDENTIAL_RESPONSE_BODY_BYTES = 2 * 1024 * 1024;
 const MAX_PROXY_STREAM_DURATION_MS = boundedPositiveIntegerEnv(
   "STEWARD_PROXY_STREAM_DURATION_MS",
   5 * 60_000,
@@ -545,6 +548,69 @@ function responseHasEncodedBody(headers: Headers): boolean {
 
 function responseTextReflectsAnyCredential(bodyText: string, credentialValues: string[]): boolean {
   return credentialValues.some((value) => bodyText.includes(value));
+}
+
+function cancelResponseBody(body: ReadableStream<Uint8Array>): void {
+  try {
+    void body.cancel().catch(() => undefined);
+  } catch {
+    // Hostile/custom streams may throw synchronously from cancel().
+  }
+}
+
+async function readResponseBodyBounded(
+  body: ReadableStream<Uint8Array>,
+  headers: Headers,
+  maxBytes: number,
+): Promise<ArrayBuffer> {
+  const declared = headers.get("content-length");
+  if (declared !== null) {
+    const length = Number(declared);
+    if (!Number.isSafeInteger(length) || length < 0 || length > maxBytes) {
+      cancelResponseBody(body);
+      throw new Error("Upstream response body inspection failed");
+    }
+  }
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const cancelReader = () => {
+    try {
+      void reader.cancel().catch(() => undefined);
+    } catch {
+      // See cancelResponseBody: contain custom stream diagnostics.
+    }
+  };
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        cancelReader();
+        throw new Error("Upstream response body inspection failed");
+      }
+      chunks.push(value);
+    }
+  } catch {
+    cancelReader();
+    throw new Error("Upstream response body inspection failed");
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // A disturbed custom stream may retain its reader; it is never reused.
+    }
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes.buffer;
 }
 
 function credentialLeakVariants(values: string[]): string[] {
@@ -1938,6 +2004,30 @@ export async function handleProxy(c: Context): Promise<Response> {
   const isJsonResponse = contentType.includes("application/json");
   let slackSemanticFailure: string | null = null;
   let deferSlackSuccessAudit = false;
+  let credentialResponseInspectionFailed = false;
+
+  // Every credential-bearing, non-streaming identity-encoded body is consumed
+  // exactly once through an independent 2 MiB reader. This bounds allocation
+  // even when Content-Length is absent or false, and the resulting bytes are
+  // reused by provider semantics, spend parsing, reflection scanning, and the
+  // downstream response.
+  if (
+    sensitiveCredentialValues.length > 0 &&
+    responseBody instanceof ReadableStream &&
+    responseBodyCanReflectCredential(response.headers) &&
+    !responseHasEncodedBody(response.headers)
+  ) {
+    try {
+      responseBody = await readResponseBodyBounded(
+        responseBody,
+        response.headers,
+        MAX_CREDENTIAL_RESPONSE_BODY_BYTES,
+      );
+    } catch {
+      responseBody = new ArrayBuffer(0);
+      credentialResponseInspectionFailed = true;
+    }
+  }
 
   // Slack Web API encodes operation failures as HTTP 200 + {ok:false}. Treat
   // that envelope as a failed dispatch, while retaining the buffered bytes for
@@ -1945,20 +2035,13 @@ export async function handleProxy(c: Context): Promise<Response> {
   // also fail-closed: it cannot prove that the requested action succeeded.
   if (target.host === "slack.com" && response.status >= 200 && response.status < 300) {
     try {
-      const length = Number(response.headers.get("content-length") ?? "0");
-      if (Number.isFinite(length) && length > MAX_PROXY_RESPONSE_BYTES) {
-        throw new Error("Slack response too large");
+      if (credentialResponseInspectionFailed || !(responseBody instanceof ArrayBuffer)) {
+        throw new Error("Slack response inspection failed");
       }
-      const buffer = await response.arrayBuffer();
-      if (buffer.byteLength > MAX_PROXY_RESPONSE_BYTES) throw new Error("Slack response too large");
-      responseBody = buffer;
-      slackSemanticFailure = classifySlackWebApiPayload(new TextDecoder().decode(buffer));
+      slackSemanticFailure = classifySlackWebApiPayload(new TextDecoder().decode(responseBody));
       deferSlackSuccessAudit = slackSemanticFailure === null;
     } catch {
-      // `arrayBuffer()` can reject after disturbing/locking the original body.
-      // Never hand that stream to the later credential scanner or client: a
-      // second read would throw outside this fail-closed boundary and could
-      // retain the per-agent proxy slot. Discard all partial provider bytes.
+      // Never hand partial provider bytes to a later scanner or the client.
       responseBody = new ArrayBuffer(0);
       slackSemanticFailure = "invalid_response";
     }
@@ -1983,13 +2066,13 @@ export async function handleProxy(c: Context): Promise<Response> {
     isProxyRedisAvailable() &&
     (target.host === "api.openai.com" || target.host === "api.anthropic.com");
 
-  if (isLLMHost && isJsonResponse && response.body) {
+  if (isLLMHost && isJsonResponse && responseBody instanceof ArrayBuffer) {
     try {
       const contentLength = Number(response.headers.get("content-length") ?? "0");
       if (Number.isFinite(contentLength) && contentLength > MAX_LLM_SPEND_TRACKING_BODY_BYTES) {
         throw new Error("LLM response too large for spend parsing");
       }
-      const bodyBuffer = await response.arrayBuffer();
+      const bodyBuffer = responseBody;
       if (bodyBuffer.byteLength > MAX_LLM_SPEND_TRACKING_BODY_BYTES) {
         responseBody = bodyBuffer;
         throw new Error("LLM response too large for spend parsing");
@@ -2128,32 +2211,23 @@ export async function handleProxy(c: Context): Promise<Response> {
     responseBodyCanReflectCredential(response.headers) &&
     responseBody instanceof ReadableStream
   ) {
-    const contentLength = Number(response.headers.get("content-length") ?? "0");
-    if (
-      MAX_PROXY_RESPONSE_BYTES <= 0 ||
-      !Number.isFinite(contentLength) ||
-      contentLength <= MAX_PROXY_RESPONSE_BYTES
-    ) {
-      const bodyBuffer = await new Response(responseBody).arrayBuffer();
-      const bodyText = new TextDecoder().decode(bodyBuffer);
-      if (responseTextReflectsAnyCredential(bodyText, sensitiveCredentialValues)) {
-        await recordAudit({
-          agentId,
-          tenantId,
-          targetHost: target.host,
-          targetPath: target.path,
-          method,
-          statusCode: 502,
-          latencyMs: Date.now() - startTime,
-          reason: "credential-reflected-in-response-body",
-        });
-        injectedCredentialValue = null;
-        sensitiveCredentialValues = [];
-        proxySlot.release();
-        return c.json({ ok: false, error: "Upstream response reflected injected credential" }, 502);
-      }
-      responseBody = bodyBuffer;
-    }
+    // Defensive invariant: every inspectable credential-bearing stream was
+    // converted to a bounded ArrayBuffer above.
+    cancelResponseBody(responseBody);
+    await recordAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: 502,
+      latencyMs: Date.now() - startTime,
+      reason: "credential-response-inspection-failed",
+    });
+    injectedCredentialValue = null;
+    sensitiveCredentialValues = [];
+    proxySlot.release();
+    return c.json({ ok: false, error: "Upstream response could not be inspected safely" }, 502);
   } else if (
     sensitiveCredentialValues.length > 0 &&
     responseBody instanceof ArrayBuffer &&
@@ -2199,6 +2273,22 @@ export async function handleProxy(c: Context): Promise<Response> {
       },
       502,
     );
+  }
+  if (sensitiveCredentialValues.length > 0 && credentialResponseInspectionFailed) {
+    await recordAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: 502,
+      latencyMs: Date.now() - startTime,
+      reason: "credential-response-inspection-failed",
+    });
+    injectedCredentialValue = null;
+    sensitiveCredentialValues = [];
+    proxySlot.release();
+    return c.json({ ok: false, error: "Upstream response could not be inspected safely" }, 502);
   }
   if (deferSlackSuccessAudit) {
     // A Slack `ok:true` envelope is not a successful Steward dispatch until
