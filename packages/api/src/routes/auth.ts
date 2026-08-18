@@ -4900,7 +4900,20 @@ auth.get("/oidc/:provider/authorize", async (c) => {
 
   const callbackUrl = buildOidcCallbackUrl(c, provider.id);
   const scopes = provider.scopes?.length ? provider.scopes : ["openid", "email", "profile"];
-  const authUrl = new URL(provider.authorizationUrl);
+  let authUrl: URL;
+  try {
+    // Revalidate legacy rows at the action boundary before issuing a browser
+    // redirect. Configuration-time checks alone do not cover pre-fix data.
+    authUrl = assertPublicHttpsEndpoint(provider.authorizationUrl, "OIDC authorization endpoint");
+  } catch (err) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "Invalid OIDC authorization endpoint",
+      },
+      400,
+    );
+  }
   authUrl.searchParams.set("response_type", "code");
   authUrl.searchParams.set("client_id", provider.clientId);
   authUrl.searchParams.set("redirect_uri", callbackUrl);

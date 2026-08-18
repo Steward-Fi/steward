@@ -26,6 +26,9 @@ describe("enterprise OIDC authorization-code SSO hardening", () => {
     expect(authorizeRoute).toContain(
       "await assertAllowedOAuthRedirectUri(redirectUri, tenantId, clientId)",
     );
+    expect(authorizeRoute).toContain(
+      'assertPublicHttpsEndpoint(provider.authorizationUrl, "OIDC authorization endpoint")',
+    );
     expect(authorizeRoute).toContain("const nonce = randomBase64Url(24)");
     expect(authorizeRoute).toContain("const codeVerifier = randomBase64Url(48)");
     expect(authorizeRoute).toContain('pkceChallengeForVerifier(codeVerifier, "S256")');
@@ -95,6 +98,22 @@ describe("enterprise OIDC authorization-code SSO hardening", () => {
       expect(() => assertPublicHttpsEndpoint(tokenUrl, "OIDC token endpoint"), tokenUrl).toThrow(
         "OIDC token endpoint must be a public https URL",
       );
+    }
+  });
+
+  it("rejects local and special-use browser authorization destinations", () => {
+    for (const authorizationUrl of [
+      "https://[::127.0.0.1]/authorize",
+      "https://[::ffff:0:127.0.0.1]/authorize",
+      "https://192.0.2.1/authorize",
+      "https://[100::1]/authorize",
+      "https://[3fff::1]/authorize",
+      "https://user:secret@idp.example.com/authorize",
+    ]) {
+      expect(
+        () => assertPublicHttpsEndpoint(authorizationUrl, "OIDC authorization endpoint"),
+        authorizationUrl,
+      ).toThrow("OIDC authorization endpoint must be a public https URL");
     }
   });
 

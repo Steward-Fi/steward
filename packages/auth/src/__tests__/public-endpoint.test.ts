@@ -67,6 +67,7 @@ describe("public Internet destination classifier", () => {
   it("fails closed on malformed addresses and resolver family mismatches", () => {
     expect(isPublicInternetAddress("not-an-ip")).toBe(false);
     expect(isPublicInternetAddress("8.8.8.8", 6)).toBe(false);
+    expect(isPublicInternetAddress("2606:4700:4700::1111%en0", 6)).toBe(false);
     expect(() => assertPublicInternetAddress("8.8.8.8", 0, "OIDC token endpoint")).toThrow(
       "OIDC token endpoint must resolve to a public address",
     );
@@ -80,6 +81,10 @@ describe("public HTTPS endpoint validator", () => {
       "https://localhost/token",
       "https://localhost./token",
       "https://idp.internal./token",
+      "https://idp/token",
+      "https://idp.home.arpa/token",
+      "https://idp.test/token",
+      "https://idp.onion/token",
       "https://user:secret@idp.example.com/token",
       "https://192.0.2.1/token",
       "https://[::7f00:1]/token",

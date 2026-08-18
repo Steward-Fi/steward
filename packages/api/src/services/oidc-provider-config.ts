@@ -1,5 +1,5 @@
+import { assertPublicHttpsEndpoint } from "@stwd/auth";
 import type { TenantOidcProviderConfig } from "@stwd/shared";
-import { validateWebhookUrl } from "./webhook-url";
 
 /**
  * Tenant-configured OIDC client secrets may only be sourced from env vars in
@@ -21,16 +21,13 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isHttpsUrl(value: string): boolean {
+function isPublicHttpsUrl(value: string): boolean {
   try {
-    return new URL(value).protocol === "https:";
+    assertPublicHttpsEndpoint(value, "OIDC endpoint");
+    return true;
   } catch {
     return false;
   }
-}
-
-function isPublicHttpsUrl(value: string): boolean {
-  return isHttpsUrl(value) && !validateWebhookUrl(value);
 }
 
 export function normalizeOidcProviders(value: unknown): TenantOidcProviderConfig[] | string {

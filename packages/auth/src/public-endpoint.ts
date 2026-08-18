@@ -133,10 +133,13 @@ function isPublicIpv6(address: string): boolean {
 
 /** True only when `address` is a syntactically valid, globally-routable IP. */
 export function isPublicInternetAddress(address: string, family?: number): boolean {
+  // Zone identifiers are interface-local routing hints, not public Internet
+  // destinations. Resolvers should not return them; fail closed if one does.
+  if (address.includes("%")) return false;
   const normalized = address
     .toLowerCase()
     .replace(/^\[|\]$/g, "")
-    .split("%", 1)[0];
+    .trim();
   const detected = isIP(normalized);
   if (family !== undefined && family !== 4 && family !== 6) return false;
   if (family !== undefined && detected !== family) return false;
@@ -157,21 +160,40 @@ export function assertPublicInternetAddress(
 
 /** Validate the non-DNS portion of an outbound public HTTPS endpoint. */
 export function assertPublicHttpsEndpoint(value: string, resource: string): URL {
-  const url = new URL(value);
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${resource} must be a public https URL`);
+  }
   const hostname = url.hostname
     .replace(/^\[|\]$/g, "")
     .replace(/\.+$/g, "")
     .toLowerCase();
   const literalFamily = isIP(hostname);
+  const blockedDnsSuffixes = [
+    ".localhost",
+    ".local",
+    ".internal",
+    ".localdomain",
+    ".lan",
+    ".home",
+    ".home.arpa",
+    ".corp",
+    ".test",
+    ".example",
+    ".invalid",
+    ".onion",
+    ".alt",
+  ];
   if (
     url.protocol !== "https:" ||
     url.username !== "" ||
     url.password !== "" ||
     !hostname ||
     hostname === "localhost" ||
-    hostname.endsWith(".localhost") ||
-    hostname.endsWith(".local") ||
-    hostname.endsWith(".internal") ||
+    (literalFamily === 0 && !hostname.includes(".")) ||
+    blockedDnsSuffixes.some((suffix) => hostname.endsWith(suffix)) ||
     (literalFamily !== 0 && !isPublicInternetAddress(hostname, literalFamily))
   ) {
     throw new Error(`${resource} must be a public https URL`);
