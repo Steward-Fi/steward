@@ -1143,6 +1143,14 @@ export function __setForwardProxyRequestForTests(forwarder: ProxyForwarder): voi
   forwardProxyRequestForHandler = forwarder;
 }
 
+/** Restore every mutable proxy-handler dependency after an integration fixture. */
+export function __resetProxyHandlerTestHooksForTests(): void {
+  checkProxySpendLimitForHandler = checkProxySpendLimit;
+  checkProxyRateLimitForHandler = checkProxyRateLimit;
+  resolveProxyHostForHandler = dnsLookup;
+  forwardProxyRequestForHandler = forwardWithVettedDns;
+}
+
 // ─── Main proxy handler ──────────────────────────────────────────────────────
 
 /**

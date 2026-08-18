@@ -46,6 +46,7 @@ const FINE_GRAINED_PAT = "github_pat_11QUERYCASE_examplefinegrainedtokenvalue";
 let authMiddleware: typeof import("../middleware/auth")["authMiddleware"];
 let handleProxy: typeof import("../handlers/proxy")["handleProxy"];
 let proxyMod: typeof import("../handlers/proxy");
+let originalProxyDevMode: string | undefined;
 
 // Captures the outbound URL the proxy would have shipped upstream.
 let captured: { url: URL; method: string; path: string } | null = null;
@@ -54,6 +55,12 @@ beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "proxy-query-preservation-jwt-secret-with-enough-bytes";
+  originalProxyDevMode = process.env.STEWARD_PROXY_DEV_MODE;
+  // The production proxy correctly requires shared replay/rate-limit storage
+  // and signed requests. This isolated transport fixture intentionally uses
+  // neither, so opt into the explicit test/dev posture before importing the
+  // handler instead of depending on ambient CI environment.
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
 
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
@@ -81,10 +88,16 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // This file replaces DNS and the final network forwarder. Restore the real
+  // production functions so a shared-process run cannot leak its permissive
+  // transport hooks into a later security test.
+  proxyMod.__resetProxyHandlerTestHooksForTests();
   await closeDb().catch(() => {});
   delete process.env.STEWARD_PGLITE_MEMORY;
   delete process.env.STEWARD_MASTER_PASSWORD;
   delete process.env.STEWARD_JWT_SECRET;
+  if (originalProxyDevMode === undefined) delete process.env.STEWARD_PROXY_DEV_MODE;
+  else process.env.STEWARD_PROXY_DEV_MODE = originalProxyDevMode;
 });
 
 function buildApp() {
