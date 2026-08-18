@@ -35,6 +35,7 @@ import {
   parseNonNegativeInt,
   parsePositiveInt,
   resolveClientIp,
+  SOCKET_PEER_ENV_KEY,
 } from "./services/runtime-gate";
 import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
 import {
@@ -373,8 +374,16 @@ const BIND_HOST = process.env.STEWARD_BIND_HOST || "127.0.0.1";
 const serverOptions = {
   hostname: BIND_HOST,
   port: PORT,
-  fetch: (request: Request, server: { requestIP(req: Request): { address: string } | null }) =>
-    runtimeGate(request, server.requestIP(request)?.address ?? null) ?? app.fetch(request),
+  fetch: (request: Request, server: { requestIP(req: Request): { address: string } | null }) => {
+    const peerAddress = server.requestIP(request)?.address ?? null;
+    // Hand the runtime-observed socket peer to the app via Hono's env bag so
+    // per-route limiters (auth) can key on it when no trusted forwarding
+    // config exists — it cannot be client-influenced, unlike any header.
+    return (
+      runtimeGate(request, peerAddress) ??
+      app.fetch(request, { [SOCKET_PEER_ENV_KEY]: peerAddress })
+    );
+  },
   idleTimeout: 30,
 } as Parameters<typeof Bun.serve>[0] & { hostname?: string };
 

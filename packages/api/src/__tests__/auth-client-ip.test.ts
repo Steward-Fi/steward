@@ -17,6 +17,7 @@ import { hashSha256Hex } from "@stwd/auth";
 import { closeDb } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
+import { SOCKET_PEER_ENV_KEY } from "../services/runtime-gate";
 
 // ─── @stwd/redis counting mock ───────────────────────────────────────────────
 
@@ -388,6 +389,35 @@ describe("auth rate-limit keying (route harness)", () => {
       expect(call.key).not.toContain(hashSha256Hex("global"));
       expect(call.key).not.toContain("global");
     }
+  });
+
+  it("prefers the entry-injected socket peer over the Host fallback when no trusted IP exists", async () => {
+    await connectMockRedis();
+    delete process.env.STEWARD_TRUSTED_PROXY_HOPS;
+    delete process.env.STEWARD_TRUST_PROXY_HEADERS;
+
+    // The socket peer is injected by the server entry (Bun requestIP) via the
+    // Hono env bag — no client-controlled header can mint or rotate it.
+    await authRoutes.request(
+      "/nonce",
+      { headers: { host: "api.steward.example" } },
+      { [SOCKET_PEER_ENV_KEY]: "198.51.100.60" },
+    );
+    expect(capturedKeys("siwe-nonce")).toEqual([
+      `ratelimit:auth:siwe-nonce:${hashSha256Hex("ip:198.51.100.60")}:60000`,
+    ]);
+
+    // A non-IP injection (runtime could not supply a peer) must NOT become an
+    // ip: bucket — the request degrades to the coarse per-host fallback.
+    rateLimitCalls.length = 0;
+    await authRoutes.request(
+      "/nonce",
+      { headers: { host: "api.steward.example" } },
+      { [SOCKET_PEER_ENV_KEY]: "not-an-ip" },
+    );
+    expect(capturedKeys("siwe-nonce")).toEqual([
+      `ratelimit:auth:siwe-nonce:${hashSha256Hex("host:api.steward.example")}:60000`,
+    ]);
   });
 
   it("hashes subjectOverride subjects: destination emails never reach Redis raw", async () => {

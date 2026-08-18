@@ -152,6 +152,7 @@ import {
   isAllowedOidcClientSecretEnvForTenant,
   normalizeOidcProviders,
 } from "../services/oidc-provider-config";
+import { socketPeerFromEnv } from "../services/runtime-gate";
 import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
 import { lockUserSession } from "../services/session-lock";
 import { testAccountOtpMatches } from "../services/test-account-credentials";
@@ -367,10 +368,15 @@ let coarseSubjectWarnedAt = 0;
 
 /**
  * Rate-limit subject for auth endpoints. With a trusted client IP every
- * client gets an independent budget (IPv6 at /64). Without one, requests
+ * client gets an independent budget (IPv6 at /64). Without one, the socket
+ * peer injected by the server entry point (SOCKET_PEER_ENV_KEY — set by the
+ * runtime, never client-influenceable) provides the same per-client budget.
+ * Only when neither exists (e.g. Workers, which has no socket) do requests
  * shard per Host — the edge only routes configured domains here, so Host
  * cannot be rotated to mint unbounded buckets the way client-controlled
- * headers or user-agents can — and checkAuthRateLimit widens the budget by
+ * headers or user-agents can; note this last-resort fallback does rely on
+ * that edge invariant, so deployments should prefer STEWARD_TRUSTED_PROXY_HOPS
+ * or a socket-bearing entry. checkAuthRateLimit widens the coarse budget by
  * AUTH_RATE_LIMIT_FALLBACK_HEADROOM because many clients share each bucket.
  * No configuration yields the old literal "global" chokepoint (#268), and no
  * client-controlled free text ever reaches Redis unhashed.
@@ -378,6 +384,8 @@ let coarseSubjectWarnedAt = 0;
 function authRateLimitSubject(c: Context): { subject: string; coarse: boolean } {
   const ip = trustedClientIp(c);
   if (ip) return { subject: `ip:${clientIpBucket(ip)}`, coarse: false };
+  const peer = socketPeerFromEnv(c.env);
+  if (peer && isIP(peer)) return { subject: `ip:${clientIpBucket(peer)}`, coarse: false };
   const now = Date.now();
   if (process.env.NODE_ENV === "production" && now - coarseSubjectWarnedAt >= 60_000) {
     coarseSubjectWarnedAt = now;
