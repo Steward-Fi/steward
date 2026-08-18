@@ -47,6 +47,7 @@ class FakeIssuer implements UpstreamTokenIssuer {
   failRevoke = false;
   revokeFailuresRemaining = 0;
   expiryOffsetMs = 3_590_000;
+  token = TOKEN;
   issueStarted?: () => void;
   issueBarrier?: Promise<void>;
   beforeRevoke?: () => Promise<void>;
@@ -57,12 +58,12 @@ class FakeIssuer implements UpstreamTokenIssuer {
     if (this.issueBarrier) await this.issueBarrier;
     await new Promise((resolve) => setTimeout(resolve, 10));
     if (this.failIssue) throw new Error("issuer down");
-    return { token: TOKEN, expiresAt: new Date(NOW.getTime() + this.expiryOffsetMs) };
+    return { token: this.token, expiresAt: new Date(NOW.getTime() + this.expiryOffsetMs) };
   }
 
   async revoke(token: string) {
     this.revokeCalls += 1;
-    expect(token).toBe(TOKEN);
+    expect(token).toBe(this.token);
     await this.beforeRevoke?.();
     if (this.failRevoke) throw new Error("revoker down");
     if (this.revokeFailuresRemaining > 0) {
@@ -612,7 +613,7 @@ describe("upstream credential leases", () => {
     expect(events.at(-1)).toMatchObject({ action: "lease.expire", decision: "allow" });
   });
 
-  test("an overlong upstream token is revoked or durably flagged for attention", async () => {
+  test("a contract-invalid upstream expiry is revoked or durably flagged for attention", async () => {
     const issuer = new FakeIssuer();
     issuer.expiryOffsetMs = 4_000_000;
     issuer.failRevoke = true;
@@ -638,6 +639,55 @@ describe("upstream credential leases", () => {
       expiresAt: new Date(NOW.getTime() + issuer.expiryOffsetMs),
     });
     expect(JSON.stringify(rows[0])).not.toContain(TOKEN);
+    issuer.failRevoke = false;
+    issuer.beforeRevoke = undefined;
+    await harness.db
+      .update(upstreamCredentialLeases)
+      .set({ updatedAt: new Date(NOW.getTime() - 31_000) })
+      .where(eq(upstreamCredentialLeases.id, rows[0].id));
+    expect(
+      await recoverInterruptedUpstreamCredentialLeases({
+        db: harness.db,
+        tenantId: TENANT,
+        issuer,
+        exerciseToken,
+        auditedTransaction: auditedTransaction(),
+        now: NOW,
+      }),
+    ).toEqual({ unknown: 0, revoked: 1, attention: 0 });
+    rows = await harness.db.select().from(upstreamCredentialLeases);
+    expect(rows[0].status).toBe("revoked");
+  });
+
+  test("an overlong issued token is sealed before cleanup and recovered exactly", async () => {
+    const issuer = new FakeIssuer();
+    issuer.token = "x".repeat(4097);
+    issuer.failRevoke = true;
+    issuer.beforeRevoke = async () => {
+      const [staged] = await harness.db.select().from(upstreamCredentialLeases);
+      expect(staged).toMatchObject({
+        status: "revoking",
+        tokenHash: sha256(issuer.token),
+        tokenCiphertext: Buffer.from(issuer.token).toString("base64"),
+        expiresAt: new Date(NOW.getTime() + issuer.expiryOffsetMs),
+      });
+    };
+
+    const denied = await issueUpstreamCredentialLease(
+      issueArgs(issuer, "idempotency-overlong-provider-token"),
+    );
+    expect(denied).toMatchObject({ ok: false, code: "issuer_contract_violation" });
+    expect(issuer.revokeCalls).toBe(1);
+
+    let rows = await harness.db.select().from(upstreamCredentialLeases);
+    expect(rows[0]).toMatchObject({
+      status: "needs_attention",
+      tokenHash: sha256(issuer.token),
+      tokenCiphertext: Buffer.from(issuer.token).toString("base64"),
+      expiresAt: new Date(NOW.getTime() + issuer.expiryOffsetMs),
+    });
+    expect(JSON.stringify(rows[0])).not.toContain(issuer.token);
+
     issuer.failRevoke = false;
     issuer.beforeRevoke = undefined;
     await harness.db

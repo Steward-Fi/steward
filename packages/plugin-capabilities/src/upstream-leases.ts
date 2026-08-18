@@ -25,6 +25,7 @@ export const MAX_UPSTREAM_LEASE_SWEEP_INTERVAL_MS = DELIVERY_ACK_TIMEOUT_MS / 2;
 export const UPSTREAM_LEASE_AUTHORITY_RECHECK_INTERVAL_MS = MAX_UPSTREAM_LEASE_SWEEP_INTERVAL_MS;
 const MAX_GITHUB_PERMISSION_COUNT = 100;
 const GITHUB_PERMISSION_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+const MAX_GITHUB_TOKEN_BYTES = 4096;
 
 export interface GitHubLeaseResource {
   repositories: string[];
@@ -1191,6 +1192,7 @@ export async function issueUpstreamCredentialLease(input: {
   const issuedLifetimeMs = issued.expiresAt.getTime() - now.getTime();
   if (
     !issued.token ||
+    issued.token.length > MAX_GITHUB_TOKEN_BYTES ||
     !Number.isFinite(issued.expiresAt.getTime()) ||
     issuedLifetimeMs < MIN_GITHUB_ISSUED_TTL_MS ||
     issuedLifetimeMs > MAX_GITHUB_ISSUED_TTL_MS
@@ -1240,7 +1242,7 @@ export async function issueUpstreamCredentialLease(input: {
         ok: false,
         status: 503,
         code: "issuer_contract_violation",
-        error: "upstream issuer returned an invalid expiry",
+        error: "upstream issuer returned an invalid credential",
       };
     }
     const revoked = await input.issuer.revoke(issued.token).then(
@@ -1272,7 +1274,7 @@ export async function issueUpstreamCredentialLease(input: {
       ok: false,
       status: 503,
       code: "issuer_contract_violation",
-      error: "upstream issuer returned an invalid expiry",
+      error: "upstream issuer returned an invalid credential",
     };
   }
 

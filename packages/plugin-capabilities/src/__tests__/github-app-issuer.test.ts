@@ -30,13 +30,6 @@ describe("GitHub App upstream issuer transport", () => {
       const issuer = new GitHubAppInstallationTokenIssuer((async () => response) as typeof fetch);
       await expect(issuer.issue(request)).rejects.toThrow("exceeded maximum size");
     }
-
-    const oversizedToken = new GitHubAppInstallationTokenIssuer((async () =>
-      Response.json({
-        token: "x".repeat(4097),
-        expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
-      })) as typeof fetch);
-    await expect(oversizedToken.issue(request)).rejects.toThrow("response was malformed");
   });
 
   test("applies deadlines without exposing upstream response bodies", async () => {

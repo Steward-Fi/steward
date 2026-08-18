@@ -84,7 +84,6 @@ export class GitHubAppInstallationTokenIssuer implements UpstreamTokenIssuer {
     if (
       typeof body.token !== "string" ||
       body.token.length === 0 ||
-      body.token.length > 4096 ||
       typeof body.expires_at !== "string"
     ) {
       throw new Error("GitHub installation-token response was malformed");
