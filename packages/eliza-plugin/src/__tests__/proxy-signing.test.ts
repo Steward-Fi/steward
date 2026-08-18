@@ -10,6 +10,14 @@ import type { StewardPluginConfig } from "../types.js";
 const SIGNING_SECRET = "eliza-plugin-proxy-signing-secret-with-enough-bytes";
 const JWT_SECRET = "eliza-plugin-proxy-jwt-secret-with-enough-bytes";
 const PROXY_URL = "https://proxy.eliza-plugin.test";
+const PROXY_TEST_ENV_KEYS = [
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_JWT_SECRET",
+  "STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE",
+  "STEWARD_PROXY_REQUEST_SIGNING_SECRET",
+  "STEWARD_PROXY_DEV_MODE",
+] as const;
+const savedProxyTestEnv = new Map<string, string | undefined>();
 
 let tenantId: string;
 let agentId: string;
@@ -36,10 +44,12 @@ function configuredService(overrides: Partial<StewardPluginConfig> = {}): Stewar
 }
 
 beforeAll(async () => {
+  for (const key of PROXY_TEST_ENV_KEYS) savedProxyTestEnv.set(key, process.env[key]);
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_JWT_SECRET = JWT_SECRET;
   process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
   process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET = SIGNING_SECRET;
+  delete process.env.STEWARD_PROXY_DEV_MODE;
 
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => client.close());
@@ -71,10 +81,11 @@ beforeAll(async () => {
 afterAll(async () => {
   globalThis.fetch = realFetch;
   await closeDb().catch(() => {});
-  delete process.env.STEWARD_PGLITE_MEMORY;
-  delete process.env.STEWARD_JWT_SECRET;
-  delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
-  delete process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET;
+  for (const key of PROXY_TEST_ENV_KEYS) {
+    const value = savedProxyTestEnv.get(key);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
 
 describe("Eliza plugin proxy request signing", () => {
