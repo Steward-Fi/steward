@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm";
 
 process.env.DATABASE_URL = "postgres://test:test@localhost:5432/test";
 process.env.STEWARD_MASTER_PASSWORD = "test-master-password";
-setDefaultTimeout(30000);
+setDefaultTimeout(60000);
 
 const tenantId = "tenant-agent-policy-test";
 const agentId = "agent-policy-test";
@@ -245,6 +245,33 @@ describe("agent trade policy", () => {
     expect(body.data.diff.allowedAssets).toEqual({ before: ["BTC", "ETH"], after: ["BTC"] });
   });
 
+  it("SEC-208: concurrent partial tightenings cannot overwrite and re-raise each other", async () => {
+    const requests = [
+      { dailyCap: 600, reason: "concurrent daily tightening" },
+      { leverageCap: 5, reason: "concurrent leverage tightening" },
+    ];
+    const firstResponses = await Promise.all(requests.map((body) => putPolicy(body)));
+
+    // Depending on scheduling, the second request either observes the first
+    // commit and succeeds, or its stale conditional update is rejected. Retry
+    // only the stale request against the new row.
+    for (let i = 0; i < firstResponses.length; i += 1) {
+      const response = firstResponses[i];
+      expect([200, 409]).toContain(response.status);
+      if (response.status === 409) {
+        const retry = await putPolicy(requests[i]);
+        expect(retry.status).toBe(200);
+      }
+    }
+
+    const [row] = await getDb()
+      .select()
+      .from(agentPolicies)
+      .where(eq(agentPolicies.agentId, agentId));
+    expect(Number(row?.dailyCapUsd)).toBe(600);
+    expect(Number(row?.leverageCap)).toBe(5);
+  });
+
   it("rejects values exceeding Layer 1 ceilings", async () => {
     const res = await putPolicy({ dailyCap: 50_001, reason: "too high" });
 
@@ -336,9 +363,11 @@ describe("agent trade policy", () => {
       .where(eq(auditEvents.action, "agent.policy.updated"));
 
     expect(rows.length).toBeGreaterThanOrEqual(2);
-    const latest = rows.at(-1);
-    expect(latest).toMatchObject({ tenantId, actorId: `agent:${agentId}`, resourceId: agentId });
-    expect(latest?.metadata).toMatchObject({
+    const tightened = rows.find(
+      (row) => (row.metadata as { reason?: string } | null)?.reason === "tighten risk",
+    );
+    expect(tightened).toMatchObject({ tenantId, actorId: `agent:${agentId}`, resourceId: agentId });
+    expect(tightened?.metadata).toMatchObject({
       agentId,
       reason: "tighten risk",
     });

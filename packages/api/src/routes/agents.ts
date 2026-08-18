@@ -7,7 +7,7 @@
 import { hashSha256Hex, importP256PublicKey, revocationStore } from "@stwd/auth";
 import { agentPolicies, toPersistedPolicyRule } from "@stwd/db";
 import { getSpend, getSpendByHost, invalidateCache, type SpendPeriod } from "@stwd/redis";
-import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
+import { and, arrayContains, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { isRedisAvailable } from "../middleware/redis";
 import { writeAuditEvent } from "../services/audit";
@@ -1801,36 +1801,64 @@ agentRoutes.put("/:agentId/policy", async (c) => {
     ? (c.get("agentSubject") ?? `agent:${agentId}`)
     : (c.get("userId") ?? "unknown");
   const updatedReason = body.reason.trim();
-  const [upserted] = await db
-    .insert(agentPolicies)
-    .values({
-      agentId,
-      tenantId,
-      dailyCapUsd: String(dailyCapValue),
-      perOrderCapUsd: String(perOrderCapValue),
-      leverageCap: String(leverageCapValue),
-      allowedAssets: allowedAssetsValue,
-      allowedVenues: allowedVenuesValue,
-      allowBuilderPerps: allowBuilderPerpsValue,
-      updatedAt: new Date(),
-      updatedBy,
-      updatedReason,
-    })
-    .onConflictDoUpdate({
-      target: agentPolicies.agentId,
-      set: {
-        dailyCapUsd: String(dailyCapValue),
-        perOrderCapUsd: String(perOrderCapValue),
-        leverageCap: String(leverageCapValue),
-        allowedAssets: allowedAssetsValue,
-        allowedVenues: allowedVenuesValue,
-        allowBuilderPerps: allowBuilderPerpsValue,
-        updatedAt: new Date(),
-        updatedBy,
-        updatedReason,
-      },
-    })
-    .returning();
+  const nextPolicyValues = {
+    dailyCapUsd: String(dailyCapValue),
+    perOrderCapUsd: String(perOrderCapValue),
+    leverageCap: String(leverageCapValue),
+    allowedAssets: allowedAssetsValue,
+    allowedVenues: allowedVenuesValue,
+    allowBuilderPerps: allowBuilderPerpsValue,
+    updatedAt: new Date(),
+    updatedBy,
+    updatedReason,
+  };
+
+  let upserted: typeof agentPolicies.$inferSelect | undefined;
+  if (isAgentSelfUpdate) {
+    // SEC-208 concurrency fence: the earlier comparison is useful for a clear
+    // error, but it is not authorization by itself. Two requests can read the
+    // same row, both appear to tighten it, and then overwrite each other. Make
+    // the write conditional on the CURRENT database row still being at least
+    // as permissive as the proposed policy in every dimension. A stale write
+    // therefore fails instead of re-raising a cap or widening an allowlist.
+    [upserted] = await db
+      .update(agentPolicies)
+      .set(nextPolicyValues)
+      .where(
+        and(
+          eq(agentPolicies.agentId, agentId),
+          eq(agentPolicies.tenantId, tenantId),
+          gte(agentPolicies.dailyCapUsd, String(dailyCapValue)),
+          gte(agentPolicies.perOrderCapUsd, String(perOrderCapValue)),
+          gte(agentPolicies.leverageCap, String(leverageCapValue)),
+          arrayContains(agentPolicies.allowedAssets, allowedAssetsValue),
+          arrayContains(agentPolicies.allowedVenues, allowedVenuesValue),
+          allowBuilderPerpsValue ? eq(agentPolicies.allowBuilderPerps, true) : undefined,
+        ),
+      )
+      .returning();
+    if (!upserted) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Agent policy changed concurrently; retry against the latest policy" },
+        409,
+      );
+    }
+  } else {
+    [upserted] = await db
+      .insert(agentPolicies)
+      .values({ agentId, tenantId, ...nextPolicyValues })
+      .onConflictDoUpdate({
+        target: agentPolicies.agentId,
+        set: {
+          ...nextPolicyValues,
+        },
+      })
+      .returning();
+  }
+
+  if (!upserted) {
+    return c.json<ApiResponse>({ ok: false, error: "Failed to update agent policy" }, 500);
+  }
 
   const after = policyRowToResponse(upserted);
   const diff = policyDiff(before, after);
