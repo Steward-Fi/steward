@@ -18,8 +18,11 @@ const TENANT_CLOSED = `oidc-tenant-closed-${Date.now()}`;
 const TENANT_MIXED_CASE_DISABLED = `oidc-tenant-disabled-${Date.now()}`;
 const TENANT_AZP = `oidc-tenant-azp-${Date.now()}`;
 const AZP_CLIENT_ID = "azp-client-id";
-const ISSUER = "https://issuer.example.test";
-const JWKS_URI = "https://issuer.example.test/.well-known/jwks.json";
+// Use a syntactically public hostname so request-time provider validation is
+// exercised consistently with production. The test-only JWKS override below
+// still intercepts the fetch, so no network request reaches example.com.
+const ISSUER = "https://issuer.example.com";
+const JWKS_URI = "https://issuer.example.com/.well-known/jwks.json";
 const PROVIDER_ID = "primary";
 const ORIGINAL_FETCH = globalThis.fetch;
 const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
