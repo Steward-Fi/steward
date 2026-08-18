@@ -81,3 +81,20 @@ that would not work over HTTP, and Steward's actual posture on each, are:
     correctly over the HTTP transport) must be re-reviewed before adopting it.
 - Long-running multi-statement transactions — the audit chain relies on them
   on postgres-js; on neon-http they fail closed as described above.
+
+## Transaction-capable RLS transport checkpoint
+
+`createNeonTransactionDbForRequest()` provides a request-scoped Neon WebSocket
+pool with exactly one connection. It supports Drizzle callback transactions and
+is therefore eligible for `withTenantRlsTransaction(..., "neon-websocket", ...)`.
+The handle exposes an idempotent `close()` which callers must await before a
+Worker request finishes.
+
+This is a transport primitive, not RLS activation. The shipped Worker remains
+on `DATABASE_DRIVER=neon-http` until authenticated request middleware can mint
+a trusted tenant capability and propagate the transaction-bound database to
+every downstream query. To prevent partial adoption, `getDb()` and the legacy
+`createDbForRequest()` reject `neon-websocket`; callers must use the explicit
+request-scoped handle. FORCE RLS remains blocked until bootstrap credential
+functions, request-wide propagation, background-job scoping, schema backfills,
+and all-table policies are complete (SEC-169).

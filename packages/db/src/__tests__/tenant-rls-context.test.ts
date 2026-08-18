@@ -58,6 +58,7 @@ describe("tenant RLS transaction context", () => {
       }),
     ).toThrow("RLS_TENANT_AUTHORITY_INVALID");
     expect(() => assertTenantRlsDriver("neon-http")).toThrow("RLS_TRANSACTION_UNSUPPORTED");
+    expect(() => assertTenantRlsDriver("neon-websocket")).not.toThrow();
 
     const db = { transaction: async () => undefined };
     await expect(
@@ -147,5 +148,28 @@ describe("tenant RLS transaction context", () => {
       ),
     ).rejects.toThrow("RLS_TRANSACTION_UNSUPPORTED");
     expect(opened).toBe(false);
+  });
+
+  test("binds tenant context through the transaction-capable Workers driver", async () => {
+    let executeCount = 0;
+    const tx = {
+      async execute() {
+        executeCount += 1;
+        return executeCount === 3 ? [{ tenant_id: "tenant-worker" }] : [];
+      },
+    };
+    const db = {
+      async transaction<T>(callback: (value: typeof tx) => Promise<T>) {
+        return callback(tx);
+      },
+    };
+    const result = await withTenantRlsTransaction(
+      db,
+      "neon-websocket",
+      tenantContextForInternalJob({ tenantId: "tenant-worker", job: "worker-request" }),
+      async () => "bound",
+    );
+    expect(result).toBe("bound");
+    expect(executeCount).toBe(3);
   });
 });
