@@ -60,25 +60,25 @@ if (at !== -1) {
 // may interpret that as a literal plus.
 const rawQuery = rawQueryStart === -1 ? "" : raw.slice(rawQueryStart + 1);
 const retainedQueryParts: string[] = [];
-const queryPasswords: string[] = [];
+let lastNonEmptyQueryPassword: string | undefined;
 if (rawQueryStart !== -1) {
   for (const part of rawQuery.split("&")) {
     const separator = part.indexOf("=");
     const rawKey = separator === -1 ? part : part.slice(0, separator);
     const rawValue = separator === -1 ? "" : part.slice(separator + 1);
     if (decodeURIComponent(rawKey) === "password") {
-      queryPasswords.push(decodeURIComponent(rawValue));
+      const queryPassword = decodeURIComponent(rawValue);
+      // libpq processes parameters from left to right and lets the last
+      // non-empty value win. Empty query values therefore do not erase an
+      // earlier userinfo password, while duplicate non-empty values retain
+      // their documented libpq meaning.
+      if (queryPassword.length > 0) lastNonEmptyQueryPassword = queryPassword;
     } else {
       retainedQueryParts.push(part);
     }
   }
 }
-if (queryPasswords.length > 1) {
-  throw new Error("DATABASE_URL must not contain multiple password parameters");
-}
-if (queryPasswords.length === 1) {
-  password = queryPasswords[0] ?? "";
-}
+if (lastNonEmptyQueryPassword !== undefined) password = lastNonEmptyQueryPassword;
 
 if (/[\0\r\n]/.test(password)) {
   throw new Error("DATABASE_URL password contains an unsupported control character");

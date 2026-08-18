@@ -111,11 +111,24 @@ describe.serial("SEC-050 scripts/migrate.sh keeps the DB password out of psql ar
     expect(env).toBe("PGPASSWORD=query-secret");
   });
 
-  test("rejects ambiguous duplicate query password parameters", () => {
-    expect(() =>
-      runMigrate(
-        "postgresql://steward@db.example/steward?password=first-secret&password=second-secret",
-      ),
-    ).toThrow();
+  test("uses the last non-empty duplicate query password like libpq", () => {
+    const { argv, env } = runMigrate(
+      "postgresql://steward:userinfo-secret@db.example/steward?password=first-secret&password=&password=last-secret&password=",
+    );
+    expect(argv).not.toContain("userinfo-secret");
+    expect(argv).not.toContain("first-secret");
+    expect(argv).not.toContain("last-secret");
+    expect(argv).not.toContain("password=");
+    expect(env).toBe("PGPASSWORD=last-secret");
+  });
+
+  test("empty query passwords retain a non-empty userinfo password", () => {
+    const { argv, env } = runMigrate(
+      "postgresql://steward:userinfo-secret@db.example/steward?password=&sslmode=require&password=",
+    );
+    expect(argv).not.toContain("userinfo-secret");
+    expect(argv).not.toContain("password=");
+    expect(argv).toContain("sslmode=require");
+    expect(env).toBe("PGPASSWORD=userinfo-secret");
   });
 });
