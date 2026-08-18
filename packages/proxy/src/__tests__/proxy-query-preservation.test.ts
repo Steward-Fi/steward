@@ -88,6 +88,10 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // This file replaces DNS and the final network forwarder. Restore the real
+  // production functions so a shared-process run cannot leak its permissive
+  // transport hooks into a later security test.
+  proxyMod.__resetProxyHandlerTestHooksForTests();
   await closeDb().catch(() => {});
   delete process.env.STEWARD_PGLITE_MEMORY;
   delete process.env.STEWARD_MASTER_PASSWORD;
