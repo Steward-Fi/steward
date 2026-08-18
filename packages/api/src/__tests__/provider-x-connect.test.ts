@@ -2061,6 +2061,16 @@ describe("disconnect", () => {
     });
     expect(exhausted).toMatchObject({ processed: 1, attention: 1, revoked: 0 });
     expect(fake.counters.revoke).toBe(0);
+    const [terminal] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.id, pending.id));
+    expect(terminal).toMatchObject({
+      state: "needs_attention",
+      attempts: 5,
+      nextRetryAt: null,
+    });
+    expect(terminal.credentialSecretId).toBe(pending.credentialSecretId);
     await getDb()
       .update(providerXCredentialLifecycles)
       .set({ attempts: 0, state: "revocation_pending", nextRetryAt: new Date() })
