@@ -247,6 +247,26 @@ func TestCustomHTTPClientCannotDisableRedirectBoundary(t *testing.T) {
 	}
 }
 
+func TestCustomRedirectPolicyCannotMutatePastRedirectBoundary(t *testing.T) {
+	custom := &http.Client{CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+		mutated, err := url.Parse("http://127.0.0.1:1/internal-metadata")
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.URL = mutated
+		return nil
+	}}
+	client, err := NewClient(Config{BaseURL: "https://api.example.test", HTTPClient: custom})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, _ := http.NewRequest(http.MethodGet, "https://api.example.test/accounts", nil)
+	redirect, _ := http.NewRequest(http.MethodGet, "https://api.example.test/other", nil)
+	if err := client.http.CheckRedirect(redirect, []*http.Request{original}); err == nil || !strings.Contains(err.Error(), "refusing cross-origin") {
+		t.Fatalf("caller mutation bypassed redirect boundary: %v", err)
+	}
+}
+
 func TestAPIErrorIncludesStatusAndPayload(t *testing.T) {
 	client, err := NewClient(Config{
 		BaseURL: "https://api.example.test",

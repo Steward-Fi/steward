@@ -176,9 +176,14 @@ func NewClient(config Config) (*Client, error) {
 			return err
 		}
 		if configuredRedirect != nil {
-			return configuredRedirect(req, via)
+			if err := configuredRedirect(req, via); err != nil {
+				return err
+			}
 		}
-		return nil
+		// A caller policy is allowed to mutate req. Re-enforce Steward's mandatory
+		// boundary after it runs so mutation cannot redirect credentials or turn
+		// the client into an SSRF primitive after the initial check.
+		return stewardRedirectPolicy(req, via)
 	}
 	httpClient = &httpClientCopy
 	now := config.Now
