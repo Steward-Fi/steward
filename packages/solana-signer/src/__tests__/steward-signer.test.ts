@@ -201,6 +201,28 @@ describe("signTransaction", () => {
     expect(stub.requests.length).toBe(before);
   });
 
+  it("rejects a valid transaction prefix with trailing bytes before any vault call", async () => {
+    const signer = await newSigner();
+    const before = stub.requests.length;
+    const canonical = legacyTransfer(signer.publicKey).serialize({
+      requireAllSignatures: false,
+      verifySignatures: false,
+    });
+    const nonCanonical = Buffer.concat([canonical, Buffer.from([0xa5])]).toString("base64");
+
+    await expect(signer.signSerializedTransaction(nonCanonical)).rejects.toThrow(/non-canonical/);
+    expect(stub.requests.length).toBe(before);
+  });
+
+  it("rejects a Steward response with trailing parser-ignored bytes", async () => {
+    const signer = await newSigner();
+    stub.setMode("trailing-response-bytes");
+
+    await expect(signer.signTransaction(legacyTransfer(signer.publicKey))).rejects.toThrow(
+      /non-canonical/,
+    );
+  });
+
   it("requires explicit non-broadcast and matching-chain proof from Steward", async () => {
     const signer = await newSigner();
     stub.setMode("missing-broadcast-proof");

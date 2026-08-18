@@ -218,6 +218,13 @@ function validateSignedResponse(
       "Steward returned signatures for a different Solana message",
     );
     const required = submitted.message.header.numRequiredSignatures;
+    if (
+      submitted.signatures.length !== required ||
+      returned.signatures.length !== required ||
+      returned.signatures.length !== submitted.signatures.length
+    ) {
+      throw new StewardSignerError("api", "Steward returned a mismatched signature-slot count");
+    }
     const signerIndex = submitted.message.staticAccountKeys
       .slice(0, required)
       .findIndex((key) => key.equals(publicKey));
@@ -255,6 +262,9 @@ function validateSignedResponse(
     submittedMessage,
     "Steward returned signatures for a different Solana message",
   );
+  if (returnedLegacy.signatures.length !== submittedLegacy.signatures.length) {
+    throw new StewardSignerError("api", "Steward returned a mismatched signature-slot count");
+  }
   const signerIndex = submittedLegacy.signatures.findIndex((entry) =>
     entry.publicKey.equals(publicKey),
   );
@@ -301,9 +311,20 @@ function deserializeTransaction(bytes: Uint8Array): Transaction | VersionedTrans
   }
   const messageByte = bytes[bytesRead + signatureCount * 64];
   if (messageByte === undefined) throw new StewardSignerError("api", "invalid Solana transaction");
-  return (messageByte & 0x80) !== 0
-    ? VersionedTransaction.deserialize(bytes)
-    : Transaction.from(bytes);
+  const transaction =
+    (messageByte & 0x80) !== 0 ? VersionedTransaction.deserialize(bytes) : Transaction.from(bytes);
+  // web3.js deserializers accept a valid transaction prefix followed by
+  // arbitrary trailing bytes; Transaction.from also normalizes extra legacy
+  // signature records away. Reject every parser-differential representation by
+  // requiring the parsed transaction to serialize to the exact submitted byte
+  // string. This applies to both caller input and Steward's signed response.
+  const canonical = isVersioned(transaction)
+    ? transaction.serialize()
+    : transaction.serialize({ requireAllSignatures: false, verifySignatures: false });
+  if (!Buffer.from(canonical).equals(Buffer.from(bytes))) {
+    throw new StewardSignerError("api", "non-canonical Solana transaction encoding");
+  }
+  return transaction;
 }
 
 /** Build a signer for one Steward agent. Async because it resolves the agent's

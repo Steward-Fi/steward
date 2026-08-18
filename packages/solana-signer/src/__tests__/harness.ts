@@ -27,6 +27,7 @@ export type StubMode =
   | "invalid-signature"
   | "changed-cosigner"
   | "injected-cosigner"
+  | "trailing-response-bytes"
   | "missing-broadcast-proof"
   | "wrong-chain";
 
@@ -157,6 +158,9 @@ export function startStubSteward(kp: Keypair): StubSteward {
           signed = new Uint8Array(
             tx.serialize({ requireAllSignatures: false, verifySignatures: false }),
           );
+        }
+        if (mode === "trailing-response-bytes") {
+          signed = new Uint8Array([...signed, 0xa5]);
         }
         const data: Record<string, unknown> = {
           txId: crypto.randomUUID(),
