@@ -241,6 +241,43 @@ describe("StewardAuth authProxyUrl (SEC-018: HttpOnly refresh-token custody)", (
     expect(storage.getItem("steward_session_token")).toBeNull();
   });
 
+  test("a sign-out racing the refresh-token deposit cannot resurrect the session", async () => {
+    await server?.close();
+    server = await startServer(async (req) => {
+      requests.push(req);
+      if (req.path === "/auth/email/verify") {
+        return {
+          json: { ok: true, token: fakeJwt(), refreshToken: "rt-stale", user: TEST_USER },
+        };
+      }
+      if (req.path === "/proxy/session" && req.method === "POST") {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return { json: { ok: true } };
+      }
+      if (req.path === "/proxy/session" && req.method === "DELETE") {
+        return { json: { ok: true } };
+      }
+      return { status: 404, json: { ok: false, error: "not found" } };
+    });
+    const auth = new StewardAuth({
+      baseUrl: server.baseUrl,
+      storage,
+      authProxyUrl: `${server.baseUrl}/proxy`,
+    });
+
+    const signIn = auth.verifyEmailCallback("magic-token", "test@example.com");
+    while (proxyRequests("/proxy/session", "POST").length === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    auth.signOut();
+
+    await expect(signIn).rejects.toThrow(/cancelled by sign-out/i);
+    await lockTail;
+    expect(storage.getItem("steward_session_token")).toBeNull();
+    expect(storage.getItem("steward_refresh_token")).toBeNull();
+    expect(proxyRequests("/proxy/session", "DELETE").length).toBeGreaterThanOrEqual(1);
+  });
+
   test("refreshSession calls the proxy without a JS-held token", async () => {
     const auth = new StewardAuth({
       baseUrl: server!.baseUrl,
@@ -286,6 +323,39 @@ describe("StewardAuth authProxyUrl (SEC-018: HttpOnly refresh-token custody)", (
 
     expect(sessions.every((session) => session?.userId === "user-2")).toBe(true);
     expect(proxyRequests("/proxy/refresh", "POST")).toHaveLength(1);
+  });
+
+  test("serializes proxy refreshes across client instances with the origin lock", async () => {
+    await server?.close();
+    let activeRefreshes = 0;
+    let maximumActiveRefreshes = 0;
+    server = await startServer(async (req) => {
+      requests.push(req);
+      if (req.path === "/proxy/refresh") {
+        activeRefreshes += 1;
+        maximumActiveRefreshes = Math.max(maximumActiveRefreshes, activeRefreshes);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        activeRefreshes -= 1;
+        return { json: { ok: true, token: fakeJwt(), expiresIn: 900 } };
+      }
+      return { json: { ok: true } };
+    });
+    const authA = new StewardAuth({
+      baseUrl: server.baseUrl,
+      storage: new TestStorage(),
+      authProxyUrl: `${server.baseUrl}/proxy`,
+    });
+    const authB = new StewardAuth({
+      baseUrl: server.baseUrl,
+      storage: new TestStorage(),
+      authProxyUrl: `${server.baseUrl}/proxy`,
+    });
+
+    const sessions = await Promise.all([authA.refreshSession(), authB.refreshSession()]);
+
+    expect(sessions.every((session) => session?.userId === "user-1")).toBe(true);
+    expect(proxyRequests("/proxy/refresh", "POST")).toHaveLength(2);
+    expect(maximumActiveRefreshes).toBe(1);
   });
 
   test("serializes refresh and tenant switching across the same rotating token", async () => {

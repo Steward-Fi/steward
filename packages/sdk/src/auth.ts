@@ -2443,12 +2443,32 @@ export class StewardAuth {
     if (!token) {
       throw new StewardApiError("Auth response did not include a session token", 0);
     }
+    const generation = this.sessionGeneration;
+    const logoutEpoch = this.authProxyUrl ? this.readLogoutEpoch() : null;
     // Only persist the refresh token when it's a non-empty string.
     // An empty string means the API didn't issue one (e.g. SIWE flow).
     if (refreshToken) {
       if (this.authProxyUrl) {
         // HttpOnly cookie custody — never written to JS-readable storage.
-        await this.depositRefreshToken(refreshToken);
+        await this.runProxyMutation(async () => {
+          if (
+            generation !== this.sessionGeneration ||
+            (logoutEpoch !== undefined && this.readLogoutEpoch() !== logoutEpoch)
+          ) {
+            throw new StewardApiError("Authentication was cancelled by sign-out", 0);
+          }
+          await this.depositRefreshToken(refreshToken);
+          if (
+            generation !== this.sessionGeneration ||
+            (logoutEpoch !== undefined && this.readLogoutEpoch() !== logoutEpoch)
+          ) {
+            // The cookie deposit completed after this or another tab signed
+            // out. Remove it while still holding the origin mutation lock so
+            // the stale authentication cannot resurrect the browser session.
+            await this.deleteProxyCookieUnlocked();
+            throw new StewardApiError("Authentication was cancelled by sign-out", 0);
+          }
+        });
       } else {
         this.storage.setItem(REFRESH_TOKEN_KEY, refreshToken);
       }
@@ -2519,18 +2539,16 @@ export class StewardAuth {
     });
   }
 
-  private async runProxyMutation(operation: () => Promise<void>): Promise<void> {
+  private async runProxyMutation<T>(operation: () => Promise<T>): Promise<T> {
     if (isBrowser()) {
       if (navigator.locks && this.readLogoutEpoch() !== undefined) {
-        await navigator.locks.request(AUTH_ROTATION_LOCK, operation);
-        return;
+        return await navigator.locks.request(AUTH_ROTATION_LOCK, operation);
       }
       // Rotation is disabled when coordination primitives are unavailable, so
       // an unlocked destructive clear/revoke cannot race a supported rotation.
-      await operation();
-      return;
+      return await operation();
     }
-    await operation();
+    return await operation();
   }
 
   private clearToken(): void {
