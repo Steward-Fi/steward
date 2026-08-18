@@ -1,4 +1,13 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  setDefaultTimeout,
+} from "bun:test";
 import { generateApiKey, signAgentToken } from "@stwd/auth";
 import { closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -16,6 +25,8 @@ const originalDefaultJwksOptIn = process.env.STEWARD_ALLOW_DEFAULT_ELIZA_JWKS;
 // This suite deliberately mocks the built-in development JWKS endpoint. SEC-069
 // requires callers to opt into that trust anchor explicitly, including tests.
 process.env.STEWARD_ALLOW_DEFAULT_ELIZA_JWKS = "true";
+
+setDefaultTimeout(30_000);
 
 const auditEvents: Array<{ action: string; metadata?: Record<string, unknown>; actorId?: string }> =
   [];

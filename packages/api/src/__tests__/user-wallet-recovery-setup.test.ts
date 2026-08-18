@@ -898,8 +898,11 @@ describe("user wallet recovery setup", () => {
     expect(response.headers.get("Cache-Control")).toContain("no-store");
     const text = await response.text();
     expect(text).not.toContain(mnemonic);
-    expect(text).toContain("Failed to restore wallet: Internal server error");
     expect(text).not.toContain("not mnemonic-recoverable");
+    expect(JSON.parse(text)).toEqual({
+      ok: false,
+      error: "Failed to restore wallet: Internal server error",
+    });
   }, 30_000);
 
   it("does not mint a fake recovery phrase for an existing wallet", async () => {
