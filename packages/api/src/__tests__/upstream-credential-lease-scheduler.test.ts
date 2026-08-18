@@ -103,7 +103,12 @@ test("lease scheduler health fails closed after a sweep error and recovers on su
   await attempted;
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(getUpstreamCredentialLeaseSchedulerHealth().ok).toBe(false);
-  expect(getUpstreamCredentialLeaseSchedulerHealth().lastError).toBe("provider unavailable");
+  expect(getUpstreamCredentialLeaseSchedulerHealth().lastError).toBe(
+    "credential lease recovery failed",
+  );
+  expect(getUpstreamCredentialLeaseSchedulerHealth().lastError).not.toContain(
+    "provider unavailable",
+  );
   await retried;
   await new Promise((resolve) => setTimeout(resolve, 1));
   expect(getUpstreamCredentialLeaseSchedulerHealth().ok).toBe(true);
