@@ -64,15 +64,25 @@ class RealPgRaceProvider implements ExternalKeyCustodyProvider {
   }
 }
 
-async function waitForBlockedAdvisoryConnections(expected: number): Promise<number[]> {
+async function waitForBlockedAdvisoryConnections(
+  lockKey: string,
+  expected: number,
+): Promise<number[]> {
   if (!inspector) throw new Error("real PostgreSQL inspector is unavailable");
   for (let attempt = 0; attempt < 500; attempt += 1) {
     const rows = await inspector<{ pid: number }[]>`
-      select distinct pid
-      from pg_locks
-      where locktype = 'advisory'
-        and granted = false
-        and database = (select oid from pg_database where datname = current_database())
+      with target as (
+        select hashtextextended(${lockKey}, 0)::bigint as key
+      )
+      select distinct locks.pid
+      from pg_locks as locks
+      cross join target
+      where locks.locktype = 'advisory'
+        and locks.granted = false
+        and locks.database = (select oid from pg_database where datname = current_database())
+        and locks.classid::bigint = ((target.key >> 32) & 4294967295)
+        and locks.objid::bigint = (target.key & 4294967295)
+        and locks.objsubid = 1
     `;
     if (rows.length >= expected) return rows.map((row) => row.pid);
     await Bun.sleep(10);
@@ -81,6 +91,7 @@ async function waitForBlockedAdvisoryConnections(expected: number): Promise<numb
 }
 
 async function holdCustodyLock(lockedAgentId: string): Promise<{
+  lockKey: string;
   release: () => void;
   done: Promise<void>;
 }> {
@@ -100,7 +111,7 @@ async function holdCustodyLock(lockedAgentId: string): Promise<{
     await release;
   });
   await blockerReady;
-  return { release: releaseBlocker, done };
+  return { lockKey, release: releaseBlocker, done };
 }
 
 async function seedBareRecoverableAgent(seededAgentId: string): Promise<{
@@ -164,21 +175,29 @@ suite("custody transitions across real PostgreSQL connections", () => {
       address,
       handle: { providerId: provider.id, keyId: `key-${suffix}` },
     });
-    const firstWaiters = await waitForBlockedAdvisoryConnections(1);
-
-    const restore = localVault.restoreAgentFromMnemonic(
-      tenantId,
-      agentId,
-      "Custody Race Agent",
-      TEST_MNEMONIC,
-      { walletType: "recoverable_user" },
-    );
-    const allWaiters = await waitForBlockedAdvisoryConnections(2);
+    const pending: Promise<unknown>[] = [externalImport];
+    let restore: Promise<unknown> | undefined;
+    let firstWaiters: number[] = [];
+    let allWaiters: number[] = [];
+    try {
+      firstWaiters = await waitForBlockedAdvisoryConnections(heldLock.lockKey, 1);
+      restore = localVault.restoreAgentFromMnemonic(
+        tenantId,
+        agentId,
+        "Custody Race Agent",
+        TEST_MNEMONIC,
+        { walletType: "recoverable_user" },
+      );
+      pending.push(restore);
+      allWaiters = await waitForBlockedAdvisoryConnections(heldLock.lockKey, 2);
+    } finally {
+      heldLock.release();
+      await Promise.allSettled([heldLock.done, ...pending]);
+    }
     expect(new Set(allWaiters).size).toBeGreaterThanOrEqual(2);
     expect(allWaiters).toEqual(expect.arrayContaining(firstWaiters));
 
-    heldLock.release();
-    await heldLock.done;
+    if (!restore) throw new Error("mnemonic restore did not start");
     const [externalResult, restoreResult] = await Promise.allSettled([externalImport, restore]);
     expect(externalResult.status).toBe("fulfilled");
     expect(restoreResult.status).toBe("rejected");
@@ -225,20 +244,28 @@ suite("custody transitions across real PostgreSQL connections", () => {
       address,
       handle: { providerId: provider.id, keyId: `external-before-import-${suffix}` },
     });
-    const firstWaiters = await waitForBlockedAdvisoryConnections(1);
-
-    const localImport = localVault.importKey(
-      tenantId,
-      externalBeforeImportAgentId,
-      generatePrivateKey(),
-      "evm",
-    );
-    const allWaiters = await waitForBlockedAdvisoryConnections(2);
+    const pending: Promise<unknown>[] = [externalImport];
+    let localImport: Promise<unknown> | undefined;
+    let firstWaiters: number[] = [];
+    let allWaiters: number[] = [];
+    try {
+      firstWaiters = await waitForBlockedAdvisoryConnections(heldLock.lockKey, 1);
+      localImport = localVault.importKey(
+        tenantId,
+        externalBeforeImportAgentId,
+        generatePrivateKey(),
+        "evm",
+      );
+      pending.push(localImport);
+      allWaiters = await waitForBlockedAdvisoryConnections(heldLock.lockKey, 2);
+    } finally {
+      heldLock.release();
+      await Promise.allSettled([heldLock.done, ...pending]);
+    }
     expect(new Set(allWaiters).size).toBeGreaterThanOrEqual(2);
     expect(allWaiters).toEqual(expect.arrayContaining(firstWaiters));
 
-    heldLock.release();
-    await heldLock.done;
+    if (!localImport) throw new Error("local import did not start");
     const [externalResult, localResult] = await Promise.allSettled([externalImport, localImport]);
     expect(externalResult.status).toBe("fulfilled");
     expect(localResult.status).toBe("rejected");
@@ -273,26 +300,34 @@ suite("custody transitions across real PostgreSQL connections", () => {
       generatePrivateKey(),
       "evm",
     );
-    const firstWaiters = await waitForBlockedAdvisoryConnections(1);
-
+    const pending: Promise<unknown>[] = [localImport];
     const provider = new RealPgRaceProvider();
-    const externalVault = new Vault({
-      masterPassword: MASTER_PASSWORD,
-      externalKeyCustodyProvider: provider,
-    });
-    const externalImport = externalVault.importExternalKeyHandle({
-      tenantId,
-      agentId: importBeforeExternalAgentId,
-      chainFamily: "evm",
-      address,
-      handle: { providerId: provider.id, keyId: `import-before-external-${suffix}` },
-    });
-    const allWaiters = await waitForBlockedAdvisoryConnections(2);
+    let externalImport: Promise<unknown> | undefined;
+    let firstWaiters: number[] = [];
+    let allWaiters: number[] = [];
+    try {
+      firstWaiters = await waitForBlockedAdvisoryConnections(heldLock.lockKey, 1);
+      const externalVault = new Vault({
+        masterPassword: MASTER_PASSWORD,
+        externalKeyCustodyProvider: provider,
+      });
+      externalImport = externalVault.importExternalKeyHandle({
+        tenantId,
+        agentId: importBeforeExternalAgentId,
+        chainFamily: "evm",
+        address,
+        handle: { providerId: provider.id, keyId: `import-before-external-${suffix}` },
+      });
+      pending.push(externalImport);
+      allWaiters = await waitForBlockedAdvisoryConnections(heldLock.lockKey, 2);
+    } finally {
+      heldLock.release();
+      await Promise.allSettled([heldLock.done, ...pending]);
+    }
     expect(new Set(allWaiters).size).toBeGreaterThanOrEqual(2);
     expect(allWaiters).toEqual(expect.arrayContaining(firstWaiters));
 
-    heldLock.release();
-    await heldLock.done;
+    if (!externalImport) throw new Error("external import did not start");
     const [localResult, externalResult] = await Promise.allSettled([localImport, externalImport]);
     expect(localResult.status).toBe("fulfilled");
     expect(externalResult.status).toBe("rejected");
@@ -337,26 +372,34 @@ suite("custody transitions across real PostgreSQL connections", () => {
       TEST_MNEMONIC,
       { walletType: "recoverable_user" },
     );
-    const firstWaiters = await waitForBlockedAdvisoryConnections(1);
-
+    const pending: Promise<unknown>[] = [restore];
     const provider = new RealPgRaceProvider();
-    const externalVault = new Vault({
-      masterPassword: MASTER_PASSWORD,
-      externalKeyCustodyProvider: provider,
-    });
-    const externalImport = externalVault.importExternalKeyHandle({
-      tenantId,
-      agentId: restoreFirstAgentId,
-      chainFamily: "evm",
-      address,
-      handle: { providerId: provider.id, keyId: `restore-first-key-${suffix}` },
-    });
-    const allWaiters = await waitForBlockedAdvisoryConnections(2);
+    let externalImport: Promise<unknown> | undefined;
+    let firstWaiters: number[] = [];
+    let allWaiters: number[] = [];
+    try {
+      firstWaiters = await waitForBlockedAdvisoryConnections(heldLock.lockKey, 1);
+      const externalVault = new Vault({
+        masterPassword: MASTER_PASSWORD,
+        externalKeyCustodyProvider: provider,
+      });
+      externalImport = externalVault.importExternalKeyHandle({
+        tenantId,
+        agentId: restoreFirstAgentId,
+        chainFamily: "evm",
+        address,
+        handle: { providerId: provider.id, keyId: `restore-first-key-${suffix}` },
+      });
+      pending.push(externalImport);
+      allWaiters = await waitForBlockedAdvisoryConnections(heldLock.lockKey, 2);
+    } finally {
+      heldLock.release();
+      await Promise.allSettled([heldLock.done, ...pending]);
+    }
     expect(new Set(allWaiters).size).toBeGreaterThanOrEqual(2);
     expect(allWaiters).toEqual(expect.arrayContaining(firstWaiters));
 
-    heldLock.release();
-    await heldLock.done;
+    if (!externalImport) throw new Error("external import did not start");
     const [restoreResult, externalResult] = await Promise.allSettled([restore, externalImport]);
     expect(restoreResult.status).toBe("fulfilled");
     expect(externalResult.status).toBe("rejected");
