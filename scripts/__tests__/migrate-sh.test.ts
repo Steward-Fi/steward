@@ -75,6 +75,15 @@ describe.serial("SEC-050 scripts/migrate.sh keeps the DB password out of psql ar
     expect(env).toBe("PGPASSWORD=query@secret");
   });
 
+  test("preserves non-password libpq query encoding byte-for-byte", () => {
+    const { argv, env } = runMigrate(
+      "postgresql://steward@db.example/steward?options=-c%20statement_timeout%3D5s&password=a+b",
+    );
+    expect(argv).toContain("options=-c%20statement_timeout%3D5s");
+    expect(argv).not.toContain("password=");
+    expect(env).toBe("PGPASSWORD=a+b");
+  });
+
   test("query password takes precedence and neither credential reaches argv", () => {
     const { argv, env } = runMigrate(
       "postgresql://steward:userinfo-secret@db.example/steward?password=query-secret",
@@ -82,5 +91,13 @@ describe.serial("SEC-050 scripts/migrate.sh keeps the DB password out of psql ar
     expect(argv).not.toContain("userinfo-secret");
     expect(argv).not.toContain("query-secret");
     expect(env).toBe("PGPASSWORD=query-secret");
+  });
+
+  test("rejects ambiguous duplicate query password parameters", () => {
+    expect(() =>
+      runMigrate(
+        "postgresql://steward@db.example/steward?password=first-secret&password=second-secret",
+      ),
+    ).toThrow();
   });
 });

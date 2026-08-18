@@ -395,7 +395,9 @@ Common causes:
 - Check logs: `journalctl -u steward --since "5 minutes ago"`
 
 ### "Tenant not found" errors
-- Verify tenant exists: `curl -sf http://localhost:3200/platform/tenants -H 'X-Steward-Platform-Key: <key>'`
+- Verify the tenant through the owner-only platform header file created in the
+  smoke-test procedure above:
+  `curl -sf http://localhost:3200/platform/tenants -H "@$PLATFORM_HEADERS"`
 - Create missing tenant via platform API
 
 ### High memory usage
@@ -601,13 +603,16 @@ In **production** (`NODE_ENV=production`) the proxy treats Redis as **required**
 After deploying, configure webhooks for your tenants to receive real-time event notifications:
 
 ```bash
-PK="<your-platform-key>"
-API_KEY="<tenant-api-key>"
 BASE="http://localhost:3200"
+read -rsp "Tenant API key: " API_KEY; printf '\n'
+TENANT_HEADERS=$(mktemp); WEBHOOK_RESPONSE=$(mktemp)
+chmod 600 "$TENANT_HEADERS" "$WEBHOOK_RESPONSE"
+trap 'rm -f "$TENANT_HEADERS"' EXIT
+printf 'X-Steward-Key: %s\n' "$API_KEY" > "$TENANT_HEADERS"
 
 # Register a webhook endpoint
 curl -sf -X POST $BASE/webhooks \
-  -H "X-Steward-Key: $API_KEY" \
+  -H "@$TENANT_HEADERS" \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://your-app.com/webhooks/steward",
@@ -615,11 +620,14 @@ curl -sf -X POST $BASE/webhooks \
     "description": "Production webhook",
     "maxRetries": 5,
     "retryBackoffMs": 60000
-  }'
-# → Returns webhook config including "secret" (save this!)
+  }' > "$WEBHOOK_RESPONSE"
+echo "Webhook config and one-time secret saved to $WEBHOOK_RESPONSE (mode 0600)"
 ```
 
-**Save the `secret` field** — it's only returned on creation. Use it to verify `X-Steward-Signature` on incoming events.
+**Securely move or consume `WEBHOOK_RESPONSE`, then delete it.** The `secret`
+field is only returned on creation and is used to verify
+`X-Steward-Signature` on incoming events; do not print it into terminal or CI
+logs.
 
 ### Verify webhook delivery
 
@@ -627,7 +635,7 @@ curl -sf -X POST $BASE/webhooks \
 # List recent deliveries
 WEBHOOK_ID="wh_..."
 curl -sf "$BASE/webhooks/$WEBHOOK_ID/deliveries" \
-  -H "X-Steward-Key: $API_KEY"
+  -H "@$TENANT_HEADERS"
 ```
 
 ---

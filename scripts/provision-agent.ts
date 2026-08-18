@@ -5,6 +5,7 @@ import { and, eq } from "drizzle-orm";
 import { createAgentToken, DEFAULT_TENANT_ID, vault } from "../packages/api/src/services/context";
 import { TradeSessionManager } from "../packages/trade-sessions/src/index";
 import { type DefaultTenantStore, ensureDefaultTenant } from "./lib/default-tenant";
+import { type ProvisionSecrets, writeProvisionSecrets } from "./lib/provision-secrets";
 
 const USAGE = `Usage:
   bun run scripts/provision-agent.ts <agentId> <ownerAddress>
@@ -21,8 +22,8 @@ function requireArg(value: string | undefined, name: string): string {
 }
 
 // Drizzle-backed store for the default-tenant key logic (SEC-012). The key
-// itself is generated inside ensureDefaultTenant and only ever printed once
-// to the operator — never logged elsewhere or stored in plaintext.
+// itself is generated inside ensureDefaultTenant and written once to the
+// owner-only provisioning output — never logged or stored in the database.
 const defaultTenantStore: DefaultTenantStore = {
   async getApiKeyHash(tenantId) {
     const [row] = await getDb()
@@ -88,6 +89,17 @@ async function main() {
     ownerAddress,
   });
 
+  const provisionSecrets: ProvisionSecrets = {
+    ...(tenantResult.status === "created" || tenantResult.status === "rotated"
+      ? { tenantApiKey: tenantResult.apiKey }
+      : {}),
+  };
+  // Persist a newly-created/rotated tenant key immediately. If a later wallet
+  // or session step fails, the only usable copy of that one-time key is still
+  // recoverable and was never written to terminal scrollback or CI logs.
+  const credentialsPath = writeProvisionSecrets(provisionSecrets);
+  console.log(`Sensitive provisioning output: ${credentialsPath} (mode 0600)`);
+
   const { agent, created: agentCreated } = await ensureAgent(agentId, ownerAddress);
   const { wallet, created: walletCreated } = await ensureHyperliquidWallet(agentId);
 
@@ -109,30 +121,31 @@ async function main() {
     "trade:hyperliquid:write",
   ]);
 
+  Object.assign(provisionSecrets, {
+    agentId,
+    apiUrl: "http://localhost:3200",
+    tradeSessionId: session.id,
+    jwt,
+  });
+  writeProvisionSecrets(provisionSecrets, credentialsPath);
+
   console.log("Steward Sol provisioning complete");
   console.log("================================");
   if (tenantResult.status === "created") {
-    console.log(
-      `Default tenant created. API key (shown ONCE — save it now): ${tenantResult.apiKey}`,
-    );
+    console.log("Default tenant created. Its one-time API key is in the private output file.");
   } else if (tenantResult.status === "rotated") {
     console.log("⚠  ROTATED the default tenant API key: the previous key was publicly");
     console.log("   derivable (sha256 of a string published in this repo, SEC-012) and is");
     console.log("   now INVALID. Update any client still using it.");
-    console.log(`   New API key (shown ONCE — save it now): ${tenantResult.apiKey}`);
+    console.log("   The replacement key is in the private output file.");
   }
   console.log(`Agent ID: ${agent.id} (${agentCreated ? "created" : "existing"})`);
   console.log(`Owner address: ${ownerAddress}`);
   console.log(`HL deposit address: ${wallet.address} (${walletCreated ? "created" : "existing"})`);
-  console.log(`Trade session ID: ${session.id}`);
   console.log(`Trade session expires: ${session.expiresAt.toISOString()}`);
   console.log("Policy: $100/day cap, $100/order cap, BTC+ETH only, max 2x leverage");
   console.log("");
-  console.log("Set these in Sol's eliza-cloud container env:");
-  console.log(`STEWARD_AGENT_ID=${agentId}`);
-  console.log("STEWARD_API_URL=http://localhost:3200");
-  console.log(`STEWARD_TRADE_SESSION_ID=${session.id}`);
-  console.log(`STEWARD_JWT=${jwt}`);
+  console.log("Agent environment credentials were written to the private output file above.");
   console.log("");
   console.log(
     "Manual funding step: bridge/fund the HL deposit address above with $20 USDC on Arbitrum first. Do not submit live orders from automation.",

@@ -7,12 +7,10 @@
 # spending policies.
 #
 # Usage:
-#   ./deploy/migrate-agent-keys.sh <node-ip> [--dry-run] [platform-key]
+#   ./deploy/migrate-agent-keys.sh <node-ip> [--dry-run]
 #
-# The platform key is read ON THE NODE from the mode-0600 deploy/.env (never
-# on any argv). Passing it as a positional arg is DEPRECATED: it leaks into
-# local ps/shell history. It is still accepted for compatibility and is then
-# piped to the remote over ssh stdin, never on a command line.
+# The platform key is read ON THE NODE from the mode-0600 deploy/.env and is
+# never accepted as an argument (argv is visible through ps and shell history).
 #
 # Requirements:
 #   - Steward must be running on the node (port 3200)
@@ -28,9 +26,8 @@
 set -euo pipefail
 
 # ── Args ─────────────────────────────────────────────────────────────────────
-NODE_IP="${1:?Usage: $0 <node-ip> [--dry-run] [platform-key]}"
+NODE_IP="${1:?Usage: $0 <node-ip> [--dry-run]}"
 shift
-PLATFORM_KEY=""
 DRY_RUN=false
 for arg in "$@"; do
   case "$arg" in
@@ -40,12 +37,8 @@ for arg in "$@"; do
       exit 1
       ;;
     *)
-      if [[ -z "${PLATFORM_KEY}" ]]; then
-        PLATFORM_KEY="$arg"
-      else
-        echo "❌ Unexpected argument: $arg"
-        exit 1
-      fi
+      echo "❌ Unexpected positional argument (platform keys are never accepted on argv)"
+      exit 1
       ;;
   esac
 done
@@ -66,22 +59,13 @@ DEFAULT_DAILY_LIMIT="${DEFAULT_DAILY_LIMIT:-100}"
 REMOTE_DIR="${REMOTE_DIR:-/opt/steward}"
 
 # ── Platform key handling (SEC-020) ──────────────────────────────────────────
-# The key must never appear on a local or remote command line. Default path:
-# the remote shell reads it from the node's mode-0600 deploy/.env. The
-# deprecated positional-arg path pipes it over ssh stdin instead.
-if [[ -n "${PLATFORM_KEY}" ]]; then
-  echo "⚠  DEPRECATED: passing the platform key as an argument exposes it in"
-  echo "   local ps/shell history. Omit it to read the key on the node from"
-  echo "   ${REMOTE_DIR}/deploy/.env instead."
-  PK_SNIPPET="PK=\$(cat)"
-else
-  PK_SNIPPET="PK=\$(sed -n 's/^STEWARD_PLATFORM_KEY=//p' ${REMOTE_DIR}/deploy/.env | head -n1)"
-  # Fail-closed preflight: the key must be readable on the node.
-  if ! ${SSH_CMD} "grep -q '^STEWARD_PLATFORM_KEY=.\+' ${REMOTE_DIR}/deploy/.env" 2>/dev/null; then
-    echo "❌ No STEWARD_PLATFORM_KEY found in ${REMOTE_DIR}/deploy/.env on ${NODE_IP}"
-    echo "   Provision the node first (deploy/provision-steward-node.sh)."
-    exit 1
-  fi
+# The remote shell reads the key from the node's mode-0600 deploy/.env.
+PK_SNIPPET="PK=\$(sed -n 's/^STEWARD_PLATFORM_KEY=//p' ${REMOTE_DIR}/deploy/.env | head -n1)"
+# Fail-closed preflight: the key must be readable on the node.
+if ! ${SSH_CMD} "grep -q '^STEWARD_PLATFORM_KEY=.\+' ${REMOTE_DIR}/deploy/.env" 2>/dev/null; then
+  echo "❌ No STEWARD_PLATFORM_KEY found in ${REMOTE_DIR}/deploy/.env on ${NODE_IP}"
+  echo "   Provision the node first (deploy/provision-steward-node.sh)."
+  exit 1
 fi
 
 # curl expands a literal `-H "...${PK}"` into its process argv, even when PK
@@ -159,7 +143,7 @@ while IFS= read -r CONTAINER; do
   echo "  Creating agent in Steward..."
   # The platform key is resolved on the REMOTE side (${PK_SNIPPET}) and never
   # placed on the remote curl argv (visible in the node's process list).
-  CREATE_RESP=$(printf '%s' "${PLATFORM_KEY}" | ${SSH_CMD} "${PK_SNIPPET}; ${AUTH_HEADER_SNIPPET}; curl -sf -X POST '${STEWARD_URL}/platform/tenants/${TENANT_ID}/agents' \
+  CREATE_RESP=$(${SSH_CMD} "${PK_SNIPPET}; ${AUTH_HEADER_SNIPPET}; curl -sf -X POST '${STEWARD_URL}/platform/tenants/${TENANT_ID}/agents' \
     -H 'Content-Type: application/json' \
     -H \"@\${AUTH_FILE}\" \
     -d '{
@@ -181,7 +165,7 @@ while IFS= read -r CONTAINER; do
 
   # ── Set default policies ─────────────────────────────────────────────────
   echo "  Setting default policies..."
-  POLICY_RESP=$(printf '%s' "${PLATFORM_KEY}" | ${SSH_CMD} "${PK_SNIPPET}; ${AUTH_HEADER_SNIPPET}; curl -sf -X PUT '${STEWARD_URL}/platform/tenants/${TENANT_ID}/policies' \
+  POLICY_RESP=$(${SSH_CMD} "${PK_SNIPPET}; ${AUTH_HEADER_SNIPPET}; curl -sf -X PUT '${STEWARD_URL}/platform/tenants/${TENANT_ID}/policies' \
     -H 'Content-Type: application/json' \
     -H \"@\${AUTH_FILE}\" \
     -d '{
