@@ -54,12 +54,41 @@ const PROVIDER_OPERATION_ALLOWLIST: Readonly<
     "x.tweet.delete": "DELETE",
     "x.user.me.read": "GET",
   },
+  slack: {
+    "slack.chat.postMessage": "POST",
+    "slack.conversations.list": "GET",
+    "slack.users.info": "GET",
+  },
+};
+const PROVIDER_OPERATION_MINIMUM_RISK: Readonly<
+  Record<string, Readonly<Record<string, ProviderRiskClass>>>
+> = {
+  github: {
+    "github.issue.list": "read",
+    "github.pr.comment.create": "write",
+  },
+  x: {
+    "x.tweet.create": "write",
+    "x.tweet.delete": "write",
+    "x.user.me.read": "read",
+  },
+  slack: {
+    "slack.chat.postMessage": "write",
+    "slack.conversations.list": "read",
+    "slack.users.info": "read",
+  },
+};
+const PROVIDER_RISK_RANK: Readonly<Record<ProviderRiskClass, number>> = {
+  read: 0,
+  write: 1,
+  consequential: 2,
 };
 const PROVIDER_HOST_ALLOWLIST: Readonly<Record<string, string>> = {
   github: "api.github.com",
   x: "api.x.com",
+  slack: "slack.com",
 };
-const REGISTERED_ADAPTER_KEYS = new Set(["github", "x", "generic-http"]);
+const REGISTERED_ADAPTER_KEYS = new Set(["github", "x", "slack", "generic-http"]);
 const ENVIRONMENTS = new Set(["development", "staging", "production"]);
 const PRINCIPAL_TYPES = new Set(["human", "agent"]);
 const ROLES = new Set([
@@ -753,7 +782,12 @@ export class ProviderAuthorityStore {
     const operationKey = assertText(input.operationKey, "operationKey", 128);
     if (!RISK_CLASSES.has(input.riskClass))
       throw new ProviderAuthorityError("invalid riskClass", "bad_request", 400);
-    if (!OPERATION_KEY.test(operationKey))
+    // Config-driven keys follow the operator-authored lowercase grammar. Fixed
+    // adapters are instead constrained by their exact compile-time allowlist;
+    // Slack's upstream operation names intentionally include camelCase (for
+    // example chat.postMessage), so applying the generic grammar first would
+    // make the registered adapter impossible to configure.
+    if (account.adapterKey === "generic-http" && !OPERATION_KEY.test(operationKey))
       throw new ProviderAuthorityError("invalid operationKey", "bad_request", 400);
     let allowedMethods: readonly string[];
     let genericDescriptor: ReturnType<typeof validateGenericHttpDescriptor> | undefined;
@@ -782,6 +816,14 @@ export class ProviderAuthorityStore {
           "forbidden",
           403,
         );
+      const minimumRisk = PROVIDER_OPERATION_MINIMUM_RISK[account.adapterKey]?.[operationKey];
+      if (!minimumRisk || PROVIDER_RISK_RANK[input.riskClass] < PROVIDER_RISK_RANK[minimumRisk]) {
+        throw new ProviderAuthorityError(
+          "riskClass understates the adapter operation risk",
+          "bad_request",
+          400,
+        );
+      }
       allowedMethods = [fixedMethod];
     }
     if (account.adapterKey === "generic-http" && !input.secretRouteId) {
