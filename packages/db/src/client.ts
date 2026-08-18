@@ -478,7 +478,7 @@ export function setPGLiteOverride(
 
 type RequestDatabase = ReturnType<typeof createDb>["db"];
 interface RequestDatabaseContext {
-  db: RequestDatabase;
+  db: RequestDatabase | undefined;
   active: boolean;
 }
 const requestDatabaseStorage = new AsyncLocalStorage<RequestDatabaseContext>();
@@ -506,6 +506,7 @@ export async function withRequestDatabase<T>(
     // Detached tasks inherit AsyncLocalStorage. Revoke their capability before
     // the owning Worker closes its socket so late getDb() calls fail before I/O.
     context.active = false;
+    context.db = undefined;
   }
 }
 
@@ -544,6 +545,7 @@ export function getDb() {
   const requestContext = requestDatabaseStorage.getStore();
   if (requestContext) {
     if (!requestContext.active) throw new Error("REQUEST_DATABASE_CONTEXT_CLOSED");
+    if (!requestContext.db) throw new Error("REQUEST_DATABASE_CONTEXT_INVALID");
     return requestContext.db;
   }
   if (pgliteOverride) return pgliteOverride.db as ReturnType<typeof createDb>["db"];

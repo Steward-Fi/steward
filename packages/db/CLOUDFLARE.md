@@ -98,6 +98,10 @@ a Node compatibility shim's `process.env`; because Cloudflare does not provide
 Both `neon-http` and `neon-websocket` are bound through request-local async
 context. The context is revoked as soon as the owning callback settles, so any
 detached async task fails before reusing a database handle after cleanup.
+Before enabling the WebSocket driver, every database-backed fire-and-forget
+task must be made part of the owning callback (or an explicitly owned Worker
+lifetime); revocation prevents stale-handle use but cannot preserve unawaited
+work.
 
 `withRequestDatabase()` propagates that explicit handle through the async
 request so existing services calling `getDb()` resolve the request-owned
