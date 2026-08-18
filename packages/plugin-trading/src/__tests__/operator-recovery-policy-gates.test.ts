@@ -314,8 +314,9 @@ describe("SEC-004: usd-send policy gate + caps", () => {
   it("fails closed (429) when the process-local rate-limit map is saturated with live windows", async () => {
     // The fallback map caps at 1_000 keys. Under a distinct-agent flood the
     // limiter must deny new keys instead of growing unbounded or resetting
-    // live budgets. The rate limiter runs BEFORE the agent-exists check, so
-    // unknown agents still consume map slots (404s below).
+    // live budgets. Agent existence is checked first, so seed the distinct
+    // principals that exercise the fallback instead of relying on unknown
+    // request identities to mutate limiter state.
     const { tenantId, agentId } = await seedAgent({
       policies: [
         { type: "approved-addresses", config: { mode: "whitelist", addresses: [DEST_A] } },
@@ -323,6 +324,17 @@ describe("SEC-004: usd-send policy gate + caps", () => {
     });
     usdSendCalls.length = 0;
     const app = await buildApp();
+
+    await getDb()
+      .insert(agents)
+      .values(
+        Array.from({ length: 1_000 }, (_, i) => ({
+          id: i === 999 ? "flood-agent-overflow" : `flood-agent-${i}`,
+          tenantId,
+          name: `Flood Agent ${i}`,
+          walletAddress: "0x1111111111111111111111111111111111111111",
+        })),
+      );
 
     // One real call so the agent has a LIVE window recorded.
     const first = await postTransfer(app, "usd-send", tenantId, {
