@@ -32,6 +32,10 @@ function isPositiveFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
+function isNonNegativeFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
 function isPositiveInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) > 0;
 }
@@ -105,19 +109,45 @@ function validatePolicyConfig(policy: PolicyRule): string | null {
       const weiFields = ["maxPerTx", "maxPerDay", "maxPerWeek"] as const;
       const usdFields = ["maxPerTxUsd", "maxPerDayUsd", "maxPerWeekUsd"] as const;
       for (const field of weiFields) {
-        if (config[field] !== undefined && !isWeiString(config[field])) {
+        if (
+          Object.hasOwn(config, field) &&
+          config[field] !== undefined &&
+          !isWeiString(config[field])
+        ) {
           return `spending-limit.${field} must be a wei string`;
         }
       }
       for (const field of usdFields) {
-        if (config[field] !== undefined && !isPositiveFiniteNumber(config[field])) {
-          return `spending-limit.${field} must be a positive number`;
+        if (
+          Object.hasOwn(config, field) &&
+          config[field] !== undefined &&
+          !isNonNegativeFiniteNumber(config[field])
+        ) {
+          return `spending-limit.${field} must be a non-negative finite number`;
         }
       }
-      const hasWeiLimit = weiFields.some((field) => isWeiString(config[field]));
-      const hasUsdLimit = usdFields.some((field) => isPositiveFiniteNumber(config[field]));
-      if (!hasWeiLimit && !hasUsdLimit) {
-        return "spending-limit requires at least one positive wei or USD limit";
+      if (Object.hasOwn(config, "maxAmount") && !isWeiString(config.maxAmount)) {
+        return "spending-limit.maxAmount must be a wei string";
+      }
+      const legacyPeriods = new Set(["tx", "transaction", "day", "daily", "week", "weekly"]);
+      if (
+        Object.hasOwn(config, "period") &&
+        (typeof config.period !== "string" || !legacyPeriods.has(config.period))
+      ) {
+        return "spending-limit.period must be tx, transaction, day, daily, week, or weekly";
+      }
+      if (Object.hasOwn(config, "period") && !isWeiString(config.maxAmount)) {
+        return "spending-limit.period requires maxAmount";
+      }
+      const hasWeiLimit = weiFields.some(
+        (field) => Object.hasOwn(config, field) && isWeiString(config[field]),
+      );
+      const hasUsdLimit = usdFields.some(
+        (field) => Object.hasOwn(config, field) && isNonNegativeFiniteNumber(config[field]),
+      );
+      const hasLegacyLimit = Object.hasOwn(config, "maxAmount") && isWeiString(config.maxAmount);
+      if (!hasWeiLimit && !hasUsdLimit && !hasLegacyLimit) {
+        return "spending-limit requires at least one wei or USD limit";
       }
       return null;
     }
