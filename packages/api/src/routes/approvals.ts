@@ -53,7 +53,7 @@ const MAX_APPROVAL_LIST_LIMIT = 200;
 const MAX_APPROVAL_LIST_OFFSET = 10_000;
 const MAX_APPROVAL_TEXT_LENGTH = 1_000;
 const MAX_APPROVAL_AGENT_ID_LENGTH = 64;
-const MAX_APPROVAL_CURSOR_ID_LENGTH = 128;
+const MAX_APPROVAL_CURSOR_ID_LENGTH = 64;
 
 const approvalTransactionMatchesQueue = sql`${transactions.agentId} = ${approvalQueue.agentId}`;
 // JSON/JavaScript Date values retain milliseconds while PostgreSQL timestamps
@@ -139,14 +139,14 @@ function isNonNegativeIntegerString(value: unknown): value is string {
 }
 
 function parseNonNegativeIntegerParam(value: string | undefined, fallback: number): number | null {
-  if (value === undefined || value === "") return fallback;
+  if (value === undefined) return fallback;
   if (!/^\d+$/.test(value)) return null;
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
 function parseApprovalListParams(c: Context<{ Variables: AppVariables }>) {
-  const rawStatus = c.req.query("status") || "pending";
+  const rawStatus = c.req.query("status") ?? "pending";
   if (!APPROVAL_STATUS_FILTERS.has(rawStatus as ApprovalStatusFilter)) {
     return { ok: false as const, error: "status must be pending, approved, rejected, or all" };
   }
@@ -171,7 +171,10 @@ function parseApprovalListParams(c: Context<{ Variables: AppVariables }>) {
   const agentId = rawAgentId?.trim();
   if (
     rawAgentId !== undefined &&
-    (!agentId || agentId.length > MAX_APPROVAL_AGENT_ID_LENGTH || agentId !== rawAgentId)
+    (!agentId ||
+      agentId.length > MAX_APPROVAL_AGENT_ID_LENGTH ||
+      agentId !== rawAgentId ||
+      /[\u0000-\u001f\u007f]/.test(agentId))
   ) {
     return {
       ok: false as const,
@@ -196,7 +199,8 @@ function parseApprovalListParams(c: Context<{ Variables: AppVariables }>) {
     const parsedCursorRequestedAt = new Date(rawCursorRequestedAt);
     if (
       Number.isNaN(parsedCursorRequestedAt.getTime()) ||
-      parsedCursorRequestedAt.toISOString() !== rawCursorRequestedAt
+      parsedCursorRequestedAt.toISOString() !== rawCursorRequestedAt ||
+      !/^(?!0000-)\d{4}-/.test(rawCursorRequestedAt)
     ) {
       return { ok: false as const, error: "cursorRequestedAt must be an ISO 8601 timestamp" };
     }
@@ -206,7 +210,8 @@ function parseApprovalListParams(c: Context<{ Variables: AppVariables }>) {
     if (
       rawCursorId.length === 0 ||
       rawCursorId.length > MAX_APPROVAL_CURSOR_ID_LENGTH ||
-      rawCursorId.trim() !== rawCursorId
+      rawCursorId.trim() !== rawCursorId ||
+      /[\u0000-\u001f\u007f]/.test(rawCursorId)
     ) {
       return {
         ok: false as const,

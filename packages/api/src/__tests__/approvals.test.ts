@@ -33,6 +33,7 @@ const OWNER_USER_ID = crypto.randomUUID();
 
 let validApiKey: string;
 let adminToken: string;
+let futureMfaToken: string;
 
 // ─── Setup ────────────────────────────────────────────────────────────────
 
@@ -67,6 +68,16 @@ beforeAll(async () => {
     mfaVerifiedAt: Date.now(),
     mfaMethod: "totp",
   });
+  futureMfaToken = await createSessionToken(
+    "0x0000000000000000000000000000000000000001",
+    TEST_TENANT,
+    {
+      userId: OWNER_USER_ID,
+      email: `approvals-${RUN_ID}@example.test`,
+      mfaVerifiedAt: Date.now() + 24 * 60 * 60_000,
+      mfaMethod: "totp",
+    },
+  );
 
   await db
     .insert(agents)
@@ -203,6 +214,17 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
       expect(body.error).toContain("owner or admin user session");
     });
 
+    it("rejects a future-dated MFA assertion", async () => {
+      const res = await fetch(`${BASE_URL}/approvals`, {
+        headers: {
+          ...adminHeaders(),
+          Authorization: `Bearer ${futureMfaToken}`,
+        },
+      });
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toContain("recent MFA");
+    });
+
     it("lists pending approvals for tenant", async () => {
       const res = await fetch(`${BASE_URL}/approvals`, {
         headers: adminHeaders(),
@@ -256,8 +278,8 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
       ).toBe(true);
     });
 
-    it("rejects empty, padded, and overlong agent filters", async () => {
-      for (const agentId of ["", ` ${TEST_AGENT}`, "x".repeat(65)]) {
+    it("rejects empty, padded, overlong, and control-byte agent filters", async () => {
+      for (const agentId of ["", ` ${TEST_AGENT}`, "x".repeat(65), `${TEST_AGENT}\0`]) {
         const res = await fetch(`${BASE_URL}/approvals?agentId=${encodeURIComponent(agentId)}`, {
           headers: adminHeaders(),
         });
@@ -325,7 +347,18 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
         "cursorId=approval-1",
         "cursorRequestedAt=not-a-date&cursorId=approval-1",
         "cursorRequestedAt=2026-01-01T00%3A00%3A00.000Z&cursorId=approval-1&offset=1",
+        "cursorRequestedAt=0000-01-01T00%3A00%3A00.000Z&cursorId=approval-1",
+        "cursorRequestedAt=%2B010000-01-01T00%3A00%3A00.000Z&cursorId=approval-1",
+        "cursorRequestedAt=2026-01-01T00%3A00%3A00.000Z&cursorId=approval%00bad",
+        `cursorRequestedAt=2026-01-01T00%3A00%3A00.000Z&cursorId=${"x".repeat(65)}`,
       ]) {
+        const res = await fetch(`${BASE_URL}/approvals?${query}`, { headers: adminHeaders() });
+        expect(res.status).toBe(400);
+      }
+    });
+
+    it("rejects explicitly empty status, limit, and offset parameters", async () => {
+      for (const query of ["status=", "limit=", "offset="]) {
         const res = await fetch(`${BASE_URL}/approvals?${query}`, { headers: adminHeaders() });
         expect(res.status).toBe(400);
       }
