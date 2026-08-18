@@ -293,10 +293,21 @@ describe("SEC-081 enterprise backup service keeps the DSN out of container env a
       // With no slash, libpq's raw-userinfo extension is indistinguishable
       // from an @ in a query value. Reject rather than leak either reading.
       "postgresql://steward:p?ss@postgres:5432",
+      // A raw slash terminates the authority before the apparent userinfo
+      // delimiter; multiple raw delimiters are likewise not uniquely parseable.
+      // Neither secret-bearing input may survive into pg_dump's argv.
+      "postgresql://steward:slash-secret/part@postgres:5432/steward",
+      "postgresql://steward:first-secret@second-secret@postgres:5432/steward",
+      // Steward's database client requires URI form. Passing libpq's alternate
+      // keyword/value form through unchanged would expose password= in argv.
+      "host=postgres dbname=steward user=steward password=keyword-secret",
     ]) {
-      const result = runParser(malformed);
-      expect(result.exitCode).not.toBe(0);
-      expect(result.stderr.toString()).not.toContain(malformed);
+      for (const shell of ["sh", "dash"]) {
+        const result = runParser(malformed, shell);
+        expect(result.exitCode).not.toBe(0);
+        expect(result.stdout.toString()).toBe("");
+        expect(result.stderr.toString()).not.toContain(malformed);
+      }
     }
   });
 });
