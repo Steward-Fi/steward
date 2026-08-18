@@ -13,9 +13,9 @@ const cleanResult = {
   remaining: false,
 };
 
-const disposers: Array<() => void> = [];
-afterEach(() => {
-  while (disposers.length) disposers.pop()?.();
+const disposers: Array<() => Promise<void>> = [];
+afterEach(async () => {
+  while (disposers.length) await disposers.pop()?.();
 });
 
 describe("Google credential lifecycle scheduler", () => {
@@ -39,18 +39,37 @@ describe("Google credential lifecycle scheduler", () => {
     expect(calls).toBe(1);
     expect(peak).toBe(1);
     expect(getGoogleCredentialLifecycleSchedulerHealth().lastSucceededAt).toBeNumber();
-    stop();
+    await stop();
     await new Promise((resolve) => setTimeout(resolve, 1_020));
     expect(calls).toBe(1);
   });
 
-  test("records unresolved recovery without treating the sweep as clean", async () => {
+  test("drains a clean bounded backlog immediately and awaits shutdown", async () => {
+    let calls = 0;
+    const stop = startGoogleCredentialLifecycleScheduler({
+      intervalMs: 60_000,
+      sweep: async () => ({ ...cleanResult, claimed: 1, remaining: ++calls === 1 }),
+    });
+    disposers.push(stop);
+    for (let attempt = 0; attempt < 100 && calls < 2; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    await stop();
+    expect(calls).toBe(2);
+  });
+
+  test("records unresolved recovery without tight-looping it", async () => {
+    let calls = 0;
     const stop = startGoogleCredentialLifecycleScheduler({
       intervalMs: 1_000,
-      sweep: async () => ({ ...cleanResult, needsAttention: 1 }),
+      sweep: async () => {
+        calls += 1;
+        return { ...cleanResult, needsAttention: 1 };
+      },
     });
     disposers.push(stop);
     await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls).toBe(1);
     expect(getGoogleCredentialLifecycleSchedulerHealth().lastError).toContain("unresolved");
   });
 });

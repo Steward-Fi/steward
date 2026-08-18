@@ -106,6 +106,25 @@ export async function runWorkerUpstreamCredentialLeaseSweep(
   return sweep();
 }
 
+export async function runWorkerGoogleCredentialLifecycleSweep(
+  env: Env,
+  options?: { sweep?: () => Promise<unknown> },
+): Promise<unknown | null> {
+  hydrateProcessEnv(env);
+  if (
+    process.env.STEWARD_GOOGLE_LIFECYCLE_SWEEPER === "false" ||
+    !process.env.GOOGLE_PROVIDER_CLIENT_ID ||
+    !process.env.GOOGLE_PROVIDER_CLIENT_SECRET
+  ) {
+    return null;
+  }
+  const sweep =
+    options?.sweep ??
+    (await import("./services/provider-google-lifecycle-scheduler"))
+      .runGoogleCredentialLifecycleRecoverySweep;
+  return sweep();
+}
+
 /**
  * Pull Worker `env` bindings into `globalThis.process.env` so any code that
  * reads `process.env.X` at request time (e.g. JWT secret, RPC URL) can find it.
@@ -239,6 +258,11 @@ export default {
     env: Env,
     ctx: { waitUntil(promise: Promise<unknown>): void },
   ) {
-    ctx.waitUntil(runWorkerUpstreamCredentialLeaseSweep(env));
+    ctx.waitUntil(
+      Promise.all([
+        runWorkerUpstreamCredentialLeaseSweep(env),
+        runWorkerGoogleCredentialLifecycleSweep(env),
+      ]),
+    );
   },
 };

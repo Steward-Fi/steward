@@ -33,12 +33,16 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   and,
+  asc,
   eq,
   getDb,
   inArray,
+  lte,
+  or,
   providerAccounts,
   providerGoogleCredentialLifecycles,
   type Secret,
+  secretRoutes,
   secrets,
   sql,
   withTenantAuditedTransaction,
@@ -1956,6 +1960,19 @@ export async function reconcileGoogleRefreshLifecycle(
         current.secretName,
         JSON.stringify(payload),
       );
+      // Keep every credential route on the same versioned lineage. Rotating
+      // only provider_accounts would leave governed routes decrypting the
+      // superseded secret. Bumping route revision intentionally invalidates
+      // already-minted execution authorizations.
+      await tx
+        .update(secretRoutes)
+        .set({ secretId: meta.id })
+        .where(
+          and(
+            eq(secretRoutes.tenantId, input.tenantId),
+            eq(secretRoutes.secretId, account.credentialSecretId),
+          ),
+        );
       const [updated] = await tx
         .update(providerAccounts)
         .set({

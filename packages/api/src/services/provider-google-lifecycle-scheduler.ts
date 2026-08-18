@@ -1,5 +1,6 @@
 import { SecretVault } from "@stwd/vault";
 import {
+  type GoogleCredentialLifecycleSweepResult,
   resolveGoogleConnectConfig,
   runGoogleCredentialLifecycleSweep,
 } from "./provider-google-connect";
@@ -29,7 +30,7 @@ export function getGoogleCredentialLifecycleSchedulerHealth(): GoogleCredentialL
   return { ...health };
 }
 
-function intervalMs(): number {
+function configuredInterval(): number {
   const raw = process.env.STEWARD_GOOGLE_LIFECYCLE_SWEEP_INTERVAL_MS;
   if (raw === undefined) return DEFAULT_INTERVAL_MS;
   const parsed = Number(raw);
@@ -41,30 +42,31 @@ function intervalMs(): number {
   return parsed;
 }
 
-async function defaultSweep() {
-  const { MASTER_PASSWORD } = await import("./context");
+export async function runGoogleCredentialLifecycleRecoverySweep(): Promise<GoogleCredentialLifecycleSweepResult> {
+  const password = process.env.STEWARD_MASTER_PASSWORD?.trim();
+  if (!password) throw new Error("STEWARD_MASTER_PASSWORD is required for Google OAuth recovery");
   return runGoogleCredentialLifecycleSweep({
-    vault: new SecretVault(MASTER_PASSWORD),
+    vault: new SecretVault(password),
     config: resolveGoogleConnectConfig(),
   });
 }
 
-/** Start the immediate and periodic bounded Google OAuth lifecycle recovery. */
+/** Start immediate, bounded Google OAuth recovery and drain clean backlogs without overlap. */
 export function startGoogleCredentialLifecycleScheduler(options?: {
   intervalMs?: number;
-  sweep?: typeof defaultSweep;
-}): () => void {
+  sweep?: () => Promise<GoogleCredentialLifecycleSweepResult>;
+}): () => Promise<void> {
   if (process.env.STEWARD_GOOGLE_LIFECYCLE_SWEEPER === "false") {
     Object.assign(health, { enabled: false, lastError: "scheduler disabled" });
-    return () => {};
+    return async () => {};
   }
-  const sweep = options?.sweep ?? defaultSweep;
-  const every = options?.intervalMs ?? intervalMs();
+  const every = options?.intervalMs ?? configuredInterval();
   if (!Number.isSafeInteger(every) || every < 1_000 || every > MAX_INTERVAL_MS) {
     throw new Error(
       `Google lifecycle scheduler interval must be between 1000 and ${MAX_INTERVAL_MS}`,
     );
   }
+  const sweep = options?.sweep ?? runGoogleCredentialLifecycleRecoverySweep;
   Object.assign(health, {
     enabled: true,
     inFlight: false,
@@ -73,10 +75,15 @@ export function startGoogleCredentialLifecycleScheduler(options?: {
     lastFailedAt: null,
     lastError: null,
   });
-  let stopped = false;
   let active: Promise<void> | undefined;
+  let stopped = false;
+  let rerunRequested = false;
   const tick = () => {
-    if (stopped || active) return;
+    if (stopped) return;
+    if (active) {
+      rerunRequested = true;
+      return;
+    }
     health.inFlight = true;
     health.lastStartedAt = Date.now();
     active = sweep()
@@ -86,6 +93,7 @@ export function startGoogleCredentialLifecycleScheduler(options?: {
           result.needsAttention > 0 || result.failed > 0
             ? `recovery left ${result.needsAttention + result.failed} lifecycle(s) unresolved`
             : null;
+        rerunRequested ||= result.remaining;
       })
       .catch((error) => {
         health.lastFailedAt = Date.now();
@@ -95,14 +103,19 @@ export function startGoogleCredentialLifecycleScheduler(options?: {
       .finally(() => {
         health.inFlight = false;
         active = undefined;
+        if (rerunRequested && !stopped) {
+          rerunRequested = false;
+          queueMicrotask(tick);
+        }
       });
   };
   const timer = setInterval(tick, every);
   timer.unref?.();
   tick();
-  return () => {
+  return async () => {
     stopped = true;
     clearInterval(timer);
     health.enabled = false;
+    await active;
   };
 }

@@ -19,12 +19,14 @@ import {
   test,
 } from "bun:test";
 import {
+  agents,
   auditEvents as auditEventsTable,
   closeDb,
   getDb,
   providerAccounts,
   providerGoogleCredentialLifecycles,
   providerRoleBindings,
+  secretRoutes,
   secrets,
   tenants,
   users,
@@ -71,6 +73,7 @@ const VIEWER = "10000000-0000-4000-8000-0000000000a3";
 const OUTSIDER = "10000000-0000-4000-8000-0000000000a4";
 const WORKSPACE = "20000000-0000-4000-8000-0000000000b1";
 const WORKSPACE_OTHER = "20000000-0000-4000-8000-0000000000b2";
+const AGENT = "agent-google-connect-test";
 const ADMIN_BINDING = "30000000-0000-4000-8000-0000000000c1";
 const APPROVER_BINDING = "30000000-0000-4000-8000-0000000000c2";
 const VIEWER_BINDING = "30000000-0000-4000-8000-0000000000c3";
@@ -230,6 +233,12 @@ async function seed() {
     { userId: VIEWER, tenantId: TENANT, role: "member" },
     // OUTSIDER is deliberately NOT a tenant member.
   ]);
+  await db.insert(agents).values({
+    id: AGENT,
+    tenantId: TENANT,
+    name: "Google connect test agent",
+    walletAddress: `0x${"7".repeat(40)}`,
+  });
   await db.insert(workspaces).values([
     {
       id: WORKSPACE,
@@ -594,13 +603,12 @@ describe("connect", () => {
     expect(JSON.stringify(encryptedHandle)).not.toContain("refresh-initial");
     expect(await vault.decryptSecret(TENANT, encryptedHandle.id)).toContain("refresh-initial");
     await expect(
-      reconcileGoogleCredentialRevocation({
-        tenantId: TENANT,
-        lifecycleId: lifecycle.id,
+      runGoogleCredentialLifecycleSweep({
         vault,
         config: CONFIG,
+        now: new Date(Date.now() + 20_000),
       }),
-    ).resolves.toBe("revoked");
+    ).resolves.toMatchObject({ processed: 1, revoked: 1, attention: 0 });
     await expect(
       reconcileGoogleCredentialRevocation({
         tenantId: TENANT,
@@ -1094,6 +1102,19 @@ describe("refresh", () => {
   test("force refresh rotates token to a new credential version + audit", async () => {
     const store = new MemoryConnectStore();
     const { completed } = await connectHappy(store);
+    const [beforeAccount] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    const route = await vault.createRoute(TENANT, beforeAccount.credentialSecretId as string, {
+      agentId: AGENT,
+      hostPattern: "gmail.googleapis.com",
+      pathPattern: "/gmail/v1/users/me/messages/send",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "authorization",
+      injectFormat: "Bearer {value}",
+    });
 
     const fake = installFakeX();
     const result = await refreshGoogleProviderCredential({
@@ -1111,6 +1132,16 @@ describe("refresh", () => {
     const cred = await decryptCredential(completed.providerAccountId);
     expect(cred.accessToken).toBe("access-refreshed-1");
     expect(cred.refreshToken).toBe("refresh-rotated-1");
+    const [afterAccount] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    const [updatedRoute] = await getDb()
+      .select()
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, route.id));
+    expect(updatedRoute.secretId).toBe(afterAccount.credentialSecretId);
+    expect(updatedRoute.authorityRevision).toBeGreaterThan(1);
     fake.restore();
 
     const events = await readAuditActions(TENANT);
@@ -1274,8 +1305,12 @@ describe("refresh", () => {
       .where(eq(providerGoogleCredentialLifecycles.kind, "refresh_rotation"));
     expect(lifecycle.state).toBe("inflight");
     await expect(
-      reconcileGoogleRefreshLifecycle({ ...refreshInput, lifecycleId: lifecycle.id }),
-    ).rejects.toMatchObject({ code: "GOOGLE_CREDENTIAL_NEEDS_ATTENTION" });
+      runGoogleCredentialLifecycleSweep({
+        vault,
+        config: CONFIG,
+        now: new Date(Date.now() + 20_000),
+      }),
+    ).resolves.toMatchObject({ processed: 1, attention: 1 });
     expect(fake.counters.refresh).toBe(0);
   });
 

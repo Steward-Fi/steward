@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { hydrateProcessEnv, runWorkerUpstreamCredentialLeaseSweep } from "../worker";
+import {
+  hydrateProcessEnv,
+  runWorkerGoogleCredentialLifecycleSweep,
+  runWorkerUpstreamCredentialLeaseSweep,
+} from "../worker";
 
 test("Worker hydration cannot be overridden by a STEWARD_RUNTIME binding", () => {
   const previous = process.env.STEWARD_RUNTIME;
@@ -45,4 +49,24 @@ test("Worker scheduled recovery is inert without the capabilities plugin", async
   );
   expect(calls).toBe(0);
   expect(result).toBeNull();
+});
+
+test("Worker cron runs Google lifecycle recovery when provider credentials are configured", async () => {
+  let calls = 0;
+  const result = await runWorkerGoogleCredentialLifecycleSweep(
+    {
+      DATABASE_URL: "postgresql://worker.invalid/steward",
+      GOOGLE_PROVIDER_CLIENT_ID: "provider-client",
+      GOOGLE_PROVIDER_CLIENT_SECRET: "provider-secret",
+      STEWARD_MASTER_PASSWORD: "worker-master",
+    },
+    {
+      sweep: async () => {
+        calls += 1;
+        return { processed: 2, adopted: 1, revoked: 1, attention: 0, remaining: false };
+      },
+    },
+  );
+  expect(calls).toBe(1);
+  expect(result).toEqual({ processed: 2, adopted: 1, revoked: 1, attention: 0, remaining: false });
 });
