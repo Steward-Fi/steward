@@ -60,6 +60,7 @@ type Posture =
   | "session-with-mfa"
   // MFA verified 10 minutes ago — outside the 5-minute recency window (SEC-034).
   | "session-stale-mfa"
+  | "session-future-mfa"
   // agent's own bearer, scoped to AGENT_ID — the autonomous self-service path.
   | "agent-self"
   // agent bearer scoped to a DIFFERENT agent — must be refused.
@@ -90,6 +91,7 @@ async function makeApp(posture: Posture) {
       c.set("authType", "session-jwt");
       if (posture === "session-with-mfa") c.set("sessionMfaVerifiedAt", Date.now());
       if (posture === "session-stale-mfa") c.set("sessionMfaVerifiedAt", Date.now() - 10 * 60_000);
+      if (posture === "session-future-mfa") c.set("sessionMfaVerifiedAt", Date.now() + 60 * 60_000);
     }
     await next();
   });
@@ -254,6 +256,12 @@ describe("trade session control-plane gates (real routes)", () => {
       .from(tradeSessions)
       .where(eq(tradeSessions.id, SEEDED_SESSION_ID));
     expect(row.status).toBe("active");
+  });
+
+  it("SEC-034: a future-dated MFA timestamp fails closed", async () => {
+    const res = await post(await makeApp("session-future-mfa"), "/sessions", CREATE_BODY);
+    expect(res.status).toBe(403);
+    expect(await errorOf(res)).toBe("Trade session management requires recent MFA verification");
   });
 
   it("revoke session: allows api-key while refusing owner-session-without-MFA, leaving the seeded session active", async () => {
