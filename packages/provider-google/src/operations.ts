@@ -17,7 +17,7 @@ export const isGoogleOperationKey = (v: unknown): v is GoogleOperationKey =>
 export interface GoogleActionBuild {
   operationKey: GoogleOperationKey;
   method: "GET" | "POST";
-  risk: "read" | "write";
+  risk: "read" | "consequential";
   action: GoogleCanonicalActionV1;
   safeSummary: Record<string, unknown>;
   policyArgs: Record<string, unknown>;
@@ -130,7 +130,7 @@ function gmail(raw: unknown): GoogleActionBuild {
   return {
     operationKey: "google.gmail.messages.send",
     method: "POST",
-    risk: "write",
+    risk: "consequential",
     action,
     safeSummary: {
       operation: "google.gmail.messages.send",
@@ -212,7 +212,7 @@ function insert(raw: unknown): GoogleActionBuild {
   return {
     operationKey: "google.calendar.events.insert",
     method: "POST",
-    risk: "write",
+    risk: "consequential",
     action,
     safeSummary: {
       operation: "google.calendar.events.insert",
