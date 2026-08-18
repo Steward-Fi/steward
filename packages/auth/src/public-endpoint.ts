@@ -14,11 +14,15 @@ export const BLOCKED_PUBLIC_ENDPOINT_DNS_SUFFIXES = [
   "alt",
 ] as const;
 function ipv4ToUint32(address: string): number | null {
-  const octets = address.split(".").map((part) => Number(part));
-  if (
-    octets.length !== 4 ||
-    octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)
-  ) {
+  const parts = address.split(".");
+  // DNS APIs return canonical dotted-decimal addresses. Keep this portable
+  // parser equally strict: Number() would otherwise accept empty octets,
+  // signs, exponents, whitespace, and ambiguous leading-zero forms.
+  if (parts.length !== 4 || parts.some((part) => !/^(?:0|[1-9]\d{0,2})$/.test(part))) {
+    return null;
+  }
+  const octets = parts.map((part) => Number(part));
+  if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) {
     return null;
   }
   return (((octets[0] * 256 + octets[1]) * 256 + octets[2]) * 256 + octets[3]) >>> 0;
@@ -151,7 +155,7 @@ function isPublicIpv6(address: string): boolean {
 export function isPublicInternetAddress(address: string, family?: number): boolean {
   // Zone identifiers are interface-local routing hints, not public Internet
   // destinations. Resolvers should not return them; fail closed if one does.
-  if (address.includes("%")) return false;
+  if (address.includes("%") || address !== address.trim()) return false;
   const normalized = address
     .toLowerCase()
     .replace(/^\[|\]$/g, "")

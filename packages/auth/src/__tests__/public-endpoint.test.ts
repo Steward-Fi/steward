@@ -1,11 +1,15 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
+import * as dns from "node:dns";
 import {
   assertPublicHttpsEndpoint,
   assertPublicInternetAddress,
   BLOCKED_PUBLIC_ENDPOINT_DNS_SUFFIXES,
   isPublicInternetAddress,
 } from "../public-endpoint";
-import { assertPinnedDnsTransportSupported } from "../public-endpoint-node";
+import {
+  assertPinnedDnsTransportSupported,
+  createPublicInternetLookup,
+} from "../public-endpoint-node";
 
 describe("public Internet destination classifier", () => {
   it("rejects IPv4-compatible, translated, and mapped private IPv6 targets", () => {
@@ -68,12 +72,42 @@ describe("public Internet destination classifier", () => {
   });
 
   it("fails closed on malformed addresses and resolver family mismatches", () => {
-    expect(isPublicInternetAddress("not-an-ip")).toBe(false);
+    for (const address of [
+      "not-an-ip",
+      "01.2.3.4",
+      "+1.2.3.4",
+      "1e0.2.3.4",
+      "1..2.3",
+      " 8.8.8.8 ",
+    ]) {
+      expect(isPublicInternetAddress(address), address).toBe(false);
+    }
     expect(isPublicInternetAddress("8.8.8.8", 6)).toBe(false);
     expect(isPublicInternetAddress("2606:4700:4700::1111%en0", 6)).toBe(false);
     expect(() => assertPublicInternetAddress("8.8.8.8", 0, "OIDC token endpoint")).toThrow(
       "OIDC token endpoint must resolve to a public address",
     );
+  });
+});
+
+describe("connect-time public DNS lookup", () => {
+  it("rejects a Happy Eyeballs result when any candidate is non-public", async () => {
+    const dnsSpy = spyOn(dns, "lookup").mockImplementation(((_hostname, _options, callback) => {
+      callback(null, [
+        { address: "8.8.8.8", family: 4 },
+        { address: "127.0.0.1", family: 4 },
+      ]);
+    }) as typeof dns.lookup);
+    try {
+      const lookup = createPublicInternetLookup("OIDC token endpoint");
+      const error = await new Promise<Error | null>((resolve) => {
+        lookup("idp.example.com", { all: true }, (lookupError) => resolve(lookupError));
+      });
+      expect(error?.message).toBe("OIDC token endpoint must resolve to a public address");
+      expect(dnsSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      dnsSpy.mockRestore();
+    }
   });
 });
 
