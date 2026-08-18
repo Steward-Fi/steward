@@ -294,6 +294,119 @@ jobs:
         working-directory: packages/eliza-plugin
         run: bun run test
 
+  unit-agent-trader:
+    # packages/agent-trader ships real src/__tests__ coverage but no root-level
+    # `scripts.test`, so run it explicitly from the package directory where its
+    # workspace links resolve correctly.
+    name: Unit Tests (packages/agent-trader)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build workspace dependencies
+        run: bunx turbo run build --filter=@stwd/agent-trader...
+
+      - name: Test packages/agent-trader
+        working-directory: packages/agent-trader
+        run: bun test src/__tests__
+
+  unit-android:
+    name: Unit Tests (packages/android)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Java SDK dependency
+        run: mvn -B -f packages/java/pom.xml install -DskipTests
+      - name: Test Android SDK
+        run: mvn -B -f packages/android/pom.xml test
+
+  unit-csharp:
+    name: Unit Tests (packages/csharp)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test C# SDK
+        # Steward.Tests is a dependency-free executable harness, not a VSTest
+        # project. `dotnet test` only built it and reported success with zero
+        # tests; run the harness so assertion failures reach the job status.
+        run: dotnet run --project packages/csharp/tests/Steward.Tests/Steward.Tests.csproj
+
+  unit-go:
+    name: Unit Tests (packages/go)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test Go SDK
+        working-directory: packages/go
+        run: go test ./...
+
+  unit-java:
+    name: Unit Tests (packages/java)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test Java SDK
+        run: mvn -B -f packages/java/pom.xml test
+
+  unit-python:
+    name: Unit Tests (packages/python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test Python SDK
+        run: PYTHONPATH=packages/python python3 -m unittest discover -s packages/python/tests
+
+  unit-ruby:
+    name: Unit Tests (packages/ruby)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test Ruby SDK
+        run: ruby -Ipackages/ruby/lib -e 'Dir["packages/ruby/test/**/*_test.rb"].sort.each { |file| require File.expand_path(file) }'
+
+  unit-rust:
+    name: Unit Tests (packages/rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test Rust SDK
+        run: cargo test --locked --manifest-path packages/rust/Cargo.toml
+
+  unit-swift:
+    name: Unit Tests (packages/swift)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test Swift SDK
+        run: swift test --package-path packages/swift
+
   unit-signer-frost:
     # The FROST tests build and exercise the real Rust threshold-signing
     # sidecar. GitHub's Ubuntu image includes stable Rust; a dedicated job
@@ -358,6 +471,33 @@ jobs:
       - name: Test Flutter SDK
         working-directory: packages/flutter
         run: flutter test
+
+  unit-web:
+    # web/src contains Bun-driven unit suites that are distinct from the Worker
+    # build and the Playwright trust-ux checks above. Keep them explicit so
+    # adding a source-level test cannot silently bypass CI.
+    name: Unit Tests (web)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build workspace dependencies
+        run: bunx turbo run build --filter=@stwd/react --filter=@stwd/sdk --filter=@stwd/shared
+
+      - name: Test web/src
+        working-directory: web
+        run: bun test src
 
   unit-redis:
     name: Unit Tests (packages/redis)
