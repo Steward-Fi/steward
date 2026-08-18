@@ -11,6 +11,7 @@ import {
   isNull,
   tenants,
 } from "@stwd/db";
+import { generatePrivateKey } from "viem/accounts";
 import type {
   ExternalKeyCustodyProvider,
   ExternalKeyHandleImportRequest,
@@ -32,6 +33,8 @@ const suffix = crypto.randomUUID().replaceAll("-", "");
 const tenantId = `custody-race-tenant-${suffix}`;
 const agentId = `custody-race-agent-${suffix}`;
 const restoreFirstAgentId = `custody-race-restore-first-${suffix}`;
+const externalBeforeImportAgentId = `race-external-first-${suffix}`;
+const importBeforeExternalAgentId = `race-local-first-${suffix}`;
 const blocker = databaseUrl ? createPostgresClient(databaseUrl) : null;
 const inspector = databaseUrl ? createPostgresClient(databaseUrl) : null;
 
@@ -203,6 +206,125 @@ suite("custody transitions across real PostgreSQL connections", () => {
     ).toHaveLength(0);
   });
 
+  test("an external registration queued first prevents a concurrent EVM import from creating local keys", async () => {
+    const db = getDb();
+    const { vault: localVault, address } = await seedBareRecoverableAgent(
+      externalBeforeImportAgentId,
+    );
+    const heldLock = await holdCustodyLock(externalBeforeImportAgentId);
+
+    const provider = new RealPgRaceProvider();
+    const externalVault = new Vault({
+      masterPassword: MASTER_PASSWORD,
+      externalKeyCustodyProvider: provider,
+    });
+    const externalImport = externalVault.importExternalKeyHandle({
+      tenantId,
+      agentId: externalBeforeImportAgentId,
+      chainFamily: "evm",
+      address,
+      handle: { providerId: provider.id, keyId: `external-before-import-${suffix}` },
+    });
+    const firstWaiters = await waitForBlockedAdvisoryConnections(1);
+
+    const localImport = localVault.importKey(
+      tenantId,
+      externalBeforeImportAgentId,
+      generatePrivateKey(),
+      "evm",
+    );
+    const allWaiters = await waitForBlockedAdvisoryConnections(2);
+    expect(new Set(allWaiters).size).toBeGreaterThanOrEqual(2);
+    expect(allWaiters).toEqual(expect.arrayContaining(firstWaiters));
+
+    heldLock.release();
+    await heldLock.done;
+    const [externalResult, localResult] = await Promise.allSettled([externalImport, localImport]);
+    expect(externalResult.status).toBe("fulfilled");
+    expect(localResult.status).toBe("rejected");
+    if (localResult.status === "rejected") {
+      expect(String(localResult.reason)).toContain("external-custody");
+    }
+    expect(provider.registrationCalls).toBe(1);
+    expect(
+      await db
+        .select()
+        .from(encryptedKeys)
+        .where(eq(encryptedKeys.agentId, externalBeforeImportAgentId)),
+    ).toHaveLength(0);
+    expect(
+      await db
+        .select()
+        .from(encryptedChainKeys)
+        .where(eq(encryptedChainKeys.agentId, externalBeforeImportAgentId)),
+    ).toHaveLength(0);
+  });
+
+  test("an EVM import queued first makes external registration revalidate and fail closed", async () => {
+    const db = getDb();
+    const { vault: localVault, address } = await seedBareRecoverableAgent(
+      importBeforeExternalAgentId,
+    );
+    const heldLock = await holdCustodyLock(importBeforeExternalAgentId);
+
+    const localImport = localVault.importKey(
+      tenantId,
+      importBeforeExternalAgentId,
+      generatePrivateKey(),
+      "evm",
+    );
+    const firstWaiters = await waitForBlockedAdvisoryConnections(1);
+
+    const provider = new RealPgRaceProvider();
+    const externalVault = new Vault({
+      masterPassword: MASTER_PASSWORD,
+      externalKeyCustodyProvider: provider,
+    });
+    const externalImport = externalVault.importExternalKeyHandle({
+      tenantId,
+      agentId: importBeforeExternalAgentId,
+      chainFamily: "evm",
+      address,
+      handle: { providerId: provider.id, keyId: `import-before-external-${suffix}` },
+    });
+    const allWaiters = await waitForBlockedAdvisoryConnections(2);
+    expect(new Set(allWaiters).size).toBeGreaterThanOrEqual(2);
+    expect(allWaiters).toEqual(expect.arrayContaining(firstWaiters));
+
+    heldLock.release();
+    await heldLock.done;
+    const [localResult, externalResult] = await Promise.allSettled([localImport, externalImport]);
+    expect(localResult.status).toBe("fulfilled");
+    expect(externalResult.status).toBe("rejected");
+    if (externalResult.status === "rejected") {
+      expect(String(externalResult.reason)).toContain("server-managed key");
+    }
+    expect(provider.registrationCalls).toBe(1);
+    expect(
+      await db
+        .select()
+        .from(encryptedKeys)
+        .where(eq(encryptedKeys.agentId, importBeforeExternalAgentId)),
+    ).toHaveLength(1);
+    expect(
+      await db
+        .select()
+        .from(encryptedChainKeys)
+        .where(eq(encryptedChainKeys.agentId, importBeforeExternalAgentId)),
+    ).toHaveLength(1);
+    const [wallet] = await db
+      .select({ metadata: agentWallets.metadata })
+      .from(agentWallets)
+      .where(
+        and(
+          eq(agentWallets.agentId, importBeforeExternalAgentId),
+          eq(agentWallets.chainFamily, "evm"),
+          isNull(agentWallets.venue),
+        ),
+      );
+    expect((wallet?.metadata as Record<string, unknown> | null)?.custody).not.toBe("external");
+  });
+
   test("a mnemonic restore queued first makes a concurrent external import revalidate and fail closed", async () => {
     const db = getDb();
     const { vault: localVault, address } = await seedBareRecoverableAgent(restoreFirstAgentId);
@@ -239,7 +361,7 @@ suite("custody transitions across real PostgreSQL connections", () => {
     expect(restoreResult.status).toBe("fulfilled");
     expect(externalResult.status).toBe("rejected");
     if (externalResult.status === "rejected") {
-      expect(String(externalResult.reason)).toContain("server-managed signing key");
+      expect(String(externalResult.reason)).toContain("server-managed key");
     }
     expect(provider.registrationCalls).toBe(1);
 
