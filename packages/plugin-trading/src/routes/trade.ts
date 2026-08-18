@@ -338,22 +338,40 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     return { allowed: true, resetMs: current.resetAt - now };
   }
 
+  type RouteIdempotency = {
+    conflict?: boolean;
+    inProgress?: boolean;
+    response?: TradeIdempotencyResponse;
+    claim?: () => Promise<RouteIdempotency>;
+    store?: (response: TradeIdempotencyResponse) => Promise<void>;
+    release?: () => Promise<void>;
+  };
+
+  function routeIdempotency(
+    check: Awaited<ReturnType<typeof hlIdempotencyStore.check>>,
+  ): RouteIdempotency {
+    return {
+      conflict: check.conflict,
+      inProgress: check.inProgress,
+      response: check.record,
+      claim: check.claim ? async () => routeIdempotency(await check.claim!()) : undefined,
+      store: check.store,
+      release: check.release,
+    };
+  }
+
   async function getIdempotency(
     tenantId: string,
     agentId: string,
     key: string | undefined,
     body: SubmitOrderBody,
-  ): Promise<{
-    conflict?: boolean;
-    response?: TradeIdempotencyResponse;
-    store?: (response: TradeIdempotencyResponse) => Promise<void>;
-  }> {
+  ): Promise<RouteIdempotency> {
     const check = await hlIdempotencyStore.check(
       `${tenantId}:${agentId}`,
       key,
       hashBody({ ...body, idempotencyKey: undefined }),
     );
-    return { conflict: check.conflict, response: check.record, store: check.store };
+    return routeIdempotency(check);
   }
 
   async function resolvePolicyLimitPx(
@@ -909,7 +927,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       return c.json<ApiResponse>({ ok: false, error: "Idempotency-Key is required" }, 400);
     }
 
-    const idempotency = await getIdempotency(tenantId, agentId, body.idempotencyKey, body);
+    let idempotency = await getIdempotency(tenantId, agentId, body.idempotencyKey, body);
     if (idempotency.conflict) {
       return c.json<ApiResponse>(
         { ok: false, error: "Idempotency key reused with a different body" },
@@ -919,9 +937,32 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (idempotency.response) {
       return tradeReplayResponse(c, idempotency.response);
     }
+    if (idempotency.inProgress) {
+      c.header("Retry-After", "1");
+      return c.json<ApiResponse>(
+        { ok: false, error: "Request with this idempotency key is in progress" },
+        409,
+      );
+    }
+    idempotency = idempotency.claim ? await idempotency.claim() : idempotency;
+    if (idempotency.conflict) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency key reused with a different body" },
+        409,
+      );
+    }
+    if (idempotency.response) return tradeReplayResponse(c, idempotency.response);
+    if (idempotency.inProgress) {
+      c.header("Retry-After", "1");
+      return c.json<ApiResponse>(
+        { ok: false, error: "Request with this idempotency key is in progress" },
+        409,
+      );
+    }
 
     const session = await getSessionManager().getActive(tenantId, body.sessionId);
     if (!session || session.agentId !== agentId || session.venue !== "hyperliquid") {
+      await idempotency.release?.();
       return c.json<ApiResponse>({ ok: false, error: "Active Hyperliquid session required" }, 403);
     }
     const coin = body.coin ?? body.asset;
@@ -939,7 +980,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         asset: coin,
         reason,
       });
-      return c.json({ code: "policy-violation", reason }, 400);
+      const envelope: TradeIdempotencyResponse = {
+        status: 400,
+        body: { code: "policy-violation", reason },
+      };
+      await idempotency.store?.(envelope);
+      return c.json(envelope.body, envelope.status);
     }
 
     const builderPerp = isBuilderPerpSymbol(parsedAsset.data);
@@ -976,7 +1022,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         dailySpendUsd: session.dailySpendUsd,
         reason,
       });
-      return c.json({ code: "policy-violation", reason }, 400);
+      const envelope: TradeIdempotencyResponse = {
+        status: 400,
+        body: { code: "policy-violation", reason },
+      };
+      await idempotency.store?.(envelope);
+      return c.json(envelope.body, envelope.status);
     };
 
     const limitPx = body.limitPx ?? body.limitPrice;
@@ -986,10 +1037,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         ? !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(limitPx) || Number(limitPx) <= 0
         : !Number.isFinite(limitPx) || limitPx <= 0)
     ) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "limitPx must be a positive finite price" },
-        400,
-      );
+      const envelope: TradeIdempotencyResponse = {
+        status: 400,
+        body: { ok: false, error: "limitPx must be a positive finite price" },
+      };
+      await idempotency.store?.(envelope);
+      return c.json(envelope.body, envelope.status);
     }
     if (limitPx === undefined) {
       // SEC-114: marketable order without an explicit limit — the notional is
@@ -1145,7 +1198,32 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             builderPerp,
           });
         }
-        const signed = await adapter.signOrder(order);
+        let signed: Awaited<ReturnType<HyperliquidAdapter["signOrder"]>>;
+        try {
+          signed = await adapter.signOrder(order);
+        } catch (err) {
+          // Signing is local and no order reached the venue. Release both the
+          // spend reservation and idempotency claim so a corrected retry can
+          // execute instead of leaving a 24h pending tombstone.
+          await getSessionManager().releaseSpend({
+            tenantId,
+            id: session.id,
+            amountUsd: sizeUsd,
+          });
+          await idempotency.release?.();
+          await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
+            sessionId: session.id,
+            venue: "hyperliquid",
+            asset: parsedAsset.data,
+            sizeUsd,
+            reason: "pre-submit-sign-failed",
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return {
+            status: 400,
+            body: { ok: false, error: "Order could not be signed; not submitted" },
+          } satisfies TradeIdempotencyResponse;
+        }
         const activeAfterSign = await getSessionManager().getActive(tenantId, session.id);
         if (!activeAfterSign) {
           await getSessionManager().releaseSpend({
@@ -1291,17 +1369,13 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     agentId: string,
     key: string | undefined,
     body: PmSubmitOrderBody,
-  ): Promise<{
-    conflict?: boolean;
-    response?: TradeIdempotencyResponse;
-    store?: (response: TradeIdempotencyResponse) => Promise<void>;
-  }> {
+  ): Promise<RouteIdempotency> {
     const check = await pmIdempotencyStore.check(
       `${tenantId}:${agentId}`,
       key,
       hashBody({ ...body, idempotencyKey: undefined }),
     );
-    return { conflict: check.conflict, response: check.record, store: check.store };
+    return routeIdempotency(check);
   }
 
   async function enforcePolymarketOrderRateLimit(
@@ -1399,11 +1473,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     return key;
   }
 
-  function encryptPmCredsCacheValue(plaintext: string): string | null {
+  function encryptPmCredsCacheValue(plaintext: string, cacheKey: string): string | null {
     const key = pmCredsCacheEncryptionKey();
     if (!key) return null;
     const iv = randomBytes(12);
     const cipher = createCipheriv("aes-256-gcm", key, iv);
+    cipher.setAAD(Buffer.from(cacheKey, "utf8"));
     let ciphertext = cipher.update(plaintext, "utf8", "hex");
     ciphertext += cipher.final("hex");
     return `${PM_CREDS_CACHE_PREFIX}${JSON.stringify({
@@ -1416,7 +1491,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   // Returns null for anything that is not a valid envelope for THIS key —
   // including legacy plaintext entries — so the caller treats it as a cache
   // miss, re-derives, and overwrites with an encrypted value.
-  function decryptPmCredsCacheValue(stored: string): string | null {
+  function decryptPmCredsCacheValue(stored: string, cacheKey: string): string | null {
     if (!stored.startsWith(PM_CREDS_CACHE_PREFIX)) return null;
     const key = pmCredsCacheEncryptionKey();
     if (!key) return null;
@@ -1427,6 +1502,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         tag: string;
       };
       const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(payload.iv, "hex"));
+      decipher.setAAD(Buffer.from(cacheKey, "utf8"));
       decipher.setAuthTag(Buffer.from(payload.tag, "hex"));
       let plaintext = decipher.update(payload.ciphertext, "hex", "utf8");
       plaintext += decipher.final("utf8");
@@ -1539,7 +1615,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (redis) {
       try {
         const cached = await redis.get(cacheKey);
-        const cachedPlaintext = cached ? decryptPmCredsCacheValue(cached) : null;
+        const cachedPlaintext = cached ? decryptPmCredsCacheValue(cached, cacheKey) : null;
         if (cachedPlaintext) {
           const parsed = clobApiCredentialsSchema.safeParse(JSON.parse(cachedPlaintext));
           if (parsed.success) {
@@ -1569,7 +1645,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (redis) {
       // Fail closed: without cache encryption key material, skip the write and
       // re-derive per order rather than ever storing the creds in plaintext.
-      const cacheValue = encryptPmCredsCacheValue(JSON.stringify(apiCredentials));
+      const cacheValue = encryptPmCredsCacheValue(JSON.stringify(apiCredentials), cacheKey);
       if (cacheValue) {
         await redis.setex(cacheKey, PM_CREDS_CACHE_TTL_SECONDS, cacheValue).catch(() => undefined);
       }
@@ -1673,7 +1749,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       return c.json<ApiResponse>({ ok: false, error: "Idempotency-Key is required" }, 400);
     }
 
-    const idempotency = await getPmIdempotency(tenantId, agentId, body.idempotencyKey, body);
+    let idempotency = await getPmIdempotency(tenantId, agentId, body.idempotencyKey, body);
     if (idempotency.conflict) {
       return c.json<ApiResponse>(
         { ok: false, error: "Idempotency key reused with a different body" },
@@ -1683,22 +1759,48 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (idempotency.response) {
       return tradeReplayResponse(c, idempotency.response);
     }
+    if (idempotency.inProgress) {
+      c.header("Retry-After", "1");
+      return c.json<ApiResponse>(
+        { ok: false, error: "Request with this idempotency key is in progress" },
+        409,
+      );
+    }
 
     // Validate price + amount as positive finite numbers up front (the policy gate
     // needs the notional; the adapter re-validates the (0,1) price range).
     const amount = Number(body.amount);
     const price = Number(body.price);
-    if (!Number.isFinite(amount) || amount <= 0) {
+    idempotency = idempotency.claim ? await idempotency.claim() : idempotency;
+    if (idempotency.conflict) {
       return c.json<ApiResponse>(
-        { ok: false, error: "amount must be a positive finite number" },
-        400,
+        { ok: false, error: "Idempotency key reused with a different body" },
+        409,
       );
     }
-    if (!Number.isFinite(price) || price <= 0 || price >= 1) {
+    if (idempotency.response) return tradeReplayResponse(c, idempotency.response);
+    if (idempotency.inProgress) {
+      c.header("Retry-After", "1");
       return c.json<ApiResponse>(
-        { ok: false, error: "price must be in the open interval (0,1)" },
-        400,
+        { ok: false, error: "Request with this idempotency key is in progress" },
+        409,
       );
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      const envelope: TradeIdempotencyResponse = {
+        status: 400,
+        body: { ok: false, error: "amount must be a positive finite number" },
+      };
+      await idempotency.store?.(envelope);
+      return c.json(envelope.body, envelope.status);
+    }
+    if (!Number.isFinite(price) || price <= 0 || price >= 1) {
+      const envelope: TradeIdempotencyResponse = {
+        status: 400,
+        body: { ok: false, error: "price must be in the open interval (0,1)" },
+      };
+      await idempotency.store?.(envelope);
+      return c.json(envelope.body, envelope.status);
     }
     // SEC-041: a SELL's notional must be floored at the live best bid — a FOK
     // sell at an arbitrarily low limit fills at the bid, so sizing on the
@@ -1763,6 +1865,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     // polymarket session. A mismatch is treated as "no active session" (403) — we
     // never leak another agent's session existence.
     if (session.agentId !== agentId || session.venue !== "polymarket") {
+      await idempotency.release?.();
       return c.json<ApiResponse>({ ok: false, error: "Active Polymarket session required" }, 403);
     }
 
@@ -1782,6 +1885,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       if (status === 403) {
         // 403s are not stored for idempotent replay (session state can change to
         // active and a retry should re-evaluate) — mirrors HL's session-required 403.
+        await idempotency.release?.();
         return c.json<ApiResponse>({ ok: false, error: "Active Polymarket session required" }, 403);
       }
       const envelope: TradeIdempotencyResponse = {
@@ -1807,6 +1911,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         conditionId: body.conditionId ?? null,
         reason: creds.reason,
       });
+      await idempotency.release?.();
       return c.json<ApiResponse>({ ok: false, error: reason }, 409);
     }
 
@@ -1824,6 +1929,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         sessionWallet: session.walletId,
         resolvedWallet: creds.walletAddress,
       });
+      await idempotency.release?.();
       return c.json<ApiResponse>(
         {
           ok: false,
