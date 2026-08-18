@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { jwtVerify } from "jose";
-import { revocationStore, SessionManager, TokenRevokedError } from "../index";
+import {
+  MONOTONIC_REVOCATION_SCRIPT,
+  revocationStore,
+  SessionManager,
+  TokenRevokedError,
+} from "../index";
 
 const secret = "test-session-revocation-secret-at-least-32-chars";
 
@@ -101,6 +106,17 @@ describe("session revocation", () => {
     await revocationStore.revokeAgentTokens("agent-monotonic-line", 100, Date.now() + 60_000);
 
     await expect(revocationStore.getAgentRevokedBefore("agent-monotonic-line")).resolves.toBe(200);
+  });
+
+  it("keeps the Redis revocation TTL monotonic for stale lines", () => {
+    // The in-memory fallback already preserves its existing expiration. Keep a
+    // deterministic guard on the Redis Lua path so a stale concurrent request
+    // cannot reintroduce the TTL-shortening resurrection bug.
+    expect(MONOTONIC_REVOCATION_SCRIPT).toContain(
+      'local existingTtlMs = redis.call("PTTL", latestKey)',
+    );
+    expect(MONOTONIC_REVOCATION_SCRIPT).toContain("if existingTtlMs > effectiveTtlMs then");
+    expect(MONOTONIC_REVOCATION_SCRIPT).toContain("elseif effectiveTtlMs > existingTtlMs then");
   });
 
   it("fails closed in production when no shared revocation backend is configured", async () => {

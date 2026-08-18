@@ -38,18 +38,36 @@ function ttlMs(expiresAt: ExpiresAt, now = Date.now()): number {
 }
 
 const DEFAULT_AGENT_REVOCATION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const MONOTONIC_REVOCATION_SCRIPT = `
+export const MONOTONIC_REVOCATION_SCRIPT = `
 local markerKey = KEYS[1]
 local latestKey = KEYS[2]
 local issuedBefore = tonumber(ARGV[1])
 local ttlMs = tonumber(ARGV[2])
-local existing = tonumber(redis.call("GET", latestKey) or "-1")
+local existingRaw = redis.call("GET", latestKey)
+local existingTtlMs = redis.call("PTTL", latestKey)
 redis.call("SET", markerKey, "1", "PX", ttlMs)
-if existing == nil or issuedBefore > existing then
+if existingRaw == false then
   redis.call("SET", latestKey, ARGV[1], "PX", ttlMs)
   return issuedBefore
 end
-redis.call("PEXPIRE", latestKey, ttlMs)
+
+local existing = tonumber(existingRaw)
+if existing == nil then
+  redis.call("SET", latestKey, ARGV[1], "PX", ttlMs)
+  return issuedBefore
+end
+
+-- A stale revocation request must not shorten the current revocation line.
+-- Retain the longer of the existing and incoming TTLs for every value update.
+local effectiveTtlMs = ttlMs
+if existingTtlMs > effectiveTtlMs then
+  effectiveTtlMs = existingTtlMs
+end
+if issuedBefore > existing then
+  redis.call("SET", latestKey, ARGV[1], "PX", effectiveTtlMs)
+elseif effectiveTtlMs > existingTtlMs then
+  redis.call("PEXPIRE", latestKey, effectiveTtlMs)
+end
 return existing
 `;
 
