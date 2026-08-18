@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
   assertPublicHttpsEndpoint,
   assertPublicInternetAddress,
+  BLOCKED_PUBLIC_ENDPOINT_DNS_SUFFIXES,
   isPublicInternetAddress,
 } from "../public-endpoint";
 import { assertPinnedDnsTransportSupported } from "../public-endpoint-node";
@@ -99,6 +100,17 @@ describe("public HTTPS endpoint validator", () => {
       expect(() => assertPublicHttpsEndpoint(endpoint, "OIDC token endpoint"), endpoint).toThrow(
         "OIDC token endpoint must be a public https URL",
       );
+    }
+  });
+
+  it("rejects every blocked DNS suffix at apex, subdomain, and trailing-dot apex", () => {
+    for (const suffix of BLOCKED_PUBLIC_ENDPOINT_DNS_SUFFIXES) {
+      for (const hostname of [suffix, `idp.${suffix}`, `${suffix}.`]) {
+        const endpoint = `https://${hostname}/token`;
+        expect(() => assertPublicHttpsEndpoint(endpoint, "OIDC token endpoint"), endpoint).toThrow(
+          "OIDC token endpoint must be a public https URL",
+        );
+      }
     }
   });
 

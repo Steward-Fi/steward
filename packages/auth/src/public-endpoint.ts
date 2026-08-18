@@ -1,3 +1,18 @@
+export const BLOCKED_PUBLIC_ENDPOINT_DNS_SUFFIXES = [
+  "localhost",
+  "local",
+  "internal",
+  "localdomain",
+  "lan",
+  "home",
+  "home.arpa",
+  "corp",
+  "test",
+  "example",
+  "invalid",
+  "onion",
+  "alt",
+] as const;
 function ipv4ToUint32(address: string): number | null {
   const octets = address.split(".").map((part) => Number(part));
   if (
@@ -174,29 +189,15 @@ export function assertPublicHttpsEndpoint(value: string, resource: string): URL 
     .toLowerCase();
   const literalFamily =
     ipv4ToUint32(hostname) !== null ? 4 : expandIpv6Words(hostname) !== null ? 6 : 0;
-  const blockedDnsSuffixes = [
-    ".localhost",
-    ".local",
-    ".internal",
-    ".localdomain",
-    ".lan",
-    ".home",
-    ".home.arpa",
-    ".corp",
-    ".test",
-    ".example",
-    ".invalid",
-    ".onion",
-    ".alt",
-  ];
   if (
     url.protocol !== "https:" ||
     url.username !== "" ||
     url.password !== "" ||
     !hostname ||
-    hostname === "localhost" ||
     (literalFamily === 0 && !hostname.includes(".")) ||
-    blockedDnsSuffixes.some((suffix) => hostname.endsWith(suffix)) ||
+    BLOCKED_PUBLIC_ENDPOINT_DNS_SUFFIXES.some(
+      (suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`),
+    ) ||
     (literalFamily !== 0 && !isPublicInternetAddress(hostname, literalFamily))
   ) {
     throw new Error(`${resource} must be a public https URL`);
