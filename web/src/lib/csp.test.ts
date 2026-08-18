@@ -12,6 +12,12 @@ function connectSrc(csp: string): string[] {
   return directive.slice("connect-src ".length).split(" ");
 }
 
+function imgSrc(csp: string): string[] {
+  const directive = csp.split("; ").find((d) => d.startsWith("img-src "));
+  if (!directive) throw new Error("img-src directive missing");
+  return directive.slice("img-src ".length).split(" ");
+}
+
 describe("CSP connect-src allowlist (SEC-077)", () => {
   afterEach(() => {
     delete process.env.NEXT_PUBLIC_SOLANA_RPC_URL;
@@ -81,5 +87,19 @@ describe("CSP connect-src allowlist (SEC-077)", () => {
     // API origin, so it is deliberately omitted for that configuration only.
     delete process.env.NEXT_PUBLIC_STEWARD_API_URL;
     expect(buildCsp("nonce", false)).not.toContain("upgrade-insecure-requests");
+  });
+});
+
+describe("CSP img-src (SEC-077 residual channel)", () => {
+  test("keeps only the documented tenant-logo exception — never a full wildcard or plain http", () => {
+    // Tenant theme logos/favicons are operator-supplied URLs on arbitrary
+    // https origins, so `https:` cannot be dropped without breaking tenant
+    // branding (documented at the directive in csp.ts). What must never
+    // regress: a bare `*` or plain `http:` source, which would widen the
+    // residual GET-only beacon channel beyond encrypted origins.
+    const sources = imgSrc(buildCsp("nonce", false));
+    expect(sources).toEqual(["'self'", "data:", "blob:", "https:"]);
+    expect(sources).not.toContain("*");
+    expect(sources).not.toContain("http:");
   });
 });
