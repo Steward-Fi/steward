@@ -65,21 +65,13 @@ jobs:
           # Compare the immutable commits captured by the pull_request event.
           # The base branch can advance while this job runs; diffing its live
           # remote tip would then attribute unrelated merged changes to the PR.
-          git fetch --no-tags origin "${BASE_SHA}" "${HEAD_SHA}"
-          changed_files=$(git diff --name-only "${BASE_SHA}...${HEAD_SHA}")
-
-          status=0
-          for pkg in sdk react eliza-plugin; do
-            pkg_dir="packages/${pkg}"
-            if echo "$changed_files" | grep -qE "^${pkg_dir}/"; then
-              if ! echo "$changed_files" | grep -qE "^${pkg_dir}/(package.json|CHANGELOG.md|CHANGELOG|changelog.md)$"; then
-                echo "::error::${pkg_dir} changed without a package.json version bump or changelog update"
-                status=1
-              fi
-            fi
-          done
-
-          exit "$status"
+          # The helper validates both values as full commit IDs, verifies/fetches
+          # missing objects independently (fork heads are normally already
+          # parents of the checked-out PR merge commit), and consumes Git's
+          # NUL-delimited filename output so hostile filenames cannot bypass the
+          # package check.
+          bun test scripts/__tests__/check-public-package-metadata.test.ts
+          bun scripts/check-public-package-metadata.ts "$BASE_SHA" "$HEAD_SHA"
 
       - name: Check PR title
         # PR title is attacker-controlled. Pass it through env (never inline into
