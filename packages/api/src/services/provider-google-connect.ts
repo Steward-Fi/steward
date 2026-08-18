@@ -1119,6 +1119,32 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
       }
     }
 
+    const unresolvedRefreshes = account
+      ? await tx
+          .select({
+            id: providerGoogleCredentialLifecycles.id,
+            state: providerGoogleCredentialLifecycles.state,
+            credentialSecretId: providerGoogleCredentialLifecycles.credentialSecretId,
+          })
+          .from(providerGoogleCredentialLifecycles)
+          .where(
+            and(
+              eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+              eq(providerGoogleCredentialLifecycles.workspaceId, input.workspaceId),
+              eq(providerGoogleCredentialLifecycles.providerAccountId, account.id),
+              eq(providerGoogleCredentialLifecycles.kind, "refresh_rotation"),
+              inArray(providerGoogleCredentialLifecycles.state, [
+                "inflight",
+                "credential_staged",
+                "revocation_pending",
+                "needs_attention",
+              ]),
+            ),
+          )
+          .orderBy(asc(providerGoogleCredentialLifecycles.createdAt))
+          .for("update")
+      : [];
+
     const [existingSecret] = await tx
       .select({ id: secrets.id })
       .from(secrets)
@@ -1169,6 +1195,66 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
           409,
           "account revision conflict on reconnect",
         );
+      }
+
+      if (unresolvedRefreshes.length > 0) {
+        const unresolvedIds = unresolvedRefreshes.map(({ id }) => id);
+        const superseded = await tx
+          .update(providerGoogleCredentialLifecycles)
+          .set({
+            state: "superseded",
+            credentialSecretId: null,
+            lastErrorCode: "SUPERSEDED_BY_RECONNECT",
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+              eq(providerGoogleCredentialLifecycles.workspaceId, input.workspaceId),
+              eq(providerGoogleCredentialLifecycles.providerAccountId, account.id),
+              eq(providerGoogleCredentialLifecycles.kind, "refresh_rotation"),
+              inArray(providerGoogleCredentialLifecycles.id, unresolvedIds),
+              inArray(providerGoogleCredentialLifecycles.state, [
+                "inflight",
+                "credential_staged",
+                "revocation_pending",
+                "needs_attention",
+              ]),
+            ),
+          )
+          .returning({ id: providerGoogleCredentialLifecycles.id });
+        if (superseded.length !== unresolvedRefreshes.length) {
+          throw new GoogleConnectError(
+            "GOOGLE_CREDENTIAL_NEEDS_ATTENTION",
+            409,
+            "refresh lifecycle changed during reconnect",
+          );
+        }
+        const handleIds = unresolvedRefreshes
+          .map(({ credentialSecretId }) => credentialSecretId)
+          .filter((id): id is string => id !== null);
+        if (handleIds.length > 0) {
+          await tx
+            .delete(secrets)
+            .where(and(eq(secrets.tenantId, input.tenantId), inArray(secrets.id, handleIds)));
+        }
+        await append({
+          tenantId: input.tenantId,
+          actorType: "user",
+          actorId: input.callerUserId,
+          action: "provider.google.refresh.superseded_by_reconnect",
+          resourceType: "provider_account",
+          resourceId: account.id,
+          metadata: {
+            workspaceId: input.workspaceId,
+            priorAccountRevision: account.revision,
+            newAccountRevision: account.revision + 1,
+            lifecycleIds: [...unresolvedIds].sort(),
+            priorStates: unresolvedRefreshes
+              .map(({ id, state }) => ({ id, state }))
+              .sort((a, b) => a.id.localeCompare(b.id)),
+          },
+        });
       }
     } else {
       reconnected = false;
@@ -1376,18 +1462,38 @@ export async function refreshGoogleProviderCredential(input: RefreshInput): Prom
           "no refresh token on record",
         );
       const [activeLifecycle] = await tx
-        .select({ id: providerGoogleCredentialLifecycles.id })
+        .select({
+          id: providerGoogleCredentialLifecycles.id,
+          state: providerGoogleCredentialLifecycles.state,
+        })
         .from(providerGoogleCredentialLifecycles)
         .where(
           and(
             eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
             eq(providerGoogleCredentialLifecycles.providerAccountId, account.id),
             eq(providerGoogleCredentialLifecycles.kind, "refresh_rotation"),
-            inArray(providerGoogleCredentialLifecycles.state, ["inflight", "credential_staged"]),
+            inArray(providerGoogleCredentialLifecycles.state, [
+              "inflight",
+              "credential_staged",
+              "needs_attention",
+              "revocation_pending",
+            ]),
           ),
         )
         .limit(1);
-      if (activeLifecycle) return { kind: "wait", lifecycleId: activeLifecycle.id };
+      if (activeLifecycle) {
+        if (
+          activeLifecycle.state === "needs_attention" ||
+          activeLifecycle.state === "revocation_pending"
+        ) {
+          throw new GoogleConnectError(
+            "GOOGLE_CREDENTIAL_NEEDS_ATTENTION",
+            409,
+            "Google credential refresh lifecycle must be reconciled before refresh",
+          );
+        }
+        return { kind: "wait", lifecycleId: activeLifecycle.id };
+      }
       const lifecycleId = randomUUID();
       await tx.insert(providerGoogleCredentialLifecycles).values({
         id: lifecycleId,
