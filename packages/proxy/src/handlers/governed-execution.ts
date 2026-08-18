@@ -184,10 +184,10 @@ export function verifyDispatchXSummonProvenance(input: {
   keysJson: string | undefined;
   now?: Date;
 }): "absent" | "valid" | "invalid" {
-  if (sha256Hex(jcsStringify(input.requestEnvelope)) !== input.requestHash) return "invalid";
   const summonDigest = input.requestEnvelope.xSummonAttestationDigest;
   const persistedAttestation = input.safeSummary.xSummonAttestation;
   if (summonDigest === undefined && persistedAttestation === undefined) return "absent";
+  if (sha256Hex(jcsStringify(input.requestEnvelope)) !== input.requestHash) return "invalid";
   const body = input.canonicalAction.canonicalBody;
   const reply =
     body && typeof body === "object" && !Array.isArray(body)
