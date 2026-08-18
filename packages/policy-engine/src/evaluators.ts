@@ -31,10 +31,6 @@ const MAX_UINT256_DECIMAL =
   "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 const MAX_UINT256_DECIMAL_DIGITS = 78;
 
-function hasOwnDefined(record: Record<string, unknown>, key: string): boolean {
-  return Object.hasOwn(record, key) && record[key] !== undefined;
-}
-
 export interface EvaluatorContext {
   request: SignRequest;
   recentTxCount24h: number;
@@ -298,6 +294,10 @@ function evaluateRawSigningChain(rule: PolicyRule, ctx: EvaluatorContext): Polic
  * Normalize spending-limit config to the canonical format (maxPerTx/maxPerDay/maxPerWeek).
  * Accepts both the canonical format and the simplified maxAmount/period format.
  */
+function hasOwnDefined(record: Record<string, unknown>, key: string): boolean {
+  return Object.hasOwn(record, key) && record[key] !== undefined;
+}
+
 function normalizeSpendingLimitConfig(config: Record<string, unknown>): SpendingLimitConfig {
   const simplifiedWeiCaps = (): Pick<
     SpendingLimitConfig,
