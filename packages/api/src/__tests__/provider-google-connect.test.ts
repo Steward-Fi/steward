@@ -319,6 +319,7 @@ afterAll(async () => {
   __setGoogleDisconnectJournalHookForTests(null);
   __setGoogleDisconnectRevokeHookForTests(null);
   __setGoogleRefreshIntentHookForTests(null);
+  __setGoogleExecutionTokenForwarderForTests(null);
   await closeDb();
 });
 
@@ -329,6 +330,7 @@ afterEach(async () => {
   __setGoogleDisconnectJournalHookForTests(null);
   __setGoogleDisconnectRevokeHookForTests(null);
   __setGoogleRefreshIntentHookForTests(null);
+  __setGoogleExecutionTokenForwarderForTests(null);
   // Reset connected accounts + credential secrets between tests.
   const db = getDb();
   await db
@@ -492,21 +494,13 @@ describe("connect", () => {
     expect(rows[0].credentialVersion).toBe(2);
   });
 
-  test("reconnect supersedes an unresolved refresh lifecycle and restores minting without replay", async () => {
+  test("reconnect supersedes only a null-handle unknown refresh and restores minting without replay", async () => {
     const first = await connectHappy(new MemoryConnectStore());
     const db = getDb();
     const [beforeAccount] = await db
       .select()
       .from(providerAccounts)
       .where(eq(providerAccounts.id, first.completed.providerAccountId));
-    const strandedHandle = await vault.createSecret(
-      TENANT,
-      `provider-google-lifecycle:${crypto.randomUUID()}`,
-      JSON.stringify({
-        schemaVersion: "steward.provider-google.lifecycle.v1",
-        token: { access_token: "stranded-access", refresh_token: "stranded-refresh" },
-      }),
-    );
     const lifecycleId = crypto.randomUUID();
     await db.insert(providerGoogleCredentialLifecycles).values({
       id: lifecycleId,
@@ -515,7 +509,7 @@ describe("connect", () => {
       providerAccountId: beforeAccount.id,
       kind: "refresh_rotation",
       state: "needs_attention",
-      credentialSecretId: strandedHandle.id,
+      credentialSecretId: null,
       expectedAccountRevision: beforeAccount.revision,
       lastErrorCode: "REFRESH_OUTCOME_UNKNOWN",
     });
@@ -573,9 +567,7 @@ describe("connect", () => {
         .where(eq(providerGoogleCredentialLifecycles.id, lifecycleId));
       expect(superseded.state).toBe("superseded");
       expect(superseded.credentialSecretId).toBeNull();
-      expect(await db.select().from(secrets).where(eq(secrets.id, strandedHandle.id))).toHaveLength(
-        0,
-      );
+      expect(superseded.lastErrorCode).toBe("SUPERSEDED_BY_RECONNECT");
 
       const minted = await mintGoogleExecutionAccessToken({
         tenantId: TENANT,
@@ -595,6 +587,52 @@ describe("connect", () => {
     } finally {
       __setGoogleExecutionTokenForwarderForTests(null);
     }
+  });
+
+  test("reconnect preserves and rejects every unresolved staged refresh credential handle", async () => {
+    const first = await connectHappy(new MemoryConnectStore());
+    const db = getDb();
+    const [beforeAccount] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, first.completed.providerAccountId));
+    const strandedHandle = await vault.createSecret(
+      TENANT,
+      `provider-google-lifecycle:${crypto.randomUUID()}`,
+      JSON.stringify({
+        schemaVersion: "steward.provider-google.lifecycle.v1",
+        token: { access_token: "stranded-access", refresh_token: "stranded-refresh" },
+      }),
+    );
+    const lifecycleId = crypto.randomUUID();
+    await db.insert(providerGoogleCredentialLifecycles).values({
+      id: lifecycleId,
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      providerAccountId: beforeAccount.id,
+      kind: "refresh_rotation",
+      state: "needs_attention",
+      credentialSecretId: strandedHandle.id,
+      expectedAccountRevision: beforeAccount.revision,
+      lastErrorCode: "REFRESH_OUTCOME_UNKNOWN",
+    });
+
+    await expect(connectHappy(new MemoryConnectStore())).rejects.toMatchObject({
+      code: "GOOGLE_CREDENTIAL_NEEDS_ATTENTION",
+    });
+
+    const [unchangedLifecycle] = await db
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.id, lifecycleId));
+    const [unchangedAccount] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, beforeAccount.id));
+    expect(unchangedLifecycle.state).toBe("needs_attention");
+    expect(unchangedLifecycle.credentialSecretId).toBe(strandedHandle.id);
+    expect(unchangedAccount.revision).toBe(beforeAccount.revision);
+    expect(await vault.decryptSecret(TENANT, strandedHandle.id)).toContain("stranded-refresh");
   });
 
   test("injected initial persistence failure rolls back secret/account and revokes issued grant", async () => {

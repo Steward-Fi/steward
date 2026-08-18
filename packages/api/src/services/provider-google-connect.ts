@@ -1125,6 +1125,8 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
             id: providerGoogleCredentialLifecycles.id,
             state: providerGoogleCredentialLifecycles.state,
             credentialSecretId: providerGoogleCredentialLifecycles.credentialSecretId,
+            expectedAccountRevision: providerGoogleCredentialLifecycles.expectedAccountRevision,
+            lastErrorCode: providerGoogleCredentialLifecycles.lastErrorCode,
           })
           .from(providerGoogleCredentialLifecycles)
           .where(
@@ -1144,6 +1146,26 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
           .orderBy(asc(providerGoogleCredentialLifecycles.createdAt))
           .for("update")
       : [];
+    const supersedableRefreshes = account
+      ? unresolvedRefreshes.filter(
+          (row) =>
+            row.state === "needs_attention" &&
+            row.credentialSecretId === null &&
+            row.lastErrorCode === "REFRESH_OUTCOME_UNKNOWN" &&
+            row.expectedAccountRevision !== null &&
+            row.expectedAccountRevision <= account.revision,
+        )
+      : [];
+    if (supersedableRefreshes.length !== unresolvedRefreshes.length) {
+      // Never discard a staged/revocation handle: it may contain a live rotated
+      // provider credential and must be durably revoked first. A live inflight
+      // refresh must also finish or become outcome-unknown before reconnect.
+      throw new GoogleConnectError(
+        "GOOGLE_CREDENTIAL_NEEDS_ATTENTION",
+        409,
+        "previous Google refresh must be reconciled before reconnect",
+      );
+    }
 
     const [existingSecret] = await tx
       .select({ id: secrets.id })
@@ -1197,13 +1219,12 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
         );
       }
 
-      if (unresolvedRefreshes.length > 0) {
-        const unresolvedIds = unresolvedRefreshes.map(({ id }) => id);
+      if (supersedableRefreshes.length > 0) {
+        const unresolvedIds = supersedableRefreshes.map(({ id }) => id);
         const superseded = await tx
           .update(providerGoogleCredentialLifecycles)
           .set({
             state: "superseded",
-            credentialSecretId: null,
             lastErrorCode: "SUPERSEDED_BY_RECONNECT",
             updatedAt: new Date(),
           })
@@ -1214,29 +1235,18 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
               eq(providerGoogleCredentialLifecycles.providerAccountId, account.id),
               eq(providerGoogleCredentialLifecycles.kind, "refresh_rotation"),
               inArray(providerGoogleCredentialLifecycles.id, unresolvedIds),
-              inArray(providerGoogleCredentialLifecycles.state, [
-                "inflight",
-                "credential_staged",
-                "revocation_pending",
-                "needs_attention",
-              ]),
+              eq(providerGoogleCredentialLifecycles.state, "needs_attention"),
+              sql`${providerGoogleCredentialLifecycles.credentialSecretId} IS NULL`,
+              eq(providerGoogleCredentialLifecycles.lastErrorCode, "REFRESH_OUTCOME_UNKNOWN"),
             ),
           )
           .returning({ id: providerGoogleCredentialLifecycles.id });
-        if (superseded.length !== unresolvedRefreshes.length) {
+        if (superseded.length !== supersedableRefreshes.length) {
           throw new GoogleConnectError(
             "GOOGLE_CREDENTIAL_NEEDS_ATTENTION",
             409,
             "refresh lifecycle changed during reconnect",
           );
-        }
-        const handleIds = unresolvedRefreshes
-          .map(({ credentialSecretId }) => credentialSecretId)
-          .filter((id): id is string => id !== null);
-        if (handleIds.length > 0) {
-          await tx
-            .delete(secrets)
-            .where(and(eq(secrets.tenantId, input.tenantId), inArray(secrets.id, handleIds)));
         }
         await append({
           tenantId: input.tenantId,
@@ -1250,9 +1260,6 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
             priorAccountRevision: account.revision,
             newAccountRevision: account.revision + 1,
             lifecycleIds: [...unresolvedIds].sort(),
-            priorStates: unresolvedRefreshes
-              .map(({ id, state }) => ({ id, state }))
-              .sort((a, b) => a.id.localeCompare(b.id)),
           },
         });
       }
