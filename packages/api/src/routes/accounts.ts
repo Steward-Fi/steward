@@ -1151,10 +1151,7 @@ accountRoutes.post("/", async (c) => {
     });
   } catch (error) {
     await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
-    return c.json<ApiResponse>(
-      { ok: false, error: error instanceof Error ? error.message : "Failed to create account" },
-      400,
-    );
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(error) }, 400);
   }
 
   const account = await serializeAccount(tenantId, accountId);
@@ -1362,7 +1359,7 @@ accountRoutes.post("/:accountId/aggregations", async (c) => {
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: error instanceof Error ? error.message : "Failed to create account aggregation",
+        error: sanitizeErrorMessage(error),
       },
       400,
     );

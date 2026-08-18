@@ -2940,30 +2940,21 @@ user.post("/me/accounts/oauth/:provider/token", async (c) => {
   try {
     oauthClient = new OAuthClient(getProviderConfig(providerName));
   } catch (err) {
-    return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Provider not configured" },
-      503,
-    );
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(err) }, 503);
   }
 
   let tokenResponse: Awaited<ReturnType<OAuthClient["exchangeCode"]>>;
   try {
     tokenResponse = await oauthClient.exchangeCode(code, redirectUri, codeVerifier || undefined);
   } catch (err) {
-    return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Token exchange failed" },
-      502,
-    );
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(err) }, 502);
   }
 
   let providerUser: Awaited<ReturnType<OAuthClient["getUserInfo"]>>;
   try {
     providerUser = await oauthClient.getUserInfo(tokenResponse.access_token);
   } catch (err) {
-    return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Failed to fetch user info" },
-      502,
-    );
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(err) }, 502);
   }
 
   if (!providerUser.id) {

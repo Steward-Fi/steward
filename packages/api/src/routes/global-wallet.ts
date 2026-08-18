@@ -13,7 +13,12 @@ import { and, eq, sql } from "drizzle-orm";
 import type { Context, Next } from "hono";
 import { Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
-import { safeJsonParse, setNoStoreHeaders, verifySessionToken } from "../services/context";
+import {
+  safeJsonParse,
+  sanitizeErrorMessage,
+  setNoStoreHeaders,
+  verifySessionToken,
+} from "../services/context";
 import { getConfiguredVault } from "../services/vault-factory";
 
 type UserSessionPayload = {
@@ -1356,8 +1361,7 @@ globalWalletRoutes.post("/rpc", async (c) => {
         parsedParams.message,
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Global wallet signing failed";
-      return c.json<ApiResponse>({ ok: false, error: message }, 500);
+      return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(error) }, 500);
     }
     await getDb()
       .update(userWalletAppConsents)
@@ -1458,9 +1462,7 @@ globalWalletRoutes.post("/rpc", async (c) => {
         value: parsedParams.value,
       });
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Global wallet typed-data signing failed";
-      return c.json<ApiResponse>({ ok: false, error: message }, 500);
+      return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(error) }, 500);
     }
     await getDb()
       .update(userWalletAppConsents)
@@ -1574,9 +1576,7 @@ globalWalletRoutes.post("/rpc", async (c) => {
         broadcast: true,
       });
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Global wallet transaction execution failed";
-      return c.json<ApiResponse>({ ok: false, error: message }, 500);
+      return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(error) }, 500);
     }
     await getDb()
       .update(userWalletAppConsents)
