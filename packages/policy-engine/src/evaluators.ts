@@ -38,6 +38,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function usdMicrosToConservativeNumber(value: bigint): number {
+  if (value < 0n) return Number.NaN;
+  // Number conversion above MAX_SAFE_INTEGER may round down. A finite policy
+  // limit cannot safely admit such a balance, so reject it via Infinity.
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) return Number.POSITIVE_INFINITY;
+  return Number(value) / 1_000_000;
+}
+
 function isEvmAddress(value: unknown): value is string {
   return typeof value === "string" && /^0x[a-f0-9]{40}$/i.test(value);
 }
@@ -241,6 +249,15 @@ export interface EvaluatorContext {
    */
   spentToday: bigint;
   spentThisWeek: bigint;
+  /**
+   * Additional committed or conservatively-pending spend denominated in USD
+   * micros. This is kept separate from the chain-native counters above: adding
+   * USDC base units (or a quoted native equivalent) to wei/lamports would
+   * corrupt raw-denominated limits. USD limits apply these amounts
+   * conjunctively after pricing the chain-native counters.
+   */
+  additionalUsdSpentTodayMicros?: bigint;
+  additionalUsdSpentThisWeekMicros?: bigint;
   /** Optional price oracle for USD-based policy evaluation */
   priceOracle?: PriceOracle;
   /** Optional reputation score for reputation-based policies */
@@ -710,7 +727,13 @@ async function evaluateSpendingLimit(
 
     // Daily USD limit - convert spentToday from wei to USD
     if (config.maxPerDayUsd !== undefined) {
-      const spentTodayUsd = await ctx.priceOracle.weiToUsd(ctx.spentToday.toString(), chainId);
+      const nativeSpentTodayUsd = await ctx.priceOracle.weiToUsd(
+        ctx.spentToday.toString(),
+        chainId,
+      );
+      const additionalUsd = usdMicrosToConservativeNumber(ctx.additionalUsdSpentTodayMicros ?? 0n);
+      const spentTodayUsd =
+        nativeSpentTodayUsd === null ? null : nativeSpentTodayUsd + additionalUsd;
       if (spentTodayUsd === null || !Number.isFinite(spentTodayUsd) || spentTodayUsd < 0) {
         return {
           ...base,
@@ -729,7 +752,14 @@ async function evaluateSpendingLimit(
 
     // Weekly USD limit - convert spentThisWeek from wei to USD
     if (config.maxPerWeekUsd !== undefined) {
-      const spentWeekUsd = await ctx.priceOracle.weiToUsd(ctx.spentThisWeek.toString(), chainId);
+      const nativeSpentWeekUsd = await ctx.priceOracle.weiToUsd(
+        ctx.spentThisWeek.toString(),
+        chainId,
+      );
+      const additionalUsd = usdMicrosToConservativeNumber(
+        ctx.additionalUsdSpentThisWeekMicros ?? 0n,
+      );
+      const spentWeekUsd = nativeSpentWeekUsd === null ? null : nativeSpentWeekUsd + additionalUsd;
       if (spentWeekUsd === null || !Number.isFinite(spentWeekUsd) || spentWeekUsd < 0) {
         return {
           ...base,

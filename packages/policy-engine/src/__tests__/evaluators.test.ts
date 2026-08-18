@@ -547,6 +547,40 @@ describe("Spending Limit Policy", () => {
     expect(result.passed).toBe(true);
   });
 
+  it("counts pending operator USDC against the USD cap without corrupting the wei cap", async () => {
+    const rule = makeSpendingRule({
+      maxPerDay: "1000000000000000000", // 1 ETH raw cap
+      maxPerDayUsd: 100,
+    });
+
+    const evaluation = await new PolicyEngine().evaluate(
+      [rule],
+      makeContext({
+        request: { ...makeContext().request, value: "5000000000000000" }, // $10, 0.005 ETH
+        spentToday: 0n,
+        additionalUsdSpentTodayMicros: 95_000_000n, // pending/final operator USDC
+        priceOracle: ethPriceOracle,
+      }),
+    );
+
+    expect(evaluation.approved).toBe(false);
+    expect(evaluation.results[0]?.reason).toContain("daily USD spending limit");
+  });
+
+  it("keeps operator USD micros out of raw-denominated counters", async () => {
+    const rule = makeSpendingRule({ maxPerDay: "1000" });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "100" },
+        spentToday: 0n,
+        additionalUsdSpentTodayMicros: 900_000_000n,
+      }),
+    );
+
+    expect(result.passed).toBe(true);
+  });
+
   it("enforces a mixed daily wei cap when maxPerTx is omitted", async () => {
     const rule = makeSpendingRule({
       maxPerDay: "1000000000000000000", // 1 ETH

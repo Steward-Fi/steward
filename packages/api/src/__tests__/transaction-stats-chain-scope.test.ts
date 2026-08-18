@@ -22,7 +22,14 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { agents, closeDb, getDb, tenants, transactions } from "@stwd/db";
+import {
+  agents,
+  closeDb,
+  getDb,
+  operatorTransferReservations,
+  tenants,
+  transactions,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 
 // context.ts reads required env and touches the DB at module import time, so
@@ -81,6 +88,37 @@ describe("getTransactionStats chain scoping (issue #110)", () => {
     // One committed spend on each chain, both inside the rolling day/week window.
     await seedTx("eth", ETH_MAINNET, ETH_SPEND);
     await seedTx("sol", SOLANA, SOL_SPEND);
+    await getDb()
+      .insert(operatorTransferReservations)
+      .values([
+        {
+          tenantId: TENANT_ID,
+          agentId: AGENT_ID,
+          rail: "withdraw",
+          idempotencyKey: "pending-operator-spend",
+          destination: RECIPIENT,
+          amountBaseUnits: "25000000",
+          status: "pending",
+        },
+        {
+          tenantId: TENANT_ID,
+          agentId: AGENT_ID,
+          rail: "usd-send",
+          idempotencyKey: "final-operator-spend",
+          destination: RECIPIENT,
+          amountBaseUnits: "35000000",
+          status: "final",
+        },
+        {
+          tenantId: TENANT_ID,
+          agentId: AGENT_ID,
+          rail: "withdraw",
+          idempotencyKey: "released-operator-spend",
+          destination: RECIPIENT,
+          amountBaseUnits: "900000000",
+          status: "released",
+        },
+      ]);
   });
 
   afterAll(async () => {
@@ -114,6 +152,15 @@ describe("getTransactionStats chain scoping (issue #110)", () => {
     expect(stats.spentThisWeek.toString()).toBe(combined);
     // Counts remain agent-wide (chain-agnostic) regardless of chain scoping.
     expect(stats.recentTxCount24h).toBe(2);
+  });
+
+  it("returns pending and final operator USDC separately from native-chain spend", async () => {
+    const stats = await getTransactionStats(AGENT_ID, ETH_MAINNET);
+    expect(stats.additionalUsdSpentTodayMicros).toBe(60_000_000n);
+    expect(stats.additionalUsdSpentThisWeekMicros).toBe(60_000_000n);
+    // Released reservations are reusable and therefore no longer consume cap.
+    expect(stats.additionalUsdSpentTodayMicros).not.toBe(960_000_000n);
+    expect(stats.spentToday.toString()).toBe(ETH_SPEND);
   });
 });
 

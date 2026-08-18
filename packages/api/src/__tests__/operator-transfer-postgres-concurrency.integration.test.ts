@@ -69,3 +69,73 @@ realPostgresIt("serializes cumulative operator reservations across real connecti
     await Promise.all([admin.end(), first.end(), second.end()]);
   }
 });
+
+realPostgresIt(
+  "accounts operator and vault spend conjunctively under the shared lock in either order",
+  async () => {
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const admin = postgres(databaseUrl!, { max: 1 });
+    const first = postgres(databaseUrl!, { max: 1 });
+    const second = postgres(databaseUrl!, { max: 1 });
+    const tenantId = `cross-spend-tenant-${suffix}`;
+
+    const runOrderedRace = async (firstKind: "operator" | "vault") => {
+      const agentId = `cross-spend-${firstKind}-${suffix}`;
+      await admin`insert into tenants (id, name, api_key_hash) values (${tenantId}, ${tenantId}, ${`hash-${tenantId}`}) on conflict (id) do nothing`;
+      await admin`insert into agents (id, tenant_id, name, wallet_address) values (${agentId}, ${tenantId}, ${agentId}, '0x1234567890123456789012345678901234567890')`;
+
+      let unlockFirst: (() => void) | undefined;
+      const firstHasLock = new Promise<void>((resolve) => {
+        unlockFirst = resolve;
+      });
+      const attempt = (client: Sql, kind: "operator" | "vault", onLocked?: () => void) =>
+        client.begin(async (tx) => {
+          await tx`select pg_advisory_xact_lock(hashtextextended(${agentId}, 0))`;
+          onLocked?.();
+          // The fixture pins both rails to one USD-micro denomination. Production
+          // keeps native counters separate and adds operator USDC only in the USD
+          // evaluator; this query exercises the same conjunctive admission rule.
+          const [totals] = await tx<[{ vault: string; operator: string }]>`
+            select
+              coalesce((select sum(value::numeric) from transactions where agent_id = ${agentId} and status in ('signed', 'broadcast', 'confirmed', 'outcome_unknown')), 0)::text as vault,
+              coalesce((select sum(amount_base_units::numeric) from operator_transfer_reservations where agent_id = ${agentId} and status in ('pending', 'final')), 0)::text as operator
+          `;
+          if (BigInt(totals.vault) + BigInt(totals.operator) + 60_000_000n > 100_000_000n) {
+            return false;
+          }
+          await Bun.sleep(25);
+          if (kind === "operator") {
+            await tx`
+              insert into operator_transfer_reservations
+                (tenant_id, agent_id, rail, idempotency_key, destination, amount_base_units, status)
+              values
+                (${tenantId}, ${agentId}, 'usd-send', ${`${kind}-${agentId}`}, '0x2222222222222222222222222222222222222222', '60000000', 'pending')
+            `;
+          } else {
+            await tx`
+              insert into transactions
+                (id, agent_id, status, to_address, value, chain_id, policy_results)
+              values
+                (${`${kind}-${agentId}`}, ${agentId}, 'signed', '0x2222222222222222222222222222222222222222', '60000000', 8453, '[]'::jsonb)
+            `;
+          }
+          return true;
+        });
+
+      const secondKind = firstKind === "operator" ? "vault" : "operator";
+      const firstAttempt = attempt(first, firstKind, unlockFirst);
+      await firstHasLock;
+      const secondAttempt = attempt(second, secondKind);
+      const admitted = await Promise.all([firstAttempt, secondAttempt]);
+      expect(admitted).toEqual([true, false]);
+    };
+
+    try {
+      await runOrderedRace("operator");
+      await runOrderedRace("vault");
+    } finally {
+      await admin`delete from tenants where id = ${tenantId}`;
+      await Promise.all([admin.end(), first.end(), second.end()]);
+    }
+  },
+);
