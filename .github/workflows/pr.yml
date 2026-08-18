@@ -58,27 +58,20 @@ jobs:
 
       - name: Check public package version bumps
         env:
-          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          # Checkout above is intentionally unshallow. Keep it that way: a
-          # depth-1 fetch can rewrite origin/${BASE_REF} as a shallow tip and
-          # remove the merge base needed by the three-dot diff below.
-          git fetch --no-tags origin "${BASE_REF}"
-          changed_files=$(git diff --name-only "origin/${BASE_REF}...HEAD")
-
-          status=0
-          for pkg in sdk react eliza-plugin; do
-            pkg_dir="packages/${pkg}"
-            if echo "$changed_files" | grep -qE "^${pkg_dir}/"; then
-              if ! echo "$changed_files" | grep -qE "^${pkg_dir}/(package.json|CHANGELOG.md|CHANGELOG|changelog.md)$"; then
-                echo "::error::${pkg_dir} changed without a package.json version bump or changelog update"
-                status=1
-              fi
-            fi
-          done
-
-          exit "$status"
+          # Compare the immutable commits captured by the pull_request event.
+          # The base branch can advance while this job runs; diffing its live
+          # remote tip would then attribute unrelated merged changes to the PR.
+          # checkout uses fetch-depth: 0 and the pull_request merge ref, so both
+          # immutable parent commits are already present. The helper validates
+          # the object IDs and commit types without refetching fork objects, then
+          # consumes NUL-delimited filenames so hostile names cannot bypass the
+          # package check.
+          bun test scripts/__tests__/check-public-package-metadata.test.ts
+          bun scripts/check-public-package-metadata.ts "$BASE_SHA" "$HEAD_SHA"
 
       - name: Check PR title
         # PR title is attacker-controlled. Pass it through env (never inline into
