@@ -398,6 +398,25 @@ describe("SEC-042: withdraw policy evaluation is real", () => {
 });
 
 describe("SEC-043: operator idempotency stores ambiguous outcomes", () => {
+  it("releases durable spend before freeing the idempotency claim", async () => {
+    const source = await Bun.file(
+      new URL("../routes/operator-recovery.ts", import.meta.url),
+    ).text();
+    const helperStart = source.indexOf("async function releaseOperatorTransfer");
+    const helperEnd = source.indexOf("function operatorActor", helperStart);
+    const helper = source.slice(helperStart, helperEnd);
+    expect(helperStart).toBeGreaterThan(-1);
+    expect(helperEnd).toBeGreaterThan(helperStart);
+    expect(helper.indexOf("finishOperatorReservation")).toBeLessThan(
+      helper.indexOf("idempotency.release"),
+    );
+    expect(helper).toContain("if (released)");
+
+    const finishStart = source.indexOf("async function finishOperatorReservation");
+    const finish = source.slice(finishStart, helperStart);
+    expect(finish).toContain('eq(operatorTransferReservations.status, "pending")');
+  });
+
   it("releases a usd-send reservation after a definite local signing failure", async () => {
     const { tenantId, agentId } = await seedAgent({
       policies: [
