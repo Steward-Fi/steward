@@ -14,6 +14,8 @@ export * from "./oidc";
 export * from "./passkey";
 export * from "./phone";
 export * from "./platform";
+export * from "./public-endpoint";
+export * from "./public-endpoint-node";
 export * from "./recovery-codes";
 export * from "./revocation";
 export * from "./saml";

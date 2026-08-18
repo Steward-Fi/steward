@@ -45,17 +45,19 @@
 // If any of these fail at runtime on Workers, fall back to tweetnacl for
 // ed25519 verify (lightweight, edge-compatible).
 import { createPublicKey, randomBytes, verify as verifySignature } from "node:crypto";
-import { lookup as dnsLookup } from "node:dns";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
 import {
   ACCESS_TOKEN_EXPIRY,
   ACCESS_TOKEN_EXPIRY_SECONDS,
+  assertPinnedDnsTransportSupported,
+  assertPublicHttpsEndpoint,
   assertTokenNotRevoked,
   buildBackend,
   buildOtpauthUri,
   buildSamlAuthorizeUrl,
   ChallengeStore,
+  createPublicInternetLookup,
   EmailAuth,
   type EmailAuthConfig,
   EmailDeliveryError,
@@ -146,7 +148,10 @@ import {
   verifyCaptchaToken,
 } from "../services/auth-abuse";
 import { verifyEip1271 } from "../services/eip1271";
-import { isAllowedOidcClientSecretEnv } from "../services/oidc-provider-config";
+import {
+  isAllowedOidcClientSecretEnv,
+  normalizeOidcProviders,
+} from "../services/oidc-provider-config";
 import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
 import { lockUserSession } from "../services/session-lock";
 import { testAccountOtpMatches } from "../services/test-account-credentials";
@@ -3391,7 +3396,11 @@ async function getTenantOidcProviders(tenantId: string): Promise<TenantOidcProvi
     .select({ oidcProviders: tenantConfigs.oidcProviders })
     .from(tenantConfigs)
     .where(eq(tenantConfigs.tenantId, tenantId));
-  return row?.oidcProviders ?? [];
+  // Revalidate persisted JSON on every trust-boundary read. Older rows can
+  // predate write-time validation; treating their TypeScript cast as trusted
+  // would re-enable unsafe algorithms or malformed endpoint configuration.
+  const normalized = normalizeOidcProviders(row?.oidcProviders ?? []);
+  return typeof normalized === "string" ? [] : normalized;
 }
 
 function selectOidcProvider(
@@ -4898,7 +4907,20 @@ auth.get("/oidc/:provider/authorize", async (c) => {
 
   const callbackUrl = buildOidcCallbackUrl(c, provider.id);
   const scopes = provider.scopes?.length ? provider.scopes : ["openid", "email", "profile"];
-  const authUrl = new URL(provider.authorizationUrl);
+  let authUrl: URL;
+  try {
+    // Revalidate legacy rows at the action boundary before issuing a browser
+    // redirect. Configuration-time checks alone do not cover pre-fix data.
+    authUrl = assertPublicHttpsEndpoint(provider.authorizationUrl, "OIDC authorization endpoint");
+  } catch (err) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "Invalid OIDC authorization endpoint",
+      },
+      400,
+    );
+  }
   authUrl.searchParams.set("response_type", "code");
   authUrl.searchParams.set("client_id", provider.clientId);
   authUrl.searchParams.set("redirect_uri", callbackUrl);
@@ -4933,10 +4955,15 @@ auth.get("/oidc/:provider/callback", async (c) => {
   const errorParam = c.req.query("error");
 
   if (errorParam) {
-    return c.json<ApiResponse>({ ok: false, error: `OIDC error: ${errorParam}` }, 400);
+    // Provider-supplied query text is untrusted and may contain diagnostics or
+    // attacker-controlled markup. Do not reflect it to the browser.
+    return c.json<ApiResponse>({ ok: false, error: "OIDC authorization failed" }, 400);
   }
   if (!code || !state) {
     return c.json<ApiResponse>({ ok: false, error: "code and state are required" }, 400);
+  }
+  if (code.length > 4_096 || state.length > 256) {
+    return c.json<ApiResponse>({ ok: false, error: "code or state is too long" }, 400);
   }
 
   const stateKey = `oidc:${state}`;
@@ -10199,161 +10226,16 @@ function randomBase64Url(byteLength: number): string {
 const OIDC_TOKEN_EXCHANGE_TIMEOUT_MS = 10_000;
 const OIDC_TOKEN_EXCHANGE_MAX_BYTES = 64 * 1024;
 
-function isPrivateOidcIpv4(address: string): boolean {
-  const parts = address.split(".").map((part) => Number(part));
-  if (
-    parts.length !== 4 ||
-    parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
-  ) {
-    return false;
-  }
-  const [a, b] = parts;
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    (a === 192 && b === 0) ||
-    (a === 198 && (b === 18 || b === 19)) ||
-    a >= 224
-  );
-}
-
-function expandOidcIpv6Words(address: string): number[] | null {
-  let normalized = address.toLowerCase();
-  // Convert a dotted-quad tail (e.g. 64:ff9b::10.0.0.1) to two hex words.
-  if (normalized.includes(".")) {
-    const colonIndex = normalized.lastIndexOf(":");
-    if (colonIndex === -1) return null;
-    const quad = normalized
-      .slice(colonIndex + 1)
-      .split(".")
-      .map((part) => Number(part));
-    if (
-      quad.length !== 4 ||
-      quad.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
-    ) {
-      return null;
-    }
-    normalized = `${normalized.slice(0, colonIndex)}:${((quad[0] << 8) | quad[1]).toString(16)}:${((quad[2] << 8) | quad[3]).toString(16)}`;
-  }
-  const halves = normalized.split("::");
-  if (halves.length > 2) return null;
-
-  const parseWords = (part: string): number[] | null => {
-    if (!part) return [];
-    const words = part.split(":");
-    const parsed = words.map((word) => {
-      if (!/^[0-9a-f]{1,4}$/.test(word)) return Number.NaN;
-      return Number.parseInt(word, 16);
-    });
-    return parsed.some((word) => !Number.isInteger(word) || word < 0 || word > 0xffff)
-      ? null
-      : parsed;
-  };
-
-  const left = parseWords(halves[0]);
-  const right = parseWords(halves[1] ?? "");
-  if (!left || !right) return null;
-
-  const missing = 8 - left.length - right.length;
-  if ((halves.length === 1 && missing !== 0) || missing < 0) return null;
-
-  return [...left, ...Array.from({ length: missing }, () => 0), ...right];
-}
-
-/**
- * Extract the IPv4 address embedded in an IPv6 transition mechanism
- * (NAT64 64:ff9b::/96 per RFC 6052,
- * 6to4 2002::/16 per RFC 3056) so it can be screened against
- * isPrivateOidcIpv4.
- */
-function embeddedTransitionOidcIpv4(address: string): string | null {
-  const words = expandOidcIpv6Words(address);
-  if (!words) return null;
-  const fromWords = (high: number, low: number) =>
-    [high >> 8, high & 0xff, low >> 8, low & 0xff].join(".");
-  const isWellKnownNat64 =
-    words[0] === 0x64 &&
-    words[1] === 0xff9b &&
-    words[2] === 0 &&
-    words[3] === 0 &&
-    words[4] === 0 &&
-    words[5] === 0;
-  if (isWellKnownNat64) return fromWords(words[6], words[7]);
-  if (words[0] === 0x2002) return fromWords(words[1], words[2]);
-  return null;
-}
-
-function isPrivateOidcIpv6(address: string): boolean {
-  const normalized = address.toLowerCase();
-  const ipv4Mapped = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (ipv4Mapped) return isPrivateOidcIpv4(ipv4Mapped[1]);
-  const hexIpv4Mapped = normalized.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  if (hexIpv4Mapped) {
-    const high = Number.parseInt(hexIpv4Mapped[1], 16);
-    const low = Number.parseInt(hexIpv4Mapped[2], 16);
-    if (Number.isFinite(high) && Number.isFinite(low) && high <= 0xffff && low <= 0xffff) {
-      return isPrivateOidcIpv4(
-        `${(high >> 8) & 255}.${high & 255}.${(low >> 8) & 255}.${low & 255}`,
-      );
-    }
-  }
-  const embedded = embeddedTransitionOidcIpv4(normalized);
-  if (embedded) return isPrivateOidcIpv4(embedded);
-  const words = expandOidcIpv6Words(normalized);
-  // RFC 8215 reserves 64:ff9b:1::/48 for local use and explicitly says no
-  // assumption can be made about an embedded IPv4 address or its location.
-  // Treat the entire non-globally-reachable prefix as non-public.
-  if (words?.[0] === 0x64 && words[1] === 0xff9b && words[2] === 1) return true;
-  // Teredo (2001:0000::/32) obfuscates the embedded client IPv4 — block outright.
-  if (words?.[0] === 0x2001 && words[1] === 0) return true;
-  return (
-    normalized === "::" ||
-    normalized === "::1" ||
-    normalized.startsWith("fc") ||
-    normalized.startsWith("fd") ||
-    normalized.startsWith("fe80:") ||
-    normalized.startsWith("ff") ||
-    normalized.startsWith("2001:db8:")
-  );
-}
-
-function assertPublicOidcAddress(address: string, family: number): void {
-  if (
-    (family === 4 && isPrivateOidcIpv4(address)) ||
-    (family === 6 && isPrivateOidcIpv6(address))
-  ) {
-    throw new Error("OIDC token endpoint must resolve to a public address");
-  }
-}
-
-function assertPublicOidcTokenUrl(url: URL): void {
-  const hostname = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  const literalVersion = isIP(hostname);
-  if (
-    url.protocol !== "https:" ||
-    hostname === "localhost" ||
-    hostname.endsWith(".localhost") ||
-    hostname.endsWith(".local") ||
-    hostname.endsWith(".internal") ||
-    (literalVersion === 4 && isPrivateOidcIpv4(hostname)) ||
-    (literalVersion === 6 && isPrivateOidcIpv6(hostname))
-  ) {
-    throw new Error("OIDC token endpoint must be a public https URL");
-  }
-}
-
 async function postPublicOidcTokenEndpoint(
   tokenUrl: string,
   body: URLSearchParams,
 ): Promise<{ ok: boolean; status: number; text: string }> {
-  const url = new URL(tokenUrl);
-  assertPublicOidcTokenUrl(url);
+  const url = assertPublicHttpsEndpoint(tokenUrl, "OIDC token endpoint");
+  assertPinnedDnsTransportSupported("OIDC token endpoint");
   const bodyText = body.toString();
+  if (new TextEncoder().encode(bodyText).length > 16 * 1024) {
+    throw new Error("OIDC token endpoint request is too large");
+  }
 
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -10375,28 +10257,17 @@ async function postPublicOidcTokenEndpoint(
           "Content-Type": "application/x-www-form-urlencoded",
           "Content-Length": new TextEncoder().encode(bodyText).length.toString(),
         },
-        lookup(hostname, options, callback) {
-          dnsLookup(
-            hostname,
-            { all: false, family: options.family, verbatim: true },
-            (error, address, family) => {
-              if (error) {
-                callback(error, address, family);
-                return;
-              }
-              try {
-                assertPublicOidcAddress(address, family);
-                callback(null, address, family);
-              } catch (privateAddressError) {
-                callback(privateAddressError as NodeJS.ErrnoException, address, family);
-              }
-            },
-          );
-        },
+        lookup: createPublicInternetLookup("OIDC token endpoint"),
       },
       (response) => {
         if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400) {
           finish(reject, new Error("OIDC token endpoint redirects are not allowed"));
+          response.resume();
+          return;
+        }
+        const declaredLength = Number(response.headers["content-length"]);
+        if (Number.isFinite(declaredLength) && declaredLength > OIDC_TOKEN_EXCHANGE_MAX_BYTES) {
+          finish(reject, new Error("OIDC token endpoint response is too large"));
           response.resume();
           return;
         }
@@ -10418,6 +10289,12 @@ async function postPublicOidcTokenEndpoint(
             status: response.statusCode ?? 0,
             text: responseText,
           });
+        });
+        response.on("aborted", () => {
+          finish(reject, new Error("OIDC token endpoint response was interrupted"));
+        });
+        response.on("error", () => {
+          finish(reject, new Error("OIDC token endpoint response failed"));
         });
       },
     );
@@ -10463,7 +10340,16 @@ async function exchangeOidcAuthorizationCode(opts: {
     body.set("client_secret", secret);
   }
 
-  const response = await postPublicOidcTokenEndpoint(provider.tokenUrl, body);
+  let response: Awaited<ReturnType<typeof postPublicOidcTokenEndpoint>>;
+  try {
+    response = await postPublicOidcTokenEndpoint(provider.tokenUrl, body);
+  } catch (error) {
+    // Keep resolver, TLS, socket, and certificate diagnostics server-side.
+    // They may contain configured hostnames or runtime network details and are
+    // not useful to an unauthenticated callback client.
+    console.warn("[OIDC] Token endpoint request failed:", error);
+    throw new Error("OIDC token endpoint request failed");
+  }
   const text = response.text;
   let payload: unknown;
   try {

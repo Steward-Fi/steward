@@ -1,5 +1,5 @@
+import { assertPublicHttpsEndpoint } from "@stwd/auth";
 import type { TenantOidcProviderConfig } from "@stwd/shared";
-import { validateWebhookUrl } from "./webhook-url";
 
 /**
  * Tenant-configured OIDC client secrets may only be sourced from env vars in
@@ -21,16 +21,24 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isHttpsUrl(value: string): boolean {
+function isPublicHttpsUrl(value: string): boolean {
   try {
-    return new URL(value).protocol === "https:";
+    assertPublicHttpsEndpoint(value, "OIDC endpoint");
+    return true;
   } catch {
     return false;
   }
 }
 
-function isPublicHttpsUrl(value: string): boolean {
-  return isHttpsUrl(value) && !validateWebhookUrl(value);
+function isPublicOidcIssuer(value: string): boolean {
+  try {
+    const url = assertPublicHttpsEndpoint(value, "OIDC issuer");
+    // OIDC Core 1.0 section 2 requires issuer identifiers to have no query or
+    // fragment component. Enforce this at write and legacy-row read time.
+    return url.search === "" && url.hash === "";
+  } catch {
+    return false;
+  }
 }
 
 export function normalizeOidcProviders(value: unknown): TenantOidcProviderConfig[] | string {
@@ -67,14 +75,17 @@ export function normalizeOidcProviders(value: unknown): TenantOidcProviderConfig
       : undefined;
     if (!/^[a-zA-Z0-9_.:-]{1,64}$/.test(id)) return "provider id is required and must be URL-safe";
     if (ids.has(id)) return `duplicate provider id: ${id}`;
-    if (issuer.length > 2048 || !isPublicHttpsUrl(issuer)) {
+    if (issuer.length > 2048 || !isPublicOidcIssuer(issuer)) {
       return `issuer for provider ${id} must be a public https URL`;
     }
     if (jwksUri.length > 2048 || !isPublicHttpsUrl(jwksUri)) {
       return `jwksUri for provider ${id} must be a public https URL`;
     }
+    // A direct-id_token provider may configure clientId solely to enforce the
+    // OIDC `azp` binding. The remaining fields opt into authorization-code
+    // exchange and must then be complete as a group.
     const hasAuthorizationCodeConfig = Boolean(
-      clientId || clientSecretEnv || authorizationUrl || tokenUrl || scopes.length > 0,
+      clientSecretEnv || authorizationUrl || tokenUrl || scopes.length > 0,
     );
     if (clientId && clientId.length > 256) {
       return `clientId for provider ${id} may be at most 256 characters`;
