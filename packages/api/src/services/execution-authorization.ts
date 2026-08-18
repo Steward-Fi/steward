@@ -267,11 +267,9 @@ function signExecutionAuthorization(authorization: ExecutionAuthorization): stri
 
 function executionAuthorizationKey(): Uint8Array {
   // Derive from the dedicated execution-auth secret, never from
-  // STEWARD_JWT_SECRET. A JWT-secret compromise
-  // compromise must not yield forgeable execution authorizations). Mirrors the
-  // must not yield forgeable execution authorizations. Like the v2 mint path,
-  // v1 has no JWT-secret fallback. v1
-  // authorizations are minted and consumed inside this process within a 60s
+  // STEWARD_JWT_SECRET. A JWT-secret compromise must not yield forgeable
+  // execution authorizations. Like the v2 mint path, v1 has no JWT-secret
+  // fallback. V1 authorizations are minted and consumed within a 60s
   // TTL, so the active (first) key entry suffices; v1 keeps its own HKDF
   // salt/info above for domain separation from the v2 derived keys.
   let secret: Uint8Array;

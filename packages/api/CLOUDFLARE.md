@@ -7,7 +7,7 @@ Steward now ships three runtime adapters that share the same Hono app
 | -------------- | ------------------------------------ | ----------------------------------------------------------------- |
 | Bun (existing) | `packages/api/src/index.ts`          | Production server with TCP Postgres + ioredis. Long-lived process.|
 | PGLite         | `packages/api/src/embedded.ts`       | Electrobun / desktop. In-process WASM Postgres, no external deps.  |
-| Workers (new)  | `packages/api/src/worker.ts`         | Cloudflare Workers. HTTP Postgres (Neon) + REST Redis (Upstash). |
+| Workers        | `packages/api/src/worker.ts`         | Cloudflare Workers. Request-owned Neon + REST Redis (Upstash).   |
 
 The adapters are additive — switching to Workers does NOT change the Bun
 or PGLite paths.
@@ -17,6 +17,8 @@ or PGLite paths.
 - **DB driver** is selected by the `DATABASE_DRIVER` env var:
   - `postgres-js` (default): TCP pool, used by Bun/Node.
   - `neon-http`: Neon's HTTP/fetch driver, used by Workers.
+  - `neon-websocket`: request-owned, transaction-capable Neon connection for
+    Worker operations that require transactions.
   - PGLite (set via `setPGLiteOverride()` in `embedded.ts`).
 - **Redis** is selected by `REDIS_DRIVER`:
   - `ioredis` (default): persistent TCP connection, used by Bun/Node.
@@ -37,21 +39,20 @@ or PGLite paths.
 
 ### Per-request usage on Workers
 
-The neon-http driver is HTTP-only, so a fresh client per request is
-acceptable. For the singleton case `getDb()` continues to work, but for
-hot paths consider:
+The Worker entry creates a database handle for each fetch or scheduled event
+and binds it to request-local async context. Existing services that call
+`getDb()` receive that handle; they do not use an isolate-global singleton.
+The HTTP driver is used for non-transactional work. Selecting
+`DATABASE_DRIVER=neon-websocket` creates a single-connection handle for
+transactional work and closes it before the event completes:
 
 ```ts
-import { createDbForRequest } from "@stwd/db";
+import { withWorkerRequestDatabase } from "./worker";
 
 app.use("*", async (c, next) => {
-  c.set("db", createDbForRequest(c.env));
-  await next();
+  await withWorkerRequestDatabase(c.env, next);
 });
 ```
-
-(Currently Steward calls `getDb()` directly in route handlers; it's still
-correct on Workers because the neon-http client is cheap to construct.)
 
 ## One-time setup
 
@@ -84,6 +85,8 @@ directory. Do NOT put them in `wrangler.toml`.
 | `DISCORD_CLIENT_ID`/`_SECRET`   | Discord OAuth.                                                         |
 | `GITHUB_CLIENT_ID`/`_SECRET`    | GitHub OAuth.                                                          |
 | `TWITTER_CLIENT_ID`/`_SECRET`   | Twitter/X OAuth (PKCE).                                                |
+| `X_CLIENT_ID`/`X_CLIENT_SECRET` | Provider-account X connection and lifecycle recovery.                  |
+| `GOOGLE_PROVIDER_CLIENT_ID`/`_SECRET` | Google provider-account connection and governed execution.      |
 | `PASSKEY_RP_ID`                 | WebAuthn relying-party ID (your apex domain).                          |
 | `PASSKEY_ORIGIN`                | WebAuthn origin (https://...).                                         |
 | `PASSKEY_RP_NAME`               | Display name for the WebAuthn UI.                                      |
@@ -159,9 +162,9 @@ RESEND_API_KEY=...
   TTL-driven cleanup in the storage backends. Anything new that needs a
   cron should use Cloudflare Cron Triggers (add a `scheduled()` handler in
   `worker.ts`).
-- **Per-request DB client.** `neon-http` is fetch-based, so we don't
-  benefit from connection pooling. For very high QPS, look at
-  Hyperdrive (Cloudflare's Postgres pooler) or sharding the workload.
+- **Per-request DB client.** `neon-http` is fetch-based and
+  `neon-websocket` uses one request-owned connection. Neither retains a
+  process-wide Worker pool. For very high QPS, evaluate Hyperdrive or sharding.
 - **No `node:fs` at runtime.** PGLite, the Drizzle file-based migrator,
   and any code that reads from the SQL migrations folder cannot run on a
   Worker. The pluggable factories make sure these paths are dead-code in

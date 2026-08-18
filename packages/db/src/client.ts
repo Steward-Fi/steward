@@ -390,8 +390,9 @@ export function __buildNeonTransactionPoolConfigForTests(
  * Create one request-scoped, transaction-capable Neon database handle.
  *
  * Unlike neon-http, the WebSocket transport pins an interactive transaction
- * to one checked-out connection, so `withTenantRlsTransaction()` can safely
- * use transaction-local `set_config`. The caller MUST await `close()` after
+ * to one checked-out connection, so the transaction runner returned by
+ * `createTenantRlsAuthority()` can safely use transaction-local `set_config`.
+ * The caller MUST await `close()` after
  * every request (normally from a `finally` block before returning the
  * response). This handle is deliberately excluded from the global singleton:
  * a Worker isolate must not retain request-owned sockets after the request's

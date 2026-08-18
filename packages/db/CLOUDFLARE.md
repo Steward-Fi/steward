@@ -86,7 +86,8 @@ that would not work over HTTP, and Steward's actual posture on each, are:
 
 `createNeonTransactionDbForRequest()` provides a request-scoped Neon WebSocket
 pool with exactly one connection. It supports Drizzle callback transactions and
-is therefore eligible for `withTenantRlsTransaction(..., "neon-websocket", ...)`.
+is therefore eligible for
+`createTenantRlsAuthority(...).transactions.run(..., "neon-websocket", ...)`.
 The handle exposes an idempotent `close()` which callers must await before a
 Worker request finishes. Connection acquisition is capped at 10 seconds; query,
 statement, lock, idle-connection, and idle-in-transaction phases are capped at

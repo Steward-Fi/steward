@@ -335,19 +335,19 @@ export interface PluginHostDiagnostics {
   webhookEvents: string[];
   /** which plugin contributed which webhook event names (core events excluded). */
   webhookEventContributions: Record<string, string[]>;
-  /** which plugin contributed which policy rule types (plugin policy-rule contribution contract). */
+  /** Which plugin contributed each policy rule type. */
   policyRuleContributions: Record<string, string[]>;
   /**
    * which plugin contributed which adapters, as `"<category>::<provider>"` keys
-   * (plugin adapter contribution contract). reflects what the host REGISTERED into the adapter registry.
+   * Reflects the adapters registered by the host.
    */
   adapterContributions: Record<string, string[]>;
   /**
    * which plugin declared a migration source, and the namespaced bookkeeping
    * table its ledger is (or will be) recorded in —
    * `drizzle.__drizzle_migrations_plugin_<id>`, isolated from the core journal
-   * (plugin migration contribution contract). Present whether or not {@link PluginHost.runMigrations} has run
-   * yet (it reflects the declared sources, not applied state).
+   * Present whether or not {@link PluginHost.runMigrations} has run; this
+   * describes declared sources, not applied state.
    */
   migrationSources: Record<string, { id: string; migrationsTable: string }>;
 }
@@ -423,34 +423,34 @@ function orderByDependencies<Ctx>(
 /**
  * The plugin host: composes one or more plugins onto a steward app.
  *
- * RESPONSIBILITIES (plugin event-contribution contract + 2b + 2c + 2d)
- * ------------------------------------------
+ * Responsibilities
+ * ----------------
  *  1. validate unique plugin names + a valid (acyclic, fully-satisfied)
  *     `dependsOn` graph, FAILING CLOSED on any violation.
  *  2. order plugins so each registers AFTER its dependencies.
  *  3. collect each plugin's declared `webhookEvents` into a runtime-extensible
  *     {@link WebhookEventRegistry} (core events ∪ plugin-declared), so the
- *     webhook config/dispatch path accepts a plugin's event type. (plugin event-contribution contract)
+ *     webhook config/dispatch path accepts a plugin's event type.
  *  4. register each plugin's declared `policyRules` into the policy engine's
  *     runtime evaluator {@link PolicyRuleRegistry}, FAILING CLOSED on a rule
  *     `type` that collides with a core rule type or another plugin's, so the
  *     policy engine evaluates a contributed rule type via the plugin's
- *     evaluator (core rule evaluation is untouched). (plugin policy-rule contribution contract)
+ *     evaluator; core rule evaluation is untouched.
  *  5. call each plugin's `register(app, ctx)` (if present) in dependency order.
  *  6. collect each plugin's declared `migrations` source (in dependency order)
  *     and apply them — via {@link runMigrations}, called by the boot/migrate path
  *     AFTER the core migrator — into a per-plugin NAMESPACED bookkeeping table,
  *     totally isolated from the core's `drizzle.__drizzle_migrations` journal
- *     (plugin migration contribution contract). Migrations are NOT run during `register` (route registration
- *     must not block on a schema migration) and NEVER per request.
+ *     Migrations are not run during `register` because route registration must
+ *     not block on a schema migration, and they never run per request.
  *  7. register each plugin's declared `adapters` into the core adapter registry
  *     (from `ctx.adapterRegistry`) via its existing `register(category, provider,
  *     adapter)` seam, in dependency order, FAILING CLOSED on a `(category,
  *     provider)` collision with another plugin's contribution (the host never
  *     silently overwrites a real money-route adapter) or an invalid contribution
  *     (unknown category, empty provider, missing adapter). The registry's
- *     fail-closed-in-production RESOLUTION is untouched — the host only CALLS
- *     register(). (plugin adapter contribution contract)
+ *     fail-closed production resolution remains unchanged; the host only
+ *     registers contributions.
  *  8. expose {@link describe} so ops can see what loaded + what was contributed.
  */
 export class PluginHost<Ctx> {
@@ -461,7 +461,7 @@ export class PluginHost<Ctx> {
   private readonly policyContributions = new Map<string, string[]>();
   /**
    * which plugin contributed which adapters, as `"<category>::<provider>"` keys
-   * (diagnostics). plugin adapter contribution contract.
+   * for diagnostics.
    */
   private readonly adapterContributions = new Map<string, string[]>();
   /**

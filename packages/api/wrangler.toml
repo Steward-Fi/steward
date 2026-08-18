@@ -47,6 +47,9 @@ REDIS_DRIVER = "upstash"
 #   TWITTER_CLIENT_ID, TWITTER_CLIENT_SECRET
 #   X_CLIENT_ID, X_CLIENT_SECRET     provider-account X connect and lifecycle
 #                                     recovery; distinct from Twitter sign-in
+#   GOOGLE_PROVIDER_CLIENT_ID, GOOGLE_PROVIDER_CLIENT_SECRET
+#                                    Google provider-account connection and
+#                                    governed execution; distinct from sign-in
 #
 # Passkeys (WebAuthn)
 #   PASSKEY_RP_ID, PASSKEY_ORIGIN, PASSKEY_RP_NAME
