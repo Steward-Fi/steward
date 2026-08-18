@@ -13,9 +13,50 @@
 const PUBLIC_PACKAGES = ["sdk", "react", "eliza-plugin"] as const;
 const FULL_SHA1 = /^[0-9a-f]{40}$/;
 const CHANGELOG_NAMES = new Set(["CHANGELOG.md", "CHANGELOG", "changelog.md"]);
+const SEMVER =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 export function isFullCommitSha(value: string | undefined): value is string {
   return typeof value === "string" && FULL_SHA1.test(value);
+}
+
+function comparePrerelease(left: string | undefined, right: string | undefined): number {
+  if (left === right) return 0;
+  if (left === undefined) return 1;
+  if (right === undefined) return -1;
+  const leftParts = left.split(".");
+  const rightParts = right.split(".");
+  for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
+    const a = leftParts[index];
+    const b = rightParts[index];
+    if (a === undefined) return -1;
+    if (b === undefined) return 1;
+    if (a === b) continue;
+    const aNumeric = /^\d+$/.test(a);
+    const bNumeric = /^\d+$/.test(b);
+    if (aNumeric && bNumeric) return BigInt(a) < BigInt(b) ? -1 : 1;
+    if (aNumeric !== bNumeric) return aNumeric ? -1 : 1;
+    return a < b ? -1 : 1;
+  }
+  return 0;
+}
+
+export function isStrictSemverIncrease(base: string | null, head: string | null): boolean {
+  if (base === null || head === null) return false;
+  const before = SEMVER.exec(base);
+  const after = SEMVER.exec(head);
+  if (!before || !after) return false;
+  for (const prerelease of [before[4], after[4]]) {
+    if (prerelease?.split(".").some((part) => /^\d+$/.test(part) && part.length > 1 && part[0] === "0")) {
+      return false;
+    }
+  }
+  for (let index = 1; index <= 3; index += 1) {
+    const left = BigInt(before[index]);
+    const right = BigInt(after[index]);
+    if (left !== right) return right > left;
+  }
+  return comparePrerelease(before[4], after[4]) < 0;
 }
 
 export interface PackageMetadataInput {
@@ -36,10 +77,7 @@ export function evaluatePublicPackageMetadata(input: PackageMetadataInput): stri
     const packageJsonChanged = relative.includes("package.json");
     const version = input.versions[pkg];
     const versionBumped =
-      packageJsonChanged &&
-      version?.base !== null &&
-      version?.head !== null &&
-      version?.base !== version?.head;
+      packageJsonChanged && isStrictSemverIncrease(version?.base ?? null, version?.head ?? null);
 
     if (!changelogChanged && !versionBumped) {
       errors.push(
@@ -114,7 +152,11 @@ export function main(argv: string[]): number {
     const versions: Record<string, { base: string | null; head: string | null }> = {};
     for (const pkg of PUBLIC_PACKAGES) {
       versions[pkg] = {
-        base: readVersion(mergeBase, pkg),
+        // Changed-file attribution remains three-dot/merge-base based, but a
+        // release version must advance beyond the immutable event base. If the
+        // base branch independently reached the same version as the PR, the PR
+        // must choose another version (or add a changelog) before merging.
+        base: readVersion(baseSha, pkg),
         head: readVersion(headSha, pkg),
       };
     }

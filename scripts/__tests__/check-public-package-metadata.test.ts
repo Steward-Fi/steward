@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   evaluatePublicPackageMetadata,
   isFullCommitSha,
+  isStrictSemverIncrease,
   parseNulDelimitedFiles,
 } from "../check-public-package-metadata";
 
@@ -44,6 +45,26 @@ describe("public package metadata check", () => {
         versions: unchangedVersions,
       }),
     ).toEqual([]);
+  });
+
+  test("requires a strict semver increase over the immutable event base", () => {
+    const changedFiles = ["packages/sdk/src/index.ts", "packages/sdk/package.json"];
+    expect(
+      evaluatePublicPackageMetadata({
+        changedFiles,
+        versions: { ...unchangedVersions, sdk: { base: "1.0.1", head: "1.0.1" } },
+      }),
+    ).toHaveLength(1);
+    expect(
+      evaluatePublicPackageMetadata({
+        changedFiles,
+        versions: { ...unchangedVersions, sdk: { base: "1.0.1", head: "1.0.0" } },
+      }),
+    ).toHaveLength(1);
+    expect(isStrictSemverIncrease("1.0.0-beta.2", "1.0.0-beta.10")).toBe(true);
+    expect(isStrictSemverIncrease("1.0.0", "1.0.1")).toBe(true);
+    expect(isStrictSemverIncrease("1.0.0", "2.0")).toBe(false);
+    expect(isStrictSemverIncrease("1.0.0-1", "1.0.0-01")).toBe(false);
   });
 
   test("rejects malformed or ref-like SHA inputs before invoking git", () => {
