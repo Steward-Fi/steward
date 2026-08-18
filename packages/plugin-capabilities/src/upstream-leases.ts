@@ -387,7 +387,21 @@ async function recordFailure(
   await auditedTransaction(tenantId, async (tx: Db, appendRequiredAudit) => {
     const updated = await tx
       .update(upstreamCredentialLeases)
-      .set({ status, lastError: error.slice(0, 500), updatedAt: new Date() })
+      .set({
+        status,
+        lastError: error.slice(0, 500),
+        updatedAt: new Date(),
+        ...(status === "failed"
+          ? {
+              tokenHash: null,
+              tokenCiphertext: null,
+              tokenIv: null,
+              tokenAuthTag: null,
+              tokenSalt: null,
+              expiresAt: null,
+            }
+          : {}),
+      })
       .where(
         and(
           eq(upstreamCredentialLeases.id, leaseId),
