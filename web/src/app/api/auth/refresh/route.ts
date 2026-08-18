@@ -1,4 +1,5 @@
 import {
+  AuthProxyRequestError,
   buildExpiredRefreshCookie,
   buildRefreshCookie,
   forwardToApi,
@@ -7,6 +8,7 @@ import {
   normalizeAccessToken,
   normalizeRefreshToken,
   proxyJson,
+  readBoundedJsonObject,
   readRefreshCookie,
 } from "@/lib/auth-proxy";
 
@@ -37,12 +39,22 @@ export async function POST(request: Request): Promise<Response> {
 
   let tenantId: string | undefined;
   try {
-    const body = (await request.json()) as { tenantId?: unknown } | null;
-    if (typeof body?.tenantId === "string" && body.tenantId.length > 0) {
+    const body = await readBoundedJsonObject(request);
+    if (
+      body.tenantId !== undefined &&
+      (typeof body.tenantId !== "string" || !/^[a-zA-Z0-9_\-.:]{1,64}$/.test(body.tenantId))
+    ) {
+      return proxyJson({ ok: false, error: "Invalid tenant id format" }, 400);
+    }
+    if (typeof body.tenantId === "string") {
       tenantId = body.tenantId;
     }
-  } catch {
-    // Empty / non-JSON body is fine — tenantId is optional.
+  } catch (error) {
+    const status = error instanceof AuthProxyRequestError ? error.status : 400;
+    return proxyJson(
+      { ok: false, error: status === 413 ? "Request body is too large" : "Invalid JSON body" },
+      status,
+    );
   }
 
   let upstream: Awaited<ReturnType<typeof forwardToApi>>;

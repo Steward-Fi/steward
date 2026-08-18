@@ -30,6 +30,7 @@ const REFRESH_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60; // 30 days
 
 /** Sanity bound so a malformed deposit cannot write an oversized cookie. */
 const MAX_REFRESH_TOKEN_LENGTH = 8192;
+const AUTH_PROXY_REQUEST_MAX_BYTES = 16 * 1024;
 const AUTH_UPSTREAM_TIMEOUT_MS = 10_000;
 const AUTH_UPSTREAM_MAX_BYTES = 1024 * 1024;
 
@@ -62,7 +63,7 @@ export function readRefreshCookie(request: Request): string | null {
       const value = part.slice(eq + 1).trim();
       if (!value) return null;
       try {
-        return decodeURIComponent(value);
+        return normalizeRefreshToken(decodeURIComponent(value));
       } catch {
         return null;
       }
@@ -87,6 +88,9 @@ export function proxyJson(
     headers: {
       "Content-Type": "application/json",
       "Cache-Control": "no-store",
+      Pragma: "no-cache",
+      Expires: "0",
+      "X-Content-Type-Options": "nosniff",
       ...headers,
     },
   });
@@ -114,6 +118,65 @@ export function normalizeRefreshToken(value: unknown): string | null {
   return value;
 }
 
+export class AuthProxyRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: 400 | 413,
+  ) {
+    super(message);
+  }
+}
+
+/** Parse a small JSON object without allowing chunked request-body memory DoS. */
+export async function readBoundedJsonObject(request: Request): Promise<Record<string, unknown>> {
+  if (!request.body) return {};
+  const contentType = request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  if (contentType !== "application/json") {
+    throw new AuthProxyRequestError("Content-Type must be application/json", 400);
+  }
+  const declared = request.headers.get("content-length");
+  if (declared !== null) {
+    if (!/^\d+$/.test(declared)) throw new AuthProxyRequestError("Invalid Content-Length", 400);
+    const bytes = Number(declared);
+    if (!Number.isSafeInteger(bytes) || bytes > AUTH_PROXY_REQUEST_MAX_BYTES) {
+      throw new AuthProxyRequestError("Request body is too large", 413);
+    }
+  }
+  const encoding = request.headers.get("content-encoding");
+  if (encoding && encoding.toLowerCase() !== "identity") {
+    throw new AuthProxyRequestError("Encoded request bodies are not accepted", 400);
+  }
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > AUTH_PROXY_REQUEST_MAX_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new AuthProxyRequestError("Request body is too large", 413);
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw new AuthProxyRequestError("Invalid JSON body", 400);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new AuthProxyRequestError("JSON body must be an object", 400);
+  }
+  return parsed as Record<string, unknown>;
+}
+
 /**
  * Accept only the compact-JWT shape Steward issues for browser access tokens.
  * The proxy is not a verifier, but this prevents a malformed upstream response
@@ -135,16 +198,30 @@ export function normalizeAccessToken(
  * upstream status and parsed body (or null when the body is not JSON).
  */
 export async function forwardToApi(
-  path: string,
+  path: "/auth/refresh" | "/auth/revoke",
   payload: Record<string, unknown>,
   limits: { timeoutMs?: number; maxBytes?: number } = {},
 ): Promise<{ status: number; json: Record<string, unknown> | null }> {
   // Resolved per call: route handlers run server-side, where the env var is
   // available at request time (and tests can point it at a stub server).
-  const apiBase = (process.env.NEXT_PUBLIC_STEWARD_API_URL || DEFAULT_STEWARD_API_URL).replace(
-    /\/+$/,
-    "",
-  );
+  const rawApiBase = process.env.NEXT_PUBLIC_STEWARD_API_URL || DEFAULT_STEWARD_API_URL;
+  const parsedApiBase = new URL(rawApiBase);
+  if (
+    !["http:", "https:"].includes(parsedApiBase.protocol) ||
+    parsedApiBase.username ||
+    parsedApiBase.password ||
+    parsedApiBase.search ||
+    parsedApiBase.hash
+  ) {
+    throw new Error("Steward API URL must be an absolute credential-free HTTP(S) URL");
+  }
+  const apiHostname = parsedApiBase.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const loopback =
+    apiHostname === "localhost" || apiHostname === "127.0.0.1" || apiHostname === "::1";
+  if (process.env.NODE_ENV === "production" && parsedApiBase.protocol !== "https:" && !loopback) {
+    throw new Error("Steward API URL must use HTTPS in production");
+  }
+  const apiBase = parsedApiBase.toString().replace(/\/+$/, "");
   const timeoutMs = limits.timeoutMs ?? AUTH_UPSTREAM_TIMEOUT_MS;
   const maxBytes = limits.maxBytes ?? AUTH_UPSTREAM_MAX_BYTES;
   const controller = new AbortController();

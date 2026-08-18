@@ -1,10 +1,12 @@
 import {
+  AuthProxyRequestError,
   buildExpiredRefreshCookie,
   buildRefreshCookie,
   hasProxyHeader,
   isHttpsRequest,
   normalizeRefreshToken,
   proxyJson,
+  readBoundedJsonObject,
 } from "@/lib/auth-proxy";
 
 /**
@@ -23,13 +25,17 @@ export async function POST(request: Request): Promise<Response> {
   if (!hasProxyHeader(request)) {
     return proxyJson({ ok: false, error: "Forbidden" }, 403);
   }
-  let body: unknown;
+  let body: Record<string, unknown>;
   try {
-    body = await request.json();
-  } catch {
-    return proxyJson({ ok: false, error: "Invalid JSON body" }, 400);
+    body = await readBoundedJsonObject(request);
+  } catch (error) {
+    const status = error instanceof AuthProxyRequestError ? error.status : 400;
+    return proxyJson(
+      { ok: false, error: status === 413 ? "Request body is too large" : "Invalid JSON body" },
+      status,
+    );
   }
-  const refreshToken = normalizeRefreshToken((body as { refreshToken?: unknown })?.refreshToken);
+  const refreshToken = normalizeRefreshToken(body.refreshToken);
   if (!refreshToken) {
     return proxyJson({ ok: false, error: "refreshToken is required" }, 400);
   }

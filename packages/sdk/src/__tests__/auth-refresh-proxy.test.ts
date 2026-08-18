@@ -135,7 +135,14 @@ describe("StewardAuth authProxyUrl (SEC-018: HttpOnly refresh-token custody)", (
         addEventListener: (type: string, listener: (event: StorageEvent) => void) => {
           if (type === "storage") storageListeners.push(listener);
         },
-        location: { host: "app.example.test", origin: "https://app.example.test" },
+        location: {
+          get origin() {
+            return server?.baseUrl ?? "https://app.example.test";
+          },
+          get host() {
+            return new URL(server?.baseUrl ?? "https://app.example.test").host;
+          },
+        },
       },
     });
     Object.defineProperty(globalThis, "navigator", {
@@ -204,6 +211,20 @@ describe("StewardAuth authProxyUrl (SEC-018: HttpOnly refresh-token custody)", (
   function proxyRequests(path: string, method?: string): CapturedRequest[] {
     return requests.filter((r) => r.path === path && (!method || r.method === method));
   }
+
+  test("rejects cross-origin, credential-bearing, and ambiguous proxy URLs", () => {
+    for (const authProxyUrl of [
+      "https://evil.example/proxy",
+      "//evil.example/proxy",
+      `${server!.baseUrl.replace("http://", "http://user:password@")}/proxy`,
+      `${server!.baseUrl}/proxy?next=https://evil.example`,
+      `${server!.baseUrl}/proxy#fragment`,
+    ]) {
+      expect(() => new StewardAuth({ baseUrl: server!.baseUrl, storage, authProxyUrl })).toThrow(
+        /authProxyUrl/,
+      );
+    }
+  });
 
   test("sign-in deposits the refresh token with the proxy, never with JS storage", async () => {
     const auth = new StewardAuth({

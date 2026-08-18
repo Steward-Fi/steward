@@ -132,7 +132,7 @@ import type {
 } from "@stwd/shared";
 import { KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import bs58 from "bs58";
-import { and, eq, gte, isNull, lt, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { generateNonce, SiweMessage } from "siwe";
 import { getAddress, verifyMessage as viemVerifyMessage } from "viem";
@@ -896,6 +896,12 @@ type RefreshRotationResult =
   | { status: "not_member"; userId: string; tenantId: string }
   | { status: "revoked"; userId: string; tenantId: string };
 
+type UsedRefreshTokenRecord = {
+  userId?: string;
+  tenantId?: string;
+  successorTokenHash?: string;
+};
+
 function refreshTokenIssuedAtSeconds(record: typeof refreshTokens.$inferSelect): number {
   return Math.floor(new Date(record.createdAt).getTime() / 1000);
 }
@@ -929,9 +935,7 @@ async function rotateRefreshTokenForUserSession(
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`refresh_token_${tokenHash}`}, 0))`,
       );
-      const used = await readMfaJson<{ userId?: string; tenantId?: string }>(
-        `refresh:used:${tokenHash}`,
-      );
+      const used = await readMfaJson<UsedRefreshTokenRecord>(`refresh:used:${tokenHash}`);
       if (used?.userId && used?.tenantId) {
         await tx
           .delete(refreshTokens)
@@ -962,9 +966,7 @@ async function rotateRefreshTokenForUserSession(
       .returning();
 
     if (!record) {
-      const used = await readMfaJson<{ userId?: string; tenantId?: string }>(
-        `refresh:used:${tokenHash}`,
-      );
+      const used = await readMfaJson<UsedRefreshTokenRecord>(`refresh:used:${tokenHash}`);
       if (used?.userId && used?.tenantId) {
         await tx
           .delete(refreshTokens)
@@ -1033,6 +1035,19 @@ async function rotateRefreshTokenForUserSession(
       tokenHash: newRefreshTokenHash,
       expiresAt: new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000),
     });
+    // Keep a bounded predecessor link so a concurrent single-session revoke
+    // that started with the just-spent token can delete its rotated successor
+    // after acquiring the same user/advisory locks. Otherwise refresh can win
+    // the race and leave a live replacement token after sign-out.
+    await writeMfaJson(
+      `refresh:used:${tokenHash}`,
+      {
+        userId: record.userId,
+        tenantId: record.tenantId,
+        successorTokenHash: newRefreshTokenHash,
+      },
+      REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000,
+    );
     if (Object.keys(sessionClaims).length > 0) {
       await writeMfaJson(
         `refresh:claims:${newRefreshTokenHash}`,
@@ -7713,10 +7728,28 @@ auth.post("/revoke", async (c) => {
   }
 
   const db = getDb();
-  const [existing] = await db
-    .select()
-    .from(refreshTokens)
-    .where(eq(refreshTokens.tokenHash, hashToken(body.refreshToken)));
+  const tokenHash = hashToken(body.refreshToken);
+  const revoked = await db.transaction(async (tx) => {
+    const [candidate] = await tx
+      .select()
+      .from(refreshTokens)
+      .where(eq(refreshTokens.tokenHash, tokenHash));
+    const usedBeforeLock = candidate
+      ? null
+      : await readMfaJson<UsedRefreshTokenRecord>(`refresh:used:${tokenHash}`);
+    const userId = candidate?.userId ?? usedBeforeLock?.userId;
+    if (userId) await lockUserSession(tx, userId);
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`refresh_token_${tokenHash}`}, 0))`,
+    );
+    // Re-read after both locks: rotation may have replaced the candidate while
+    // this revoke waited for the user-wide session lock.
+    const used = await readMfaJson<UsedRefreshTokenRecord>(`refresh:used:${tokenHash}`);
+    const hashes = [tokenHash];
+    if (used?.successorTokenHash) hashes.push(used.successorTokenHash);
+    return tx.delete(refreshTokens).where(inArray(refreshTokens.tokenHash, hashes)).returning();
+  });
+  const existing = revoked[0];
   if (existing) {
     await writeAuditEvent({
       tenantId: existing.tenantId,
@@ -7730,19 +7763,14 @@ auth.post("/revoke", async (c) => {
       requestId: c.get("requestId") ?? null,
     });
   }
-  const [revoked] = await db
-    .delete(refreshTokens)
-    .where(eq(refreshTokens.tokenHash, hashToken(body.refreshToken)))
-    .returning();
-
-  if (revoked) {
+  for (const revokedToken of revoked) {
     await writeAuditEvent({
-      tenantId: revoked.tenantId,
+      tenantId: revokedToken.tenantId,
       actorType: "user",
-      actorId: revoked.userId,
+      actorId: revokedToken.userId,
       action: "auth.refresh_token.revoke",
       resourceType: "session",
-      metadata: { tokenId: revoked.id },
+      metadata: { tokenId: revokedToken.id },
       ipAddress: c.req.header("x-forwarded-for") ?? null,
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,

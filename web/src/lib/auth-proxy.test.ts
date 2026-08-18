@@ -3,11 +3,13 @@ import {
   AUTH_PROXY_HEADER,
   buildExpiredRefreshCookie,
   buildRefreshCookie,
+  forwardToApi,
   hasProxyHeader,
   isHttpsRequest,
   normalizeAccessToken,
   normalizeRefreshToken,
   proxyJson,
+  readBoundedJsonObject,
   readRefreshCookie,
 } from "@/lib/auth-proxy";
 
@@ -67,6 +69,9 @@ describe("auth proxy cookie contract (SEC-018)", () => {
     expect(readRefreshCookie(req({ headers: { cookie: "other=1" } }))).toBeNull();
     expect(readRefreshCookie(req({ headers: { cookie: "steward_rt=" } }))).toBeNull();
     expect(readRefreshCookie(req({ headers: { cookie: "steward_rt=%E0%A4%A" } }))).toBeNull();
+    expect(
+      readRefreshCookie(req({ headers: { cookie: `steward_rt=${"x".repeat(9000)}` } })),
+    ).toBeNull();
   });
 });
 
@@ -86,7 +91,28 @@ describe("auth proxy CSRF/header checks (SEC-018)", () => {
     const response = proxyJson({ ok: true });
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     expect(response.headers.get("Content-Type")).toBe("application/json");
+    expect(response.headers.get("Pragma")).toBe("no-cache");
+    expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
     expect(await response.json()).toEqual({ ok: true });
+  });
+
+  test("bounded JSON parsing rejects oversized, encoded, and non-object bodies", async () => {
+    const request = (body: string, headers: Record<string, string> = {}) =>
+      new Request("https://app.example.test/api/auth/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body,
+      });
+    await expect(
+      readBoundedJsonObject(request(`{"padding":"${"x".repeat(17000)}"}`)),
+    ).rejects.toThrow("too large");
+    await expect(readBoundedJsonObject(request("[]"))).rejects.toThrow("must be an object");
+    await expect(
+      readBoundedJsonObject(request("{}", { "Content-Encoding": "gzip" })),
+    ).rejects.toThrow("Encoded");
+    await expect(
+      readBoundedJsonObject(request("{}", { "Content-Type": "text/plain" })),
+    ).rejects.toThrow("Content-Type");
   });
 
   test("normalizeRefreshToken rejects non-strings and oversized values", () => {
@@ -173,6 +199,26 @@ describe("forwardToApi (SEC-018)", () => {
         new Promise<void>((resolve) => redirector.close(() => resolve())),
         new Promise<void>((resolve) => receiver.close(() => resolve())),
       ]);
+    }
+  });
+
+  test("rejects credential-bearing and plaintext production API destinations", async () => {
+    const mutableEnv = process.env as Record<string, string | undefined>;
+    const originalNodeEnv = mutableEnv.NODE_ENV;
+    try {
+      mutableEnv.NEXT_PUBLIC_STEWARD_API_URL = "https://user:password@api.example.test";
+      await expect(forwardToApi("/auth/revoke", { refreshToken: "secret" })).rejects.toThrow(
+        "credential-free",
+      );
+      mutableEnv.NODE_ENV = "production";
+      mutableEnv.NEXT_PUBLIC_STEWARD_API_URL = "http://api.example.test";
+      await expect(forwardToApi("/auth/revoke", { refreshToken: "secret" })).rejects.toThrow(
+        "HTTPS",
+      );
+    } finally {
+      delete mutableEnv.NEXT_PUBLIC_STEWARD_API_URL;
+      if (originalNodeEnv === undefined) delete mutableEnv.NODE_ENV;
+      else mutableEnv.NODE_ENV = originalNodeEnv;
     }
   });
 });

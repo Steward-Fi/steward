@@ -57,6 +57,14 @@ describe("auth proxy route handlers (SEC-018)", () => {
       expect(res.status).toBe(400);
       expect(res.headers.get("Set-Cookie")).toBeNull();
     });
+
+    test("rejects oversized deposits before parsing or setting a cookie", async () => {
+      const res = await sessionPOST(
+        postJson("https://app.example.test/api/auth/session", { refreshToken: "x".repeat(17000) }),
+      );
+      expect(res.status).toBe(413);
+      expect(res.headers.get("Set-Cookie")).toBeNull();
+    });
   });
 
   describe("DELETE /api/auth/session (sign-out)", () => {
@@ -188,6 +196,21 @@ describe("auth proxy route handlers (SEC-018)", () => {
       );
       expect(res.status).toBe(200);
       expect(upstreamRequests[0].body).toEqual({ refreshToken: "rt-secret", tenantId: "tenant-2" });
+    });
+
+    test("refresh rejects malformed or oversized tenant ids without forwarding", async () => {
+      for (const tenantId of ["../tenant", "x".repeat(65)]) {
+        const before = upstreamRequests.length;
+        const res = await refreshPOST(
+          postJson(
+            "https://app.example.test/api/auth/refresh",
+            { tenantId },
+            { cookie: "steward_rt=rt-secret" },
+          ),
+        );
+        expect(res.status).toBe(400);
+        expect(upstreamRequests).toHaveLength(before);
+      }
     });
 
     test("a 401 from the API clears the cookie so the client signs out", async () => {

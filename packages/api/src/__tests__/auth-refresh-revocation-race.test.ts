@@ -61,4 +61,23 @@ describe("auth refresh revocation race hardening", () => {
       "rotateRefreshTokenForUserSession(body.refreshToken, body.tenantId)",
     );
   });
+
+  it("binds single-session revoke to a concurrently rotated successor", () => {
+    const rotateStart = routeSource.indexOf("async function rotateRefreshTokenForUserSession");
+    const rotateRoute = routeSource.slice(
+      rotateStart,
+      routeSource.indexOf("/** Build", rotateStart),
+    );
+    expect(rotateRoute).toContain("successorTokenHash: newRefreshTokenHash");
+
+    const revokeStart = routeSource.indexOf('auth.post("/revoke"');
+    const revokeRoute = routeSource.slice(
+      revokeStart,
+      routeSource.indexOf("/**\n * DELETE /sessions", revokeStart),
+    );
+    expect(revokeRoute).toContain("await lockUserSession(tx, userId)");
+    expect(revokeRoute).toContain("pg_advisory_xact_lock");
+    expect(revokeRoute).toContain("used?.successorTokenHash");
+    expect(revokeRoute).toContain("inArray(refreshTokens.tokenHash, hashes)");
+  });
 });

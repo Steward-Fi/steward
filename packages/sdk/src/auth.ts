@@ -194,6 +194,37 @@ function isBrowser(): boolean {
   );
 }
 
+/** Resolve the cookie-custody proxy without permitting a refresh-token handoff
+ * to another origin. Protocol-relative URLs are cross-origin capable too. */
+function normalizeAuthProxyUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.replace(/\/+$/, "");
+  if (!trimmed) throw new Error("authProxyUrl must identify a non-root path");
+  if (!isBrowser()) {
+    if (!trimmed.startsWith("/") || trimmed.startsWith("//")) {
+      throw new Error("authProxyUrl must be root-relative outside a browser");
+    }
+    return trimmed;
+  }
+  let resolved: URL;
+  try {
+    resolved = new URL(trimmed, window.location.origin);
+  } catch {
+    throw new Error("authProxyUrl must be a valid same-origin HTTP(S) URL");
+  }
+  if (
+    !["http:", "https:"].includes(resolved.protocol) ||
+    resolved.origin !== window.location.origin ||
+    resolved.username ||
+    resolved.password ||
+    resolved.search ||
+    resolved.hash
+  ) {
+    throw new Error("authProxyUrl must be a credential-free same-origin HTTP(S) URL");
+  }
+  return trimmed.startsWith("/") ? trimmed : resolved.href.replace(/\/+$/, "");
+}
+
 function getSignInOrigin(): { domain: string; origin: string } {
   return isBrowser()
     ? { domain: window.location.host, origin: window.location.origin }
@@ -286,6 +317,7 @@ async function authRequest<T>(
     response = await fetch(`${baseUrl.replace(/\/+$/, "")}${path}`, {
       ...init,
       headers,
+      redirect: "error",
     });
   } catch (err) {
     throw new StewardApiError(err instanceof Error ? err.message : "Network request failed", 0);
@@ -336,7 +368,7 @@ export class StewardAuth {
     assertSecureBaseUrl(baseUrl, allowInsecureBaseUrl);
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.tenantId = tenantId;
-    this.authProxyUrl = authProxyUrl ? authProxyUrl.replace(/\/+$/, "") : undefined;
+    this.authProxyUrl = normalizeAuthProxyUrl(authProxyUrl);
 
     // Use caller-provided storage only. Tokens default to memory so a browser
     // XSS cannot read long-lived refresh tokens from localStorage by default.
