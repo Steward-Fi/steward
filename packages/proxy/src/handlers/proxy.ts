@@ -136,6 +136,17 @@ async function decryptSecret(tenantId: string, secretId: string): Promise<string
   return getSecretVault().decryptSecret(tenantId, secretId);
 }
 
+/**
+ * Slack's governed routes are intentionally bot-token only. Secret routes are
+ * otherwise provider-neutral, so enforce the credential kind again at the last
+ * possible boundary: after decrypt and before it can enter an outbound header.
+ * This prevents a mistakenly stored user token (xoxp-) or arbitrary plaintext
+ * secret from inheriting the bot grant's authority.
+ */
+function isSlackBotTokenCredential(value: string): boolean {
+  return value.length <= 512 && /^xoxb-[A-Za-z0-9-]{10,}$/.test(value);
+}
+
 // ─── Credential injection ────────────────────────────────────────────────────
 
 /**
@@ -1733,6 +1744,27 @@ export async function handleProxy(c: Context): Promise<Response> {
     await releaseUnsafeProxyRequest(replayClaim);
     proxySlot.release();
     return c.json({ ok: false, error: "Failed to decrypt credential" }, 500);
+  }
+
+  if (target.host === "slack.com" && !isSlackBotTokenCredential(credential)) {
+    // Do not include the credential (or any derivative of it) in the response,
+    // logs, or audit reason. The agent only learns that the configured grant is
+    // not an eligible Slack bot credential.
+    credential = "";
+    await recordRequiredAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: 403,
+      latencyMs: Date.now() - startTime,
+      reason: "slack-bot-credential-required",
+    });
+    await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
+    await releaseUnsafeProxyRequest(replayClaim);
+    proxySlot.release();
+    return c.json({ ok: false, error: "Slack route requires a bot credential" }, 403);
   }
 
   // 4. Build outbound request
