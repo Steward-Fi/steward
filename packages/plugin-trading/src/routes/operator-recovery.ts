@@ -473,7 +473,7 @@ export function createOperatorRecoveryRoutes(
       const pgliteRuntime =
         process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true";
       if (!pgliteRuntime) {
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${input.agentId}))`);
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${input.agentId}, 0))`);
       }
       // Stabilize the authorization snapshot until the reservation commits.
       // Policy writes take ROW EXCLUSIVE table locks, which conflict with SHARE;

@@ -18,6 +18,22 @@ const postgres = ((postgresModule as { default?: unknown }).default ?? postgresM
 const databaseUrl = process.env.DATABASE_URL;
 const realPostgresIt = databaseUrl && !process.env.STEWARD_PGLITE_MEMORY ? it : it.skip;
 
+it("keeps every cumulative spend path on the same 64-bit advisory key", async () => {
+  const sources = await Promise.all(
+    [
+      "../routes/intents.ts",
+      "../routes/vault.ts",
+      "../routes/user.ts",
+      "../../../plugin-trading/src/routes/operator-recovery.ts",
+    ].map((path) => Bun.file(new URL(path, import.meta.url)).text()),
+  );
+  const sharedLock = "pg_advisory_xact_lock(hashtextextended(${";
+  for (const source of sources) {
+    expect(source).toContain(sharedLock);
+    expect(source).not.toContain("pg_advisory_xact_lock(hashtext(${agentId}))");
+  }
+});
+
 realPostgresIt("serializes cumulative operator reservations across real connections", async () => {
   const suffix = crypto.randomUUID().replaceAll("-", "");
   const table = `operator_lock_test_${suffix}`;
@@ -32,7 +48,7 @@ realPostgresIt("serializes cumulative operator reservations across real connecti
     );
     const reserve = (client: Sql) =>
       client.begin(async (tx) => {
-        await tx`select pg_advisory_xact_lock(hashtext(${agentId}))`;
+        await tx`select pg_advisory_xact_lock(hashtextextended(${agentId}, 0))`;
         const [row] = await tx.unsafe<{ total: string }[]>(
           `select coalesce(sum(amount), 0)::text as total from "${table}" where status in ('pending', 'final')`,
         );

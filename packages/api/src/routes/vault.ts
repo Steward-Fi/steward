@@ -1978,7 +1978,7 @@ async function withAgentSpendLock<T>(agentId: string, fn: () => Promise<T>): Pro
     return fn();
   }
   return db.transaction(async (tx) => {
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${agentId}))`);
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${agentId}, 0))`);
     return fn();
   });
 }
