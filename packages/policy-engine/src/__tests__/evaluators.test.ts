@@ -2229,17 +2229,22 @@ describe("Malformed evaluator config fails closed instead of throwing (SEC-105)"
     }
   });
 
-  it("rejects a checksum-valid Monero address with a non-canonical public key", async () => {
-    const moneroWithZeroSpendKey =
-      "41a6wB6x6y171M4XwwjJ4F3cfT4qMmkZaM3vR2n5nhQwfoSqoFktSX9HEjQppn8ewfo9fz4hPWWfknP4jM8w14iA5GZyG6s";
-    const result = await evaluatePolicy(
-      makeAddressRule({ addresses: [moneroWithZeroSpendKey], mode: "whitelist" }),
-      makeContext({
-        request: { ...makeContext().request, to: moneroWithZeroSpendKey, chainId: 301 },
-      }),
-    );
-    expect(result.passed).toBe(false);
-    expect(result.reason).toContain("address family");
+  it("rejects checksum-valid Monero identity and torsion points in both public keys", async () => {
+    for (const address of [
+      // Identity and small-order/torsion public spend keys, respectively.
+      "41fJjQDhryD11111111111111111111111111111111116M6xLGByLYcTsbJzTVUuLSHxtbfgKyZJVBqPffpP8fm7BapnRj",
+      "41d7FXjswpK11111111111111111111111111111111116M6xLGByLYcTsbJzTVUuLSHxtbfgKyZJVBqPffpP8fm7C8GNnw",
+      // The same invalid points in the public view-key position.
+      "45AmZ2FRjuqZts5NGzb7ZXSNRuwS9MUqEeakpyEeSHsB5gg2sUQdweP11111111111111111111111111111111113vBvjU",
+      "45AmZ2FRjuqZts5NGzb7ZXSNRuwS9MUqEeakpyEeSHsB5gdqPbvp2VV111111111111111111111111111111111179TEUy",
+    ]) {
+      const result = await evaluatePolicy(
+        makeAddressRule({ addresses: [address], mode: "whitelist" }),
+        makeContext({ request: { ...makeContext().request, to: address, chainId: 301 } }),
+      );
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("address family");
+    }
   });
 
   it("filters valid mixed-family policy entries to the request chain", async () => {
