@@ -2109,10 +2109,9 @@ export const providerGoogleCredentialLifecycles = pgTable(
 );
 
 /**
- * Durable hand-off journal for X OAuth refresh-token rotation. X refresh
- * tokens are single use, so a provider response must be encrypted before any
- * semantic validation that can fail. Reconnect is the explicit recovery
- * boundary for unresolved outcomes.
+ * Durable hand-off journal for X OAuth code exchange and refresh rotation.
+ * One-time provider responses are encrypted before semantic validation, then
+ * either adopted transactionally or retained for bounded revocation recovery.
  */
 export const providerXCredentialLifecycles = pgTable(
   "provider_x_credential_lifecycles",
@@ -2120,10 +2119,13 @@ export const providerXCredentialLifecycles = pgTable(
     id: uuid("id").defaultRandom().primaryKey(),
     tenantId: varchar("tenant_id", { length: 64 }).notNull(),
     workspaceId: uuid("workspace_id").notNull(),
-    providerAccountId: uuid("provider_account_id").notNull(),
+    providerAccountId: uuid("provider_account_id"),
+    kind: varchar("kind", { length: 32 }).notNull().default("refresh_rotation"),
     state: varchar("state", { length: 32 }).notNull(),
     credentialSecretId: uuid("credential_secret_id"),
-    expectedAccountRevision: integer("expected_account_revision").notNull(),
+    expectedAccountRevision: integer("expected_account_revision"),
+    attempts: integer("attempts").notNull().default(0),
+    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
     lastErrorCode: varchar("last_error_code", { length: 64 }),
     ...timestamps,
   },
@@ -2151,9 +2153,21 @@ export const providerXCredentialLifecycles = pgTable(
       "provider_x_lifecycle_state_check",
       sql`${table.state} IN ('inflight', 'credential_staged', 'revocation_pending', 'adopted', 'revoked', 'needs_attention', 'superseded')`,
     ),
+    kindCheck: check(
+      "provider_x_lifecycle_kind_check",
+      sql`${table.kind} IN ('connect_exchange', 'refresh_rotation')`,
+    ),
     revisionCheck: check(
       "provider_x_lifecycle_revision_check",
-      sql`${table.expectedAccountRevision} >= 1`,
+      sql`${table.expectedAccountRevision} IS NULL OR ${table.expectedAccountRevision} >= 1`,
+    ),
+    refreshBindingCheck: check(
+      "provider_x_lifecycle_refresh_binding_check",
+      sql`${table.kind} <> 'refresh_rotation' OR (${table.providerAccountId} IS NOT NULL AND ${table.expectedAccountRevision} IS NOT NULL)`,
+    ),
+    retryCheck: check(
+      "provider_x_lifecycle_retry_check",
+      sql`${table.attempts} >= 0 AND ${table.attempts} <= 5 AND (${table.state} <> 'revocation_pending' OR ${table.nextRetryAt} IS NOT NULL)`,
     ),
     secretStateCheck: check(
       "provider_x_lifecycle_secret_state_check",
@@ -2164,10 +2178,15 @@ export const providerXCredentialLifecycles = pgTable(
       table.providerAccountId,
       table.state,
     ),
+    recoveryIdx: index("provider_x_lifecycle_recovery_idx").on(
+      table.state,
+      table.nextRetryAt,
+      table.updatedAt,
+    ),
     activeRefreshIdx: uniqueIndex("provider_x_lifecycle_active_refresh_idx")
       .on(table.tenantId, table.providerAccountId)
       .where(
-        sql`${table.state} IN ('inflight', 'credential_staged', 'revocation_pending', 'needs_attention')`,
+        sql`${table.kind} = 'refresh_rotation' AND ${table.state} IN ('inflight', 'credential_staged', 'revocation_pending', 'needs_attention')`,
       ),
   }),
 );

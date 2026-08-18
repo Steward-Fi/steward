@@ -51,6 +51,8 @@ services:
       STEWARD_EMAIL_CODE_SECRET: "${STEWARD_EMAIL_CODE_SECRET:-}"
       STEWARD_PLUGINS: "${STEWARD_PLUGINS:-}"
       WXMR_SOLANA_RPC_URL: "${WXMR_SOLANA_RPC_URL:-}"
+      X_CLIENT_ID: "${X_CLIENT_ID:-}"
+      X_CLIENT_SECRET: "${X_CLIENT_SECRET:-}"
     volumes:
       - steward-data:/app/data
     depends_on:

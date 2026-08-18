@@ -138,6 +138,7 @@ Embedded mode uses PGLite, an in-process PostgreSQL-compatible database through 
 | `RESEND_API_KEY` | Email magic-link authentication, optional. |
 | `PASSKEY_RP_ID` | WebAuthn relying-party domain, optional. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth, optional. |
+| `X_CLIENT_ID` / `X_CLIENT_SECRET` | Provider-account X OAuth connect and lifecycle recovery, optional. Distinct from human sign-in credentials. |
 | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | Discord OAuth, optional. |
 
 See [`.env.example`](.env.example) for the full list.
