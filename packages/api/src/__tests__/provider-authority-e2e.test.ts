@@ -67,6 +67,7 @@ type ProxyMod = typeof import("@stwd/proxy/src/handlers/proxy");
 type DispatchMod = typeof import("@stwd/proxy/src/handlers/governed-execution");
 let proxyMod: ProxyMod;
 let dispatchGovernedExecution: DispatchMod["dispatchGovernedExecution"];
+let restoreProxyRateLimit: (() => void) | undefined;
 
 // Shared fixture (real create/decide services) — imported dynamically so the
 // PGLite override is installed before the fixture's db handle resolves.
@@ -326,14 +327,19 @@ beforeAll(async () => {
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => client.close());
   proxyMod = await import("@stwd/proxy/src/handlers/proxy");
+  const redisEnforcement = await import("@stwd/proxy/src/middleware/redis-enforcement");
   ({ dispatchGovernedExecution } = await import("@stwd/proxy/src/handlers/governed-execution"));
   ({ F, principal } = await import("./provider-approval-fixture"));
   ({ seedCaseFixture, wipeCase } = await import("./provider-case-fixture"));
   // Pin DNS to a public address so the SSRF guard passes without a real lookup.
   proxyMod.__setResolveProxyHostForTests(async () => [{ address: "140.82.112.6", family: 4 }]);
+  proxyMod.__setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
+  restoreProxyRateLimit = () =>
+    proxyMod.__setCheckProxyRateLimitForTests(redisEnforcement.checkProxyRateLimit);
 });
 
 afterAll(async () => {
+  restoreProxyRateLimit?.();
   await closeDb();
 });
 
