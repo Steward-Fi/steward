@@ -575,6 +575,13 @@
       "when": 1787106472000,
       "tag": "0101_operator_transfer_integrity",
       "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1787106473000,
+      "tag": "0102_google_consequential_write_risk",
+      "breakpoints": true
     }
   ]
 }

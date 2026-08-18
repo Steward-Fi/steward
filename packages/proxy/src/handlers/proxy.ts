@@ -31,11 +31,7 @@ import {
   workspaces,
 } from "@stwd/db";
 import { getRedis, type SpendReservation, settleReservedSpend } from "@stwd/redis";
-import {
-  isValidOAuthBearerToken,
-  redactedThrownDiagnostics,
-  strictParseJson,
-} from "@stwd/shared";
+import { isValidOAuthBearerToken, redactedThrownDiagnostics, strictParseJson } from "@stwd/shared";
 import { SecretVault } from "@stwd/vault";
 import type { Context } from "hono";
 import { boundedPositiveIntegerEnv, isProxyDevMode } from "../config";
