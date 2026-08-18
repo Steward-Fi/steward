@@ -43,7 +43,7 @@ describe("auth proxy route handlers (SEC-018)", () => {
       );
       expect(res.status).toBe(200);
       const cookie = res.headers.get("Set-Cookie") ?? "";
-      expect(cookie).toContain("steward_rt=rt-secret");
+      expect(cookie).toContain("__Host-steward_rt=rt-secret");
       expect(cookie).toContain("HttpOnly");
       expect(cookie).toContain("SameSite=Strict");
       expect(cookie).toContain("Secure");
@@ -146,7 +146,7 @@ describe("auth proxy route handlers (SEC-018)", () => {
       const res = await refreshPOST(
         new Request("https://app.example.test/api/auth/refresh", {
           method: "POST",
-          headers: { cookie: "steward_rt=rt-secret" },
+          headers: { cookie: "__Host-steward_rt=rt-secret" },
         }),
       );
       expect(res.status).toBe(403);
@@ -165,7 +165,7 @@ describe("auth proxy route handlers (SEC-018)", () => {
         postJson(
           "https://app.example.test/api/auth/refresh",
           {},
-          { cookie: "steward_rt=rt-secret" },
+          { cookie: "__Host-steward_rt=rt-secret" },
         ),
       );
       expect(res.status).toBe(200);
@@ -182,7 +182,7 @@ describe("auth proxy route handlers (SEC-018)", () => {
 
       // The rotated token goes straight into the HttpOnly cookie.
       const cookie = res.headers.get("Set-Cookie") ?? "";
-      expect(cookie).toContain("steward_rt=rotated-rt");
+      expect(cookie).toContain("__Host-steward_rt=rotated-rt");
       expect(cookie).toContain("HttpOnly");
     });
 
@@ -191,7 +191,7 @@ describe("auth proxy route handlers (SEC-018)", () => {
         postJson(
           "https://app.example.test/api/auth/refresh",
           { tenantId: "tenant-2" },
-          { cookie: "steward_rt=rt-secret" },
+          { cookie: "__Host-steward_rt=rt-secret" },
         ),
       );
       expect(res.status).toBe(200);
@@ -205,7 +205,7 @@ describe("auth proxy route handlers (SEC-018)", () => {
           postJson(
             "https://app.example.test/api/auth/refresh",
             { tenantId },
-            { cookie: "steward_rt=rt-secret" },
+            { cookie: "__Host-steward_rt=rt-secret" },
           ),
         );
         expect(res.status).toBe(400);
@@ -216,7 +216,11 @@ describe("auth proxy route handlers (SEC-018)", () => {
     test("a 401 from the API clears the cookie so the client signs out", async () => {
       upstreamStatus = 401;
       const res = await refreshPOST(
-        postJson("https://app.example.test/api/auth/refresh", {}, { cookie: "steward_rt=stale" }),
+        postJson(
+          "https://app.example.test/api/auth/refresh",
+          {},
+          { cookie: "__Host-steward_rt=stale" },
+        ),
       );
       expect(res.status).toBe(401);
       expect(res.headers.get("Set-Cookie")).toContain("Max-Age=0");
@@ -230,7 +234,11 @@ describe("auth proxy route handlers (SEC-018)", () => {
         expiresIn: 900,
       };
       const res = await refreshPOST(
-        postJson("https://app.example.test/api/auth/refresh", {}, { cookie: "steward_rt=stale" }),
+        postJson(
+          "https://app.example.test/api/auth/refresh",
+          {},
+          { cookie: "__Host-steward_rt=stale" },
+        ),
       );
       expect(res.status).toBe(502);
       expect(res.headers.get("Set-Cookie")).toContain("Max-Age=0");
@@ -246,7 +254,11 @@ describe("auth proxy route handlers (SEC-018)", () => {
           expiresIn,
         };
         const res = await refreshPOST(
-          postJson("https://app.example.test/api/auth/refresh", {}, { cookie: "steward_rt=stale" }),
+          postJson(
+            "https://app.example.test/api/auth/refresh",
+            {},
+            { cookie: "__Host-steward_rt=stale" },
+          ),
         );
         expect(res.status).toBe(502);
         expect(res.headers.get("Set-Cookie")).toContain("Max-Age=0");
@@ -262,7 +274,11 @@ describe("auth proxy route handlers (SEC-018)", () => {
         nested: { refreshToken: "also-reflected" },
       };
       const res = await refreshPOST(
-        postJson("https://app.example.test/api/auth/refresh", {}, { cookie: "steward_rt=stale" }),
+        postJson(
+          "https://app.example.test/api/auth/refresh",
+          {},
+          { cookie: "__Host-steward_rt=stale" },
+        ),
       );
       expect(res.status).toBe(429);
       expect(await res.json()).toEqual({ ok: false, error: "Refresh failed" });
@@ -276,7 +292,11 @@ describe("auth proxy route handlers (SEC-018)", () => {
         expiresIn: 900,
       };
       const res = await refreshPOST(
-        postJson("https://app.example.test/api/auth/refresh", {}, { cookie: "steward_rt=stale" }),
+        postJson(
+          "https://app.example.test/api/auth/refresh",
+          {},
+          { cookie: "__Host-steward_rt=stale" },
+        ),
       );
       expect(res.status).toBe(502);
       expect(res.headers.get("Set-Cookie")).toContain("Max-Age=0");
@@ -298,7 +318,11 @@ describe("auth proxy route handlers (SEC-018)", () => {
 
     test("revoke forwards the cookie token and always clears the cookie", async () => {
       const res = await revokePOST(
-        postJson("https://app.example.test/api/auth/revoke", {}, { cookie: "steward_rt=rt-9" }),
+        postJson(
+          "https://app.example.test/api/auth/revoke",
+          {},
+          { cookie: "__Host-steward_rt=rt-9" },
+        ),
       );
       expect(res.status).toBe(200);
       expect(upstreamRequests).toHaveLength(1);

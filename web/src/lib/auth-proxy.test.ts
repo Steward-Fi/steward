@@ -27,31 +27,35 @@ function req(init: { url?: string; headers?: Record<string, string> } = {}): Req
 }
 
 describe("auth proxy cookie contract (SEC-018)", () => {
-  test("refresh cookie is HttpOnly, SameSite=Strict, path-scoped, and Secure on https", () => {
+  test("refresh cookie is host-bound, HttpOnly, SameSite=Strict, and Secure on https", () => {
     const cookie = buildRefreshCookie("token-123", true);
-    expect(cookie).toContain("steward_rt=token-123");
+    expect(cookie).toContain("__Host-steward_rt=token-123");
     expect(cookie).toContain("HttpOnly");
     expect(cookie).toContain("SameSite=Strict");
-    expect(cookie).toContain("Path=/api/auth");
+    expect(cookie).toContain("Path=/");
     expect(cookie).toContain("Secure");
     expect(cookie).toContain("Max-Age=");
   });
 
   test("refresh cookie omits Secure on plain http (local e2e/dev origin)", () => {
     const cookie = buildRefreshCookie("token-123", false);
+    expect(cookie).toContain("steward_rt=token-123");
+    expect(cookie).toContain("Path=/api/auth");
     expect(cookie).not.toContain("Secure");
     expect(cookie).toContain("HttpOnly");
   });
 
   test("refresh cookie value is URL-encoded", () => {
     const cookie = buildRefreshCookie("tok%en/with=special;chars", true);
-    expect(cookie).toContain(`steward_rt=${encodeURIComponent("tok%en/with=special;chars")}`);
+    expect(cookie).toContain(
+      `__Host-steward_rt=${encodeURIComponent("tok%en/with=special;chars")}`,
+    );
     expect(cookie).not.toContain("tok%en/with=special;chars;");
   });
 
   test("expired cookie clears the value with Max-Age=0", () => {
     const cookie = buildExpiredRefreshCookie(true);
-    expect(cookie).toContain("steward_rt=");
+    expect(cookie).toContain("__Host-steward_rt=");
     expect(cookie).toContain("Max-Age=0");
     expect(cookie).toContain("HttpOnly");
   });
@@ -59,7 +63,7 @@ describe("auth proxy cookie contract (SEC-018)", () => {
   test("readRefreshCookie round-trips a written token", () => {
     const token = "refresh-token-abc.123";
     const request = req({
-      headers: { cookie: `other=1; steward_rt=${encodeURIComponent(token)}; theme=dark` },
+      headers: { cookie: `other=1; __Host-steward_rt=${encodeURIComponent(token)}; theme=dark` },
     });
     expect(readRefreshCookie(request)).toBe(token);
   });
@@ -67,11 +71,22 @@ describe("auth proxy cookie contract (SEC-018)", () => {
   test("readRefreshCookie returns null when missing, empty, or malformed", () => {
     expect(readRefreshCookie(req())).toBeNull();
     expect(readRefreshCookie(req({ headers: { cookie: "other=1" } }))).toBeNull();
-    expect(readRefreshCookie(req({ headers: { cookie: "steward_rt=" } }))).toBeNull();
-    expect(readRefreshCookie(req({ headers: { cookie: "steward_rt=%E0%A4%A" } }))).toBeNull();
+    expect(readRefreshCookie(req({ headers: { cookie: "__Host-steward_rt=" } }))).toBeNull();
     expect(
-      readRefreshCookie(req({ headers: { cookie: `steward_rt=${"x".repeat(9000)}` } })),
+      readRefreshCookie(req({ headers: { cookie: "__Host-steward_rt=%E0%A4%A" } })),
     ).toBeNull();
+    expect(
+      readRefreshCookie(req({ headers: { cookie: `__Host-steward_rt=${"x".repeat(9000)}` } })),
+    ).toBeNull();
+  });
+
+  test("production ignores a sibling-domain legacy cookie shadow", () => {
+    expect(
+      readRefreshCookie(
+        req({ headers: { cookie: "steward_rt=attacker; __Host-steward_rt=trusted" } }),
+      ),
+    ).toBe("trusted");
+    expect(readRefreshCookie(req({ headers: { cookie: "steward_rt=attacker" } }))).toBeNull();
   });
 });
 

@@ -20,7 +20,8 @@ import { DEFAULT_STEWARD_API_URL } from "@/lib/steward-api-url";
  * CORS preflight.
  */
 
-export const REFRESH_COOKIE_NAME = "steward_rt";
+export const REFRESH_COOKIE_NAME = "__Host-steward_rt";
+export const DEV_REFRESH_COOKIE_NAME = "steward_rt";
 export const REFRESH_COOKIE_PATH = "/api/auth";
 export const AUTH_PROXY_HEADER = "x-steward-auth-proxy";
 export const AUTH_PROXY_HEADER_VALUE = "1";
@@ -35,7 +36,14 @@ const AUTH_UPSTREAM_TIMEOUT_MS = 10_000;
 const AUTH_UPSTREAM_MAX_BYTES = 1024 * 1024;
 
 function cookieAttributes(secure: boolean): string {
-  return `Path=${REFRESH_COOKIE_PATH}; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`;
+  // __Host- forbids Domain cookies and therefore closes sibling-subdomain
+  // cookie tossing/session fixation. Browsers require Path=/ + Secure for that
+  // prefix; plain-http loopback development uses the legacy scoped name.
+  return `Path=${secure ? "/" : REFRESH_COOKIE_PATH}; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`;
+}
+
+function refreshCookieName(secure: boolean): string {
+  return secure ? REFRESH_COOKIE_NAME : DEV_REFRESH_COOKIE_NAME;
 }
 
 /**
@@ -44,22 +52,23 @@ function cookieAttributes(secure: boolean): string {
  * origin, which browsers would otherwise reject.
  */
 export function buildRefreshCookie(refreshToken: string, secure: boolean): string {
-  return `${REFRESH_COOKIE_NAME}=${encodeURIComponent(refreshToken)}; ${cookieAttributes(secure)}; Max-Age=${REFRESH_COOKIE_MAX_AGE_SECONDS}`;
+  return `${refreshCookieName(secure)}=${encodeURIComponent(refreshToken)}; ${cookieAttributes(secure)}; Max-Age=${REFRESH_COOKIE_MAX_AGE_SECONDS}`;
 }
 
 /** Serialize an immediately-expiring cookie (sign-out / failed refresh). */
 export function buildExpiredRefreshCookie(secure: boolean): string {
-  return `${REFRESH_COOKIE_NAME}=; ${cookieAttributes(secure)}; Max-Age=0`;
+  return `${refreshCookieName(secure)}=; ${cookieAttributes(secure)}; Max-Age=0`;
 }
 
 /** Extract the refresh token from a request's Cookie header, or null. */
 export function readRefreshCookie(request: Request): string | null {
   const header = request.headers.get("cookie");
   if (!header) return null;
+  const expectedName = refreshCookieName(isHttpsRequest(request));
   for (const part of header.split(";")) {
     const eq = part.indexOf("=");
     if (eq === -1) continue;
-    if (part.slice(0, eq).trim() === REFRESH_COOKIE_NAME) {
+    if (part.slice(0, eq).trim() === expectedName) {
       const value = part.slice(eq + 1).trim();
       if (!value) return null;
       try {

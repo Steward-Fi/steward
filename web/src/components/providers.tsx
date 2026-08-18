@@ -16,7 +16,7 @@ const API_URL = STEWARD_API_URL;
  * `authProxyUrl: "/api/auth"`, so:
  *   - sign-in deposits the refresh token with the same-origin route handlers
  *     in `app/api/auth/`, which store it in an HttpOnly, SameSite=Strict
- *     cookie (`steward_rt`) that page JavaScript cannot read;
+ *     host-bound cookie (`__Host-steward_rt`) that page JavaScript cannot read;
  *   - session refresh / revoke / tenant-switch go through those routes, which
  *     inject the cookie-held token before forwarding to the Steward API and
  *     return only the short-lived access token to the browser;
