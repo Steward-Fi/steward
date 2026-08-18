@@ -85,10 +85,6 @@ function embeddedIpv4FromIpv6(hostname: string): string | null {
     words[5] === 0;
   if (isNat64WellKnown) return fromWords(words[6], words[7]);
 
-  const isNat64LocalUse =
-    words[0] === 0x64 && words[1] === 0xff9b && words[2] === 1 && words[3] === 0;
-  if (isNat64LocalUse) return fromWords(words[6], words[7]);
-
   if (words[0] === 0x2002) return fromWords(words[1], words[2]);
 
   return null;
@@ -101,6 +97,11 @@ function isNonPublicIpv6(hostname: string): boolean {
   const ipv4Embedded = embeddedIpv4FromIpv6(normalized);
   if (ipv4Embedded) return isNonPublicIpv4(ipv4Embedded);
   const words = expandIpv6Words(normalized);
+  // RFC 8215 reserves 64:ff9b:1::/48 for local use and explicitly says no
+  // assumption can be made about an embedded IPv4 address or its location.
+  // Treat the entire non-globally-reachable prefix as non-public (matching the
+  // OIDC screeners) instead of extracting a would-be /96 suffix.
+  if (words?.[0] === 0x64 && words[1] === 0xff9b && words[2] === 1) return true;
   if (words?.[0] === 0x2001 && (words[1] === 0 || words[1] === 0xdb8)) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfe80) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfec0) return true;

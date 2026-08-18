@@ -37,13 +37,24 @@ describe("resolveClientIp (SEC-014)", () => {
     expect(resolveClientIp(spoofed, "3.3.3.3", 1)).toBe("2.2.2.2");
   });
 
-  it("uses the leftmost entry when the chain is shorter than the configured trust", () => {
+  it("rejects a short forwarded chain instead of trusting its spoofable leftmost entry", () => {
     const h = headers({ "x-forwarded-for": "1.1.1.1" });
-    expect(resolveClientIp(h, "2.2.2.2", 3)).toBe("1.1.1.1");
+    expect(resolveClientIp(h, "2.2.2.2", 3)).toBe("2.2.2.2");
+    expect(resolveClientIp(h, null, 3)).toBe("unknown");
   });
 
-  it("honors X-Real-IP only through trusted proxies", () => {
-    expect(resolveClientIp(headers({ "x-real-ip": "1.2.3.4" }), "10.0.0.9", 1)).toBe("1.2.3.4");
+  it("never consults X-Real-IP, even with trusted proxy hops configured", () => {
+    // X-Real-IP has no chain semantics, so a hop count cannot be applied; when
+    // XFF is absent/short a direct client could spoof it to rotate identities.
+    expect(resolveClientIp(headers({ "x-real-ip": "1.2.3.4" }), "10.0.0.9", 1)).toBe("10.0.0.9");
+    // ...but a spoofed X-Real-IP must not shadow a usable XFF chain either:
+    expect(
+      resolveClientIp(
+        headers({ "x-forwarded-for": "1.1.1.1, 2.2.2.2", "x-real-ip": "9.9.9.9" }),
+        "10.0.0.9",
+        1,
+      ),
+    ).toBe("2.2.2.2");
   });
 });
 

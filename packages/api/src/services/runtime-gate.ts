@@ -16,8 +16,14 @@
  *     entry to its left is attacker-controlled prefix and ignored;
  *   - with zero trusted hops (default) both forwarding headers are ignored and
  *     the socket peer is used;
- *   - when the chain is shorter than the configured trust, the leftmost
- *     (earliest trusted) entry is the best available signal.
+ *   - when the chain is shorter than the configured trust, no forwarded entry
+ *     is trustworthy; fall back to the socket peer instead of accepting a
+ *     client-supplied leftmost value.
+ *
+ * `X-Real-IP` is never consulted: it carries no chain semantics, so the hop
+ * count cannot be applied to it, and whenever XFF is absent/short a direct
+ * client can simply spoof it to rotate rate-limit identities. This matches the
+ * auth-route resolver (routes/auth.ts), which deliberately ignores it too.
  *
  * The log is also capped (`STEWARD_RATE_LIMIT_MAX_KEYS`): when full it sweeps
  * expired entries inline and then fails CLOSED (429) rather than letting the
@@ -52,14 +58,12 @@ export function resolveClientIp(
         .split(",")
         .map((part) => part.trim())
         .filter(Boolean);
-      if (hops.length > 0) {
-        const clientIndex = Math.max(hops.length - trustedProxyHops, 0);
+      if (hops.length >= trustedProxyHops) {
+        const clientIndex = hops.length - trustedProxyHops;
         const derived = hops[clientIndex];
         if (derived) return derived;
       }
     }
-    const realIp = headers.get("x-real-ip")?.trim();
-    if (realIp) return realIp;
   }
   return peerAddress ?? "unknown";
 }

@@ -403,7 +403,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -435,7 +435,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -708,7 +709,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -740,7 +741,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -1026,7 +1028,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -1058,7 +1060,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -1342,7 +1345,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -1374,7 +1377,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -1644,7 +1648,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -1676,7 +1680,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -1967,7 +1972,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -1999,7 +2004,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -2267,7 +2273,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -2299,7 +2305,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -2571,7 +2578,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -2603,7 +2610,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -2875,7 +2883,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -2907,7 +2915,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -3179,7 +3188,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -3211,7 +3220,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -3476,7 +3486,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -3508,7 +3518,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -3744,7 +3755,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -3776,7 +3787,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -4055,7 +4067,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -4087,7 +4099,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -4366,7 +4379,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -4398,7 +4411,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -4631,7 +4645,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -4663,7 +4677,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -4930,7 +4945,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -4962,7 +4977,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -5194,7 +5210,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -5226,7 +5242,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -5587,7 +5604,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -5619,7 +5636,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -5837,7 +5855,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -6073,7 +6091,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -6145,7 +6164,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -6381,7 +6400,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -6608,7 +6628,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -6844,7 +6864,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -6916,7 +6937,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -7152,7 +7173,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -7389,7 +7411,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -7625,7 +7647,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -7852,7 +7875,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -8088,7 +8111,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -8160,7 +8184,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -8396,7 +8420,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -8623,7 +8648,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -8859,7 +8884,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -8931,7 +8957,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -9167,7 +9193,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -10074,7 +10101,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -10106,7 +10133,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -10366,7 +10394,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -10398,7 +10426,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -12483,7 +12512,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -12515,7 +12544,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -13656,7 +13686,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -13688,7 +13718,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -13910,7 +13941,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -13942,7 +13973,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -15077,7 +15109,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -15109,7 +15141,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -15591,7 +15624,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -15623,7 +15656,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -16762,7 +16796,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -16794,7 +16828,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -17935,7 +17970,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -17967,7 +18002,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -18189,7 +18225,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -18221,7 +18257,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -19356,7 +19393,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -19388,7 +19425,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -19870,7 +19908,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -19902,7 +19940,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -20416,7 +20455,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -20448,7 +20487,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -20814,7 +20854,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -20846,7 +20886,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -21341,7 +21382,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -21373,7 +21414,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -21592,7 +21634,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -21624,7 +21666,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -21892,7 +21935,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -21924,7 +21967,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -22438,7 +22482,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -22470,7 +22514,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -22836,7 +22881,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -22868,7 +22913,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -23363,7 +23409,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -23395,7 +23441,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -23614,7 +23661,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -23646,7 +23693,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -23914,7 +23962,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -23946,7 +23994,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -24475,7 +24524,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -24507,7 +24556,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -25002,7 +25052,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -25034,7 +25084,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -25249,7 +25300,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -25281,7 +25332,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -25810,7 +25862,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -25842,7 +25894,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -26140,7 +26193,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -26172,7 +26225,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -26666,7 +26720,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -26698,7 +26752,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -26913,7 +26968,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -26945,7 +27000,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -27474,7 +27530,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -27506,7 +27562,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -28001,7 +28058,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -28033,7 +28090,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -28248,7 +28306,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -28280,7 +28338,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -28809,7 +28868,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -28841,7 +28900,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -29139,7 +29199,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -29171,7 +29231,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -29665,7 +29726,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -29697,7 +29758,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -29912,7 +29974,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -29944,7 +30006,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -30833,7 +30896,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -30865,7 +30928,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -31320,7 +31384,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -31352,7 +31416,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -31690,7 +31755,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -31722,7 +31787,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -32324,7 +32390,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -32356,7 +32422,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -32715,7 +32782,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -32747,7 +32814,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -33037,7 +33105,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -33069,7 +33137,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -33958,7 +34027,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -33990,7 +34059,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -34445,7 +34515,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -34477,7 +34547,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -34815,7 +34886,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -34847,7 +34918,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -35449,7 +35521,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -35481,7 +35553,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -35840,7 +35913,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -35872,7 +35945,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -36162,7 +36236,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -36194,7 +36268,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -37251,7 +37326,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -37283,7 +37358,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -38108,7 +38184,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -38140,7 +38216,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -38597,7 +38674,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -38629,7 +38706,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -39085,7 +39163,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -39117,7 +39195,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -39573,7 +39652,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -39605,7 +39684,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -40061,7 +40141,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -40093,7 +40173,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -40549,7 +40630,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -40581,7 +40662,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -41037,7 +41119,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -41069,7 +41151,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -45500,7 +45583,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -45532,7 +45615,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -45828,7 +45912,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -45860,7 +45944,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -46594,7 +46679,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -46626,7 +46711,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -46710,7 +46796,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -47029,7 +47115,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -48842,7 +48929,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -48874,7 +48961,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -49220,7 +49308,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -49252,7 +49340,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -49801,7 +49890,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -49833,7 +49922,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -50215,7 +50305,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -50247,7 +50337,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -50986,7 +51077,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -51018,7 +51109,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -51320,7 +51412,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -51352,7 +51444,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -51789,7 +51882,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -51821,7 +51914,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -52360,7 +52454,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -52392,7 +52486,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -52824,7 +52919,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -52856,7 +52951,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -53382,7 +53478,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -53414,7 +53510,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -54148,7 +54245,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -54180,7 +54277,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -54482,7 +54580,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -54514,7 +54612,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -54813,7 +54912,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -54845,7 +54944,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -55366,7 +55466,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -55398,7 +55498,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -55707,7 +55808,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -55739,7 +55840,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -56052,7 +56154,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -56084,7 +56186,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -56331,7 +56434,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -56363,7 +56466,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -56667,7 +56771,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -56699,7 +56803,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -57370,7 +57475,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -57402,7 +57507,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -57951,7 +58057,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -57983,7 +58089,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -58365,7 +58472,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -58397,7 +58504,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -59136,7 +59244,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -59168,7 +59276,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -59470,7 +59579,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -59502,7 +59611,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -59939,7 +60049,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -59971,7 +60081,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -60510,7 +60621,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -60542,7 +60653,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -60974,7 +61086,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -61006,7 +61118,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -61532,7 +61645,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -61564,7 +61677,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -62298,7 +62412,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -62330,7 +62444,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -62632,7 +62747,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -62664,7 +62779,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -62963,7 +63079,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -62995,7 +63111,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -63516,7 +63633,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -63548,7 +63665,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -63857,7 +63975,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -63889,7 +64007,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -64202,7 +64321,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -64234,7 +64353,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -64481,7 +64601,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -64513,7 +64633,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -64817,7 +64938,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -64849,7 +64970,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -65520,7 +65642,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -65552,7 +65674,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -66156,7 +66279,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -66188,7 +66311,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -66504,7 +66628,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -66536,7 +66660,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -67069,7 +67194,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -67101,7 +67226,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -67402,7 +67528,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -67434,7 +67560,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -67757,7 +67884,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -67789,7 +67916,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -68342,7 +68470,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -68374,7 +68502,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -69806,7 +69935,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -70052,7 +70181,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -70745,7 +70875,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -70777,7 +70907,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -71366,7 +71497,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -71398,7 +71529,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -71750,7 +71882,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -71782,7 +71914,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -72002,7 +72135,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -72034,7 +72167,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -72520,7 +72654,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -72552,7 +72686,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -72772,7 +72907,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -72804,7 +72939,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -73094,7 +73230,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -73126,7 +73262,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -73722,7 +73859,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -73754,7 +73891,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -74119,7 +74257,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -74151,7 +74289,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -74375,7 +74514,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -74407,7 +74546,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -74648,7 +74788,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -74680,7 +74820,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -75545,7 +75686,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -75577,7 +75718,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -75865,7 +76007,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -75897,7 +76039,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -76702,7 +76845,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -76734,7 +76877,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -77061,7 +77205,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -77093,7 +77237,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -77654,7 +77799,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -77686,7 +77831,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -78525,7 +78671,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -78557,7 +78703,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -79165,7 +79312,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -79197,7 +79344,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -79513,7 +79661,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -79545,7 +79693,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -79931,7 +80080,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -79963,7 +80112,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -80247,7 +80397,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -80279,7 +80429,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -80764,7 +80915,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -80796,7 +80947,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -81307,7 +81459,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -81339,7 +81491,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -81738,7 +81891,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -81770,7 +81923,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -82082,7 +82236,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -82114,7 +82268,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -82410,7 +82565,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -82442,7 +82597,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -82808,7 +82964,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -82840,7 +82996,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -83143,7 +83300,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -83175,7 +83332,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -83480,7 +83638,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -83512,7 +83670,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -83832,7 +83991,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -83864,7 +84023,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -84349,7 +84509,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -84381,7 +84541,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -84892,7 +85053,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -84924,7 +85085,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -85323,7 +85485,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -85355,7 +85517,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -85667,7 +85830,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -85699,7 +85862,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -85995,7 +86159,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -86027,7 +86191,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -86393,7 +86558,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -86425,7 +86590,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -86728,7 +86894,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -86760,7 +86926,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -87065,7 +87232,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -87097,7 +87264,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -87417,7 +87585,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -87449,7 +87617,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -88343,7 +88512,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -88375,7 +88544,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -88832,7 +89002,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -88864,7 +89034,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -89280,7 +89451,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -89312,7 +89483,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -90388,7 +90560,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -90420,7 +90592,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -90716,7 +90889,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -90748,7 +90921,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -91266,7 +91440,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -91298,7 +91472,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -91577,7 +91752,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -91609,7 +91784,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -91824,7 +92000,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -91856,7 +92032,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -92504,7 +92681,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -92536,7 +92713,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -92771,7 +92949,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -92803,7 +92981,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -93108,7 +93287,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -93140,7 +93319,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -93806,7 +93986,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -93838,7 +94018,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -94115,7 +94296,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -94147,7 +94328,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -94506,7 +94688,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -94538,7 +94720,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -95065,7 +95248,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -95097,7 +95280,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -95871,7 +96055,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -95903,7 +96087,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -96407,7 +96592,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -96439,7 +96624,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -96724,7 +96910,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -96756,7 +96942,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -97225,7 +97412,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -97257,7 +97444,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -97736,7 +97924,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -97768,7 +97956,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -98367,7 +98556,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -98399,7 +98588,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -98873,7 +99063,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -98905,7 +99095,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -99482,7 +99673,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -99514,7 +99705,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",
@@ -100053,7 +100245,7 @@
             "name": "X-Steward-Signing-Key-Id",
             "in": "header",
             "required": false,
-            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "description": "Tenant request-signing key id used to select a managed HMAC signing key. Required when signing with a managed tenant key; omit only for static or app-client signing secrets.",
             "schema": {
               "type": "string"
             }
@@ -100085,7 +100277,8 @@
               "v1=hmac-sha256",
               "p256=ecdsa-secp256r1"
             ],
-            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+            "managedTenantKeyHeader": "X-Steward-Signing-Key-Id",
+            "requiredForManagedTenantKey": true
           },
           "idempotency": {
             "header": "Idempotency-Key",

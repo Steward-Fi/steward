@@ -25,6 +25,26 @@ describe("webhook URL validation", () => {
     }
   });
 
+  it("rejects the entire NAT64 local-use range 64:ff9b:1::/48 (RFC 8215)", () => {
+    // No assumption can be made about an embedded IPv4 address or its location
+    // in the local-use range, so the whole /48 is non-public — including
+    // variants whose fourth word is non-zero (the old /96-suffix extraction
+    // both misread the suffix placement and let these through entirely).
+    for (const url of [
+      "https://[64:ff9b:1::a9fe:a9fe]/hook",
+      "https://[64:ff9b:1:1::a9fe:a9fe]/hook",
+      "https://[64:ff9b:1:ffff::]/hook",
+      "https://[64:ff9b:1::808:808]/hook",
+    ]) {
+      expect(validateWebhookUrl(url)).toBe("url host must be public");
+    }
+  });
+
+  it("still allows public IPv6 and well-known NAT64 embeddings of public IPv4", () => {
+    expect(validateWebhookUrl("https://[2001:4860:4860::8888]/hook")).toBeNull();
+    expect(validateWebhookUrl("https://[64:ff9b::808:808]/hook")).toBeNull();
+  });
+
   it("rejects Teredo and documentation IPv6 addresses", () => {
     for (const url of ["https://[2001::]/hook", "https://[2001:db8::1]/hook"]) {
       expect(validateWebhookUrl(url)).toBe("url host must be public");
