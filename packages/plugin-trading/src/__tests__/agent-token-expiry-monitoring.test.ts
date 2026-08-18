@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { generateApiKey, signAgentToken } from "@stwd/auth";
-import { auditEvents, closeDb, getDb, tenants } from "@stwd/db";
+import { __resetAuditHmacKeyCacheForTests, auditEvents, closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -18,6 +18,9 @@ const TEST_JWKS_URL = "https://jwks.example.test/.well-known/jwks.json";
 const originalJwksUrl = process.env.ELIZA_CLOUD_JWKS_URL;
 const originalAuditHmacKey = process.env.STEWARD_AUDIT_HMAC_KEY;
 const originalJwtSecret = process.env.STEWARD_JWT_SECRET;
+const originalPgliteMemory = process.env.STEWARD_PGLITE_MEMORY;
+const originalDatabaseUrl = process.env.DATABASE_URL;
+const originalMasterPassword = process.env.STEWARD_MASTER_PASSWORD;
 const originalFetch = globalThis.fetch;
 
 let privateKey: CryptoKey;
@@ -35,6 +38,10 @@ beforeAll(async () => {
   process.env.DATABASE_URL ??= "postgres://test:test@localhost:5432/test";
   process.env.STEWARD_MASTER_PASSWORD ??= "test-master-password";
   process.env.STEWARD_AUDIT_HMAC_KEY = "agent-token-expiry-audit-hmac-key-with-enough-entropy";
+  // @stwd/db memoizes the decoded HMAC key. Sibling files share Bun's module
+  // cache, so changing only process.env would otherwise keep another fixture's
+  // key (and restoring the env later would still leak this fixture's key).
+  __resetAuditHmacKeyCacheForTests();
   // Platform agent-token signing (SEC-091 test): tenantAuth verifies Bearer
   // tokens with the canonical JWT secret, so configure one explicitly.
   process.env.STEWARD_JWT_SECRET ??= "test-jwt-secret-32-chars-minimum!!!!";
@@ -103,6 +110,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   globalThis.fetch = originalFetch;
+  await closeDb();
   if (originalJwksUrl === undefined) {
     delete process.env.ELIZA_CLOUD_JWKS_URL;
   } else {
@@ -118,7 +126,22 @@ afterAll(async () => {
   } else {
     process.env.STEWARD_JWT_SECRET = originalJwtSecret;
   }
-  await closeDb();
+  if (originalPgliteMemory === undefined) {
+    delete process.env.STEWARD_PGLITE_MEMORY;
+  } else {
+    process.env.STEWARD_PGLITE_MEMORY = originalPgliteMemory;
+  }
+  if (originalDatabaseUrl === undefined) {
+    delete process.env.DATABASE_URL;
+  } else {
+    process.env.DATABASE_URL = originalDatabaseUrl;
+  }
+  if (originalMasterPassword === undefined) {
+    delete process.env.STEWARD_MASTER_PASSWORD;
+  } else {
+    process.env.STEWARD_MASTER_PASSWORD = originalMasterPassword;
+  }
+  __resetAuditHmacKeyCacheForTests();
 });
 
 beforeEach(() => {
