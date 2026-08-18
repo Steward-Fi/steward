@@ -11,6 +11,7 @@ export * from "./execution-payload.js";
 export * from "./generic-http-provider-action.js";
 export * from "./google-provider-action.js";
 export * from "./google-provider-action.js";
+export * from "./oauth-token.js";
 export type { PriceOracle } from "./price-oracle.js";
 export { createPriceOracle } from "./price-oracle.js";
 export * from "./provider-action.js";

@@ -604,6 +604,44 @@ describe("connect state validation", () => {
     expect(retried.xUserId).toBe("x-user-123");
     ok.restore();
   });
+
+  test("rejects malformed token endpoint credentials before identity fetch or persistence", async () => {
+    for (const exchangeToken of [
+      { access_token: "" },
+      { access_token: "access\ncontrol" },
+      { access_token: "x".repeat(16_385) },
+      { refresh_token: "" },
+      { refresh_token: "refresh\rcontrol" },
+      { refresh_token: "r".repeat(16_385) },
+    ]) {
+      const store = new MemoryConnectStore();
+      const fake = installFakeX({ exchangeToken });
+      const initiated = await initiateXConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        initiatedByUserId: ADMIN,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store,
+      });
+      await expect(
+        completeXConnect({
+          tenantId: TENANT,
+          workspaceId: WORKSPACE,
+          callerUserId: ADMIN,
+          code: "auth-code",
+          state: initiated.state,
+          connectToken: initiated.connectToken,
+          redirectUri: REDIRECT,
+          config: CONFIG,
+          store,
+          vault,
+        }),
+      ).rejects.toMatchObject({ code: "X_TOKEN_EXCHANGE_FAILED" });
+      expect(fake.counters.identity).toBe(0);
+      fake.restore();
+    }
+  });
 });
 
 // ── Refresh: rotation, single-flight, revoke ──────────────────────────────────
@@ -632,6 +670,33 @@ describe("refresh", () => {
 
     const events = await readAuditActions(TENANT);
     expect(events.includes("provider.x.refresh.completed")).toBe(true);
+  });
+
+  test("rejects malformed refresh credentials without rotating the stored secret", async () => {
+    for (const body of [
+      { access_token: "bad token", refresh_token: "refresh-valid" },
+      { access_token: "access-valid", refresh_token: "r".repeat(16_385) },
+    ]) {
+      const store = new MemoryConnectStore();
+      const { completed } = await connectHappy(store);
+      const before = await decryptCredential(completed.providerAccountId);
+      const fake = installFakeX({ refreshResponses: [{ status: 200, body }] });
+      await expect(
+        refreshXProviderCredential({
+          tenantId: TENANT,
+          workspaceId: WORKSPACE,
+          accountId: completed.providerAccountId,
+          vault,
+          config: CONFIG,
+          force: true,
+        }),
+      ).rejects.toMatchObject({ code: "X_REFRESH_FAILED" });
+      const after = await decryptCredential(completed.providerAccountId);
+      expect(after).toEqual(before);
+      fake.restore();
+      await getDb().delete(providerAccounts).where(eq(providerAccounts.tenantId, TENANT));
+      await getDb().delete(secrets).where(eq(secrets.tenantId, TENANT));
+    }
   });
 
   test("SINGLE-FLIGHT: two concurrent refreshes of a near-expiry token make exactly ONE token call", async () => {

@@ -31,7 +31,7 @@ import {
   workspaces,
 } from "@stwd/db";
 import { getRedis, type SpendReservation, settleReservedSpend } from "@stwd/redis";
-import { strictParseJson } from "@stwd/shared";
+import { isValidOAuthBearerToken, strictParseJson } from "@stwd/shared";
 import { SecretVault } from "@stwd/vault";
 import type { Context } from "hono";
 import { boundedPositiveIntegerEnv, isProxyDevMode } from "../config";
@@ -183,16 +183,16 @@ export function extractProviderCredentialForHost(host: string, credential: strin
     if (googleHost) throw new Error("invalid Google OAuth credential envelope");
     // A parseable object at the X boundary is an envelope, not a legacy raw
     // token. Unknown/malformed envelopes must never be formatted into a header.
-    if (xHost && typeof parsed === "object" && parsed !== null)
-      throw new Error("invalid X OAuth credential envelope");
+    if (xHost) {
+      if (typeof parsed === "object" && parsed !== null)
+        throw new Error("invalid X OAuth credential envelope");
+      if (!isValidOAuthBearerToken(credential))
+        throw new Error("invalid X OAuth bearer credential");
+    }
     return credential;
   }
   if (!parsedEnvelope) throw new Error("invalid provider OAuth credential envelope");
-  if (
-    typeof parsedEnvelope.accessToken !== "string" ||
-    parsedEnvelope.accessToken.length < 1 ||
-    parsedEnvelope.accessToken.length > 16_384
-  )
+  if (!isValidOAuthBearerToken(parsedEnvelope.accessToken))
     throw new Error(
       googleHost
         ? "invalid Google OAuth credential envelope"

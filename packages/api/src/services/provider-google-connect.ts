@@ -47,6 +47,7 @@ import {
   sql,
   withTenantAuditedTransaction,
 } from "@stwd/db";
+import { isValidOAuthBearerToken, isValidOAuthOpaqueToken } from "@stwd/shared";
 import type { SecretVault } from "@stwd/vault";
 
 type DbBase = ReturnType<typeof getDb>;
@@ -753,9 +754,9 @@ export async function reconcileGoogleCredentialRevocation(input: {
     ) as GoogleLifecycleSecret;
     if (parsed.schemaVersion !== "steward.provider-google.lifecycle.v1")
       throw new Error("invalid handle");
-    const token = boundedString(parsed.token.refresh_token, 16_384)
+    const token = isValidOAuthOpaqueToken(parsed.token.refresh_token)
       ? parsed.token.refresh_token
-      : boundedString(parsed.token.access_token, 16_384)
+      : isValidOAuthBearerToken(parsed.token.access_token)
         ? parsed.token.access_token
         : null;
     if (!token) throw new Error("invalid handle");
@@ -997,8 +998,8 @@ function validateTokenEnvelope(
   code: "GOOGLE_TOKEN_EXCHANGE_FAILED" | "GOOGLE_REFRESH_FAILED",
 ): void {
   if (
-    !boundedString(parsed.access_token, 16_384) ||
-    (parsed.refresh_token !== undefined && !boundedString(parsed.refresh_token, 16_384)) ||
+    !isValidOAuthBearerToken(parsed.access_token) ||
+    (parsed.refresh_token !== undefined && !isValidOAuthOpaqueToken(parsed.refresh_token)) ||
     (parsed.token_type !== undefined &&
       (typeof parsed.token_type !== "string" || parsed.token_type.toLowerCase() !== "bearer")) ||
     (parsed.expires_in !== undefined &&
@@ -2209,8 +2210,8 @@ function parseGoogleCredential(value: string): GoogleCredentialPayload {
   };
   if (
     p.schemaVersion !== "steward.provider-google.credential.v1" ||
-    !bounded(p.accessToken, 16_384) ||
-    !(p.refreshToken === null || bounded(p.refreshToken, 16_384)) ||
+    !isValidOAuthBearerToken(p.accessToken) ||
+    !(p.refreshToken === null || isValidOAuthOpaqueToken(p.refreshToken)) ||
     !Array.isArray(p.scopesGranted) ||
     p.scopesGranted.length === 0 ||
     p.scopesGranted.length > GOOGLE_DEFAULT_SCOPES.length ||
