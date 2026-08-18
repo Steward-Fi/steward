@@ -661,7 +661,9 @@ describe("upstream credential leases", () => {
 
   test("an overlong issued token is sealed before cleanup and recovered exactly", async () => {
     const issuer = new FakeIssuer();
-    issuer.token = "x".repeat(4097);
+    // Exercise the byte limit, not UTF-16 code-unit length: this is 4,098
+    // UTF-8 bytes while remaining only 2,049 JavaScript characters.
+    issuer.token = "é".repeat(2049);
     issuer.failRevoke = true;
     issuer.beforeRevoke = async () => {
       const [staged] = await harness.db.select().from(upstreamCredentialLeases);
