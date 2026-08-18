@@ -228,18 +228,32 @@ export async function mintGoogleExecutionAccessToken(
       .for("update");
     if (!account) throw new Error("Google provider account changed before token mint");
     const [active] = await tx
-      .select({ id: providerGoogleCredentialLifecycles.id })
+      .select({
+        id: providerGoogleCredentialLifecycles.id,
+        state: providerGoogleCredentialLifecycles.state,
+      })
       .from(providerGoogleCredentialLifecycles)
       .where(
         and(
           eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
           eq(providerGoogleCredentialLifecycles.providerAccountId, input.accountId),
           eq(providerGoogleCredentialLifecycles.kind, "refresh_rotation"),
-          inArray(providerGoogleCredentialLifecycles.state, ["inflight", "credential_staged"]),
+          inArray(providerGoogleCredentialLifecycles.state, [
+            "inflight",
+            "credential_staged",
+            "needs_attention",
+            "revocation_pending",
+          ]),
         ),
       )
       .limit(1);
-    if (active) throw new Error("Google credential refresh is already in progress");
+    if (active) {
+      throw new Error(
+        active.state === "needs_attention" || active.state === "revocation_pending"
+          ? "Google credential refresh lifecycle must be reconciled before token mint"
+          : "Google credential refresh is already in progress",
+      );
+    }
     await tx.insert(providerGoogleCredentialLifecycles).values({
       id: lifecycleId,
       tenantId: input.tenantId,
