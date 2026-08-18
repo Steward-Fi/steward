@@ -1,16 +1,8 @@
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  mock,
-  setDefaultTimeout,
-} from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { generateApiKey, signAgentToken } from "@stwd/auth";
-import { closeDb, getDb, tenants } from "@stwd/db";
+import { __resetAuditHmacKeyCacheForTests, auditEvents, closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { and, desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
@@ -24,27 +16,12 @@ const FOREIGN_AGENT_ID = "test-token-watch-foreign";
 const KID = "test-agent-token-kid";
 const TEST_JWKS_URL = "https://jwks.example.test/.well-known/jwks.json";
 const originalJwksUrl = process.env.ELIZA_CLOUD_JWKS_URL;
+const originalAuditHmacKey = process.env.STEWARD_AUDIT_HMAC_KEY;
+const originalJwtSecret = process.env.STEWARD_JWT_SECRET;
+const originalPgliteMemory = process.env.STEWARD_PGLITE_MEMORY;
+const originalDatabaseUrl = process.env.DATABASE_URL;
+const originalMasterPassword = process.env.STEWARD_MASTER_PASSWORD;
 const originalFetch = globalThis.fetch;
-
-const auditEvents: Array<{ action: string; metadata?: Record<string, unknown>; actorId?: string }> =
-  [];
-
-mock.module("../../../api/src/services/audit", () => ({
-  trackAuditEvent: (event: {
-    action: string;
-    metadata?: Record<string, unknown>;
-    actorId?: string;
-  }) => {
-    auditEvents.push(event);
-  },
-  writeAuditEvent: async (event: {
-    action: string;
-    metadata?: Record<string, unknown>;
-    actorId?: string;
-  }) => {
-    auditEvents.push(event);
-  },
-}));
 
 let privateKey: CryptoKey;
 let publicJwk: JsonWebKey;
@@ -60,6 +37,11 @@ beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.DATABASE_URL ??= "postgres://test:test@localhost:5432/test";
   process.env.STEWARD_MASTER_PASSWORD ??= "test-master-password";
+  process.env.STEWARD_AUDIT_HMAC_KEY = "agent-token-expiry-audit-hmac-key-with-enough-entropy";
+  // @stwd/db memoizes the decoded HMAC key. Sibling files share Bun's module
+  // cache, so changing only process.env would otherwise keep another fixture's
+  // key (and restoring the env later would still leak this fixture's key).
+  __resetAuditHmacKeyCacheForTests();
   // Platform agent-token signing (SEC-091 test): tenantAuth verifies Bearer
   // tokens with the canonical JWT secret, so configure one explicitly.
   process.env.STEWARD_JWT_SECRET ??= "test-jwt-secret-32-chars-minimum!!!!";
@@ -76,7 +58,7 @@ beforeAll(async () => {
   publicJwk.alg = "RS256";
   publicJwk.use = "sig";
 
-  globalThis.fetch = mock(async (input) => {
+  globalThis.fetch = (async (input) => {
     if (String(input) !== TEST_JWKS_URL) throw new Error(`Unexpected JWKS URL: ${String(input)}`);
     return Response.json({ keys: [publicJwk] });
   }) as unknown as typeof fetch;
@@ -127,20 +109,75 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  clearAgentJwksCacheForTests?.();
+  clearAgentTokenStatusForTests?.();
   globalThis.fetch = originalFetch;
+  await closeDb();
   if (originalJwksUrl === undefined) {
     delete process.env.ELIZA_CLOUD_JWKS_URL;
   } else {
     process.env.ELIZA_CLOUD_JWKS_URL = originalJwksUrl;
   }
-  await closeDb();
+  if (originalAuditHmacKey === undefined) {
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
+  } else {
+    process.env.STEWARD_AUDIT_HMAC_KEY = originalAuditHmacKey;
+  }
+  if (originalJwtSecret === undefined) {
+    delete process.env.STEWARD_JWT_SECRET;
+  } else {
+    process.env.STEWARD_JWT_SECRET = originalJwtSecret;
+  }
+  if (originalPgliteMemory === undefined) {
+    delete process.env.STEWARD_PGLITE_MEMORY;
+  } else {
+    process.env.STEWARD_PGLITE_MEMORY = originalPgliteMemory;
+  }
+  if (originalDatabaseUrl === undefined) {
+    delete process.env.DATABASE_URL;
+  } else {
+    process.env.DATABASE_URL = originalDatabaseUrl;
+  }
+  if (originalMasterPassword === undefined) {
+    delete process.env.STEWARD_MASTER_PASSWORD;
+  } else {
+    process.env.STEWARD_MASTER_PASSWORD = originalMasterPassword;
+  }
+  __resetAuditHmacKeyCacheForTests();
 });
 
 beforeEach(() => {
-  auditEvents.length = 0;
   clearAgentJwksCacheForTests?.();
   clearAgentTokenStatusForTests?.();
 });
+
+async function latestTokenAudit(
+  action: "agent.token.expiring" | "agent.token.expired",
+  expectedAgentId: string,
+  expectedExp: number,
+) {
+  // Production telemetry uses fire-and-forget `trackAuditEvent`, so observe the
+  // real durable sink instead of globally mocking the audit module. A global
+  // module mock leaked into sibling test files in the same Bun worker and made
+  // their genuine audit assertions read an empty table.
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const [event] = await getDb()
+      .select()
+      .from(auditEvents)
+      .where(and(eq(auditEvents.tenantId, TENANT_ID), eq(auditEvents.action, action)))
+      .orderBy(desc(auditEvents.seq))
+      .limit(1);
+    if (
+      event?.actorId === expectedAgentId &&
+      event.metadata?.agentId === expectedAgentId &&
+      event.metadata?.exp === expectedExp
+    ) {
+      return event;
+    }
+    await Bun.sleep(10);
+  }
+  return undefined;
+}
 
 async function signTradeToken(expiresAt: number): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
@@ -207,7 +244,7 @@ describe("agent trade token expiry monitoring", () => {
     });
 
     expect(res.status).toBe(200);
-    const event = auditEvents.find((entry) => entry.action === "agent.token.expiring");
+    const event = await latestTokenAudit("agent.token.expiring", AGENT_ID, exp);
     expect(event?.actorId).toBe(AGENT_ID);
     expect(event?.metadata?.agentId).toBe(AGENT_ID);
     expect(event?.metadata?.exp).toBe(exp);
@@ -229,7 +266,7 @@ describe("agent trade token expiry monitoring", () => {
     });
 
     expect(res.status).toBe(401);
-    const event = auditEvents.find((entry) => entry.action === "agent.token.expired");
+    const event = await latestTokenAudit("agent.token.expired", AGENT_ID, exp);
     expect(event?.actorId).toBe(AGENT_ID);
     expect(event?.metadata?.agentId).toBe(AGENT_ID);
     expect(event?.metadata?.exp).toBe(exp);
