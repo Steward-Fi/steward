@@ -1937,6 +1937,7 @@ export async function handleProxy(c: Context): Promise<Response> {
   const contentType = response.headers.get("content-type") || "";
   const isJsonResponse = contentType.includes("application/json");
   let slackSemanticFailure: string | null = null;
+  let deferSlackSuccessAudit = false;
 
   // Slack Web API encodes operation failures as HTTP 200 + {ok:false}. Treat
   // that envelope as a failed dispatch, while retaining the buffered bytes for
@@ -1952,14 +1953,20 @@ export async function handleProxy(c: Context): Promise<Response> {
       if (buffer.byteLength > MAX_PROXY_RESPONSE_BYTES) throw new Error("Slack response too large");
       responseBody = buffer;
       slackSemanticFailure = classifySlackWebApiPayload(new TextDecoder().decode(buffer));
+      deferSlackSuccessAudit = slackSemanticFailure === null;
     } catch {
+      // `arrayBuffer()` can reject after disturbing/locking the original body.
+      // Never hand that stream to the later credential scanner or client: a
+      // second read would throw outside this fail-closed boundary and could
+      // retain the per-agent proxy slot. Discard all partial provider bytes.
+      responseBody = new ArrayBuffer(0);
       slackSemanticFailure = "invalid_response";
     }
   }
 
   // Slack can report failure in an HTTP 200 envelope. Do not persist a
   // contradictory successful audit row before the semantic failure row below.
-  if (!slackSemanticFailure) {
+  if (!slackSemanticFailure && !deferSlackSuccessAudit) {
     await recordAudit({
       agentId,
       tenantId,
@@ -2192,6 +2199,21 @@ export async function handleProxy(c: Context): Promise<Response> {
       },
       502,
     );
+  }
+  if (deferSlackSuccessAudit) {
+    // A Slack `ok:true` envelope is not a successful Steward dispatch until
+    // response headers/body have also passed the credential-reflection gates
+    // above. Persist success only at that final boundary so blocked responses
+    // cannot leave a contradictory 200 audit row.
+    await recordAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: response.status,
+      latencyMs: Date.now() - startTime,
+    });
   }
   injectedCredentialValue = null;
   sensitiveCredentialValues = [];

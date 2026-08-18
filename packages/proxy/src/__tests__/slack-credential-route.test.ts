@@ -126,6 +126,65 @@ describe("Slack narrow credential route", () => {
     expect(audit.at(-1)?.reason).toBe("slack-api-error:channel_not_found");
   });
 
+  test("fails closed on an interrupted Slack body and releases the proxy slot", async () => {
+    const { tenantId, agentId } = await fixture();
+    proxyMod.__setProxyInFlightCapsForTests({ perAgent: 1, perTenant: 1 });
+    try {
+      proxyMod.__setForwardProxyRequestForTests(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode('{"ok":true,"secret":"xoxb-CANARY'));
+                controller.error(new Error("xoxb-CANARY hostile stream diagnostic"));
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      );
+
+      const interrupted = await invoke(tenantId, agentId);
+      const interruptedBody = await interrupted.text();
+      expect(interrupted.status).toBe(502);
+      expect(interruptedBody).toContain("Slack upstream operation failed");
+      expect(interruptedBody).not.toContain("CANARY");
+
+      // A disturbed provider stream must not strand the one allowed slot.
+      proxyMod.__setForwardProxyRequestForTests(
+        async () =>
+          new Response('{"ok":true}', {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      );
+      const retry = await invoke(tenantId, agentId);
+      expect(retry.status).toBe(200);
+    } finally {
+      proxyMod.__setProxyInFlightCapsForTests({ perAgent: 50, perTenant: 250 });
+    }
+  });
+
+  test("does not audit Slack success before credential-reflection checks", async () => {
+    const { tenantId, agentId } = await fixture();
+    proxyMod.__setForwardProxyRequestForTests(
+      async () =>
+        new Response(JSON.stringify({ ok: true, reflected: SLACK_TOKEN }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+
+    const response = await invoke(tenantId, agentId);
+    expect(response.status).toBe(502);
+    expect(await response.text()).not.toContain(SLACK_TOKEN);
+    const audit = await getDb()
+      .select()
+      .from(proxyAuditLog)
+      .where(eq(proxyAuditLog.tenantId, tenantId));
+    expect(audit.map((row) => row.statusCode)).toEqual([102, 502]);
+    expect(audit.some((row) => row.statusCode === 200)).toBe(false);
+  });
+
   for (const [label, invalidCredential] of [
     ["user token", "xoxp-CANARY-user-token-must-not-forward"],
     ["arbitrary plaintext", "CANARY-not-a-slack-token"],
