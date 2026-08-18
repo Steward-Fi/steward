@@ -192,6 +192,7 @@ beforeAll(async () => {
   resetCheckpointSignerCache();
   app = (await import("../app")).app as Hono<{ Variables: AppVariables }>;
   const proxy = await import("@stwd/proxy/src/handlers/proxy");
+  proxy.__resetSecretVaultForTests();
   ({ dispatchGovernedExecution } = await import("@stwd/proxy/src/handlers/governed-execution"));
   proxy.__setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
   // The boundary proof is about canonical provider authority and exact

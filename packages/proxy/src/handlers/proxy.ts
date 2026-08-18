@@ -66,6 +66,11 @@ function getSecretVault(): SecretVault {
   return _secretVault;
 }
 
+/** Reset the process-local vault cache between isolated test fixtures. */
+export function __resetSecretVaultForTests(): void {
+  _secretVault = null;
+}
+
 // ─── Route matching ──────────────────────────────────────────────────────────
 
 /**

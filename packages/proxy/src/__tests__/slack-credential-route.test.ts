@@ -27,12 +27,14 @@ beforeAll(async () => {
   setPGLiteOverride(db, async () => client.close());
   ({ authMiddleware } = await import("../middleware/auth"));
   proxyMod = await import("../handlers/proxy");
+  proxyMod.__resetSecretVaultForTests();
   ({ handleProxy } = proxyMod);
   proxyMod.__setResolveProxyHostForTests(async () => [{ address: "13.107.42.16", family: 4 }]);
 });
 
 afterAll(async () => {
   await closeDb().catch(() => {});
+  proxyMod.__resetSecretVaultForTests();
   delete process.env.STEWARD_PGLITE_MEMORY;
   delete process.env.STEWARD_MASTER_PASSWORD;
   delete process.env.STEWARD_JWT_SECRET;
