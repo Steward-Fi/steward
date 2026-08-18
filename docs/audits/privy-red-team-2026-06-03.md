@@ -73,7 +73,7 @@ Patch:
 Run these focused checks while the product worktree is concurrently dirty:
 
 ```bash
-/Users/shawwalters/.bun/bin/bun test --timeout 30000 packages/api/src/__tests__/webhook-url-validation.test.ts packages/webhooks/src/__tests__/dispatcher-security.test.ts packages/webhooks/src/__tests__/queue.test.ts
-/Users/shawwalters/.bun/bin/bun test --timeout 30000 packages/api/src/__tests__/webhook-payload-redaction.test.ts packages/api/src/__tests__/webhook-retry-hardening.test.ts packages/api/src/__tests__/webhook-events.test.ts
-/Users/shawwalters/.bun/bin/bun test --timeout 30000 packages/api/src/__tests__/user-linked-accounts.test.ts packages/api/src/__tests__/user-wallet-recovery-setup.test.ts packages/api/src/__tests__/pregenerated-user-wallets.test.ts
+bun test --timeout 30000 packages/api/src/__tests__/webhook-url-validation.test.ts packages/webhooks/src/__tests__/dispatcher-security.test.ts packages/webhooks/src/__tests__/queue.test.ts
+bun test --timeout 30000 packages/api/src/__tests__/webhook-payload-redaction.test.ts packages/api/src/__tests__/webhook-retry-hardening.test.ts packages/api/src/__tests__/webhook-events.test.ts
+bun test --timeout 30000 packages/api/src/__tests__/user-linked-accounts.test.ts packages/api/src/__tests__/user-wallet-recovery-setup.test.ts packages/api/src/__tests__/pregenerated-user-wallets.test.ts
 ```

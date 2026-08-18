@@ -29,7 +29,7 @@ export function dispatchWebhook(
   data: Record<string, unknown>,
 ): void {
   const configuredType = toConfiguredWebhookEventType(type);
-  // EMISSION-PATH WIDENING (Phase 2b): a plugin-declared event is one that is NOT
+  // EMISSION-PATH WIDENING (plugin policy-rule contribution contract): a plugin-declared event is one that is NOT
   // a core configured/alias type but IS present in the runtime
   // WebhookEventRegistry (core ∪ plugin-declared) because the plugin host merged
   // it in. We thread the raw plugin event name into the configured fan-out so a

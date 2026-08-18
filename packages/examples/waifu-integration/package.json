@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc --project tsconfig.json --noEmit",
+    "test": "bun test src/__tests__",
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts"
   },

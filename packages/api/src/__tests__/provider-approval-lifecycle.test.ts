@@ -1,5 +1,5 @@
 /**
- * PR3 approval lifecycle (state machine) integration tests against PGLite.
+ * Provider approval lifecycle state-machine integration tests against PGLite.
  * Covers creation, approve, deny, expiry, staleness, and safe resume through the
  * real provider-approval service + the exact atomic state machine (spec §6).
  */
@@ -93,7 +93,7 @@ function decideInput(
   };
 }
 
-describe("PR3 approval lifecycle", () => {
+describe("provider approval lifecycle", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY ||= "0".repeat(64);

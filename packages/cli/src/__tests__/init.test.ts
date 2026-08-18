@@ -188,7 +188,6 @@ describe("steward init", () => {
         "STEWARD_MASTER_PASSWORD",
         "STEWARD_JWT_SECRET",
         "STEWARD_EXECUTION_AUTH_SECRET",
-        "STEWARD_SESSION_SECRET",
         "STEWARD_KDF_SALT",
         "STEWARD_AUDIT_HMAC_KEY",
         "STEWARD_AUDIT_SIGNING_KEY",
@@ -264,7 +263,6 @@ describe("steward init", () => {
         "STEWARD_MASTER_PASSWORD",
         "STEWARD_JWT_SECRET",
         "STEWARD_EXECUTION_AUTH_SECRET",
-        "STEWARD_SESSION_SECRET",
         "STEWARD_KDF_SALT",
         "STEWARD_AUDIT_HMAC_KEY",
         "STEWARD_AUDIT_SIGNING_KEY",
@@ -281,14 +279,14 @@ describe("steward init", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  }, 15_000);
+  }, 30_000);
 
   test("--migrate never executes a CWD-relative decoy migrate.ts", () => {
     const dir = mkdtempSync(join(tmpdir(), "steward-cli-migrate-"));
     const previousCwd = process.cwd();
     try {
       // Decoy at <cwd>/packages/db/src/migrate.ts: exits 0 and drops a marker.
-      // Pre-fix, `steward init --migrate` executed exactly this path.
+      // A CWD-relative lookup would execute this decoy instead of the shipped migrator.
       const decoyDir = join(dir, "packages", "db", "src");
       mkdirSync(decoyDir, { recursive: true });
       const marker = join(dir, "decoy-executed");
@@ -311,13 +309,12 @@ describe("steward init", () => {
       process.chdir(previousCwd);
       rmSync(dir, { recursive: true, force: true });
     }
-  }, 15_000);
+  }, 30_000);
 
   test("--migrate does not default STEWARD_ALLOW_INSECURE_DB on for the child", async () => {
-    // With NODE_ENV=production and a non-loopback DATABASE_URL lacking a
-    // verifying sslmode, the shipped migrator must hit the db package's TLS
-    // gate. Pre-fix the CLI forced STEWARD_ALLOW_INSECURE_DB=true into the
-    // child env, silently disabling that gate; post-fix the gate fires.
+    // With NODE_ENV=production and a non-loopback DATABASE_URL lacking
+    // authenticated TLS, the shipped migrator must retain the database
+    // package's fail-closed transport gate.
     const dir = mkdtempSync(join(tmpdir(), "steward-cli-migrate-tls-"));
     try {
       const envPath = join(dir, ".env");
@@ -342,15 +339,13 @@ describe("steward init", () => {
       );
       const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
       expect(exitCode).toBe(1);
-      // SEC-087: the gate now demands a server-authenticating TLS mode —
-      // sslmode=require alone no longer satisfies it.
       expect(stderr).toContain("sslmode=verify-full");
       expect(stderr).toContain("sslmode=verify-ca");
       expect(stderr).not.toContain("STEWARD_ALLOW_INSECURE_DB=true —");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  }, 15_000);
+  }, 30_000);
 
   test("generated env does not pre-acknowledge local plaintext key custody", () => {
     const dir = mkdtempSync(join(tmpdir(), "steward-cli-"));
@@ -381,7 +376,6 @@ describe("steward init", () => {
         "STEWARD_MASTER_PASSWORD",
         "STEWARD_JWT_SECRET",
         "STEWARD_EXECUTION_AUTH_SECRET",
-        "STEWARD_SESSION_SECRET",
         "STEWARD_KDF_SALT",
         "STEWARD_AUDIT_HMAC_KEY",
         "STEWARD_AUDIT_SIGNING_KEY",

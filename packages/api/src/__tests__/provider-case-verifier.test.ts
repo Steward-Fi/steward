@@ -1,5 +1,5 @@
 /**
- * PR5 offline-verifier unit tests. Builds synthetic signed evidence envelopes
+ * Offline-verifier unit tests. Builds synthetic signed evidence envelopes
  * (no DB) and exercises the verifier's tamper/format/version guards directly.
  * These are the DB-free cases from spec §8 (N20, N22, N40, N43, N44, N45) plus
  * the plain-bundle no-regression and empty-bundle cases.
@@ -188,9 +188,9 @@ function run(obj: unknown, args: string[] = []) {
   return { code: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
-describe("PR5 offline verifier (synthetic bundles)", () => {
+describe("offline verifier (synthetic bundles)", () => {
   beforeAll(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "pr5-verify-"));
+    tmpDir = mkdtempSync(join(tmpdir(), "provider-case-verify-"));
     const { privateKey, publicKey } = generateKeyPairSync("ed25519");
     priv = privateKey;
     pubPem = publicKey.export({ format: "pem", type: "spki" }).toString();

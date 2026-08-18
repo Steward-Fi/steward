@@ -300,10 +300,10 @@ fn handle(state: &mut ShareState, method: &str, url: &str, body: &str) -> (u16, 
                 .to_string(),
         ),
         ("POST", "/commit") => {
-            // SEC-083 bounds the map; the re-audit follow-up: a hard 429 at
-            // the cap let an authenticated coordinator park 1024 rounds
-            // forever and wedge the signer (availability). Evict the oldest
-            // parked round instead — its /sign will fail closed with
+            // SEC-083 bounds the map. A hard refusal at the cap would let an
+            // authenticated coordinator park 1024 rounds indefinitely and
+            // wedge the signer. Evict the oldest parked round instead — its
+            // /sign will fail closed with
             // "unknown or reused nonce_id", and an evicted unused nonce is
             // never signed with, so FROST nonce-reuse safety is preserved.
             // Never wrap the wire-id counter: wrapping could alias and
@@ -564,9 +564,9 @@ mod tests {
         (code, nonce_id)
     }
 
-    // Re-audit: the bare 429 cap let an authenticated coordinator park
-    // MAX_PENDING_NONCES rounds forever and wedge the share service. /commit
-    // must evict the oldest parked round instead of refusing new rounds.
+    // An authenticated coordinator must not wedge the share service by parking
+    // MAX_PENDING_NONCES rounds indefinitely. /commit evicts the oldest parked
+    // round rather than refusing all new rounds.
     #[test]
     fn commit_evicts_oldest_parked_round_at_the_cap() {
         let mut state = test_state();

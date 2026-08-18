@@ -2,8 +2,7 @@
  * x-provider-action.ts — the `x.provider-action.v1` canonicalization profile.
  *
  * This module is the X (Twitter) sibling of the `github.provider-action.v1`
- * profile in provider-action.ts. It defines, for the governed-provider-authority
- * plan (issue #195 workstream B):
+ * profile in provider-action.ts. It defines:
  *   - the X canonical origin (`https://api.x.com`) + host allowlist;
  *   - the X canonical action type (`XCanonicalActionV1`) and profile string;
  *   - the X origin canonicalizer + the thin body/content-type orchestration that
@@ -152,8 +151,8 @@ export function canonicalizeXOrigin(raw: string): string {
 /**
  * A raw, INTERNAL HTTP representation of an X provider action. Mirrors
  * {@link RawInternalAction} for GitHub. Fields are raw/pre-canonical; the X
- * adapter constructs these from validated operation arguments and the PR-C proxy
- * recomputation / offline verifier feed the same shape in, so there is exactly
+ * adapter constructs these from validated operation arguments, and proxy
+ * recomputation plus the offline verifier feed the same shape in, so there is exactly
  * ONE X canonicalization path and the golden corpus proves it byte-for-byte.
  *
  * X operations carry NO caller-supplied headers: the only header that can appear

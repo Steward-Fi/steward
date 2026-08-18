@@ -113,6 +113,26 @@ describe("Cost Estimator", () => {
     expect(cost).toBe(0);
   });
 
+  test("does not undercount partial or invalid usage", () => {
+    expect(
+      estimateCost("api.openai.com", { model: "gpt-4o" }, { usage: { prompt_tokens: 100 } }),
+    ).toBe(0);
+    expect(
+      estimateCost(
+        "api.anthropic.com",
+        { model: "claude-sonnet-4-6" },
+        { usage: { input_tokens: 100, output_tokens: -1 } },
+      ),
+    ).toBe(0);
+    expect(
+      estimateCost(
+        "api.openai.com",
+        { model: "gpt-4o" },
+        { usage: { prompt_tokens: "100", completion_tokens: 20 } },
+      ),
+    ).toBe(0);
+  });
+
   test("returns 0 for missing model", () => {
     const cost = estimateCost(
       "api.openai.com",

@@ -21,8 +21,8 @@
  * packages/vault route-matcher). capabilities are tenant-wide (UNIQUE(tenant,
  * name)) with per-agent grants, so a single tenant-wide route could not be
  * matched for a specific agent without changing the proxy's matching semantics.
- * materializing one route per grant (agentId = the grant's agent) keeps the
- * proxy UNCHANGED. documented in the PR body as the locked design call.
+ * materializing one route per grant (agentId = the grant's agent) preserves the
+ * proxy's exact agent-scoped matching contract.
  *
  * the plugin NEVER decrypts a secret and NEVER injects a credential itself - it
  * only maintains the secret_route ROWS the already-defended proxy consumes. the

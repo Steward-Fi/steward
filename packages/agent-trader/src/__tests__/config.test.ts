@@ -52,7 +52,7 @@ describe("loadConfig (SEC-188)", () => {
 
     const config = loadConfig();
     expect(config.agents).toEqual([]);
-    expect(config.steward.apiUrl).toBe("http://localhost:3000");
+    expect(config.steward.apiUrl).toBe("http://localhost:3200");
   });
 
   it("loads a valid config file", () => {

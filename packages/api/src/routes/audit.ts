@@ -68,7 +68,7 @@ const AUDIT_ACTION_FILTER_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 const AUDIT_METADATA_PATH_PART_PATTERN = /^[A-Za-z0-9_]{1,64}$/;
 const MAX_AUDIT_METADATA_VALUE_LENGTH = 256;
 
-// Owner/admin + recent-MFA gate, shared with the PR5 case/evidence routes so
+// Owner/admin + recent-MFA gate, shared with the evidence case/evidence routes so
 // both surfaces enforce an IDENTICAL posture (spec §6.3).
 auditRoutes.use("*", auditOwnerAdminMfaGate);
 

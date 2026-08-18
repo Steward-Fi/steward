@@ -1,5 +1,5 @@
 /**
- * PR3 negative matrix (spec §12, N01-N50) — the cases that map to shipped code
+ * Approval negative matrix (spec §12, N01-N50) for cases that map to shipped code
  * paths, exercised through the real provider-approval service against PGLite.
  * Each asserts the exact stable code + persisted tuple + zero forbidden side
  * effects (no secret decrypt / proxy / mint — the service imports none).
@@ -97,7 +97,7 @@ async function expectFail(p: Promise<{ ok: boolean } & Record<string, unknown>>,
   return r;
 }
 
-describe("PR3 negative matrix", () => {
+describe("provider approval negative matrix", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY ||= "0".repeat(64);
@@ -274,7 +274,7 @@ describe("PR3 negative matrix", () => {
   test("N24: persisted canonical bytes changed after request => stale COMMITMENT_INTEGRITY_MISMATCH", async () => {
     const { intentId, requestHash, actionDigest } = await createApprovalRequired();
     // Tamper the stored canonical bytes as an attacker with RAW DB write would.
-    // The PR3 immutability trigger normally freezes this column; disable it for
+    // The immutability trigger normally freezes this column; disable it for
     // the tamper so we exercise the SERVICE integrity recomputation (the trigger
     // is defense-in-depth, the recompute is the authority check).
     await getDb().execute(

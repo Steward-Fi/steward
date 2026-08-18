@@ -1,27 +1,19 @@
 /**
- * REAL behavioral coverage for the Hyperliquid venue-submit spend-fence and the
+ * Behavioral coverage for the Hyperliquid venue-submit spend fence and the
  * submit-authorization ordering on POST /v1/trade/hyperliquid/order.
  *
- * The retired structural backstop (in vault-trade-audit-gates.test.ts) only
- * readFileSync'd trade.ts and asserted, by substring/index order, that:
- *   - the rejected branch releases spend + writes trade.order.canceled and
- *     returns before trade.order.submitted;
- *   - the submitAttempted branch keeps spend + idempotency fenced and returns a
- *     502 without releasing;
- *   - "trade.order.submit.authorized" appears before adapter.signOrder.
- * A grep cannot prove any of those FIRE. This drives the REAL route against an
- * in-memory PGLite DB + the REAL TradeSessionManager and proves them by
- * execution:
+ * This drives the route against an in-memory PGLite DB and the
+ * TradeSessionManager, proving by execution:
  *
  *   (a) venue rejection (submitOrder resolves status:"rejected") → 400 carrying
  *       the venue error, the reserved spend is RELEASED (dailySpendUsd back to 0),
  *       a trade.order.canceled audit is written, NO trade.order.submitted audit
  *       exists, and an idempotent replay returns the same 400 WITHOUT re-hitting
  *       the venue.
- *   (b) unknown status (submitOrder throws AFTER the submit was attempted) → 502
- *       "Trade submission status unknown", and — because the order may have landed
+ *   (b) unknown status (submitOrder throws AFTER the submit was attempted) → 202
+ *       durable `submission_unknown`, and — because the order may have landed
  *       at the venue — the spend is NOT released (dailySpendUsd stays at the
- *       reserved notional); an idempotent replay returns the same 502 WITHOUT
+ *       reserved notional); an idempotent replay returns the same 202 WITHOUT
  *       re-submitting.
  *   (c) success → 200, and the trade.order.submit.authorized audit is sequenced
  *       BEFORE trade.order.submitted (authorization is durably recorded as part of
@@ -240,7 +232,7 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     expect(submitSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps spend reserved and returns 502 when the venue submit status is unknown", async () => {
+  it("keeps spend reserved and durably replays submission_unknown", async () => {
     const { tenantId, agentId, sessionId } = await seedSession();
     const app = makeApp(tenantId, agentId, tradeRoutes);
 
@@ -255,26 +247,73 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
 
     const key = crypto.randomUUID();
     const res = await postOrder(app, sessionId, key);
-    expect(res.status).toBe(502);
-    const body = (await res.json()) as { ok: boolean; error?: string };
+    expect(res.status).toBe(202);
+    expect(res.headers.get("X-Steward-Order-State")).toBe("submission_unknown");
+    const body = (await res.json()) as {
+      ok: boolean;
+      error?: string;
+      data?: { reconciliation?: { state?: string; signedNonce?: number } };
+    };
     expect(body.ok).toBe(false);
     expect(body.error).toContain("Trade submission status unknown");
+    expect(body.data?.reconciliation?.state).toBe("submission_unknown");
 
     // The order may have hit the venue → the spend stays reserved (NOT released).
     expect(submitSpy).toHaveBeenCalledTimes(1);
     expect(await dailySpendOf(sessionId)).toBe(SIZE_USD);
     expect(await auditCount(tenantId, "trade.order.submitted")).toBe(0);
+    expect(await auditCount(tenantId, "trade.order.submission_unknown")).toBe(1);
+    expect(await auditCount(tenantId, "trade.order.canceled")).toBe(0);
     // Authorization was recorded before the faulting submit attempt.
     expect(await auditCount(tenantId, "trade.order.submit.authorized")).toBe(1);
 
-    // Idempotent replay returns the same 502 WITHOUT re-submitting to the venue.
+    // Idempotent replay returns the same terminal state WITHOUT re-submitting.
     const replay = await postOrder(app, sessionId, key);
-    expect(replay.status).toBe(502);
+    expect(replay.status).toBe(202);
     expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
     expect(((await replay.json()) as { error?: string }).error).toContain(
       "Trade submission status unknown",
     );
     expect(submitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps submission_unknown closed when its audit write fails", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession();
+    const { createTradeRoutes } = await import("../routes/trade");
+    const { testCtx } = await import("./_ctx");
+    const baseContext = testCtx();
+    const routes = createTradeRoutes({
+      ...baseContext,
+      writeAuditEvent: async (event) => {
+        if (event.action === "trade.order.submission_unknown") {
+          throw new Error("audit unavailable");
+        }
+        await baseContext.writeAuditEvent(event);
+      },
+    });
+    const app = makeApp(tenantId, agentId, routes);
+
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockResolvedValue({
+      action: {},
+      nonce: 123456,
+      signature: { r: "0x1", s: "0x2", v: 27 },
+    });
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockRejectedValue(
+      new Error("socket hang up"),
+    );
+
+    const key = crypto.randomUUID();
+    const first = await postOrder(app, sessionId, key);
+    expect(first.status).toBe(202);
+    expect(first.headers.get("X-Steward-Audit-State")).toBe("pending");
+    expect(first.headers.get("X-Steward-Order-State")).toBe("submission_unknown");
+
+    const replay = await postOrder(app, sessionId, key);
+    expect(replay.status).toBe(202);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(replay.headers.get("X-Steward-Audit-State")).toBe("pending");
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+    expect(await auditCount(tenantId, "trade.order.canceled")).toBe(0);
   });
 
   it("records submit-authorization before the submitted audit, with signOrder before submitOrder", async () => {

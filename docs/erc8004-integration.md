@@ -1,77 +1,63 @@
-
+---
+title: "ERC-8004 integration"
+description: "Current Steward identity, discovery, and reputation behavior for EVM registries."
 ---
 
-## Cross-Chain Registry Strategy
+# ERC-8004 integration
 
-**Requirement:** True interoperability across Base, Ethereum, BSC, and Solana.
+Steward currently exposes a tenant-scoped database view of ERC-8004 registration
+records and public discovery data. It does not relay registrations between
+chains, bridge attestations to Solana, aggregate cross-chain reputation, or
+operate a production on-chain indexer.
 
-### EVM Chains (Base, Ethereum, BSC, Arbitrum, Polygon)
+## API behavior
 
-ERC-8004 uses CREATE2 deterministic deployment — the same contract address exists on every EVM chain. An agent registered on Base can be verified on Ethereum or BSC by querying the same contract address on that chain.
+The API mounts these routes:
 
-**Steward's approach:**
-- **Primary registry:** Base (cheap gas, sub-cent per registration)
-- **Mirror registries:** Ethereum + BSC + Arbitrum (for platforms on those chains)
-- **Cross-chain attestation:** When an agent registers on Base, steward can optionally mirror the registration to other chains via a batch relay
-- **Reputation aggregation:** Configured reputation signals feed into a unified score
+- `POST /agents/:id/register-onchain` validates an owner/admin session with
+  recent MFA, records an audited **pending** registration request, and stores the
+  proposed agent card. It does not submit an EVM transaction.
+- `GET /agents/:id/onchain` returns the tenant's stored registration and
+  reputation-cache rows. Reputation values are explicitly marked unverified.
+- `POST /agents/:id/feedback` is disabled because signed on-chain feedback is
+  not implemented.
+- `GET /discovery/agents` and `GET /discovery/registries` expose stored discovery
+  records. They do not prove that a registry or score was verified on-chain.
 
-| Chain | Registry Address | Gas Cost | Use Case |
-|-------|-----------------|----------|----------|
-| Base | 0x8004...A432 | ~$0.001 | Primary (default) |
-| Ethereum | 0x8004...A432 | ~$2-5 | High-value agents needing L1 trust |
-| BSC | 0x8004...A432 | ~$0.05 | BSC-native platforms |
-| Arbitrum | 0x8004...A432 | ~$0.01 | Arbitrum ecosystem |
+The placeholder registry address
+`0x0000000000000000000000000000000000008004` identifies pending/unconfigured
+records. Consumers must not interpret it as a deployed contract.
 
-### Solana
+## Library behavior
 
-Solana is NOT EVM, so ERC-8004 contracts don't deploy there. Two options:
+`@stwd/erc8004` contains an EVM client used independently of the API routes. A
+caller must provide a real RPC endpoint, deployed identity and reputation
+registry addresses, and an `Eip8004Signer` for identity registration.
 
-**Option A: Bridge/Attestation (recommended)**
-- Agent registers on Base (EVM, ERC-8004 native)
-- A Wormhole/LayerZero attestation proves the Base registration on Solana
-- Solana programs can verify the attestation
-- Reputation: post on EVM, attest to Solana
+The identity client can:
 
-**Option B: Solana-native registry (future)**
-- Deploy a Solana program that mirrors the ERC-8004 interface
-- Same agent card JSON schema, different on-chain implementation
-- Cross-chain linking via shared agentId + multi-chain identity proof
+- encode an ERC-8004 registration payload;
+- submit `register(string agentURI)` through the caller-provided signer;
+- wait for a successful receipt and require a matching `Registered` event; and
+- read `ownerOf` and `tokenURI` for an existing token.
 
-**Steward already supports Solana wallets** (chain_family: "solana" in the DB). Adding Solana attestation is a natural extension.
+The reputation client is read-only. It reads `getReputation`,
+`reputationOf`, or `feedbackCount` from the configured EVM registry. It rejects
+all feedback writes. Feedback history also requires an external indexer and
+currently returns no records.
 
-### Universal Agent ID
+Both clients fail closed when configured with a zero or placeholder registry.
+Unconfigured identity lookups return `null`; unconfigured reputation lookups
+return `verified: false` without numeric score fields.
 
-Every steward agent gets a cross-chain identifier:
+## Supported configuration
 
-```
-steward:{tenantId}:{agentId}
-```
+`REGISTRY_CONFIGS` supplies RPC defaults and registry addresses for Ethereum,
+Base, BSC, BSC Testnet, Gnosis, and Arbitrum. These entries are client
+configuration, not deployment verification. Operators must independently verify
+contract deployment and bytecode on the selected chain before treating results
+as authoritative.
 
-This maps to ERC-8004's format:
-
-```
-eip155:{chainId}:{registryAddress}:{tokenId}
-```
-
-Steward maintains the mapping between its internal ID and all on-chain registrations:
-
-| Internal ID | Base Registration | Ethereum Registration | Solana Attestation |
-|------------|-------------------|----------------------|--------------------|
-| `agent-123` | `eip155:8453:0x8004...A432:42` | `eip155:1:0x8004...A432:42` | `wormhole:attestation:...` |
-
-### Per-Tenant Chain Selection
-
-Tenants can configure which chains to register on:
-
-```json
-{
-  "registryConfig": {
-    "primaryChain": 8453,
-    "mirrorChains": [1, 56],
-    "solanaAttestation": true,
-    "customRegistryAddress": null
-  }
-}
-```
-
-Default: Base only. Tenants can opt into multi-chain at their own gas cost.
+Solana wallets elsewhere in Steward are unrelated to ERC-8004. No Solana-native
+registry, Wormhole/LayerZero bridge, universal cross-chain agent mapping, batch
+relay, or per-tenant mirror-chain configuration is implemented.

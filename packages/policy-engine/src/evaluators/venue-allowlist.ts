@@ -1,4 +1,4 @@
-// Sprint 4: venue-allowlist policy evaluator.
+// trading-policy: venue-allowlist policy evaluator.
 //
 // Allows trades only on the named venues. Without a venue on the context
 // (i.e. non-trade signing requests), the policy NACKs by default: this

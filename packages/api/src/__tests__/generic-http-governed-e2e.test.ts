@@ -1,5 +1,5 @@
 /**
- * #201 generic-http governed provider-action E2E (config-driven profile).
+ * Generic HTTP governed provider-action E2E for a config-driven profile.
  *
  * Proves the FULL governed chain for an operator-authored generic-http operation
  * over the REAL provider-action service + approval state machine against PGLite,
@@ -480,15 +480,17 @@ async function wipe() {
   await db.delete(tenants);
 }
 
-describe("#201 generic-http governed provider-action E2E", () => {
+describe("generic-http governed provider-action E2E", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
+    process.env.STEWARD_PROXY_DEV_MODE = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY ||= "0".repeat(64);
     process.env.STEWARD_EXECUTION_AUTH_SECRET ||= "1".repeat(64);
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => client.close());
     const proxy = await import("@stwd/proxy/src/handlers/proxy");
     ({ dispatchGovernedExecution } = await import("@stwd/proxy/src/handlers/governed-execution"));
+    proxy.__setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
     proxy.__setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
     proxy.__setForwardProxyRequestForTests(async (url, method, headers, body) => {
       const bytes = body
@@ -504,8 +506,12 @@ describe("#201 generic-http governed provider-action E2E", () => {
     });
   });
   afterAll(async () => {
+    const proxy = await import("@stwd/proxy/src/handlers/proxy");
+    const { checkProxyRateLimit } = await import("@stwd/proxy/src/middleware/redis-enforcement");
+    proxy.__setCheckProxyRateLimitForTests(checkProxyRateLimit);
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
+    delete process.env.STEWARD_PROXY_DEV_MODE;
   });
   beforeEach(async () => {
     capturedForward = undefined;

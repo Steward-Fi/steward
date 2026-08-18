@@ -34,7 +34,7 @@ Date: 2026-04-17
 
 ## High-confidence reasons
 - `_resolveTenantForUser` had zero callers
-- The dashboard was already flagged in `REVIEW-FRONTEND.md` as using the old pending/approve/reject path
+- The dashboard used the old pending/approve/reject path instead of the tenant-level approvals API
 - The tenant-level approvals API and SDK support already exist in-repo
 - Changes were limited to internal web UI plumbing, not published SDK/React package compat surfaces
 

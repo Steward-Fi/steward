@@ -1,11 +1,10 @@
 /**
  * Tests for the per-agent capability rate limiter (SEC-094).
  *
- * Before the fix the invoke / OpenAI-adapter / manifest-issuance routes had no
- * throttle at all (the only limit was an optional operator-configured
- * `maxCallsPerHour` policy rule), so an agent could spam invocations — a DB
- * write per attempt plus upstream calls with credential injection. These tests
- * pin the limiter's contract: the (max+1)-th request in a window is denied,
+ * The invoke, OpenAI-adapter, and manifest-issuance routes share a hard
+ * infrastructure ceiling independent of the optional operator-configured
+ * `maxCallsPerHour` policy rule. These tests pin the limiter's contract: the
+ * (max+1)-th request in a window is denied,
  * buckets are per-agent and per-surface, an expired window resets, and a
  * Redis-path error fails CLOSED (deny).
  */

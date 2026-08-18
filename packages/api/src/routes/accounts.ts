@@ -614,8 +614,13 @@ async function configuredWalletMemberships(
       createdWalletAgentIds.push(walletAgentId);
     } catch (error) {
       await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
-      const message = error instanceof Error ? error.message : "Failed to create configured wallet";
-      return message;
+      console.error("[accounts] Failed to provision configured wallet", {
+        tenantId,
+        accountId,
+        walletAgentId,
+        error,
+      });
+      throw new Error("Configured wallet provisioning failed", { cause: error });
     }
     memberships.push({ walletAgentId, chainFamily });
   }
@@ -1098,8 +1103,11 @@ accountRoutes.post("/", async (c) => {
     memberships = await buildMemberships(tenantId, accountId, body, createdWalletAgentIds);
   } catch (error) {
     await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
-    // SEC-210: membership building can surface vault/DB internals — sanitize.
-    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(error) }, 400);
+    console.error("[accounts] Account wallet membership creation failed", {
+      tenantId,
+      error: sanitizeErrorMessage(error),
+    });
+    return c.json<ApiResponse>({ ok: false, error: "Account wallet provisioning failed" }, 500);
   }
   if (memberships === undefined) {
     return c.json<ApiResponse>(
@@ -1456,8 +1464,12 @@ accountRoutes.patch("/:accountId", async (c) => {
     memberships = await buildMemberships(tenantId, accountId, body, createdWalletAgentIds);
   } catch (error) {
     await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
-    // SEC-210: membership building can surface vault/DB internals — sanitize.
-    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(error) }, 400);
+    console.error("[accounts] Account wallet membership update failed", {
+      tenantId,
+      accountId,
+      error: sanitizeErrorMessage(error),
+    });
+    return c.json<ApiResponse>({ ok: false, error: "Account wallet provisioning failed" }, 500);
   }
   if (typeof memberships === "string") {
     await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);

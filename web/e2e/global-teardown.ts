@@ -16,6 +16,35 @@ const NEXT_BUILD_DIR = join(__dirname, "..", ".next");
 
 type ProcessIdentity = { pid: number; startedAt: string; command: string };
 
+interface PsResult {
+  error?: Error;
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+}
+
+interface ProcessControl {
+  runPs(args: string[]): PsResult;
+  kill(pid: number, signal: "SIGTERM"): void;
+}
+
+const systemProcessControl: ProcessControl = {
+  runPs(args) {
+    const result = spawnSync("ps", args, { encoding: "utf8" });
+    return {
+      error: result.error,
+      status: result.status,
+      signal: result.signal,
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
+    };
+  },
+  kill(pid, signal) {
+    process.kill(pid, signal);
+  },
+};
+
 function validatedProcess(value: unknown, name: string): ProcessIdentity | undefined {
   if (value === undefined) return undefined;
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -47,23 +76,56 @@ function validatedDataDir(value: unknown): string | undefined {
   return resolved;
 }
 
-function killProcess(processIdentity: ProcessIdentity | undefined, name: string): void {
+function inspectProcessField(
+  processControl: ProcessControl,
+  pid: number,
+  field: "lstart" | "command",
+  name: string,
+): string | undefined {
+  const result = processControl.runPs(["-p", String(pid), "-o", `${field}=`]);
+  if (result.error) {
+    throw new Error(`Could not inspect ${name} process`, { cause: result.error });
+  }
+  const value = result.stdout.trim();
+  // With fixed, valid arguments, ps exits 1 with no matching output when the
+  // process no longer exists. Every other execution failure must be surfaced.
+  if (
+    result.status === 1 &&
+    result.signal === null &&
+    value.length === 0 &&
+    result.stderr.trim().length === 0
+  ) {
+    return undefined;
+  }
+  if (result.status !== 0 || result.signal !== null) {
+    const outcome = result.signal ? `signal ${result.signal}` : `status ${String(result.status)}`;
+    throw new Error(`Could not inspect ${name} process: ps exited with ${outcome}`);
+  }
+  if (value.length === 0) {
+    throw new Error(`Could not inspect ${name} process: ps returned no ${field}`);
+  }
+  return value;
+}
+
+function killProcess(
+  processIdentity: ProcessIdentity | undefined,
+  name: string,
+  processControl: ProcessControl,
+): void {
   if (processIdentity === undefined) return;
   const { pid, startedAt, command } = processIdentity;
-  const currentStartedAt = spawnSync("ps", ["-p", String(pid), "-o", "lstart="], {
-    encoding: "utf8",
-  }).stdout.trim();
-  if (!currentStartedAt) return;
-  const currentCommand = spawnSync("ps", ["-p", String(pid), "-o", "command="], {
-    encoding: "utf8",
-  }).stdout.trim();
+  const currentStartedAt = inspectProcessField(processControl, pid, "lstart", name);
+  if (currentStartedAt === undefined) return;
+  const currentCommand = inspectProcessField(processControl, pid, "command", name);
+  if (currentCommand === undefined) return;
   if (currentStartedAt !== startedAt || currentCommand !== command) {
     throw new Error(`Refusing to signal reused ${name} PID`);
   }
   try {
-    process.kill(pid, "SIGTERM");
-  } catch {
-    /* already gone */
+    processControl.kill(pid, "SIGTERM");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+    throw new Error(`Could not terminate ${name} process`, { cause: error });
   }
 }
 
@@ -83,7 +145,11 @@ async function removeDirWithRetry(path: string): Promise<void> {
  * Exported for tests; Playwright calls the default export, which binds the
  * real harness paths.
  */
-export async function runGlobalTeardown(pidFile: string, nextBuildDir: string): Promise<void> {
+export async function runGlobalTeardown(
+  pidFile: string,
+  nextBuildDir: string,
+  processControl: ProcessControl = systemProcessControl,
+): Promise<void> {
   try {
     // Setup persists state after each process spawn, but a failure before the
     // first spawn can still leave no file after producing a flag-built .next.
@@ -115,7 +181,7 @@ export async function runGlobalTeardown(pidFile: string, nextBuildDir: string): 
           [fakeOAuth, "fakeOAuth"],
         ] as const) {
           try {
-            killProcess(identity, name);
+            killProcess(identity, name, processControl);
           } catch (error) {
             cleanupError ??= error;
           }
@@ -138,8 +204,8 @@ export async function runGlobalTeardown(pidFile: string, nextBuildDir: string): 
   } finally {
     // SEC-076: the harness builds .next with E2E_ALLOW_INSECURE_HTTP (no HSTS /
     // upgrade-insecure-requests). Never leave that artifact in the working tree
-    // where it could be deployed by accident — even when setup failed before
-    // writing the PID file (the early return that used to skip this).
+    // where it could be deployed by accident, including when setup failed
+    // before writing the PID file.
     await removeDirWithRetry(nextBuildDir);
   }
 }

@@ -1,14 +1,14 @@
 /**
- * provider-execution.ts — PR4 execution authorization v2 minting (spec §2.3,
+ * provider-execution.ts — execution authorization v2 minting (spec §2.3,
  * §3, §4.1 step 1, §7.1).
  *
  * This module owns the API-side MINT of a v2 execution authorization. It runs
- * INSIDE the PR3 `resume()` transaction (spec §2.3 preferred: one atomic step
+ * INSIDE the approval-lifecycle `resume()` transaction (spec §2.3 preferred: one atomic step
  * from approved→execution_ready→authorization minted, removing an extra crash
  * window). It:
  *
- *   1. reads the persisted PR3 approval commitment (source of every bound fact)
- *      + the persisted PR2 canonical action bytes (source of the pinned target +
+ *   1. reads the persisted approval commitment (source of every bound fact)
+ *      + the persisted persisted canonical action bytes (source of the pinned target +
  *      header profile),
  *   2. reconstructs the exact v2 commitment document (@stwd/shared pure builder),
  *   3. signs it with the domain-separated HKDF(STEWARD_EXECUTION_AUTH_SECRET)
@@ -23,9 +23,9 @@
  * intent, K22/F01): a duplicate resume returns the existing authorization with
  * no second row and no second `authorized` event.
  *
- * Correlation contract (PR5 C1): the audit event sets top-level
+ * Correlation contract (evidence C1): the audit event sets top-level
  * `resource_type='provider_action'`, `resource_id=intents.id`.
- * Data minimization (PR5 C3): audit metadata records
+ * Data minimization (evidence C3): audit metadata records
  * `providerIdempotencyKeyHash` (sha256), NEVER the raw provider idempotency key.
  */
 
@@ -74,7 +74,7 @@ export function hashProviderIdempotencyKey(key: string): string {
 }
 
 // A `tx`/`append` pair from `withTenantAuditedTransaction`. The service is
-// transaction-agnostic (it is handed the running tx by the PR3 resume path).
+// transaction-agnostic (it is handed the running tx by the approval-lifecycle resume path).
 type TxLike = {
   insert: (...args: unknown[]) => {
     values: (row: Record<string, unknown>) => {
@@ -88,7 +88,7 @@ type TxLike = {
 
 type AppendAudit = (ev: { tenantId: string } & Record<string, unknown>) => Promise<void>;
 
-/** The subset of the PR3 binding + persisted approval a mint needs. */
+/** The subset of the binding and persisted approval required to mint an authorization. */
 export interface MintBindingInput {
   intentId: string;
   tenantId: string;
@@ -99,15 +99,15 @@ export interface MintBindingInput {
   operationRevision: number;
   requestHash: string;
   actionDigest: string;
-  /** PR3 approval_queue row id. */
+  /** approval_queue row id. */
   approvalId: string;
   /** The exact hash the binding recorded. */
   approvalCommitmentHash: string;
-  /** The persisted PR3 approval commitment (approval_queue.approval_commitment). */
+  /** The persisted approval commitment (approval_queue.approval_commitment). */
   approvalCommitment: ProviderApprovalCommitmentV1;
-  /** The persisted PR2 canonical action bytes (provider_action_bindings.canonical_action_bytes). */
+  /** The persisted persisted canonical action bytes (provider_action_bindings.canonical_action_bytes). */
   canonicalActionBytes: Uint8Array;
-  /** PR3 request envelope requestId (defaults to intentId). */
+  /** approval-lifecycle request envelope requestId (defaults to intentId). */
   requestId?: string | null;
 }
 
@@ -123,8 +123,8 @@ export interface MintResult {
 }
 
 /**
- * Parse the persisted PR2 canonical action bytes back into the canonical action
- * object. The bytes are the strict JCS serialization PR2 stored; we parse them
+ * Parse the persisted persisted canonical action bytes back into the canonical action
+ * object. The bytes are the strict JCS serialization action-creation stored; we parse them
  * with the same strict JSON parser so a corrupted/truncated blob fails closed.
  */
 function parseCanonicalAction(bytes: Uint8Array): GithubCanonicalActionV1 {

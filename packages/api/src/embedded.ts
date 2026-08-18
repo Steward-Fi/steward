@@ -31,9 +31,8 @@ if (!process.env.DATABASE_URL) {
 // Ensure STEWARD_MASTER_PASSWORD is set (context.ts requires it at module level).
 // Auto-generate one if not provided — the sidecar also generates one and passes
 // it via env, but standalone `bun run start:local` needs a fallback.
-// SEC-147: a fresh random password per boot silently makes everything sealed
-// under it undecryptable after restart, so the generated password is persisted
-// to the data dir (mode 0600) and reused on subsequent boots.
+// Persist a generated password in the data directory with owner-only permissions
+// so encrypted state remains readable after a restart.
 if (!process.env.STEWARD_MASTER_PASSWORD) {
   process.env.STEWARD_MASTER_PASSWORD = loadOrCreateEmbeddedMasterPassword(getDataDir());
   console.log(

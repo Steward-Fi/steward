@@ -15,14 +15,9 @@ import {
   type KeyObject,
   randomBytes,
 } from "node:crypto";
+import { tenantConfigs as tenantConfigsTable, users, userTenants } from "@stwd/db";
 import {
-  executionAuthorizationNonces,
-  tenantConfigs as tenantConfigsTable,
-  users,
-  userTenants,
-} from "@stwd/db";
-import { recordAggregationEvent } from "@stwd/redis";
-import {
+  DEFAULT_CHAIN_ID,
   ExecutionPayloadNormalizationError,
   type PolicyResult,
   rawSigningChainSupport,
@@ -102,7 +97,16 @@ import {
   resolveGasSponsorshipRequest,
 } from "../services/gas-sponsorship";
 import { plaintextKeyExportResponseGateError } from "../services/key-export-plaintext-gate";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { verifySignerCredential } from "../services/signer-credentials";
+import {
+  claimWalletOperation,
+  completeWalletOperation,
+  markWalletOperationSubmissionUnknown,
+  normalizeWalletIdempotencyKey,
+  releaseWalletOperationClaim,
+  type WalletOperationClaim,
+} from "../services/wallet-operation-idempotency";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 import {
   decryptImportSessionJson,
@@ -111,6 +115,17 @@ import {
 } from "./auth";
 
 export const vaultRoutes = new Hono<{ Variables: AppVariables }>();
+
+function configuredDefaultChainId(): number {
+  const configured = process.env.CHAIN_ID?.trim();
+  if (!configured) return DEFAULT_CHAIN_ID;
+  if (!/^\d+$/.test(configured)) throw new Error("CHAIN_ID must be a positive integer");
+  const parsed = Number(configured);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error("CHAIN_ID must be a positive safe integer");
+  }
+  return parsed;
+}
 
 vaultRoutes.use("*", async (c, next) => {
   setNoStoreHeaders(c);
@@ -167,20 +182,114 @@ async function writeOutcomeUnknownAudit(
     );
   }
 }
-// ─── Unsafe-signing opt-in flags (read LIVE, not captured at module-init) ──────
-//
-// Each accessor reads its env var on every call instead of freezing the value
-// when this module first loads. In production the relevant env vars are fixed
-// before this module is imported, so a live read returns exactly what a captured
-// `const` would — behavior is identical. Reading live matters only for the api
-// test suite, which runs all ~135 files in ONE `bun test` process: Bun shares
-// the module registry, so a captured const would freeze whichever file imported
-// vault.ts first and ignore every later file's beforeAll/afterAll flag toggles.
-// Live reads let each file exercise BOTH the opt-in path and the fail-closed
-// default within the single process.
-//
-// Fail-closed by construction: anything other than the exact string "true"
-// (unset, "false", "1", etc.) yields false, i.e. signing disabled.
+
+async function walletOperationClaimResponse(
+  claim: Exclude<WalletOperationClaim, { kind: "claimed" }>,
+  idField: "txId" | "actionId" = "txId",
+): Promise<Response> {
+  if (claim.kind === "conflict") {
+    return Response.json(
+      { ok: false, error: "Idempotency-Key was already used for a different request" },
+      { status: 409, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+  if (claim.entry.status === "completed" && claim.entry.responseBody) {
+    return Response.json(claim.entry.responseBody, {
+      status: claim.entry.responseStatus ?? 200,
+      headers: { "Cache-Control": "no-store", "Idempotency-Replayed": "true" },
+    });
+  }
+  if (claim.entry.status === "submission_unknown") {
+    const [transaction] = await db
+      .select({ status: transactions.status, txHash: transactions.txHash })
+      .from(transactions)
+      .where(eq(transactions.id, claim.entry.txId));
+    if (
+      transaction?.txHash &&
+      (transaction.status === "broadcast" || transaction.status === "confirmed")
+    ) {
+      return Response.json(
+        {
+          ok: true,
+          data: {
+            [idField]: claim.entry.txId,
+            txHash: transaction.txHash,
+            status: transaction.status,
+          },
+        },
+        {
+          status: 200,
+          headers: { "Cache-Control": "no-store", "Idempotency-Replayed": "true" },
+        },
+      );
+    }
+    if (transaction?.status === "failed") {
+      return Response.json(
+        {
+          ok: false,
+          error: "Transaction execution failed",
+          data: {
+            [idField]: claim.entry.txId,
+            ...(transaction.txHash ? { txHash: transaction.txHash } : {}),
+            status: "failed",
+          },
+        },
+        {
+          status: 409,
+          headers: { "Cache-Control": "no-store", "Idempotency-Replayed": "true" },
+        },
+      );
+    }
+    return Response.json(
+      {
+        ok: false,
+        error:
+          "Broadcast submission outcome is unknown; inspect transaction status before retrying",
+        data: {
+          [idField]: claim.entry.txId,
+          ...(transaction?.txHash ? { txHash: transaction.txHash } : {}),
+          status:
+            transaction?.status === "outcome_unknown" ? "outcome_unknown" : "submission_unknown",
+        },
+      },
+      {
+        status: 202,
+        headers: { "Cache-Control": "no-store", "Idempotency-Replayed": "true" },
+      },
+    );
+  }
+  return Response.json(
+    {
+      ok: false,
+      error: "Idempotency key is already processing",
+      data: { [idField]: claim.entry.txId, status: "processing" },
+    },
+    {
+      status: 409,
+      headers: {
+        "Cache-Control": "no-store",
+        "Idempotency-Replayed": "true",
+        "Retry-After": "1",
+      },
+    },
+  );
+}
+
+function invalidWalletIdempotencyKeyResponse(
+  c: Context<{ Variables: AppVariables }>,
+  broadcast: boolean,
+): Response | null {
+  if (!broadcast) return null;
+  try {
+    normalizeWalletIdempotencyKey(c.req.header("Idempotency-Key") ?? "");
+    return null;
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid Idempotency-Key header" }, 400);
+  }
+}
+// Unsafe signing/export capabilities are disabled unless their exact audited
+// environment opt-in is "true". Accessors read current configuration at the
+// authorization boundary and fail closed for missing or malformed values.
 const allowPrivateKeyExport = (): boolean =>
   process.env.STEWARD_ALLOW_KEY_EXPORT !== "false" &&
   process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT === "true";
@@ -545,7 +654,7 @@ function parseTransferActionInput(body: TransferActionInput): {
   const chainId =
     typeof body.chainId === "number" && Number.isInteger(body.chainId)
       ? body.chainId
-      : parseInt(process.env.CHAIN_ID || "8453", 10);
+      : configuredDefaultChainId();
   const referenceId = parseReferenceId(body.referenceId);
   const isSolanaTransfer = isSolanaActionChain(chainId);
 
@@ -598,7 +707,7 @@ function parseSendCallsActionInput(body: SendCallsActionInput):
   const chainId =
     typeof body.chainId === "number" && Number.isInteger(body.chainId)
       ? body.chainId
-      : parseInt(process.env.CHAIN_ID || "8453", 10);
+      : configuredDefaultChainId();
   if (!Number.isSafeInteger(chainId) || chainId <= 0) return "chainId must be a positive integer";
   const referenceId = parseReferenceId(body.referenceId);
   if (referenceId === null) return "referenceId must be a non-empty string up to 128 characters";
@@ -888,15 +997,9 @@ function getSendCallsActionPayload(payload: unknown): {
 }
 
 /**
- * Raised when a stored `transaction` action payload contains a present field of
- * the wrong type / out-of-range value. Replaying such a payload previously
- * silently coerced or dropped the offending field (e.g. a non-boolean broadcast
- * coerced to true, a string/float/negative/unsafe nonce dropped, wrong-type
- * gasLimit/venue/walletAddress dropped). That silent normalization changed the
- * caller's approved intent under the approval digest and could route a mutated
- * request to raw signing. The strict validator now throws instead, and the
- * approval replay path converts this into a fail-closed 409 with a specific
- * rejection audit (malformed_transaction_action_payload).
+ * Identifies a stored transaction action whose fields do not satisfy the exact
+ * approval replay contract. The replay path converts this to a fail-closed 409
+ * and records a specific rejection audit.
  */
 class TransactionActionPayloadValidationError extends Error {
   constructor(
@@ -931,9 +1034,7 @@ function getTransactionActionPayload(payload: unknown): {
   const value = payload as Record<string, unknown>;
   if (value.type !== "transaction") return null;
 
-  // broadcast: REQUIRED boolean. A missing or non-boolean broadcast was
-  // previously coerced (value.broadcast !== false) to true, silently promoting
-  // an ambiguous payload to a broadcast execution. Require it explicitly.
+  // Broadcast is required so approval replay cannot infer an irreversible action.
   if (typeof value.broadcast !== "boolean") {
     throw new TransactionActionPayloadValidationError(
       "transaction action payload 'broadcast' must be a boolean",
@@ -941,15 +1042,7 @@ function getTransactionActionPayload(payload: unknown): {
     );
   }
 
-  // nonce: OPTIONAL, but a PRESENT value (including an explicit null) must be a
-  // non-negative safe integer. Absence is distinguished from a present-null via
-  // Object.hasOwn: a legitimately-minted payload omits the key entirely (the
-  // transactionActionPayload builder spreads it in only when defined+non-null,
-  // and jsonb storage never injects nulls for omitted keys), so a present null
-  // can only come from a malformed/adversarial payload and must fail closed
-  // rather than be silently normalized to "omitted". A string/object/float/
-  // negative/unsafe-integer nonce was likewise previously dropped, silently
-  // changing the digested intent.
+  // Optional fields distinguish absence from explicit null and validate exactly.
   let nonce: number | undefined;
   if (Object.hasOwn(value, "nonce")) {
     if (typeof value.nonce !== "number" || !Number.isSafeInteger(value.nonce) || value.nonce < 0) {
@@ -961,10 +1054,7 @@ function getTransactionActionPayload(payload: unknown): {
     nonce = value.nonce;
   }
 
-  // gasLimit: OPTIONAL, but a PRESENT value (including explicit null) must be a
-  // decimal uint string (its actual contract, e.g. "65000"). Absence vs
-  // present-null distinguished via Object.hasOwn; a wrong-type or present-null
-  // gasLimit was previously dropped.
+  // Gas limits use decimal uint strings to preserve exact values in the digest.
   let gasLimit: string | undefined;
   if (Object.hasOwn(value, "gasLimit")) {
     if (!isUint256DecimalString(value.gasLimit)) {
@@ -976,10 +1066,7 @@ function getTransactionActionPayload(payload: unknown): {
     gasLimit = value.gasLimit;
   }
 
-  // venue / walletAddress: OPTIONAL, but a PRESENT value (including explicit
-  // null) must be a string. Absence vs present-null distinguished via
-  // Object.hasOwn; wrong-type or present-null values were previously dropped,
-  // changing the resolved signing wallet/venue.
+  // Venue and wallet identity are part of the approved execution target.
   let venue: string | undefined;
   if (Object.hasOwn(value, "venue")) {
     if (typeof value.venue !== "string") {
@@ -1562,12 +1649,7 @@ function hasRecentSessionMfa(
   maxAgeMs = DEFAULT_MFA_MAX_AGE_MS,
 ) {
   const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt >= 0 &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(verifiedAt, maxAgeMs);
 }
 
 function hasTenantAdminSession(c: Context<{ Variables: AppVariables }>): boolean {
@@ -2096,6 +2178,12 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
   if (!isNonEmptyString(request.value) || !isUint256DecimalString(request.value)) {
     return c.json<ApiResponse>({ ok: false, error: "'value' must be a uint256 wei string" }, 400);
   }
+  if (
+    request.chainId !== undefined &&
+    (!Number.isSafeInteger(request.chainId) || request.chainId <= 0)
+  ) {
+    return c.json<ApiResponse>({ ok: false, error: "'chainId' must be a positive integer" }, 400);
+  }
   if (hasCalldata(request.data) && !allowUnsafeContractCallSigning()) {
     return c.json<ApiResponse>(
       {
@@ -2106,8 +2194,17 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       403,
     );
   }
+  const shouldBroadcast = request.broadcast !== false;
+  if (shouldBroadcast && !isNonEmptyString(c.req.header("Idempotency-Key"))) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Broadcast signing requires an Idempotency-Key header" },
+      428,
+    );
+  }
+  const invalidIdempotencyKey = invalidWalletIdempotencyKeyResponse(c, shouldBroadcast);
+  if (invalidIdempotencyKey) return invalidIdempotencyKey;
 
-  const resolvedChainId = request.chainId || parseInt(process.env.CHAIN_ID || "8453", 10);
+  const resolvedChainId = request.chainId ?? configuredDefaultChainId();
   if (!hasCalldata(request.data)) {
     const gasGuard = await nativeTransferGasAccountingGuard(
       c,
@@ -2130,14 +2227,6 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     venue: request.venue,
     walletAddress: request.walletAddress,
   };
-  const shouldBroadcast = signRequest.broadcast !== false;
-  if (shouldBroadcast && !isNonEmptyString(c.req.header("Idempotency-Key"))) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Broadcast signing requires an Idempotency-Key header" },
-      428,
-    );
-  }
-
   const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
   const isEvmSignRequest = resolvedChainId !== 101 && resolvedChainId !== 102;
@@ -2184,12 +2273,9 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
   return withAgentSpendLock(agentId, async () => {
     const stats = await getTransactionStats(agentId, signRequest.chainId);
 
-    // Authoritative cumulative aggregates (Redis-sourced) for any aggregation
-    // policies on this agent. Loaded INSIDE the per-agent spend lock so the
-    // snapshot the evaluator sees is consistent with the recordAggregationEvent
-    // write we make on commit below — concurrent signs cannot race a cap.
-    // Fail-closed: snapshots that cannot be sourced are omitted from the lookup,
-    // which makes the evaluator deny that aggregation condition.
+    // Load durable cumulative aggregates inside the per-agent spend lock. The
+    // committed transaction table is the source of truth, so concurrent signs
+    // cannot race a cap and cache outages cannot undercount prior actions.
     const aggregations = await loadAggregationsForPolicies(policySet, signRequest);
 
     const evaluation = await policyEngine.evaluate(policySet, {
@@ -2323,70 +2409,40 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     }
 
     const idempotencyKey = c.req.header("Idempotency-Key");
-    if (isEvmSignRequest && idempotencyKey && executionPayloadDigest) {
-      const [priorAuthorization] = await db
-        .select({
-          requestId: executionAuthorizationNonces.requestId,
-          payloadDigest: executionAuthorizationNonces.payloadDigest,
-        })
-        .from(executionAuthorizationNonces)
-        .where(
-          and(
-            eq(executionAuthorizationNonces.tenantId, tenantId),
-            eq(executionAuthorizationNonces.agentId, agentId),
-            eq(executionAuthorizationNonces.idempotencyKey, idempotencyKey),
-          ),
-        )
-        .orderBy(desc(executionAuthorizationNonces.issuedAt))
-        .limit(1);
-      if (priorAuthorization) {
-        if (priorAuthorization.payloadDigest !== executionPayloadDigest) {
-          return c.json<ApiResponse>(
-            { ok: false, error: "Idempotency-Key was already used for a different transaction" },
-            409,
-          );
+    const txId = crypto.randomUUID();
+    let walletOperationClaimed = false;
+    let pendingTransactionCreated = false;
+    let broadcastSubmissionFenced = false;
+    let knownBroadcastResponse: { ok: true; data: { txId: string; txHash: string } } | undefined;
+    let reconciliationRequiredResponse:
+      | {
+          ok: true;
+          data: { txId: string; txHash: string; status: "accepted_reconciliation_required" };
         }
-        const [priorTransaction] = await db
-          .select({ status: transactions.status, txHash: transactions.txHash })
-          .from(transactions)
-          .where(
-            and(
-              eq(transactions.id, priorAuthorization.requestId),
-              eq(transactions.agentId, agentId),
-            ),
-          );
-        if (priorTransaction?.status === "outcome_unknown" && priorTransaction.txHash) {
-          const response = externalBroadcastOutcomeUnknownResponse(
-            c,
-            new ExternalBroadcastOutcomeUnknownError(priorTransaction.txHash),
-            priorAuthorization.requestId,
-          );
-          if (!response) throw new Error("invariant: outcome_unknown response was not constructed");
-          return response;
-        }
-        if (
-          priorTransaction?.txHash &&
-          (priorTransaction.status === "broadcast" || priorTransaction.status === "confirmed")
-        ) {
-          return c.json<ApiResponse<{ txId: string; txHash: string }>>({
-            ok: true,
-            data: { txId: priorAuthorization.requestId, txHash: priorTransaction.txHash },
-          });
-        }
-        return c.json<ApiResponse>(
-          {
-            ok: false,
-            error: "Transaction execution is already recorded; inspect its status before retrying",
-            data: { txId: priorAuthorization.requestId, status: priorTransaction?.status },
-          },
-          409,
-        );
-      }
-    }
-
-    const executionTxId = crypto.randomUUID();
+      | undefined;
     try {
-      const txId = executionTxId;
+      if (shouldBroadcast) {
+        const claim = await claimWalletOperation({
+          tenantId,
+          agentId,
+          operation: "vault.sign.broadcast",
+          idempotencyKey: c.req.header("Idempotency-Key") ?? "",
+          request: {
+            to: signRequest.to,
+            value: signRequest.value,
+            data: signRequest.data,
+            chainId: signRequest.chainId,
+            nonce: signRequest.nonce,
+            gasLimit: signRequest.gasLimit,
+            broadcast: shouldBroadcast,
+            venue: signRequest.venue,
+            walletAddress: signRequest.walletAddress,
+          },
+          txId,
+        });
+        if (claim.kind !== "claimed") return await walletOperationClaimResponse(claim);
+        walletOperationClaimed = true;
+      }
       const txStatus: "broadcast" | "signed" = shouldBroadcast ? "broadcast" : "signed";
       const executionAuthorization =
         isEvmSignRequest && executionPayloadDigest
@@ -2437,6 +2493,37 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
           policyResults: evaluation.results,
         },
       });
+      if (shouldBroadcast) {
+        await db.insert(transactions).values({
+          id: txId,
+          agentId,
+          status: "pending",
+          toAddress: signRequest.to,
+          value: signRequest.value,
+          data: signRequest.data,
+          chainId: signRequest.chainId,
+          executionPayloadDigest,
+          executionPolicyRevisionHash,
+          executionBackend: executionTarget.backend,
+          executionBackendIdentityDigest: executionTarget.backendIdentityDigest,
+          policyResults: evaluation.results,
+          actionPayload: transactionActionPayload({
+            broadcast: true,
+            nonce: signRequest.nonce,
+            gasLimit: signRequest.gasLimit,
+            venue: signRequest.venue,
+            walletAddress: signRequest.walletAddress,
+          }),
+        });
+        pendingTransactionCreated = true;
+        await markWalletOperationSubmissionUnknown({
+          tenantId,
+          agentId,
+          operation: "vault.sign.broadcast",
+          txId,
+        });
+        broadcastSubmissionFenced = true;
+      }
       const result =
         executionAuthorization && executionPayloadDigest
           ? await new GovernedVault(vault, async (authorization, expected) => {
@@ -2455,31 +2542,6 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
                     capability: expected.capability,
                     backend: expected.backend,
                   },
-                });
-                // Stage the governed intent after authorization consumption but
-                // before the raw signer can perform external I/O. This exact
-                // row is the durable recovery anchor if the provider returns a
-                // hash and Vault.recordSignedTransaction subsequently fails.
-                await db.insert(transactions).values({
-                  id: txId,
-                  agentId,
-                  status: "approved",
-                  toAddress: signRequest.to,
-                  value: signRequest.value,
-                  data: signRequest.data,
-                  chainId: resolvedChainId,
-                  executionPayloadDigest,
-                  executionPolicyRevisionHash,
-                  executionBackend: executionTarget.backend,
-                  executionBackendIdentityDigest: executionTarget.backendIdentityDigest,
-                  policyResults: evaluation.results,
-                  actionPayload: transactionActionPayload({
-                    broadcast: shouldBroadcast,
-                    nonce: signRequest.nonce,
-                    gasLimit: signRequest.gasLimit,
-                    venue: signRequest.venue,
-                    walletAddress: signRequest.walletAddress,
-                  }),
                 });
               } catch (error) {
                 await writeVaultAudit(c, {
@@ -2509,7 +2571,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
               // executionPayloadDigest and therefore mints+consumes an
               // authorization above. The raw fallback exists ONLY for the
               // non-EVM (Solana) chain family. An EVM request reaching here is an
-              // invariant violation (fail-open), not a signable request.
+              // invariant violation (fail-closed), not a signable request.
               if (isEvmSignRequest) {
                 throw new Error(
                   "invariant: primary EVM sign reached raw signer without gateway authorization",
@@ -2521,6 +2583,28 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
                 status: txStatus,
               });
             })();
+
+      if (shouldBroadcast) {
+        const completedResponse = { ok: true as const, data: { txId, txHash: result } };
+        try {
+          await completeWalletOperation({
+            tenantId,
+            agentId,
+            operation: "vault.sign.broadcast",
+            txId,
+            txHash: result,
+            responseStatus: 200,
+            responseBody: completedResponse,
+          });
+          knownBroadcastResponse = completedResponse;
+        } catch (error) {
+          console.error("[vault] Failed to persist known broadcast idempotency result:", error);
+          reconciliationRequiredResponse = {
+            ok: true,
+            data: { txId, txHash: result, status: "accepted_reconciliation_required" },
+          };
+        }
+      }
 
       await db
         .update(transactions)
@@ -2534,29 +2618,11 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
         })
         .where(eq(transactions.id, txId));
 
-      // ── Record spend in Redis (fire-and-forget) ──────────────────────────────
+      // Update the Redis display cache. Policy enforcement reads committed rows,
+      // so a cache outage cannot weaken a spend or aggregation limit.
       recordVaultSpend(agentId, tenantId, signRequest.value, resolvedChainId).catch((err) =>
         console.error("[vault] Failed to record spend", redactedThrownDiagnostics(err)),
       );
-
-      // ── Record the authoritative aggregation event ───────────────────────────
-      // AWAITED (unlike recordVaultSpend) and still inside the per-agent spend
-      // lock, so the next request's loadAggregationsForPolicies snapshot already
-      // includes this contribution — cumulative caps cannot be raced past the
-      // threshold by overlapping signs. The tx is already committed/broadcast at
-      // this point, so a record failure cannot retroactively fail the request;
-      // we log it loudly (an undercounted aggregate is a known residual risk of
-      // any post-commit counter, bounded by the spend lock's serialization).
-      try {
-        await recordAggregationEvent({
-          agentId,
-          valueRaw: signRequest.value,
-          to: signRequest.to,
-          chainId: resolvedChainId,
-        });
-      } catch (err) {
-        console.error("[vault] Failed to record aggregation event", redactedThrownDiagnostics(err));
-      }
 
       await writeVaultAudit(c, {
         tenantId,
@@ -2589,6 +2655,9 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       }
 
       if (shouldBroadcast) {
+        if (reconciliationRequiredResponse) {
+          return c.json<ApiResponse>(reconciliationRequiredResponse, 202);
+        }
         return c.json<ApiResponse<{ txId: string; txHash: string }>>({
           ok: true,
           data: { txId, txHash: result },
@@ -2600,6 +2669,64 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
         data: { txId, signedTx: result },
       });
     } catch (e: unknown) {
+      if (knownBroadcastResponse) {
+        return c.json<ApiResponse<{ txId: string; txHash: string }>>(knownBroadcastResponse);
+      }
+      if (reconciliationRequiredResponse) {
+        return c.json<ApiResponse>(reconciliationRequiredResponse, 202);
+      }
+      if (e instanceof ExternalBroadcastOutcomeUnknownError) {
+        await db
+          .update(transactions)
+          .set({ status: "outcome_unknown", txHash: e.transactionHash, signedAt: new Date() })
+          .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
+        recordVaultSpend(agentId, tenantId, signRequest.value, resolvedChainId).catch((error) =>
+          console.error("[vault] Failed to update ambiguous-spend display cache:", error),
+        );
+        await writeOutcomeUnknownAudit(c, {
+          tenantId,
+          actorType: "agent",
+          actorId: agentId,
+          action: "vault.broadcast.outcome_unknown",
+          resourceType: "transaction",
+          resourceId: txId,
+          metadata: {
+            agentId,
+            txId,
+            txHash: e.transactionHash,
+            chainId: resolvedChainId,
+          },
+        });
+        const response = externalBroadcastOutcomeUnknownResponse(c, e, txId);
+        if (!response) throw new Error("invariant: outcome_unknown response was not constructed");
+        return response;
+      }
+      if (broadcastSubmissionFenced) {
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error:
+              "Broadcast submission outcome is unknown; inspect transaction status before retrying",
+            data: { txId, status: "submission_unknown" },
+          },
+          202,
+        );
+      }
+      if (walletOperationClaimed) {
+        await (async () => {
+          if (pendingTransactionCreated) {
+            await db.delete(transactions).where(eq(transactions.id, txId));
+          }
+          await releaseWalletOperationClaim({
+            tenantId,
+            agentId,
+            operation: "vault.sign.broadcast",
+            txId,
+          });
+        })().catch((error) => {
+          console.error("[vault] Failed to release pre-submission idempotency claim:", error);
+        });
+      }
       const frozen = frozenSigningResponse(c, e);
       if (frozen) return frozen;
       const bindingMismatch = await backendBindingMismatchResponse(c, e, {
@@ -2610,68 +2737,10 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       if (bindingMismatch) return bindingMismatch;
       const authorizationError = executionAuthorizationErrorResponse(c, e);
       if (authorizationError) return authorizationError;
-      const outcomeUnknown = externalBroadcastOutcomeUnknownResponse(c, e, executionTxId);
-      if (outcomeUnknown) {
-        // This is also the fallback for a failed Vault.recordSignedTransaction
-        // write. Preserve the irreversible hash on the pre-staged intent before
-        // returning the typed 202 response.
-        try {
-          await db
-            .update(transactions)
-            .set({
-              status: "outcome_unknown",
-              txHash:
-                e instanceof ExternalBroadcastOutcomeUnknownError ? e.transactionHash : undefined,
-              signedAt: new Date(),
-            })
-            .where(and(eq(transactions.id, executionTxId), eq(transactions.agentId, agentId)));
-        } catch {
-          // The awaited pre-broadcast checkpoint is already durable. Do not
-          // replace the non-retryable result with a generic 500 merely because
-          // this redundant bookkeeping write is temporarily unavailable.
-          console.error("[vault] Failed to refresh durable outcome_unknown transaction state");
-        }
-
-        // A lost response may still represent real spend. Account for it
-        // conservatively before releasing the per-agent spend lock.
-        recordVaultSpend(agentId, tenantId, signRequest.value, resolvedChainId).catch((err) =>
-          console.error("[vault] Failed to record ambiguous spend", redactedThrownDiagnostics(err)),
-        );
-        try {
-          await recordAggregationEvent({
-            agentId,
-            valueRaw: signRequest.value,
-            to: signRequest.to,
-            chainId: resolvedChainId,
-          });
-        } catch (err) {
-          console.error(
-            "[vault] Failed to record ambiguous aggregation event",
-            redactedThrownDiagnostics(err),
-          );
-        }
-        const outcomeUnknownTransactionHash =
-          e instanceof ExternalBroadcastOutcomeUnknownError ? e.transactionHash : null;
-        await writeOutcomeUnknownAudit(c, {
-          tenantId,
-          actorType: "agent",
-          actorId: agentId,
-          action: "vault.broadcast.outcome_unknown",
-          resourceType: "transaction",
-          resourceId: executionTxId,
-          metadata: {
-            agentId,
-            txId: executionTxId,
-            txHash: outcomeUnknownTransactionHash,
-            chainId: resolvedChainId,
-          },
-        });
-        return outcomeUnknown;
-      }
       await db
         .update(transactions)
         .set({ status: "failed" })
-        .where(and(eq(transactions.id, executionTxId), eq(transactions.agentId, agentId)));
+        .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
       const requestId = c.get("requestId") || "unknown";
       console.error(`[${requestId}] Sign transaction failed for agent ${agentId}`);
 
@@ -3112,6 +3181,14 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       400,
     );
   }
+  const idempotencyResponse = requireBroadcastActionIdempotency(
+    c,
+    transfer.broadcast,
+    "Broadcast transfer actions",
+  );
+  if (idempotencyResponse) return idempotencyResponse;
+  const invalidIdempotencyKey = invalidWalletIdempotencyKeyResponse(c, transfer.broadcast);
+  if (invalidIdempotencyKey) return invalidIdempotencyKey;
   const sponsorship = await resolveGasSponsorshipRequest({
     tenantId,
     agentId,
@@ -3136,12 +3213,6 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       : transfer.sponsor
         ? { requested: true, sponsored: false }
         : undefined;
-  const idempotencyResponse = requireBroadcastActionIdempotency(
-    c,
-    transfer.broadcast,
-    "Broadcast transfer actions",
-  );
-  if (idempotencyResponse) return idempotencyResponse;
   const existingAction = await findActionByReferenceId(agentId, "transfer", transfer.referenceId);
   if (existingAction) {
     return c.json<ApiResponse>({
@@ -3384,7 +3455,34 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
 
     let completedResult: string | null = null;
     let completedStatus: "broadcast" | "signed" | null = null;
+    let walletOperationClaimed = false;
+    let pendingTransactionCreated = false;
+    let broadcastSubmissionFenced = false;
+    let reconciliationRequiredResponse:
+      | {
+          ok: true;
+          data: {
+            actionId: string;
+            txHash: string;
+            status: "accepted_reconciliation_required";
+          };
+        }
+      | undefined;
     try {
+      if (transfer.broadcast) {
+        const claim = await claimWalletOperation({
+          tenantId,
+          agentId,
+          operation: "vault.transfer.broadcast",
+          idempotencyKey: c.req.header("Idempotency-Key") ?? "",
+          request: transfer,
+          txId: actionId,
+        });
+        if (claim.kind !== "claimed") {
+          return await walletOperationClaimResponse(claim, "actionId");
+        }
+        walletOperationClaimed = true;
+      }
       await writeVaultAudit(c, {
         tenantId,
         actorType: "agent",
@@ -3413,32 +3511,72 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         status: "reserved",
       });
       if (typeof reservationError === "string") {
+        if (walletOperationClaimed) {
+          await releaseWalletOperationClaim({
+            tenantId,
+            agentId,
+            operation: "vault.transfer.broadcast",
+            txId: actionId,
+          });
+          walletOperationClaimed = false;
+        }
         return c.json<ApiResponse>({ ok: false, error: reservationError }, 403);
+      }
+      if (transfer.broadcast) {
+        await db.insert(transactions).values({
+          id: actionId,
+          agentId,
+          status: "pending",
+          toAddress: signRequest.to,
+          value: signRequest.value,
+          data: signRequest.data,
+          chainId: signRequest.chainId,
+          actionType: "transfer",
+          actionPayload: transferActionPayload({
+            token: transfer.token,
+            recipient: transfer.to,
+            amount: transfer.value,
+            broadcast: true,
+            referenceId: transfer.referenceId,
+            sponsorship: sponsorshipPayload,
+          }),
+          policyResults: evaluation.results,
+        });
+        pendingTransactionCreated = true;
+        await markWalletOperationSubmissionUnknown({
+          tenantId,
+          agentId,
+          operation: "vault.transfer.broadcast",
+          txId: actionId,
+        });
+        broadcastSubmissionFenced = true;
       }
       let result: string;
       if (isSolanaTokenTransfer) {
         if (!signRequest.data) {
           throw new Error("SPL transfer transaction was not built");
         }
-        await db.insert(transactions).values({
-          id: actionId,
-          agentId,
-          status: "pending",
-          toAddress: transfer.to,
-          value: transfer.value,
-          data: signRequest.data,
-          chainId: transfer.chainId,
-          actionType: "transfer",
-          actionPayload: transferActionPayload({
-            token: transfer.token,
-            recipient: transfer.to,
-            amount: transfer.value,
-            broadcast: transfer.broadcast,
-            referenceId: transfer.referenceId,
-            sponsorship: sponsorshipPayload,
-          }),
-          policyResults: evaluation.results,
-        });
+        if (!transfer.broadcast) {
+          await db.insert(transactions).values({
+            id: actionId,
+            agentId,
+            status: "pending",
+            toAddress: transfer.to,
+            value: transfer.value,
+            data: signRequest.data,
+            chainId: transfer.chainId,
+            actionType: "transfer",
+            actionPayload: transferActionPayload({
+              token: transfer.token,
+              recipient: transfer.to,
+              amount: transfer.value,
+              broadcast: false,
+              referenceId: transfer.referenceId,
+              sponsorship: sponsorshipPayload,
+            }),
+            policyResults: evaluation.results,
+          });
+        }
         const signed = await vault.signSolanaTransaction({
           agentId,
           tenantId,
@@ -3462,6 +3600,46 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       completedResult = result;
       completedStatus = txStatus;
       const signedTx = transfer.broadcast ? undefined : result;
+      if (transfer.broadcast) {
+        const responseBody = {
+          ok: true,
+          data: transferActionResponse({
+            actionId,
+            status: txStatus,
+            chainId: signRequest.chainId,
+            to: transfer.to,
+            value: transfer.value,
+            token: transfer.token,
+            txHash: result,
+            sponsorship: sponsorshipPayload,
+            policyResults: evaluation.results,
+          }),
+        };
+        try {
+          await completeWalletOperation({
+            tenantId,
+            agentId,
+            operation: "vault.transfer.broadcast",
+            txId: actionId,
+            txHash: result,
+            responseStatus: 200,
+            responseBody,
+          });
+        } catch (error) {
+          console.error(
+            "[vault] Failed to persist known transfer broadcast idempotency result:",
+            error,
+          );
+          reconciliationRequiredResponse = {
+            ok: true,
+            data: {
+              actionId,
+              txHash: result,
+              status: "accepted_reconciliation_required",
+            },
+          };
+        }
+      }
       await db
         .update(transactions)
         .set({
@@ -3531,6 +3709,10 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         });
       }
 
+      if (reconciliationRequiredResponse) {
+        return c.json<ApiResponse>(reconciliationRequiredResponse, 202);
+      }
+
       return c.json<ApiResponse>({
         ok: true,
         data: transferActionResponse({
@@ -3568,8 +3750,16 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
             signedAt: new Date(),
           })
           .where(eq(transactions.id, actionId))
-          .catch(() => null);
+          .catch((error) => {
+            console.error(
+              "[vault] Failed to repair transaction row after known transfer result:",
+              error,
+            );
+          });
 
+        if (reconciliationRequiredResponse) {
+          return c.json<ApiResponse>(reconciliationRequiredResponse, 202);
+        }
         return c.json<ApiResponse>({
           ok: true,
           data: transferActionResponse({
@@ -3584,6 +3774,35 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
             sponsorship: sponsorshipPayload,
             policyResults: evaluation.results,
           }),
+        });
+      }
+      if (broadcastSubmissionFenced) {
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error:
+              "Broadcast submission outcome is unknown; inspect transaction status before retrying",
+            data: { actionId, status: "submission_unknown" },
+          },
+          202,
+        );
+      }
+      if (walletOperationClaimed) {
+        await (async () => {
+          if (pendingTransactionCreated) {
+            await db.delete(transactions).where(eq(transactions.id, actionId));
+          }
+          await releaseWalletOperationClaim({
+            tenantId,
+            agentId,
+            operation: "vault.transfer.broadcast",
+            txId: actionId,
+          });
+        })().catch((error) => {
+          console.error(
+            "[vault] Failed to release pre-submission transfer idempotency claim:",
+            error,
+          );
         });
       }
       await db.insert(transactions).values({
@@ -3747,6 +3966,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
     .select({
       transaction: transactions,
       approval: {
+        status: approvalQueue.status,
         requestedByType: approvalQueue.requestedByType,
         requestedById: approvalQueue.requestedById,
       },
@@ -3754,24 +3974,33 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
     .from(transactions)
     .innerJoin(
       approvalQueue,
-      and(
-        eq(approvalQueue.txId, transactions.id),
-        eq(approvalQueue.agentId, transactions.agentId),
-        eq(approvalQueue.status, "pending"),
-      ),
+      and(eq(approvalQueue.txId, transactions.id), eq(approvalQueue.agentId, transactions.agentId)),
     )
-    .where(
-      and(
-        eq(transactions.id, txId),
-        eq(transactions.agentId, agentId),
-        eq(transactions.status, "pending"),
-      ),
-    );
+    .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
   if (!transaction) {
     return c.json<ApiResponse>({ ok: false, error: "Transaction not found" }, 404);
   }
   const pendingApproval = transaction.approval;
   const transactionRow = transaction.transaction;
+  if (transactionRow.status === "broadcast" && transactionRow.txHash) {
+    return c.json<ApiResponse<{ txId: string; txHash: string }>>({
+      ok: true,
+      data: { txId, txHash: transactionRow.txHash },
+    });
+  }
+  if (pendingApproval.status === "approved" && transactionRow.status === "pending") {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Approved transaction submission outcome is unknown; reconcile before retrying",
+        data: { txId, status: "submission_unknown" },
+      },
+      202,
+    );
+  }
+  if (pendingApproval.status !== "pending" || transactionRow.status !== "pending") {
+    return c.json<ApiResponse>({ ok: false, error: "Transaction already processed" }, 409);
+  }
   const approverPrincipal = approvalPrincipal(c, agentId);
   if (isSameApprovalPrincipal(pendingApproval, approverPrincipal)) {
     return c.json<ApiResponse>(
@@ -3870,6 +4099,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
   return withAgentSpendLock(agentId, async () => {
     const resolvedAt = new Date();
     let irreversibleResult = false;
+    let submissionStarted = false;
     let completedTxHash: string | null = null;
     try {
       const requestedBroadcast = transferPayload
@@ -3932,12 +4162,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         return c.json<ApiResponse>({ ok: false, error }, 409);
       };
 
-      // Compute the replay digest inside a guarded block. The shared normalizer
-      // throws ExecutionPayloadNormalizationError on any malformed numeric caller
-      // field (e.g. an unsafe-integer nonce). Previously this threw BEFORE the
-      // failClosed helper and the outer catch only handles GovernedVaultError, so
-      // signing was prevented but no specific rejection audit was produced. We now
-      // convert it into the same fail-closed 409 path with a specific reason.
+      // Malformed numeric fields, including unsafe-integer nonces, take the
+      // audited fail-closed 409 path.
       let approvalExecutionPayloadDigest: string | null = null;
       let approvalExecutionTarget: Awaited<ReturnType<typeof vault.resolveExecutionTarget>> = {
         backend: "local-vault",
@@ -3959,9 +4185,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       }
 
       if (isRawEvmSigningCandidate) {
-        // 1. Require a valid typed transaction action payload. A missing/malformed
-        //    actionPayload previously flipped isPrimaryEvmApproval=false and fell
-        //    through to raw signing. Now it fails closed.
+        // Require a valid typed transaction action payload; missing or malformed
+        // payloads must not fall through to raw signing.
         if (!isPrimaryEvmApproval) {
           return failClosed(
             "missing_or_malformed_transaction_action_payload",
@@ -4211,6 +4436,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         }
         const isSolanaTokenTransfer =
           transferPayload !== null && transferPayload.token !== "native";
+        submissionStarted = shouldBroadcast;
         const result = await vault.signSolanaTransaction({
           agentId,
           tenantId,
@@ -4294,6 +4520,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
               throw error;
             }
           });
+          submissionStarted = shouldBroadcast;
           txHash = await governedVault.signTransactionAuthorized(approvalSignRequest, {
             txId,
             policyResults: currentEvaluation.results,
@@ -4312,6 +4539,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
               "invariant: primary EVM approval reached raw signer without gateway authorization",
             );
           }
+          submissionStarted = shouldBroadcast;
           txHash = await vault.signTransaction(approvalSignRequest, {
             txId,
             policyResults: currentEvaluation.results,
@@ -4465,6 +4693,16 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         txId,
         chainId: transactionRow.chainId,
       });
+      if (submissionStarted && !irreversibleResult) {
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: "Approved transaction submission outcome is unknown; reconcile before retrying",
+            data: { txId, status: "submission_unknown" },
+          },
+          202,
+        );
+      }
       if (!irreversibleResult) {
         await db
           .update(approvalQueue)
@@ -4519,19 +4757,6 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
               redactedThrownDiagnostics(err),
             ),
         );
-        try {
-          await recordAggregationEvent({
-            agentId,
-            valueRaw: transactionRow.value,
-            to: transactionRow.toAddress,
-            chainId: transactionRow.chainId,
-          });
-        } catch (err) {
-          console.error(
-            "[vault] Failed to record ambiguous approved aggregation event",
-            redactedThrownDiagnostics(err),
-          );
-        }
         await writeOutcomeUnknownAudit(c, {
           tenantId,
           actorType: "user",
@@ -6788,8 +7013,13 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
   }
 
   const resolvedChainId =
-    (typeof body.domain.chainId === "number" ? body.domain.chainId : 0) ||
-    parseInt(process.env.CHAIN_ID || "8453", 10);
+    typeof body.domain.chainId === "number" ? body.domain.chainId : configuredDefaultChainId();
+  if (!Number.isSafeInteger(resolvedChainId) || resolvedChainId <= 0) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "'domain.chainId' must be a positive integer" },
+      400,
+    );
+  }
   // Use the EIP-712 domain's verifyingContract as the request `to` so that
   // destination-based policies (approved-addresses, condition-set, contract
   // allowlist) meaningfully gate the contract the typed data authorizes. Falls
@@ -7766,6 +7996,8 @@ async function signSolanaBlind(
     "Broadcast Solana signing requests",
   );
   if (idempotencyResponse) return idempotencyResponse;
+  const invalidIdempotencyKey = invalidWalletIdempotencyKeyResponse(c, shouldBroadcast);
+  if (invalidIdempotencyKey) return invalidIdempotencyKey;
 
   const signRequest = { agentId, tenantId, to: toAddress, value: txValue, chainId };
   const signerAuthorization = await requireSignerPermission(
@@ -7855,6 +8087,22 @@ async function signSolanaBlind(
     }
 
     const txId = crypto.randomUUID();
+    let walletOperationClaimed = false;
+    let pendingTransactionCreated = false;
+    let submissionFenced = false;
+    let reconciliationRequiredResponse:
+      | {
+          ok: true;
+          data: {
+            txId: string;
+            signature: string;
+            broadcast: boolean;
+            chainId: number;
+            caip2?: string;
+            status: "accepted_reconciliation_required";
+          };
+        }
+      | undefined;
     let completedResult: {
       txId: string;
       signature: string;
@@ -7863,6 +8111,42 @@ async function signSolanaBlind(
       caip2?: string;
     } | null = null;
     try {
+      if (shouldBroadcast) {
+        const claim = await claimWalletOperation({
+          tenantId,
+          agentId,
+          operation: "vault.solana.blind.broadcast",
+          idempotencyKey: c.req.header("Idempotency-Key") ?? "",
+          request: {
+            transaction: args.transaction,
+            chainId,
+            to: toAddress,
+            value: txValue,
+            broadcast: true,
+          },
+          txId,
+        });
+        if (claim.kind !== "claimed") return await walletOperationClaimResponse(claim);
+        walletOperationClaimed = true;
+        await db.insert(transactions).values({
+          id: txId,
+          agentId,
+          status: "pending",
+          toAddress,
+          value: txValue,
+          data: args.transaction,
+          chainId,
+          policyResults: evaluation.results,
+        });
+        pendingTransactionCreated = true;
+        await markWalletOperationSubmissionUnknown({
+          tenantId,
+          agentId,
+          operation: "vault.solana.blind.broadcast",
+          txId,
+        });
+        submissionFenced = true;
+      }
       const result = await vault.signSolanaTransaction({
         agentId,
         tenantId,
@@ -7873,17 +8157,48 @@ async function signSolanaBlind(
         expectedValue: txValue,
       });
       completedResult = { txId, ...result };
-      await db.insert(transactions).values({
-        id: txId,
-        agentId,
-        status: result.broadcast ? "broadcast" : "signed",
-        toAddress,
-        value: txValue,
-        chainId,
-        txHash: result.broadcast ? result.signature : undefined,
-        policyResults: evaluation.results,
-        signedAt: new Date(),
-      });
+      const successResponse = { ok: true as const, data: completedResult };
+      if (result.broadcast) {
+        try {
+          await completeWalletOperation({
+            tenantId,
+            agentId,
+            operation: "vault.solana.blind.broadcast",
+            txId,
+            txHash: result.signature,
+            responseStatus: 200,
+            responseBody: successResponse,
+          });
+        } catch (error) {
+          console.error("[vault] Failed to persist blind Solana broadcast result:", error);
+          reconciliationRequiredResponse = {
+            ok: true,
+            data: { ...completedResult, status: "accepted_reconciliation_required" },
+          };
+        }
+      }
+      if (pendingTransactionCreated) {
+        await db
+          .update(transactions)
+          .set({
+            status: result.broadcast ? "broadcast" : "signed",
+            txHash: result.broadcast ? result.signature : undefined,
+            signedAt: new Date(),
+          })
+          .where(eq(transactions.id, txId));
+      } else {
+        await db.insert(transactions).values({
+          id: txId,
+          agentId,
+          status: result.broadcast ? "broadcast" : "signed",
+          toAddress,
+          value: txValue,
+          chainId,
+          txHash: result.broadcast ? result.signature : undefined,
+          policyResults: evaluation.results,
+          signedAt: new Date(),
+        });
+      }
       recordVaultSpend(agentId, tenantId, txValue, chainId).catch((err) =>
         console.error("[vault] Failed to record Solana spend", redactedThrownDiagnostics(err)),
       );
@@ -7909,6 +8224,9 @@ async function signSolanaBlind(
         txId,
         txHash: result.broadcast ? result.signature : undefined,
       });
+      if (reconciliationRequiredResponse) {
+        return c.json<ApiResponse>(reconciliationRequiredResponse, 202);
+      }
       return c.json<
         ApiResponse<{
           txId: string;
@@ -7919,8 +8237,6 @@ async function signSolanaBlind(
         }>
       >({ ok: true, data: { txId, ...result } });
     } catch (e: unknown) {
-      const frozen = frozenSigningResponse(c, e);
-      if (frozen) return frozen;
       const requestId = c.get("requestId") || "unknown";
       console.error(
         `[${requestId}] Solana blind sign failed for agent ${agentId}`,
@@ -7931,6 +8247,9 @@ async function signSolanaBlind(
           `[${requestId}] Solana blind sign completed before bookkeeping failed for agent ${agentId}, tx ${txId}; returning completed result to prevent duplicate retry`,
         );
         setNoStoreHeaders(c);
+        if (reconciliationRequiredResponse) {
+          return c.json<ApiResponse>(reconciliationRequiredResponse, 202);
+        }
         return c.json<
           ApiResponse<{
             txId: string;
@@ -7941,6 +8260,33 @@ async function signSolanaBlind(
           }>
         >({ ok: true, data: completedResult });
       }
+      if (submissionFenced) {
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: "Solana broadcast submission outcome is unknown; reconcile before retrying",
+            data: { txId, status: "submission_unknown" },
+          },
+          202,
+        );
+      }
+      if (walletOperationClaimed) {
+        await (async () => {
+          if (pendingTransactionCreated) {
+            await db.delete(transactions).where(eq(transactions.id, txId));
+          }
+          await releaseWalletOperationClaim({
+            tenantId,
+            agentId,
+            operation: "vault.solana.blind.broadcast",
+            txId,
+          });
+        })().catch((error) => {
+          console.error("[vault] Failed to release blind Solana broadcast claim:", error);
+        });
+      }
+      const frozen = frozenSigningResponse(c, e);
+      if (frozen) return frozen;
       dispatchWebhook(tenantId, agentId, "tx_failed", {
         error: "Transaction failed",
         ...redactedThrownDiagnostics(e),
@@ -8315,6 +8661,10 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
     }
 
     const txId = crypto.randomUUID();
+    let walletOperationClaimed = false;
+    let pendingTransactionCreated = false;
+    let submissionFenced = false;
+    let reconciliationRequired = false;
     let completedResult: {
       txId: string;
       signature: string;
@@ -8323,6 +8673,37 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       caip2?: string;
     } | null = null;
     try {
+      if (shouldBroadcast) {
+        const claim = await claimWalletOperation({
+          tenantId,
+          agentId,
+          operation: "vault.solana.broadcast",
+          idempotencyKey: c.req.header("Idempotency-Key") ?? "",
+          request: { transaction: body.transaction, chainId, broadcast: true },
+          txId,
+        });
+        if (claim.kind !== "claimed") return await walletOperationClaimResponse(claim);
+        walletOperationClaimed = true;
+        await db.insert(transactions).values({
+          id: txId,
+          agentId,
+          status: "pending",
+          toAddress,
+          value: txValue,
+          data: body.transaction,
+          chainId,
+          policyResults: evaluation.results,
+        });
+        pendingTransactionCreated = true;
+        await markWalletOperationSubmissionUnknown({
+          tenantId,
+          agentId,
+          operation: "vault.solana.broadcast",
+          txId,
+        });
+        submissionFenced = true;
+      }
+
       // The vault's defense-in-depth envelope check (assertSolanaTransferTransactionMatches)
       // only models a single native SOL transfer. The instruction parser is the
       // authoritative policy check for ALL transaction shapes, so we only pass the
@@ -8350,18 +8731,46 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
           : { allowBlindSign: true }),
       });
       completedResult = { txId, ...result };
+      const successResponse = { ok: true as const, data: completedResult };
+      if (result.broadcast) {
+        try {
+          await completeWalletOperation({
+            tenantId,
+            agentId,
+            operation: "vault.solana.broadcast",
+            txId,
+            txHash: result.signature,
+            responseStatus: 200,
+            responseBody: successResponse,
+          });
+        } catch (error) {
+          console.error("[vault] Failed to persist parsed Solana broadcast result:", error);
+          reconciliationRequired = true;
+        }
+      }
 
-      await db.insert(transactions).values({
-        id: txId,
-        agentId,
-        status: result.broadcast ? "broadcast" : "signed",
-        toAddress,
-        value: txValue,
-        chainId,
-        txHash: result.broadcast ? result.signature : undefined,
-        policyResults: evaluation.results,
-        signedAt: new Date(),
-      });
+      if (pendingTransactionCreated) {
+        await db
+          .update(transactions)
+          .set({
+            status: result.broadcast ? "broadcast" : "signed",
+            txHash: result.broadcast ? result.signature : undefined,
+            signedAt: new Date(),
+          })
+          .where(eq(transactions.id, txId));
+      } else {
+        await db.insert(transactions).values({
+          id: txId,
+          agentId,
+          status: result.broadcast ? "broadcast" : "signed",
+          toAddress,
+          value: txValue,
+          chainId,
+          txHash: result.broadcast ? result.signature : undefined,
+          policyResults: evaluation.results,
+          signedAt: new Date(),
+        });
+      }
 
       // ── Record spend in Redis (fire-and-forget) ──────────────────────────────
       recordVaultSpend(agentId, tenantId, txValue, chainId).catch((err) =>
@@ -8400,6 +8809,15 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       });
 
       setNoStoreHeaders(c);
+      if (reconciliationRequired) {
+        return c.json<ApiResponse>(
+          {
+            ok: true,
+            data: { ...completedResult, status: "accepted_reconciliation_required" },
+          },
+          202,
+        );
+      }
       return c.json<
         ApiResponse<{
           txId: string;
@@ -8425,6 +8843,15 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
           `[${requestId}] Solana sign completed before bookkeeping failed for agent ${agentId}, tx ${txId}; returning completed result to prevent duplicate retry`,
         );
         setNoStoreHeaders(c);
+        if (reconciliationRequired) {
+          return c.json<ApiResponse>(
+            {
+              ok: true,
+              data: { ...completedResult, status: "accepted_reconciliation_required" },
+            },
+            202,
+          );
+        }
         return c.json<
           ApiResponse<{
             txId: string;
@@ -8434,6 +8861,33 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
             caip2?: string;
           }>
         >({ ok: true, data: completedResult });
+      }
+
+      if (submissionFenced) {
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: "Solana broadcast submission outcome is unknown; reconcile before retrying",
+            data: { txId, status: "submission_unknown" },
+          },
+          202,
+        );
+      }
+
+      if (walletOperationClaimed) {
+        await (async () => {
+          if (pendingTransactionCreated) {
+            await db.delete(transactions).where(eq(transactions.id, txId));
+          }
+          await releaseWalletOperationClaim({
+            tenantId,
+            agentId,
+            operation: "vault.solana.broadcast",
+            txId,
+          });
+        })().catch((error) => {
+          console.error("[vault] Failed to release parsed Solana broadcast claim:", error);
+        });
       }
 
       dispatchWebhook(tenantId, agentId, "tx_failed", {

@@ -20,6 +20,7 @@ describe("user wallet additional signers API", () => {
     process.env.STEWARD_MASTER_PASSWORD = "user-wallet-signers-master-password";
     process.env.STEWARD_JWT_SECRET = "user-wallet-signers-jwt-secret-32chars";
     process.env.STEWARD_AUDIT_HMAC_KEY = "user-wallet-signers-audit-hmac-key-32chars";
+    process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER = "user-wallet-signers-credential-pepper-32chars";
     process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING = "true";
     process.env.STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING = "true";
 
@@ -66,6 +67,7 @@ describe("user wallet additional signers API", () => {
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_JWT_SECRET;
     delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    delete process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER;
     delete process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING;
     delete process.env.STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING;
   });
@@ -274,6 +276,110 @@ describe("user wallet additional signers API", () => {
       expect(typeof stored?.metadata.credentialLastUsedAt).toBe("string");
     } finally {
       rpcSpy.mockRestore();
+      signSpy.mockRestore();
+    }
+  });
+
+  it("rejects invalid amounts, caller gas limits, and contract recipients before signing", async () => {
+    const signer = await createSigner("device-transaction-guards", ["sign_transaction"]);
+    const headers = {
+      "Content-Type": "application/json",
+      "x-steward-signer-id": signer.id,
+      "x-steward-signer-secret": signer.credentialSecret,
+    };
+
+    const invalidAmount = await userRoutes.request("/me/wallet/sign", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        walletIndex: 2,
+        to: RECIPIENT,
+        value: "-1",
+        chainId: 8453,
+        broadcast: false,
+      }),
+    });
+    expect(invalidAmount.status).toBe(400);
+    expect(await invalidAmount.json()).toMatchObject({
+      error: "'value' must be a non-negative uint256 wei amount encoded as a decimal string",
+    });
+
+    const gasLimit = await userRoutes.request("/me/wallet/sign", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        walletIndex: 2,
+        to: RECIPIENT,
+        value: "1",
+        chainId: 8453,
+        gasLimit: "21000",
+        broadcast: false,
+      }),
+    });
+    expect(gasLimit.status).toBe(403);
+    expect(await gasLimit.json()).toMatchObject({
+      error:
+        "User wallet native transfers cannot set gasLimit because gas spend is not policy-accounted",
+    });
+
+    const rpcSpy = spyOn(Vault.prototype, "rpcPassthrough").mockResolvedValue({
+      jsonrpc: "2.0",
+      id: 1,
+      result: "0x6000",
+    } as Awaited<ReturnType<Vault["rpcPassthrough"]>>);
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockResolvedValue(
+      "0xshould-not-sign",
+    );
+    try {
+      const contractRecipient = await userRoutes.request("/me/wallet/sign", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          walletIndex: 2,
+          to: RECIPIENT,
+          value: "1",
+          chainId: 8453,
+          broadcast: false,
+        }),
+      });
+      expect(contractRecipient.status).toBe(403);
+      expect(await contractRecipient.json()).toMatchObject({
+        error:
+          "User wallet native transfers to contract recipients are disabled because gas spend is not policy-accounted",
+      });
+      expect(signSpy).not.toHaveBeenCalled();
+    } finally {
+      rpcSpy.mockRestore();
+      signSpy.mockRestore();
+    }
+  });
+
+  it("requires an idempotency key before broadcast signing", async () => {
+    const signer = await createSigner("device-broadcast-replay-guard", ["sign_transaction"]);
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockResolvedValue("0xunexpected");
+    try {
+      const response = await userRoutes.request("/me/wallet/sign", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-steward-signer-id": signer.id,
+          "x-steward-signer-secret": signer.credentialSecret,
+        },
+        body: JSON.stringify({
+          walletIndex: 2,
+          to: RECIPIENT,
+          value: "1",
+          chainId: 8453,
+          broadcast: true,
+        }),
+      });
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        error: "Broadcast signing requires an Idempotency-Key header",
+      });
+      expect(signSpy).not.toHaveBeenCalled();
+    } finally {
       signSpy.mockRestore();
     }
   });

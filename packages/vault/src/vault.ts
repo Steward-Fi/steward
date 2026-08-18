@@ -52,7 +52,12 @@ import {
   parseBitcoinPsbtSigningMetadata,
   signBitcoinPsbt,
 } from "./bitcoin-psbt";
-import { allocateEvmNonce, confirmEvmNonce, markEvmNonceDropped } from "./evm-nonce-manager";
+import {
+  allocateEvmNonce,
+  confirmEvmNonce,
+  markEvmNonceBroadcasting,
+  markEvmNonceSubmissionUnknown,
+} from "./evm-nonce-manager";
 import {
   assertExternalKeyCustodyProviderV1,
   assertNoExternalPrivateKeyMaterial,
@@ -763,15 +768,12 @@ export class Vault {
    * WITHOUT decrypting keys, signing, or calling any third-party provider.
    *
    * This mirrors the exact key-resolution precedence in {@link signTransaction}:
-   *   1. A local encrypted chain key (multi-chain table)  -> "local-vault"
-   *   2. Otherwise an third-party-custody wallet             -> "third-party-custody"
-   *   3. Otherwise a legacy local encrypted key / none     -> "local-vault"
+   *   1. A local encrypted chain key -> "local-vault"
+   *   2. An external-custody wallet -> "external-custody"
+   *   3. A local encrypted fallback key, or no matching key -> "local-vault"
    *
-   * The execution gateway (PR #182) mints ExecutionAuthorizations bound to
-   * backend "local-vault". External custody is NOT a gateway-supported backend
-   * in this PR: an authorization bound to "local-vault" must never be able to
-   * authorize an third-party-custody execution. Callers use this to fail closed
-   * BEFORE minting/consuming when the resolved backend is third-party-custody.
+   * Execution authorizations bind this backend and its identity digest so a
+   * request cannot switch custody provider, key, or wallet after policy review.
    */
   async resolveExecutionTarget(request: {
     tenantId: string;
@@ -866,6 +868,8 @@ export class Vault {
     const db = getDb();
     const txId = options.txId ?? crypto.randomUUID();
     const signedAt = new Date();
+    const desiredStatus = shouldBroadcast ? (options.status ?? "signed") : "signed";
+    const desiredTxHash = shouldBroadcast ? hash : null;
     const [existingTransaction] = await db
       .select({ agentId: transactions.agentId })
       .from(transactions)
@@ -874,17 +878,17 @@ export class Vault {
       throw new Error("Transaction id already belongs to a different agent");
     }
 
-    await db
+    const stored = await db
       .insert(transactions)
       .values({
         id: txId,
         agentId: request.agentId,
-        status: shouldBroadcast ? (options.status ?? "signed") : "signed",
+        status: desiredStatus,
         toAddress: request.to,
         value: request.value,
         data: request.data,
         chainId,
-        txHash: shouldBroadcast ? hash : undefined,
+        txHash: desiredTxHash,
         executionBackend: options.expectedBackend,
         executionBackendIdentityDigest: options.expectedBackendIdentityDigest,
         policyResults: options.policyResults ?? [],
@@ -894,19 +898,37 @@ export class Vault {
       .onConflictDoUpdate({
         target: transactions.id,
         set: {
-          agentId: request.agentId,
-          status: shouldBroadcast ? (options.status ?? "signed") : "signed",
-          toAddress: request.to,
-          value: request.value,
-          data: request.data,
-          chainId,
-          txHash: shouldBroadcast ? hash : undefined,
-          executionBackend: options.expectedBackend,
-          executionBackendIdentityDigest: options.expectedBackendIdentityDigest,
+          status: desiredStatus,
+          txHash: desiredTxHash,
           policyResults: options.policyResults ?? [],
           signedAt,
         },
-      });
+        setWhere: and(
+          eq(transactions.agentId, request.agentId),
+          eq(transactions.toAddress, request.to),
+          eq(transactions.value, request.value),
+          sql`${transactions.data} is not distinct from ${request.data ?? null}`,
+          eq(transactions.chainId, chainId),
+          sql`${transactions.executionBackend} is not distinct from ${options.expectedBackend ?? null}`,
+          sql`${transactions.executionBackendIdentityDigest} is not distinct from ${options.expectedBackendIdentityDigest ?? null}`,
+          sql`(
+            ${transactions.status} = 'pending'
+            or (
+              ${transactions.status} = 'outcome_unknown'
+              and ${desiredStatus} = 'broadcast'
+              and ${transactions.txHash} is not distinct from ${desiredTxHash}
+            )
+            or (
+              ${transactions.status} = ${desiredStatus}
+              and ${transactions.txHash} is not distinct from ${desiredTxHash}
+            )
+          )`,
+        ),
+      })
+      .returning({ id: transactions.id });
+    if (stored.length !== 1) {
+      throw new Error("Transaction id conflicts with an existing immutable transaction");
+    }
   }
 
   /**
@@ -1860,6 +1882,13 @@ export class Vault {
         const nonce = request.nonce ?? (allocatedNonce as number);
 
         try {
+          if (allocatedNonce !== undefined) {
+            await markEvmNonceBroadcasting({
+              walletAddress: account.address,
+              chainId,
+              nonce: allocatedNonce,
+            });
+          }
           hash = await client.sendTransaction({
             to: request.to as `0x${string}`,
             value: BigInt(request.value),
@@ -1868,22 +1897,29 @@ export class Vault {
             nonce,
           });
           if (allocatedNonce !== undefined) {
-            // Best-effort: confirmation bookkeeping must not fail a good send.
             await confirmEvmNonce({
               walletAddress: account.address,
               chainId,
               nonce: allocatedNonce,
-            }).catch(() => {});
+            }).catch((error) => {
+              console.error("[vault] Failed to reconcile a confirmed EVM nonce:", error);
+            });
           }
         } catch (err) {
           if (allocatedNonce !== undefined) {
-            // Best-effort: mark the dropped nonce reclaimable so the wallet
-            // doesn't wedge behind a permanent hole.
-            await markEvmNonceDropped({
+            // The transport error does not prove the network rejected the
+            // transaction. Preserve the nonce as uncertain so it cannot be
+            // reused and replace a transaction whose response was lost.
+            await markEvmNonceSubmissionUnknown({
               walletAddress: account.address,
               chainId,
               nonce: allocatedNonce,
-            }).catch(() => {});
+            }).catch((reconciliationError) => {
+              console.error(
+                "[vault] Failed to persist an unknown EVM broadcast outcome:",
+                reconciliationError,
+              );
+            });
           }
           throw err;
         }
@@ -2135,14 +2171,10 @@ export class Vault {
 
     // Wrap all writes atomically - roll back on any failure
     await db.transaction(async (tx) => {
-      // Re-audit: the SEC-024 custody guard below used to run BEFORE this
-      // transaction — check-then-act with no DB serialization. A concurrent
-      // importExternalKeyHandle for the same (agent, chain family) could
-      // interleave between the check and these writes, leaving both a
-      // server-managed key and an external-custody wallet row. Serialize
-      // custody transitions per scope and run the guard INSIDE the lock so
-      // the interleave fails closed. Skipped on single-connection PGlite,
-      // where transactions already serialize.
+      // Serialize custody transitions per scope and run the guard inside the
+      // lock. Otherwise a concurrent external-key import for the same agent and
+      // chain family could interleave and leave both local and external custody
+      // rows. Single-connection PGlite already serializes transactions.
       if (usesCustodyAdvisoryLock()) {
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(tenantId, agentId, chainType, null)}, 0))`,
@@ -2214,7 +2246,7 @@ export class Vault {
 
       // ── Also write to multi-wallet tables so new signing paths find the key ─
       // Upsert into encrypted_chain_keys (replace if key already imported).
-      // Sprint 4: target the partial unique index on (agent_id, chain_family)
+      // trading-policy: target the partial unique index on (agent_id, chain_family)
       // WHERE venue IS NULL so this only conflicts with the legacy row, not
       // with venue-scoped wallets that share the same chain family.
       await tx
@@ -2353,14 +2385,10 @@ export class Vault {
     const now = new Date();
 
     await db.transaction(async (tx) => {
-      // Re-audit: the custody guards below were check-then-act with no DB
-      // serialization — a concurrent importKey (or a second handle import)
-      // for the same (agent, chain family, venue) scope could interleave
-      // between the checks and the wallet write, leaving both a
-      // server-managed key and an external-custody wallet row. Serialize
-      // custody transitions per scope and run every guard INSIDE the lock so
-      // the interleave fails closed. Skipped on single-connection PGlite,
-      // where transactions already serialize.
+      // Serialize custody transitions per agent, chain family, and venue, and
+      // run every guard inside the lock. Concurrent local-key and external-key
+      // imports must not both commit. Single-connection PGlite already
+      // serializes transactions.
       if (usesCustodyAdvisoryLock()) {
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(request.tenantId, request.agentId, request.chainFamily, venue)}, 0))`,
@@ -2467,7 +2495,7 @@ export class Vault {
         and(
           eq(encryptedChainKeys.agentId, agentId),
           eq(encryptedChainKeys.chainFamily, chainFamilyToUse),
-          // Sprint 4: legacy lookup, NULL-venue only.
+          // trading-policy: legacy lookup, NULL-venue only.
           isNull(encryptedChainKeys.venue),
         ),
       );
@@ -3742,13 +3770,12 @@ export class Vault {
   }
 
   // ──────────────────────────────────────────────────────────────────────
-  // Sprint 4 Phase 1 Day 1: venue-scoped wallet API
+  // Venue-scoped wallet API.
   // ──────────────────────────────────────────────────────────────────────
   //
-  // Wallets used to be keyed by (agentId, chainFamily). Trade-sessions now
-  // need to address them per (agentId, venue) because Sol's BSC wallet
-  // and Sol's Hyperliquid wallet sit on the same chainFamily (EVM) but
-  // must hold distinct keys. `venue` is optional: legacy callers still
+  // Trade sessions address wallets by (agentId, venue) because Sol's BSC wallet
+  // and Sol's Hyperliquid wallet share the EVM chain family but must hold
+  // distinct keys. `venue` is optional: legacy callers still
   // pass `chainId` (mapped to chainFamily), which resolves to the
   // NULL-venue row written by `createAgent`.
 

@@ -1,11 +1,10 @@
 /**
  * Governed-request query-preservation integration tests.
  *
- * The proxy handler resolves the upstream target from `c.req.path`, which Hono
- * strips of any query string. Before the fix this meant a governed request such
- * as `GET /github/search/issues?q=foo&page=2` was forwarded upstream as
- * `/search/issues` with the query silently dropped — a correctness bug that
- * breaks paginated / filtered APIs and can change request semantics.
+ * Hono's `c.req.path` omits the query string, so the proxy must reconstruct the
+ * upstream target from the request URL. A governed request such as
+ * `GET /github/search/issues?q=foo&page=2` must retain its query so paginated
+ * and filtered API semantics remain intact.
  *
  * These tests drive the real `handleProxy` end-to-end (auth middleware + PGLite
  * DB + vault, network stubbed) and assert that:

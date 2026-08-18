@@ -54,11 +54,11 @@ export interface PolicyEvaluationContext {
   priceOracle?: PriceOracle;
   /** Optional reputation score for reputation-based policies */
   reputationScore?: number;
-  /** Sprint 4: trading venue (for `venue-allowlist`). */
+  /** trading-policy: trading venue (for `venue-allowlist`). */
   venue?: string;
-  /** Sprint 4: requested leverage multiple (for `leverage-cap`). */
+  /** trading-policy: requested leverage multiple (for `leverage-cap`). */
   leverage?: number;
-  /** Sprint 4: pre-computed USD value of the action. */
+  /** trading-policy: pre-computed USD value of the action. */
   valueUsd?: number;
   /**
    * Privy-style condition set items keyed by conditionSetId. Callers load these
@@ -158,7 +158,7 @@ export type AuditHook = (event: PolicyEvaluatedEvent) => void | Promise<void>;
 
 export interface PolicyEngineOptions {
   /**
-   * Sprint 4: optional sink for `policy.evaluated` audit events. Trade-
+   * trading-policy: optional sink for `policy.evaluated` audit events. Trade-
    * sessions wires this to the proxy audit log so every evaluation is
    * traceable to its inputs and verdict. Failures inside the hook are
    * swallowed so they don't block the trade — but counted on

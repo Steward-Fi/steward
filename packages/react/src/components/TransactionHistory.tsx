@@ -1,3 +1,4 @@
+import { SUPPORTED_CHAINS } from "@stwd/sdk";
 import { useTransactions } from "../hooks/useTransactions.js";
 import { useStewardContext } from "../provider.js";
 import type { TransactionHistoryProps } from "../types.js";
@@ -69,7 +70,7 @@ export function TransactionHistory({
                 return <div key={tx.id}>{renderTransaction(tx)}</div>;
               }
 
-              const chainId = tx.request?.chainId || 8453;
+              const chainId = tx.request?.chainId || SUPPORTED_CHAINS.baseSepolia;
               return (
                 <div
                   key={tx.id}

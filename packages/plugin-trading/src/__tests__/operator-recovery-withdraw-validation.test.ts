@@ -292,8 +292,8 @@ describe("operator recovery withdraw spend-cap enforcement (issue #109)", () => 
     const tenantId = `tenant-wd-cap-${Date.now()}`;
     const agentId = `agent-wd-cap-${Date.now()}`;
     // maxPerTx = 0.01 ETH in wei; a 100 USDC withdraw (~0.025 ETH at the
-    // stubbed $4000) exceeds it. Before the fix the policy saw value:"0" and
-    // PASSED; with USDC-as-wei denomination it would still pass (1e8 < 1e16).
+    // stubbed $4000) exceeds it. The policy must use normalized USD value;
+    // treating USDC units as wei would incorrectly pass (1e8 < 1e16).
     await seedAgent({
       tenantId,
       agentId,

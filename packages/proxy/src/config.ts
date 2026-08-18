@@ -40,9 +40,8 @@ export const PROXY_SCOPE = "api:proxy";
 /**
  * SEC-175: the proxy fails closed by default — request signing, Redis-backed
  * rate limiting, and the shared replay store are REQUIRED regardless of
- * NODE_ENV. The soft development posture (unsigned requests, permissive
- * in-process fallbacks) now needs this explicit opt-in, so a deployment that
- * merely forgets to set NODE_ENV=production no longer silently gets it.
+ * NODE_ENV. The soft development posture (unsigned requests and permissive
+ * in-process fallbacks) requires this explicit opt-in.
  * Local dev compose sets STEWARD_PROXY_DEV_MODE=true.
  */
 export function isProxyDevMode(): boolean {

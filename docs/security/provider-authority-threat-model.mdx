@@ -5,12 +5,11 @@ description: "What the governed-provider proof establishes, what it does NOT, an
 
 # Provider Authority: Threat Model & Honest Claims
 
-This document states, in pre-real-proof wording, exactly what the governed
-provider-execution proof establishes and, just as importantly, what it does
-**not**. It is written to the claims discipline the master plan requires: no
-aspirational language is presented as a shipped guarantee.
+This document states exactly what the governed provider-execution validation
+establishes and, just as importantly, what it does **not**. No aspirational
+language is presented as a shipped guarantee.
 
-## What is proven (fake CI proof)
+## What the deterministic validation proves
 
 - **Single authority path.** A governed provider route is reachable only through
   `dispatchGovernedExecution`: an atomic single-winner claim that re-checks every
@@ -40,11 +39,11 @@ operator did not author or alter events before signing. Evidence should be
 verified against a signing-key fingerprint obtained out-of-band; verifying
 against the embedded key proves self-consistency only.
 
-## What is NOT claimed (pre-real-proof)
+## Validation boundary
 
-This proof is against a deterministic in-process fake transport plus a documented
-(not-yet-recorded) real GitHub sandbox run. Until a real sandbox artifact is
-recorded, the following are explicitly **not** claimed:
+The repository records deterministic in-process fake-transport evidence. It does
+not contain a recorded real GitHub sandbox artifact, so the following are
+explicitly **not** claimed:
 
 - It is **not** a proof against a real provider in production.
 - It is **not** an operator-integrity proof (see the operator-key trust limit).
@@ -54,15 +53,14 @@ recorded, the following are explicitly **not** claimed:
   credentials.
 - It is **not** a SOC2 (or any external) attestation.
 - It does **not** enroll any production route or assert product-wide
-  enforcement; enrollment is a separate, later step.
+  enforcement; route enrollment is an independent operator action.
 
 ## Residual risks / open questions
 
-- The real GitHub sandbox run is documented but not yet recorded here; the
-  golden-path manifest keeps the pre-real-proof wording until it is.
-- A render-based accessibility (axe) scan of the two trust surfaces is deferred
-  until the web package adopts a component-render test harness; the current
-  guard is a structural source scan.
+- No real GitHub sandbox artifact is recorded in this repository. Claims remain
+  limited to the deterministic fake-transport evidence.
+- The two trust surfaces have structural source guards, not a render-based axe
+  accessibility result; accessibility is unverified by this evidence bundle.
 - Reconciliation for consequential writes depends on a Steward-chosen comment
   marker; if a provider cannot support a safe bounded reconciliation for an
   operation, that operation must be recorded as a stop condition, not papered

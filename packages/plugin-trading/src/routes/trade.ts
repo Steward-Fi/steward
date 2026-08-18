@@ -2,15 +2,9 @@
  * trade.ts — trade-session management + venue order routes (Hyperliquid +
  * Polymarket).
  *
- * MOVED from `@stwd/api` (packages/api/src/routes/trade.ts) into the opt-in
- * trading plugin. behavior is IDENTICAL to the pre-move route: every endpoint,
- * auth check, policy evaluation, audit event, idempotency rule, and error
- * response is preserved. the only structural change is that the core services
- * this route used to import from `../services/context`, `../services/audit`,
- * `../services/agent-token-status`, and `../middleware/redis` are now INJECTED
- * via the plugin context (`StewardAppContext`), so this file does not import
- * `@stwd/api` (no circular dependency: the core does not import the plugin and
- * the plugin does not import the core).
+ * This opt-in trading-plugin route receives core services through
+ * `StewardAppContext`. It does not import `@stwd/api`, avoiding a dependency
+ * cycle between the host and plugin packages.
  *
  * `createTradeRoutes(ctx)` returns the hono router the plugin mounts at
  * /trade + /v1/trade.
@@ -38,6 +32,7 @@ import {
   clobApiCredentialsSchema,
   deriveApiCredentials,
   type EthersSignerLike,
+  getMarketByToken,
   getPrices,
   isPolymarketPostNotAttempted,
   isPolymarketUnauthorized,
@@ -52,7 +47,16 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { StewardAppContext } from "../context";
-import { DurableIdempotencyStore } from "./idempotency";
+import {
+  normalizeTradeIdempotencyKey,
+  type TradeIdempotencyClaim,
+  type TradeIdempotencyClaimResult,
+  type TradeIdempotencyEnvelope,
+  type TradeIdempotencyLookup,
+  type TradeIdempotencyRequest,
+  TradeIdempotencyUnavailableError,
+  TradeOrderIdempotencyStore,
+} from "../trade-idempotency";
 
 // Prediction-market session asset: pm:<tokenId> (a single outcome token) or
 // pm:cond:<conditionId> (a whole market). Mirrors @stwd/trade-sessions'
@@ -127,10 +131,8 @@ const hyperliquidOrderSchema = z.object({
     .optional(),
 });
 
-type TradeIdempotencyResponse = {
-  status: 200 | 400 | 403 | 409 | 502;
+type TradeIdempotencyResponse = Omit<TradeIdempotencyEnvelope, "body"> & {
   body: ApiResponse<unknown> | { code: string; reason: string };
-  headers?: Record<string, string>;
 };
 
 const pmSubmitOrderSchema = z.object({
@@ -155,12 +157,20 @@ const pmSubmitOrderSchema = z.object({
 
 type PmSubmitOrderBody = z.infer<typeof pmSubmitOrderSchema>;
 
+export interface TradeRouteDependencies {
+  resolvePolymarketMarketByToken?: typeof getMarketByToken;
+  orderIdempotencyStore?: TradeOrderIdempotencyStore;
+}
+
 /**
  * Build the trade router, closing over the injected core context. Every helper
  * + route that used a core service (db, vault, redis, audit, token status) reads
  * it from `ctx` here instead of importing it from `@stwd/api`.
  */
-export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: AppVariables }> {
+export function createTradeRoutes(
+  ctx: StewardAppContext,
+  dependencies: TradeRouteDependencies = {},
+): Hono<{ Variables: AppVariables }> {
   const {
     db,
     vault,
@@ -172,21 +182,25 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   } = ctx;
 
   const tradeRoutes = new Hono<{ Variables: AppVariables }>();
+  const resolvePolymarketMarketByToken =
+    dependencies.resolvePolymarketMarketByToken ?? getMarketByToken;
 
   const memoryRateLimit = new Map<string, { count: number; resetAt: number }>();
+  const maxMemoryRateLimitEntries = 2_000;
+  const orderIdempotency =
+    dependencies.orderIdempotencyStore ?? new TradeOrderIdempotencyStore(getRedisClient);
 
-  // SEC-043: idempotency records are Redis-backed when a client is available
-  // (multi-replica dedup survives restarts), with the bounded wave-2
-  // process-local map as the dev/single-replica fallback. Two namespaces so
-  // the Hyperliquid and Polymarket routes never collide on a shared key.
-  const hlIdempotencyStore = new DurableIdempotencyStore<TradeIdempotencyResponse>({
-    namespace: "trade:hl",
-    getRedisClient,
-  });
-  const pmIdempotencyStore = new DurableIdempotencyStore<TradeIdempotencyResponse>({
-    namespace: "trade:pm",
-    getRedisClient,
-  });
+  function initializeMemoryRateLimit(key: string, now: number): void {
+    for (const [candidate, value] of memoryRateLimit) {
+      if (value.resetAt <= now) memoryRateLimit.delete(candidate);
+    }
+    while (memoryRateLimit.size >= maxMemoryRateLimitEntries) {
+      const oldest = memoryRateLimit.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      memoryRateLimit.delete(oldest);
+    }
+    memoryRateLimit.set(key, { count: 1, resetAt: now + 1000 });
+  }
 
   function getSessionManager(): TradeSessionManager {
     return new TradeSessionManager({ redis: getRedisClient() });
@@ -283,6 +297,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       | "trade.order.policy-rejected"
       | "trade.order.builder.stamped"
       | "trade.builder.approved"
+      | "trade.order.submission_unknown"
       | "trade.order.canceled",
     details: Record<string, unknown>,
     actor: { actorType: "agent" | "user" | "api-key"; actorId: string } = {
@@ -316,10 +331,6 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       .catch(() => undefined);
   }
 
-  function hashBody(body: unknown): string {
-    return JSON.stringify(body);
-  }
-
   async function enforceOrderRateLimit(
     agentId: string,
   ): Promise<{ allowed: boolean; resetMs: number }> {
@@ -332,7 +343,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     const now = Date.now();
     const current = memoryRateLimit.get(agentId);
     if (!current || current.resetAt <= now) {
-      memoryRateLimit.set(agentId, { count: 1, resetAt: now + 1000 });
+      initializeMemoryRateLimit(agentId, now);
       return { allowed: true, resetMs: 1000 };
     }
     if (current.count >= 10) return { allowed: false, resetMs: current.resetAt - now };
@@ -340,66 +351,16 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     return { allowed: true, resetMs: current.resetAt - now };
   }
 
-  type RouteIdempotency = {
-    conflict?: boolean;
-    inProgress?: boolean;
-    response?: TradeIdempotencyResponse;
-    claim?: () => Promise<RouteIdempotency>;
-    store?: (response: TradeIdempotencyResponse) => Promise<void>;
-    release?: () => Promise<void>;
-  };
-
-  function routeIdempotency(
-    check: Awaited<ReturnType<typeof hlIdempotencyStore.check>>,
-  ): RouteIdempotency {
-    return {
-      conflict: check.conflict,
-      inProgress: check.inProgress,
-      response: check.record,
-      claim: check.claim ? async () => routeIdempotency(await check.claim!()) : undefined,
-      store: check.store,
-      release: check.release,
-    };
-  }
-
-  async function getIdempotency(
-    tenantId: string,
-    agentId: string,
-    key: string | undefined,
-    body: SubmitOrderBody,
-  ): Promise<RouteIdempotency> {
-    const check = await hlIdempotencyStore.check(
-      `${tenantId}:${agentId}`,
-      key,
-      hashBody({ ...body, idempotencyKey: undefined }),
-    );
-    return routeIdempotency(check);
-  }
-
   async function resolvePolicyLimitPx(
     asset: z.infer<typeof hyperliquidAssetSchema>,
     side: "buy" | "sell",
     limitPx: string | number | undefined,
   ): Promise<string | number> {
-    // Respect a caller-supplied limit price for BOTH sides. Previously the sell
-    // branch ignored `limitPx` entirely and always returned a MARKETABLE price,
-    // so a resting limit-sell ABOVE market (e.g. a breakeven take-profit) executed
-    // immediately at the bid instead of resting. A provided limitPx is the caller's
-    // intent for the ORDER price — use it; only synthesize a marketable price when
-    // none is given. NOTE: this is the ORDER price; policy NOTIONAL sizing must be
-    // computed separately via resolveSizingPx (a low sell limit must NOT understate
-    // the notional for cap enforcement).
+    // A provided limitPx is the caller's order price. Only synthesize a marketable
+    // price when it is absent; policy notional sizing is computed separately so a
+    // low sell limit cannot understate the amount subject to caps.
     if (limitPx !== undefined && limitPx !== null && limitPx !== "") return limitPx;
-    if (side !== "sell") return getMarketableLimitPx(asset, true);
-    try {
-      return await getMarketableLimitPx(asset, false);
-    } catch (error) {
-      const response = await fetch("https://api.hyperliquid.xyz/info");
-      const prices = (await response.json()) as Record<string, unknown>;
-      const livePx = Number(prices[asset]);
-      if (Number.isFinite(livePx) && livePx > 0) return livePx;
-      throw error;
-    }
+    return getMarketableLimitPx(asset, side === "buy");
   }
 
   /**
@@ -467,14 +428,99 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     return c.json(envelope.body, envelope.status);
   }
 
-  async function completeTradeIdempotencyBestEffort(
-    idempotency: Awaited<ReturnType<typeof getIdempotency>>,
+  function tradeEnvelopeResponse(
+    c: Context<{ Variables: AppVariables }>,
     envelope: TradeIdempotencyResponse,
+  ) {
+    for (const [name, value] of Object.entries(envelope.headers ?? {})) {
+      c.header(name, value);
+    }
+    return c.json(envelope.body, envelope.status);
+  }
+
+  function idempotencyOutcomeResponse(
+    c: Context<{ Variables: AppVariables }>,
+    outcome: TradeIdempotencyLookup | TradeIdempotencyClaimResult,
+  ): Response | null {
+    if (outcome.kind === "missing" || outcome.kind === "claimed") return null;
+    if (outcome.kind === "replay") {
+      return tradeReplayResponse(c, outcome.response as TradeIdempotencyResponse);
+    }
+    if (outcome.kind === "inflight") {
+      c.header("Retry-After", "5");
+      return c.json<ApiResponse>(
+        { ok: false, error: "An order with this idempotency key is still in progress" },
+        409,
+      );
+    }
+    return c.json<ApiResponse>(
+      { ok: false, error: "Idempotency key reused with a different body" },
+      409,
+    );
+  }
+
+  function idempotencyUnavailableResponse(c: Context<{ Variables: AppVariables }>) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Durable trade idempotency is unavailable" },
+      503,
+    );
+  }
+
+  function acceptedReconciliationEnvelope(response: unknown): TradeIdempotencyResponse {
+    return {
+      status: 503,
+      body: {
+        ok: false,
+        error: "Order accepted by venue; durable reconciliation is required",
+        data: response,
+      },
+      headers: {
+        "X-Steward-Audit-State": "pending",
+        "X-Steward-Order-State": "accepted-reconciliation-required",
+      },
+    };
+  }
+
+  function orderIdempotencyRequest(
+    tenantId: string,
+    agentId: string,
+    venue: "hyperliquid" | "polymarket",
+    key: string,
+    body: SubmitOrderBody | PmSubmitOrderBody,
+  ): TradeIdempotencyRequest {
+    const { idempotencyKey: _idempotencyKey, ...orderBody } = body;
+    return { tenantId, agentId, venue, key, body: orderBody };
+  }
+
+  async function completeOrderIdempotency(
+    claim: TradeIdempotencyClaim,
+    envelope: TradeIdempotencyResponse,
+    auditState: "pending" | "recorded" = "recorded",
   ): Promise<void> {
+    await orderIdempotency.complete(claim, envelope, auditState);
+  }
+
+  async function recordSubmissionUnknown(
+    claim: TradeIdempotencyClaim,
+    envelope: TradeIdempotencyResponse,
+    audit: () => Promise<void>,
+  ): Promise<TradeIdempotencyResponse> {
+    const pendingEnvelope: TradeIdempotencyResponse = {
+      ...envelope,
+      headers: { ...envelope.headers, "X-Steward-Audit-State": "pending" },
+    };
+    await orderIdempotency.markSubmissionUnknown(claim, pendingEnvelope, "pending");
     try {
-      await idempotency.store?.(envelope);
-    } catch {
-      // Idempotency replay is best effort for this in-memory fallback path.
+      await audit();
+      const recordedEnvelope: TradeIdempotencyResponse = {
+        ...envelope,
+        headers: { ...envelope.headers, "X-Steward-Audit-State": "recorded" },
+      };
+      await orderIdempotency.markSubmissionUnknown(claim, recordedEnvelope, "recorded");
+      return recordedEnvelope;
+    } catch (auditError) {
+      console.error("[trade/order] submission-unknown audit requires reconciliation", auditError);
+      return pendingEnvelope;
     }
   }
 
@@ -921,50 +967,34 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (!parsed.success) {
       return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
     }
-    const body = {
-      ...parsed.data,
-      idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
-    };
-    if (!body.idempotencyKey) {
-      return c.json<ApiResponse>({ ok: false, error: "Idempotency-Key is required" }, 400);
+    const normalizedKey = normalizeTradeIdempotencyKey(
+      c.req.header("Idempotency-Key"),
+      parsed.data.idempotencyKey,
+    );
+    if (!normalizedKey.ok) {
+      return c.json<ApiResponse>({ ok: false, error: normalizedKey.error }, 400);
     }
-
-    let idempotency = await getIdempotency(tenantId, agentId, body.idempotencyKey, body);
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.response) {
-      return tradeReplayResponse(c, idempotency.response);
-    }
-    if (idempotency.inProgress) {
-      c.header("Retry-After", "1");
-      return c.json<ApiResponse>(
-        { ok: false, error: "Request with this idempotency key is in progress" },
-        409,
-      );
-    }
-    idempotency = idempotency.claim ? await idempotency.claim() : idempotency;
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.response) return tradeReplayResponse(c, idempotency.response);
-    if (idempotency.inProgress) {
-      c.header("Retry-After", "1");
-      return c.json<ApiResponse>(
-        { ok: false, error: "Request with this idempotency key is in progress" },
-        409,
-      );
+    const body = { ...parsed.data, idempotencyKey: normalizedKey.key };
+    const idempotencyRequest = orderIdempotencyRequest(
+      tenantId,
+      agentId,
+      "hyperliquid",
+      normalizedKey.key,
+      body,
+    );
+    try {
+      const prior = await orderIdempotency.lookup(idempotencyRequest);
+      const priorResponse = idempotencyOutcomeResponse(c, prior);
+      if (priorResponse) return priorResponse;
+    } catch (error) {
+      if (error instanceof TradeIdempotencyUnavailableError) {
+        return idempotencyUnavailableResponse(c);
+      }
+      throw error;
     }
 
     const session = await getSessionManager().getActive(tenantId, body.sessionId);
     if (!session || session.agentId !== agentId || session.venue !== "hyperliquid") {
-      await idempotency.release?.();
       return c.json<ApiResponse>({ ok: false, error: "Active Hyperliquid session required" }, 403);
     }
     const coin = body.coin ?? body.asset;
@@ -982,12 +1012,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         asset: coin,
         reason,
       });
-      const envelope: TradeIdempotencyResponse = {
-        status: 400,
-        body: { code: "policy-violation", reason },
-      };
-      await idempotency.store?.(envelope);
-      return c.json(envelope.body, envelope.status);
+      return c.json({ code: "policy-violation", reason }, 400);
     }
 
     const builderPerp = isBuilderPerpSymbol(parsedAsset.data);
@@ -1024,12 +1049,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         dailySpendUsd: session.dailySpendUsd,
         reason,
       });
-      const envelope: TradeIdempotencyResponse = {
-        status: 400,
-        body: { code: "policy-violation", reason },
-      };
-      await idempotency.store?.(envelope);
-      return c.json(envelope.body, envelope.status);
+      return c.json({ code: "policy-violation", reason }, 400);
     };
 
     const limitPx = body.limitPx ?? body.limitPrice;
@@ -1039,12 +1059,10 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         ? !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(limitPx) || Number(limitPx) <= 0
         : !Number.isFinite(limitPx) || limitPx <= 0)
     ) {
-      const envelope: TradeIdempotencyResponse = {
-        status: 400,
-        body: { ok: false, error: "limitPx must be a positive finite price" },
-      };
-      await idempotency.store?.(envelope);
-      return c.json(envelope.body, envelope.status);
+      return c.json<ApiResponse>(
+        { ok: false, error: "limitPx must be a positive finite price" },
+        400,
+      );
     }
     if (limitPx === undefined) {
       // SEC-114: marketable order without an explicit limit — the notional is
@@ -1091,8 +1109,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       reduceOnly: body.reduceOnly,
       ...(body.orderType ? { orderType: body.orderType } : {}),
     };
-    // SEC-184: enforce the adapter contract check (the result was previously
-    // discarded) BEFORE reserving spend or signing. Every field is already
+    // Enforce the adapter contract before reserving spend or signing. Every field is already
     // validated upstream, so a failure here is an internal inconsistency —
     // fail closed.
     const parsedOrder = hyperliquidOrderSchema.safeParse(order);
@@ -1102,6 +1119,20 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         sizeUsd,
         policyLimitPx,
       );
+    }
+
+    let idempotency: TradeIdempotencyClaim;
+    try {
+      const claim = await orderIdempotency.claim(idempotencyRequest);
+      const claimResponse = idempotencyOutcomeResponse(c, claim);
+      if (claimResponse) return claimResponse;
+      if (claim.kind !== "claimed") throw new Error("unreachable idempotency claim state");
+      idempotency = claim.claim;
+    } catch (error) {
+      if (error instanceof TradeIdempotencyUnavailableError) {
+        return idempotencyUnavailableResponse(c);
+      }
+      throw error;
     }
 
     const walletAddress = session.walletId;
@@ -1119,7 +1150,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               error: "Trade session was revoked before order submission",
             },
           };
-          await idempotency.store?.(envelope);
+          await completeOrderIdempotency(idempotency, envelope);
           return envelope;
         }
 
@@ -1133,7 +1164,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             status: 400,
             body: { ok: false, error: "Trade session cap exceeded" },
           };
-          await idempotency.store?.(envelope);
+          await completeOrderIdempotency(idempotency, envelope);
           return envelope;
         }
 
@@ -1187,7 +1218,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
                 error: "Failed to set leverage before order; order not submitted",
               },
             };
-            await idempotency.store?.(envelope);
+            await completeOrderIdempotency(idempotency, envelope);
             return envelope;
           }
           await auditTradeEvent(tenantId, agentId, "trade.order.leverage.set", {
@@ -1204,15 +1235,13 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         try {
           signed = await adapter.signOrder(order);
         } catch (err) {
-          // Signing is local and no order reached the venue. Release both the
-          // spend reservation and idempotency claim so a corrected retry can
-          // execute instead of leaving a 24h pending tombstone.
+          // Signing is local and no order reached the venue. Release the spend
+          // reservation and durably replay the definite pre-submit failure.
           await getSessionManager().releaseSpend({
             tenantId,
             id: session.id,
             amountUsd: sizeUsd,
           });
-          await idempotency.release?.();
           await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
             sessionId: session.id,
             venue: "hyperliquid",
@@ -1221,10 +1250,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             reason: "pre-submit-sign-failed",
             ...redactedThrownDiagnostics(err),
           });
-          return {
+          const envelope: TradeIdempotencyResponse = {
             status: 400,
             body: { ok: false, error: "Order could not be signed; not submitted" },
-          } satisfies TradeIdempotencyResponse;
+          };
+          await completeOrderIdempotency(idempotency, envelope);
+          return envelope;
         }
         const activeAfterSign = await getSessionManager().getActive(tenantId, session.id);
         if (!activeAfterSign) {
@@ -1240,20 +1271,42 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               error: "Trade session was revoked before order submission",
             },
           };
-          await idempotency.store?.(envelope);
+          await completeOrderIdempotency(idempotency, envelope);
           return envelope;
         }
 
         let result: Awaited<ReturnType<HyperliquidAdapter["submitOrder"]>>;
         try {
           result = await adapter.submitOrder(signed);
-        } catch {
-          const envelope: TradeIdempotencyResponse = {
-            status: 502,
-            body: { ok: false, error: "Trade submission status unknown" },
+        } catch (error) {
+          const reconciliation = {
+            venue: "hyperliquid" as const,
+            state: "submission_unknown" as const,
+            requestDigest: idempotency.bodyHash,
+            walletAddress,
+            signedNonce: signed.nonce,
+            asset: parsedAsset.data,
+            side: body.side,
           };
-          await idempotency.store?.(envelope);
-          return envelope;
+          const envelope: TradeIdempotencyResponse = {
+            status: 202,
+            body: {
+              ok: false,
+              error: "Trade submission status unknown; operator reconciliation is required",
+              data: { reconciliationRequired: true, reconciliation },
+            },
+            headers: { "X-Steward-Order-State": "submission_unknown" },
+          };
+          return recordSubmissionUnknown(idempotency, envelope, () =>
+            auditTradeEvent(tenantId, agentId, "trade.order.submission_unknown", {
+              sessionId: session.id,
+              ...reconciliation,
+              size: body.size,
+              limitPx: policyLimitPx,
+              sizeUsd,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          );
         }
 
         if (result.status === "rejected") {
@@ -1282,7 +1335,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             orderId: result.orderId ?? null,
             reason: result.error ?? "Trade order rejected",
           });
-          await idempotency.store?.(envelope);
+          await completeOrderIdempotency(idempotency, envelope);
           return envelope;
         }
 
@@ -1316,6 +1369,19 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           body: responseData(response),
         };
         try {
+          await completeOrderIdempotency(
+            idempotency,
+            { ...envelope, headers: { "X-Steward-Audit-State": "pending" } },
+            "pending",
+          );
+        } catch (persistenceError) {
+          console.error(
+            "[hyperliquid/order] accepted order requires idempotency reconciliation",
+            persistenceError,
+          );
+          return acceptedReconciliationEnvelope(response);
+        }
+        try {
           await auditTradeEvent(tenantId, agentId, "trade.order.submitted", {
             sessionId: session.id,
             venue: "hyperliquid",
@@ -1327,11 +1393,24 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             sizeUsd,
             orderId: response.orderId,
           });
-          await completeTradeIdempotencyBestEffort(idempotency, envelope);
-          return c.json(responseData(response));
-        } catch {
-          await completeTradeIdempotencyBestEffort(idempotency, envelope);
-          return c.json(responseData(response));
+          await completeOrderIdempotency(
+            idempotency,
+            { ...envelope, headers: { "X-Steward-Audit-State": "recorded" } },
+            "recorded",
+          );
+          return {
+            ...envelope,
+            headers: { "X-Steward-Audit-State": "recorded" },
+          };
+        } catch (auditError) {
+          console.error(
+            "[hyperliquid/order] submitted-audit write failed (order already final)",
+            auditError,
+          );
+          return {
+            ...envelope,
+            headers: { "X-Steward-Audit-State": "pending" },
+          };
         }
       },
     );
@@ -1341,11 +1420,11 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         status: 409,
         body: { ok: false, error: "Trade session was revoked before order submission" },
       };
-      await idempotency.store?.(envelope);
-      return c.json(envelope.body, envelope.status);
+      await completeOrderIdempotency(idempotency, envelope);
+      return tradeEnvelopeResponse(c, envelope);
     }
     if (fenced instanceof Response) return fenced;
-    return c.json(fenced.body, fenced.status);
+    return tradeEnvelopeResponse(c, fenced);
   });
 
   // ===========================================================================
@@ -1357,28 +1436,12 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
   // prediction-market policy gate (checkActiveOrder), spend reserve→release-on-
   // failure, the vault→ethers-signer bridge, the venue adapter call, audit events.
   //
-  // Phase C creds-provisioning is NOT wired yet: the L2 CLOB apiCredentials +
-  // funder Safe are resolved from the agent's polymarket venue wallet. Until
-  // provisioning writes them, resolvePolymarketAccount returns null and the route
+  // The route requires L2 CLOB apiCredentials and a funder Safe on the agent's
+  // Polymarket venue wallet. If provisioning has not written them,
+  // resolvePolymarketAccount returns null and the route
   // FAILS CLOSED with a typed 409 ("polymarket creds not provisioned"). We never
   // invent credentials.
   // ===========================================================================
-
-  // Idempotency for the Polymarket body shape. Mirrors getIdempotency() but keyed
-  // for PmSubmitOrderBody so the two routes never collide on a shared namespace.
-  async function getPmIdempotency(
-    tenantId: string,
-    agentId: string,
-    key: string | undefined,
-    body: PmSubmitOrderBody,
-  ): Promise<RouteIdempotency> {
-    const check = await pmIdempotencyStore.check(
-      `${tenantId}:${agentId}`,
-      key,
-      hashBody({ ...body, idempotencyKey: undefined }),
-    );
-    return routeIdempotency(check);
-  }
 
   async function enforcePolymarketOrderRateLimit(
     agentId: string,
@@ -1389,9 +1452,10 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       return { allowed: result.allowed, resetMs: result.resetMs };
     }
     const now = Date.now();
-    const current = memoryRateLimit.get(`pm:${agentId}`);
+    const key = `pm:${agentId}`;
+    const current = memoryRateLimit.get(key);
     if (!current || current.resetAt <= now) {
-      memoryRateLimit.set(`pm:${agentId}`, { count: 1, resetAt: now + 1000 });
+      initializeMemoryRateLimit(key, now);
       return { allowed: true, resetMs: 1000 };
     }
     if (current.count >= 10) return { allowed: false, resetMs: current.resetAt - now };
@@ -1417,7 +1481,6 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
    */
   async function polymarketSellNotionalUsd(
     amount: number,
-    price: number,
     tokenId: string,
     clobUrl?: string,
   ): Promise<number> {
@@ -1747,71 +1810,50 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     if (!parsed.success) {
       return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
     }
-    const body = {
-      ...parsed.data,
-      idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
-    };
-    if (!body.idempotencyKey) {
-      return c.json<ApiResponse>({ ok: false, error: "Idempotency-Key is required" }, 400);
+    const normalizedKey = normalizeTradeIdempotencyKey(
+      c.req.header("Idempotency-Key"),
+      parsed.data.idempotencyKey,
+    );
+    if (!normalizedKey.ok) {
+      return c.json<ApiResponse>({ ok: false, error: normalizedKey.error }, 400);
     }
-
-    let idempotency = await getPmIdempotency(tenantId, agentId, body.idempotencyKey, body);
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.response) {
-      return tradeReplayResponse(c, idempotency.response);
-    }
-    if (idempotency.inProgress) {
-      c.header("Retry-After", "1");
-      return c.json<ApiResponse>(
-        { ok: false, error: "Request with this idempotency key is in progress" },
-        409,
-      );
+    const body = { ...parsed.data, idempotencyKey: normalizedKey.key };
+    const idempotencyRequest = orderIdempotencyRequest(
+      tenantId,
+      agentId,
+      "polymarket",
+      normalizedKey.key,
+      body,
+    );
+    try {
+      const prior = await orderIdempotency.lookup(idempotencyRequest);
+      const priorResponse = idempotencyOutcomeResponse(c, prior);
+      if (priorResponse) return priorResponse;
+    } catch (error) {
+      if (error instanceof TradeIdempotencyUnavailableError) {
+        return idempotencyUnavailableResponse(c);
+      }
+      throw error;
     }
 
     // Validate price + amount as positive finite numbers up front (the policy gate
     // needs the notional; the adapter re-validates the (0,1) price range).
     const amount = Number(body.amount);
     const price = Number(body.price);
-    idempotency = idempotency.claim ? await idempotency.claim() : idempotency;
-    if (idempotency.conflict) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Idempotency key reused with a different body" },
-        409,
-      );
-    }
-    if (idempotency.response) return tradeReplayResponse(c, idempotency.response);
-    if (idempotency.inProgress) {
-      c.header("Retry-After", "1");
-      return c.json<ApiResponse>(
-        { ok: false, error: "Request with this idempotency key is in progress" },
-        409,
-      );
-    }
     if (!Number.isFinite(amount) || amount <= 0) {
-      const envelope: TradeIdempotencyResponse = {
-        status: 400,
-        body: { ok: false, error: "amount must be a positive finite number" },
-      };
-      await idempotency.store?.(envelope);
-      return c.json(envelope.body, envelope.status);
+      return c.json<ApiResponse>(
+        { ok: false, error: "amount must be a positive finite number" },
+        400,
+      );
     }
     if (!Number.isFinite(price) || price <= 0 || price >= 1) {
-      const envelope: TradeIdempotencyResponse = {
-        status: 400,
-        body: { ok: false, error: "price must be in the open interval (0,1)" },
-      };
-      await idempotency.store?.(envelope);
-      return c.json(envelope.body, envelope.status);
+      return c.json<ApiResponse>(
+        { ok: false, error: "price must be in the open interval (0,1)" },
+        400,
+      );
     }
-    // SEC-041: a SELL's notional must be floored at the live best bid — a FOK
-    // sell at an arbitrarily low limit fills at the bid, so sizing on the
-    // caller's price would understate notional and bypass the session caps.
-    // Fail closed (policy-violation, no spend) when the book can't be read.
+    // SELL caps use the protocol's stable $1/share upper bound. The market read
+    // remains a fail-closed market-existence check.
     let notionalUsd: number;
     if (body.side === "sell") {
       let clobUrl: string | undefined;
@@ -1821,7 +1863,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         clobUrl = undefined;
       }
       try {
-        notionalUsd = await polymarketSellNotionalUsd(amount, price, body.tokenId, clobUrl);
+        notionalUsd = await polymarketSellNotionalUsd(amount, body.tokenId, clobUrl);
       } catch (err) {
         const reason = err instanceof Error ? err.message : "unable to size sell notional";
         await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
@@ -1836,33 +1878,41 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           status: 400,
           body: { code: "policy-violation", reason },
         };
-        await idempotency.store?.(envelope);
         return c.json(envelope.body, envelope.status);
       }
     } else {
       notionalUsd = polymarketNotionalUsd(body.side, amount, price);
     }
 
+    // Resolve the executable token's parent market from Polymarket itself. A
+    // caller-provided condition is only a consistency assertion; it never becomes
+    // authorization input unless it matches the venue's token binding.
+    let conditionId: string;
+    try {
+      const market = await resolvePolymarketMarketByToken(body.tokenId);
+      conditionId = market.conditionId;
+    } catch {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Unable to verify Polymarket market metadata" },
+        502,
+      );
+    }
+    if (body.conditionId && body.conditionId.toLowerCase() !== conditionId) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "conditionId does not match the submitted tokenId" },
+        400,
+      );
+    }
+
     // Session fetch + ownership + venue check + the prediction-market policy gate,
-    // all in one pass. checkActiveOrder loads the session and runs checkOrderAllowed
-    // against the allowlist + per-order/daily caps.
-    //
-    // SECURITY: we deliberately do NOT forward the caller-supplied `conditionId` to
-    // the allowlist check. The order is submitted for `tokenId` only, so trusting an
-    // UNVERIFIED conditionId would let an agent pair any non-allowlisted token with
-    // an allowlisted `pm:cond:<id>` and bypass the market allowlist. Until the
-    // token->condition mapping is resolved from VERIFIED Polymarket metadata, the
-    // order route honors ONLY exact `pm:<tokenId>` entries. A `pm:cond:<id>`
-    // session grant therefore requires the per-token entry to also be present to
-    // trade (or a future Phase C resolver that derives + verifies the condition).
-    // TODO(phase-c): resolve the token's true conditionId from venue metadata and
-    // pass it here so market-wide grants can be honored safely.
+    // all in one pass. The condition-wide grant is safe because conditionId was
+    // derived from authoritative venue metadata and bound to this exact token.
     const { session, check } = await getSessionManager().checkActiveOrder({
       tenantId,
       id: body.sessionId,
       order: {
         tokenId: body.tokenId,
-        // conditionId intentionally omitted — see SECURITY note above.
+        conditionId,
         notionalUsd,
       },
     });
@@ -1871,7 +1921,6 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     // polymarket session. A mismatch is treated as "no active session" (403) — we
     // never leak another agent's session existence.
     if (session.agentId !== agentId || session.venue !== "polymarket") {
-      await idempotency.release?.();
       return c.json<ApiResponse>({ ok: false, error: "Active Polymarket session required" }, 403);
     }
 
@@ -1881,7 +1930,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         sessionId: session.id,
         venue: "polymarket",
         tokenId: body.tokenId,
-        conditionId: body.conditionId ?? null,
+        conditionId,
         side: body.side,
         amount,
         price,
@@ -1891,15 +1940,27 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       if (status === 403) {
         // 403s are not stored for idempotent replay (session state can change to
         // active and a retry should re-evaluate) — mirrors HL's session-required 403.
-        await idempotency.release?.();
         return c.json<ApiResponse>({ ok: false, error: "Active Polymarket session required" }, 403);
       }
       const envelope: TradeIdempotencyResponse = {
         status: 400,
         body: { code: "policy-violation", reason: check.reason },
       };
-      await idempotency.store?.(envelope);
-      return c.json(envelope.body, envelope.status);
+      try {
+        const policyClaim = await orderIdempotency.claim(idempotencyRequest);
+        const claimResponse = idempotencyOutcomeResponse(c, policyClaim);
+        if (claimResponse) return claimResponse;
+        if (policyClaim.kind !== "claimed") {
+          throw new Error("unreachable idempotency claim state");
+        }
+        await completeOrderIdempotency(policyClaim.claim, envelope);
+        return tradeEnvelopeResponse(c, envelope);
+      } catch (error) {
+        if (error instanceof TradeIdempotencyUnavailableError) {
+          return idempotencyUnavailableResponse(c);
+        }
+        throw error;
+      }
     }
 
     // Resolve creds BEFORE reserving spend so a fail-closed creds gap never
@@ -1914,10 +1975,9 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         sessionId: session.id,
         venue: "polymarket",
         tokenId: body.tokenId,
-        conditionId: body.conditionId ?? null,
+        conditionId,
         reason: creds.reason,
       });
-      await idempotency.release?.();
       return c.json<ApiResponse>({ ok: false, error: reason }, 409);
     }
 
@@ -1930,12 +1990,11 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         sessionId: session.id,
         venue: "polymarket",
         tokenId: body.tokenId,
-        conditionId: body.conditionId ?? null,
+        conditionId,
         reason: "wallet-binding-mismatch",
         sessionWallet: session.walletId,
         resolvedWallet: creds.walletAddress,
       });
-      await idempotency.release?.();
       return c.json<ApiResponse>(
         {
           ok: false,
@@ -1971,6 +2030,20 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       ...(typeof body.negRisk === "boolean" ? { negRisk: body.negRisk } : {}),
     };
 
+    let idempotency: TradeIdempotencyClaim;
+    try {
+      const claim = await orderIdempotency.claim(idempotencyRequest);
+      const claimResponse = idempotencyOutcomeResponse(c, claim);
+      if (claimResponse) return claimResponse;
+      if (claim.kind !== "claimed") throw new Error("unreachable idempotency claim state");
+      idempotency = claim.claim;
+    } catch (error) {
+      if (error instanceof TradeIdempotencyUnavailableError) {
+        return idempotencyUnavailableResponse(c);
+      }
+      throw error;
+    }
+
     const manager = getSessionManager();
     // Fence reserve→submit against concurrent revocation (mirrors HL's
     // withActiveSubmissionFence). After SEC-044 the fence's advisory lock covers
@@ -1993,7 +2066,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             status: 400,
             body: { ok: false, error: "Trade session cap exceeded" },
           };
-          await idempotency.store?.(envelope);
+          await completeOrderIdempotency(idempotency, envelope);
           return envelope;
         }
 
@@ -2001,7 +2074,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           sessionId: session.id,
           venue: "polymarket",
           tokenId: body.tokenId,
-          conditionId: body.conditionId ?? null,
+          conditionId,
           side: body.side,
           amount,
           price,
@@ -2034,7 +2107,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             sessionId: session.id,
             venue: "polymarket",
             tokenId: body.tokenId,
-            conditionId: body.conditionId ?? null,
+            conditionId,
             notionalUsd,
             reason: "pre-submit-build-failed",
             ...redactedThrownDiagnostics(err),
@@ -2043,7 +2116,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             status: 400,
             body: { ok: false, error: "Order could not be built; not submitted" },
           };
-          await idempotency.store?.(envelope);
+          await completeOrderIdempotency(idempotency, envelope);
           return envelope;
         }
 
@@ -2065,7 +2138,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               error: "Trade session was revoked before order submission",
             },
           };
-          await idempotency.store?.(envelope);
+          await completeOrderIdempotency(idempotency, envelope);
           return envelope;
         }
 
@@ -2100,7 +2173,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               sessionId: session.id,
               venue: "polymarket",
               tokenId: body.tokenId,
-              conditionId: body.conditionId ?? null,
+              conditionId,
               notionalUsd,
               reason: "pre-submit-build-failed",
               ...redactedThrownDiagnostics(err),
@@ -2109,26 +2182,40 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               status: 400,
               body: { ok: false, error: "Trade submission could not be built" },
             };
-            await idempotency.store?.(envelope);
+            await completeOrderIdempotency(idempotency, envelope);
             return envelope;
           }
-          // Otherwise the POST was attempted and the order may have landed —
-          // status unknown, KEEP spend (mirrors HL's 502).
-          await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
-            sessionId: session.id,
-            venue: "polymarket",
+          // Otherwise the POST was attempted and the order may have landed.
+          // Persist an explicit terminal unknown state before attempting audit so
+          // an audit outage can never reopen this request for resubmission.
+          const reconciliation = {
+            venue: "polymarket" as const,
+            state: "submission_unknown" as const,
+            requestDigest: idempotency.bodyHash,
+            walletAddress: creds.walletAddress,
             tokenId: body.tokenId,
-            conditionId: body.conditionId ?? null,
-            notionalUsd,
-            reason: "submit-status-unknown",
-            ...redactedThrownDiagnostics(err),
-          });
-          const envelope: TradeIdempotencyResponse = {
-            status: 502,
-            body: { ok: false, error: "Trade submission status unknown" },
+            conditionId,
+            side: body.side,
           };
-          await idempotency.store?.(envelope);
-          return envelope;
+          const envelope: TradeIdempotencyResponse = {
+            status: 202,
+            body: {
+              ok: false,
+              error: "Trade submission status unknown; operator reconciliation is required",
+              data: { reconciliationRequired: true, reconciliation },
+            },
+            headers: { "X-Steward-Order-State": "submission_unknown" },
+          };
+          return recordSubmissionUnknown(idempotency, envelope, () =>
+            auditTradeEvent(tenantId, agentId, "trade.order.submission_unknown", {
+              sessionId: session.id,
+              ...reconciliation,
+              amount,
+              price,
+              notionalUsd,
+              ...redactedThrownDiagnostics(err),
+            }),
+          );
         }
 
         // The adapter reports rejection as success:false / errorMsg / actualAmount 0.
@@ -2160,7 +2247,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             sessionId: session.id,
             venue: "polymarket",
             tokenId: body.tokenId,
-            conditionId: body.conditionId ?? null,
+            conditionId,
             side: body.side,
             amount,
             price,
@@ -2176,7 +2263,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               data: { status: result.status ?? "rejected" },
             },
           };
-          await idempotency.store?.(envelope);
+          await completeOrderIdempotency(idempotency, envelope);
           return envelope;
         }
 
@@ -2213,7 +2300,19 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         // The order HAS landed at the venue. Persist the idempotency record BEFORE
         // the audit write so a retry after an audit failure replays this response
         // instead of re-submitting a duplicate order.
-        await idempotency.store?.(envelope);
+        try {
+          await completeOrderIdempotency(
+            idempotency,
+            { ...envelope, headers: { "X-Steward-Audit-State": "pending" } },
+            "pending",
+          );
+        } catch (persistenceError) {
+          console.error(
+            "[polymarket/order] accepted order requires idempotency reconciliation",
+            persistenceError,
+          );
+          return acceptedReconciliationEnvelope(response);
+        }
         // The audit write is best-effort here: the order is final + the response is
         // recorded, so an audit failure must NOT turn a successful fill into an
         // error to the client (which could prompt a duplicate retry). Log + proceed.
@@ -2222,20 +2321,32 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             sessionId: session.id,
             venue: "polymarket",
             tokenId: body.tokenId,
-            conditionId: body.conditionId ?? null,
+            conditionId,
             side: body.side,
             amount,
             price,
             notionalUsd,
             orderId: response.orderId,
           });
+          await completeOrderIdempotency(
+            idempotency,
+            { ...envelope, headers: { "X-Steward-Audit-State": "recorded" } },
+            "recorded",
+          );
         } catch (auditErr) {
           console.error(
             "[polymarket/order] submitted-audit write failed (order already final)",
             redactedThrownDiagnostics(auditErr),
           );
+          return {
+            ...envelope,
+            headers: { "X-Steward-Audit-State": "pending" },
+          };
         }
-        return envelope;
+        return {
+          ...envelope,
+          headers: { "X-Steward-Audit-State": "recorded" },
+        };
       },
     );
 
@@ -2246,10 +2357,10 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         status: 409,
         body: { ok: false, error: "Trade session was revoked before order submission" },
       };
-      await idempotency.store?.(envelope);
-      return c.json(envelope.body, envelope.status);
+      await completeOrderIdempotency(idempotency, envelope);
+      return tradeEnvelopeResponse(c, envelope);
     }
-    return c.json(fenced.body, fenced.status);
+    return tradeEnvelopeResponse(c, fenced);
   });
 
   return tradeRoutes;

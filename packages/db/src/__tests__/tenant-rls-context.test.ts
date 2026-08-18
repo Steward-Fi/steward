@@ -2,13 +2,51 @@ import { describe, expect, test } from "bun:test";
 import { PgTransaction } from "drizzle-orm/pg-core";
 import {
   assertTenantRlsDriver,
-  tenantContextForInternalJob,
-  tenantContextFromAuthenticatedPrincipal,
-  withTenantRlsTransaction,
+  createTenantRlsAuthority,
+  type TrustedTenantContext,
 } from "../tenant-rls-context";
 
+interface VerifiedPrincipal {
+  readonly tenantId: string;
+  readonly method: string;
+  readonly subject: string;
+  readonly verificationToken: symbol;
+}
+
+interface ScheduledJob {
+  readonly tenantId: string;
+  readonly job: string;
+  readonly scheduled: boolean;
+}
+
+function authority() {
+  return createTenantRlsAuthority<VerifiedPrincipal, ScheduledJob>({
+    resolveAuthenticatedPrincipal(provenance) {
+      return provenance.verificationToken === verificationToken ? provenance : null;
+    },
+    resolveInternalJob(provenance) {
+      return provenance.scheduled ? provenance : null;
+    },
+  });
+}
+
+const verificationToken = Symbol("verified-authentication");
+
+const principal = (tenantId = "tenant-a"): VerifiedPrincipal => ({
+  tenantId,
+  method: "session-jwt",
+  subject: "user:123",
+  verificationToken,
+});
+
+const job = (tenantId = "tenant-a"): ScheduledJob => ({
+  tenantId,
+  job: "retention",
+  scheduled: true,
+});
+
 describe("tenant RLS transaction context", () => {
-  test("binds and verifies context before exposing the transaction", async () => {
+  test("binds verified provenance before exposing the transaction", async () => {
     const calls: string[] = [];
     let executeCount = 0;
     const tx = {
@@ -24,12 +62,9 @@ describe("tenant RLS transaction context", () => {
         return callback(tx);
       },
     };
-    const context = tenantContextFromAuthenticatedPrincipal({
-      tenantId: "tenant-a",
-      method: "session-jwt",
-      subject: "user:123",
-    });
-    const result = await withTenantRlsTransaction(db, "postgres-js", context, async () => {
+    const boundary = authority();
+    const context = boundary.issuer.fromAuthenticatedPrincipal(principal());
+    const result = await boundary.transactions.run(db, "postgres-js", context, async () => {
       calls.push("callback");
       return 42;
     });
@@ -39,44 +74,55 @@ describe("tenant RLS transaction context", () => {
     expect(Object.isFrozen(context.authority)).toBe(true);
   });
 
-  test("rejects invalid identities, forged objects, and transactionless Workers", async () => {
+  test("rejects unverified provenance, forged contexts, and contexts from another authority", async () => {
+    const boundary = authority();
     expect(() =>
-      tenantContextFromAuthenticatedPrincipal({
-        tenantId: "tenant-a\nSET ROLE owner",
-        method: "jwt",
-        subject: "user:1",
+      boundary.issuer.fromAuthenticatedPrincipal({
+        ...principal(),
+        verificationToken: Symbol("unverified"),
       }),
-    ).toThrow("RLS_TENANT_CONTEXT_INVALID");
-    expect(() => tenantContextForInternalJob({ tenantId: "tenant-a", job: "" })).toThrow(
-      "RLS_TENANT_JOB_INVALID",
+    ).toThrow("RLS_TENANT_AUTHORITY_UNVERIFIED");
+    expect(() => boundary.issuer.forInternalJob({ ...job(), scheduled: false })).toThrow(
+      "RLS_TENANT_JOB_UNVERIFIED",
     );
     expect(() =>
-      tenantContextFromAuthenticatedPrincipal({
-        tenantId: "tenant-a",
+      boundary.issuer.fromAuthenticatedPrincipal({
+        ...principal(),
+        tenantId: "tenant-a\nSET ROLE owner",
+      }),
+    ).toThrow("RLS_TENANT_CONTEXT_INVALID");
+    expect(() =>
+      boundary.issuer.fromAuthenticatedPrincipal({
+        ...principal(),
         method: "session-jwt\nforged",
-        subject: "user:1",
       }),
     ).toThrow("RLS_TENANT_AUTHORITY_INVALID");
     expect(() => assertTenantRlsDriver("neon-http")).toThrow("RLS_TRANSACTION_UNSUPPORTED");
     expect(() => assertTenantRlsDriver("neon-websocket")).not.toThrow();
 
     const db = { transaction: async () => undefined };
+    const forged = {
+      tenantId: "tenant-a",
+      authority: { kind: "internal-job", job: "forged" },
+    } as unknown as TrustedTenantContext;
     await expect(
-      withTenantRlsTransaction(
-        db as never,
-        "postgres-js",
-        {
-          tenantId: "tenant-a",
-          authority: { kind: "internal-job", job: "forged" },
-        } as never,
-        async () => undefined,
-      ),
+      boundary.transactions.run(db, "postgres-js", forged, async () => undefined),
     ).rejects.toThrow("RLS_TENANT_CONTEXT_UNTRUSTED");
 
-    const genuine = tenantContextForInternalJob({ tenantId: "tenant-a", job: "retention" });
+    const otherBoundaryContext = authority().issuer.forInternalJob(job());
+    await expect(
+      boundary.transactions.run(db, "postgres-js", otherBoundaryContext, async () => undefined),
+    ).rejects.toThrow("RLS_TENANT_CONTEXT_UNTRUSTED");
+
+    const genuine = boundary.issuer.forInternalJob(job());
     const cloned = Object.assign({}, genuine, { tenantId: "tenant-b" });
     await expect(
-      withTenantRlsTransaction(db as never, "postgres-js", cloned as never, async () => undefined),
+      boundary.transactions.run(
+        db,
+        "postgres-js",
+        cloned as unknown as TrustedTenantContext,
+        async () => undefined,
+      ),
     ).rejects.toThrow("RLS_TENANT_CONTEXT_UNTRUSTED");
   });
 
@@ -94,11 +140,12 @@ describe("tenant RLS transaction context", () => {
         return callback(tx);
       },
     };
+    const boundary = authority();
     await expect(
-      withTenantRlsTransaction(
+      boundary.transactions.run(
         db,
         "postgres-js",
-        tenantContextForInternalJob({ tenantId: "tenant-a", job: "retention" }),
+        boundary.issuer.forInternalJob(job()),
         async () => {
           callbackCalled = true;
         },
@@ -121,11 +168,12 @@ describe("tenant RLS transaction context", () => {
         return callback(tx);
       },
     });
+    const boundary = authority();
     await expect(
-      withTenantRlsTransaction(
+      boundary.transactions.run(
         db,
         "postgres-js",
-        tenantContextForInternalJob({ tenantId: "tenant-a", job: "retention" }),
+        boundary.issuer.forInternalJob(job()),
         async () => undefined,
       ),
     ).rejects.toThrow("RLS_TENANT_TRANSACTION_NESTED");
@@ -139,11 +187,13 @@ describe("tenant RLS transaction context", () => {
         opened = true;
       },
     };
+    const boundary = authority();
+    expect(() => assertTenantRlsDriver("neon-http")).toThrow("RLS_TRANSACTION_UNSUPPORTED");
     await expect(
-      withTenantRlsTransaction(
-        db as never,
+      boundary.transactions.run(
+        db,
         "neon-http",
-        tenantContextForInternalJob({ tenantId: "tenant-a", job: "retention" }),
+        boundary.issuer.forInternalJob(job()),
         async () => undefined,
       ),
     ).rejects.toThrow("RLS_TRANSACTION_UNSUPPORTED");
@@ -163,10 +213,11 @@ describe("tenant RLS transaction context", () => {
         return callback(tx);
       },
     };
-    const result = await withTenantRlsTransaction(
+    const boundary = authority();
+    const result = await boundary.transactions.run(
       db,
       "neon-websocket",
-      tenantContextForInternalJob({ tenantId: "tenant-worker", job: "worker-request" }),
+      boundary.issuer.forInternalJob(job("tenant-worker")),
       async () => "bound",
     );
     expect(result).toBe("bound");

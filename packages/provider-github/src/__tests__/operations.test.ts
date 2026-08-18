@@ -200,7 +200,7 @@ describe("github.pr.comment.create", () => {
 });
 
 describe("operation-key guard", () => {
-  it("recognizes only the two PR2 operations", () => {
+  it("recognizes only the two supported operations", () => {
     expect(isGithubOperationKey("github.issue.list")).toBe(true);
     expect(isGithubOperationKey("github.pr.comment.create")).toBe(true);
     expect(isGithubOperationKey("github.repo.delete")).toBe(false);

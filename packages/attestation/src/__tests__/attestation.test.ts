@@ -41,9 +41,7 @@ describe("attestation providers", () => {
     ).toThrow(/production/);
   });
 
-  // SEC-029: the insecure noop mode must not key solely on NODE_ENV — it
-  // requires STEWARD_ALLOW_DEV_SECRETS-style dual consent like every other
-  // dev escape hatch in this repo.
+  // The insecure noop mode requires explicit dual consent outside production.
   test("noop-dev refuses without dev-secrets dual consent even outside production", () => {
     expect(() => createNoopDevProvider({ allowUnverified: true, environment: "test" })).toThrow(
       /dual consent/,
@@ -82,8 +80,7 @@ describe("dstack verification (stubbed verifier)", () => {
     info: { os_image_hash: "attacker-image", compose_hash: "attacker-compose" },
   };
 
-  // SEC-009: a verifier response without details.app_info must NOT let the
-  // measurement fall back to attacker-controlled raw quote info.
+  // Verified measurements cannot fall back to attacker-controlled raw quote fields.
   test("fails closed when the verifier omits app_info (no measurement from raw info)", async () => {
     const provider = stubbedProvider({
       is_valid: true,
@@ -115,8 +112,7 @@ describe("dstack verification (stubbed verifier)", () => {
     });
   });
 
-  // SEC-028: without a nonce no freshness check was performed, so the quote
-  // must not verify — a captured once-valid quote would otherwise replay.
+  // A quote without a nonce has no freshness proof and must not verify.
   test("nonce-less verification never reports verified", async () => {
     const provider = stubbedProvider({
       is_valid: true,
@@ -221,9 +217,7 @@ describe("measurement registry", () => {
     ).toContain("not cryptographically verified");
   });
 
-  // SEC-027: with no pinned trust anchor the signature check is ceremony —
-  // anyone can re-sign a tampered registry. Fail closed unless the caller
-  // explicitly opts into unpinned verification.
+  // Unpinned verification is available only through an explicit local-development opt-in.
   test("unpinned verification fails closed without an explicit opt-in", () => {
     const registry = signRegistry(basePayload());
     expect(verifyRegistrySignatures(registry).ok).toBe(false);
@@ -235,8 +229,7 @@ describe("measurement registry", () => {
     ).toBe(true);
   });
 
-  // SEC-007: an empty (0) or malformed (NaN) required count must fail closed,
-  // not silently disable the signature gate.
+  // An invalid quorum cannot disable the signature gate.
   test("zero/NaN requiredSignatureCount fails closed", () => {
     const registry = signRegistry(basePayload());
     for (const bad of [0, Number.NaN, -1, 1.5]) {
@@ -247,8 +240,7 @@ describe("measurement registry", () => {
     );
   });
 
-  // SEC-008: the same signature pasted twice must not satisfy a two-person
-  // quorum — count distinct keys, not array entries.
+  // Repeated entries from one key cannot satisfy a multi-key quorum.
   test("duplicated signatures from one key cannot satisfy a 2-of-2 quorum", () => {
     const registry = signRegistry(basePayload());
     const duplicated: MeasurementRegistryFile = {
@@ -294,8 +286,7 @@ describe("measurement registry", () => {
     ).toBe(true);
   });
 
-  // SEC-086: pin the expected registryId and reject registries older than the
-  // last-known-good updatedAt (replay/rollback protection).
+  // Registry identity and freshness pins prevent substitution and rollback.
   test("registry metadata is bound: registryId and updatedAt freshness", () => {
     const registry = signRegistry(basePayload());
     expect(

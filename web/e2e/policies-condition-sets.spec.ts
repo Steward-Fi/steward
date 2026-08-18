@@ -303,3 +303,74 @@ test.describe("Dashboard condition sets", () => {
     });
   });
 });
+
+test.describe("Dashboard policy templates", () => {
+  test("creates a template with the typed rule-array contract", async ({ page, request }) => {
+    const email = `policy-template-${Date.now()}@example.test`;
+    let submitted: Record<string, unknown> | null = null;
+
+    await page.route(
+      (url) => url.href.startsWith(API) && url.pathname === "/policies",
+      async (route) => {
+        if (route.request().method() === "GET") {
+          await route.fulfill({ json: { ok: true, data: [] } });
+          return;
+        }
+        submitted = route.request().postDataJSON() as Record<string, unknown>;
+        await route.fulfill({
+          status: 201,
+          json: {
+            ok: true,
+            data: {
+              id: "11111111-1111-4111-8111-111111111111",
+              tenantId: "personal-test",
+              name: submitted.name,
+              description: submitted.description ?? null,
+              rules: submitted.rules,
+              isDefault: false,
+              createdAt: "2026-08-17T00:00:00.000Z",
+              updatedAt: "2026-08-17T00:00:00.000Z",
+            },
+          },
+        });
+      },
+    );
+    await page.route(
+      (url) => url.href.startsWith(API) && url.pathname === "/agents",
+      async (route) => route.fulfill({ json: { ok: true, data: [] } }),
+    );
+    await page.route(
+      (url) => url.href.startsWith(API) && url.pathname === "/condition-sets",
+      async (route) =>
+        route.fulfill({
+          json: { ok: true, data: { conditionSets: [], limit: 100, offset: 0 } },
+        }),
+    );
+
+    await loginWithMagicLink(page, request, email);
+    await page.goto(`${WEB}/dashboard/policies`);
+    await page.getByRole("button", { name: "New Policy" }).click();
+    await page.getByRole("button", { name: /Standard Agent/ }).click();
+
+    const rulesEditor = page.getByLabel("Rules (JSON)");
+    const rules = JSON.parse(await rulesEditor.inputValue()) as Array<Record<string, unknown>>;
+    expect(rules).toHaveLength(3);
+    for (const rule of rules) {
+      expect(rule).toEqual(
+        expect.objectContaining({
+          id: expect.any(String),
+          type: expect.any(String),
+          enabled: true,
+          config: expect.any(Object),
+        }),
+      );
+    }
+
+    await page.getByRole("button", { name: "Create Policy" }).click();
+    await expect(page.getByText("Policy created")).toBeVisible();
+    expect(submitted).not.toBeNull();
+    const payload = submitted as unknown as Record<string, unknown>;
+    expect(payload.rules).toEqual(rules);
+    expect(Array.isArray(payload.rules)).toBe(true);
+  });
+});

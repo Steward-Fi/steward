@@ -626,9 +626,9 @@ describe("@stwd/react-native storage", () => {
     expect(lastRequest?.headers.authorization).toBe("Bearer static-user-token");
   });
 
-  test("createStewardNativeClient rejects function token providers loudly (SEC-124)", () => {
-    // The provider was previously accepted and silently dropped, so requests
-    // went out unauthenticated while the type signature claimed auth was set.
+  test("createStewardNativeClient rejects unsupported function token providers", () => {
+    // The native client accepts only concrete tokens so configured
+    // authentication cannot be silently omitted from outgoing requests.
     expect(() =>
       createStewardNativeClient({
         baseUrl: "https://api.example.test",

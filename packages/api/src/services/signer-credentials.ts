@@ -15,8 +15,7 @@ function signerCredentialPepper(): string {
         "Generate with `openssl rand -hex 32`.",
     );
   }
-  // SEC-073: never silently degrade to an unpeppered hash — mirror the
-  // STEWARD_AUDIT_HMAC_KEY posture (services/audit.ts). The pepper is
+  // Never silently degrade to an unpeppered hash. The pepper is
   // defense-in-depth against a DB-only attacker (scrypt+salt still applies),
   // but losing it must be loud, not silent. Production fails closed; outside
   // production the pepperless path requires the explicit dev opt-in.

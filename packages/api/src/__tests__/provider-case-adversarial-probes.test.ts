@@ -1,20 +1,16 @@
 /**
- * PR5 independent adversarial probes (review-gate). Two probes NOT duplicating
- * the PR's own suite:
+ * Independent provider-case adversarial probes:
  *
  *  P-A "byte-flip in a stored event's metadata": mutate ONE byte in a correlated
  *  event's metadata AFTER export and confirm the offline verifier FAILs on the
  *  signed content digest (proves the digest actually covers metadata, not just
- *  hmac/action). Distinct from the PR's N08 (which mutates a MANIFEST fact, not
- *  a bundle event's metadata) and N19 (synthetic-bundle field mutation).
+ *  hmac/action).
  *
  *  P-B "manifest-omission cannot hide incompleteness": drop a REQUIRED-role
  *  event from the manifest's events[] index (leaving it in the signed bundle
  *  segment) while claiming complete. The verifier must FAIL (forged completeness)
  *  — a bad/absent event surfaces as incompleteness, never silence (spec §7.4.3 /
- *  verifier-independence item 4). Distinct from the PR's N09 (which flips
- *  terminalState) — here we keep terminalState honest and instead attack the
- *  events[] index omission + completeness claim.
+ *  verifier-independence item 4).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
@@ -67,15 +63,16 @@ function runVerifier(env: unknown, args: string[] = []) {
   return { code: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
-describe("PR5 independent adversarial probes", () => {
+describe("provider-case independent adversarial probes", () => {
   beforeAll(async () => {
-    tmpDir = mkdtempSync(join(tmpdir(), "pr5-adv-"));
+    tmpDir = mkdtempSync(join(tmpdir(), "provider-case-adversarial-"));
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY = "0".repeat(64);
-    process.env.STEWARD_MASTER_PASSWORD = "pr5-adv-master-password";
+    process.env.STEWARD_MASTER_PASSWORD = "provider-case-adversarial-master-password";
     // Canonical JWT secret for minting the admin session token (clean-CI safe).
     process.env.STEWARD_JWT_SECRET =
-      process.env.STEWARD_JWT_SECRET || "pr5-adv-jwt-secret-0123456789abcdef0123456789abcd";
+      process.env.STEWARD_JWT_SECRET ||
+      "provider-case-adversarial-jwt-secret-0123456789abcdef0123456789abcd";
     const { privateKey } = generateKeyPairSync("ed25519");
     process.env.STEWARD_AUDIT_SIGNING_KEY = privateKey
       .export({ format: "pem", type: "pkcs8" })

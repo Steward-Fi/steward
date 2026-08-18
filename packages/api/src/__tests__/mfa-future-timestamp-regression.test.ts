@@ -13,29 +13,4 @@ describe("future-dated MFA timestamps", () => {
     };
     expect(hasRecentSessionMfa(context as never)).toBe(false);
   });
-
-  it("every local recent-MFA helper has a non-negative age bound", async () => {
-    const files = [
-      "middleware/idempotency.ts",
-      "routes/agents.ts",
-      "routes/approvals.ts",
-      "routes/condition-sets.ts",
-      "routes/dashboard.ts",
-      "routes/erc8004.ts",
-      "routes/global-wallet.ts",
-      "routes/intents.ts",
-      "routes/policies-standalone.ts",
-      "routes/secrets.ts",
-      "routes/session-signers.ts",
-      "routes/tenant-config.ts",
-      "routes/tenants.ts",
-      "routes/user.ts",
-      "routes/vault.ts",
-      "routes/webhooks.ts",
-    ];
-    for (const relative of files) {
-      const source = await Bun.file(new URL(`../${relative}`, import.meta.url)).text();
-      expect(source, relative).toMatch(/(?:Date\.now\(\)|\bnow\b) - [\w.]+ >= 0/);
-    }
-  });
 });

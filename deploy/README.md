@@ -121,20 +121,26 @@ DATABASE_URL=postgresql://steward:password@your-db-host/steward?sslmode=verify-f
 
 # Vault encryption — 32+ random bytes, hex-encoded
 STEWARD_MASTER_PASSWORD=<run: openssl rand -hex 32>
+STEWARD_KDF_SALT=<run: openssl rand -hex 32>
 
-# Auth
-STEWARD_SESSION_SECRET=<run: openssl rand -hex 32>
-STEWARD_PLATFORM_KEYS=<run: openssl rand -hex 32>
+# Authentication and integrity (use distinct random values)
+STEWARD_JWT_SECRET=<run: openssl rand -hex 32>
+STEWARD_EMAIL_CODE_SECRET=<run: openssl rand -hex 32>
+STEWARD_AUDIT_HMAC_KEY=<run: openssl rand -hex 32>
+STEWARD_EXECUTION_AUTH_SECRET=<run: printf 'v1:%s' "$(openssl rand -hex 32)">
+STEWARD_PLATFORM_KEYS=<optional: comma-separated platform administration keys>
 
 # RPC
-RPC_URL=https://mainnet.base.org
-CHAIN_ID=8453
+RPC_URL=https://sepolia.base.org
+CHAIN_ID=84532
 
-# Redis (optional — enables persistent rate limiting + spend tracking)
-# REDIS_URL=redis://localhost:6379
+# Redis is required by the production proxy unless the documented soft-fail
+# override is deliberately enabled.
+REDIS_URL=redis://localhost:6379
 
 # Proxy
 STEWARD_PROXY_PORT=8080
+STEWARD_PROXY_REQUEST_SIGNING_SECRETS=<run: openssl rand -hex 32>
 EOF
 
 ssh root@${NODE_IP} "chmod 600 /etc/steward/env && chown steward:steward /etc/steward/env"
@@ -220,16 +226,21 @@ sudo nginx -t
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `STEWARD_MASTER_PASSWORD` | **Yes** | — | AES-256 vault encryption key. Use `openssl rand -hex 32`. Rotating this requires re-encrypting all vault entries. |
+| `STEWARD_KDF_SALT` | **Yes in production** | — | Per-deployment random salt for vault key derivation. Use `openssl rand -hex 32`. |
 | `DATABASE_URL` | **Yes** | — | PostgreSQL connection string. In Docker Compose, defaults to internal postgres container. |
-| `STEWARD_PLATFORM_KEYS` | **Yes** | — | Comma-separated platform admin keys. Used for `/platform/*` routes (cross-tenant admin). |
+| `STEWARD_PLATFORM_KEYS` | No | — | Comma-separated platform admin keys. Required only when using platform administration routes. |
 | `PORT` | No | `3200` | API listen port. |
 | `STEWARD_BIND_HOST` | No | `127.0.0.1` | Set to `0.0.0.0` when behind a reverse proxy or in Docker. |
-| `STEWARD_SESSION_SECRET` | No | `STEWARD_MASTER_PASSWORD` | JWT signing secret. Set separately to allow independent rotation. |
+| `STEWARD_JWT_SECRET` | **Yes for server deployments** | — | Canonical JWT signing secret. Use at least 32 random characters and keep it distinct from all other secrets. |
+| `STEWARD_SESSION_SECRET` | Deprecated | — | Compatibility alias for existing deployments. Rename the same value to `STEWARD_JWT_SECRET`; do not configure both. |
+| `STEWARD_EMAIL_CODE_SECRET` | **Yes in production** | — | HMAC key for email login codes and cross-device polling. |
+| `STEWARD_AUDIT_HMAC_KEY` | **Yes in production** | — | HMAC key for the tamper-evident audit chain. |
+| `STEWARD_EXECUTION_AUTH_SECRET` | **Yes for governed provider actions** | — | Rotation list in `keyId:secret` form; the first key signs and all listed keys verify. |
 | `STEWARD_DEFAULT_TENANT_KEY` | No | — | Default tenant key for single-tenant deployments (no `X-Steward-Tenant` header needed). |
 | `AGENT_TOKEN_EXPIRY` | No | `24h` | Default expiry for agent-scoped JWTs. |
 | `RPC_URL` | No | `https://sepolia.base.org` | EVM RPC endpoint. |
 | `CHAIN_ID` | No | `84532` | Default chain ID (84532 = Base Sepolia, 8453 = Base mainnet). |
-| `REDIS_URL` | No | — | Redis connection string. Enables persistent rate limiting + spend tracking. Without it, falls back to in-memory (resets on restart). |
+| `REDIS_URL` | **Yes for the production proxy** | — | Redis connection string for persistent rate limiting and spend tracking. Non-production single-instance mode can use the documented in-memory fallback. |
 | `RESEND_API_KEY` | No | — | Resend API key for magic link emails. Without it, tokens print to console (dev mode). |
 | `EMAIL_FROM` | No | `login@localhost` in root Compose; code fallback `login@steward.fi` | From address for magic links. |
 | `APP_URL` | No | `http://localhost:3200` in root Compose; set a public URL for production/OAuth | Base URL for magic link callbacks. |
@@ -241,7 +252,7 @@ sudo nginx -t
 | `STEWARD_PROXY_REQUEST_SIGNING_SECRET` / `_SECRETS` | **Yes for full API+proxy Compose** | — | Shared HMAC root for signed proxy requests. Generate with `openssl rand -hex 32`; keep distinct from JWT/audit/master secrets. |
 | `STEWARD_DB_MODE` | No | — | Set to `pglite` for embedded DB (no Postgres needed). For local dev only. |
 | `POSTGRES_USER` | No | `steward` | Postgres user (Docker Compose internal DB). |
-| `POSTGRES_PASSWORD` | No | `changeme` | Postgres password (Docker Compose internal DB). Change this! |
+| `POSTGRES_PASSWORD` | **Yes with bundled Compose Postgres** | — | Postgres password for the bundled container. There is no production default. |
 | `POSTGRES_DB` | No | `steward` | Postgres database name (Docker Compose internal DB). |
 
 ---

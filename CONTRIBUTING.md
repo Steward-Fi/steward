@@ -23,25 +23,16 @@ bun run packages/api/src/index.ts
 
 ## Project Structure
 
-Steward is a monorepo managed with [Turborepo](https://turbo.build). All packages live under `packages/`:
+Steward is a monorepo managed with [Turborepo](https://turbo.build). Package manifests under
+`packages/` are authoritative. The main package groups are:
 
-| Package | Description |
-|---------|-------------|
-| `api` | Core REST API server (Hono) |
-| `auth` | Authentication service (passkeys, OAuth, email) |
-| `db` | Database schemas and migrations (Drizzle + Postgres) |
-| `policy-engine` | Transaction policy rules and evaluation |
-| `proxy` | RPC proxy with policy enforcement |
-| `redis` | Redis client and caching layer |
-| `shared` | Shared types, utils, and constants |
-| `sdk` | Client SDK (`@stwd/sdk`) |
-| `vault` | Key management and signing |
-| `webhooks` | Webhook delivery and management |
-| `react` | React auth components (`@stwd/react`) |
-| `eliza-plugin` | ElizaOS plugin for agent wallets |
-| `agent-trader` | Autonomous agent trading module |
-| `seed` | Database seeding scripts |
-| `examples` | Example integrations |
+| Group | Packages |
+|---|---|
+| Runtime and security | `api`, `auth`, `db`, `policy-engine`, `proxy`, `redis`, `vault`, `webhooks`, `attestation`, `signer-frost` |
+| Client surfaces | `sdk`, `react`, `react-native`, `mcp`, `eliza-plugin`, `proxy-client`, `cli` |
+| Providers and plugins | `provider-github`, `provider-x`, `plugin-capabilities`, `plugin-sdk`, `plugin-trading`, `plugin-wxmr` |
+| Trading and adapters | `adapters`, `agent-trader`, `trade-sessions`, `venue-hyperliquid`, `venue-polymarket` |
+| Other SDKs and examples | language-specific package directories and `examples/` |
 
 ## Making Changes
 
@@ -107,12 +98,16 @@ bun test
 
 ## Versioning
 
-Steward uses **independent versioning** for published vs internal packages:
+Steward package versions are independent. Do not infer publication status or compatibility from a
+shared repository version:
 
-- **Published packages** (`@stwd/sdk`, `@stwd/react`, `@stwd/eliza-plugin`) follow semver and are bumped by the release script. These may have different versions from each other (e.g., sdk 0.7.2, react 0.6.4) based on their individual change cadence.
-- **Internal packages** (`api`, `auth`, `db`, `proxy`, `redis`, `vault`, `webhooks`, `policy-engine`, `shared`, etc.) are pinned at 0.3.0 and versioned together. They are marked `"private": true` and are never published to npm. Their version number is informational only.
+- Each package's `package.json` is authoritative for its current version and `private` status.
+- The tag-driven release workflow currently bumps and publishes `@stwd/sdk`, `@stwd/react`, and
+  `@stwd/eliza-plugin`.
+- Other non-private packages are not published by that workflow; consult their package docs and
+  registry state before releasing them. Internal packages are marked `"private": true`.
 
-Do not try to synchronize published and internal package versions. They serve different audiences.
+Do not synchronize package versions unless a compatibility change requires it.
 
 ## Releasing
 
@@ -126,14 +121,14 @@ Steward uses git tags to trigger the release pipeline. When a `v*` tag is pushed
 The easiest way is the release script:
 
 ```bash
-./scripts/release.sh 0.4.0
+./scripts/release.sh <version>
 ```
 
 This will:
 1. Bump versions in `packages/sdk`, `packages/react`, and `packages/eliza-plugin`
 2. Update cross-dependencies (`@stwd/sdk` version in react and eliza-plugin)
-3. Commit: `chore: release v0.4.0`
-4. Tag: `v0.4.0`
+3. Commit: `chore: release v<version>`
+4. Tag: `v<version>`
 5. Push branch + tags
 
 ### Manual release
@@ -146,10 +141,10 @@ If you prefer to do it manually:
 
 # 2. Commit
 git add packages/*/package.json
-git commit -m "chore: release v0.4.0"
+git commit -m "chore: release v<version>"
 
 # 3. Tag and push
-git tag v0.4.0
+git tag v<version>
 git push origin develop --tags
 ```
 

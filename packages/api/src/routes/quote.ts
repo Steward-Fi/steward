@@ -10,11 +10,9 @@ import { checkAuthRateLimit } from "./auth";
 
 export const quoteRoutes = new Hono<{ Variables: AppVariables }>();
 
-// SEC-085: /quote is mounted unauthenticated, and every request drives two
-// blocking unix-socket round trips into the dstack guest agent (TDX quote
-// generation is non-trivial). Bound anonymous callers with the shared
-// Redis-backed limiter (residual: replaces the wave-2 in-memory fixed-window
-// Map, which could not coordinate across isolates/replicas).
+// /quote is unauthenticated and drives two blocking round trips into the
+// dstack guest agent. Bound anonymous callers with the shared Redis-backed
+// limiter so isolates and replicas share one budget.
 const QUOTE_RATE_LIMIT_WINDOW_MS = 60_000;
 const QUOTE_RATE_LIMIT_MAX = 30;
 

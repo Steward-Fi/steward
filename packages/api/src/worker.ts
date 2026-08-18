@@ -24,7 +24,7 @@
  *   - KV_REST_API_URL               Upstash REST endpoint
  *   - KV_REST_API_TOKEN             Upstash REST token
  *   - SKIP_MIGRATIONS=1             Migrations run via wrangler-driven CI script
- *   - STEWARD_SESSION_SECRET        HS256 JWT signing secret
+ *   - STEWARD_JWT_SECRET            Canonical HS256 JWT signing secret
  *   - STEWARD_MASTER_PASSWORD       Vault keystore master password
  *   - RESEND_API_KEY                Magic-link email provider
  *   - GOOGLE/DISCORD/GITHUB/TWITTER OAuth client IDs + secrets
@@ -48,6 +48,8 @@ export interface Env {
   KV_REST_API_URL?: string;
   KV_REST_API_TOKEN?: string;
   SKIP_MIGRATIONS?: string;
+  STEWARD_JWT_SECRET?: string;
+  /** Deprecated migration alias; use STEWARD_JWT_SECRET. */
   STEWARD_SESSION_SECRET?: string;
   STEWARD_MASTER_PASSWORD?: string;
   RESEND_API_KEY?: string;
@@ -153,16 +155,16 @@ export async function runWorkerXCredentialLifecycleSweep(
  *
  * Workers expose `nodejs_compat`'s `process.env` as an empty object on cold
  * boot — bindings come in via the `fetch` handler's `env` argument instead.
- * This runs on EVERY request (SEC-148): Workers may reuse isolates across
+ * This runs on every request because Workers may reuse isolates across
  * different deployments (and therefore different binding sets), and rotated
  * bindings/secrets must take effect without waiting for an isolate recycle.
  * Keys we hydrated that disappear from a later binding set are deleted again
  * so stale values cannot linger. Module-init-time readers still see only the
- * first binding set an isolate ever served (imports are cached per isolate) —
- * that is inherent to the module registry and unchanged by this.
+ * first binding set an isolate ever served because imports are cached per
+ * isolate.
  *
- * Known trade-off (accepted, SEC-148): string bindings — including secrets —
- * are copied onto the global `process.env`, because the entire codebase reads
+ * String bindings, including secrets, are copied onto global `process.env`
+ * because the codebase reads
  * configuration through `process.env`. Moving every reader onto per-request
  * binding access is out of scope; per-request hydration at least keeps the
  * values current and bounded to the current binding set.

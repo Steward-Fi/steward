@@ -104,8 +104,8 @@ describe("fail-closed magic-link delivery", () => {
       auth.sendMagicLink("victim@example.com", { tenantId: "tenant-a" }),
     ).rejects.toThrow(EmailDeliveryError);
 
-    // The pre-fix false green: these credentials stayed redeemable. Now every
-    // record of the challenge must be gone.
+    // Delivery failure must revoke every record of the challenge so no
+    // credential remains redeemable.
     const remaining = [...backend.values.keys()].filter((k) => k.startsWith("email-login:"));
     expect(remaining).toEqual([]);
 

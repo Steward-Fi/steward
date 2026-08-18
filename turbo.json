@@ -52,6 +52,10 @@
       "dependsOn": ["^build"],
       "outputs": []
     },
+    "@stwd/cli#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
     "@stwd/db#build": {
       "dependsOn": ["^build"],
       "outputs": []
@@ -61,6 +65,14 @@
       "outputs": []
     },
     "@stwd/plugin-capabilities#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@stwd/plugin-trading#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@stwd/plugin-wxmr#build": {
       "dependsOn": ["^build"],
       "outputs": []
     },
@@ -84,7 +96,31 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]
     },
+    "@stwd/provider-github#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@stwd/provider-x#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@stwd/signer-frost#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@stwd/trade-sessions#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
     "@stwd/vault#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@stwd/venue-hyperliquid#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@stwd/venue-polymarket#build": {
       "dependsOn": ["^build"],
       "outputs": []
     },
@@ -98,6 +134,7 @@
     },
     "lint": {},
     "test": {
+      "dependsOn": ["^build"],
       "cache": false
     }
   }

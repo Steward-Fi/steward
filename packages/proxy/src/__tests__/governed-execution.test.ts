@@ -1,8 +1,8 @@
 /**
- * PR4 governed proxy cutover — proxy-side claim/dispatch + authority gate.
+ * Governed proxy claim/dispatch and authority-gate coverage.
  *
  * Covers the security-critical proxy invariants against PGLite with the existing
- * forwarder stub (the "test transport seam"; PR6 owns the real sandbox):
+ * forwarder stub (the test transport seam):
  *   - X1 governed routes unreachable via direct /proxy / forged header (P01/P05)
  *   - §6.3 unknown authority_mode default-deny (P53)
  *   - X3 single-winner claim under concurrency (K01), double-claim (P43)
@@ -663,7 +663,7 @@ function fakeDirectContext(path: string, forgedClaim?: unknown) {
   } as unknown as import("hono").Context;
 }
 
-describe("PR4 governed proxy authority gate (X1, §5.1)", () => {
+describe("governed proxy authority gate (X1, §5.1)", () => {
   it("P01: direct /proxy to a governed route is denied 403, zero forward", async () => {
     await seedExecutionReady();
     const res = await handleProxy(
@@ -734,7 +734,7 @@ describe("PR4 governed proxy authority gate (X1, §5.1)", () => {
   });
 });
 
-describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
+describe("dispatchGovernedExecution claim and dispatch", () => {
   it("EXEC_AUTH_NOT_READY when the intent has no active v2 nonce (P25)", async () => {
     const res = await dispatchGovernedExecution("pa_missing", IDS.tenant);
     expect(res.ok).toBe(false);
@@ -742,7 +742,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(res.httpStatus).toBe(409);
   });
 
-  it("#239 rollout: a signed legacy nonce cannot dispatch without execute-time policy evidence", async () => {
+  it("a signed legacy nonce cannot dispatch without execute-time policy evidence", async () => {
     const { intentId, authorizationId } = await seedExecutionReady();
     const db = getDb();
     // Simulate a pre-0084 row. The live schema prevents creating this shape, so
@@ -1200,7 +1200,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
   it("P12c: substituted nonce route revision cannot escape the signed approval tuple", async () => {
     const { intentId, authorizationId } = await seedExecutionReady();
     // Move both the live route and the denormalized nonce column to revision 2,
-    // while leaving the signed PR3 approval commitment at revision 1. Comparing
+    // while leaving the signed approval commitment at revision 1. Comparing
     // only nonce-to-live would accept this substitution; signed-to-loaded tuple
     // equality must reject it before claim.
     await getDb()
@@ -1310,7 +1310,7 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     }
   });
 
-  // ── §9 fault matrix + more §8 negatives (added lane pr4-13452) ─────────────
+  // ── §9 fault matrix and additional §8 negatives ───────────────────────────
 
   it("K13/K14: upstream throw AFTER dispatch => outcome_unknown, exactly one forward, NO blind retry (X8)", async () => {
     const { intentId, authorizationId } = await seedExecutionReady();

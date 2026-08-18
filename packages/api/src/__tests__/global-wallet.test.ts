@@ -1,6 +1,4 @@
 import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import {
   agentWallets,
   closeDb,
@@ -178,27 +176,6 @@ describe("global wallet routes", () => {
       { headers: { Authorization: `Bearer ${await token()}`, Origin: ORIGIN } },
     );
     expect(disabled.status).toBe(404);
-  });
-
-  it("source rolls back consent approval if final audit fails", () => {
-    const source = readFileSync(join(import.meta.dir, "..", "routes", "global-wallet.ts"), "utf8");
-    const routeStart = source.indexOf('globalWalletRoutes.post("/consent/approve"');
-    expect(routeStart).toBeGreaterThanOrEqual(0);
-    const route = source.slice(
-      routeStart,
-      source.indexOf('globalWalletRoutes.get("/consents"', routeStart),
-    );
-    const authorized = route.indexOf('action: "global_wallet.consent.approve.authorized"');
-    const insert = route.indexOf(".insert(userWalletAppConsents)", authorized);
-    const finalAudit = route.indexOf('action: "global_wallet.consent.approved"', insert);
-    const rollbackDelete = route.indexOf(".delete(userWalletAppConsents)", finalAudit);
-    const restoreActive = route.indexOf('status: "active"', rollbackDelete);
-
-    expect(authorized).toBeGreaterThanOrEqual(0);
-    expect(insert).toBeGreaterThan(authorized);
-    expect(finalAudit).toBeGreaterThan(insert);
-    expect(rollbackDelete).toBeGreaterThan(finalAudit);
-    expect(restoreActive).toBeGreaterThan(rollbackDelete);
   });
 
   it("uses browser Origin as authoritative over explicit origin parameters", async () => {
@@ -721,33 +698,6 @@ describe("global wallet routes", () => {
       }),
     });
     expect(reused.status).toBe(403);
-  });
-
-  it("source writes global wallet RPC authorization audits before sensitive execution", () => {
-    const source = readFileSync(join(import.meta.dir, "..", "routes", "global-wallet.ts"), "utf8");
-    const rpcStart = source.indexOf('globalWalletRoutes.post("/rpc",');
-    expect(rpcStart).toBeGreaterThanOrEqual(0);
-
-    for (const [methodMarker, auditAction, executionMarker] of [
-      ['method === "personal_sign"', "global_wallet.rpc.sign.authorized", "signMessage("],
-      [
-        'method === "eth_signTypedData_v4"',
-        "global_wallet.rpc.typed_data_sign.authorized",
-        "signTypedData({",
-      ],
-      [
-        'method === "eth_sendTransaction"',
-        "global_wallet.rpc.transaction_submit.authorized",
-        "signTransaction({",
-      ],
-    ] as const) {
-      const methodStart = source.indexOf(methodMarker, rpcStart);
-      expect(methodStart).toBeGreaterThan(rpcStart);
-      const audit = source.indexOf(auditAction, methodStart);
-      const execution = source.indexOf(executionMarker, methodStart);
-      expect(audit).toBeGreaterThan(methodStart);
-      expect(audit).toBeLessThan(execution);
-    }
   });
 
   it("requires eth_signTypedData_v4 scope and recent MFA before signing global wallet typed data", async () => {

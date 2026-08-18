@@ -76,7 +76,7 @@ beforeAll(async () => {
     lastProxyRequest = new Request(url, init);
     return proxyApp.request(path, init as RequestInit);
   }) as typeof fetch;
-});
+}, 120_000);
 
 afterAll(async () => {
   globalThis.fetch = realFetch;
@@ -137,8 +137,8 @@ describe("Eliza plugin proxy request signing", () => {
     delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
     try {
       lastProxyRequest = null;
-      // configuredService() includes proxyRequestSigningSecret — dev-mode must
-      // not downgrade this deployment to unsigned proxy calls (SEC-171).
+      // A configured signing secret always produces signed proxy calls,
+      // including in development mode.
       const result = await configuredService().callGovernedApi({
         url: "https://api.example.com/v1/items",
       });
@@ -151,8 +151,9 @@ describe("Eliza plugin proxy request signing", () => {
     }
   });
 
-  it("allows unsigned proxy operation only with the explicit dev-mode opt-in (SEC-175)", async () => {
+  it("allows unsigned proxy operation only with the explicit dev-mode opt-in", async () => {
     delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
+    delete process.env.STEWARD_PROXY_DEV_MODE;
     try {
       // Enforcement off but no dev-mode opt-in: the proxy fails closed rather
       // than silently accepting an unsigned call.
@@ -176,6 +177,7 @@ describe("Eliza plugin proxy request signing", () => {
         delete process.env.STEWARD_PROXY_DEV_MODE;
       }
     } finally {
+      delete process.env.STEWARD_PROXY_DEV_MODE;
       process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
     }
   });

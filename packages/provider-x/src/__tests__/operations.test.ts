@@ -389,7 +389,7 @@ describe("x.user.me.read", () => {
 });
 
 describe("operation-key guard + risk map", () => {
-  it("recognizes only the three workstream-B operations", () => {
+  it("recognizes only the three supported operations", () => {
     expect(isXOperationKey("x.tweet.create")).toBe(true);
     expect(isXOperationKey("x.tweet.delete")).toBe(true);
     expect(isXOperationKey("x.user.me.read")).toBe(true);

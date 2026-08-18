@@ -1017,4 +1017,23 @@ describe("generated OpenAPI contract", () => {
 
     expect(committed).toBe(generated);
   });
+
+  it("publishes the complete runtime contract to the docs explorer", async () => {
+    const committed = JSON.parse(
+      await readFile(
+        resolve(import.meta.dir, "../../../../docs/api-reference/openapi.json"),
+        "utf8",
+      ),
+    ) as ReturnType<typeof getOpenApiSpec>;
+    const runtime = getOpenApiSpec();
+
+    expect(committed.paths).toEqual(runtime.paths);
+    expect(committed.components).toEqual(runtime.components);
+    expect(committed.servers).toEqual([
+      {
+        url: "http://localhost:3200",
+        description: "Your self-hosted Steward instance. Replace this URL with your deployment.",
+      },
+    ]);
+  });
 });

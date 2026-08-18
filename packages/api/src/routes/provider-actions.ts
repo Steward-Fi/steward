@@ -1,5 +1,5 @@
 /**
- * provider-actions.ts — POST /v2/provider-actions (PR2 spec §2).
+ * provider-actions.ts — POST /v2/provider-actions (action-creation spec §2).
  *
  * The public provider-action ingress. It:
  *   1. Reads BOUNDED raw UTF-8 bytes (never `request.json()` first — JSON.parse

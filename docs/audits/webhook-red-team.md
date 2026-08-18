@@ -49,19 +49,19 @@ Impact: source-level invariants are useful but weaker than route execution. Keep
 ## Commands Run
 
 ```bash
-/Users/shawwalters/.bun/bin/bun test --timeout 30000 packages/api/src/__tests__/webhook-url-validation.test.ts packages/api/src/__tests__/webhook-payload-redaction.test.ts packages/api/src/__tests__/webhook-retry-hardening.test.ts packages/webhooks/src/__tests__/queue.test.ts
+bun test --timeout 30000 packages/api/src/__tests__/webhook-url-validation.test.ts packages/api/src/__tests__/webhook-payload-redaction.test.ts packages/api/src/__tests__/webhook-retry-hardening.test.ts packages/webhooks/src/__tests__/queue.test.ts
 ```
 
 Result: 29 pass, 1 fail. Failure was `webhook payload secrecy > redacts nested mnemonic and private key material before delivery persistence`, blocked before the assertion by `DATABASE_URL is required`.
 
 ```bash
-/Users/shawwalters/.bun/bin/bun test --timeout 30000 packages/api/src/__tests__/vault-unsafe-signing-hardening.test.ts packages/api/src/__tests__/key-export-guards.test.ts
+bun test --timeout 30000 packages/api/src/__tests__/vault-unsafe-signing-hardening.test.ts packages/api/src/__tests__/key-export-guards.test.ts
 ```
 
 Result: 8 pass, 6 skip, 0 fail.
 
 ```bash
-/Users/shawwalters/.bun/bin/bun test --timeout 30000 packages/webhooks/src/__tests__/dispatcher-security.test.ts packages/api/src/__tests__/webhook-audit-order.test.ts packages/api/src/__tests__/webhook-signed-delivery.test.ts
+bun test --timeout 30000 packages/webhooks/src/__tests__/dispatcher-security.test.ts packages/api/src/__tests__/webhook-audit-order.test.ts packages/api/src/__tests__/webhook-signed-delivery.test.ts
 ```
 
 Result: 18 pass, 0 fail.

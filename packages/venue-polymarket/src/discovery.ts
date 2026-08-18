@@ -1,11 +1,15 @@
-import { DEFAULT_FETCH_TIMEOUT_MS, POLYMARKET_GAMMA_API_BASE } from "./constants";
+import {
+  DEFAULT_FETCH_TIMEOUT_MS,
+  POLYMARKET_CLOB_API_BASE,
+  POLYMARKET_GAMMA_API_BASE,
+} from "./constants";
 import { getClobTokenIds, getOutcomePrices, getOutcomes } from "./parsing";
 import { type PolymarketEvent, type PolymarketMarket } from "./types";
 
 // ---------------------------------------------------------------------------
 // Discovery — Gamma. Keyset/cursor pagination is the stable path for backfills.
 // `offset` is REJECTED on keyset endpoints; keyset events expose `closed` but
-// NOT `active` (filter active client-side). See KNOWLEDGE-DUMP §3.
+// NOT `active` (filter active client-side).
 // ---------------------------------------------------------------------------
 
 export interface PolymarketFetchOptions {
@@ -17,6 +21,47 @@ export interface PolymarketFetchOptions {
    * POLYMARKET_CLOB_API_BASE.
    */
   clobUrl?: string;
+}
+
+export interface PolymarketMarketByToken {
+  conditionId: string;
+  primaryTokenId: string;
+  secondaryTokenId: string;
+}
+
+/** Resolve a CLOB token to its authoritative parent condition. */
+export async function getMarketByToken(
+  tokenId: string,
+  opts?: PolymarketFetchOptions,
+): Promise<PolymarketMarketByToken> {
+  if (!/^[0-9]{1,128}$/.test(tokenId)) throw new Error("invalid Polymarket token id");
+  const doFetch = opts?.fetch ?? fetch;
+  const response = await doFetch(
+    `${POLYMARKET_CLOB_API_BASE}/markets-by-token/${encodeURIComponent(tokenId)}`,
+    {
+      headers: { Accept: "application/json" },
+      signal: timeoutSignal(opts),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`Polymarket market-by-token error: ${response.status}`);
+  }
+  const raw = (await response.json()) as Record<string, unknown>;
+  const conditionId = raw.condition_id;
+  const primaryTokenId = raw.primary_token_id;
+  const secondaryTokenId = raw.secondary_token_id;
+  if (
+    typeof conditionId !== "string" ||
+    !/^0x[0-9a-fA-F]{64}$/.test(conditionId) ||
+    typeof primaryTokenId !== "string" ||
+    !/^[0-9]{1,128}$/.test(primaryTokenId) ||
+    typeof secondaryTokenId !== "string" ||
+    !/^[0-9]{1,128}$/.test(secondaryTokenId) ||
+    (tokenId !== primaryTokenId && tokenId !== secondaryTokenId)
+  ) {
+    throw new Error("Polymarket market-by-token response did not bind the requested token");
+  }
+  return { conditionId: conditionId.toLowerCase(), primaryTokenId, secondaryTokenId };
 }
 
 function gammaUrl(

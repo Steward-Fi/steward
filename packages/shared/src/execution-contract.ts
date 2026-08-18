@@ -26,10 +26,9 @@ export interface ExecutionPolicyResult {
 /**
  * Canonical request envelope for a consequential operation.
  *
- * This is a types-only contract for the policy-bound execution gateway. Current
- * signing routes still build their own route-local policy context; PRs after
- * this one can use this shape to bind wallet and credential actions to one
- * authorization path without changing the raw Vault API in this PR.
+ * This is the shared types contract for the policy-bound execution gateway.
+ * Signing routes may build route-local policy context before producing this
+ * envelope; the raw Vault API remains an internal signing primitive.
  */
 export interface ExecutionRequest<Payload = unknown> {
   id: string;
@@ -86,7 +85,7 @@ export interface ExecutionAuthorization {
   /**
    * HMAC-SHA256 over the canonical authorization fields. Optional for
    * compatibility with callers compiled against the original append-only
-   * contract, but required by the PR4 gateway verifier.
+   * contract, but required by the execution-authorization gateway verifier.
    */
   signature?: string;
   /** Caller-supplied idempotency key bound into the signed authorization. */
@@ -94,7 +93,7 @@ export interface ExecutionAuthorization {
 }
 
 /**
- * PR4 provider execution authorization v2.
+ * provider execution authorization v2.
  *
  * A `version: 2` authorization row in `execution_authorization_nonces`. It is a
  * subordinate, per-execution claim object keyed 1:1 to the intent; it NEVER
@@ -153,7 +152,7 @@ export interface ProviderExecutionAuthorizationV2 {
  *
  * The bundle intentionally references request, decision, authorization, audit,
  * and optional chain/provider artifacts without prescribing a runtime storage
- * format. Later evidence PRs can sign this bundle and ship an offline verifier.
+ * format. Evidence tooling can sign this bundle and verify it offline.
  */
 export interface EvidenceBundle<Payload = unknown> {
   request: ExecutionRequest<Payload>;

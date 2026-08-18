@@ -25,9 +25,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    # Pinned, overridable tag for reproducible deploys. Override with
-    # STEWARD_IMAGE_TAG to deploy a specific build; defaults to the current release.
-    image: steward:${STEWARD_IMAGE_TAG:-0.4.2}
+    # Override STEWARD_IMAGE_TAG to deploy a published image tag. The local build
+    # remains the default so this file does not silently pin a stale release.
+    image: steward:${STEWARD_IMAGE_TAG:-local}
     container_name: steward-api
     restart: unless-stopped
     depends_on:
@@ -43,7 +43,7 @@ services:
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
       STEWARD_EMAIL_CODE_SECRET: "${STEWARD_EMAIL_CODE_SECRET:?STEWARD_EMAIL_CODE_SECRET is required}"
-      # PR4 execution authorization v2 key (keyId:secret,... rotation list).
+      # Execution-authorization v2 keyring (keyId:secret,... rotation list).
       # SEPARATE from STEWARD_JWT_SECRET; governed provider actions fail closed
       # if unset. Both api (mint) and proxy (claim/verify) require it.
       STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?STEWARD_EXECUTION_AUTH_SECRET is required - generate with: printf 'v1:%s' \"$(openssl rand -hex 32)\"}"
@@ -78,6 +78,8 @@ services:
       GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
       X_CLIENT_ID: "${X_CLIENT_ID:-}"
       X_CLIENT_SECRET: "${X_CLIENT_SECRET:-}"
+      GOOGLE_PROVIDER_CLIENT_ID: "${GOOGLE_PROVIDER_CLIENT_ID:-}"
+      GOOGLE_PROVIDER_CLIENT_SECRET: "${GOOGLE_PROVIDER_CLIENT_SECRET:-}"
       DISCORD_CLIENT_ID: "${DISCORD_CLIENT_ID:-}"
       DISCORD_CLIENT_SECRET: "${DISCORD_CLIENT_SECRET:-}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?STEWARD_KDF_SALT is required - generate with: openssl rand -hex 32}"
@@ -128,8 +130,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    # Same pinned image as steward-api (built from the same Dockerfile).
-    image: steward:${STEWARD_IMAGE_TAG:-0.4.2}
+    # Same local or explicitly tagged image as steward-api.
+    image: steward:${STEWARD_IMAGE_TAG:-local}
     container_name: steward-proxy
     restart: unless-stopped
     # The API's deep /ready check verifies proxy clock health, so waiting for API
@@ -146,7 +148,7 @@ services:
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
       STEWARD_EMAIL_CODE_SECRET: "${STEWARD_EMAIL_CODE_SECRET:?STEWARD_EMAIL_CODE_SECRET is required}"
-      # PR4 execution authorization v2 key (keyId:secret,... rotation list).
+      # Execution-authorization v2 keyring (keyId:secret,... rotation list).
       # SEPARATE from STEWARD_JWT_SECRET; governed provider actions fail closed
       # if unset. Both api (mint) and proxy (claim/verify) require it.
       STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?STEWARD_EXECUTION_AUTH_SECRET is required - generate with: printf 'v1:%s' \"$(openssl rand -hex 32)\"}"
@@ -159,6 +161,8 @@ services:
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
       STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
       STEWARD_PROXY_REQUEST_SIGNING_SECRET: "${STEWARD_PROXY_REQUEST_SIGNING_SECRET:?STEWARD_PROXY_REQUEST_SIGNING_SECRET is required - generate with: openssl rand -hex 32}"
+      GOOGLE_PROVIDER_CLIENT_ID: "${GOOGLE_PROVIDER_CLIENT_ID:-}"
+      GOOGLE_PROVIDER_CLIENT_SECRET: "${GOOGLE_PROVIDER_CLIENT_SECRET:-}"
       # Explicit soft posture for functional dev/test stacks. Empty by default;
       # NODE_ENV=production always overrides it in proxy security guards.
       STEWARD_PROXY_DEV_MODE: "${STEWARD_PROXY_DEV_MODE:-}"

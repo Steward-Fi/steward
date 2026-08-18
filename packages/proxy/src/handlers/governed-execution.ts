@@ -1,12 +1,12 @@
 /**
- * governed-execution.ts — PR4 governed dispatch entry (spec §2.3, §4.1, §5.3,
+ * governed-execution.ts — execution-authorized governed dispatch entry (spec §2.3, §4.1, §5.3,
  * §6). This is the ONLY caller allowed to reach a governed route's decrypt.
  *
  * WHY THIS LIVES IN @stwd/proxy (contradiction C2, resolved & reported): the
  * proxy runs as a SEPARATE PROCESS from the API and does NOT depend on @stwd/api,
  * yet §5.3 requires dispatchGovernedExecution to call handleProxy (which lives
  * here). So the claim + the governed handleProxy invocation live in the proxy;
- * the MINT stays in the API inside the PR3 resume tx. The v2 signing crypto is in
+ * the MINT stays in the API inside the approval-lifecycle resume tx. The v2 signing crypto is in
  * @stwd/shared so both sides agree. The claim is one atomic DB UPDATE regardless
  * of process, preserving X1-X4.
  *
@@ -125,7 +125,7 @@ async function hook(name: keyof GovernedDispatchHooks): Promise<void> {
 
 class AuditUnavailableError extends Error {}
 // Thrown inside the claim tx when the binding was not execution_ready at claim
-// time (codex P1a): rolls the whole claim back so the nonce is never consumed
+// time: rolls the whole claim back so the nonce is never consumed
 // against a non-ready binding. Classified as a lost claim by the caller.
 class BindingNotReadyError extends Error {}
 
@@ -252,7 +252,7 @@ async function loadGovernedExecution(
   if (!row) return null;
   const { binding, nonce } = row;
 
-  // The persisted PR3 approval commitment lives on the approval_queue row; the
+  // The persisted approval commitment lives on the approval_queue row; the
   // binding carries approval_queue_id. Reload it (jsonb) by that id.
   if (!binding.approvalQueueId) return null;
   const queueRows = await db
@@ -396,7 +396,7 @@ function deny(
 /**
  * Dispatch a governed, approved (execution_ready) provider action exactly once.
  *
- * @param intentId the PR3 intent (lifecycle root).
+ * @param intentId the approval-lifecycle intent (lifecycle root).
  * @param tenantId owning tenant.
  */
 export async function dispatchGovernedExecution(
@@ -483,7 +483,7 @@ export async function dispatchGovernedExecution(
   }
 
   // For a FRESH (active nonce, dispatch_state='none') execution, the ONLY
-  // dispatchable binding state is execution_ready (codex P1a, §2.2). A binding
+  // dispatchable binding state is execution_ready (§2.2). A binding
   // that has advanced past execution_ready via another path (while its nonce
   // somehow lingers active/none) must never reach the claim. This is the early
   // read-side guard; the claim tx ALSO gates the execution_ready -> executing
@@ -609,7 +609,7 @@ export async function dispatchGovernedExecution(
     ) {
       return deny("EXEC_AUTH_STALE_ROUTE", 409, intentId, { executionId: loaded.executionId });
     }
-    // Route↔operation binding (codex P2): the nonce binds routeId and operationId
+    // Route↔operation binding: the nonce binds routeId and operationId
     // independently, and provider_operations.secret_route_id is NOT unique, so a
     // governed route configured for operation A must not be usable to inject a
     // credential for a DIFFERENT operation B. The authority_revision bump (0082
@@ -681,10 +681,10 @@ export async function dispatchGovernedExecution(
       }
 
       // Advance the binding execution_ready -> executing (§2.2) in the SAME tx and
-      // make that transition part of the claim success condition (codex P1a): the
+      // make that transition part of the claim success condition: the
       // nonce claim and the binding lifecycle are one atomic step, so a nonce can
       // NEVER be consumed while the binding is not execution_ready (e.g. already
-      // terminal from another path). The PR3 transition trigger requires
+      // terminal from another path). The approval-lifecycle transition trigger requires
       // binding_revision to increment by exactly 1. If the scoped update affects
       // ZERO rows, the binding was not in execution_ready → roll the whole claim
       // back (no consumed nonce, no dispatch, fail closed).
@@ -748,7 +748,7 @@ export async function dispatchGovernedExecution(
     }
     if (e instanceof BindingNotReadyError) {
       // The nonce claim rolled back because the binding was not execution_ready
-      // (codex P1a): the nonce is NOT consumed, nothing dispatched. Classify as a
+      // the nonce is not consumed and nothing is dispatched. Classify as a
       // lost claim (the binding lifecycle, not the nonce, is the blocker).
       return deny("EXEC_AUTH_CLAIM_LOST", 409, intentId, { executionId: loaded.executionId });
     }
@@ -779,7 +779,7 @@ export async function dispatchGovernedExecution(
 }
 
 // sha256 hex-prefixed (audit records the HASH of the provider idempotency key,
-// NEVER the raw key — PR5 C3 data minimization).
+// NEVER the raw key — evidence C3 data minimization).
 function sha256Hex(value: string): string {
   return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
 }
@@ -845,7 +845,7 @@ async function revalidateAccountBoundary(
 ): Promise<{ ok: true } | { ok: false; code: GovernedDispatchCode }> {
   const db = getDb();
   // Workspace status: a disabled/revoked workspace must fail closed before any
-  // decrypt (codex P1b). The claim SQL cannot express the workspace status.
+  // decrypt. The claim SQL cannot express the workspace status.
   const wsRows = await db
     .select({ status: workspaces.status })
     .from(workspaces)
@@ -874,7 +874,7 @@ async function revalidateAccountBoundary(
     return { ok: false, code: "EXEC_AUTH_STALE_DEPENDENCY" };
 
   // Provider operation: must exist, be active, live in the bound workspace +
-  // account, AND its revision must still equal the committed one (codex P1b: the
+  // account, and its revision must still equal the committed one (the
   // operation STATUS and scope were not checked before). A disabled operation or
   // a revision drift fails closed.
   const opRows = await db
@@ -972,7 +972,7 @@ async function dispatchOnce(
   const headers = new Headers();
   for (const [name, value] of loaded.canonicalAction.selectedHeaders) headers.set(name, value);
   // Serialize the outbound body with the SAME JCS serializer that computed the
-  // canonical action digest + v2 signature (codex P2). JSON.stringify does NOT
+  // canonical action digest + v2 signature. JSON.stringify does not
   // guarantee JCS key ordering (e.g. integer-like keys sort differently), so it
   // could send bytes that were never authorized. jcsStringify(canonicalBody) is
   // byte-identical to what canonicalActionBytes committed.
@@ -1006,7 +1006,7 @@ async function dispatchOnce(
           routeId: loaded.routeId,
           // Carry the CLAIMED route revision + secret binding so the proxy gate can
           // fail closed if the route/secret was rotated between the claim and the
-          // decrypt (codex P1 stale-credential race): a matching routeId alone is
+          // decrypt: a matching routeId alone is
           // not sufficient because the current route.secretId/version drives the
           // decrypt. The proxy gate re-verifies these against the live route.
           routeRevision: loaded.routeRevision,
@@ -1061,7 +1061,7 @@ async function dispatchOnce(
   await hook("afterUpstream");
 
   const upstreamStatus = response.status;
-  // Drain/cancel the proxy response body on EVERY governed path (codex P2). The
+  // Drain/cancel the proxy response body on every governed path. The
   // dispatcher records only the OUTCOME; it never streams the body back to a
   // client. handleProxy releases its in-flight proxy slot via
   // releaseWhenBodyCloses, so an unconsumed streaming body would leak that slot
@@ -1121,7 +1121,7 @@ async function dispatchOnce(
   }
   const forwardLevelFailure = upstreamStatus === 502 && proxyError === "Upstream request failed";
   // Cancel the original body (the 502 branch cloned it; every other error status
-  // never touched it) so the proxy in-flight slot is released (codex P2).
+  // never touched it) so the proxy in-flight slot is released.
   drainBody(response);
   if (forwardLevelFailure) {
     // Sent-but-no-clean-response → outcome_unknown, NEVER auto-retry (X8, K13/K14).
@@ -1216,7 +1216,7 @@ async function recordTerminal(
       .set({ dispatchState: state, outcomeRecordedAt: new Date() })
       .where(eq(executionAuthorizationNonces.authorizationId, loaded.authorizationId));
     // executing -> succeeded|failed|outcome_unknown (§2.2). Bump binding_revision
-    // by exactly 1 (PR3 trigger convention) and scope by the executing precursor.
+    // by exactly 1 (approval-lifecycle trigger convention) and scope by the executing precursor.
     await dbTx
       .update(providerActionBindings)
       .set({

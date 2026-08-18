@@ -1,5 +1,5 @@
 /**
- * Provider-account X (Twitter) OAuth connect and token lifecycle.
+ * Provider-account X (Twitter) OAuth connection and token lifecycle.
  *
  * This is the PROVIDER-CONNECTION plane (agent execution authority), NOT the
  * user sign-in plane. Login-with-X (packages/auth oauth.ts `twitter` provider)
@@ -7,7 +7,7 @@
  * can act as, holding the rotating OAuth tokens in the versioned vault so the
  * agent never sees a raw credential.
  *
- * Security posture (mirrors the hardened user-auth OAuth flow):
+ * Security posture:
  *   - PKCE S256, minimal explicit scopes.
  *   - Pending-connect state lives in a short-TTL, single-use store. We persist
  *     ONLY the SHA-256 hash of the state token and the SHA-256 hash of the PKCE

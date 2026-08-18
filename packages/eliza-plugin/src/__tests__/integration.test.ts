@@ -298,38 +298,53 @@ describeLive("Actions (validation + error paths)", () => {
     });
 
     it("returns error for missing params", async () => {
-      const result = await transferAction.handler(runtime, {} as any, undefined, {
-        parameters: {},
-      });
+      const result = await transferAction.handler(
+        runtime,
+        { id: "missing-params" } as any,
+        undefined,
+        {
+          parameters: {},
+        },
+      );
       expect(result?.success).toBe(false);
       expect(result?.error).toContain("Missing required parameters");
     });
 
     it("returns error for unknown chain", async () => {
-      const result = await transferAction.handler(runtime, {} as any, undefined, {
-        parameters: {
-          to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-          amount: "0.01 ETH",
-          chain: "avalanche",
+      const result = await transferAction.handler(
+        runtime,
+        { id: "unknown-chain" } as any,
+        undefined,
+        {
+          parameters: {
+            to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+            amount: "0.01 ETH",
+            chain: "avalanche",
+          },
         },
-      });
+      );
       expect(result?.success).toBe(false);
       expect(result?.error).toContain("Unknown chain");
     });
 
     it("returns error for invalid amount format", async () => {
-      const result = await transferAction.handler(runtime, {} as any, undefined, {
-        parameters: {
-          to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-          amount: "not-a-number",
+      const result = await transferAction.handler(
+        runtime,
+        { id: "invalid-amount" } as any,
+        undefined,
+        {
+          parameters: {
+            to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+            amount: "not-a-number",
+          },
         },
-      });
+      );
       expect(result?.success).toBe(false);
       expect(result?.text).toContain("Transfer failed");
     });
 
     it("parses 0.1 ETH correctly and hits API", async () => {
-      const result = await transferAction.handler(runtime, {} as any, undefined, {
+      const result = await transferAction.handler(runtime, { id: "valid-eth" } as any, undefined, {
         parameters: {
           to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
           amount: "0.1 ETH",
@@ -343,15 +358,20 @@ describeLive("Actions (validation + error paths)", () => {
       }
     });
 
-    it("parses amount without symbol (defaults to ETH)", async () => {
-      const result = await transferAction.handler(runtime, {} as any, undefined, {
-        parameters: {
-          to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-          amount: "0.5",
-          chain: "base",
+    it("rejects an amount without an explicit native symbol", async () => {
+      const result = await transferAction.handler(
+        runtime,
+        { id: "missing-symbol" } as any,
+        undefined,
+        {
+          parameters: {
+            to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+            amount: "0.5",
+            chain: "base",
+          },
         },
-      });
-      expect(result).toBeDefined();
+      );
+      expect(result?.success).toBe(false);
     });
   });
 });
@@ -412,9 +432,9 @@ describe("approvalRequiredEvaluator", () => {
 describe("Amount parsing (via transfer handler)", () => {
   const cases = [
     { input: "0.01 ETH", shouldFail: false },
-    { input: "1.5 BNB", shouldFail: false },
-    { input: "100 USDC", shouldFail: false },
-    { input: "0.001", shouldFail: false },
+    { input: "1.5 ETH", shouldFail: false },
+    { input: "100 USDC", shouldFail: true },
+    { input: "0.001", shouldFail: true },
     { input: "", shouldFail: true },
     { input: "abc xyz", shouldFail: true },
     { input: "-5 ETH", shouldFail: true },
@@ -430,13 +450,18 @@ describe("Amount parsing (via transfer handler)", () => {
       } as any;
       const runtime = { getService: () => service } as any;
 
-      const result = await transferAction.handler(runtime, {} as any, undefined, {
-        parameters: {
-          to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-          amount: input,
-          chain: "base",
+      const result = await transferAction.handler(
+        runtime,
+        { id: `amount-${input}` } as any,
+        undefined,
+        {
+          parameters: {
+            to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+            amount: input,
+            chain: "base",
+          },
         },
-      });
+      );
 
       if (shouldFail) {
         expect(result?.success).toBe(false);

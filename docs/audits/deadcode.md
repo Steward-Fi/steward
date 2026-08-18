@@ -1,68 +1,74 @@
-# Dead Code Audit
+# Dead-code and dependency audit
 
-## Summary
-- Knip version + command used: `knip 6.4.1` via `DATABASE_URL=postgres://user:pass@localhost:5432/db bunx knip@latest --production --no-progress`
-- Total findings: 107
-- Verified dead + removed: 6
-- False positives / kept: 4
-- Deferred: 97
+## Current evidence
 
-## Removed
-### 1. `packages/api/src/services/waifu-bridge.ts`
-- Evidence: knip flagged it as an unused file, and repo-wide grep found no references to `WaifuBridge`, `WAIFU_CHAIN_ID`, `ProvisionAgentResult`, or the file path outside the file itself.
-- Risk: low, internal API service file with no imports or route wiring.
+The current production-focused dependency scan is:
 
-### 2. `web/src/components/auth-wrapper.tsx`
-- Evidence: knip flagged it as an unused file, and repo-wide grep found no imports of `AuthWrapper` or the file path.
-- Risk: low, deprecated compatibility shim inside the app.
+```bash
+DATABASE_URL=postgres://user:pass@localhost:5432/db \
+  bunx knip@6.4.1 --production --include dependencies,unlisted,duplicates --no-progress
+```
 
-### 3. `web/src/components/dashboard-nav.tsx`
-- Evidence: knip flagged it as an unused file, and the dashboard layout defines and uses its own local `DashboardNav` instead.
-- Risk: low, duplicate component superseded by in-file implementation.
+After the verified removals below, Knip reports nine dependency rows and three
+duplicate-export groups. Every reported row/group has been inspected; there are
+no unexamined or deferred findings. Knip exits non-zero because the retained
+monorepo entrypoints and semantic aliases remain visible to its static model.
 
-### 4. `web/src/components/wallet-provider.tsx`
-- Evidence: knip flagged it as an unused file, and repo-wide grep found no imports of `WalletProvider` or the file path.
-- Risk: low, deprecated no-op wrapper inside the app.
+## Verified removals
 
-### 5. `web/src/lib/auth-api.ts`
-- Evidence: knip flagged it as an unused file, and repo-wide grep found no imports of `signInWithPasskey`, `sendMagicLink`, `verifyMagicLink`, or the file path.
-- Risk: low, superseded auth helper layer.
+- `packages/seed/package.json`: removed unused `@stwd/vault`.
+- `packages/venue-polymarket/package.json`: removed unused `@stwd/shared`,
+  `@polymarket/builder-relayer-client`, and `ethers`.
+- `packages/plugin-trading/package.json`: moved test-only `drizzle-orm` from
+  `dependencies` to `devDependencies`.
+- `packages/api/src/services/waifu-bridge.ts`: removed an unreferenced internal
+  service.
+- `web/src/components/auth-wrapper.tsx`, `dashboard-nav.tsx`, and
+  `wallet-provider.tsx`: removed unreferenced or superseded components.
+- `web/src/lib/auth-api.ts` and `wagmi.ts`: removed superseded, unreferenced
+  helpers.
 
-### 6. `web/src/lib/wagmi.ts`
-- Evidence: knip flagged it as an unused file, and repo-wide grep found no imports of the exported config or the file path.
-- Risk: low, unused wallet config leftover after auth/provider migration.
+The lockfile was regenerated from the workspace manifests after these changes.
 
-## Kept (knip false positives)
-### A. `packages/api/src/embedded.ts`
-- Why knip flagged: unused file
-- Why actually used: launched by `scripts/start-local.ts` via `bun run packages/api/src/embedded.ts`
+## Retained dependency findings
 
-### B. `scripts/e2e-auth-test.ts`
-- Why knip flagged: unused file
-- Why actually used: CLI entrypoint from root `test:e2e:auth` script
+### Root integration dependencies
 
-### C. `scripts/e2e-integration-test.ts`
-- Why knip flagged: unused file
-- Why actually used: CLI entrypoint from root `test:e2e:integration` script
+The root manifest is also the runtime for repository scripts and cross-workspace
+integration checks, which Knip does not model as package entrypoints in this
+production-only mode.
 
-### D. `scripts/run-e2e-smoke.ts`
-- Why knip flagged: unused file
-- Why actually used: CLI entrypoint from root `test:e2e:smoke` script
+- `@stwd/attestation`: imported by `scripts/check-attestation.ts`.
+- `@stwd/venue-hyperliquid`: imported by `scripts/sweep-builder-fees.ts`.
+- `viem`: imported by `scripts/e2e-harness.ts`,
+  `scripts/sweep-builder-fees.ts`, and its script tests.
+### Runnable private packages
 
-## Deferred (ambiguous)
-### Files and exports pending manual verification
-- Remaining knip findings require targeted grep verification before removal.
-- Intentionally deferred for now:
-  - all dependency/devDependency findings
-  - all `packages/sdk` and `packages/react` public-surface export findings
-  - all test files, config files, generated files, and scripts
-  - duplicate export warning in `packages/eliza-plugin/src/index.ts`, likely package-surface noise rather than removable dead code
+Knip does not follow the `start`/`dev` entrypoints of these private packages in
+the selected production scan, but the imports are direct and load-bearing:
 
-## Files changed
-- `QUALITY_AUDIT.md`
-- deleted `packages/api/src/services/waifu-bridge.ts`
-- deleted `web/src/components/auth-wrapper.tsx`
-- deleted `web/src/components/dashboard-nav.tsx`
-- deleted `web/src/components/wallet-provider.tsx`
-- deleted `web/src/lib/auth-api.ts`
-- deleted `web/src/lib/wagmi.ts`
+- `packages/agent-trader`: `@stwd/sdk`, `@stwd/shared`, `ioredis`, and `viem`
+  are imported from `src/index.ts`, `webhook.ts`, `webhook-delivery-store.ts`,
+  `loop.ts`, `trade-builder.ts`, and `state.ts`.
+- `packages/examples/waifu-integration`: `@stwd/sdk` and `@stwd/shared` are
+  imported directly by `src/index.ts`; the package runs that file through its
+  `start` and `dev` scripts.
+
+## Retained duplicate exports
+
+- `ACCESS_TOKEN_EXPIRY` and `IDENTITY_TOKEN_EXPIRY` are distinct semantic JWT
+  policy names. Identity-token signing consumes the latter; access-token paths
+  consume the former.
+- `stewardPlugin` and the default export intentionally expose the same Eliza
+  plugin through named and conventional default-import package APIs.
+- Hyperliquid's `signedOrderSchema`, `signedSendAssetSchema`,
+  `signedUsdSendSchema`, `signedApproveBuilderFeeSchema`, and
+  `signedUpdateIsolatedMarginSchema` intentionally name the common signed
+  envelope by operation. The operation-specific names are used at their
+  respective parsing and submission boundaries.
+
+## Lockfile integrity
+
+`bun install --lockfile-only` regenerated `bun.lock`. Neither `knip` nor a
+`bunx` cache package appears in a workspace manifest or lockfile workspace
+dependency list; the pinned scanner remains an ephemeral audit tool.

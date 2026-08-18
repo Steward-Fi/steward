@@ -1,5 +1,5 @@
 /**
- * Provider-account X (Twitter) OAuth connect routes (issue #195 workstream A).
+ * Provider-account X (Twitter) OAuth connection routes.
  *
  * Mounted under `/v2/provider-accounts/connect/x`. Every route requires a human
  * session (session-jwt) AND workspace admin/approver authority (or tenant
@@ -87,7 +87,7 @@ function fail(c: RouteContext, error: unknown): Response {
  * Require a human session + workspace connect authority. Returns the userId, or
  * a Response to short-circuit. Mirrors provider-authority.ts's 404 parity: an
  * unauthorized caller gets 404 (resource not found) so authority state does not
- * leak, matching PR3 conventions.
+ * leak, matching approval-lifecycle conventions.
  */
 async function requireConnectAuthority(
   c: RouteContext,

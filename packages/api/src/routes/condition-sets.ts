@@ -19,6 +19,7 @@ import {
   requireTenantLevel,
   safeJsonParse,
 } from "../services/context";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 
 type ConditionSetResponse = {
   id: string;
@@ -70,6 +71,8 @@ type ReplaceItemsBody = {
 type ConditionSetRow = typeof conditionSets.$inferSelect;
 type ConditionSetItemRow = typeof conditionSetItems.$inferSelect;
 
+class ConditionSetInputError extends Error {}
+
 function iso(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : String(value);
 }
@@ -103,21 +106,21 @@ function itemToResponse(row: typeof conditionSetItems.$inferSelect): ConditionSe
 function normalizeMetadata(value: unknown): Record<string, unknown> {
   if (value === undefined) return {};
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("metadata must be an object");
+    throw new ConditionSetInputError("metadata must be an object");
   }
   if (JSON.stringify(value).length > MAX_ITEM_METADATA_BYTES) {
-    throw new Error(`metadata must not exceed ${MAX_ITEM_METADATA_BYTES} bytes`);
+    throw new ConditionSetInputError(`metadata must not exceed ${MAX_ITEM_METADATA_BYTES} bytes`);
   }
   return value as Record<string, unknown>;
 }
 
 function normalizeRequiredText(value: unknown, field: string, maxLength: number): string {
   if (!isNonEmptyString(value)) {
-    throw new Error(`${field} is required`);
+    throw new ConditionSetInputError(`${field} is required`);
   }
   const trimmed = value.trim();
   if (trimmed.length > maxLength) {
-    throw new Error(`${field} must not exceed ${maxLength} characters`);
+    throw new ConditionSetInputError(`${field} must not exceed ${maxLength} characters`);
   }
   return trimmed;
 }
@@ -130,22 +133,24 @@ function normalizeOptionalText(
   if (value === undefined) return undefined;
   if (value === null) return null;
   if (typeof value !== "string") {
-    throw new Error(`${field} must be a string`);
+    throw new ConditionSetInputError(`${field} must be a string`);
   }
   const trimmed = value.trim();
   if (!trimmed) return null;
   if (trimmed.length > maxLength) {
-    throw new Error(`${field} must not exceed ${maxLength} characters`);
+    throw new ConditionSetInputError(`${field} must not exceed ${maxLength} characters`);
   }
   return trimmed;
 }
 
 function normalizeItem(body: UpsertItemBody): UpsertItemBody {
   if (!isNonEmptyString(body.value)) {
-    throw new Error("item value is required and must be a non-empty string");
+    throw new ConditionSetInputError("item value is required and must be a non-empty string");
   }
   if (body.value.trim().length > MAX_CONDITION_SET_ITEM_VALUE_LENGTH) {
-    throw new Error(`item value must not exceed ${MAX_CONDITION_SET_ITEM_VALUE_LENGTH} characters`);
+    throw new ConditionSetInputError(
+      `item value must not exceed ${MAX_CONDITION_SET_ITEM_VALUE_LENGTH} characters`,
+    );
   }
   const label =
     normalizeOptionalText(body.label, "item label", MAX_CONDITION_SET_ITEM_LABEL_LENGTH) ?? null;
@@ -271,13 +276,19 @@ function requireTenantAdminSession(c: Parameters<typeof requireTenantLevel>[0]):
 }
 
 function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt >= 0 &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), maxAgeMs);
+}
+
+function conditionSetErrorResponse(
+  c: Parameters<typeof requireTenantLevel>[0],
+  error: unknown,
+  fallback: string,
+) {
+  if (error instanceof ConditionSetInputError) {
+    return c.json<ApiResponse>({ ok: false, error: error.message }, 400);
+  }
+  console.error(`[condition-sets] ${fallback}:`, error);
+  return c.json<ApiResponse>({ ok: false, error: fallback }, 500);
 }
 
 function requireRecentAdminMfa(c: Parameters<typeof requireTenantLevel>[0], reason: string) {
@@ -375,7 +386,9 @@ conditionSetRoutes.post("/", async (c) => {
         .from(conditionSets)
         .where(eq(conditionSets.tenantId, tenantId));
       if (Number(total) >= MAX_CONDITION_SETS) {
-        throw new Error(`tenant cannot contain more than ${MAX_CONDITION_SETS} condition sets`);
+        throw new ConditionSetInputError(
+          `tenant cannot contain more than ${MAX_CONDITION_SETS} condition sets`,
+        );
       }
 
       return tx
@@ -413,8 +426,7 @@ conditionSetRoutes.post("/", async (c) => {
 
     return c.json<ApiResponse<ConditionSetResponse>>({ ok: true, data: setToResponse(row) }, 201);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to create condition set";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+    return conditionSetErrorResponse(c, err, "Failed to create condition set");
   }
 });
 
@@ -517,8 +529,7 @@ conditionSetRoutes.patch("/:id", async (c) => {
 
     return c.json<ApiResponse<ConditionSetResponse>>({ ok: true, data: setToResponse(row) });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to update condition set";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+    return conditionSetErrorResponse(c, err, "Failed to update condition set");
   }
 });
 
@@ -680,7 +691,7 @@ conditionSetRoutes.post("/:id/items", async (c) => {
             ),
           );
         if (Number(total) >= MAX_CONDITION_SET_ITEMS) {
-          throw new Error(
+          throw new ConditionSetInputError(
             `condition set cannot contain more than ${MAX_CONDITION_SET_ITEMS} items`,
           );
         }
@@ -729,8 +740,7 @@ conditionSetRoutes.post("/:id/items", async (c) => {
       201,
     );
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to add condition set item";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+    return conditionSetErrorResponse(c, err, "Failed to add condition set item");
   }
 });
 
@@ -833,8 +843,7 @@ conditionSetRoutes.put("/:id/items", async (c) => {
       data: rows.map(itemToResponse),
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to replace condition set items";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+    return conditionSetErrorResponse(c, err, "Failed to replace condition set items");
   }
 });
 
@@ -952,8 +961,7 @@ conditionSetRoutes.patch("/:id/items/:itemId", async (c) => {
 
     return c.json<ApiResponse<ConditionSetItemResponse>>({ ok: true, data: itemToResponse(row) });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to update condition set item";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+    return conditionSetErrorResponse(c, err, "Failed to update condition set item");
   }
 });
 

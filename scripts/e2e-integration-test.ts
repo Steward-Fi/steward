@@ -996,6 +996,7 @@ async function main() {
   const failed = results.filter((r) => !r.passed).length;
   const skipped = results.filter((r) => r.skipped).length;
   const total = results.length;
+  const strictSkipFailure = process.env.CI === "true" && skipped > 0;
 
   console.log(`  Total:   ${total}`);
   console.log(`  Passed:  ${passed} ✅`);
@@ -1011,11 +1012,19 @@ async function main() {
     console.log("");
   }
 
-  if (failed === 0) {
+  if (strictSkipFailure) {
+    console.log("  Skipped checks are failures in CI:");
+    for (const r of results.filter((r) => r.skipped)) {
+      console.log(`    ❌ ${r.name}`);
+    }
+    console.log("");
+  }
+
+  if (failed === 0 && !strictSkipFailure) {
     console.log("  🎉 All tests passed!\n");
     process.exit(0);
   } else {
-    console.log(`  💥 ${failed} test(s) failed.\n`);
+    console.log(`  💥 ${failed + (strictSkipFailure ? skipped : 0)} test(s) failed.\n`);
     process.exit(1);
   }
 }

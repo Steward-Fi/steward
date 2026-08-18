@@ -1,8 +1,8 @@
 /**
- * agent-client-e2e.test.ts — Pillar A / lane A3 happy-path E2E.
+ * Agent client happy-path E2E.
  *
  * Drives the REAL @stwd/sdk AgentClient against a REAL, in-process Steward API
- * surface — the actual A1 route handlers (agent-enroll + manifest/issuance +
+ * surface — the agent-enroll, manifest, issuance, and
  * broker invoke), the real @stwd/auth crypto, a real pglite DB with a seeded
  * p256 agent_signer, and the real @stwd/proxy forward path (only the outbound
  * network is stubbed). No mock server: the client talks to the shipping handlers.
@@ -132,6 +132,7 @@ beforeAll(async () => {
   process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET = SIGNING_SECRET;
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.github.com";
   process.env.STEWARD_PROXY_URL = PROXY_URL;
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
 
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
@@ -142,13 +143,15 @@ beforeAll(async () => {
     { db, client, useAdvisoryLock: false, migrateFn: pgliteMigrate as never },
   );
 
-  // ── real proxy, outbound network stubbed ────────────────────────────────────
+  // Real proxy with only the outbound network stubbed.
   const { authMiddleware } = await import("@stwd/proxy/src/middleware/auth");
   const {
     handleProxy,
+    __setCheckProxyRateLimitForTests: setRateLimit,
     __setForwardProxyRequestForTests: setForward,
     __setResolveProxyHostForTests: setResolveHost,
   } = await import("@stwd/proxy/src/handlers/proxy");
+  setRateLimit(async () => ({ allowed: true, resetMs: 0 }));
   setResolveHost(async () => [{ address: "93.184.216.34", family: 4 }]);
   setForward(async (url, method, headers, body) => {
     const bodyText = body ? await new Response(body).text() : null;
@@ -166,7 +169,7 @@ beforeAll(async () => {
   proxyApp.use("*", authMiddleware);
   proxyApp.all("*", handleProxy);
 
-  // ── the API app: real enroll + manifest + invoke routes ─────────────────────
+  // Real enroll, manifest, and invoke routes.
   ({ agentEnrollRoutes } = await import("../routes/agent-enroll"));
   const { createManifestRoutes, createInvokeRoutes } = await import("@stwd/plugin-capabilities");
   const ctx = await buildStewardAppContext();
@@ -179,7 +182,7 @@ beforeAll(async () => {
   apiApp.route("/capabilities", createManifestRoutes(ctx));
   apiApp.route("/capabilities", createInvokeRoutes(ctx));
 
-  // ── seed: tenant, agent, p256 signer (OPERATOR STEP), capability + grant ─────
+  // Seed a tenant, agent, P-256 signer, capability, and grant.
   tenantId = `t-a3-${crypto.randomUUID()}`;
   agentId = `a-a3-${crypto.randomUUID()}`;
   capName = "github.pr.comment";
@@ -244,6 +247,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
   globalThis.fetch = realFetch;
+  const proxy = await import("@stwd/proxy/src/handlers/proxy");
+  const { checkProxyRateLimit } = await import("@stwd/proxy/src/middleware/redis-enforcement");
+  proxy.__setCheckProxyRateLimitForTests(checkProxyRateLimit);
   await closeDb().catch(() => {});
   for (const k of [
     "STEWARD_PGLITE_MEMORY",
@@ -253,6 +259,7 @@ afterAll(async () => {
     "STEWARD_PROXY_REQUEST_SIGNING_SECRET",
     "STEWARD_PROXY_ALLOWED_HOSTS",
     "STEWARD_PROXY_URL",
+    "STEWARD_PROXY_DEV_MODE",
   ]) {
     delete process.env[k];
   }

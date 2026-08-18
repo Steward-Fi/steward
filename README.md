@@ -90,7 +90,10 @@ function App() {
 
 Components include `StewardLogin`, `StewardAuthGuard`, `StewardUserButton`, `StewardTenantPicker`, `WalletOverview`, `PolicyControls`, `ApprovalQueue`, `SpendDashboard`, and `TransactionHistory`.
 
-## Packages
+## Core packages
+
+This is a selected package overview. Each `packages/*/package.json` manifest is the source of truth
+for package name, version, and publication status.
 
 | Package | Description |
 |---|---|
@@ -111,8 +114,10 @@ Components include `StewardLogin`, `StewardAuthGuard`, `StewardUserButton`, `Ste
 ```bash
 git clone https://github.com/Steward-Fi/steward.git && cd steward
 cp .env.example .env
-# Set STEWARD_MASTER_PASSWORD, POSTGRES_PASSWORD, STEWARD_PLATFORM_KEYS,
-# STEWARD_SESSION_SECRET, and STEWARD_JWT_SECRET in .env.
+# Set the production-required values documented in .env.example, including
+# STEWARD_MASTER_PASSWORD, POSTGRES_PASSWORD, STEWARD_JWT_SECRET,
+# STEWARD_EMAIL_CODE_SECRET, STEWARD_KDF_SALT, STEWARD_AUDIT_HMAC_KEY,
+# STEWARD_EXECUTION_AUTH_SECRET, and STEWARD_PROXY_REQUEST_SIGNING_SECRETS.
 docker compose up -d
 curl http://127.0.0.1:3200/ready
 ```
@@ -132,13 +137,18 @@ Embedded mode uses PGLite, an in-process PostgreSQL-compatible database through 
 | Variable | Description |
 |---|---|
 | `STEWARD_MASTER_PASSWORD` | Derives vault encryption keys. There is no recovery if it is lost. |
+| `STEWARD_KDF_SALT` | Per-deployment random salt for vault key derivation; required in production. |
 | `DATABASE_URL` | PostgreSQL connection string, not needed in embedded mode. |
-| `STEWARD_SESSION_SECRET` | JWT signing secret, defaults to the master password. |
-| `REDIS_URL` | Redis for rate limiting and the token store, optional. |
+| `STEWARD_JWT_SECRET` | Canonical JWT signing secret; required for server deployments. `STEWARD_SESSION_SECRET` is only a deprecated compatibility alias. |
+| `STEWARD_EMAIL_CODE_SECRET` | Dedicated HMAC key for email authentication codes; required in production. |
+| `STEWARD_AUDIT_HMAC_KEY` | Dedicated HMAC key for the tamper-evident audit chain; required in production. |
+| `STEWARD_EXECUTION_AUTH_SECRET` | Separate rotation key list for governed provider execution. |
+| `REDIS_URL` | Redis for rate limiting and token storage; required by the production proxy unless its explicit soft-fail override is enabled. |
 | `RESEND_API_KEY` | Email magic-link authentication, optional. |
 | `PASSKEY_RP_ID` | WebAuthn relying-party domain, optional. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth, optional. |
 | `X_CLIENT_ID` / `X_CLIENT_SECRET` | Provider-account X OAuth connect and lifecycle recovery, optional. Distinct from human sign-in credentials. |
+| `GOOGLE_PROVIDER_CLIENT_ID` / `GOOGLE_PROVIDER_CLIENT_SECRET` | Google workspace provider-account OAuth and governed execution, optional. Both API and proxy processes require the same client credentials when enabled. |
 | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | Discord OAuth, optional. |
 
 See [`.env.example`](.env.example) for the full list.

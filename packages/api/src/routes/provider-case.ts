@@ -1,5 +1,5 @@
 /**
- * PR5 correlated case-evidence routes.
+ * Correlated case-evidence routes.
  *
  *   GET /v2/provider-actions/:id/case      → ProviderCaseManifestV1 (manifest only)
  *   GET /v2/provider-actions/:id/evidence  → ProviderCaseEvidenceV1 (manifest + signed bundle)
@@ -15,9 +15,8 @@
  * Scoping note (spec §5.2): the shared gate admits tenant `owner`/`admin`
  * sessions; those callers may read ANY workspace in their tenant, so we
  * authorize all tenant workspace ids. Workspace-scoped `workspace_admin` /
- * `workspace_auditor` session access is deferred ("if later added", §5.2) since
- * the session gate carries a tenant role, not a workspace role. Reported as a
- * design note in the PR body.
+ * `workspace_auditor` sessions are not accepted because the session gate carries
+ * a tenant role rather than a workspace role.
  */
 
 import { getDb, workspaces } from "@stwd/db";

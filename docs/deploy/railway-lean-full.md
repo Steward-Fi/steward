@@ -390,10 +390,10 @@ signatures, but do not set it), `STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE=false`
 the proxy holds `STEWARD_MASTER_PASSWORD` + `STEWARD_KDF_SALT` because it
 decrypts injected secrets itself. that means the proxy and the API currently
 share the same encryption trust domain: a full compromise of either process can
-decrypt tenant secrets. this is acceptable for now (both run the same image, same
-operator, same VPC) but it is NOT isolation — a future hardening step is to move
-decryption behind a dedicated KMS/enclave so neither the API nor the proxy holds
-the raw master password. document this in the threat model when the split lands.
+decrypt tenant secrets. this deployment is therefore a co-located trust domain,
+not process or custody isolation. operators that require isolation must use a
+supported external-custody design; the Railway topology documented here does not
+provide that boundary.
 
 the proxy's own defense-in-depth (independent of that tradeoff): mandatory JWT
 `api:proxy` scope, HMAC proof-of-possession request signatures (prod), an

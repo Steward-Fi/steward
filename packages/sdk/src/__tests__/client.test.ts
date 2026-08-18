@@ -1129,11 +1129,13 @@ describe("HTTP request building", () => {
     await makeClient().signTransaction("agent-1", tx, {
       signerId: "signer-tx-1",
       signerSecret: "secret-tx-1",
+      idempotencyKey: "stable-transfer-1",
     });
     expect(lastCapture?.method).toBe("POST");
     expect(lastCapture?.url).toBe("https://api.steward.example/vault/agent-1/sign");
     expect(lastCapture?.headers["x-steward-signer-id"]).toBe("signer-tx-1");
     expect(lastCapture?.headers["x-steward-signer-secret"]).toBe("secret-tx-1");
+    expect(lastCapture?.headers["idempotency-key"]).toBe("stable-transfer-1");
     expect(lastCapture?.body).toEqual(tx);
   });
 
@@ -1335,13 +1337,18 @@ describe("HTTP request building", () => {
         referenceId: "transfer-ref-1",
         sponsor: true,
       },
-      { signerId: "signer-transfer-1", signerSecret: "secret-transfer-1" },
+      {
+        signerId: "signer-transfer-1",
+        signerSecret: "secret-transfer-1",
+        idempotencyKey: "stable-action-transfer-1",
+      },
     );
 
     expect(lastCapture?.method).toBe("POST");
     expect(lastCapture?.url).toBe("https://api.steward.example/vault/agent-1/actions/transfer");
     expect(lastCapture?.headers["x-steward-signer-id"]).toBe("signer-transfer-1");
     expect(lastCapture?.headers["x-steward-signer-secret"]).toBe("secret-transfer-1");
+    expect(lastCapture?.headers["idempotency-key"]).toBe("stable-action-transfer-1");
     expect(lastCapture?.body).toMatchObject({
       token: "0x4200000000000000000000000000000000000006",
       referenceId: "transfer-ref-1",

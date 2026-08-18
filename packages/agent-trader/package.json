@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
-    "build": "tsc --noEmit"
+    "build": "tsc --noEmit",
+    "test": "bun test src/__tests__"
   },
   "dependencies": {
     "@stwd/redis": "workspace:*",

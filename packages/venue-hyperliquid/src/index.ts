@@ -259,15 +259,6 @@ export const usdSendResultSchema = z.object({
   raw: z.unknown().optional(),
 });
 export type UsdSendResult = z.infer<typeof usdSendResultSchema>;
-export const usdSendParamsSchema = z.object({
-  destination: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-  amount: z
-    .union([z.string(), z.number()])
-    .refine((v) => /^\d+(?:\.\d+)?$/.test(typeof v === "number" ? String(v) : v.trim()), {
-      message: "amount must be a decimal string",
-    })
-    .refine((v) => Number(v) > 0, { message: "amount must be positive" }),
-});
 export type ApproveBuilderFeeParams = {
   builder: string;
   maxFeeRate: string;

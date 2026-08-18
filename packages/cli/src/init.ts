@@ -67,10 +67,9 @@ function renderEnv(options: InitOptions): string {
     "STEWARD_MASTER_PASSWORD=" + hex(32),
     "STEWARD_JWT_SECRET=" + hex(32),
     "STEWARD_EMAIL_CODE_SECRET=" + hex(32),
-    // PR4 provider execution authorization key rotation list. The active first
+    // provider execution authorization key rotation list. The active first
     // entry signs and all entries verify. Keep this separate from JWT material.
     "STEWARD_EXECUTION_AUTH_SECRET=v1:" + hex(32),
-    "STEWARD_SESSION_SECRET=" + hex(32),
     "STEWARD_KDF_SALT=" + hex(32),
     // This env sets NODE_ENV=production with no STEWARD_KMS_PROVIDER, so the
     // vault resolves to `local` custody (plaintext key in app memory at sign
@@ -96,8 +95,8 @@ function renderEnv(options: InitOptions): string {
     "# Tenant API key (X-Steward-Key). Machine credential the CLI falls back to",
     "# for non-interactive agent/secret/policy/approval calls when STEWARD_TOKEN is unset.",
     "STEWARD_TENANT_KEY=",
-    "RPC_URL=https://mainnet.base.org",
-    "CHAIN_ID=8453",
+    "RPC_URL=https://sepolia.base.org",
+    "CHAIN_ID=84532",
     "REDIS_URL=redis://redis:6379",
     "STEWARD_PROXY_REQUEST_SIGNING_SECRETS=" + hex(32),
     "APP_URL=https://steward.localhost",

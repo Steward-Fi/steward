@@ -37,7 +37,7 @@ export interface AgentTraderConfig {
   intervalSeconds: number;
   /** Disabled agents are registered but their loops are never started */
   enabled: boolean;
-  /** Chain to submit transactions on (defaults to Base mainnet 8453) */
+  /** Chain to submit transactions on (defaults to Base Sepolia 84532). */
   chainId?: number;
   /** DEX portal/router address for swap calldata encoding */
   portalAddress?: string;
@@ -118,7 +118,7 @@ export function loadConfig(): TraderConfig {
 
   // Merge: file takes precedence, env vars override the connection block
   const steward: StewardConnection = {
-    apiUrl: process.env.STEWARD_API_URL ?? file.steward?.apiUrl ?? "http://localhost:3000",
+    apiUrl: process.env.STEWARD_API_URL ?? file.steward?.apiUrl ?? "http://localhost:3200",
     tenantId: process.env.STEWARD_TENANT_ID ?? file.steward?.tenantId ?? "default",
     apiKey: process.env.STEWARD_API_KEY ?? file.steward?.apiKey ?? "",
   };

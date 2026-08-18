@@ -90,11 +90,9 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
   }
 
   private sweepMemory(now: number): void {
-    // Evict EXPIRED entries only. Previously this also evicted live records
-    // oldest-first once the map hit the cap, which silently dropped replay
-    // protection for in-flight fund movements under key flooding: a retried
-    // request whose record was evicted would re-execute. Saturation with live
-    // records is handled by the claim path failing closed instead.
+    // Evict expired entries only. Live records preserve replay protection for
+    // in-flight fund movements; the claim path fails closed when they saturate
+    // the bounded map.
     for (const [entryKey, entry] of this.memory) {
       if (entry.expiresAt <= now) this.memory.delete(entryKey);
     }

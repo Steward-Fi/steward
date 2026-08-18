@@ -3,10 +3,9 @@
  * transient failures (serialization errors, seq-index races) — not every
  * unique violation that happens to occur inside the retried unit of work.
  *
- * Before the fix, a bare 23505 / generic "duplicate key value" text matched,
- * so a caller's OWN unique conflict (e.g. an idempotency-key violation in a
- * mutation) retried the whole transaction 5 times: wasted work, and an
- * unearned reliance on the caller's retry-idempotency contract.
+ * A bare 23505 or generic "duplicate key value" error may describe a caller's
+ * own unique conflict, such as an idempotency-key violation. Retrying it wastes
+ * work and creates unearned reliance on the caller's idempotency contract.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { withTenantAuditedTransaction } from "../audit-chain";

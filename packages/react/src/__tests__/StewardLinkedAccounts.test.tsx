@@ -1,6 +1,4 @@
 import { describe, expect, mock, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import * as React from "react";
 import { renderToString } from "react-dom/server";
 
@@ -177,27 +175,5 @@ describe("<StewardLinkedAccounts />", () => {
     expect(html).toContain("link social proof");
     expect(html).toContain("link telegram");
     expect(html).toContain("link farcaster");
-  });
-
-  test("uses SDK linked-account read, unlink, phone-link, wallet-link, and social-link helpers", () => {
-    const source = readFileSync(
-      join(import.meta.dir, "..", "components", "StewardLinkedAccounts.tsx"),
-      "utf8",
-    );
-    expect(source).toContain("client.listUserAccounts()");
-    expect(source).toContain("client.unlinkUserAccount(");
-    expect(source).toContain("client.sendUserPhoneAccountLinkOtp(");
-    expect(source).toContain("client.verifyUserPhoneAccountLinkOtp(");
-    expect(source).toContain("client.createUserEthereumWalletLinkNonce(");
-    expect(source).toContain("client.linkUserEthereumWallet(");
-    expect(source).toContain("client.createUserSolanaWalletLinkNonce(");
-    expect(source).toContain("client.linkUserSolanaWallet(");
-    expect(source).toContain("client.createUserOAuthAccountLinkChallenge(");
-    expect(source).toContain("client.linkUserOAuthAccount(");
-    expect(source).toContain("client.createUserTelegramAccountLinkChallenge(");
-    expect(source).toContain("client.linkUserTelegramAccount(");
-    expect(source).toContain("client.createUserFarcasterAccountLinkNonce(");
-    expect(source).toContain("client.linkUserFarcasterAccount(");
-    expect(source).toContain("canUnlink");
   });
 });

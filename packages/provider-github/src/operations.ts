@@ -1,9 +1,9 @@
 /**
  * operations.ts — GitHub provider-action operation schemas + canonical action
- * construction (PR2 spec §2.2, §3.10).
+ * construction (action-creation spec §2.2, §3.10).
  *
  * This adapter owns method, origin, path construction, header selection, and
- * body shape for the two PR2 operations. It validates operation ARGUMENTS
+ * body shape for the two action-creation operations. It validates operation ARGUMENTS
  * strictly (fail closed with stable CANON_* codes), builds a raw internal HTTP
  * representation, and runs it through the ONE shared canonicalizer
  * (`canonicalizeRawInternalAction`) so the action digest matches the golden

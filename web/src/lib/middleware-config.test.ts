@@ -1,14 +1,8 @@
 // @ts-nocheck
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
-const middlewareSource = readFileSync(join(import.meta.dir, "..", "middleware.ts"), "utf8");
-const nextConfigSource = readFileSync(join(import.meta.dir, "..", "..", "next.config.ts"), "utf8");
-const providersSource = readFileSync(
-  join(import.meta.dir, "..", "components", "providers.tsx"),
-  "utf8",
-);
+import { NextRequest } from "next/server";
+import nextConfig from "../../next.config";
+import { config, middleware } from "../middleware";
 
 /**
  * SEC-155/SEC-156: middleware matcher anchoring + cross-origin isolation
@@ -16,8 +10,7 @@ const providersSource = readFileSync(
  * (see components/providers.test.ts).
  */
 describe("middleware matcher anchoring (SEC-155)", () => {
-  const matcherMatch = middlewareSource.match(/source:\s*\n?\s*"([^"]+)"/);
-  const pattern = matcherMatch?.[1] ?? "";
+  const pattern = config.matcher[0].source;
 
   test("the api exclusion is anchored to api/ only", () => {
     expect(pattern).toContain("(?!api/|");
@@ -39,26 +32,16 @@ describe("middleware matcher anchoring (SEC-155)", () => {
 });
 
 describe("cross-origin isolation headers (SEC-156)", () => {
-  test("middleware sets COOP same-origin-allow-popups (keeps OAuth popup opener)", () => {
-    expect(middlewareSource).toContain(
-      '["Cross-Origin-Opener-Policy", "same-origin-allow-popups"]',
-    );
-    // Must NOT be plain same-origin — that severs window.opener for the OAuth
-    // popup flow once the popup navigates cross-origin.
-    expect(middlewareSource).not.toContain('["Cross-Origin-Opener-Policy", "same-origin"]');
+  test("middleware response preserves OAuth popups and restricts resource embedding", () => {
+    const response = middleware(new NextRequest("https://steward.example/dashboard"));
+    expect(response.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin-allow-popups");
+    expect(response.headers.get("Cross-Origin-Resource-Policy")).toBe("same-origin");
   });
 
-  test("middleware sets CORP same-origin", () => {
-    expect(middlewareSource).toContain('"Cross-Origin-Resource-Policy"');
-    expect(middlewareSource).toContain('"same-origin"');
-  });
-
-  test("static-asset headers in next.config.ts mirror COOP/CORP", () => {
-    expect(nextConfigSource).toContain('"Cross-Origin-Opener-Policy"');
-    expect(nextConfigSource).toContain('"Cross-Origin-Resource-Policy"');
-  });
-
-  test("no stale web/vercel.json CSP references remain", () => {
-    expect(providersSource).not.toContain("vercel.json");
+  test("static-asset responses mirror the middleware policy", async () => {
+    const rules = await nextConfig.headers();
+    const headers = new Map(rules[0].headers.map(({ key, value }) => [key, value]));
+    expect(headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin-allow-popups");
+    expect(headers.get("Cross-Origin-Resource-Policy")).toBe("same-origin");
   });
 });

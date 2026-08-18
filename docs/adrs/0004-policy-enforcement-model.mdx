@@ -100,7 +100,7 @@ These are real wins. The overclaim is not "policies work" — they do —
 it's an unqualified product-wide enforcement claim. The stronger execution
 authorization boundary is earned only for the enrolled primary EVM sign path.
 
-## Decision (future direction, sketched)
+## Stronger boundary not provided by the current deployment
 
 The way to make the enforcement claim stronger is **process
 separation**: move the vault into a dedicated signer process that
@@ -131,16 +131,14 @@ In that model:
   compromise the signer itself (a smaller, more auditable
   codebase).
 
-This is **not implemented in v1.** It is on the roadmap as part of
-"production hardening." We deliberately shipped the simpler,
-co-located model first because:
+This process-separated signer is **not implemented**. The supported deployment
+model is co-located because:
 
 - It is enough for the self-hosted, single-operator use case.
 - A process split adds operational complexity (two more services
   in Compose, IPC, a signing-key distribution story).
-- The interface contract (`evaluate → sign`) is cleanly factorable
-  when we do split — `PolicyEngine` and `Vault` are already in
-  separate packages.
+- `PolicyEngine` and `Vault` are separate code packages but not separate
+  security principals or processes.
 
 ## Consequences
 
@@ -150,12 +148,9 @@ co-located model first because:
 - **Negative:** the security boundary is "trust the API process,"
   which is a weaker claim than "trust the vault process." We need
   to communicate this honestly.
-- **Honesty obligation:** `VISION.md` previously said policies are
-  "enforced at the cryptographic signing layer." They are not.
-  They are enforced in the API process, by convention, before
-  the vault signs. That is a meaningful protection but it is not
-  a cryptographic one. The vision doc should be updated to
-  reflect this.
+- **Honesty obligation:** policies are enforced in the API process before the
+  vault signs. That is meaningful application-layer protection, not a
+  cryptographic or process-isolated enforcement boundary.
 
 ## Related
 

@@ -48,6 +48,40 @@ export async function allocateEvmNonce(input: {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`evm-nonce:${lockKey}`}))`);
       }
 
+      // A transport failure after submission cannot prove whether the network
+      // accepted the transaction. Never reuse such a nonce while it is still at
+      // or ahead of the chain's pending nonce. Once the pending nonce advances
+      // past it, the chain itself proves the slot was consumed and the fence can
+      // be removed safely.
+      await tx
+        .delete(evmWalletNonceInflight)
+        .where(
+          and(
+            eq(evmWalletNonceInflight.walletAddress, walletAddress),
+            eq(evmWalletNonceInflight.chainId, input.chainId),
+            sql`${evmWalletNonceInflight.state} in ('broadcasting', 'unknown')`,
+            sql`${evmWalletNonceInflight.nonce} < ${pendingNonce}`,
+          ),
+        );
+      const [uncertain] = await tx
+        .select({ nonce: evmWalletNonceInflight.nonce })
+        .from(evmWalletNonceInflight)
+        .where(
+          and(
+            eq(evmWalletNonceInflight.walletAddress, walletAddress),
+            eq(evmWalletNonceInflight.chainId, input.chainId),
+            sql`${evmWalletNonceInflight.state} in ('broadcasting', 'unknown')`,
+            sql`${evmWalletNonceInflight.nonce} >= ${pendingNonce}`,
+          ),
+        )
+        .orderBy(asc(evmWalletNonceInflight.nonce))
+        .limit(1);
+      if (uncertain) {
+        throw new Error(
+          `Nonce ${uncertain.nonce} has an unresolved broadcast outcome; reconcile it before submitting another transaction`,
+        );
+      }
+
       // Gap recovery: reclaim the lowest previously-dropped nonce that is still
       // at or ahead of the chain's pending nonce. Dropped nonces below the
       // pending nonce are already consumed/replaced on-chain and must not be
@@ -126,6 +160,54 @@ export async function allocateEvmNonce(input: {
       return nonce;
     });
   });
+}
+
+async function setEvmNonceState(input: {
+  walletAddress: Address;
+  chainId: number;
+  nonce: number;
+  state: "broadcasting" | "unknown";
+}): Promise<void> {
+  const walletAddress = input.walletAddress.toLowerCase() as Address;
+  const lockKey = `${input.chainId}:${walletAddress}`;
+
+  await withNonceLock(lockKey, async () => {
+    const updated = await getDb().transaction(async (tx) => {
+      if (usesAdvisoryLock()) {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`evm-nonce:${lockKey}`}))`);
+      }
+      return tx
+        .update(evmWalletNonceInflight)
+        .set({ state: input.state, updatedAt: new Date() })
+        .where(
+          and(
+            eq(evmWalletNonceInflight.walletAddress, walletAddress),
+            eq(evmWalletNonceInflight.chainId, input.chainId),
+            eq(evmWalletNonceInflight.nonce, input.nonce),
+          ),
+        )
+        .returning({ nonce: evmWalletNonceInflight.nonce });
+    });
+    if (updated.length !== 1) throw new Error("Allocated EVM nonce is missing");
+  });
+}
+
+/** Fence an allocated nonce immediately before the irreversible RPC call. */
+export async function markEvmNonceBroadcasting(input: {
+  walletAddress: Address;
+  chainId: number;
+  nonce: number;
+}): Promise<void> {
+  await setEvmNonceState({ ...input, state: "broadcasting" });
+}
+
+/** Preserve a nonce whose broadcast result is ambiguous until chain reconciliation. */
+export async function markEvmNonceSubmissionUnknown(input: {
+  walletAddress: Address;
+  chainId: number;
+  nonce: number;
+}): Promise<void> {
+  await setEvmNonceState({ ...input, state: "unknown" });
 }
 
 /**

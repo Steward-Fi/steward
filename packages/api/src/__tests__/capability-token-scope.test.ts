@@ -3,12 +3,11 @@
  * must NOT authenticate as a general agent credential on the tenant surface.
  *
  * The capability issuance layer (packages/plugin-capabilities) mints short-lived
- * tokens documented as "authorizes EXACTLY this capability and nothing else".
- * Before the fix they also carried the broad `agent` scope, and tenantAuth
- * accepted any HS256 `scope === "agent"` bearer — so the "least-privilege"
- * token worked on every agent-token endpoint (trade-session self-management,
- * token-status reads, policy reads, ...). These tests exercise the REAL app +
- * tenantAuth against an in-memory PGLite db and assert both halves of the fix:
+ * tokens that authorize exactly one capability. They must not carry the broad
+ * `agent` scope or pass tenant authentication for unrelated agent-token routes
+ * such as trade-session self-management, token-status reads, or policy reads.
+ * These tests exercise the real app and tenantAuth against an in-memory PGLite
+ * database and assert both sides of the boundary:
  *
  *   1. tenantAuth refuses any agent token carrying a `cap:` scope (even one
  *      that also stamps the broad `agent` scope — defense in depth).

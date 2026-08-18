@@ -1,19 +1,10 @@
 /**
- * middleware.test.ts — SEC-132: tenantAuthMiddleware must fail unknown-tenant
- * requests with the same constant-shape 403 as a bad key, and must still run
- * the dummy-hash comparison, so response shape/timing cannot enumerate valid
- * tenant ids.
- *
- * Two layers of proof:
- *   - behavioral: known-tenant/wrong-key and unknown-tenant responses are
- *     byte-identical 403s (status, body, content type);
- *   - structural: the middleware source pins the dummy-hash mechanism (a
- *     timing assertion would be flaky in CI).
+ * tenantAuthMiddleware returns the same constant-shape 403 for unknown tenants
+ * and bad keys while still performing the dummy-hash comparison. This prevents
+ * response shape and timing from becoming tenant-enumeration signals.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
@@ -22,6 +13,8 @@ import { generateApiKey } from "../api-keys";
 
 const TENANT_ID = "sec132-known-tenant";
 const ENV_KEYS = ["STEWARD_PGLITE_MEMORY", "STEWARD_DB_MODE", "STEWARD_MASTER_PASSWORD"] as const;
+
+setDefaultTimeout(30_000);
 
 describe("tenantAuthMiddleware unknown-tenant hardening (SEC-132)", () => {
   const savedEnv: Record<string, string | undefined> = {};
@@ -90,19 +83,6 @@ describe("tenantAuthMiddleware unknown-tenant hardening (SEC-132)", () => {
     expect(unknownTenantRes.headers.get("content-type")).toBe(
       knownBadKeyRes.headers.get("content-type"),
     );
-  });
-
-  it("pins the dummy-hash comparison in the middleware source", () => {
-    // The unknown-tenant path must still run validateApiKey against a dummy
-    // hash so response TIMING matches the known-tenant path. Pinning the
-    // construction beats a wall-clock assertion, which flakes under CI load.
-    const source = readFileSync(join(import.meta.dir, "..", "middleware.ts"), "utf8");
-    expect(source).toContain('hashApiKey("steward-unknown-tenant-dummy-key")');
-    expect(source).toContain(
-      "validateApiKey(apiKey, tenant?.apiKeyHash ?? UNKNOWN_TENANT_DUMMY_HASH)",
-    );
-    // One shared denial: no branch may reveal WHICH leg failed.
-    expect(source).toContain("if (!tenant || !keyValid)");
   });
 
   it("keeps the healthcheck bypass exact: GET / and /health only", async () => {

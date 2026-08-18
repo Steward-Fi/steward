@@ -1,8 +1,7 @@
 /**
- * SEC-166: pin the Workers (neon-http) audit-append posture.
+ * Pin the Workers (neon-http) audit-append posture.
  *
- * CLOUDFLARE.md previously claimed advisory locks are unused; in reality the
- * audit chain acquires `pg_advisory_xact_lock` on every non-PGLite append
+ * The audit chain acquires `pg_advisory_xact_lock` on every non-PGLite append
  * (`appendAuditEvent`, `withTenantAuditedTransaction`). On Workers the point
  * is moot today: drizzle's neon-http driver throws
  * "No transactions support in neon-http driver" from `db.transaction()`, so

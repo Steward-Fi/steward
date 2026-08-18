@@ -4,7 +4,7 @@ import { join, relative } from "node:path";
 import { RAW_EVM_SIGN_EXPECTED_COUNTS, RAW_EVM_SIGN_INVENTORY } from "@stwd/shared";
 
 /**
- * Repository-wide CI guard for the PR4 execution gateway raw-signer inventory.
+ * Repository-wide CI guard for the execution gateway raw-signer inventory.
  *
  * This scans EVERY production TypeScript file under packages/api/src (excluding
  * __tests__) and counts raw member-call `.signTransaction(` sites in ANY form

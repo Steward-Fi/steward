@@ -4,6 +4,7 @@ import { StewardProvider, useAuth } from "@stwd/react";
 import { createElement, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { clearAuthToken, setAuthToken, steward } from "@/lib/api";
 import { STEWARD_API_URL } from "@/lib/steward-api-url";
+import { syncLegacyAuthToken } from "./auth-token-sync";
 
 // Pre-import @simplewebauthn/browser so it's in the client bundle.
 import "@simplewebauthn/browser";
@@ -64,16 +65,14 @@ function AuthTokenSync({ children }: { children: ReactNode }) {
   const sessionToken = auth.session?.token ?? null;
 
   useEffect(() => {
-    if (!auth.isAuthenticated) {
-      lastToken.current = null;
-      clearAuthToken();
-      return;
-    }
-    const token = sessionToken ?? auth.getToken();
-    if (token && token !== lastToken.current) {
-      lastToken.current = token;
-      setAuthToken(token);
-    }
+    lastToken.current = syncLegacyAuthToken({
+      isAuthenticated: auth.isAuthenticated,
+      sessionToken,
+      lastToken: lastToken.current,
+      getToken: auth.getToken,
+      setToken: setAuthToken,
+      clearToken: clearAuthToken,
+    });
   }, [auth.isAuthenticated, auth.getToken, auth.activeTenantId, sessionToken]);
 
   return <>{children}</>;

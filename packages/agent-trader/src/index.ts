@@ -21,7 +21,7 @@ import { createConfiguredWebhookDeliveryStore } from "./webhook-delivery-store.j
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  logInfo("agent-trader starting", { version: "0.3.0" });
+  logInfo("agent-trader starting");
 
   // 1. Config
   let config: ReturnType<typeof loadConfig>;

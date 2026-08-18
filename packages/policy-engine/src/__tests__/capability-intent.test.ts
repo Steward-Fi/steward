@@ -646,7 +646,7 @@ describe("capability-intent — multi-rule composition (all-must-pass)", () => {
 });
 
 describe("capability-intent — composeCapabilityIntentDecision (canonical precedence)", () => {
-  // The canonical composition (master-plan §5.3 / PR2 spec §6.3):
+  // Canonical policy composition (§5.3 / §6.3):
   //   1. malformed/unknown rule config or unavailable input => hard_deny
   //   2. any matching hard deny (deny effect OR failed hard constraint) => hard_deny
   //   3. else any matching require-approval => approval_required

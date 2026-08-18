@@ -58,6 +58,7 @@ beforeAll(async () => {
   // exercises the client's HMAC signer against the proxy verifier.
   process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
   process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET = SIGNING_SECRET;
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   // api.openai.com is already in the direct-proxy + secret-route default
   // allowlists, but set it explicitly for hermeticity.
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.openai.com";
@@ -119,6 +120,7 @@ afterAll(async () => {
   delete process.env.STEWARD_JWT_SECRET;
   delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
   delete process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET;
+  delete process.env.STEWARD_PROXY_DEV_MODE;
   delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
 });
 

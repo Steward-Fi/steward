@@ -5,7 +5,6 @@ import {
   aggregationQueriesForPolicies,
   aggregationQueryKey,
 } from "@stwd/policy-engine";
-import { getAggregationSnapshot } from "@stwd/redis";
 import type { ApiResponse, AppVariables, PolicyRule, SignRequest } from "@stwd/shared";
 import { toCaip2 } from "@stwd/shared";
 import type { Context } from "hono";
@@ -322,13 +321,45 @@ async function getTransactionStats(ctx: StewardAppContext, agentId: string, chai
   };
 }
 
-async function loadAggregations(policySet: PolicyRule[], request: SignRequest) {
+async function loadAggregations(
+  ctx: StewardAppContext,
+  policySet: PolicyRule[],
+  request: SignRequest,
+) {
+  const { and, eq, gt, lte, sql, transactions } = await import("@stwd/db");
+  const now = Date.now();
   const queries = aggregationQueriesForPolicies(policySet, request);
   const snapshots = new Map<string, bigint>();
   await Promise.all(
     queries.map(async (query) => {
-      const value = await getAggregationSnapshot(query, Date.now());
-      if (value !== null) snapshots.set(aggregationQueryKey(query), value);
+      const scopeFilter =
+        query.scope === "per_recipient"
+          ? sql`lower(${transactions.toAddress}) = ${query.scopeKey.toLowerCase()}`
+          : query.scope === "per_chain"
+            ? eq(transactions.chainId, Number(query.scopeKey))
+            : sql`true`;
+      const aggregate =
+        query.metric === "value_sum"
+          ? sql<string>`coalesce(sum((${transactions.value})::numeric), 0)::text`
+          : query.metric === "tx_count"
+            ? sql<string>`count(*)::text`
+            : sql<string>`count(distinct lower(${transactions.toAddress}))::text`;
+      const [row] = await ctx.db
+        .select({ value: aggregate })
+        .from(transactions)
+        .where(
+          and(
+            eq(transactions.agentId, query.agentId),
+            gt(transactions.createdAt, new Date(now - query.windowSeconds * 1000)),
+            lte(transactions.createdAt, new Date(now)),
+            sql`${transactions.status} in ('signed', 'broadcast', 'confirmed')`,
+            scopeFilter,
+          ),
+        );
+      if (row?.value === undefined || !/^\d+$/.test(row.value)) {
+        throw new Error("invalid durable aggregation result");
+      }
+      snapshots.set(aggregationQueryKey(query), BigInt(row.value));
     }),
   );
   return aggregationLookupFromMap(snapshots);
@@ -528,7 +559,7 @@ export function createEvmSwapRoutes(ctx: StewardAppContext): Hono<{ Variables: A
       const [stats, conditionSets, aggregations] = await Promise.all([
         getTransactionStats(ctx, parsed.data.agentId, intent.chainId),
         loadConditionSets(ctx, tenantId, policySet),
-        loadAggregations(policySet, request),
+        loadAggregations(ctx, policySet, request),
       ]);
       const policyEvaluation = await ctx.policyEngine.evaluate(policySet, {
         request,

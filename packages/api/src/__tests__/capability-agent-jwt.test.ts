@@ -1,9 +1,8 @@
 /**
  * SEC-092 regression: the agent-facing capability surface must not be gated by
- * the TRADING scope. Before the fix, capability invoke/manifest/issuance routes
- * mounted the legacy `requireAgentJwt`, which hard-requires `trade:order` — so
- * capability-only agents were locked out and every trading agent implicitly
- * carried capability access (scope conflation). The dedicated
+ * the trading scope. Capability invoke, manifest, and issuance routes require
+ * capability-specific authority; `trade:order` neither grants that authority
+ * nor substitutes for it. The dedicated
  * `requireCapabilityAgentJwt` authenticates the same JWT but leaves
  * authorization to the capability grant + capability-intent policy
  * (default-deny) in the invoke path.
@@ -33,8 +32,8 @@ let jwksServer: Server;
 let privateKey: KeyLike;
 let app: Hono<{ Variables: AppVariables }>;
 
-async function signToken(scopes: string[]): Promise<string> {
-  return new SignJWT({ agent_id: AGENT, scopes })
+async function signToken(scopes: string[], claims: Record<string, unknown> = {}): Promise<string> {
+  return new SignJWT({ agent_id: AGENT, scopes, ...claims })
     .setProtectedHeader({ alg: "RS256", kid: KID })
     .setIssuer("eliza-cloud")
     .setAudience("steward")
@@ -51,9 +50,13 @@ beforeAll(async () => {
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => client.close());
   await getDb().insert(tenants).values({ id: TENANT, name: "Cap Gate Tenant", apiKeyHash: "hash" });
-  await getDb()
-    .insert(agents)
-    .values({ id: AGENT, tenantId: TENANT, name: AGENT, walletAddress: "0x4" });
+  await getDb().insert(agents).values({
+    id: AGENT,
+    tenantId: TENANT,
+    name: AGENT,
+    walletAddress: "0x4",
+    platformId: "platform-a",
+  });
 
   const kp = await generateKeyPair("RS256");
   privateKey = kp.privateKey;
@@ -116,5 +119,33 @@ describe("requireCapabilityAgentJwt (SEC-092)", () => {
   test("still rejects an unverifiable token (authentication unchanged)", async () => {
     const res = await probe("/cap/probe", "not-a-jwt");
     expect(res.status).toBe(401);
+  });
+
+  test("binds present tenant and platform claims to the registered principal", async () => {
+    const wrongTenant = await probe(
+      "/cap/probe",
+      await signToken([], { tenant_id: "different-tenant" }),
+    );
+    expect(wrongTenant.status).toBe(401);
+    expect(await wrongTenant.json()).toMatchObject({
+      code: "invalid-jwt",
+      reason: "invalid tenant claims",
+    });
+
+    const wrongPlatform = await probe(
+      "/cap/probe",
+      await signToken([], { tenant_id: TENANT, platform_id: "platform-b" }),
+    );
+    expect(wrongPlatform.status).toBe(401);
+    expect(await wrongPlatform.json()).toMatchObject({
+      code: "invalid-jwt",
+      reason: "invalid platform claims",
+    });
+
+    const matchingClaims = await probe(
+      "/cap/probe",
+      await signToken([], { tenant_id: TENANT, platform_id: "platform-a" }),
+    );
+    expect(matchingClaims.status).toBe(200);
   });
 });

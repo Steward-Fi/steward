@@ -27,7 +27,7 @@ const banner =
   "/**\n" +
   " * GENERATED FILE — do not edit by hand.\n" +
   " * Produced by packages/api/scripts/generate-sdk-types.ts from the OpenAPI\n" +
-  " * document (packages/api/openapi.json). Run `bun run openapi:generate` in\n" +
+  " * document (docs/api-reference/openapi.json). Run `bun run openapi:generate` in\n" +
   " * @stwd/api to regenerate after a route schema changes.\n" +
   " */\n\n";
 

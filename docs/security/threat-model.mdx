@@ -268,8 +268,9 @@ the master password as a crown jewel.
   committed `.env`).
 - Rotate it on suspicion of leak. Rotation means: generate new
   master password, re-encrypt all stored keys with a migration,
-  retire old password. Tooling for bulk re-encryption is not
-  yet shipped — this is tracked as a follow-up.
+  retire old password. Steward does not provide bulk master-key
+  re-encryption tooling; operators must not rotate this value without a
+  reviewed migration for all existing ciphertext.
 - Use OS-level access controls on the Compose host to limit who
   can read the environment of the API container.
 
@@ -355,10 +356,10 @@ engine runs in the same process, so bypassing it is an
 `import { Vault } from "@stwd/vault"` away.
 
 **What this costs us:** it is the strongest honest reason to not
-claim "enforced at the cryptographic signing layer." Until the
-vault-as-separate-process design in
-[ADR-0004](../adrs/0004-policy-enforcement-model.mdx) ships, this
-adversary defeats the entire architecture.
+claim "enforced at the cryptographic signing layer." The current
+co-located design documented in
+[ADR-0004](../adrs/0004-policy-enforcement-model.mdx) does not defend
+against this adversary.
 
 **Mitigation (operator):**
 
@@ -368,15 +369,15 @@ adversary defeats the entire architecture.
 - Network egress controls: the API only needs to reach its DB,
   Redis, and configured chain RPC endpoints. Deny everything
   else at the firewall.
-- Watch the roadmap for the process-separated signer.
+- Use a separately reviewed external-custody architecture when this threat must
+  be isolated; the default deployment does not provide a separate signer.
 
 ---
 
 ## Known limitations (summarized)
 
-- **Policies run in-process with the vault.** See ADR-0004. The
-  future direction is a separate signer with policy attestations;
-  not shipped in v1.
+- **Policies run in-process with the vault.** See ADR-0004. A separate signer
+  with policy attestations is not part of the current deployment model.
 - **JS strings cannot be reliably zeroed.** When `Vault.decrypt()`
   returns a plaintext private key, that string may remain in the V8
   / JSC heap until garbage collection. We do not hold it longer than

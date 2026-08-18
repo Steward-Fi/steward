@@ -582,12 +582,12 @@ function isAuthTokenResponseReplaySuppressedPath(pathname: string): boolean {
   return pathname === "/auth" || pathname.startsWith("/auth/");
 }
 
-// SEC-070: secret-bearing mutating routes must never have their response
-// bodies persisted to the idempotency store (Redis or memory, up to 24h).
+// Secret-bearing mutating routes must never have their response bodies
+// persisted to the idempotency store (Redis or memory, up to 24h).
 // The reservation itself is still recorded (409-on-reuse semantics are
 // preserved); the completed body is suppressed exactly like /auth token
-// responses. Named per the audit: wallet export key material, KMS decrypt
-// plaintext, and the /secrets value plane.
+// responses. This covers wallet export key material, KMS decrypt plaintext,
+// and the /secrets value plane.
 const SECRET_BEARING_RESPONSE_PATTERNS = [
   /^\/vault\/[^/]+\/export$/, // POST /vault/:agentId/export — wallet key material
   /^\/user\/me\/wallet\/export$/, // POST /user/me/wallet/export — user wallet key material

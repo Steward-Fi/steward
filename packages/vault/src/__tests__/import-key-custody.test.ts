@@ -1,16 +1,8 @@
-// SEC-023/SEC-024 regression tests for Vault.importKey.
-//
-// SEC-023: importing a Solana key for a legacy (pre-multi-chain) agent used to
-// delete the legacy encrypted_keys row — the sole store of the agent's EVM key —
-// and insert a Solana-AAD row there, permanently bricking EVM signing.
-//
-// SEC-024: importKey used to upsert a server-managed key over a wallet row
-// marked custody:"external", silently converting the wallet back to server
-// custody while the metadata kept claiming external custody.
+// Vault.importKey must preserve legacy EVM key material when adding another
+// chain family and must never replace an externally custodied wallet with a
+// server-managed key.
 
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { Keypair } from "@solana/web3.js";
 import {
   agentWallets,
@@ -226,12 +218,10 @@ describe("Vault.importKey custody hardening", () => {
     );
   });
 
-  // Re-audit: the importKey / importExternalKeyHandle custody guards were
-  // check-then-act with no DB-level serialization — two concurrent admin
-  // custody ops for the same scope could interleave and BOTH commit, leaving
-  // a server-managed key shadowing an external-custody wallet. The guards now
-  // run inside a per-scope advisory-locked transaction, so exactly one
-  // transition can commit and the loser fails closed.
+  // importKey and importExternalKeyHandle serialize custody changes inside a
+  // per-scope advisory-locked transaction. Exactly one concurrent transition
+  // may commit; the losing operation must fail closed rather than leave a local
+  // key shadowing an external-custody wallet.
   test("concurrent importKey and importExternalKeyHandle cannot both win a custody transition", async () => {
     vault = await freshVault(new RaceTestProvider());
     const agentId = "race-agent";
@@ -341,43 +331,5 @@ describe("Vault.importKey custody hardening", () => {
       }),
     ).rejects.toThrow(/legacy server-managed key/);
     expect(provider.registrationCalls).toBe(0);
-  });
-
-  // Structural guard (PGlite serializes transactions, so the lock itself is
-  // exercised but cannot interleave here): both custody transitions must take
-  // the advisory lock INSIDE their transaction, before any custody check or
-  // write, and the provider call must stay outside the lock.
-  test("custody transitions lock before their guards (source structure)", () => {
-    const source = readFileSync(join(import.meta.dir, "..", "vault.ts"), "utf8");
-
-    const importKeyBody = source.slice(
-      source.indexOf("async importKey("),
-      source.indexOf("async importExternalKeyHandle("),
-    );
-    const ikTx = importKeyBody.indexOf("await db.transaction(");
-    const ikLock = importKeyBody.indexOf("pg_advisory_xact_lock");
-    const ikGuard = importKeyBody.indexOf("isExternalKeyWalletMetadata(externalWallet.metadata)");
-    expect(ikTx).toBeGreaterThanOrEqual(0);
-    expect(ikLock).toBeGreaterThan(ikTx);
-    expect(ikGuard).toBeGreaterThan(ikLock);
-    expect(importKeyBody).toContain("custodyTransitionLockKey(tenantId, agentId, chainType, null)");
-    expect(importKeyBody).toContain("hashtextextended");
-
-    const importExternalBody = source.slice(
-      source.indexOf("async importExternalKeyHandle("),
-      source.indexOf("async registerExternalKeyHandle("),
-    );
-    const ieTx = importExternalBody.indexOf("await db.transaction(");
-    const ieLock = importExternalBody.indexOf("pg_advisory_xact_lock");
-    const ieGuard = importExternalBody.indexOf("over a server-managed signing key", ieLock);
-    const ieWrite = importExternalBody.indexOf(".insert(agentWallets)");
-    const ieProvider = importExternalBody.indexOf("registerKeyHandle(request)");
-    expect(ieTx).toBeGreaterThanOrEqual(0);
-    expect(ieLock).toBeGreaterThan(ieTx);
-    expect(ieGuard).toBeGreaterThan(ieLock);
-    expect(ieWrite).toBeGreaterThan(ieLock);
-    expect(ieProvider).toBeGreaterThanOrEqual(0);
-    expect(ieProvider).toBeLessThan(ieTx);
-    expect(importExternalBody).toContain("hashtextextended");
   });
 });

@@ -1,15 +1,8 @@
 /**
- * REAL route-level spend-cap enforcement for the vault money path.
+ * Route-level spend-cap enforcement for the vault money path.
  *
- * The audit flagged vault-send-calls-spend.test.ts as theater: it only
- * `readFileSync`'d routes/vault.ts and asserted the source *contained*
- * substrings ("getTransactionStats", "runningSpentToday += callValue", a
- * referenceId lookup). It never executed the route, so a regression that
- * silently dropped the cap check would still pass. Spend-cap ROUTE enforcement
- * and the per-batch cumulative running total had ZERO behavioral coverage.
- *
- * This drives the REAL `POST /:agentId/actions/send-calls` handler against an
- * in-memory PGLite DB and the REAL PolicyEngine, and proves behaviorally:
+ * This drives `POST /:agentId/actions/send-calls` against an in-memory PGLite DB
+ * and the PolicyEngine, proving:
  *   - a daily `spending-limit` cap denies once seeded prior spend + this op
  *     exceeds it (the route actually reads getTransactionStats().spentToday),
  *   - within a single batch the cap is evaluated against a RUNNING total, so

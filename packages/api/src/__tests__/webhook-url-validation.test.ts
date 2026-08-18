@@ -43,8 +43,6 @@ describe("webhook URL validation", () => {
   it("still allows public IPv6 and well-known NAT64 embeddings of public IPv4", () => {
     expect(validateWebhookUrl("https://[2001:4860:4860::8888]/hook")).toBeNull();
     expect(validateWebhookUrl("https://[64:ff9b::808:808]/hook")).toBeNull();
-    // IPv4-translated form with a public embedding stays allowed (no over-block).
-    expect(validateWebhookUrl("https://[::ffff:0:808:808]/hook")).toBeNull();
   });
 
   it("rejects Teredo and documentation IPv6 addresses", () => {
@@ -126,13 +124,13 @@ describe("webhook URL validation", () => {
     }
   });
 
-  it("rejects IPv4-translated ::ffff:0:0/96 and deprecated ::/96 forms at registration", () => {
-    // Parity with the delivery-time dispatcher screen (SEC-178): these forms
-    // embed an IPv4 reachable via NAT64/SIIT translators and must be refused
-    // up front, not only at delivery.
+  it("rejects non-global translation-like and deprecated IPv6 forms at registration", () => {
+    // Registration and delivery enforce the same public-address boundary for
+    // non-global IPv6 forms, including encodings that resemble IPv4 embedding.
     for (const url of [
       "https://[::ffff:0:7f00:1]/hook",
       "https://[::ffff:0:a9fe:a9fe]/hook",
+      "https://[::ffff:0:808:808]/hook",
       "https://[::7f00:1]/hook",
       "https://[::127.0.0.1]/hook",
     ]) {

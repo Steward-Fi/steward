@@ -256,8 +256,8 @@ describeWithDatabase("agent route scope enforcement", () => {
         body: JSON.stringify({}),
       });
 
-    // SEC-209: minting agent tokens is root-equivalent — a bare tenant API key
-    // is no longer sufficient by default (human admin session + recent MFA).
+    // Minting agent tokens is root-equivalent, so a bare tenant API key is not
+    // sufficient by default; callers need a human admin session with recent MFA.
     const rejected = await mintWithApiKey();
     expect(rejected.status).toBe(403);
 
@@ -277,6 +277,9 @@ describeWithDatabase("agent route scope enforcement", () => {
       expect(body.data.tenantId).toBe(TENANT_ID);
       expect(body.data.scope).toBe("agent");
       expect(body.data.scopes).toEqual(["agent"]);
+      expect(res.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+      expect(res.headers.get("Pragma")).toBe("no-cache");
+      expect(res.headers.get("Expires")).toBe("0");
 
       const [audit] = await getDb()
         .select({ actorType: auditEvents.actorType, actorId: auditEvents.actorId })
@@ -311,6 +314,28 @@ describeWithDatabase("agent route scope enforcement", () => {
       expect(body.ok).toBe(true);
       expect(body.data.agentId).toBe(AGENT_A);
     }
+  });
+
+  it("requires recent MFA for session-based agent token minting", async () => {
+    const noMfaToken = await createSessionToken(
+      "0x0000000000000000000000000000000000000001",
+      TENANT_ID,
+      { userId: OWNER_USER_ID, email: "test-ars-owner@example.test" },
+    );
+    const res = await app.request(`/agents/${AGENT_A}/token`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${noMfaToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+
+    expect(res.status).toBe(403);
+    await expect(res.json()).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("recent MFA"),
+    });
   });
 
   it("rejects agent-token, member session, missing credentials, and invalid API key for agent token minting", async () => {

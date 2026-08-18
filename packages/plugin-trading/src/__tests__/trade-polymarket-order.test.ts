@@ -49,7 +49,8 @@ import type { AppVariables } from "../services/context";
 setDefaultTimeout(30000);
 
 const TOKEN_ID = "71321045679252212594626385532706912750332728571942532289631379312455583992563";
-const COND_ID = "0xabc123";
+const COND_ID = "0xbd31dc8a20211944f6b70f31557f1001557b59905b7738480ca09bd4532f84af";
+const OTHER_COND_ID = `0x${"ab".repeat(32)}`;
 const FUNDER = "0x0985cCC0fD7C568d493874D845471D5F4B1D9c3c";
 const WALLET = "0x1111111111111111111111111111111111111111";
 
@@ -57,9 +58,14 @@ let submitSpy: ReturnType<typeof spyOn> | undefined;
 let getWalletSpy: ReturnType<typeof spyOn> | undefined;
 let buildSpy: ReturnType<typeof spyOn> | undefined;
 let fenceSpy: ReturnType<typeof spyOn> | undefined;
+let resolveMarket = async (_tokenId: string) => ({
+  conditionId: COND_ID,
+  primaryTokenId: TOKEN_ID,
+  secondaryTokenId: "52114319501245915516055106046884209969926127482827954674443846427813813222426",
+});
 
 // Inject a polymarket venue wallet WITH funder metadata so the creds resolver
-// gets past the wallet step. Whether the L2 creds resolve (Phase C) is toggled
+// gets past the wallet step. Whether the L2 credentials resolve is toggled
 // separately per test by mutating the metadata.
 function stubWallet(withFunder: boolean) {
   getWalletSpy = spyOn(Vault.prototype, "getWallet").mockImplementation((async (args: {
@@ -77,13 +83,15 @@ function stubWallet(withFunder: boolean) {
   }) as never);
 }
 
-async function seedSession(opts: {
-  allowedAssets?: string[];
-  perOrderCapUsd?: string;
-  dailyCapUsd?: string;
-  status?: "active" | "revoked";
-  walletId?: string;
-}): Promise<{ tenantId: string; agentId: string; sessionId: string }> {
+async function seedSession(
+  opts: {
+    allowedAssets?: string[];
+    perOrderCapUsd?: string;
+    dailyCapUsd?: string;
+    status?: "active" | "revoked";
+    walletId?: string;
+  } = {},
+): Promise<{ tenantId: string; agentId: string; sessionId: string }> {
   const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const tenantId = `pm-tenant-${suffix}`;
   const agentId = `pm-agent-${suffix}`;
@@ -196,7 +204,9 @@ beforeAll(async () => {
   const { createTradeRoutes } = await import("../routes/trade");
   const { testCtx } = await import("./_ctx");
   sharedTestContext = testCtx();
-  sharedTradeRoutes = createTradeRoutes(sharedTestContext);
+  sharedTradeRoutes = createTradeRoutes(sharedTestContext, {
+    resolvePolymarketMarketByToken: (tokenId) => resolveMarket(tokenId),
+  });
 });
 
 afterAll(async () => {
@@ -219,6 +229,12 @@ describe("POST /v1/trade/polymarket/order", () => {
     submitSpy = undefined;
     getWalletSpy = undefined;
     buildSpy = undefined;
+    resolveMarket = async (_tokenId: string) => ({
+      conditionId: COND_ID,
+      primaryTokenId: TOKEN_ID,
+      secondaryTokenId:
+        "52114319501245915516055106046884209969926127482827954674443846427813813222426",
+    });
   });
 
   it("rejects an order whose market is not allowlisted (400 policy-violation, no spend)", async () => {
@@ -254,11 +270,7 @@ describe("POST /v1/trade/polymarket/order", () => {
     expect(await dailySpendOf(sessionId)).toBe(0);
   });
 
-  it("SECURITY: a caller-supplied conditionId does NOT grant a non-allowlisted token", async () => {
-    // Session allowlists ONLY the market (pm:cond:<id>), not the specific token.
-    // The order route must NOT trust the caller's conditionId (the order is
-    // submitted for tokenId only), so pairing the real token with the allowlisted
-    // condition id must STILL be rejected as market-not-allowed — no bypass.
+  it("honors a condition-wide grant after verifying the token binding", async () => {
     const { tenantId, agentId, sessionId } = await seedSession({
       allowedAssets: [`pm:cond:${COND_ID}`],
     });
@@ -268,17 +280,47 @@ describe("POST /v1/trade/polymarket/order", () => {
     const res = await postOrder(app, sessionId, crypto.randomUUID(), {
       conditionId: COND_ID,
     });
+    expect(res.status).toBe(409);
+    expect(await dailySpendOf(sessionId)).toBe(0);
+  });
+
+  it("rejects a caller condition that conflicts with the verified token binding", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({
+      allowedAssets: [`pm:cond:${OTHER_COND_ID}`],
+    });
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    const res = await postOrder(app, sessionId, crypto.randomUUID(), {
+      conditionId: OTHER_COND_ID,
+    });
     expect(res.status).toBe(400);
-    const body = (await res.json()) as { code?: string; reason?: string };
-    expect(body.code).toBe("policy-violation");
-    expect(body.reason).toBe("market-not-allowed");
+    expect(await res.json()).toEqual({
+      ok: false,
+      error: "conditionId does not match the submitted tokenId",
+    });
+    expect(await dailySpendOf(sessionId)).toBe(0);
+  });
+
+  it("fails closed when the token binding cannot be verified", async () => {
+    resolveMarket = async () => {
+      throw new Error("venue unavailable");
+    };
+    const { tenantId, agentId, sessionId } = await seedSession();
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    const res = await postOrder(app, sessionId, crypto.randomUUID());
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({
+      ok: false,
+      error: "Unable to verify Polymarket market metadata",
+    });
     expect(await dailySpendOf(sessionId)).toBe(0);
   });
 
   it("SEC-041: SELL notional is floored at the CLOB best bid (low-limit cap bypass fails)", async () => {
     // perOrderCap 50. A FOK sell of 100 shares at limit 0.01 would fill at the
     // best bid (0.90): real notional ~$90 must be capped, not the caller-stated
-    // $1. Pre-fix the route sized on the caller's price and passed the gate.
+    // $1. The gate must size against the executable price, not the caller's limit.
     const { tenantId, agentId, sessionId } = await seedSession({
       perOrderCapUsd: "50",
     });
@@ -307,7 +349,7 @@ describe("POST /v1/trade/polymarket/order", () => {
     }
   });
 
-  it("SEC-041: SELL caps use the $1/share upper bound despite a lower bid", async () => {
+  it("SELL caps use the $1/share upper bound despite a lower bid", async () => {
     // A mutable best-bid snapshot cannot bound the eventual fill. 100 shares
     // can return up to $100, so a $50 cap must reject even when bid/limit are .40/.50.
     const { tenantId, agentId, sessionId } = await seedSession({
@@ -466,7 +508,7 @@ describe("POST /v1/trade/polymarket/order", () => {
     const { tenantId, agentId, sessionId } = await seedSession({});
     stubWallet(true);
     // Mock the adapter edge so the ONLY thing that can fail the order is creds
-    // resolution: pre-fix the http override + test creds would reach submit.
+    // resolution; the HTTP override and test credentials otherwise reach submit.
     buildSpy = spyOn(PolymarketExecutionAdapter.prototype, "buildSignedOrder").mockResolvedValue(
       {} as never,
     );
@@ -511,8 +553,8 @@ describe("POST /v1/trade/polymarket/order", () => {
     const app = makeApp(tenantId, agentId, tradeRoutes);
 
     // Provision funder metadata on the venue wallet + flip the route's test-only
-    // L2-creds seam so resolvePolymarketCreds resolves (Phase C wires the real
-    // secret-vault read here). The adapter network edge is stubbed so no real
+    // L2-credentials seam so resolvePolymarketCreds resolves. The adapter
+    // network edge is stubbed so no real
     // clob-client / signing runs.
     process.env.STEWARD_PM_TEST_CREDS = "1";
     stubWallet(true);
@@ -857,7 +899,7 @@ describe("POST /v1/trade/polymarket/order", () => {
     }
   });
 
-  it("submit-status-unknown (adapter throws post-submit) -> 502, KEEPS spend reserved", async () => {
+  it("submit-status-unknown is durable, auditable, and keeps spend reserved", async () => {
     const { tenantId, agentId, sessionId } = await seedSession({});
     const app = makeApp(tenantId, agentId, tradeRoutes);
 
@@ -867,20 +909,29 @@ describe("POST /v1/trade/polymarket/order", () => {
       {} as never,
     );
     // The build succeeded; the POST faults -> the order may have landed. Spend
-    // stays reserved (mirrors HL's 502 path).
+    // stays reserved (mirrors Hyperliquid's submission_unknown path).
     submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitSignedOrder").mockRejectedValue(
       new Error("socket hang up"),
     );
 
     try {
       const res = await postOrder(app, sessionId, crypto.randomUUID());
-      expect(res.status).toBe(502);
-      expect(((await res.json()) as { error?: string }).error).toContain(
-        "Trade submission status unknown",
-      );
+      expect(res.status).toBe(202);
+      expect(res.headers.get("X-Steward-Order-State")).toBe("submission_unknown");
+      const responseBody = (await res.json()) as {
+        error?: string;
+        data?: { reconciliation?: { state?: string; tokenId?: string } };
+      };
+      expect(responseBody.error).toContain("Trade submission status unknown");
+      expect(responseBody.data?.reconciliation).toMatchObject({
+        state: "submission_unknown",
+        tokenId: TOKEN_ID,
+      });
       // The order may have landed -> spend is NOT released.
       expect(await dailySpendOf(sessionId)).toBe(10);
       expect(await auditCount(tenantId, "trade.order.submitted")).toBe(0);
+      expect(await auditCount(tenantId, "trade.order.submission_unknown")).toBe(1);
+      expect(await auditCount(tenantId, "trade.order.canceled")).toBe(0);
     } finally {
       delete process.env.STEWARD_PM_TEST_CREDS;
     }

@@ -4,7 +4,9 @@
  * Parses token usage from OpenAI and Anthropic response bodies
  * and applies model-specific pricing to estimate per-request cost.
  *
- * For unknown APIs or models, returns 0 (tracked but not billed).
+ * Unknown APIs and models return zero. Known-provider responses with incomplete
+ * or invalid usage are rejected as unpriced so callers can retain their
+ * preflight reservation instead of silently undercounting tokens.
  */
 
 /** Pricing per 1K tokens (USD) */
@@ -57,13 +59,25 @@ function findModelPricing(model: string): ModelPricing | null {
 /**
  * Parse token usage from an OpenAI API response.
  */
-function parseOpenAIUsage(responseBody: any): { inputTokens: number; outputTokens: number } | null {
-  const usage = responseBody?.usage;
-  if (!usage) return null;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function nonNegativeTokenCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function parseOpenAIUsage(
+  responseBody: unknown,
+): { inputTokens: number; outputTokens: number } | null {
+  if (!isRecord(responseBody) || !isRecord(responseBody.usage)) return null;
+  const inputTokens = nonNegativeTokenCount(responseBody.usage.prompt_tokens);
+  const outputTokens = nonNegativeTokenCount(responseBody.usage.completion_tokens);
+  if (inputTokens === null || outputTokens === null) return null;
 
   return {
-    inputTokens: usage.prompt_tokens ?? 0,
-    outputTokens: usage.completion_tokens ?? 0,
+    inputTokens,
+    outputTokens,
   };
 }
 
@@ -71,15 +85,22 @@ function parseOpenAIUsage(responseBody: any): { inputTokens: number; outputToken
  * Parse token usage from an Anthropic API response.
  */
 function parseAnthropicUsage(
-  responseBody: any,
+  responseBody: unknown,
 ): { inputTokens: number; outputTokens: number } | null {
-  const usage = responseBody?.usage;
-  if (!usage) return null;
+  if (!isRecord(responseBody) || !isRecord(responseBody.usage)) return null;
+  const inputTokens = nonNegativeTokenCount(responseBody.usage.input_tokens);
+  const outputTokens = nonNegativeTokenCount(responseBody.usage.output_tokens);
+  if (inputTokens === null || outputTokens === null) return null;
 
   return {
-    inputTokens: usage.input_tokens ?? 0,
-    outputTokens: usage.output_tokens ?? 0,
+    inputTokens,
+    outputTokens,
   };
+}
+
+function readModel(value: unknown): string | null {
+  if (!isRecord(value)) return null;
+  return typeof value.model === "string" && value.model.trim() ? value.model : null;
 }
 
 /**
@@ -90,11 +111,11 @@ function parseAnthropicUsage(
  * @param responseBody - The parsed response body (needs .usage)
  * @returns Cost in USD, or 0 for unknown APIs/models
  */
-export function estimateCost(host: string, requestBody: any, responseBody: any): number {
+export function estimateCost(host: string, requestBody: unknown, responseBody: unknown): number {
   if (!KNOWN_HOSTS.has(host)) return 0;
 
   // Determine model from request or response
-  const model: string = requestBody?.model || responseBody?.model || "";
+  const model = readModel(requestBody) ?? readModel(responseBody);
   if (!model) return 0;
 
   const pricing = findModelPricing(model);

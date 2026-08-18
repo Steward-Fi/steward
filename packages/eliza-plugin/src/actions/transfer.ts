@@ -19,27 +19,32 @@ const CHAIN_IDS: Record<string, number> = {
   gnosis: 100,
 };
 
+const NATIVE_SYMBOLS: Record<string, string> = {
+  ethereum: "ETH",
+  base: "ETH",
+  "base-sepolia": "ETH",
+  bsc: "BNB",
+  "bsc-testnet": "BNB",
+  gnosis: "XDAI",
+};
+
 /**
- * Parse a human-readable amount like "0.1 ETH" or "50 USDC" into wei.
- * For now we only handle native token amounts (ETH/BNB).
- * ERC-20 transfers would need contract interaction — future work.
+ * Parse a human-readable native-token amount such as "0.1 ETH" into wei.
+ * This action supports native ETH/BNB transfers only; token-contract transfers
+ * are outside this action's contract and must use an ERC-20-aware integration.
  */
-function parseAmount(amountStr: string): { valueWei: string; symbol: string } {
+export function parseNativeAmount(amountStr: string): { valueWei: string; symbol: string } {
   const cleaned = amountStr.trim();
-  const match = cleaned.match(/^([\d.]+)\s*(\w+)?$/i);
+  const match = cleaned.match(/^(0|[1-9]\d*)(?:\.(\d{1,18}))?\s+([a-zA-Z]+)$/);
   if (!match) {
     throw new Error(`Could not parse amount: "${amountStr}". Expected format like "0.1 ETH"`);
   }
 
-  const numericValue = parseFloat(match[1]);
-  const symbol = (match[2] ?? "ETH").toUpperCase();
-
-  if (Number.isNaN(numericValue) || numericValue <= 0) {
-    throw new Error(`Invalid amount: ${numericValue}`);
-  }
-
-  // Convert to wei (18 decimals for ETH/BNB/native tokens)
-  const wei = BigInt(Math.round(numericValue * 1e18));
+  const whole = BigInt(match[1]);
+  const fractional = (match[2] ?? "").padEnd(18, "0");
+  const symbol = match[3].toUpperCase();
+  const wei = whole * 10n ** 18n + BigInt(fractional || "0");
+  if (wei <= 0n) throw new Error("Amount must be greater than zero");
   return { valueWei: wei.toString(), symbol };
 }
 
@@ -52,26 +57,26 @@ function parseAmount(amountStr: string): { valueWei: string; symbol: string } {
  */
 export const transferAction: Action = {
   name: "STEWARD_TRANSFER",
-  description: "Send tokens to an address using the Steward-managed wallet",
-  similes: ["send tokens", "transfer", "send ETH", "send SOL", "send BNB", "pay", "wire"],
+  description: "Send a chain's native EVM asset using the Steward-managed wallet",
+  similes: ["send native tokens", "transfer", "send ETH", "send BNB", "pay", "wire"],
 
   parameters: [
     {
       name: "to",
-      description: "Recipient address (0x… for EVM, base58 for Solana) or ENS name",
+      description: "Recipient EVM address (0x…)",
       required: true,
       schema: { type: "string" },
     },
     {
       name: "amount",
-      description: 'Human-readable amount (e.g. "0.1 ETH", "50 USDC")',
+      description: 'Native-asset amount with an explicit symbol (e.g. "0.1 ETH", "0.5 BNB")',
       required: true,
       schema: { type: "string" },
     },
     {
       name: "chain",
       description: "Target chain name (base, ethereum, bsc, gnosis)",
-      required: false,
+      required: true,
       schema: {
         type: "string",
         enum: ["base", "ethereum", "bsc", "gnosis", "base-sepolia", "bsc-testnet"],
@@ -107,24 +112,24 @@ export const transferAction: Action = {
 
   async handler(
     runtime: IAgentRuntime,
-    _message: Memory,
+    message: Memory,
     _state?: State,
     options?: HandlerOptions,
   ): Promise<ActionResult> {
     const steward = runtime.getService("steward" as any) as StewardService;
     const params = options?.parameters;
 
-    if (!params?.to || !params?.amount) {
+    if (!params?.to || !params?.amount || !params?.chain) {
       return {
         success: false,
-        error: "Missing required parameters: 'to' and 'amount'",
-        text: "I need a recipient address and an amount to send. Example: send 0.01 ETH to 0x…",
+        error: "Missing required parameters: 'to', 'amount', and 'chain'",
+        text: "I need a recipient, native-asset amount, and explicit chain. Example: send 0.01 ETH to 0x… on Base.",
       };
     }
 
     try {
-      const { valueWei } = parseAmount(params.amount as string);
-      const chainName = (params.chain as string) ?? "base";
+      const { valueWei, symbol } = parseNativeAmount(params.amount as string);
+      const chainName = params.chain as string;
       const chainId = CHAIN_IDS[chainName.toLowerCase()];
 
       if (!chainId) {
@@ -135,11 +140,30 @@ export const transferAction: Action = {
         };
       }
 
-      const result = await steward.signTransaction({
-        to: params.to as string,
-        value: valueWei,
-        chainId,
-      });
+      const expectedSymbol = NATIVE_SYMBOLS[chainName.toLowerCase()];
+      if (symbol !== expectedSymbol) {
+        return {
+          success: false,
+          error: `${chainName} transfers require the native symbol ${expectedSymbol}; ${symbol} is not supported by this action`,
+          text: `I can only send ${expectedSymbol}, the native asset on ${chainName}, with this action.`,
+        };
+      }
+
+      if (message.id === undefined || String(message.id).length === 0) {
+        return {
+          success: false,
+          error: "A stable message id is required to submit a transfer safely",
+        };
+      }
+
+      const result = await steward.signTransaction(
+        {
+          to: params.to as string,
+          value: valueWei,
+          chainId,
+        },
+        { idempotencyKey: `eliza-transfer:${String(message.id)}` },
+      );
 
       if ("txHash" in result) {
         return {

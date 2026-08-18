@@ -122,6 +122,27 @@ describe("SecretVault lifecycle semantics", () => {
     expect(oldVersion?.deletedAt).toBeInstanceOf(Date);
   });
 
+  it("requires an explicit opt-in to append to a deleted secret lineage", async () => {
+    const tenantId = `tenant-restore-${crypto.randomUUID()}`;
+    await ensureTenant(tenantId);
+    const original = await vault.createSecret(tenantId, "google-provider", "old-token");
+    expect(await vault.deleteSecret(tenantId, original.id)).toBe(true);
+
+    await expect(
+      getDb().transaction((tx) =>
+        vault.rotateSecretWithinTx(tx, tenantId, "google-provider", "new-token"),
+      ),
+    ).rejects.toThrow('Secret "google-provider" not found');
+
+    const replacement = await getDb().transaction((tx) =>
+      vault.rotateSecretWithinTx(tx, tenantId, "google-provider", "new-token", {
+        allowDeletedCurrent: true,
+      }),
+    );
+    expect(replacement.version).toBe(2);
+    expect(await vault.decryptSecret(tenantId, replacement.id)).toBe("new-token");
+  });
+
   it("deletes all dependent routes when deleting a secret family", async () => {
     const tenantId = `tenant-delete-${crypto.randomUUID()}`;
     await ensureTenant(tenantId);

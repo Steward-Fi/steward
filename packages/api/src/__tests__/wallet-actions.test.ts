@@ -721,6 +721,70 @@ describe("wallet transfer actions", () => {
     }
   });
 
+  it("precreates exactly one pending row before broadcasting an SPL transfer", async () => {
+    const context = await import("../services/context");
+    const originalBuildSplTransfer = context.vault.buildSolanaSplTransferTransaction.bind(
+      context.vault,
+    );
+    const originalSignSolanaTransaction = context.vault.signSolanaTransaction.bind(context.vault);
+    let signCalls = 0;
+
+    context.vault.buildSolanaSplTransferTransaction = async () => ({
+      transaction: "base64-spl-broadcast-transaction",
+      sourceTokenAccount: "source-token-account",
+      destinationTokenAccount: "destination-token-account",
+      mint: SOLANA_MINT,
+      tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      decimals: 9,
+    });
+    context.vault.signSolanaTransaction = async (request) => {
+      signCalls += 1;
+      expect(request.broadcast).toBe(true);
+      return {
+        signature: "spl-broadcast-signature",
+        broadcast: true,
+        chainId: request.chainId,
+      };
+    };
+
+    try {
+      const response = await app.request(`/vault/${SOLANA_AGENT_ID}/actions/transfer`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "spl-broadcast-regression-1",
+        },
+        body: JSON.stringify({
+          to: ALLOWED_SOLANA,
+          token: SOLANA_MINT,
+          value: "124",
+          chainId: 101,
+          broadcast: true,
+          referenceId: "spl-transfer-broadcast-success",
+        }),
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        ok: boolean;
+        data: { id: string; status: string; txHash: string };
+      };
+      expect(body).toMatchObject({
+        ok: true,
+        data: { status: "broadcast", txHash: "spl-broadcast-signature" },
+      });
+      expect(signCalls).toBe(1);
+      const rows = await getDb()
+        .select()
+        .from(transactions)
+        .where(eq(transactions.id, body.data.id));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.status).toBe("broadcast");
+    } finally {
+      context.vault.buildSolanaSplTransferTransaction = originalBuildSplTransfer;
+      context.vault.signSolanaTransaction = originalSignSolanaTransaction;
+    }
+  });
+
   it("rejects SPL token transfer actions when the mint is not allowlisted", async () => {
     const context = await import("../services/context");
     const originalBuildSplTransfer = context.vault.buildSolanaSplTransferTransaction.bind(

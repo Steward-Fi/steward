@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
 
 import { closeDb, getDb, tenantConfigs, tenants, users, userTenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -434,21 +433,5 @@ describe("tenant test account credentials", () => {
       }),
     });
     expect(invalid.status).toBe(400);
-  });
-});
-
-describe("test account token exchange hardening", () => {
-  it("does not enumerate tenant or test-account configuration and throttles credentials", () => {
-    const source = readFileSync(new URL("../routes/auth.ts", import.meta.url), "utf8");
-    const credentialSource = readFileSync(
-      new URL("../services/test-account-credentials.ts", import.meta.url),
-      "utf8",
-    );
-    expect(source).toContain("invalidTestAccountCredentials()");
-    expect(source).toContain('"test-account-token-credential"');
-    expect(source).toContain("credentialSubject");
-    expect(source).toContain("testAccountOtpMatches(body?.otp, testAccount)");
-    expect(credentialSource).toContain("otpHash: hashTestAccountOtp(otp)");
-    expect(credentialSource).toContain("STEWARD_TEST_ACCOUNT_OTP_PEPPER");
   });
 });

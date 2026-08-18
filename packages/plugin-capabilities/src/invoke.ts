@@ -158,7 +158,7 @@ async function capabilityMapsToGovernedRoute(
 ): Promise<boolean> {
   const { and, eq, gt, isNull, or } = await import("drizzle-orm");
   const now = new Date();
-  // Mirror the proxy's route SELECTION (codex P2): only ENABLED governed routes
+  // Mirror the proxy's route selection: only enabled governed routes
   // whose backing secret is currently active (not deleted, not expired) can ever
   // be selected by the proxy, so only those should gate the plugin. A disabled
   // governed route or one backed by a deleted/expired secret is unselectable and
@@ -360,7 +360,7 @@ export async function invokeCapabilityThroughProxy(
   try {
     await engine.evaluate(capRules, evaluatorCtx);
 
-    // CANONICAL PRECEDENCE (master-plan §5.3): the policy-engine helper composes
+    // CANONICAL PRECEDENCE (current contract §5.3): the policy-engine helper composes
     // ALL enabled capability-intent rules in the one true order — hard deny
     // (incl. malformed config / failed hard constraint) > approval_required >
     // allow > default-deny. This is the single source of truth: an applicable
@@ -452,11 +452,11 @@ export async function invokeCapabilityThroughProxy(
     });
   }
 
-  // ── PR4 governed-route plugin gate (spec §5.2, X1, P03/P04) ────────────────
+  // ── execution-authorization governed-route plugin gate (spec §5.2, X1, P03/P04) ────────────────
   // A governed_v2 route/operation cannot be invoked through the capability alias
   // or the OpenAI-compat adapter: the plugin's URLSearchParams path (G4) cannot
   // faithfully represent a governed action's duplicate-query semantics, and
-  // governed actions must go through /v2/provider-actions (PR2), never a minted
+  // governed actions must go through /v2/provider-actions (action-creation), never a minted
   // proxy token. If the resolved capability maps to a governed route, the plugin
   // must NOT mint a proxy token; it denies with GOVERNED_ROUTE_PLUGIN_DENIED.
   try {

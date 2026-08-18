@@ -101,7 +101,7 @@ describe("RPC Error HTTP Status", () => {
     // The actual integration test would require a running server
     // and a way to trigger an RPC error (e.g., sending without funds).
 
-    // For now, we verify the detection logic works correctly.
+    // This test exercises the detection logic independently of transport retries.
     const rpcError = new Error("insufficient funds for gas * price + value");
     expect(isRpcError(rpcError)).toBe(true);
     expect(extractRpcErrorMessage(rpcError)).toBe("Insufficient funds for transaction");

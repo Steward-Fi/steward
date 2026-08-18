@@ -8,7 +8,7 @@
   "servers": [
     {
       "url": "http://localhost:3200",
-      "description": "Your self-hosted Steward instance (Steward is self-host-first; replace with your deployment URL). The playground targets this rather than the docs domain."
+      "description": "Your self-hosted Steward instance. Replace this URL with your deployment."
     }
   ],
   "x-steward-sensitive-prefixes": [

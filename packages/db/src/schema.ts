@@ -50,7 +50,7 @@ import {
 // `tenant-rls-context.ts`, `rls-inventory.ts`, and
 // `docs/security/database-rls-rollout.mdx`. Enabling it safely requires all of
 // the following, and shipping half of it is worse than none:
-//   1. a per-request `SET LOCAL app.tenant_id` inside EVERY transaction (the
+//   1. a per-request `SET LOCAL steward.tenant_id` inside EVERY transaction (the
 //      pooled postgres-js role is shared by all tenants, so the GUC must be
 //      set on the checked-out connection for exactly the unit of work);
 //   2. `ENABLE` + `FORCE ROW LEVEL SECURITY` so the table-owning app role is
@@ -120,7 +120,7 @@ export interface TenantEmailConfig {
 
 export const chainFamilyEnum = pgEnum("chain_family", ["evm", "solana", "bitcoin", "monero"]);
 
-// PR4 (0082): governed provider route authority mode. `legacy` = the historical
+// execution-authorization (0082): governed provider route authority mode. `legacy` = the historical
 // direct-proxy credential path; `governed_v2` = decrypt/inject only reachable via
 // a claimed v2 execution authorization (dispatchGovernedExecution). A route is
 // never both. Default `legacy` => migration 0082 changes nothing at deploy (X9).
@@ -162,7 +162,7 @@ export const approvalQueueStatusEnum = pgEnum("approval_queue_status", [
   "pending",
   "approved",
   "rejected",
-  // PR3 provider-action arm lifecycle statuses (0081). The legacy transaction
+  // Provider-action approval lifecycle statuses (migration 0081). The legacy transaction
   // arm only ever uses pending/approved/rejected.
   "expired",
   "stale",
@@ -489,7 +489,7 @@ export const agentWallets = pgTable(
     chainFamily: chainFamilyEnum("chain_family").notNull(),
     address: varchar("address", { length: 128 }).notNull(),
     /**
-     * Sprint 4: trading venue this wallet is scoped to (e.g. "hyperliquid").
+     * trading-policy: trading venue this wallet is scoped to (e.g. "hyperliquid").
      * NULL on legacy rows; vault lookups fall back to chainFamily when
      * venue isn't provided. See VenueId in @stwd/shared.
      */
@@ -507,7 +507,7 @@ export const agentWallets = pgTable(
       sql`COALESCE(${table.venue}, '')`,
     ),
     /**
-     * Sprint 4: partial unique index on the legacy NULL-venue subset.
+     * trading-policy: partial unique index on the legacy NULL-venue subset.
      * Targeted by importKey()'s upsert (drizzle's onConflictDoUpdate
      * needs a named unique index, not an expression index).
      */
@@ -578,10 +578,11 @@ export const evmWalletNonces = pgTable(
 
 /**
  * Tracks EVM nonces that have been allocated to an in-flight transaction but
- * not yet confirmed on-chain. A nonce is `allocated` once handed out and is
- * cleared (deleted) on confirmation; on a dropped/failed broadcast it is marked
- * `dropped` so the allocator can reclaim it instead of leaving a permanent hole
- * that wedges the wallet behind a stuck nonce. See `evm-nonce-manager.ts`.
+ * not yet confirmed on-chain. A nonce is `allocated` once handed out,
+ * `broadcasting` immediately before submission, and `unknown` when
+ * the transport cannot prove the outcome. Uncertain nonces are never reused;
+ * the allocator clears them only after the chain's pending nonce advances.
+ * Explicitly dropped pre-submission allocations remain reclaimable.
  */
 export const evmWalletNonceInflight = pgTable(
   "evm_wallet_nonce_inflight",
@@ -880,7 +881,7 @@ export const encryptedChainKeys = pgTable(
   "encrypted_chain_keys",
   {
     /**
-     * Sprint 4: surrogate PK so a single (agentId, chainFamily) can have
+     * trading-policy: surrogate PK so a single (agentId, chainFamily) can have
      * multiple rows, one per venue. The uniqueness invariant moves to
      * `agent_chain_venue_idx` below.
      */
@@ -890,7 +891,7 @@ export const encryptedChainKeys = pgTable(
       .references(() => agents.id, { onDelete: "cascade" }),
     chainFamily: chainFamilyEnum("chain_family").notNull(),
     /**
-     * Sprint 4: trading venue this key is scoped to (e.g. "hyperliquid").
+     * trading-policy: trading venue this key is scoped to (e.g. "hyperliquid").
      * NULL on legacy rows; vault lookups fall back to chainFamily when
      * venue isn't provided.
      */
@@ -970,10 +971,14 @@ export const operatorTransferReservations = pgTable(
       .references(() => agents.id, { onDelete: "cascade" }),
     rail: varchar("rail", { length: 16 }).notNull(),
     idempotencyKey: varchar("idempotency_key", { length: 256 }).notNull(),
+    requestDigest: varchar("request_digest", { length: 64 }).notNull(),
     destination: varchar("destination", { length: 128 }).notNull(),
     amountBaseUnits: text("amount_base_units").notNull(),
     status: varchar("status", { length: 16 }).notNull().default("pending"),
+    responseStatus: integer("response_status"),
+    responseBody: jsonb("response_body").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     finalizedAt: timestamp("finalized_at", { withTimezone: true }),
   },
   (table) => ({
@@ -1002,11 +1007,76 @@ export const operatorTransferReservations = pgTable(
       "operator_transfer_reservation_status_chk",
       sql`${table.status} in ('pending', 'final', 'released')`,
     ),
+    requestDigestCheck: check(
+      "operator_transfer_reservation_request_digest_chk",
+      sql`${table.requestDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    responsePairCheck: check(
+      "operator_transfer_reservation_response_pair_chk",
+      sql`(${table.responseStatus} is null) = (${table.responseBody} is null)`,
+    ),
+    responseStatusCheck: check(
+      "operator_transfer_reservation_response_status_chk",
+      sql`((${table.status} = 'pending' and (${table.responseStatus} is null or ${table.responseStatus} = 502)) or (${table.status} = 'final' and ${table.responseStatus} in (200, 502)) or (${table.status} = 'released' and ${table.responseStatus} is null)) is true`,
+    ),
     statusFinalizedShape: check(
       "operator_transfer_reservation_status_finalized_chk",
       sql`(${table.status} = 'pending' and ${table.finalizedAt} is null)
           or (${table.status} in ('final', 'released') and ${table.finalizedAt} is not null)`,
     ),
+  }),
+);
+
+/**
+ * Durable replay fence for wallet operations that can submit an irreversible
+ * transaction. Keys are stored only as SHA-256 digests. A row is claimed
+ * atomically before submission and intentionally has no expiry: once an
+ * operation may have reached a network, automatically reopening its key can
+ * duplicate a transfer.
+ */
+export const walletOperationIdempotency = pgTable(
+  "wallet_operation_idempotency",
+  {
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: varchar("agent_id", { length: 64 })
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    operation: varchar("operation", { length: 64 }).notNull(),
+    idempotencyKeyHash: varchar("idempotency_key_hash", { length: 64 }).notNull(),
+    requestDigest: varchar("request_digest", { length: 64 }).notNull(),
+    status: varchar("status", { length: 32 }).notNull().default("processing"),
+    txId: varchar("tx_id", { length: 64 }).notNull(),
+    txHash: varchar("tx_hash", { length: 128 }),
+    responseStatus: integer("response_status"),
+    responseBody: jsonb("response_body").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    primary: primaryKey({
+      name: "wallet_operation_idempotency_pk",
+      columns: [table.tenantId, table.agentId, table.operation, table.idempotencyKeyHash],
+    }),
+    txIdUnique: uniqueIndex("wallet_operation_idempotency_tx_id_idx").on(table.txId),
+    statusCheck: check(
+      "wallet_operation_idempotency_status_chk",
+      sql`${table.status} in ('processing', 'submission_unknown', 'completed')`,
+    ),
+    keyHashCheck: check(
+      "wallet_operation_idempotency_key_hash_chk",
+      sql`${table.idempotencyKeyHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    requestDigestCheck: check(
+      "wallet_operation_idempotency_request_digest_chk",
+      sql`${table.requestDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    tenantAgentFk: foreignKey({
+      columns: [table.tenantId, table.agentId],
+      foreignColumns: [agents.tenantId, agents.id],
+      name: "wallet_operation_idempotency_tenant_agent_fk",
+    }).onDelete("cascade"),
   }),
 );
 
@@ -1036,7 +1106,7 @@ export const executionAuthorizationNonces = pgTable(
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     consumedAt: timestamp("consumed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    // ─── PR4 (0082): provider execution authorization v2 extension ───────────
+    // ─── execution-authorization (0082): provider execution authorization v2 extension ───────────
     // version=1 rows are the legacy wallet/EVM nonce (all v2 fields null).
     // version=2 rows carry the full provider commitment binding + dispatch
     // state machine. Enforced by exec_auth_nonces_v2_arm_chk (raw SQL, 0082).
@@ -1138,10 +1208,10 @@ export const sponsoredGasEvents = pgTable(
   }),
 );
 
-// PR3 (0081): approval_queue is a discriminated union. The legacy transaction
+// approval-lifecycle (0081): approval_queue is a discriminated union. The legacy transaction
 // arm (approval_kind='transaction') keeps tx_id + the original columns; the new
 // provider_action arm carries the exact-binding tuple. `tx_id` is now nullable
-// (arm CHECK re-requires it for transaction rows). Several PR3 invariants (the
+// (arm CHECK re-requires it for transaction rows). Several approval-lifecycle invariants (the
 // arm CHECK, the decision-shape CHECK, and the partial unique indexes) live in
 // 0081 raw SQL and are NOT visible to drizzle-kit.
 export const approvalQueue = pgTable(
@@ -1162,7 +1232,7 @@ export const approvalQueue = pgTable(
     resolvedBy: varchar("resolved_by", { length: 255 }),
     resolvedByType: varchar("resolved_by_type", { length: 32 }),
     resolvedById: varchar("resolved_by_id", { length: 255 }),
-    // ── PR3 provider-action arm (0081) ──
+    // ── Provider-action approval arm (migration 0081) ──
     approvalKind: varchar("approval_kind", { length: 32 }).notNull().default("transaction"),
     intentId: varchar("intent_id", { length: 64 }),
     tenantId: varchar("tenant_id", { length: 64 }),
@@ -1884,15 +1954,15 @@ export const secretRoutes = pgTable(
     enabled: boolean("enabled").notNull().default(true),
     requiresApproval: boolean("requires_approval").notNull().default(false),
     approvalConfig: jsonb("approval_config").$type<Record<string, unknown>>().notNull().default({}),
-    // PR3 (0081, G1 adjudication): a route revision that a route/secret rotation
-    // increments. Bound by PR3's approval commitment so resume can detect route
+    // Route revision incremented by route/secret rotation and bound by the
+    // approval commitment so resume can detect route
     // rotation. Maintained by the `secret_routes_bump_authority_revision`
-    // BEFORE UPDATE trigger (raw SQL only, not visible to drizzle-kit). PR4's
+    // BEFORE UPDATE trigger (raw SQL only, not visible to drizzle-kit). Migration
     // 0082 adds authority_mode + provider_operation_id and extends the trigger.
     authorityRevision: integer("authority_revision").notNull().default(1),
-    // PR4 (0082): governed cutover columns. authority_mode default 'legacy' means
+    // execution-authorization (0082): governed cutover columns. authority_mode default 'legacy' means
     // every existing route behaves exactly as today until explicitly enrolled
-    // (PR8). A governed route MUST name its provider_operation_id (raw-SQL CHECK
+    // (governed-default migration). A governed route MUST name its provider_operation_id (raw-SQL CHECK
     // secret_routes_governed_operation_chk); a legacy route MUST NOT.
     authorityMode: secretRouteAuthorityModeEnum("authority_mode").notNull().default("legacy"),
     providerOperationId: uuid("provider_operation_id"),
@@ -1907,7 +1977,7 @@ export const secretRoutes = pgTable(
   }),
 );
 
-// ─── Workspace-scoped provider authority (governed-provider plan PR1) ─────────
+// ─── Workspace-scoped provider authority (governed-provider plan provider-operation) ─────────
 //
 // ⚠️ RAW-SQL-ONLY INVARIANTS (drift risk — NOT expressible in Drizzle, see
 //    drizzle/0079_workspace_provider_authority.sql):
@@ -2065,6 +2135,10 @@ export const providerGoogleCredentialLifecycles = pgTable(
     expectedAccountRevision: integer("expected_account_revision"),
     attempts: integer("attempts").notNull().default(0),
     lastErrorCode: varchar("last_error_code", { length: 64 }),
+    disabledRoutes: jsonb("disabled_routes")
+      .$type<Array<{ id: string; authorityRevision: number }>>()
+      .notNull()
+      .default([]),
     ...timestamps,
   },
   (table) => ({
@@ -2094,6 +2168,10 @@ export const providerGoogleCredentialLifecycles = pgTable(
     kindCheck: check(
       "provider_google_lifecycle_kind_check",
       sql`${table.kind} IN ('connect_exchange', 'refresh_rotation', 'disconnect_revoke')`,
+    ),
+    disabledRoutesArrayCheck: check(
+      "provider_google_lifecycle_disabled_routes_array_check",
+      sql`jsonb_typeof(${table.disabledRoutes}) = 'array'`,
     ),
     accountStateIdx: index("provider_google_lifecycle_account_state_idx").on(
       table.tenantId,
@@ -2362,7 +2440,7 @@ export type ProviderOperation = typeof providerOperations.$inferSelect;
 export type ProviderRoleBinding = typeof providerRoleBindings.$inferSelect;
 export type ProviderGrant = typeof providerGrants.$inferSelect;
 
-// ─── Provider action bindings (PR2) ──────────────────────────────────────────
+// ─── Provider action bindings (action-creation) ──────────────────────────────────────────
 // The 1:1 typed companion to `intents` that carries the canonical provider
 // action, request envelope, and the two separate (access + policy) decision
 // documents with distinct IDs/hashes. `intents` stays the sole lifecycle root.
@@ -2373,7 +2451,7 @@ export type ProviderGrant = typeof providerGrants.$inferSelect;
 // access/policy/status state machine, byte-size bounds), and (c) the
 // `provider_action_bindings_immutable` BEFORE UPDATE trigger that freezes every
 // column except status/updated_at and allows only the
-// allowed_stub -> stub_succeeded|stub_failed transition in PR2.
+// allowed_stub -> stub_succeeded|stub_failed transition in action-creation.
 export const providerActionBindings = pgTable(
   "provider_action_bindings",
   {
@@ -2428,8 +2506,8 @@ export const providerActionBindings = pgTable(
     // historical in-flight executions whose outcome may already be unknown.
 
     status: varchar("status", { length: 32 }).notNull(),
-    // ── PR3 approval lifecycle columns (0081) ──
-    // Mutable only via the PR3 transition trigger; binding_revision increments by
+    // ── approval lifecycle columns (0081) ──
+    // Mutable only via the approval-lifecycle transition trigger; binding_revision increments by
     // exactly one per state-changing transition. Several invariants (transition
     // graph, per-state field-shape CHECK, frozen-column freeze) live in 0081 raw
     // SQL and are not visible to drizzle-kit.
@@ -2987,7 +3065,7 @@ export type NewAuditChainHead = typeof auditChainHeads.$inferInsert;
 // Ed25519 checkpoints over the audit chain head. The HMAC chain is symmetric
 // (verifiable only with STEWARD_AUDIT_HMAC_KEY); a checkpoint signs a canonical
 // statement about the chain head with an Ed25519 key whose PUBLIC half can be
-// published, so an third-party auditor can verify a signed evidence bundle offline
+// published, so a third-party auditor can verify a signed evidence bundle offline
 // without any Steward secret. `payload` is the exact JSON object that was
 // canonicalized+signed; `signature` is base64 Ed25519 over the canonical bytes;
 // `publicKey` is the SPKI PEM (denormalized per row so a bundle is

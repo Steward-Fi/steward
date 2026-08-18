@@ -4,14 +4,35 @@ import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { createDb } from "../client";
-import { tenantContextForInternalJob, withTenantRlsTransaction } from "../tenant-rls-context";
+import { createTenantRlsAuthority } from "../tenant-rls-context";
 
 const describeWithPostgres = process.env.DATABASE_URL ? describe : describe.skip;
 setDefaultTimeout(30_000);
 const schemaName = `rls_test_${randomUUID().replaceAll("-", "")}`;
 const tableName = `${schemaName}.records`;
+const relatedTableName = `${schemaName}.record_notes`;
 const roleName = `rls_role_${randomUUID().replaceAll("-", "")}`;
 const rolePassword = randomUUID().replaceAll("-", "");
+
+interface ScheduledTenantJob {
+  tenantId: string;
+  job: string;
+  schedulerToken: symbol;
+}
+
+const schedulerToken = Symbol("rls-test-scheduler");
+const tenantRls = createTenantRlsAuthority<never, ScheduledTenantJob>({
+  resolveAuthenticatedPrincipal() {
+    return null;
+  },
+  resolveInternalJob(provenance) {
+    return provenance.schedulerToken === schedulerToken ? provenance : null;
+  },
+});
+
+function jobContext(tenantId: string, job: string) {
+  return tenantRls.issuer.forInternalJob({ tenantId, job, schedulerToken });
+}
 
 function rowsOf(value: unknown): Array<Record<string, unknown>> {
   return Array.isArray(value) ? value : ((value as { rows?: [] } | null)?.rows ?? []);
@@ -67,10 +88,23 @@ describeWithPostgres("SEC-169 transaction context on a real Postgres pool", () =
         tenant_id text NOT NULL,
         value text NOT NULL
       );
+      CREATE TABLE ${relatedTableName} (
+        id text PRIMARY KEY,
+        record_id text NOT NULL REFERENCES ${tableName}(id),
+        tenant_id text NOT NULL,
+        note text NOT NULL
+      );
       INSERT INTO ${tableName} VALUES ('a-seed', 'tenant-a', 'a'), ('b-seed', 'tenant-b', 'b');
+      INSERT INTO ${relatedTableName}
+        VALUES ('a-note', 'a-seed', 'tenant-a', 'a'), ('b-note', 'b-seed', 'tenant-b', 'b');
       ALTER TABLE ${tableName} ENABLE ROW LEVEL SECURITY;
       ALTER TABLE ${tableName} FORCE ROW LEVEL SECURITY;
       CREATE POLICY tenant_isolation ON ${tableName}
+        USING (tenant_id = NULLIF(current_setting('steward.tenant_id', true), ''))
+        WITH CHECK (tenant_id = NULLIF(current_setting('steward.tenant_id', true), ''));
+      ALTER TABLE ${relatedTableName} ENABLE ROW LEVEL SECURITY;
+      ALTER TABLE ${relatedTableName} FORCE ROW LEVEL SECURITY;
+      CREATE POLICY tenant_isolation ON ${relatedTableName}
         USING (tenant_id = NULLIF(current_setting('steward.tenant_id', true), ''))
         WITH CHECK (tenant_id = NULLIF(current_setting('steward.tenant_id', true), ''));
     `);
@@ -102,13 +136,10 @@ describeWithPostgres("SEC-169 transaction context on a real Postgres pool", () =
     try {
       await contaminatedClient`SELECT set_config('steward.tenant_id', 'tenant-b', false)`;
       await expect(
-        withTenantRlsTransaction(
+        tenantRls.transactions.run(
           contaminatedDb,
           "postgres-js",
-          tenantContextForInternalJob({
-            tenantId: "tenant-a",
-            job: "rls-dirty-session-test",
-          }),
+          jobContext("tenant-a", "rls-dirty-session-test"),
           async () => undefined,
         ),
       ).rejects.toThrow("RLS_TENANT_CONTEXT_DIRTY");
@@ -124,8 +155,8 @@ describeWithPostgres("SEC-169 transaction context on a real Postgres pool", () =
   test("concurrent pooled transactions cannot cross tenants or leak context", async () => {
     const tasks = Array.from({ length: 24 }, async (_, index) => {
       const tenantId = index % 2 === 0 ? "tenant-a" : "tenant-b";
-      const context = tenantContextForInternalJob({ tenantId, job: "rls-concurrency-test" });
-      return withTenantRlsTransaction(handle.db as never, "postgres-js", context, async (tx) => {
+      const context = jobContext(tenantId, "rls-concurrency-test");
+      return tenantRls.transactions.run(handle.db, "postgres-js", context, async (tx) => {
         const visible = rowsOf(await tx.execute(sql.raw(`SELECT tenant_id FROM ${tableName}`)));
         expect(visible.length).toBeGreaterThan(0);
         expect(visible.every((row) => row.tenant_id === tenantId)).toBe(true);
@@ -144,12 +175,9 @@ describeWithPostgres("SEC-169 transaction context on a real Postgres pool", () =
   });
 
   test("WITH CHECK rejects a cross-tenant write", async () => {
-    const context = tenantContextForInternalJob({
-      tenantId: "tenant-a",
-      job: "rls-cross-tenant-write-test",
-    });
+    const context = jobContext("tenant-a", "rls-cross-tenant-write-test");
     await expectRlsRejected(
-      withTenantRlsTransaction(handle.db as never, "postgres-js", context, async (tx) =>
+      tenantRls.transactions.run(handle.db, "postgres-js", context, async (tx) =>
         tx.execute(
           sql.raw(`INSERT INTO ${tableName} VALUES ('bad-write', 'tenant-b', 'must fail')`),
         ),
@@ -157,13 +185,66 @@ describeWithPostgres("SEC-169 transaction context on a real Postgres pool", () =
     );
   });
 
-  test("rollback clears context and nesting cannot replace an outer tenant", async () => {
-    const context = tenantContextForInternalJob({
-      tenantId: "tenant-a",
-      job: "rls-rollback-test",
+  test("UPDATE, DELETE, and joins cannot observe or mutate another tenant", async () => {
+    const context = jobContext("tenant-a", "rls-mutation-and-join-test");
+    await tenantRls.transactions.run(handle.db, "postgres-js", context, async (tx) => {
+      const joined = rowsOf(
+        await tx.execute(
+          sql.raw(`
+            SELECT r.tenant_id AS record_tenant, n.tenant_id AS note_tenant
+            FROM ${tableName} r
+            JOIN ${relatedTableName} n ON n.record_id = r.id
+          `),
+        ),
+      );
+      expect(joined).toEqual([{ record_tenant: "tenant-a", note_tenant: "tenant-a" }]);
+
+      const updatedOther = rowsOf(
+        await tx.execute(
+          sql.raw(`UPDATE ${tableName} SET value = 'changed' WHERE id = 'b-seed' RETURNING id`),
+        ),
+      );
+      expect(updatedOther).toHaveLength(0);
+
+      const deletedOther = rowsOf(
+        await tx.execute(sql.raw(`DELETE FROM ${tableName} WHERE id = 'b-seed' RETURNING id`)),
+      );
+      expect(deletedOther).toHaveLength(0);
+
+      const upserted = rowsOf(
+        await tx.execute(
+          sql.raw(`
+            INSERT INTO ${tableName} (id, tenant_id, value)
+            VALUES ('a-upsert', 'tenant-a', 'created')
+            ON CONFLICT (id) DO UPDATE SET value = EXCLUDED.value
+            RETURNING tenant_id, value
+          `),
+        ),
+      );
+      expect(upserted).toEqual([{ tenant_id: "tenant-a", value: "created" }]);
+      await tx.execute(sql.raw(`DELETE FROM ${tableName} WHERE id = 'a-upsert'`));
     });
+  });
+
+  test("upsert cannot target an invisible conflicting row", async () => {
+    const context = jobContext("tenant-a", "rls-cross-tenant-upsert-test");
+    await expectRlsRejected(
+      tenantRls.transactions.run(handle.db, "postgres-js", context, async (tx) =>
+        tx.execute(
+          sql.raw(`
+            INSERT INTO ${tableName} (id, tenant_id, value)
+            VALUES ('b-seed', 'tenant-a', 'must fail')
+            ON CONFLICT (id) DO UPDATE SET value = EXCLUDED.value
+          `),
+        ),
+      ),
+    );
+  });
+
+  test("rollback clears context and nesting cannot replace an outer tenant", async () => {
+    const context = jobContext("tenant-a", "rls-rollback-test");
     await expect(
-      withTenantRlsTransaction(handle.db as never, "postgres-js", context, async () => {
+      tenantRls.transactions.run(handle.db, "postgres-js", context, async () => {
         throw new Error("ROLL_BACK_ME");
       }),
     ).rejects.toThrow("ROLL_BACK_ME");
@@ -174,13 +255,10 @@ describeWithPostgres("SEC-169 transaction context on a real Postgres pool", () =
 
     await handle.db.transaction(async (outerTx) => {
       await expect(
-        withTenantRlsTransaction(
-          outerTx as never,
+        tenantRls.transactions.run(
+          outerTx,
           "postgres-js",
-          tenantContextForInternalJob({
-            tenantId: "tenant-b",
-            job: "rls-nested-transaction-test",
-          }),
+          jobContext("tenant-b", "rls-nested-transaction-test"),
           async () => undefined,
         ),
       ).rejects.toThrow("RLS_TENANT_TRANSACTION_NESTED");

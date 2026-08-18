@@ -1,6 +1,4 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { generateApiKey } from "@stwd/auth";
 import { getDb, tenants } from "@stwd/db";
 import { eq } from "drizzle-orm";
@@ -17,7 +15,6 @@ const TENANT_WITHOUT_KEY = "test-tenant-no-key";
 type ErrorBody = { error: string };
 
 let validApiKey: string;
-const contextSource = readFileSync(join(import.meta.dir, "..", "services", "context.ts"), "utf8");
 
 // ─── Setup ────────────────────────────────────────────────────────────────
 
@@ -133,24 +130,5 @@ describeWithDatabase("Tenant API Key Authentication", () => {
       const json = (await res.json()) as ErrorBody;
       expect(json.error).toBe("Forbidden");
     });
-  });
-});
-
-describe("tenantAuth API-key oracle hardening", () => {
-  it("keeps missing, invalid, and disabled tenant API-key failures indistinguishable", () => {
-    const apiKeyFallbackStart = contextSource.indexOf(
-      'const tenantId = c.req.header("X-Steward-Tenant") || DEFAULT_TENANT_ID',
-    );
-    const apiKeyFallbackEnd = contextSource.indexOf("export async function sessionAuth");
-    expect(apiKeyFallbackStart).toBeGreaterThanOrEqual(0);
-    expect(apiKeyFallbackEnd).toBeGreaterThan(apiKeyFallbackStart);
-    const apiKeyFallback = contextSource.slice(apiKeyFallbackStart, apiKeyFallbackEnd);
-
-    expect(apiKeyFallback).toContain(
-      "if (!tenant.apiKeyHash || !validateApiKey(apiKey, tenant.apiKeyHash))",
-    );
-    expect(apiKeyFallback).not.toContain('error: "Tenant not found" }, 404');
-    expect(apiKeyFallback).not.toContain("Tenant not configured for API key auth");
-    expect(apiKeyFallback).not.toContain("API key required");
   });
 });

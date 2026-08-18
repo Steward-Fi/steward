@@ -3,7 +3,7 @@
  *
  * This is the corpus that EVERY consumer suite (shared, api, adapter, proxy)
  * re-runs. If any byte of a vector or any digest is corrupted, or if the
- * serializer drifts, these fail. See PR2-CANONICALIZATION-SPEC.md section 4.
+ * serializer drifts, these fail.
  */
 
 import { describe, expect, it } from "bun:test";

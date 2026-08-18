@@ -1,31 +1,34 @@
-import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { and, eq, evmWalletNonceInflight, evmWalletNonces, getDb } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { allocateEvmNonce, confirmEvmNonce, markEvmNonceDropped } from "../evm-nonce-manager";
+import {
+  allocateEvmNonce,
+  confirmEvmNonce,
+  markEvmNonceBroadcasting,
+  markEvmNonceDropped,
+  markEvmNonceSubmissionUnknown,
+} from "../evm-nonce-manager";
 
 setDefaultTimeout(30000);
 
-const openClients: Array<{ close: () => Promise<void> }> = [];
+let closeClient: (() => Promise<void>) | undefined;
 
-async function resetDb(): Promise<void> {
+async function initializeDb(): Promise<void> {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   const { db, client } = await createPGLiteDb("memory://");
-  openClients.push(client);
+  closeClient = () => client.close();
   setPGLiteOverride(db as never, async () => {
     await client.close();
   });
 }
 
 describe("EVM nonce manager", () => {
-  beforeEach(async () => {
-    await resetDb();
+  beforeAll(async () => {
+    await initializeDb();
   });
 
   afterAll(async () => {
-    for (const client of openClients) {
-      await client.close().catch(() => {});
-    }
-    openClients.length = 0;
+    await closeClient?.().catch(() => {});
     delete process.env.STEWARD_PGLITE_MEMORY;
   });
 
@@ -42,7 +45,10 @@ describe("EVM nonce manager", () => {
     );
 
     expect([...allocations].sort((a, b) => a - b)).toEqual([7, 8, 9, 10, 11, 12, 13, 14]);
-    const [row] = await getDb().select().from(evmWalletNonces);
+    const [row] = await getDb()
+      .select()
+      .from(evmWalletNonces)
+      .where(eq(evmWalletNonces.walletAddress, walletAddress));
     expect(row.nextNonce).toBe(15);
   });
 
@@ -62,7 +68,10 @@ describe("EVM nonce manager", () => {
     });
 
     expect(nonce).toBe(10);
-    const [row] = await getDb().select().from(evmWalletNonces);
+    const [row] = await getDb()
+      .select()
+      .from(evmWalletNonces)
+      .where(eq(evmWalletNonces.walletAddress, walletAddress));
     expect(row.nextNonce).toBe(11);
   });
 
@@ -80,7 +89,10 @@ describe("EVM nonce manager", () => {
     }
 
     expect(nonces).toEqual([0, 1, 2, 3, 4]);
-    const [row] = await getDb().select().from(evmWalletNonces);
+    const [row] = await getDb()
+      .select()
+      .from(evmWalletNonces)
+      .where(eq(evmWalletNonces.walletAddress, walletAddress));
     expect(row.nextNonce).toBe(5);
   });
 
@@ -98,7 +110,10 @@ describe("EVM nonce manager", () => {
     const [a, b] = await Promise.all([agentAllocate("agent-one"), agentAllocate("agent-two")]);
 
     expect([a, b].sort((x, y) => x - y)).toEqual([0, 1]);
-    const [row] = await getDb().select().from(evmWalletNonces);
+    const [row] = await getDb()
+      .select()
+      .from(evmWalletNonces)
+      .where(eq(evmWalletNonces.walletAddress, walletAddress));
     expect(row.nextNonce).toBe(2);
   });
 
@@ -121,7 +136,10 @@ describe("EVM nonce manager", () => {
     expect(reclaimed).toBe(6);
 
     // Stored counter is untouched by a reclaim.
-    const [counter] = await getDb().select().from(evmWalletNonces);
+    const [counter] = await getDb()
+      .select()
+      .from(evmWalletNonces)
+      .where(eq(evmWalletNonces.walletAddress, walletAddress));
     expect(counter.nextNonce).toBe(8);
 
     // After the reclaim the only dropped row is gone; next allocation advances.
@@ -155,5 +173,30 @@ describe("EVM nonce manager", () => {
     // Next allocation advances monotonically; the confirmed 0 is never reused.
     const next = await alloc();
     expect(next).toBe(2);
+  });
+
+  test("blocks reuse after an ambiguous broadcast until the chain proves consumption", async () => {
+    const walletAddress = "0x7777777777777777777777777777777777777777";
+    const chainId = 8453;
+    const allocateAt = (pendingNonce: number) =>
+      allocateEvmNonce({ walletAddress, chainId, getPendingNonce: async () => pendingNonce });
+
+    const nonce = await allocateAt(4);
+    await markEvmNonceBroadcasting({ walletAddress, chainId, nonce });
+    await markEvmNonceSubmissionUnknown({ walletAddress, chainId, nonce });
+
+    await expect(allocateAt(4)).rejects.toThrow("unresolved broadcast outcome");
+    const next = await allocateAt(5);
+    expect(next).toBe(5);
+    const uncertain = await getDb()
+      .select()
+      .from(evmWalletNonceInflight)
+      .where(
+        and(
+          eq(evmWalletNonceInflight.walletAddress, walletAddress),
+          eq(evmWalletNonceInflight.nonce, nonce),
+        ),
+      );
+    expect(uncertain).toHaveLength(0);
   });
 });

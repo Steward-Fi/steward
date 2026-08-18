@@ -15,7 +15,8 @@ This example shows how a platform such as `waifu.fun` can use Steward as the wal
   - `spending-limit`: `0.1 ETH` per tx, `1 ETH` per day
   - `approved-addresses`: Uniswap Universal Router on Base, Base USDC, and the demo wallet itself for an executable self-transfer path
   - `auto-approve-threshold`: `0.01 ETH`
-- Handling an approval-required webhook on the platform side
+- Registering a real `approval_required` webhook and retaining its one-time signing secret in memory
+- Verifying Steward's v2 timestamp, delivery-ID, event-type, and body-bound signature
 - Approving a queued transaction through Steward after the webhook arrives
 
 ## Prerequisites
@@ -23,6 +24,8 @@ This example shows how a platform such as `waifu.fun` can use Steward as the wal
 - A running Steward API
 - A reachable Postgres instance for the API
 - Bun installed locally
+- A tenant owner/admin session token with recent MFA for webhook configuration
+- A public HTTPS URL routed to the local receiver (for example, through a development tunnel)
 - For the full transaction demo:
   - Steward API configured with a working Base RPC endpoint
   - The generated demo wallet funded with ETH on Base to pay gas
@@ -38,8 +41,9 @@ export STEWARD_API_URL=http://127.0.0.1:3200
 export STEWARD_TENANT_ID=waifu-fun
 export STEWARD_API_KEY=waifu-demo-secret
 export STEWARD_TENANT_NAME=waifu.fun
+export STEWARD_TOKEN=<owner-or-admin-session-token-with-recent-mfa>
+export WAIFU_WEBHOOK_URL=https://your-public-tunnel.example/steward-events
 export WAIFU_WEBHOOK_PORT=4210
-export WAIFU_WEBHOOK_SECRET=waifu-webhook-secret
 export WAIFU_AGENT_ID=milady-trader
 export WAIFU_AGENT_NAME="Milady Trader"
 export WAIFU_PLATFORM_ID=waifu.fun:milady-trader
@@ -60,13 +64,14 @@ bun install
 bun run --filter @stwd/example-waifu-integration start
 ```
 
-You should see console output for tenant registration, wallet creation, policy installation, webhook delivery, medium-tx approval, and the final transaction history.
+You should see console output for tenant registration, webhook configuration, wallet creation, policy installation, the signed `approval_required` delivery, medium-transaction approval, and final transaction history. Steward returns the webhook signing secret once during registration; the example keeps it only in memory and does not define a separate local secret.
 
 ## Notes About The Current API
 
 - Tenant creation in the current API requires `id` and `apiKeyHash` in addition to `name` and `webhookUrl`.
-- Pending approval responses from `StewardClient.signTransaction()` do not currently expose `txId`, so the example fetches `/vault/:agentId/pending` to locate the queued transaction before approving it.
-- The API has webhook configuration endpoints, but it does not yet dispatch webhook events by itself. This example simulates the `approval_required` delivery using the documented Steward webhook headers so platform integrators can build the receiver now.
+- Webhook creation is a sensitive control-plane operation and requires a tenant owner/admin session with recent MFA.
+- Steward requires a public HTTPS callback URL. `WAIFU_WEBHOOK_URL` must route to the receiver listening on `WAIFU_WEBHOOK_PORT` and `WAIFU_WEBHOOK_PATH`.
+- The example waits for Steward's actual signed `approval_required` callback and approves the transaction identified by that callback.
 
 ## Adapting This For Your Platform
 

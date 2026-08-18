@@ -37,7 +37,6 @@ import {
   aggregationQueryKey,
   PolicyEngine,
 } from "@stwd/policy-engine";
-import { getAggregationSnapshot } from "@stwd/redis";
 import {
   type AgentIdentity,
   type ApiResponse,
@@ -51,7 +50,7 @@ import {
 } from "@stwd/shared";
 import type { Vault } from "@stwd/vault";
 import { WebhookDispatcher } from "@stwd/webhooks";
-import { and, eq, gte, sql } from "drizzle-orm";
+import { and, eq, gt, gte, lte, sql } from "drizzle-orm";
 import type { Context, Next } from "hono";
 import { sanitizePublicError } from "./public-error";
 import { getConfiguredVault } from "./vault-factory";
@@ -381,12 +380,12 @@ export const defaultTenantReady = db
   .values({
     id: DEFAULT_TENANT_ID,
     name: "Default Tenant",
-    // SEC-145: despite the variable name, STEWARD_DEFAULT_TENANT_KEY must be
+    // Despite the variable name, STEWARD_DEFAULT_TENANT_KEY must be
     // the sha256 hex hash of the plaintext key — it is stored verbatim as
     // apiKeyHash and compared against sha256(X-Steward-Key). A plaintext
     // value fails closed (default tenant unreachable); empty stays 403.
-    // SEC-153: this legacy tenant-wide key is unscoped full-tenant authority
-    // with no per-key revocation; prefer app-client secrets for new deployments.
+    // This legacy tenant-wide key is unscoped full-tenant authority with no
+    // per-key revocation; prefer app-client secrets for new deployments.
     apiKeyHash: process.env.STEWARD_DEFAULT_TENANT_KEY || "",
   })
   .onConflictDoNothing();
@@ -398,11 +397,9 @@ export type AuthenticatedPrincipal = {
   id: string;
 };
 
-// AppVariables now lives in @stwd/shared so opt-in plugins can type their own
-// hono routes against the same per-request context WITHOUT importing @stwd/api
-// (which would be a circular dependency). imported for local use in this file's
-// type positions AND re-exported so the many existing
-// `import { AppVariables } from "../services/context"` sites keep working.
+// AppVariables lives in @stwd/shared so opt-in plugins can type their Hono routes
+// against the same request context without importing @stwd/api. It is imported
+// for local type positions and re-exported for API consumers.
 import type { AppVariables } from "@stwd/shared";
 
 export type { AppVariables };
@@ -563,17 +560,10 @@ export async function getConditionSetReferenceValidationError(
 }
 
 /**
- * Materialise the rolling-aggregate lookup for a policy set's `aggregation`
- * conditions. Snapshots are computed from the authoritative Redis tracker —
- * never from caller-supplied request fields — and exposed to the engine as a
- * synchronous lookup. Any snapshot that cannot be sourced is simply omitted
- * from the map, which makes the evaluator fail closed (deny) for that
- * condition.
- *
- * Callers wire the returned lookup onto the `aggregations` field of the
- * evaluation context. The recording side (recordAggregationEvent) must be
- * driven on transaction commit, inside the same per-agent serialization window
- * used for spend caps, so the aggregate cannot be raced.
+ * Materialise rolling policy aggregates from committed transaction rows. The
+ * database is the durable source of truth, so a Redis counter outage cannot
+ * undercount prior financial actions. Any failed query rejects the caller and
+ * therefore keeps the policy evaluator fail-closed.
  */
 export async function loadAggregationsForPolicies(
   policySet: PolicyRule[],
@@ -586,18 +576,36 @@ export async function loadAggregationsForPolicies(
   const snapshots = new Map<string, bigint>();
   await Promise.all(
     queries.map(async (query) => {
-      const value = await getAggregationSnapshot(
-        {
-          agentId: query.agentId,
-          metric: query.metric,
-          windowSeconds: query.windowSeconds,
-          scope: query.scope,
-          scopeKey: query.scopeKey,
-        },
-        now,
-      );
-      // null → unavailable; leave it out so the evaluator denies that condition.
-      if (value !== null) snapshots.set(aggregationQueryKey(query), value);
+      const windowStart = new Date(now - query.windowSeconds * 1000);
+      const windowEnd = new Date(now);
+      const scopeFilter =
+        query.scope === "per_recipient"
+          ? sql`lower(${transactions.toAddress}) = ${query.scopeKey.toLowerCase()}`
+          : query.scope === "per_chain"
+            ? eq(transactions.chainId, Number(query.scopeKey))
+            : sql`true`;
+      const aggregate =
+        query.metric === "value_sum"
+          ? sql<string>`coalesce(sum((${transactions.value})::numeric), 0)::text`
+          : query.metric === "tx_count"
+            ? sql<string>`count(*)::text`
+            : sql<string>`count(distinct lower(${transactions.toAddress}))::text`;
+      const [row] = await db
+        .select({ value: aggregate })
+        .from(transactions)
+        .where(
+          and(
+            eq(transactions.agentId, query.agentId),
+            gt(transactions.createdAt, windowStart),
+            lte(transactions.createdAt, windowEnd),
+            sql`${transactions.status} in ('signed', 'broadcast', 'confirmed')`,
+            scopeFilter,
+          ),
+        );
+      if (row?.value === undefined || !/^\d+$/.test(row.value)) {
+        throw new Error("invalid durable aggregation result");
+      }
+      snapshots.set(aggregationQueryKey(query), BigInt(row.value));
     }),
   );
 
@@ -984,7 +992,7 @@ export function requireAgentAccess(c: Context<{ Variables: AppVariables }>): boo
 
 export function requireTenantLevel(c: Context<{ Variables: AppVariables }>): boolean {
   const authType = c.get("authType");
-  // SEC-153: the legacy tenant-wide X-Steward-Key ("api-key") is unscoped
+  // The legacy tenant-wide X-Steward-Key ("api-key") is unscoped
   // full-tenant authority — a standing single point of compromise. It remains
   // for backwards compatibility only; new integrations should use app-client
   // secrets ("app-secret", per-client revocation) or owner/admin sessions.

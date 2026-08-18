@@ -1,6 +1,6 @@
-# Test configuration for @stwd/api.
+# Test configuration for @stwd/plugin-trading.
 #
-# The api suite runs every test file in a single `bun test` process. Several
+# The plugin-trading suite runs every test file in a single `bun test` process. Several
 # service modules (src/services/context.ts) resolve env-dependent invariants at
 # module-init time and are cached in the shared module registry. test-preload.ts
 # runs once before any test file loads to make that first evaluation

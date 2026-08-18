@@ -1,9 +1,9 @@
 /**
  * operations.ts — X provider-action operation schemas + canonical action
- * construction (issue #195 workstream B).
+ * construction.
  *
  * This adapter owns method, origin, path construction, header selection, and
- * body shape for the three workstream-B operations. It validates operation
+ * body shape for the three supported operations. It validates operation
  * ARGUMENTS strictly (fail closed with stable CANON_* codes), builds a raw
  * internal HTTP representation, and runs it through the ONE shared X
  * canonicalizer (`canonicalizeRawInternalXAction`) so the action digest matches
@@ -24,7 +24,7 @@
  * to X for pure text (code points >= weighted length for non-URL text is not
  * guaranteed, so an occasional server-side rejection is possible for exotic
  * inputs), and it is fully deterministic and re-derivable by the proxy and the
- * offline verifier. The simplification is documented here and in the PR body.
+ * offline verifier.
  */
 
 import { createHash } from "node:crypto";
@@ -162,7 +162,7 @@ function textHasUrl(text: string): boolean {
   // `contentPolicy.allowUrls:false` / URL-spend / URL-approval policy be BYPASSED
   // by a real bare domain on an uncommon TLD (e.g. `example.social`, `foo.shop`).
   // A false positive only denies/escalates a borderline post, which is the safe
-  // direction (codex P2, PR review). We therefore treat ANY `label.tld` token
+  // direction. We therefore treat ANY `label.tld` token
   // (tld = 2+ ASCII letters) with a path OR a plausible domain shape as a URL,
   // and EXCLUDE only a small deny-list of common English abbreviations that
   // appear as `word.word` in ordinary prose.
@@ -265,10 +265,9 @@ function buildTweetCreate(rawArgs: unknown): XActionBuild {
   const codePointLength = [...text].length;
   const textSha256 = `sha256:${createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex")}`;
 
-  // Safe summary mirrors the GitHub adapter: length + sha256 only, never any
-  // slice of the text. A preview was intentionally REMOVED (codex P2, #195
-  // workstream B): for short tweets a prefix preview equals the full body, which
-  // would leak user content the summary is contractually forbidden to contain.
+  // Safe summary contains length + sha256 only, never any slice of the text.
+  // For short tweets a prefix preview can equal the full body and disclose
+  // content the summary is contractually forbidden to contain.
   const safeSummary: Record<string, unknown> = {
     operation: "x.tweet.create",
     isReply: replyToTweetId !== undefined,

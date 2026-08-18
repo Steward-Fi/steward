@@ -15,7 +15,6 @@
   },
   "dependencies": {
     "@stwd/db": "workspace:*",
-    "@stwd/vault": "workspace:*",
     "drizzle-orm": "^0.44.5",
     "viem": "^2.30.0"
   },

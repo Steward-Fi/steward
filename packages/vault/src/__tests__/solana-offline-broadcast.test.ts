@@ -1,14 +1,7 @@
 /**
- * REAL behavioral coverage for the broadcast gate on signSolanaTransaction.
+ * Behavioral coverage for the broadcast gate on signSolanaTransaction.
  *
- * The retired structural backstop (in @stwd/api's vault-trade-audit-gates
- * .test.ts) only readFileSync'd this source and grepped that it contained
- * `const shouldBroadcast = options.broadcast !== false` and that the
- * `if (!shouldBroadcast)` early-return sat ABOVE connection.sendTransaction. A
- * substring/order grep cannot prove the offline path actually WITHHOLDS the
- * broadcast, nor that the bytes it hands back are a real, fully-signed transfer.
- *
- * This drives the REAL signSolanaTransaction with its only network seam —
+ * This drives signSolanaTransaction with its only network seam —
  * @solana/web3.js Connection — stubbed at the prototype, and proves:
  *
  *   - broadcast:false → getLatestBlockhash is consulted (the tx still needs a

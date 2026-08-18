@@ -1,6 +1,6 @@
 # Steward Enterprise Reference
 
-This profile is the hardened compose path for PR6. It includes PostgreSQL, Redis, a one-shot migration job, the API, the credential proxy, Caddy TLS termination, health/readiness checks, and a `backup` service that writes `pg_dump` files into `deploy/enterprise-reference/backups`.
+This profile is the hardened compose path for end-to-end validation. It includes PostgreSQL, Redis, a one-shot migration job, the API, the credential proxy, Caddy TLS termination, health/readiness checks, and a `backup` service that writes `pg_dump` files into `deploy/enterprise-reference/backups`.
 
 Docker Compose 2.33.1 or newer is required. The profile uses `gw_priority` to
 make the egress-capable network the deterministic default gateway for its

@@ -1,6 +1,6 @@
 # Root secret key rotation
 
-This runbook is for self-hosted Steward operators. It describes behavior present in the code at `81cfa1a`. It does not claim that rotation is online where the implementation has no keyring.
+This runbook is for self-hosted Steward operators. It describes the current rotation behavior and does not claim that online rotation exists where the implementation has no keyring.
 
 ## Rules before any rotation
 
@@ -27,7 +27,7 @@ This runbook is for self-hosted Steward operators. It describes behavior present
 | Tenant request-signing keys | Encrypted DB keys accepted in `active` or `retiring` state | Online per-key overlap through tenant config API | Revoked or expired keys stop verifying |
 | OAuth client secrets: `APPLE_CLIENT_SECRET`, `DISCORD_CLIENT_SECRET`, `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_SECRET`, `INSTAGRAM_CLIENT_SECRET`, `LINE_CLIENT_SECRET`, `LINKEDIN_CLIENT_SECRET`, `SPOTIFY_CLIENT_SECRET`, `TIKTOK_CLIENT_SECRET`, `TWITCH_CLIENT_SECRET`, `TWITTER_CLIENT_SECRET`, and `X_CLIENT_SECRET` | OAuth or OIDC code exchange and refresh | Provider-dependent overlap, Steward restart required | Existing tokens are not guaranteed to survive. Test the provider rather than assuming |
 | `TELEGRAM_BOT_TOKEN`, `TWILIO_AUTH_TOKEN` | Telegram login proof and Twilio SMS authentication | Coordinated provider update and restart, no Steward keyring | Login or delivery fails on mismatch |
-| Webhook signing secrets, including optional `WAIFU_WEBHOOK_SECRET` integration | Outbound or integration signatures, encrypted in DB for core webhooks | Replace configuration and coordinate receiver overlap | Receivers that trust only the old value reject new deliveries |
+| Webhook signing secrets | Outbound webhook signatures, encrypted in DB | Replace configuration and coordinate receiver overlap | Receivers that trust only the old value reject new deliveries |
 | `STEWARD_METRICS_TOKEN` | Optional security metrics endpoint bearer auth | Restart cutover, no server keyring | Old token stops immediately |
 | `STEWARD_PLATFORM_KEY(S)`, `STEWARD_DEFAULT_TENANT_KEY`, client `STEWARD_TOKEN`/`STEWARD_API_TOKEN` | Platform, tenant, and CLI API authentication | Use multiple platform entries where configured; default tenant and client token have no overlap | Removed key stops immediately |
 | `MONERO_WALLET_RPC_PASSWORD`, `POLYMARKET_SIGNING_SERVER_TOKEN` | Optional signing sidecar authentication | Sidecar and Steward coordinated restart | In-flight sidecar calls fail |

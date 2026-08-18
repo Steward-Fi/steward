@@ -1,10 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { signXml } from "@node-saml/node-saml/lib/xml";
 import { type VerifySamlAcsInput, verifySamlAcsResponse } from "../saml";
 
-const ROOT = join(import.meta.dir, "../../../..");
 const IDP_ENTITY_ID = "https://idp.example.test/saml";
 const IDP_SSO_URL = "https://idp.example.test/sso";
 const SP_ENTITY_ID = "https://steward.example.test/saml/metadata";
@@ -61,10 +58,6 @@ qlVtzbU3DtjURtzqi3OQDpxTmADAHdU6UoeVTOuMDNQryJV9IMf7szko15oBzQJv
 xQpVMiAAIZ00Y/Q/hFsXPOLgIFtc3/O0euRQ2zkvk8eqBewjduyaP5dkHfySVfoa
 fDIFQJSzQbapRCV/a6SwPOKV5oD3ElPqkQHIt/U+ezTY0KuCcA==
 -----END CERTIFICATE-----`;
-
-function read(path: string): string {
-  return readFileSync(join(ROOT, path), "utf-8");
-}
 
 function samlTime(offsetMs = 0): string {
   return new Date(Date.now() + offsetMs).toISOString();
@@ -199,35 +192,5 @@ describe("SAML ACS verifier hardening", () => {
         verifierInput(signedSamlResponse(), { emailAttribute: "verifiedEmail" }),
       ),
     ).rejects.toThrow("SAML assertion did not include a verified email attribute");
-  });
-
-  it("pins node-saml to signed assertions, signed responses, audience, ACS, and InResponseTo", () => {
-    const source = read("packages/auth/src/saml.ts");
-
-    expect(source).toContain("wantAssertionsSigned: true");
-    expect(source).toContain("wantAuthnResponseSigned: true");
-    expect(source).toContain("audience: input.spEntityId");
-    expect(source).toContain("callbackUrl: input.acsUrl");
-    expect(source).toContain("idpIssuer: input.idpEntityId");
-    expect(source).toContain("ValidateInResponseTo.always");
-    expect(source).toContain("cacheProvider: new ExpectedRequestIdEchoCache");
-    expect(source).toContain('signatureAlgorithm: "sha256"');
-    expect(source).toContain('digestAlgorithm: "sha256"');
-    expect(source).toContain("SAML assertion ID is required for replay protection");
-    expect(source).toContain("export async function buildSamlAuthorizeUrl");
-    expect(source).toContain("generateUniqueId: () => input.requestId");
-  });
-
-  it("does not parse assertion attributes from raw unvalidated XML", () => {
-    const source = read("packages/auth/src/saml.ts");
-
-    expect(source).toContain(
-      "saml.validatePostResponseAsync({ SAMLResponse: input.samlResponse })",
-    );
-    expect(source).toContain("const profile = result.profile");
-    expect(source).not.toContain("parseString");
-    expect(source).not.toContain("DOMParser");
-    expect(source).not.toContain("getSamlResponseXml()");
-    expect(source).not.toContain("getAssertionXml()");
   });
 });

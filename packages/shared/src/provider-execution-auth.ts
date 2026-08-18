@@ -1,5 +1,5 @@
 /**
- * PR4 provider execution authorization v2 signing (spec §3.2).
+ * provider execution authorization v2 signing (spec §3.2).
  *
  * Pure crypto, NO DB. Lives in @stwd/shared so BOTH the API minter and the
  * separate-process proxy verifier (which does not depend on @stwd/api) agree on

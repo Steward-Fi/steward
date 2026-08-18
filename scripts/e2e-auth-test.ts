@@ -89,6 +89,16 @@ interface TestResult {
 }
 
 const results: TestResult[] = [];
+const CI_REQUIRED_CHECKS = new Set([
+  "Health check",
+  "Ready check",
+  "Provider discovery",
+  "Passkey registration options",
+  "Email magic link",
+  "SIWE nonce",
+  "Token refresh rejection",
+  "Cross-tenant flow",
+]);
 
 function pass(name: string, detail?: string) {
   results.push({ name, status: "pass", detail });
@@ -380,7 +390,7 @@ async function testOAuthAuthorize(provider: "google" | "discord") {
  */
 async function testSiweNonce() {
   try {
-    // SIWE nonce requests are bound to an allowed Origin (PR #79 hardening).
+    // SIWE nonce requests are bound to an allowed Origin.
     const { status, data } = await api("GET", "/auth/nonce", {
       // Exercise the configured deployment origin instead of hard-coding the
       // hosted domain, which makes local TLS-safe smoke tests fail spuriously.
@@ -566,16 +576,26 @@ async function main() {
   const failed = results.filter((r) => r.status === "fail").length;
   const skipped = results.filter((r) => r.status === "skip").length;
   const total = results.length;
+  const requiredSkips = results.filter(
+    (r) => r.status === "skip" && CI_REQUIRED_CHECKS.has(r.name),
+  );
+  const strictSkipFailure = process.env.CI === "true" && requiredSkips.length > 0;
 
   console.log(`\n${"─".repeat(45)}`);
 
-  if (failed > 0) {
+  if (failed > 0 || strictSkipFailure) {
     console.log(
       `${C.red}Passed: ${passed}/${total}  Skipped: ${skipped}  Failed: ${failed}${C.reset}  ${C.dim}(${elapsed}s)${C.reset}`,
     );
     console.log(`\n${C.red}Failed tests:${C.reset}`);
     for (const r of results.filter((r) => r.status === "fail")) {
       console.log(`  ${C.red}❌${C.reset} ${r.name}: ${r.detail}`);
+    }
+    if (strictSkipFailure) {
+      console.log(`\n${C.red}Skipped checks are failures in CI:${C.reset}`);
+      for (const r of requiredSkips) {
+        console.log(`  ${C.red}❌${C.reset} ${r.name}: ${r.detail}`);
+      }
     }
   } else {
     console.log(
@@ -585,7 +605,7 @@ async function main() {
   }
 
   console.log("");
-  process.exit(failed > 0 ? 1 : 0);
+  process.exit(failed > 0 || strictSkipFailure ? 1 : 0);
 }
 
 main().catch((e) => {

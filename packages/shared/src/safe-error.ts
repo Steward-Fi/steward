@@ -81,7 +81,6 @@ export function redactedThrownDiagnostics(value: unknown): RedactedThrownDiagnos
 
   return { errorClass, errorCode };
 }
-
 /**
  * Try to read a hostile-safe `.message` off a value that claims to be an Error.
  * The property access itself can throw (Proxy get-trap / throwing getter), so it

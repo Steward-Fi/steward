@@ -18,10 +18,8 @@ import { authRoutes, clearOAuthTokenKeyStoreForTests } from "../routes/auth";
 /**
  * NOTE on test isolation:
  *   Uses the ambient `DATABASE_URL` from the `Integration Tests (Postgres)`
- *   CI job rather than swapping pglite into the global handle. Closing a
- *   pglite handle in `afterAll` previously poisoned every subsequent test
- *   in `bun test packages/api` with `error: PGlite is closed`. We use a
- *   unique tenant prefix and clean up the rows in `afterAll` instead.
+ *   CI job so this suite does not replace and close the process-global database
+ *   handle. A unique tenant prefix and `afterAll` cleanup isolate its rows.
  */
 
 const TENANT_ID = "test-oauth-allowlist";

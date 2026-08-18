@@ -1,5 +1,5 @@
 /**
- * PR3 approval + execute HTTP route tests (PGLite + fully composed app).
+ * Provider approval and execution HTTP route tests (PGLite + fully composed app).
  * Proves the §9 route contract: human-session gating, MFA gating, unknown-field
  * + resume-actor-substitution rejection, and the exact happy-path status codes.
  */
@@ -116,7 +116,7 @@ function decideReq(intentId: string, token: string, body: unknown) {
   });
 }
 
-describe("PR3 approval + execute routes", () => {
+describe("provider approval and execution routes", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY ||= "0".repeat(64);

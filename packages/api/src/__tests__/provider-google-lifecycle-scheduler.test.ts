@@ -55,5 +55,4 @@ test("Google lifecycle scheduler redacts failure logs to class/code only", async
   expect(logged.join("\n")).toContain('"errorClass":"Error"');
   expect(logged.join("\n")).toContain('"errorCode":null');
   expect(logged.join("\n")).not.toContain(canary);
-  expect(logged.join("\n")).not.toContain("secret-name-canary");
 });

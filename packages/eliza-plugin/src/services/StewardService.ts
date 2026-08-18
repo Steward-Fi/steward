@@ -14,6 +14,7 @@ import {
   type ProviderActionStatus,
   type SignMessageResult,
   type SignTransactionInput,
+  type SignTransactionOptions,
   type SignTransactionResult,
   StewardApiError,
   StewardClient,
@@ -160,7 +161,7 @@ export class StewardService extends Service {
     const settings = runtimeState.character?.settings?.steward ?? {};
     const env = process.env;
 
-    const apiUrl = settings.apiUrl ?? env.STEWARD_API_URL ?? "http://localhost:7860";
+    const apiUrl = settings.apiUrl ?? env.STEWARD_API_URL ?? "http://localhost:3200";
     assertSecureApiUrl(apiUrl);
 
     return {
@@ -192,9 +193,12 @@ export class StewardService extends Service {
     return this.pluginConfig;
   }
 
-  async signTransaction(tx: SignTransactionInput): Promise<SignTransactionResult> {
+  async signTransaction(
+    tx: SignTransactionInput,
+    options?: SignTransactionOptions,
+  ): Promise<SignTransactionResult> {
     this.assertConnected();
-    return this.getClient().signTransaction(this.getAgentId(), tx);
+    return this.getClient().signTransaction(this.getAgentId(), tx, options);
   }
 
   async signMessage(message: string): Promise<SignMessageResult> {

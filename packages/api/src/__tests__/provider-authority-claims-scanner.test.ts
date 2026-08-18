@@ -1,9 +1,8 @@
 /**
- * PR6 prohibited-claim scanner (U8 / PN38).
+ * Provider-authority prohibited-claim scanner (U8 / PN38).
  *
- * A seeded claims-discipline guard (the full generalized scanner is PR10; this
- * is the PR6 seed scoped to the PR6 docs). It asserts the PR6 provider-authority
- * docs do NOT assert any of the prohibited pre-real-proof claims: MPC,
+ * A claims-discipline guard scoped to the provider-authority docs. It asserts
+ * they do NOT claim guarantees unsupported by repository-only evidence: MPC,
  * operator-proof, exactly-once, SOC2, or product-wide enforcement. Doc text that
  * explicitly NEGATES a claim ("NOT an operator-integrity proof", "does not use
  * MPC") is allowed — the scanner flags AFFIRMATIVE claims only.
@@ -17,7 +16,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const DOCS_ROOT = join(import.meta.dir, "..", "..", "..", "..", "docs");
-const PR6_DOCS = [
+const PROVIDER_AUTHORITY_DOCS = [
   join(DOCS_ROOT, "guides", "provider-authority-golden-path.mdx"),
   join(DOCS_ROOT, "security", "provider-authority-threat-model.mdx"),
   join(DOCS_ROOT, "runbooks", "provider-authority-operations.mdx"),
@@ -52,8 +51,8 @@ function stripNegatingContext(line: string): string {
     .replace(/\bwithout\b[^.]*/gi, "");
 }
 
-describe("PR6 prohibited-claim scanner (U8/PN38)", () => {
-  for (const path of PR6_DOCS) {
+describe("provider-authority prohibited-claim scanner (U8/PN38)", () => {
+  for (const path of PROVIDER_AUTHORITY_DOCS) {
     test(`no affirmative prohibited claim in ${path.split("/docs/")[1]}`, () => {
       const text = readFileSync(path, "utf8");
       const offenders: string[] = [];
@@ -68,7 +67,7 @@ describe("PR6 prohibited-claim scanner (U8/PN38)", () => {
   }
 
   test("the threat-model doc DOES state the required negations (fail-closed on missing)", () => {
-    const tm = readFileSync(PR6_DOCS[1], "utf8");
+    const tm = readFileSync(PROVIDER_AUTHORITY_DOCS[1], "utf8");
     // These explicit negations are REQUIRED (U8): their absence is a gate
     // failure. Markdown emphasis (**not**) is tolerated between tokens.
     expect(tm).toMatch(/operator-integrity proof/i);

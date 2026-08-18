@@ -34,6 +34,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   and,
   asc,
+  desc,
   eq,
   getDb,
   inArray,
@@ -47,7 +48,6 @@ import {
   sql,
   withTenantAuditedTransaction,
 } from "@stwd/db";
-import { isValidOAuthBearerToken, isValidOAuthOpaqueToken } from "@stwd/shared";
 import type { SecretVault } from "@stwd/vault";
 
 type DbBase = ReturnType<typeof getDb>;
@@ -754,9 +754,9 @@ export async function reconcileGoogleCredentialRevocation(input: {
     ) as GoogleLifecycleSecret;
     if (parsed.schemaVersion !== "steward.provider-google.lifecycle.v1")
       throw new Error("invalid handle");
-    const token = isValidOAuthOpaqueToken(parsed.token.refresh_token)
+    const token = boundedString(parsed.token.refresh_token, 16_384)
       ? parsed.token.refresh_token
-      : isValidOAuthBearerToken(parsed.token.access_token)
+      : boundedString(parsed.token.access_token, 16_384)
         ? parsed.token.access_token
         : null;
     if (!token) throw new Error("invalid handle");
@@ -998,8 +998,8 @@ function validateTokenEnvelope(
   code: "GOOGLE_TOKEN_EXCHANGE_FAILED" | "GOOGLE_REFRESH_FAILED",
 ): void {
   if (
-    !isValidOAuthBearerToken(parsed.access_token) ||
-    (parsed.refresh_token !== undefined && !isValidOAuthOpaqueToken(parsed.refresh_token)) ||
+    !boundedString(parsed.access_token, 16_384) ||
+    (parsed.refresh_token !== undefined && !boundedString(parsed.refresh_token, 16_384)) ||
     (parsed.token_type !== undefined &&
       (typeof parsed.token_type !== "string" || parsed.token_type.toLowerCase() !== "bearer")) ||
     (parsed.expires_in !== undefined &&
@@ -1075,6 +1075,7 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
 
   return withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
     const tx = txRaw as DbExecutor;
+    let routesDisabledByDisconnect: Array<{ id: string; authorityRevision: number }> = [];
 
     const [account] = await tx
       .select()
@@ -1117,6 +1118,22 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
           "previous Google disconnect is still awaiting upstream revocation",
         );
       }
+      const [completedDisconnect] = await tx
+        .select({ disabledRoutes: providerGoogleCredentialLifecycles.disabledRoutes })
+        .from(providerGoogleCredentialLifecycles)
+        .where(
+          and(
+            eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+            eq(providerGoogleCredentialLifecycles.workspaceId, input.workspaceId),
+            eq(providerGoogleCredentialLifecycles.providerAccountId, account.id),
+            eq(providerGoogleCredentialLifecycles.kind, "disconnect_revoke"),
+            eq(providerGoogleCredentialLifecycles.state, "revoked"),
+          ),
+        )
+        .orderBy(desc(providerGoogleCredentialLifecycles.updatedAt))
+        .limit(1)
+        .for("update");
+      routesDisabledByDisconnect = completedDisconnect?.disabledRoutes ?? [];
     }
 
     const unresolvedRefreshes = account
@@ -1170,17 +1187,14 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
     const [existingSecret] = await tx
       .select({ id: secrets.id })
       .from(secrets)
-      .where(
-        and(
-          eq(secrets.tenantId, input.tenantId),
-          eq(secrets.name, secretName),
-          sql`${secrets.deletedAt} IS NULL`,
-        ),
-      )
+      .where(and(eq(secrets.tenantId, input.tenantId), eq(secrets.name, secretName)))
+      .orderBy(desc(secrets.version))
       .limit(1)
       .for("update");
     const meta = existingSecret
-      ? await input.vault.rotateSecretWithinTx(tx, input.tenantId, secretName, serialized)
+      ? await input.vault.rotateSecretWithinTx(tx, input.tenantId, secretName, serialized, {
+          allowDeletedCurrent: true,
+        })
       : await input.vault.createSecretWithinTx(tx, input.tenantId, secretName, serialized, {
           description: "Google Workspace provider-account OAuth credential",
         });
@@ -1218,7 +1232,6 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
           "account revision conflict on reconnect",
         );
       }
-
       if (supersedableRefreshes.length > 0) {
         const unresolvedIds = supersedableRefreshes.map(({ id }) => id);
         const superseded = await tx
@@ -1262,6 +1275,31 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
             lifecycleIds: [...unresolvedIds].sort(),
           },
         });
+      }
+
+      for (const route of routesDisabledByDisconnect) {
+        if (
+          !route ||
+          typeof route.id !== "string" ||
+          !Number.isSafeInteger(route.authorityRevision) ||
+          route.authorityRevision < 1
+        ) {
+          continue;
+        }
+        await tx
+          .update(secretRoutes)
+          .set({ enabled: true })
+          .where(
+            and(
+              eq(secretRoutes.tenantId, input.tenantId),
+              eq(secretRoutes.id, route.id),
+              eq(secretRoutes.secretId, meta.id),
+              eq(secretRoutes.enabled, false),
+              // Disconnect and secret rotation each advance the route revision.
+              // Re-enable only if no administrator changed it in between.
+              eq(secretRoutes.authorityRevision, route.authorityRevision + 2),
+            ),
+          );
       }
     } else {
       reconnected = false;
@@ -2323,8 +2361,8 @@ function parseGoogleCredential(value: string): GoogleCredentialPayload {
   };
   if (
     p.schemaVersion !== "steward.provider-google.credential.v1" ||
-    !isValidOAuthBearerToken(p.accessToken) ||
-    !(p.refreshToken === null || isValidOAuthOpaqueToken(p.refreshToken)) ||
+    !bounded(p.accessToken, 16_384) ||
+    !(p.refreshToken === null || bounded(p.refreshToken, 16_384)) ||
     !Array.isArray(p.scopesGranted) ||
     p.scopesGranted.length === 0 ||
     p.scopesGranted.length > GOOGLE_DEFAULT_SCOPES.length ||
@@ -2453,7 +2491,7 @@ export async function disconnectGoogleProviderCredential(
         "provider account is not a Google account",
       );
     }
-    if (account.status === "revoked") {
+    if (account.status === "revoked" && !account.credentialSecretId) {
       return { lifecycleId: null, accessToken: null, refreshToken: null };
     }
 
@@ -2467,25 +2505,20 @@ export async function disconnectGoogleProviderCredential(
       );
     }
     const lifecycleId = credential ? randomUUID() : null;
-    const [degraded] = await tx
-      .update(providerAccounts)
-      .set({ status: "revoked", revision: account.revision + 1, updatedAt: new Date() })
-      .where(
-        and(
-          eq(providerAccounts.tenantId, input.tenantId),
-          eq(providerAccounts.id, account.id),
-          eq(providerAccounts.revision, account.revision),
-        ),
-      )
-      .returning();
-    if (!degraded) {
-      throw new GoogleConnectError(
-        "GOOGLE_REFRESH_FAILED",
-        409,
-        "account revision conflict on disconnect",
-      );
-    }
-
+    const now = new Date();
+    const routesToDisable = account.credentialSecretId
+      ? await tx
+          .select({ id: secretRoutes.id, authorityRevision: secretRoutes.authorityRevision })
+          .from(secretRoutes)
+          .where(
+            and(
+              eq(secretRoutes.tenantId, input.tenantId),
+              eq(secretRoutes.secretId, account.credentialSecretId),
+              eq(secretRoutes.enabled, true),
+            ),
+          )
+          .for("update")
+      : [];
     if (credential && lifecycleId) {
       const secret = await input.vault.createSecretWithinTx(
         tx,
@@ -2508,7 +2541,8 @@ export async function disconnectGoogleProviderCredential(
         kind: "disconnect_revoke",
         state: "revocation_pending",
         credentialSecretId: secret.id,
-        expectedAccountRevision: degraded.revision,
+        expectedAccountRevision: account.revision + 1,
+        disabledRoutes: routesToDisable,
       });
       await append({
         tenantId: input.tenantId,
@@ -2519,6 +2553,58 @@ export async function disconnectGoogleProviderCredential(
         resourceId: lifecycleId,
         metadata: { workspaceId: input.workspaceId, providerAccountId: account.id },
       });
+    }
+
+    // The revocation handle is durable before local authority is removed. All
+    // mutations commit atomically, so a crash leaves either the old usable
+    // credential or a non-executable account with recoverable provider cleanup.
+    if (account.credentialSecretId) {
+      await tx
+        .update(secretRoutes)
+        .set({ enabled: false })
+        .where(
+          and(
+            eq(secretRoutes.tenantId, input.tenantId),
+            eq(secretRoutes.secretId, account.credentialSecretId),
+            eq(secretRoutes.enabled, true),
+          ),
+        );
+    }
+    const [degraded] = await tx
+      .update(providerAccounts)
+      .set({
+        status: "revoked",
+        credentialSecretId: null,
+        credentialVersion: null,
+        revision: account.revision + 1,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(providerAccounts.tenantId, input.tenantId),
+          eq(providerAccounts.id, account.id),
+          eq(providerAccounts.revision, account.revision),
+        ),
+      )
+      .returning();
+    if (!degraded) {
+      throw new GoogleConnectError(
+        "GOOGLE_REFRESH_FAILED",
+        409,
+        "account revision conflict on disconnect",
+      );
+    }
+    if (account.credentialSecretId) {
+      await tx
+        .update(secrets)
+        .set({ deletedAt: now, updatedAt: now })
+        .where(
+          and(
+            eq(secrets.tenantId, input.tenantId),
+            eq(secrets.id, account.credentialSecretId),
+            sql`${secrets.deletedAt} IS NULL`,
+          ),
+        );
     }
 
     await append({

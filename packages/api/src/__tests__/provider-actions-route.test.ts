@@ -172,8 +172,7 @@ describe("POST /v2/provider-actions (route)", () => {
     const { clearAgentJwksCacheForTests } = await import("../middleware/agent-jwt");
     clearAgentJwksCacheForTests();
 
-    // Use the FULLY composed app (createApp + mountCoreIdempotencyAndRoutes), not
-    // the Phase-1 middleware-only app, so all `/v2` routes are mounted.
+    // Use the fully composed app so middleware and all `/v2` routes are mounted.
     const mod = await import("../app");
     app = mod.app as Hono<{ Variables: AppVariables }>;
 

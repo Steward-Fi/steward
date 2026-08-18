@@ -1,13 +1,12 @@
 /**
  * Default-tenant API key provisioning (SEC-012).
  *
- * Pre-fix, scripts/provision-agent.ts inserted the `default` tenant with
- * apiKeyHash = sha256("provision-agent:default") — a key anyone can derive
- * from this public repo, and a valid `X-Steward-Key` credential on any
- * instance where this script created the tenant before the API bootstrap
- * (the bootstrap uses .onConflictDoNothing() and never overwrites it).
+ * Older installations may contain a `default` tenant with apiKeyHash =
+ * sha256("provision-agent:default") — a key anyone can derive from this public
+ * repo and use as an `X-Steward-Key` credential. API bootstrap does not replace
+ * an existing tenant because it uses .onConflictDoNothing().
  *
- * This module is the remediation:
+ * This module enforces the following outcomes:
  *   - tenant missing          → generate a random key, store only its hash,
  *                               return the key once for the operator.
  *   - tenant has legacy hash  → rotate to a fresh random key (the derivable

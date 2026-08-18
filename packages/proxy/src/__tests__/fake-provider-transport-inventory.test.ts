@@ -1,8 +1,7 @@
 /**
- * PR6 fake-transport static inventory (U1 / M01 / PN01 / PN02).
+ * Fake-transport static inventory (U1 / M01 / PN01 / PN02).
  *
- * A source-introspection CI guard (same technique as the PR4
- * governed-decrypt-inventory scan) that proves, WITHOUT running the flow, that
+ * A source-introspection CI guard that proves, WITHOUT running the flow, that
  * the deterministic fake provider transport is UNSELECTABLE in a production
  * build:
  *
@@ -59,7 +58,7 @@ function repoSourceFiles(): { path: string; isTest: boolean; isHarness: boolean 
 
 const FAKE_IMPORT = /\bfrom\s+["'][^"']*fake-provider-transport(?:\.js)?["']/;
 
-describe("PR6 fake-transport static inventory (U1)", () => {
+describe("fake-transport static inventory (U1)", () => {
   test("M01/PN01: fake-provider-transport is imported ONLY by test files", async () => {
     const files = repoSourceFiles();
     // Sanity: the scan found a non-trivial tree.
@@ -94,7 +93,6 @@ describe("PR6 fake-transport static inventory (U1)", () => {
       ...proxy.matchAll(/forwardProxyRequestForHandler\s*=\s*([^;]+);/g),
     ].map((match) => match[1]?.trim());
     expect(assignmentValues).toEqual(["forwarder", "forwardWithVettedDns"]);
-
     const setterBody = proxy.slice(proxy.indexOf("__setForwardProxyRequestForTests"));
     expect(/forwardProxyRequestForHandler\s*=\s*forwarder\b/.test(setterBody)).toBe(true);
     const resetBody = proxy.slice(proxy.indexOf("__resetProxyHandlerTestHooksForTests"));

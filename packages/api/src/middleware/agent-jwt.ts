@@ -22,11 +22,9 @@ type CacheEntry = {
 
 const JWKS_CACHE_MS = 5 * 60 * 1000;
 const AGENT_TOKEN_EXPIRING_THRESHOLD_SECONDS = 5 * 60;
-// Dev convenience trust anchor. SEC-069: only honored behind an explicit
-// opt-in (STEWARD_ALLOW_DEFAULT_ELIZA_JWKS=true) outside production — domain
-// takeover/compromise of this host would otherwise silently become a minting
-// oracle for any staging/self-hosted deployment that forgot to configure
-// ELIZA_CLOUD_JWKS_URL.
+// Development trust anchor. It is honored only behind an explicit opt-in
+// outside production; shared and production deployments configure their own
+// JWKS URL.
 const DEFAULT_ELIZA_CLOUD_JWKS_URL = "https://milady.shad0w.xyz/.well-known/jwks.json";
 const TRADE_ORDER_SCOPE = "trade:order";
 
@@ -263,7 +261,7 @@ export function isAgentJwtFailure(
  * {@link AgentJwtAuthenticationFailure} the caller maps to a response.
  *
  * This is the single Eliza-Cloud RS256 authenticator (iss=eliza-cloud,
- * aud=steward). Multi-issuer discovery is deliberately out of PR2 scope.
+ * aud=steward). Multi-issuer discovery is deliberately out of action-creation scope.
  */
 export async function authenticateAgentJwt(
   c: Context<{ Variables: AppVariables }>,
@@ -290,13 +288,8 @@ export async function authenticateAgentJwt(
     const scopes = stringArrayClaim(payload, "scopes", "scope");
 
     const tenantId = c.req.header("X-Steward-Tenant") || DEFAULT_TENANT_ID;
-    // Tenant binding: when the token DOES carry a tenant claim it MUST match the
-    // requested tenant (prevents a token minted for tenant A from acting on
-    // tenant B). When the trusted issuer omits the claim (the eliza-cloud
-    // single-tenant minter does not embed tenant_id), we do NOT reject — the
-    // agent→tenant binding is still enforced below by ensureAgentForTenant, which
-    // 403s if this agent is not registered for the requested tenant. The token is
-    // already JWKS-verified (iss=eliza-cloud, aud=steward, RS256) at this point.
+    // A present tenant claim must match the requested tenant. When the trusted
+    // issuer omits it, the server-side agent registration supplies the binding.
     const tokenTenantId = stringClaim(payload, "tenant_id", "tenantId");
     if (tokenTenantId && tokenTenantId !== tenantId) {
       return { kind: "principal-scope-invalid", reason: "invalid tenant claims" };
@@ -307,12 +300,8 @@ export async function authenticateAgentJwt(
     if (!agent) {
       return { kind: "agent-not-registered", reason: "agent is not registered for tenant" };
     }
-    // Platform binding: when the token carries a platform_id it MUST match the
-    // agent's registered platform (prevents a token scoped to platform A from
-    // acting as the agent on platform B). When the trusted issuer omits the claim
-    // (the eliza-cloud minter does not embed platform_id), we do NOT reject — the
-    // agent identity is already established via the JWKS-verified sub + the
-    // tenant→agent registration check above. Symmetric with the tenant_id handling.
+    // A present platform claim must match the registered platform. When it is
+    // omitted, the verified subject and tenant registration establish identity.
     const tokenPlatformId = stringClaim(payload, "platform_id", "platformId");
     if (agent.platformId && tokenPlatformId && tokenPlatformId !== agent.platformId) {
       return { kind: "principal-scope-invalid", reason: "invalid platform claims" };

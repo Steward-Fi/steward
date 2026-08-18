@@ -38,6 +38,11 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      - name: Test attestation trust gates (no network)
+        run: |
+          bun run --filter @stwd/attestation build
+          bun test scripts/__tests__/check-attestation.test.ts
+
       # Supply-chain audit (SOC2 CC7.1 / CC8.1).
       # Backlog driven to zero — both CRITICAL and HIGH are now blocking.
       # Any new CRITICAL/HIGH CVE must be fixed (upgrade / override) or
@@ -204,6 +209,7 @@ jobs:
           - packages/mcp
           - packages/erc8004
           - packages/erc8183
+          - packages/examples/waifu-integration
           - packages/adapters
           - packages/proxy-client
           - packages/seed

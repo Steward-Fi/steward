@@ -1,11 +1,10 @@
 /**
- * PR3 migration 0081 schema-invariant tests. Mirrors
+ * Migration 0081 schema-invariant tests. Mirrors
  * provider-authority-migration.test.ts: asserts the raw-SQL-only invariants that
  * drizzle-kit cannot express survive migration, so accidental removal fails CI.
  *
  *   - secret_routes.authority_revision column + bump trigger (G1 adjudication)
- *   - the PR3 provider_action_bindings transition trigger (replaces the PR2
- *     immutability trigger)
+ *   - the provider_action_bindings transition trigger
  *   - the approval_queue provider-action arm CHECK + decision-shape CHECK
  *
  * A single migrated PGLite instance is shared across the cases (fresh WASM
@@ -41,7 +40,7 @@ async function applyThrough(c: PGlite, upToExclusive: string) {
   for (const f of files) await applyFile(c, f);
 }
 
-describe("PR3 exact-approval migration (0081)", () => {
+describe("exact-approval migration (0081)", () => {
   beforeAll(async () => {
     ({ client } = await createPGLiteDb("memory://"));
   });
@@ -94,7 +93,7 @@ describe("PR3 exact-approval migration (0081)", () => {
     expect(Number(rev.rows[0].authority_revision)).toBe(2);
   });
 
-  test("the PR3 provider_action_bindings transition trigger replaces the PR2 one", async () => {
+  test("installs the provider_action_bindings transition trigger", async () => {
     const trg = await client.query<{ tgname: string }>(
       `SELECT tgname FROM pg_trigger WHERE NOT tgisinternal
        AND tgname='provider_action_bindings_immutable'`,
@@ -136,9 +135,9 @@ describe("PR3 exact-approval migration (0081)", () => {
     expect(txcol.rows[0].is_nullable).toBe("YES");
   });
 
-  test("backfill: a legacy PR2 pending_approval binding migrates to approval_stale without failing the shape CHECK (P1 codex)", async () => {
-    // Build the pre-0081 schema, insert a pending_approval binding (as PR2 would
-    // leave it), THEN apply 0081 and assert the migration succeeds + reclassifies.
+  test("backfill: an earlier pending_approval binding migrates to approval_stale without failing the shape CHECK", async () => {
+    // Build the pre-0081 schema, insert a pending_approval binding, then apply
+    // 0081 and assert the migration succeeds and reclassifies it.
     const c = new PGlite("memory://");
     await applyThrough(c, MIG_0081);
     await c.exec(`
@@ -179,7 +178,7 @@ describe("PR3 exact-approval migration (0081)", () => {
     await c.close();
   });
 
-  test("the enum carries the PR3 provider lifecycle statuses", async () => {
+  test("the enum carries the provider lifecycle statuses", async () => {
     const vals = await client.query<{ enumlabel: string }>(
       `SELECT enumlabel FROM pg_enum e
        JOIN pg_type t ON t.oid = e.enumtypid

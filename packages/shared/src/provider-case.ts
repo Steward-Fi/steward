@@ -1,5 +1,5 @@
 /**
- * PR5 — Correlated provider-case evidence: shared, crypto-free types.
+ * Correlated provider-case evidence: shared, crypto-free types.
  *
  * This module holds ONLY the manifest/evidence type contracts, the
  * `requiredRoles` completeness function, and stable reason-code constants. It
@@ -10,17 +10,17 @@
  * Boundary (spec §0): the manifest is a DERIVED, deterministic index over the
  * already-signed audit chain. It mints no second case identifier (the case id
  * IS `intents.id`), adds no second ledger, and carries no independent trust —
- * every fact is checkable against a signed event (§2.3). See PR5 spec E1–E8.
+ * every fact is checkable against a signed event (§2.3). See evidence spec E1–E8.
  */
 
 export const PROVIDER_CASE_MANIFEST_SCHEMA_VERSION = "steward.provider-case-manifest.v1" as const;
 
 /**
  * Role of a correlated audit event within a case — classifies WHICH lifecycle
- * link the event proves. This is PR5's own taxonomy; it is derived from the
+ * link the event proves. This is evidence's own taxonomy; it is derived from the
  * event's `action` string at assembly time (see `roleForAction`). It is
  * deliberately decoupled from the exact `action` names so upstream taxonomy
- * drift (e.g. PR2 folding access+policy+approval-request into a single genesis
+ * drift (e.g. action-creation folding access+policy+approval-request into a single genesis
  * event) does not break correlation — the role is a semantic classifier.
  */
 export type ProviderCaseEventRole =
@@ -129,7 +129,7 @@ export interface ProviderCaseManifestV1 {
   policyDecision: { id: string | null; hash: string | null; effect: string };
   approvalCommitmentHash: string | null;
 
-  // ── Execution outcome (PR4) ────────────────────────────────────────────
+  // ── Execution outcome (execution-authorization) ────────────────────────────────────────────
   execution: {
     authorizationId: string | null;
     dispatchState: ProviderCaseDispatchState;
@@ -200,15 +200,14 @@ export interface ProviderCaseEvidenceV1 {
  * chain-linked) for the case to be `complete`. A role missing relative to this
  * set yields `incomplete`; a broken chain or unresolved state yields `unknown`.
  *
- * NOTE on landed taxonomy drift (PR2 genesis folding): the shipped code emits a
+ * The event model folds action creation into a single genesis event
  * SINGLE genesis event (`provider.action.allowed|denied|approval_required`)
  * that carries the access AND policy decision hashes, rather than separate
  * `provider.access.decided` + `provider.policy.decided` events the spec §1.4
  * taxonomy anticipated. `roleForAction` maps that single genesis event to the
  * `genesis` role, and `requiredRoles` treats `genesis` as satisfying the
  * access/policy-decided requirement for the pre-approval terminal states. This
- * keeps completeness mechanical against the code AS LANDED (spec anchor
- * re-verification protocol). See PR body contradiction C-DRIFT-1.
+ * keeps completeness mechanical against the current event taxonomy.
  */
 export function requiredRoles(terminalState: ProviderCaseTerminalState): ProviderCaseEventRole[] {
   switch (terminalState) {
@@ -217,8 +216,8 @@ export function requiredRoles(terminalState: ProviderCaseTerminalState): Provide
     case "denied_policy":
       return ["genesis"];
     case "pending_approval":
-      // Genesis (approval_required) is itself the approval-request record in the
-      // landed taxonomy; no separate approval_requested event exists.
+      // Genesis (approval_required) is itself the approval-request record; no
+      // separate approval_requested event exists.
       return ["genesis"];
     case "approval_denied":
       return ["genesis", "approval_decided"];
@@ -245,24 +244,24 @@ export function requiredRoles(terminalState: ProviderCaseTerminalState): Provide
 /**
  * Map a correlated event `action` string to its case role. Unknown actions map
  * to `null` (they are correlated but do not satisfy a required role). This is
- * the single point that couples PR5 to the upstream event names; keep it in
- * sync with the PR2/PR3/PR4 taxonomies AS LANDED.
+ * the single point that couples evidence to the upstream event names; keep it in
+ * sync with the action-creation/approval-lifecycle/execution-authorization taxonomies AS LANDED.
  */
 export function roleForAction(action: string): ProviderCaseEventRole | null {
   switch (action) {
-    // PR2 genesis (single folded event, all three arms are genesis).
+    // action-creation genesis (single folded event, all three arms are genesis).
     case "provider.action.allowed":
     case "provider.action.denied":
     case "provider.action.approval_required":
       return "genesis";
-    // Spec-taxonomy names (kept for forward-compat if PR2 ever splits them).
+    // Spec-taxonomy names (kept for forward-compat if action-creation ever splits them).
     case "provider.access.decided":
       return "access_decided";
     case "provider.policy.decided":
       return "policy_decided";
     case "provider.approval.requested":
       return "approval_requested";
-    // PR3 approval lifecycle.
+    // approval lifecycle.
     case "provider.approval.decided":
       return "approval_decided";
     case "provider.approval.expired":
@@ -270,7 +269,7 @@ export function roleForAction(action: string): ProviderCaseEventRole | null {
       return "approval_terminal";
     case "provider.resume.ready":
       return "resume_ready";
-    // PR4 execution lifecycle.
+    // execution lifecycle.
     case "provider.execution.authorized":
       return "exec_authorized";
     case "provider.execution.claimed":

@@ -1,5 +1,5 @@
 /**
- * plugin-migrate.test.ts — proves the Phase 2c isolation guarantee: a plugin's
+ * Proves the plugin migration isolation guarantee: a plugin's
  * migrations are recorded ONLY in its own namespaced bookkeeping table, never in
  * the core's `drizzle.__drizzle_migrations`, and re-running is idempotent.
  *

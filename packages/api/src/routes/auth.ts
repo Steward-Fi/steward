@@ -153,6 +153,7 @@ import {
   isAllowedOidcClientSecretEnvForTenant,
   normalizeOidcProviders,
 } from "../services/oidc-provider-config";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { socketPeerFromEnv } from "../services/runtime-gate";
 import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
 import { lockUserSession } from "../services/session-lock";
@@ -243,29 +244,6 @@ function normalizeIpCandidate(value: string | undefined): string | undefined {
   return isIP(candidate) ? candidate : undefined;
 }
 
-let clientIpDiagLoggedAt = 0;
-
-/**
- * TEMPORARY diagnostics — remove once Railway's forwarded-header shape is
- * confirmed in production logs. Fires (throttled) only when trust IS
- * configured yet no candidate validated. Never log raw forwarded headers:
- * they are attacker-controlled and may contain credential-shaped content.
- */
-function logNoTrustedClientIpDiag(c: Context, hops: number): void {
-  const now = Date.now();
-  if (now - clientIpDiagLoggedAt < 60_000) return;
-  clientIpDiagLoggedAt = now;
-  console.warn(
-    "[AuthRateLimit][diag] trust configured but no client IP derived; falling back to coarse subject",
-    JSON.stringify({
-      hops,
-      forwardedForPresent: Boolean(c.req.header("x-forwarded-for")),
-      envoyAddressPresent: Boolean(c.req.header("x-envoy-external-address")),
-      cloudflareAddressPresent: Boolean(c.req.header("cf-connecting-ip")),
-    }),
-  );
-}
-
 /**
  * Best-effort trustworthy client IP, or undefined when none can be derived.
  *
@@ -300,7 +278,6 @@ export function trustedClientIp(c: Context): string | undefined {
     // header is absent or malformed, do not fall through to other forwarded
     // headers: those may be supplied by the client when the request bypasses
     // the configured edge.
-    logNoTrustedClientIpDiag(c, 0);
     return undefined;
   }
   const hops = trustedProxyHops();
@@ -321,7 +298,6 @@ export function trustedClientIp(c: Context): string | undefined {
   // short would turn a topology/configuration failure into false attribution.
   const ip = hops >= 2 ? fromForwardedFor() : (fromEnvoy() ?? fromForwardedFor());
   if (ip) return ip;
-  logNoTrustedClientIpDiag(c, hops);
   return undefined;
 }
 
@@ -1344,6 +1320,8 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
     backend: challengeBackend,
     ttlMs: EMAIL_GRANT_TTL_MS,
   });
+  const { initUserLinkStores } = await import("./user.js");
+  initUserLinkStores(challengeBackend);
   _importSessionBackend = importSessionBackend;
 
   // Reset singletons so they pick up the new stores on next use
@@ -2673,22 +2651,17 @@ function sessionHasRecentFactorEnrollmentStepUp(
   session: Extract<Awaited<ReturnType<typeof requireSession>>, { ok: true }>,
   existingDurableFactor: boolean,
 ): boolean {
-  const now = Date.now();
-  if (
-    typeof session.payload.mfaVerifiedAt === "number" &&
-    now - session.payload.mfaVerifiedAt >= 0 &&
-    now - session.payload.mfaVerifiedAt <= FACTOR_ENROLLMENT_STEP_UP_MAX_AGE_MS
-  ) {
+  if (isRecentMfaTimestamp(session.payload.mfaVerifiedAt, FACTOR_ENROLLMENT_STEP_UP_MAX_AGE_MS)) {
     return true;
   }
   if (existingDurableFactor && session.payload.authMethod !== "passkey") {
     return false;
   }
   if (
-    typeof session.payload.factorEnrollmentVerifiedAt === "number" &&
-    Number.isFinite(session.payload.factorEnrollmentVerifiedAt) &&
-    now - session.payload.factorEnrollmentVerifiedAt >= 0 &&
-    now - session.payload.factorEnrollmentVerifiedAt <= FACTOR_ENROLLMENT_STEP_UP_MAX_AGE_MS
+    isRecentMfaTimestamp(
+      session.payload.factorEnrollmentVerifiedAt,
+      FACTOR_ENROLLMENT_STEP_UP_MAX_AGE_MS,
+    )
   ) {
     return true;
   }
@@ -4947,7 +4920,7 @@ auth.get("/oidc/:provider/authorize", async (c) => {
   let authUrl: URL;
   try {
     // Revalidate legacy rows at the action boundary before issuing a browser
-    // redirect. Configuration-time checks alone do not cover pre-fix data.
+    // redirect. Configuration-time checks alone do not cover existing legacy rows.
     authUrl = assertPublicHttpsEndpoint(provider.authorizationUrl, "OIDC authorization endpoint");
   } catch (err) {
     return c.json<ApiResponse>(

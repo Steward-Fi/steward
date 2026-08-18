@@ -61,7 +61,7 @@ export type { AuditActorType as ActorType } from "@stwd/db";
 
 /**
  * Minimal read surface a snapshot transaction (or the db) must expose so the
- * PR5 case correlator can run `verifyAuditChain` + `readAuditBundleData` inside
+ * evidence case correlator can run `verifyAuditChain` + `readAuditBundleData` inside
  * ONE coherent snapshot. Both the Drizzle db and a Drizzle tx satisfy this; we
  * alias to the db's own type so the internal `.execute(sql\`...\`)` calls keep
  * their existing typing when an executor is supplied.
@@ -80,11 +80,11 @@ export function auditRowAggregateQuery(tenantId: string, genesisSeq: number, max
             LIMIT ${maxRows + 1}
           ) AS bounded_audit_events`;
 }
-// The tamper-evident audit-chain WRITE core (append/transaction primitives, the
-// HMAC key handling, and metadata redaction) now lives in `@stwd/db` so the
+// The tamper-evident audit-chain write core (append/transaction primitives,
+// HMAC key handling, and metadata redaction) lives in `@stwd/db` so the
 // proxy package can extend the chain atomically without importing `@stwd/api`
-// (which would be a dependency cycle). This file re-exports them so its existing
-// importers are unaffected, and keeps the API-only READ side below
+// (which would be a dependency cycle). This file re-exports them and keeps the
+// API-only read side below
 // (verifyAuditChain, evidence bundles, ActorType, trackAuditEvent).
 export type { AppendRequiredAudit, AuditEventInput };
 export {
@@ -244,7 +244,7 @@ export async function verifyAuditChain(
     /**
      * Optional read executor (a snapshot transaction) so callers can verify a
      * chain segment WITHIN a single coherent snapshot alongside other reads
-     * (PR5 §4.1/§4.3 KC06). Defaults to `getDb()`; behavior is otherwise
+     * (evidence §4.1/§4.3 KC06). Defaults to `getDb()`; behavior is otherwise
      * identical. Must expose `.execute(sql)` like the Drizzle db/tx.
      */
     executor?: AuditReadExecutor;
@@ -560,7 +560,7 @@ export async function readAuditBundleData(
 
 /**
  * The self-contained, offline-verifiable signed bundle envelope shared by
- * `/audit/bundle` and PR5's `/v2/provider-actions/:id/evidence`. Factored out of
+ * `/audit/bundle` and evidence's `/v2/provider-actions/:id/evidence`. Factored out of
  * the route (spec §6.2) so both surfaces sign identically — one signing path,
  * one checkpoint-persistence policy, one canonicalization contract.
  */
@@ -582,7 +582,7 @@ export interface SignedAuditBundle {
 /**
  * Sign a checkpoint over the chain head + a content digest over exactly the
  * bundle's events, persist the checkpoint best-effort (provenance only; the
- * bundle is authoritative regardless, PR5 C4), and return the self-contained
+ * bundle is authoritative regardless, evidence C4), and return the self-contained
  * signed bundle envelope.
  *
  * `bundleData` MUST come from `readAuditBundleData(tenantId, from, to)` (ideally

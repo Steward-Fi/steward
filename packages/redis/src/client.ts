@@ -50,12 +50,6 @@ export function assertRedisUrlTls(url: string, env: NodeJS.ProcessEnv = process.
   try {
     parsed = new URL(url);
   } catch {
-    if (allowInsecure) {
-      console.warn(
-        "[steward:redis] WARNING: STEWARD_ALLOW_INSECURE_REDIS=true — REDIS_URL is not a valid URL, so TLS cannot be verified.",
-      );
-      return;
-    }
     throw new Error("REDIS_URL must be a valid URL so TLS settings can be verified in production");
   }
 
@@ -83,12 +77,9 @@ export function assertRedisUrlTls(url: string, env: NodeJS.ProcessEnv = process.
 }
 
 /**
- * SEC-032, upstash path: the Upstash REST token authenticates every request,
- * so a cleartext http:// endpoint exposes it (and lets a network-positioned
- * attacker read/tamper with spend-limit, rate-limit, and auth KV state) even
- * though the ioredis path is TLS-asserted. In production require https://
- * unless the endpoint is loopback; STEWARD_ALLOW_INSECURE_REDIS=true overrides
- * (loud warning), matching assertRedisUrlTls.
+ * The Upstash REST token authenticates every request. Production endpoints
+ * therefore require HTTPS unless they are loopback or the operator explicitly
+ * opts into a private-network HTTP endpoint.
  */
 export function assertUpstashRestUrlTls(url: string, env: NodeJS.ProcessEnv = process.env): void {
   const allowInsecure = env.STEWARD_ALLOW_INSECURE_REDIS === "true";

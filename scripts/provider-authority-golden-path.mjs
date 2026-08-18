@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * PR6 provider-authority GOLDEN PATH — single-command FAKE proof (§2.7, §5.4).
+ * Provider-authority golden path — single-command deterministic validation.
  *
  * WHAT THIS IS
  * ------------
  * A thin, deterministic, credential-FREE orchestrator that runs the in-process
- * fake CI proof (`packages/api/src/__tests__/provider-authority-e2e.test.ts` +
+ * deterministic CI validation (`packages/api/src/__tests__/provider-authority-e2e.test.ts` +
  * the proxy static-inventory guard) and emits the stable five-artifact set the
  * acceptance gate requires:
  *
@@ -23,9 +23,9 @@
  * - U6 Deterministic + credential-free: no real provider credential, no network
  *   egress. The fake transport is injected ONLY via the test seam (U1); this
  *   script NEVER ships a production image with the fake wired.
- * - U8 Claims discipline: the manifest records the PRE-real-proof claim wording
- *   until a recorded sandbox run exists. This script writes the pre-real-proof
- *   wording; it does NOT assert operator-proof / exactly-once / MPC / SOC2.
+ * - U8 Claims discipline: the manifest records the repository-evidence claim
+ *   boundary unless a recorded sandbox run exists. It does NOT assert
+ *   operator-proof / exactly-once / MPC / SOC2.
  * - U10 Fail-closed: a failing test run, a missing artifact, or a canary hit is
  *   a hard non-zero exit. A skipped required assertion is a gate failure.
  *
@@ -49,8 +49,7 @@ const OUT_DIR = join(ROOT, "artifacts", "provider-authority", "fake");
 const E2E_TEST = "src/__tests__/provider-authority-e2e.test.ts";
 const INVENTORY_TEST = "packages/proxy/src/__tests__/fake-provider-transport-inventory.test.ts";
 
-// The pre-real-proof claim wording (U8). This is the ONLY wording the artifact
-// uses until a recorded real-sandbox run exists (scripts/provider-authority-sandbox.mjs).
+// Repository evidence alone cannot establish a real provider sandbox run (U8).
 const PRE_REAL_PROOF_CLAIM =
   "Governed provider execution is proven end-to-end against a DETERMINISTIC " +
   "IN-PROCESS FAKE transport that is unselectable in production. This is NOT a " +
@@ -190,7 +189,7 @@ function main() {
 
   // 5) verifier-report.txt — the E2E's evidence round-trip (M09/M15) runs the
   //    offline verifier for the clean + tamper cases. We surface a summary; the
-  //    PR5 provider-case-evidence integration test is the exhaustive verifier
+  //    evidence provider-case-evidence integration test is the exhaustive verifier
   //    proof (clean PASS + tamper FAIL for every fixture).
   const verifierReport =
     `provider-authority verifier summary (fake run)\n` +
@@ -247,7 +246,7 @@ function main() {
 
   console.log(`[golden-path] PASS — artifacts written to ${OUT_DIR}`);
   console.log(`[golden-path] sha=${sha} pass=${passCount} fail=${failCount} canary=clean`);
-  console.log("[golden-path] claim wording: PRE-real-proof (no real sandbox run recorded).");
+  console.log("[golden-path] claim boundary: no real sandbox run recorded.");
 }
 
 main();

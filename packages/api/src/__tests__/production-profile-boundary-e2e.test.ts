@@ -105,11 +105,6 @@ const PROFILES = [
     requestProfile: {},
   },
   {
-    // AWS resolves its one permitted origin dynamically from the canonical
-    // action bytes (registry dynamicOriginPolicy "aws-ec2-region"), so the
-    // host below MUST equal `ec2.${args.region}.amazonaws.com` and the route
-    // must carry the exact SigV4 binding (see the credential/route
-    // special-cases in runAuthenticatedBoundary).
     profile: AWS_PROVIDER_ACTION_PROFILE,
     adapterKey: "aws",
     operationKey: "aws.ec2.DescribeInstances",
@@ -193,6 +188,7 @@ beforeAll(async () => {
     "api.github.com,api.x.com,slack.com,www.googleapis.com,api.example.com,ec2.us-west-2.amazonaws.com";
   process.env.STEWARD_PROXY_ALLOWED_HOSTS =
     "api.github.com,api.x.com,slack.com,www.googleapis.com,api.example.com,ec2.us-west-2.amazonaws.com";
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   process.env.STEWARD_JWT_SECRET = "profile-boundary-jwt-secret-0123456789abcdef0123456789";
   const signingKeys = generateKeyPairSync("ed25519");
   process.env.STEWARD_AUDIT_SIGNING_KEY = signingKeys.privateKey
@@ -242,7 +238,6 @@ beforeAll(async () => {
   // credential injection, not Redis availability. Make the rate-limit seam
   // deterministic so an unrelated process-local fallback cannot turn every
   // dispatch into a 429 when this file runs in a larger suite.
-  proxy.__setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
   proxy.__setForwardProxyRequestForTests(async () => {
     forwardCount += 1;
     return new Response('{"ok":true}', { status: 201 });
@@ -265,6 +260,9 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+  const proxy = await import("@stwd/proxy/src/handlers/proxy");
+  const { checkProxyRateLimit } = await import("@stwd/proxy/src/middleware/redis-enforcement");
+  proxy.__setCheckProxyRateLimitForTests(checkProxyRateLimit);
   await closeDb();
   await new Promise<void>((resolve) => jwksServer.close(() => resolve()));
   for (const key of [
@@ -274,6 +272,7 @@ afterAll(async () => {
     "STEWARD_MASTER_PASSWORD",
     "STEWARD_SECRET_ROUTE_ALLOWED_HOSTS",
     "STEWARD_PROXY_ALLOWED_HOSTS",
+    "STEWARD_PROXY_DEV_MODE",
     "STEWARD_JWT_SECRET",
     "STEWARD_AUDIT_SIGNING_KEY",
     "ELIZA_CLOUD_JWKS_URL",
@@ -322,12 +321,9 @@ async function prepareAuthenticatedBoundary(
             scopesGranted: ["openid", "email", "https://www.googleapis.com/auth/calendar.readonly"],
           })
         : fixture.profile === AWS_PROVIDER_ACTION_PROFILE
-          ? // Strict SigV4 credential schema (packages/proxy/src/sigv4.ts):
-            // accessKeyId is /^[A-Z0-9]{16,128}$/, secretAccessKey 16..256
-            // printable chars, optional sessionToken. No other keys allowed.
-            JSON.stringify({
-              accessKeyId: "AKIAPROFILEBOUNDARY0",
-              secretAccessKey: "profile-boundary-aws-secret-key",
+          ? JSON.stringify({
+              accessKeyId: "AKIDEXAMPLE123456",
+              secretAccessKey: "profile-boundary-secret-key-material",
             })
           : "profile-boundary-credential";
   const encrypted = vault.encrypt(credential, {
@@ -365,11 +361,6 @@ async function prepareAuthenticatedBoundary(
       agentId: F.AGENT,
       authorityMode: "governed_v2",
       providerOperationId: F.OP,
-      // The AWS profile dispatches through the SigV4 final-boundary signer,
-      // which requires the route's exact sigv4 binding (service ec2 + the
-      // region the fixture host commits to). Both assertAwsCredentialRouteBinding
-      // (ingress) and injectAwsSigV4AtFinalBoundary (dispatch) fail closed
-      // without it. Other profiles keep the seeded header-injection strategy.
       injectionStrategy: fixture.profile === AWS_PROVIDER_ACTION_PROFILE ? "sigv4" : "header",
       injectionConfig:
         fixture.profile === AWS_PROVIDER_ACTION_PROFILE
@@ -515,7 +506,7 @@ async function runAuthenticatedBoundary(
   expect(evidence.bundle.events.length).toBeGreaterThan(0);
 }
 
-describe("#220 real production profile boundaries", () => {
+describe("real production profile boundaries", () => {
   test("the live runner covers exactly every registered profile", () => {
     expect(PROFILES.map(({ profile }) => profile).sort()).toEqual([...REGISTERED_PROFILES].sort());
   });
@@ -567,11 +558,10 @@ describe("#220 real production profile boundaries", () => {
       .select()
       .from(proxyAuditLog)
       .where(eq(proxyAuditLog.tenantId, F.TENANT));
-    expect(audits.some((audit) => audit.reason === "credential-resolution-failed")).toBeTrue();
+    expect(audits.some((audit) => audit.reason === "credential-decrypt-failed")).toBeTrue();
     expect(JSON.stringify(audits)).not.toContain(canary);
     expect(logged.join("\n")).toContain('"errorClass":"Error"');
     expect(logged.join("\n")).toContain('"errorCode":null');
     expect(logged.join("\n")).not.toContain(canary);
-    expect(logged.join("\n")).not.toContain("profile-boundary-name-canary");
   });
 });

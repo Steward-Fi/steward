@@ -88,20 +88,6 @@ function embeddedIpv4FromIpv6(hostname: string): string | null {
     words[5] === 0;
   if (isNat64WellKnown) return fromWords(words[6], words[7]);
 
-  // RFC 8215 IPv4-translated ::ffff:0:0/96 — distinct from the IPv4-mapped
-  // form (words[5] === 0xffff, handled by mappedIpv4FromIpv6). The IPv4 is
-  // embedded in the low 32 bits and reachable through NAT64/SIIT paths, so
-  // it must face the same non-public checks. Parity with the delivery-time
-  // dispatcher screen (SEC-178); registration should reject these up front.
-  const isIpv4Translated =
-    words[0] === 0 &&
-    words[1] === 0 &&
-    words[2] === 0 &&
-    words[3] === 0 &&
-    words[4] === 0xffff &&
-    words[5] === 0;
-  if (isIpv4Translated) return fromWords(words[6], words[7]);
-
   if (words[0] === 0x2002) return fromWords(words[1], words[2]);
 
   return null;

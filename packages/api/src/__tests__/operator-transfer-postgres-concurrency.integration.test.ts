@@ -18,21 +18,6 @@ const postgres = ((postgresModule as { default?: unknown }).default ?? postgresM
 const databaseUrl = process.env.DATABASE_URL;
 const realPostgresIt = databaseUrl && !process.env.STEWARD_PGLITE_MEMORY ? it : it.skip;
 
-it("keeps every cumulative spend path on the same 64-bit advisory key", async () => {
-  const [intents, vault, operator] = await Promise.all(
-    [
-      "../routes/intents.ts",
-      "../routes/vault.ts",
-      "../../../plugin-trading/src/routes/operator-recovery.ts",
-    ].map((path) => Bun.file(new URL(path, import.meta.url)).text()),
-  );
-  for (const source of [intents, vault]) {
-    expect(source).toContain("pg_advisory_xact_lock(hashtextextended(${agentId}, 0))");
-    expect(source).not.toContain("pg_advisory_xact_lock(hashtext(${agentId}))");
-  }
-  expect(operator).toContain("pg_advisory_xact_lock(hashtextextended(${input.agentId}, 0))");
-});
-
 realPostgresIt("serializes cumulative operator reservations across real connections", async () => {
   const suffix = crypto.randomUUID().replaceAll("-", "");
   const table = `operator_lock_test_${suffix}`;
@@ -106,9 +91,11 @@ realPostgresIt(
           if (kind === "operator") {
             await tx`
               insert into operator_transfer_reservations
-                (tenant_id, agent_id, rail, idempotency_key, destination, amount_base_units, status)
+                (tenant_id, agent_id, rail, idempotency_key, request_digest, destination,
+                 amount_base_units, status)
               values
-                (${tenantId}, ${agentId}, 'usd-send', ${`${kind}-${agentId}`}, '0x2222222222222222222222222222222222222222', '60000000', 'pending')
+                (${tenantId}, ${agentId}, 'usd-send', ${`${kind}-${agentId}`}, ${"a".repeat(64)},
+                 '0x2222222222222222222222222222222222222222', '60000000', 'pending')
             `;
           } else {
             await tx`
@@ -162,12 +149,13 @@ realPostgresIt(
       `;
       await admin`
         insert into operator_transfer_reservations
-          (tenant_id, agent_id, rail, idempotency_key, destination, amount_base_units, status, finalized_at)
+          (tenant_id, agent_id, rail, idempotency_key, request_digest, destination,
+           amount_base_units, status, finalized_at, response_status, response_body)
         values
-          (${tenantId}, ${agentId}, 'withdraw', ${`pending-${suffix}`}, '0x4234567890123456789012345678901234567890', '60000000', 'pending', null),
-          (${tenantId}, ${agentId}, 'usd-send', ${`final-${suffix}`}, '0x4234567890123456789012345678901234567890', '10000000', 'final', now()),
-          (${tenantId}, ${agentId}, 'withdraw', ${`released-${suffix}`}, '0x4234567890123456789012345678901234567890', '999000000', 'released', now()),
-          (${tenantId}, ${otherAgentId}, 'withdraw', ${`other-${suffix}`}, '0x4234567890123456789012345678901234567890', '888000000', 'final', now())
+          (${tenantId}, ${agentId}, 'withdraw', ${`pending-${suffix}`}, ${"b".repeat(64)}, '0x4234567890123456789012345678901234567890', '60000000', 'pending', null, null, null),
+          (${tenantId}, ${agentId}, 'usd-send', ${`final-${suffix}`}, ${"c".repeat(64)}, '0x4234567890123456789012345678901234567890', '10000000', 'final', now(), 200, '{"ok":true}'::jsonb),
+          (${tenantId}, ${agentId}, 'withdraw', ${`released-${suffix}`}, ${"d".repeat(64)}, '0x4234567890123456789012345678901234567890', '999000000', 'released', now(), null, null),
+          (${tenantId}, ${otherAgentId}, 'withdraw', ${`other-${suffix}`}, ${"e".repeat(64)}, '0x4234567890123456789012345678901234567890', '888000000', 'final', now(), 200, '{"ok":true}'::jsonb)
       `;
 
       const { getTransactionStats } = await import("../services/context");

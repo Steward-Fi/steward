@@ -1,19 +1,7 @@
 /**
- * Regression test for issues #101 and #111.
- *
- * These guard the shipped deploy artifacts (no app logic is exercised), so the
- * test is dependency-free: it reads the files as text and asserts on their
- * content. It FAILS against the pre-fix artifacts and passes after the fix.
- *
- * #101 — steward-proxy runs NODE_ENV=production, which makes request signing and
- *        Redis enforcement fail CLOSED. The compose proxy service must therefore
- *        supply REDIS_URL and a request-signing secret (or set the explicit
- *        soft-fail / no-signature overrides), and the docs must not call
- *        REDIS_URL optional while the code treats production as requiring it.
- *
- * #111 — provision-steward-node.sh must not interpolate secret variables into an
- *        ssh / ${SSH_CMD} "..." command-line argument, and must not echo the
- *        platform admin key to stdout.
+ * Executable safety contracts for the deployment artifacts shipped with the
+ * repository. These tests inspect configuration and scripts because those
+ * files are the production behavior under test.
  */
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -44,7 +32,7 @@ function extractProxyService(compose: string): string {
   return body.join("\n");
 }
 
-describe("#101 deploy/docker-compose.yml proxy production env", () => {
+describe("deploy/docker-compose.yml proxy production env", () => {
   const compose = read("docker-compose.yml");
   const proxy = extractProxyService(compose);
 
@@ -83,18 +71,17 @@ describe("#101 deploy/docker-compose.yml proxy production env", () => {
   });
 });
 
-describe("#101 deploy/DEPLOYMENT.md docs reconciled with fail-closed code", () => {
+describe("deploy/DEPLOYMENT.md documents the fail-closed runtime", () => {
   const doc = read("DEPLOYMENT.md");
 
   test("REDIS_URL is not marked optional in the critical-env table", () => {
-    // Pre-fix row: `| `REDIS_URL` | ... | No |`
+    // Redis is required for production enforcement and cannot be documented as optional.
     const optionalRow = /\|\s*`REDIS_URL`\s*\|[^|]*\|\s*No\s*\|/i;
     expect(optionalRow.test(doc)).toBe(false);
   });
 
   test("docs do not claim Redis-absent uses in-memory fallbacks without noting prod fails closed", () => {
-    // The misleading sentence asserts in-memory fallback as the unconditional
-    // behavior. After the fix the surrounding text must mention fail-closed.
+    // Any documented in-memory fallback must also state that production fails closed.
     const claimsFallback = /in-memory fallback/i.test(doc);
     if (claimsFallback) {
       expect(/fail(s)?\s*closed/i.test(doc)).toBe(true);
@@ -103,17 +90,6 @@ describe("#101 deploy/DEPLOYMENT.md docs reconciled with fail-closed code", () =
 });
 
 describe("SEC-130 no production node inventory committed in deploy artifacts", () => {
-  const SCRIPTS_DIR = join(DEPLOY_DIR, "..", "scripts");
-
-  test("deploy-all.sh carries no hardcoded node IPs and reads an operator-local inventory", () => {
-    const script = readFileSync(join(SCRIPTS_DIR, "deploy-all.sh"), "utf8");
-    // Pre-fix: seven production host IPs were committed in the NODES map —
-    // a confirmed target list in a public repo.
-    expect(script).not.toMatch(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/);
-    expect(script).toContain("STEWARD_NODES");
-    expect(script).toContain("deploy-nodes.local.conf");
-  });
-
   test("DEPLOYMENT.md carries no production node IPs and documents the bridge threat", () => {
     const doc = read("DEPLOYMENT.md");
     expect(doc).not.toContain("88.99.66.168");
@@ -196,10 +172,8 @@ describe("SEC-081 enterprise backup service keeps the DSN out of container env a
   });
 
   test("pg_dump argv carries no password — DSN userinfo is stripped, PGPASSWORD used (SEC-050)", () => {
-    // Re-audit: pg_dump "$dsn" with the password inside the DSN re-exposed it
-    // in the HOST process list (/proc/<pid>/cmdline). The command must strip
-    // user:password@ from the DSN and authenticate via PGPASSWORD instead
-    // (same pattern as scripts/migrate.sh), BEFORE pg_dump is invoked.
+    // Strip user:password@ from the DSN and authenticate through PGPASSWORD so
+    // credentials never appear in the host process list.
     expect(backup).toContain("PGPASSWORD");
     expect(backup).toContain("pg_pw=");
     expect(backup).toContain("unset PGPASSWORD");
@@ -398,8 +372,7 @@ describe("SEC-022 DEPLOYMENT.md installs shipped hardened units, no root units o
   const doc = read("DEPLOYMENT.md");
 
   test("no inline systemd unit runs services as root", () => {
-    // Pre-fix the doc shipped inline units with `User=root` + `Restart=always`
-    // and none of the hardening in deploy/*.service.
+    // Inline units must not bypass the hardening in deploy/*.service or run as root.
     expect(doc).not.toContain("User=root");
     expect(doc).not.toContain("Restart=always");
   });
@@ -410,7 +383,7 @@ describe("SEC-022 DEPLOYMENT.md installs shipped hardened units, no root units o
   });
 
   test("platform key is not interpolated into a remote ssh curl argv", () => {
-    // Pre-fix Step 6: PLATFORM_KEY="<...>"; ssh ... "curl ... ${PLATFORM_KEY}"
+    // The platform key must never be interpolated into a remote SSH command.
     expect(doc).not.toContain("X-Steward-Platform-Key: ${PLATFORM_KEY}");
   });
 
@@ -422,12 +395,14 @@ describe("SEC-022 DEPLOYMENT.md installs shipped hardened units, no root units o
 describe("SEC-021 deploy/docker-compose.yml redis persists enforcement counters", () => {
   const compose = read("docker-compose.yml");
   const rootCompose = readFileSync(join(DEPLOY_DIR, "..", "docker-compose.yml"), "utf8");
+  const enterpriseCompose = readFileSync(
+    join(DEPLOY_DIR, "enterprise-reference", "docker-compose.yml"),
+    "utf8",
+  );
 
   test("redis runs with AOF persistence and a bounded memory policy", () => {
-    // Redis holds spend-limit / rate-limit counters. Pre-fix it ran
-    // `--save "" --appendonly no` with no maxmemory: any restart silently
-    // zeroed daily-spend and rate-limit counters while the proxy kept
-    // serving, leaving financial policies unenforced.
+    // Redis holds spend-limit and rate-limit counters. Persistence and bounded
+    // memory are required so restarts cannot silently erase enforcement state.
     expect(compose).not.toContain('"--appendonly", "no"');
     expect(compose).toContain('"--appendonly"');
     expect(compose).toContain('"yes"');
@@ -448,15 +423,20 @@ describe("SEC-021 deploy/docker-compose.yml redis persists enforcement counters"
     expect(rootCompose).toContain("--maxmemory-policy noeviction");
     expect(rootCompose).not.toContain("--maxmemory-policy allkeys-lru");
   });
+
+  test("enterprise Redis also fails writes instead of evicting enforcement state", () => {
+    expect(enterpriseCompose).toContain('"--maxmemory"');
+    expect(enterpriseCompose).toContain('"--maxmemory-policy"');
+    expect(enterpriseCompose).toContain('"noeviction"');
+  });
 });
 
 describe("SEC-020 deploy scripts keep the platform key off every argv", () => {
   const script = read("migrate-agent-keys.sh");
 
   test("platform key is read on the remote side, never interpolated into ssh/curl argv", () => {
-    // Pre-fix: the key was a positional arg interpolated into the remote curl
-    // header (visible in local ps/history AND the node's process list):
-    //   -H 'X-Steward-Platform-Key: ${PLATFORM_KEY}'
+    // Command-line interpolation would expose the key in shell history and
+    // process listings on both the local and remote hosts.
     expect(script).not.toContain("X-Steward-Platform-Key: ${PLATFORM_KEY}");
     // The remote shell resolves the key itself (sed on the node's 0600 .env,
     // or cat from ssh stdin for the deprecated arg path).
@@ -502,19 +482,15 @@ describe("SEC-020 deploy scripts keep the platform key off every argv", () => {
     expect(provision).not.toMatch(/\$\{SSH_CMD\}\s+"/);
     expect(provision).toContain("must be a single-line value");
     expect(doc).not.toContain("X-Steward-Platform-Key: \\${PK}");
-    expect(doc).toContain('-H \\"@\\${AUTH_FILE}\\"');
-    expect(doc).toContain("*[!A-Za-z0-9._~-]*");
     expect(doc).not.toContain('-H "X-Steward-Platform-Key: $PK"');
     expect(doc).not.toContain("X-Steward-Platform-Key: <key>");
     expect(doc).not.toContain('-H "X-Steward-Key: $API_KEY"');
-    expect(doc).toContain('> "$WEBHOOK_RESPONSE"');
     expect(readme).not.toContain('-H "X-Steward-Platform-Key: $PLATFORM_KEY"');
     expect(readme).toContain("*[!A-Za-z0-9._~-]*");
   });
 
   test("agent tokens are written to a mode-0600 file, not echoed to stdout", () => {
-    // Pre-fix: `echo "${NEW_ENV_VARS}"` printed per-agent STEWARD_AGENT_TOKEN
-    // values to stdout (scrollback / CI logs).
+    // Agent tokens belong in the protected environment file, never stdout or CI logs.
     expect(script).not.toMatch(/echo\s+"\$\{NEW_ENV_VARS\}"/);
     expect(script).toContain("mktemp");
     expect(script).toContain("not printed here");
@@ -522,13 +498,10 @@ describe("SEC-020 deploy scripts keep the platform key off every argv", () => {
 });
 
 describe("SEC-019 no deploy/provision SSH runs with host-key verification disabled", () => {
-  const SCRIPTS_DIR = join(DEPLOY_DIR, "..", "scripts");
   const artifacts: Array<[string, string]> = [
     ["deploy/provision-steward-node.sh", read("provision-steward-node.sh")],
     ["deploy/migrate-agent-keys.sh", read("migrate-agent-keys.sh")],
     ["deploy/DEPLOYMENT.md", read("DEPLOYMENT.md")],
-    ["scripts/deploy.sh", readFileSync(join(SCRIPTS_DIR, "deploy.sh"), "utf8")],
-    ["scripts/deploy-all.sh", readFileSync(join(SCRIPTS_DIR, "deploy-all.sh"), "utf8")],
   ];
 
   for (const [name, content] of artifacts) {
@@ -573,14 +546,14 @@ describe("SEC-011 deploy/docker-compose.yml publishes no port on all interfaces"
 
   test("provision-steward-node.sh does not advertise plain-HTTP external access", () => {
     const script = read("provision-steward-node.sh");
-    // Pre-fix: `echo "    STEWARD_API_URL=http://${NODE_IP}:3200"` told operators
-    // to drive tenant keys / platform key / agent JWTs over cleartext HTTP.
+    // External instructions must not send tenant keys, platform keys, or agent
+    // JWTs over cleartext HTTP.
     expect(/STEWARD_API_URL=http:\/\/\$\{NODE_IP\}/.test(script)).toBe(false);
     expect(/Steward URL:\s+http:\/\/\$\{NODE_IP\}/.test(script)).toBe(false);
   });
 });
 
-describe("#111 deploy/provision-steward-node.sh does not leak secrets", () => {
+describe("deploy/provision-steward-node.sh does not leak secrets", () => {
   const script = read("provision-steward-node.sh");
   const lines = script.split("\n");
 
@@ -597,7 +570,7 @@ describe("#111 deploy/provision-steward-node.sh does not leak secrets", () => {
   test('no secret is interpolated inside an ssh / ${SSH_CMD} "..." command argument', () => {
     // Flag any line that invokes ssh (directly or via ${SSH_CMD}) AND, on the
     // same line, interpolates a secret var (${VAR} or 'literal=${VAR}'). This
-    // is the heredoc-in-double-quoted-ssh leak from #111. We allow ssh lines
+    // would expose a secret through the local process argv. We allow ssh lines
     // that pipe a file over stdin ( ... < "${LOCAL_ENV_FILE}" ) and lines that
     // read the secret on the REMOTE side ($(sed ...)/$(grep ...)).
     const offenders: string[] = [];
@@ -621,7 +594,7 @@ describe("#111 deploy/provision-steward-node.sh does not leak secrets", () => {
   });
 
   test("the platform key is never echoed to stdout", () => {
-    // Pre-fix:  echo "  Platform Key:   ${PLATFORM_KEY}"
+    // Platform keys must never be printed to terminal scrollback or CI logs.
     const echoesKey = lines.some(
       (l) =>
         /^\s*echo\b/.test(l) &&

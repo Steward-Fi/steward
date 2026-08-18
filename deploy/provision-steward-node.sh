@@ -13,7 +13,7 @@
 # Optional env vars:
 #   DATABASE_URL             — External DB (default: local Postgres via compose)
 #   RPC_URL                  — EVM RPC endpoint (default: Base mainnet)
-#   CHAIN_ID                 — EVM chain ID (default: 8453)
+#   CHAIN_ID                 — EVM chain ID (default: 84532, Base Sepolia)
 #   SOLANA_RPC_URL           — Solana RPC endpoint
 #   STEWARD_REPO             — Git repo URL (default: current directory rsync)
 #   SSH_KEY                  — Path to SSH key (default: ~/.ssh/id_ed25519)
@@ -140,8 +140,8 @@ STEWARD_PROXY_REQUEST_SIGNING_SECRETS=${STEWARD_PROXY_REQUEST_SIGNING_SECRETS}
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
 DATABASE_URL=${DATABASE_URL:-}
 REDIS_URL=${REDIS_URL:-redis://redis:6379}
-RPC_URL=${RPC_URL:-https://mainnet.base.org}
-CHAIN_ID=${CHAIN_ID:-8453}
+RPC_URL=${RPC_URL:-https://sepolia.base.org}
+CHAIN_ID=${CHAIN_ID:-84532}
 SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
 ENVEOF
 

@@ -8,6 +8,7 @@ const ROOT = join(import.meta.dir, "..", "..", "..", "..");
 const COMPOSE = join(ROOT, "deploy", "enterprise-reference", "docker-compose.yml");
 const ROOT_COMPOSE = join(ROOT, "docker-compose.yml");
 const DEPLOY_COMPOSE = join(ROOT, "deploy", "docker-compose.yml");
+const COMPOSE_FILES = [ROOT_COMPOSE, DEPLOY_COMPOSE, COMPOSE];
 const INIT = join(ROOT, "packages", "cli", "src", "init.ts");
 const DOCTOR = join(ROOT, "packages", "cli", "src", "doctor.ts");
 
@@ -19,10 +20,10 @@ function composeService(path: string, service: string): string {
   return lines.slice(start, end < 0 ? undefined : end).join("\n");
 }
 
-describe("governed-route environment wiring", () => {
-  test("enterprise compose declares execution and audit signing secrets as required", () => {
+describe("provider authority deployment environment", () => {
+  test("enterprise compose requires execution and audit signing secrets", () => {
     const compose = readFileSync(COMPOSE, "utf8");
-    // The `${VAR:?required}` form fails compose boot loudly if unset (U10).
+    // The `${VAR:?required}` form makes Compose stop before an unsafe boot.
     expect(compose).toContain(
       'STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?required}"',
     );
@@ -52,5 +53,13 @@ describe("governed-route environment wiring", () => {
     const doctor = readFileSync(DOCTOR, "utf8");
     expect(doctor).toContain('"STEWARD_EXECUTION_AUTH_SECRET"');
     expect(doctor).toContain("strict:governed-route-prerequisites");
+  });
+
+  test("every production compose passes Google provider credentials to API and proxy", () => {
+    for (const path of COMPOSE_FILES) {
+      const compose = readFileSync(path, "utf8");
+      expect(compose.match(/^\s+GOOGLE_PROVIDER_CLIENT_ID:/gm)).toHaveLength(2);
+      expect(compose.match(/^\s+GOOGLE_PROVIDER_CLIENT_SECRET:/gm)).toHaveLength(2);
+    }
   });
 });

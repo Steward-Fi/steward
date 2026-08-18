@@ -295,13 +295,13 @@ export interface EvaluatorContext {
   /** Optional reputation score for reputation-based policies */
   reputationScore?: number;
   /**
-   * Sprint 4: trading venue the request is destined for. Required by the
+   * trading-policy: trading venue the request is destined for. Required by the
    * `venue-allowlist` evaluator. Trade-sessions sets this from the venue
    * adapter dispatch step; non-trade signing requests leave it undefined.
    */
   venue?: string;
   /**
-   * Sprint 4: requested leverage multiple (e.g. 2 = 2x). Required by the
+   * trading-policy: requested leverage multiple (e.g. 2 = 2x). Required by the
    * `leverage-cap` evaluator. Undefined for non-leveraged trades and for
    * spot transfers.
    */
@@ -458,7 +458,7 @@ export async function evaluatePolicy(
     default: {
       // FALLTHROUGH FOR NON-CORE RULE TYPES ONLY. Every core type is handled by a
       // `case` above; control reaches here ONLY for a rule type the core does not
-      // own. Consult the plugin policy-rule registry (Phase 2b): if a plugin
+      // own. Consult the plugin policy-rule registry (plugin policy-rule contribution contract): if a plugin
       // registered an evaluator for this type, run it; otherwise preserve the
       // historical "Unknown policy type" deny. Core decisions are byte-identical
       // because no core type ever reaches this arm.
@@ -808,11 +808,9 @@ async function evaluateSpendingLimit(
       }
     }
 
-    // USD limits hold. Wei-denominated caps declared in the SAME config are
-    // conjunctive, not alternative: previously any USD field short-circuited
-    // the whole wei section, so an operator's per-tx wei cap silently went
-    // unenforced (SEC-037). Fall through to the wei evaluation — undeclared
-    // wei fields normalize to MAX_UINT256, so only explicit caps bite.
+    // USD and wei-denominated caps declared in the same config are
+    // conjunctive. Continue into wei evaluation; undeclared wei fields
+    // normalize to MAX_UINT256, so only explicit caps constrain the request.
     if (
       !hasOwnDefined(configRecord, "maxPerTx") &&
       !hasOwnDefined(configRecord, "maxPerDay") &&

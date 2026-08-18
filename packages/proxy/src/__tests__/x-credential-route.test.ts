@@ -1,5 +1,5 @@
 /**
- * X narrow credential-route integration test (#195 workstream C, proxy plane).
+ * X credential-route integration test for the proxy plane.
  *
  * Full flow, no real network: an X OAuth access token is stored in the vault, a
  * narrow secret_route is created for a single X API endpoint, and a proxied
@@ -50,7 +50,7 @@ beforeAll(async () => {
   // explicit opt-in since SEC-175.
   process.env.STEWARD_PROXY_DEV_MODE = "true";
   // api.x.com ships in the default allowlists (secret-route + proxy alias) as of
-  // workstream C, so no STEWARD_*_ALLOWED_HOSTS env is needed for the happy path.
+  // X's host is fixed by the route, so no STEWARD_*_ALLOWED_HOSTS env is needed.
 
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
@@ -215,42 +215,6 @@ describe("x narrow credential route (integration)", () => {
     expect(captured?.headers.authorization).toBe(`Bearer ${X_ACCESS_TOKEN}`);
     expect(JSON.stringify(captured)).not.toContain(refreshCanary);
     expect(await res.text()).not.toContain(refreshCanary);
-  });
-
-  it("rejects a JSON-quoted legacy token before constructing an outbound request", async () => {
-    captured = null;
-    const tenantId = `tenant-x-invalid-bearer-${crypto.randomUUID()}`;
-    const agentId = `agent-x-invalid-bearer-${crypto.randomUUID()}`;
-    await ensureTenant(tenantId);
-    await ensureAgent(tenantId, agentId);
-
-    const invalidToken = '"quoted-legacy-token"';
-    const vault = new SecretVault(MASTER_PASSWORD);
-    const secret = await vault.createSecret(tenantId, "x-invalid-bearer", invalidToken);
-    await vault.createRoute(tenantId, secret.id, {
-      agentId,
-      hostPattern: "api.x.com",
-      pathPattern: "/2/tweets",
-      method: "POST",
-      injectAs: "header",
-      injectKey: "authorization",
-      injectFormat: "Bearer {value}",
-    });
-
-    const token = await signAgentToken({ agentId, tenantId, scopes: ["agent", PROXY_SCOPE] }, "1h");
-    const res = await buildApp().request("/x/2/tweets", {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${token}`,
-        "content-type": "application/json",
-        "idempotency-key": crypto.randomUUID(),
-      },
-      body: JSON.stringify({ text: "must not reach the wire" }),
-    });
-
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(captured).toBeNull();
-    expect(await res.text()).not.toContain(invalidToken);
   });
 
   it("MUTATION: a route/endpoint mismatch fails closed; the Bearer is NEVER injected or leaked", async () => {

@@ -37,6 +37,7 @@ import {
   isValidE164,
   OAuthClient,
   revocationStore,
+  type StoreBackend,
   type TelegramLoginPayload,
   uint8ArrayToBase64url,
   verifyFarcasterLogin,
@@ -103,6 +104,7 @@ import {
   readTenantGasSponsorshipConfig,
 } from "../services/gas-sponsorship";
 import { plaintextKeyExportResponseGateError } from "../services/key-export-plaintext-gate";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { lockUserSession } from "../services/session-lock";
 import { createSignerCredentialHash, verifySignerCredential } from "../services/signer-credentials";
 import { getConfiguredVault } from "../services/vault-factory";
@@ -193,11 +195,60 @@ const USER_ACCOUNT_CAPABILITIES = [
 const USD_SCALE_DECIMALS = 18;
 const WALLET_LINK_CHALLENGE_TTL_MS = 5 * 60_000;
 const WALLET_LINK_REDEEM_LOCK_TTL_MS = 10_000;
-const walletLinkChallenges = new ChallengeStore({ ttlMs: WALLET_LINK_CHALLENGE_TTL_MS });
+let walletLinkChallenges = new ChallengeStore({ ttlMs: WALLET_LINK_CHALLENGE_TTL_MS });
 const SOCIAL_LINK_CHALLENGE_TTL_MS = 5 * 60_000;
-const socialLinkChallenges = new ChallengeStore({ ttlMs: SOCIAL_LINK_CHALLENGE_TTL_MS });
+let socialLinkChallenges = new ChallengeStore({ ttlMs: SOCIAL_LINK_CHALLENGE_TTL_MS });
 const OAUTH_LINK_CHALLENGE_TTL_MS = 5 * 60_000;
-const oauthLinkChallenges = new ChallengeStore({ ttlMs: OAUTH_LINK_CHALLENGE_TTL_MS });
+let oauthLinkChallenges = new ChallengeStore({ ttlMs: OAUTH_LINK_CHALLENGE_TTL_MS });
+
+class NamespacedStoreBackend implements StoreBackend {
+  constructor(
+    private readonly backend: StoreBackend,
+    private readonly prefix: string,
+  ) {}
+
+  set(key: string, value: string, ttlMs: number): Promise<void> {
+    return this.backend.set(this.prefix + key, value, ttlMs);
+  }
+
+  setIfNotExists(key: string, value: string, ttlMs: number): Promise<boolean> {
+    return this.backend.setIfNotExists(this.prefix + key, value, ttlMs);
+  }
+
+  get(key: string): Promise<string | null> {
+    return this.backend.get(this.prefix + key);
+  }
+
+  consume(key: string): Promise<string | null> {
+    return this.backend.consume(this.prefix + key);
+  }
+
+  delete(key: string): Promise<void> {
+    return this.backend.delete(this.prefix + key);
+  }
+}
+
+/**
+ * Bind account-link challenges to the durable auth backend selected at startup.
+ * Keeping distinct prefixes prevents one flow from consuming another flow's key.
+ */
+export function initUserLinkStores(backend: StoreBackend): void {
+  walletLinkChallenges.destroy();
+  socialLinkChallenges.destroy();
+  oauthLinkChallenges.destroy();
+  walletLinkChallenges = new ChallengeStore({
+    backend: new NamespacedStoreBackend(backend, "wallet-link:"),
+    ttlMs: WALLET_LINK_CHALLENGE_TTL_MS,
+  });
+  socialLinkChallenges = new ChallengeStore({
+    backend: new NamespacedStoreBackend(backend, "social-link:"),
+    ttlMs: SOCIAL_LINK_CHALLENGE_TTL_MS,
+  });
+  oauthLinkChallenges = new ChallengeStore({
+    backend: new NamespacedStoreBackend(backend, "oauth-link:"),
+    ttlMs: OAUTH_LINK_CHALLENGE_TTL_MS,
+  });
+}
 const TELEGRAM_LINK_MAX_AGE_SEC = 24 * 60 * 60;
 const TENANT_ROLES = ["owner", "admin", "developer", "billing", "viewer", "member"] as const;
 type TenantRole = (typeof TENANT_ROLES)[number];
@@ -973,12 +1024,7 @@ async function restoreUserAccountUnlinkMutation(
 }
 
 function hasRecentMfaStepUp(session: UserSessionPayload, maxAgeMs = 5 * 60_000): boolean {
-  return (
-    typeof session.mfaVerifiedAt === "number" &&
-    Number.isFinite(session.mfaVerifiedAt) &&
-    Date.now() - session.mfaVerifiedAt >= 0 &&
-    Date.now() - session.mfaVerifiedAt <= maxAgeMs
-  );
+  return isRecentMfaTimestamp(session.mfaVerifiedAt, maxAgeMs);
 }
 
 async function readPersonalTenantMfaPolicy(tenantId: string): Promise<TenantMfaPolicyConfig> {
@@ -2531,7 +2577,7 @@ user.post("/me/accounts/wallet/ethereum", async (c) => {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired wallet link nonce" }, 401);
     }
   } finally {
-    walletLinkChallenges.delete(lockKey);
+    await walletLinkChallenges.delete(lockKey);
   }
 
   const normalized = address.toLowerCase();
@@ -2720,7 +2766,7 @@ user.post("/me/accounts/wallet/solana", async (c) => {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired wallet link nonce" }, 401);
     }
   } finally {
-    walletLinkChallenges.delete(lockKey);
+    await walletLinkChallenges.delete(lockKey);
   }
 
   const [userRow] = await getDb()
@@ -3631,7 +3677,7 @@ user.delete("/me/accounts/:provider/:providerAccountId", async (c) => {
               : error.message === "Linked account changed during unlink"
                 ? 409
                 : 500;
-      // SEC-210: known client-facing messages keep their detail; anything else
+      // Known client-facing messages keep their detail; anything else
       // is an internal failure and must not leak internals to the client.
       return c.json<ApiResponse>(
         {
@@ -5109,10 +5155,8 @@ user.post("/me/wallet/sign", async (c) => {
       403,
     );
   }
-  // Build the SignRequest from its declared fields only (never spread the raw
-  // body): extra body fields must not reach the policy engine or the vault —
-  // e.g. a smuggled `destination` previously shadowed `to` in the
-  // approved-addresses evaluator while the vault signed `to` (SEC-001).
+  // Build SignRequest only from declared fields. Extra body fields must never
+  // reach the policy engine or vault with a different interpretation.
   const signRequest: SignRequest = {
     tenantId,
     agentId,
@@ -5255,7 +5299,7 @@ user.post("/me/wallet/sign", async (c) => {
         redactedThrownDiagnostics(auditErr),
       );
     }
-    // SEC-210: the raw message stays in server-side logs/audit metadata only;
+    // The raw message stays in server-side logs and audit metadata only;
     // the client gets the sanitized form.
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }

@@ -35,6 +35,27 @@ describe("e2e global teardown (SEC-076)", () => {
     command: "steward-e2e-process",
   });
 
+  const runningProcessControl = (overrides?: {
+    runPs?: (args: string[]) => {
+      error?: Error;
+      status: number | null;
+      signal: NodeJS.Signals | null;
+      stdout: string;
+      stderr: string;
+    };
+    kill?: (pid: number, signal: "SIGTERM") => void;
+  }) => ({
+    runPs:
+      overrides?.runPs ??
+      ((args: string[]) => ({
+        status: 0,
+        signal: null,
+        stdout: args.at(-1) === "lstart=" ? "Mon Jan  1 00:00:00 2001\n" : "steward-e2e-process\n",
+        stderr: "",
+      })),
+    kill: overrides?.kill ?? (() => {}),
+  });
+
   test("removes .next when setup failed before its first state write", async () => {
     const nextDir = makeNextDir();
 
@@ -53,7 +74,13 @@ describe("e2e global teardown (SEC-076)", () => {
       JSON.stringify({ web: goneProcess(999999), api: goneProcess(999998), dataDir }),
     );
 
-    await runGlobalTeardown(pidFile, nextDir);
+    await runGlobalTeardown(
+      pidFile,
+      nextDir,
+      runningProcessControl({
+        runPs: () => ({ status: 1, signal: null, stdout: "", stderr: "" }),
+      }),
+    );
 
     expect(existsSync(nextDir)).toBe(false);
     expect(existsSync(pidFile)).toBe(false);
@@ -85,6 +112,138 @@ describe("e2e global teardown (SEC-076)", () => {
     const pidFile = join(workDir, ".e2e-pids.json");
     writeFileSync(pidFile, JSON.stringify({ web: goneProcess(process.pid) }));
     await expect(runGlobalTeardown(pidFile, nextDir)).rejects.toThrow(/reused web PID/);
+    expect(existsSync(nextDir)).toBe(false);
+    expect(existsSync(pidFile)).toBe(false);
+  });
+
+  test("surfaces a process-inspection launch failure", async () => {
+    const nextDir = makeNextDir();
+    const pidFile = join(workDir, ".e2e-pids.json");
+    writeFileSync(pidFile, JSON.stringify({ web: goneProcess(4242) }));
+    const launchError = Object.assign(new Error("ps unavailable"), { code: "ENOENT" });
+
+    await expect(
+      runGlobalTeardown(
+        pidFile,
+        nextDir,
+        runningProcessControl({
+          runPs: () => ({
+            error: launchError,
+            status: null,
+            signal: null,
+            stdout: "",
+            stderr: "",
+          }),
+        }),
+      ),
+    ).rejects.toThrow(/Could not inspect web process/);
+    expect(existsSync(nextDir)).toBe(false);
+    expect(existsSync(pidFile)).toBe(false);
+  });
+
+  test("surfaces an unexpected nonzero ps status", async () => {
+    const nextDir = makeNextDir();
+    const pidFile = join(workDir, ".e2e-pids.json");
+    writeFileSync(pidFile, JSON.stringify({ web: goneProcess(4242) }));
+
+    await expect(
+      runGlobalTeardown(
+        pidFile,
+        nextDir,
+        runningProcessControl({
+          runPs: () => ({
+            status: 2,
+            signal: null,
+            stdout: "",
+            stderr: "synthetic ps failure",
+          }),
+        }),
+      ),
+    ).rejects.toThrow(/ps exited with status 2/);
+    expect(existsSync(nextDir)).toBe(false);
+    expect(existsSync(pidFile)).toBe(false);
+  });
+
+  test("does not mistake ps status 1 with an error message for an exited process", async () => {
+    const nextDir = makeNextDir();
+    const pidFile = join(workDir, ".e2e-pids.json");
+    writeFileSync(pidFile, JSON.stringify({ web: goneProcess(4242) }));
+
+    await expect(
+      runGlobalTeardown(
+        pidFile,
+        nextDir,
+        runningProcessControl({
+          runPs: () => ({
+            status: 1,
+            signal: null,
+            stdout: "",
+            stderr: "synthetic inspection failure",
+          }),
+        }),
+      ),
+    ).rejects.toThrow(/ps exited with status 1/);
+    expect(existsSync(nextDir)).toBe(false);
+    expect(existsSync(pidFile)).toBe(false);
+  });
+
+  test("treats ps status 1 with no output as an exited process", async () => {
+    const nextDir = makeNextDir();
+    const pidFile = join(workDir, ".e2e-pids.json");
+    writeFileSync(pidFile, JSON.stringify({ web: goneProcess(4242) }));
+    let signalCalls = 0;
+
+    await runGlobalTeardown(
+      pidFile,
+      nextDir,
+      runningProcessControl({
+        runPs: () => ({ status: 1, signal: null, stdout: "", stderr: "" }),
+        kill: () => {
+          signalCalls += 1;
+        },
+      }),
+    );
+
+    expect(signalCalls).toBe(0);
+    expect(existsSync(nextDir)).toBe(false);
+    expect(existsSync(pidFile)).toBe(false);
+  });
+
+  test("suppresses ESRCH when a matched process exits before signaling", async () => {
+    const nextDir = makeNextDir();
+    const pidFile = join(workDir, ".e2e-pids.json");
+    writeFileSync(pidFile, JSON.stringify({ web: goneProcess(4242) }));
+
+    await runGlobalTeardown(
+      pidFile,
+      nextDir,
+      runningProcessControl({
+        kill: () => {
+          throw Object.assign(new Error("gone"), { code: "ESRCH" });
+        },
+      }),
+    );
+
+    expect(existsSync(nextDir)).toBe(false);
+    expect(existsSync(pidFile)).toBe(false);
+  });
+
+  test("surfaces EPERM from signaling a matched process", async () => {
+    const nextDir = makeNextDir();
+    const pidFile = join(workDir, ".e2e-pids.json");
+    writeFileSync(pidFile, JSON.stringify({ web: goneProcess(4242) }));
+
+    await expect(
+      runGlobalTeardown(
+        pidFile,
+        nextDir,
+        runningProcessControl({
+          kill: () => {
+            throw Object.assign(new Error("not permitted"), { code: "EPERM" });
+          },
+        }),
+      ),
+    ).rejects.toThrow(/Could not terminate web process/);
     expect(existsSync(nextDir)).toBe(false);
     expect(existsSync(pidFile)).toBe(false);
   });

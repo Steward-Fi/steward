@@ -1,14 +1,6 @@
 // @stwd/redis — Redis client, rate limiting, spend tracking, policy caching
 
 export {
-  type AggregationEvent,
-  type AggregationMetricFamily,
-  type AggregationScope,
-  type AggregationSnapshotQuery,
-  getAggregationSnapshot,
-  recordAggregationEvent,
-} from "./aggregation-tracker.js";
-export {
   assertRedisUrlTls,
   assertUpstashRestUrlTls,
   disconnectRedis,

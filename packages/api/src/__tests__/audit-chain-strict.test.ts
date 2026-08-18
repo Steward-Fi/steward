@@ -83,9 +83,9 @@ describe("strict audit chain verification", () => {
       metadata: { present: "yes", absent: undefined } as Record<string, unknown>,
     });
 
-    // Re-canonicalizing the persisted row must reproduce the written HMAC —
-    // before the fix, JSON.stringify dropped the undefined-valued key while
-    // the HMAC preimage kept it as null, breaking verification from this seq.
+    // Re-canonicalizing the persisted row must reproduce the written HMAC.
+    // Undefined metadata values must canonicalize consistently with persisted
+    // nulls or verification from this sequence would fail.
     expect(await verifyAuditChain(UNDEF_META_TENANT_ID, { requireHead: true })).toMatchObject({
       valid: true,
       count: 1,

@@ -17,7 +17,6 @@ import {
   it,
   setDefaultTimeout,
 } from "bun:test";
-import { readFileSync } from "node:fs";
 import { closeDb } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
@@ -100,16 +99,6 @@ describe("POST /auth/oauth/exchange", () => {
     expect(res.status).toBe(400);
     expect(json.ok).toBe(false);
     expect(json.error).toContain("response_type=token is disabled");
-  });
-
-  it("does not retain token-in-query redirect branches in OAuth or email callbacks", () => {
-    const source = readFileSync(new URL("../routes/auth.ts", import.meta.url), "utf8");
-
-    expect(source).not.toContain("STEWARD_ALLOW_OAUTH_TOKEN_REDIRECTS");
-    expect(source).not.toContain("STEWARD_ALLOW_EMAIL_TOKEN_REDIRECTS");
-    expect(source).not.toContain('searchParams.set("token"');
-    expect(source).not.toContain('searchParams.set("refreshToken"');
-    expect(source).not.toContain("buildEmailAuthRedirectUrl({\n      token:");
   });
 
   it("returns the bound tokens when code + redirect_uri + tenant_id all match", async () => {

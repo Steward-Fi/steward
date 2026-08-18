@@ -1,4 +1,4 @@
-import type { TxRecord, TxStatus } from "@stwd/sdk";
+import { type TxRecord, type TxStatus } from "@stwd/sdk";
 import { useCallback, useEffect, useState } from "react";
 import { useStewardContext } from "../provider.js";
 import { getAllTransactions } from "../utils/transactions.js";

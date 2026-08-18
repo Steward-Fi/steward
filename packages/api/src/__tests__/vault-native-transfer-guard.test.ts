@@ -1,11 +1,8 @@
 /**
- * REAL behavioral coverage for the native-transfer gas-accounting guard on the
+ * Behavioral coverage for the native-transfer gas-accounting guard on the
  * vault `/:agentId/sign` money path.
  *
- * The old vault-send-calls-spend.test.ts only `readFileSync`'d vault.ts and
- * asserted the source mentioned `eth_getCode` and "Native transfers to contract
- * recipients" — it never ran the guard. This drives the REAL route and proves
- * the two fail-closed deny branches actually fire:
+ * This drives the route and proves the two fail-closed deny branches actually fire:
  *
  *   1. a native transfer that sets `gasLimit` is refused (gas spend is not
  *      policy-accounted), and
@@ -176,7 +173,7 @@ describe("native transfer gas-accounting guard (real /sign path)", () => {
     }
   });
 
-  it("writes the vault.sign.authorized audit BEFORE the irreversible sign (fault-injected)", async () => {
+  it("writes the vault.sign.authorized audit before invoking the signer", async () => {
     // Recipient is a verified EOA (code "0x") AND allowlisted, so the request
     // passes the guard + policy and reaches the signer. Fault-inject the sign to
     // throw: the route must already have COMMITTED the authorization audit (which
@@ -188,9 +185,17 @@ describe("native transfer gas-accounting guard (real /sign path)", () => {
       id: 1,
       result: "0x",
     } as Awaited<ReturnType<Vault["rpcPassthrough"]>>);
-    const signSpy = spyOn(Vault.prototype, "signTransaction").mockRejectedValue(
-      new Error("hsm offline"),
-    );
+    let authorizedBeforeSign = false;
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockImplementation(async () => {
+      const authorized = await getDb()
+        .select({ action: auditEvents.action })
+        .from(auditEvents)
+        .where(
+          and(eq(auditEvents.action, "vault.sign.authorized"), eq(auditEvents.tenantId, TENANT_ID)),
+        );
+      authorizedBeforeSign = authorized.length === 1;
+      throw new Error("hsm offline");
+    });
     try {
       const res = await app.request(`/vault/${AGENT_ID}/sign`, {
         method: "POST",
@@ -207,6 +212,7 @@ describe("native transfer gas-accounting guard (real /sign path)", () => {
       expect(body.ok).toBe(false);
       expect(body.data).toBeUndefined();
       expect(signSpy).toHaveBeenCalled();
+      expect(authorizedBeforeSign).toBe(true);
 
       // The authorization audit survived the failed sign → it was written first.
       const authorized = await getDb()
@@ -217,18 +223,13 @@ describe("native transfer gas-accounting guard (real /sign path)", () => {
         );
       expect(authorized.length).toBe(1);
 
-      // Fail-closed: the pre-I/O recovery anchor is retained but marked failed;
-      // nothing is persisted as signed/broadcast and no success audit is written.
-      // Keeping this terminal row also prevents an idempotent retry from reaching
-      // the signer after an ambiguous process failure.
+      // An offline signing request has no broadcast recovery anchor. A failed
+      // signer call therefore leaves no transaction result and no success audit.
       const rows = await getDb()
         .select({ id: transactions.id, status: transactions.status, txHash: transactions.txHash })
         .from(transactions)
         .where(eq(transactions.agentId, AGENT_ID));
-      expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({ status: "failed", txHash: null });
-      expect(rows[0]?.status).not.toBe("broadcast");
-      expect(rows[0]?.status).not.toBe("outcome_unknown");
+      expect(rows).toHaveLength(0);
       const succeeded = await getDb()
         .select({ action: auditEvents.action })
         .from(auditEvents)

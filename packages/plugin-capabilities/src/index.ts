@@ -108,7 +108,7 @@ export type StewardApiPlugin = StewardPlugin<StewardApp, StewardAppContext>;
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("../drizzle", import.meta.url));
 
 /**
- * Webhook event-type names this package emits (Phase 2a contribution). Only the
+ * Webhook event-type names this package emits (plugin event-contribution contract contribution). Only the
  * CRUD lifecycle events W-1a produces are declared here; the invoke-time events
  * (capability.invoked / .denied / .approval_queued) are declared by W-1c, the
  * package that emits them.

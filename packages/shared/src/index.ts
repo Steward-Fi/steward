@@ -44,7 +44,7 @@ export type {
   PolicyRuleContribution,
   StewardPlugin,
 } from "./types/plugin.js";
-// ─── Trading venues (Sprint 4) ───
+// ─── Trading venues (trading-policy) ───
 export * from "./types/venue.js";
 // ─── Runtime-extensible webhook event registry (core ∪ plugin-declared) ───
 export { WebhookEventRegistry } from "./webhook-event-registry.js";
@@ -569,7 +569,7 @@ export interface RawSigningChainConditionConfig {
 }
 
 /**
- * `venue-allowlist` policy config (Sprint 4).
+ * `venue-allowlist` policy config (trading-policy).
  *
  * Allows trades only on the named venues. Evaluator NACKs if the eval
  * context's `venue` is absent or not in the list.
@@ -579,11 +579,11 @@ export interface VenueAllowlistConfig {
 }
 
 /**
- * `leverage-cap` policy config (Sprint 4).
+ * `leverage-cap` policy config (trading-policy).
  *
  * Caps requested leverage at `maxLeverage`. Non-leveraged trades (no
- * `leverage` in eval context) always pass. Per-venue refinement is
- * Phase 2 work; for now this is a single cap per agent.
+ * `leverage` in eval context) always pass. The current contract defines one
+ * cap per agent and does not infer venue-specific limits.
  */
 export interface LeverageCapConfig {
   maxLeverage: number;
@@ -634,10 +634,10 @@ export interface SignTypedDataRequest {
   agentId: string;
   tenantId: string;
   /**
-   * Sprint 4: optional venue scope. When set, vault.signTypedData will
+   * trading-policy: optional venue scope. When set, vault.signTypedData will
    * look up the venue-scoped wallet under (agentId, venue) instead of
-   * the legacy NULL-venue row. Phase 1 is hyperliquid-only; the field is
-   * accepted but not yet routed through the new lookup path.
+   * the legacy NULL-venue row. The current typed-data signing path accepts this
+   * selector but does not route it through the venue-specific lookup path.
    */
   venue?: VenueId;
   domain: TypedDataDomain;
@@ -1247,7 +1247,8 @@ export const SUPPORTED_CHAINS = {
   solanaDevnet: 102,
 } as const;
 
-export const DEFAULT_CHAIN_ID = SUPPORTED_CHAINS.base;
+/** Safe fallback for callers that do not explicitly select a chain. */
+export const DEFAULT_CHAIN_ID = SUPPORTED_CHAINS.baseSepolia;
 
 // ─── Chain Metadata ───
 

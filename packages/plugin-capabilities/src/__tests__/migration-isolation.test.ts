@@ -1,8 +1,8 @@
 /**
- * migration-isolation.test.ts - proves the Phase 2c isolation guarantee for THIS
+ * Proves the migration isolation guarantee for this
  * plugin: the capability migrations are recorded ONLY in the plugin's own
  * namespaced bookkeeping table, never in the core's `drizzle.__drizzle_migrations`
- * journal, and the tables land. mirrors the core 2c isolation test.
+ * journal, and the tables land.
  */
 
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";

@@ -63,12 +63,21 @@
     },
     {
       "group": "Authentication",
-      "pages": ["auth/overview", "auth/passkeys", "auth/email", "auth/oauth", "auth/cross-tenant"]
+      "pages": [
+        "auth/overview",
+        "auth/passkeys",
+        "auth/email",
+        "auth/oauth",
+        "auth/cross-tenant",
+        "auth/eip1271-rpc-config",
+        "session-revocation"
+      ]
     },
     {
       "group": "Concepts",
       "pages": [
         "concepts/architecture",
+        "security/database-rls-rollout",
         "concepts/wallet-vault",
         "concepts/secret-vault",
         "concepts/proxy-gateway",
@@ -88,7 +97,47 @@
         "guides/eliza-plugin",
         "guides/cloud-deployment",
         "guides/self-hosting",
-        "guides/docker"
+        "guides/docker",
+        "TENANT_EMAIL_CONFIG",
+        "plugins/README",
+        "erc8004-integration",
+        "guides/session-broker-integration",
+        "guides/provider-authority-golden-path"
+      ]
+    },
+    {
+      "group": "Security",
+      "pages": [
+        "security/threat-model",
+        "security/custody-posture",
+        "security/external-custody",
+        "security/permissioned-x",
+        "security/provider-authority-threat-model",
+        "security/audit-retention-archives",
+        "security/soc2-evidence",
+        "ATTESTATION"
+      ]
+    },
+    {
+      "group": "Operations",
+      "pages": [
+        "runbooks/backup-restore",
+        "runbooks/key-rotation",
+        "runbooks/provider-authority-operations",
+        "runbooks/security-alerting",
+        "deployment",
+        "RAILWAY-DEPLOY",
+        "deploy/railway-lean-full"
+      ]
+    },
+    {
+      "group": "Architecture decisions",
+      "pages": [
+        "adrs/README",
+        "adrs/0001-crypto-choices",
+        "adrs/0002-runtime-choice",
+        "adrs/0003-deployment-model",
+        "adrs/0004-policy-enforcement-model"
       ]
     },
     {
@@ -124,6 +173,10 @@
         "sdk/proxy-helpers",
         "sdk/eliza-plugin"
       ]
+    },
+    {
+      "group": "Project",
+      "pages": ["changelog"]
     }
   ],
   "footerSocials": {

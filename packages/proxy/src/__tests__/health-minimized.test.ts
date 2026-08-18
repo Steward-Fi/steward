@@ -1,7 +1,7 @@
 /**
  * SEC-174 pinning test: the unauthenticated proxy /health response must stay
- * minimal — exactly { ok, service, serverTime }. The pre-fix body also leaked
- * the service version and the alias list, which are recon details an
+ * minimal — exactly { ok, service, serverTime }. Service versions and alias
+ * lists are reconnaissance details that would let an unauthenticated caller
  * unauthenticated caller can use to fingerprint the deployment and enumerate
  * proxied upstreams. serverTime stays because the API readiness probe reads
  * it. If a future change adds a field here, this test fails loudly so the
@@ -36,7 +36,7 @@ describe("proxy /health minimized body (SEC-174)", () => {
     expect(typeof body.serverTime).toBe("string");
     expect(Number.isNaN(Date.parse(body.serverTime as string))).toBe(false);
 
-    // Explicit anti-regression pins for the pre-fix recon fields.
+    // Explicit pins for reconnaissance-sensitive fields.
     expect(body).not.toHaveProperty("version");
     expect(body).not.toHaveProperty("aliases");
   });

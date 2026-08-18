@@ -86,12 +86,14 @@ STEWARD_AGENT_ID=my-agent                  # Agent identifier
 STEWARD_PROXY_URL=http://steward-proxy:8080 # Proxy URL (for containers)
 ```
 
-## Published Packages
+## Published packages
 
-| Package | Version | Description |
-|---------|---------|-------------|
-| `@stwd/sdk` | 0.3.0 | TypeScript SDK client |
-| `@stwd/eliza-plugin` | 0.2.0 | ElizaOS integration plugin |
+Package versions are released independently. Check the package registry or the corresponding
+`packages/*/package.json` manifest for the current version rather than copying a version from this
+guide.
+
+The tag-driven release workflow publishes `@stwd/sdk`, `@stwd/react`, and
+`@stwd/eliza-plugin`. Other non-private packages are not published by that workflow.
 
 ## Next Steps
 

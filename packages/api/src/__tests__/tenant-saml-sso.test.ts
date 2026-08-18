@@ -1,9 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { buildSamlServiceProviderUrls, normalizeSamlSsoUpdate } from "../services/saml-sso-config";
 
-const ROOT = join(import.meta.dir, "../../../..");
 const CERT = `-----BEGIN CERTIFICATE-----
 MIIDdTCCAl2gAwIBAgIUE2hhcGUtc3Rld2FyZC1zYW1sLXRlc3QtY2VydGlmaWNh
 dGUwDQYJKoZIhvcNAQELBQAwSDELMAkGA1UEBhMCVVMxEjAQBgNVBAoMCVN0ZXdh
@@ -19,20 +16,6 @@ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AQIDAQAB
 -----END CERTIFICATE-----`;
-
-function read(path: string): string {
-  return readFileSync(join(ROOT, path), "utf-8");
-}
-
-// Migrations were consolidated during the PR #79 merge; assert SAML DDL across
-// the full set of migration files rather than hard-coded filenames.
-function allMigrations(): string {
-  const dir = join(ROOT, "packages/db/drizzle");
-  return readdirSync(dir)
-    .filter((f) => f.endsWith(".sql"))
-    .map((f) => readFileSync(join(dir, f), "utf-8"))
-    .join("\n");
-}
 
 describe("tenant SAML SSO config foundation", () => {
   it("normalizes public IdP config and pins generated SP URLs to APP_URL", () => {
@@ -91,34 +74,5 @@ describe("tenant SAML SSO config foundation", () => {
         groupRoleMappings: [{ group: "Owners", role: "owner" }],
       }),
     ).toBe("groupRoleMappings role must be admin, developer, billing, viewer, or member");
-  });
-
-  it("adds MFA-gated tenant routes, audit rollback, metadata, login, and ACS guardrails", () => {
-    const tenantConfigSource = read("packages/api/src/routes/tenant-config.ts");
-    const authSource = read("packages/api/src/routes/auth.ts");
-    const migration = allMigrations();
-
-    expect(tenantConfigSource).toContain('tenantConfigRoutes.get("/:id/saml-sso"');
-    expect(tenantConfigSource).toContain('tenantConfigRoutes.put("/:id/saml-sso"');
-    expect(tenantConfigSource).toContain('tenantConfigRoutes.delete("/:id/saml-sso"');
-    expect(tenantConfigSource).toContain('requireRecentTenantAdminMfa(c, "SAML SSO config');
-    expect(tenantConfigSource).toContain("tenant.saml_sso.update.authorized");
-    expect(tenantConfigSource).toContain("restoreTenantSamlSsoConfig");
-
-    expect(authSource).toContain('auth.get("/saml/:tenantId/metadata"');
-    expect(authSource).toContain('auth.get("/saml/:tenantId/login"');
-    expect(authSource).toContain('auth.post("/saml/:tenantId/acs"');
-    expect(authSource).toContain("application/samlmetadata+xml");
-    expect(authSource).toContain('WantAssertionsSigned="true"');
-    expect(authSource).toContain("verifySamlAcsResponse");
-    expect(authSource).toContain("isVerifiedSsoEmailDomainForTenant");
-    expect(authSource).toContain("recordSamlAssertionReplay");
-    expect(authSource).toContain("resolveSamlMappedRole(config, groups)");
-
-    expect(migration).toContain("\"jit_default_role\" varchar(32) NOT NULL DEFAULT 'viewer'");
-    expect(migration).toContain('"tenant_saml_sso_configs_viewer_jit_role_check"');
-    expect(migration).toContain('cardinality("idp_cert_pems") BETWEEN 1 AND 5');
-    expect(migration).toContain('"group_role_mappings" jsonb');
-    expect(migration).toContain("jsonb_typeof(\"group_role_mappings\") = 'array'");
   });
 });

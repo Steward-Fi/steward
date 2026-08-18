@@ -1,5 +1,5 @@
 /**
- * plugin-host.test.ts — focused unit tests for the Phase 2a plugin host.
+ * Focused unit tests for the plugin host.
  *
  * Covers the host's load-bearing guarantees:
  *   - `dependsOn` topological ordering (a plugin registers AFTER its deps);

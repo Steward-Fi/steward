@@ -1,5 +1,5 @@
 /**
- * plugin-policy-rules.test.ts — proves the Phase 2b pluggable policy-rule
+ * Proves the pluggable policy-rule
  * mechanism end-to-end at the policy-engine layer:
  *
  *  1. a registered plugin evaluator runs for a rule of its contributed type

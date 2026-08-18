@@ -70,9 +70,8 @@ describe("GET /quote", () => {
     expect(response.status).toBe(400);
   });
 
-  // SEC-085: the public oracle is rate limited via the shared Redis-backed
-  // limiter (residual: moved off the wave-2 in-memory Map, which could not
-  // coordinate across replicas/isolates). With Redis never configured,
+  // The public oracle uses the shared Redis-backed limiter so limits coordinate
+  // across replicas and isolates. With Redis never configured,
   // production fails closed (429) rather than letting anonymous callers drive
   // the guest agent unthrottled.
   test("fails closed with 429 in production when Redis is unconfigured", async () => {

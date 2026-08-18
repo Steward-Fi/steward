@@ -1,22 +1,32 @@
 ---
 title: "PostgreSQL tenant RLS rollout"
-description: "SEC-169 activation design, bootstrap boundary, runtime requirements, and rollback"
+description: "Pre-activation SEC-169 transaction groundwork and the remaining rollout gates"
 ---
 
 # PostgreSQL tenant RLS rollout
 
 SEC-169 is not active yet. Application predicates remain the production tenant
 boundary until every activation gate below is complete. The executable
-`withTenantRlsTransaction` helper and schema inventory are groundwork; they do
+tenant authority boundary and schema inventory are groundwork; they do
 not justify enabling a partial policy set.
 
 ## Non-forgeable context boundary
 
-Only verified JWT/API-key/app-secret middleware may mint
-`tenantContextFromAuthenticatedPrincipal`. A route parameter, header, JSON
-field, or provider payload must never be passed directly to the RLS helper.
+The application composition root creates one `createTenantRlsAuthority`
+boundary with verifier callbacks over its authenticated-principal and
+scheduled-job provenance types. The returned `issuer` capability is retained
+only by verified JWT/API-key/app-secret middleware and named job runners. Tenant
+data-access code receives the separate `transactions` capability plus an
+already-issued context;
+it cannot mint a context from a route parameter, header, JSON field, or provider
+payload. A context issued by another authority instance is rejected.
+The combined boundary and issuer must not be exported from a general-purpose
+service module.
+
 Background workers must first enumerate tenant ids using a maintenance path,
-then mint one `tenantContextForInternalJob` and one transaction per tenant.
+then use the retained issuer with scheduler-owned provenance and run one
+transaction per tenant. The verifier must reject user-constructed job inputs;
+a job name string alone is not provenance.
 
 The helper checks out one transaction connection, executes
 `set_config('steward.tenant_id', tenant_id, true)`, verifies the value, runs the
@@ -31,9 +41,9 @@ only then reports the error; throwing before commit would roll the reset back
 and return a contaminated connection to the pool. It also rejects a Drizzle
 `PgTransaction` as its database argument: a `SET LOCAL` issued by a nested
 `.transaction()` runs inside a savepoint and would otherwise survive its
-release until the caller's outer transaction ended. Tenant contexts are tracked
-by object identity, not a copyable property, so cloning a context cannot change
-its tenant authority.
+release until the caller's outer transaction ended. Each authority tracks its
+contexts by object identity, so cloning a context or presenting one from a
+different authority cannot change tenant authority.
 
 Custom PostgreSQL settings are assignable by the application role. This design
 therefore catches missing application predicates and connection-lifecycle bugs;

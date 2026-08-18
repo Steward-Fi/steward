@@ -1,83 +1,243 @@
-import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { randomUUID } from "node:crypto";
+import { hashSha256Hex } from "@stwd/auth";
+import {
+  auditEvents,
+  closeDb,
+  eq,
+  getDb,
+  refreshTokens,
+  tenants,
+  users,
+  userTenants,
+} from "@stwd/db";
+import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 
-const routeSource = readFileSync(join(import.meta.dir, "..", "routes", "auth.ts"), "utf8");
+setDefaultTimeout(30_000);
+
+process.env.STEWARD_MASTER_PASSWORD ??= "refresh-revocation-race-master-password";
+process.env.STEWARD_JWT_SECRET ??=
+  "refresh-revocation-race-jwt-secret-with-enough-entropy-0123456789";
+process.env.STEWARD_AUDIT_HMAC_KEY ??= "b".repeat(64);
+if (!process.env.DATABASE_URL) process.env.STEWARD_PGLITE_MEMORY = "true";
+
+let authRoutes: typeof import("../routes/auth").authRoutes;
+let createSessionToken: typeof import("../routes/auth").createSessionToken;
+let verifySessionToken: typeof import("../routes/auth").verifySessionToken;
+
+beforeAll(async () => {
+  if (!process.env.DATABASE_URL) {
+    const { db, client } = await createPGLiteDb("memory://");
+    setPGLiteOverride(db, async () => client.close());
+  }
+  const auth = await import("../routes/auth");
+  authRoutes = auth.authRoutes;
+  createSessionToken = auth.createSessionToken;
+  verifySessionToken = auth.verifySessionToken;
+});
+
+afterAll(async () => {
+  await closeDb();
+});
 
 describe("auth refresh revocation race hardening", () => {
-  it("serializes user-wide refresh revocation with refresh rotation", () => {
-    expect(routeSource).toContain('import { lockUserSession } from "../services/session-lock"');
-    expect(routeSource).toContain("async function revokeUserRefreshSessions");
-    expect(routeSource).toContain("refreshTokenIssuedAtSeconds(record)");
+  it("leaves no usable refresh token when rotate races revoke-all", async () => {
+    const userId = randomUUID();
+    const tenantId = `refresh-revoke-race-${randomUUID()}`;
+    const rawRefreshToken = `refresh-${randomUUID()}`;
+    const db = getDb();
 
-    const rotateStart = routeSource.indexOf("async function rotateRefreshTokenForUserSession");
-    expect(rotateStart).toBeGreaterThanOrEqual(0);
-    const rotateRoute = routeSource.slice(
-      rotateStart,
-      routeSource.indexOf("/** Build", rotateStart),
+    await db.insert(tenants).values({
+      id: tenantId,
+      name: "Refresh Revocation Race",
+      apiKeyHash: `hash-${tenantId}`,
+    });
+    await db.insert(users).values({ id: userId, email: `${userId}@example.test` });
+    await db.insert(userTenants).values({ userId, tenantId, role: "owner" });
+    await db.insert(refreshTokens).values({
+      id: randomUUID(),
+      userId,
+      tenantId,
+      tokenHash: hashSha256Hex(rawRefreshToken),
+      expiresAt: new Date(Date.now() + 86_400_000),
+    });
+
+    const accessToken = await createSessionToken("", tenantId, { userId });
+    const [rotate, revoke] = await Promise.all([
+      authRoutes.request("/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken: rawRefreshToken }),
+      }),
+      authRoutes.request("/sessions", {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }),
+    ]);
+
+    expect(revoke.status).toBe(200);
+    expect([200, 401]).toContain(rotate.status);
+    expect(await db.select().from(refreshTokens).where(eq(refreshTokens.userId, userId))).toEqual(
+      [],
     );
-    expect(rotateRoute).toContain("await lockUserSession(tx, refreshCandidate.userId)");
-    expect(rotateRoute).toContain("revokedBefore >= refreshTokenIssuedAtSeconds(record)");
-    expect(rotateRoute).not.toContain("revokedBefore >= refreshStartedAt");
 
-    for (const marker of ['action: "mfa.enable.authorized"', 'action: "mfa.disable.authorized"']) {
-      const start = routeSource.indexOf(marker);
-      expect(start).toBeGreaterThanOrEqual(0);
-      const tail = routeSource.slice(start, start + 2_000);
-      expect(tail).toContain("revokeUserRefreshSessions(session.payload.userId)");
+    const revocationAudits = await db
+      .select({ action: auditEvents.action, actorId: auditEvents.actorId })
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, tenantId));
+    expect(revocationAudits).toContainEqual({
+      action: "auth.sessions.revoke_all.authorized",
+      actorId: userId,
+    });
+
+    if (rotate.status === 200) {
+      const rotated = (await rotate.json()) as { refreshToken: string };
+      const replay = await authRoutes.request("/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken: rotated.refreshToken }),
+      });
+      expect(replay.status).toBe(401);
     }
-
-    const revokeAllStart = routeSource.indexOf('auth.delete("/sessions"');
-    expect(revokeAllStart).toBeGreaterThanOrEqual(0);
-    const revokeAll = routeSource.slice(
-      revokeAllStart,
-      routeSource.indexOf('auth.post("/refresh"', revokeAllStart),
-    );
-    expect(revokeAll).toContain("revokeUserRefreshSessions(payload.userId)");
   });
 
-  it("validates and atomically rotates an authorized tenant switch", () => {
-    const rotateStart = routeSource.indexOf("async function rotateRefreshTokenForUserSession");
-    const rotateRoute = routeSource.slice(
-      rotateStart,
-      routeSource.indexOf("/** Build", rotateStart),
-    );
-    expect(rotateRoute).toContain("requestedTenantId?: string");
-    expect(rotateRoute).toContain("const targetTenantId = requestedTenantId ?? record.tenantId");
-    expect(rotateRoute).toContain("eq(userTenants.tenantId, targetTenantId)");
-    expect(rotateRoute.match(/\.for\("update"\)/g)?.length).toBeGreaterThanOrEqual(2);
-    expect(rotateRoute).toContain("createSessionToken(walletAddress, targetTenantId");
-    expect(rotateRoute).toContain("tenantId: targetTenantId");
-    expect(rotateRoute).toContain('status: "not_member"');
-    expect(rotateRoute).toContain("if (user?.deactivatedAt)");
+  it("detects a consumed refresh token, revokes its replacement, and records the event", async () => {
+    const userId = randomUUID();
+    const tenantId = `refresh-reuse-${randomUUID()}`;
+    const rawRefreshToken = `refresh-${randomUUID()}`;
+    const db = getDb();
 
-    const endpointStart = routeSource.indexOf('auth.post("/refresh"');
-    const endpoint = routeSource.slice(
-      endpointStart,
-      routeSource.indexOf("/**\n * POST /revoke", endpointStart),
+    await db.insert(tenants).values({
+      id: tenantId,
+      name: "Refresh Reuse",
+      apiKeyHash: `hash-${tenantId}`,
+    });
+    await db.insert(users).values({ id: userId, email: `${userId}@example.test` });
+    await db.insert(userTenants).values({ userId, tenantId, role: "owner" });
+    await db.insert(refreshTokens).values({
+      id: randomUUID(),
+      userId,
+      tenantId,
+      tokenHash: hashSha256Hex(rawRefreshToken),
+      expiresAt: new Date(Date.now() + 86_400_000),
+    });
+
+    const first = await authRoutes.request("/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken: rawRefreshToken }),
+    });
+    expect(first.status).toBe(200);
+    const rotated = (await first.json()) as { refreshToken: string };
+
+    const replay = await authRoutes.request("/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken: rawRefreshToken }),
+    });
+    expect(replay.status).toBe(401);
+    await expect(replay.json()).resolves.toMatchObject({
+      ok: false,
+      error: "Refresh token reuse detected. Please sign in again.",
+    });
+
+    const replacement = await authRoutes.request("/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken: rotated.refreshToken }),
+    });
+    expect(replacement.status).toBe(401);
+    expect(await db.select().from(refreshTokens).where(eq(refreshTokens.userId, userId))).toEqual(
+      [],
     );
-    expect(endpoint).toContain("body.tenantId !== undefined && !isValidTenantId(body.tenantId)");
-    expect(endpoint).toContain(
-      "rotateRefreshTokenForUserSession(body.refreshToken, body.tenantId)",
-    );
+
+    const events = await db
+      .select({ action: auditEvents.action, actorId: auditEvents.actorId })
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, tenantId));
+    expect(events).toContainEqual({ action: "auth.refresh.reuse_detected", actorId: userId });
   });
 
-  it("binds single-session revoke to a concurrently rotated successor", () => {
-    const rotateStart = routeSource.indexOf("async function rotateRefreshTokenForUserSession");
-    const rotateRoute = routeSource.slice(
-      rotateStart,
-      routeSource.indexOf("/** Build", rotateStart),
-    );
-    expect(rotateRoute).toContain("successorTokenHash: newRefreshTokenHash");
+  it("validates and atomically rotates an authorized tenant switch", async () => {
+    const userId = randomUUID();
+    const sourceTenantId = `refresh-switch-source-${randomUUID()}`;
+    const targetTenantId = `refresh-switch-target-${randomUUID()}`;
+    const rawRefreshToken = `refresh-${randomUUID()}`;
+    const db = getDb();
 
-    const revokeStart = routeSource.indexOf('auth.post("/revoke"');
-    const revokeRoute = routeSource.slice(
-      revokeStart,
-      routeSource.indexOf("/**\n * DELETE /sessions", revokeStart),
+    await db.insert(tenants).values([
+      { id: sourceTenantId, name: "Refresh Switch Source", apiKeyHash: `hash-${sourceTenantId}` },
+      { id: targetTenantId, name: "Refresh Switch Target", apiKeyHash: `hash-${targetTenantId}` },
+    ]);
+    await db.insert(users).values({ id: userId, email: `${userId}@example.test` });
+    await db.insert(userTenants).values([
+      { userId, tenantId: sourceTenantId, role: "owner" },
+      { userId, tenantId: targetTenantId, role: "member" },
+    ]);
+    await db.insert(refreshTokens).values({
+      id: randomUUID(),
+      userId,
+      tenantId: sourceTenantId,
+      tokenHash: hashSha256Hex(rawRefreshToken),
+      expiresAt: new Date(Date.now() + 86_400_000),
+    });
+
+    const response = await authRoutes.request("/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken: rawRefreshToken, tenantId: targetTenantId }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { token: string; refreshToken: string };
+    await expect(verifySessionToken(body.token)).resolves.toMatchObject({
+      userId,
+      tenantId: targetTenantId,
+    });
+    const activeTokens = await db
+      .select({ tenantId: refreshTokens.tenantId, tokenHash: refreshTokens.tokenHash })
+      .from(refreshTokens)
+      .where(eq(refreshTokens.userId, userId));
+    expect(activeTokens).toEqual([
+      { tenantId: targetTenantId, tokenHash: hashSha256Hex(body.refreshToken) },
+    ]);
+  });
+
+  it("binds single-session revoke to a rotated successor", async () => {
+    const userId = randomUUID();
+    const tenantId = `refresh-successor-${randomUUID()}`;
+    const rawRefreshToken = `refresh-${randomUUID()}`;
+    const db = getDb();
+
+    await db.insert(tenants).values({
+      id: tenantId,
+      name: "Refresh Successor Revoke",
+      apiKeyHash: `hash-${tenantId}`,
+    });
+    await db.insert(users).values({ id: userId, email: `${userId}@example.test` });
+    await db.insert(userTenants).values({ userId, tenantId, role: "owner" });
+    await db.insert(refreshTokens).values({
+      id: randomUUID(),
+      userId,
+      tenantId,
+      tokenHash: hashSha256Hex(rawRefreshToken),
+      expiresAt: new Date(Date.now() + 86_400_000),
+    });
+
+    const rotate = await authRoutes.request("/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken: rawRefreshToken }),
+    });
+    expect(rotate.status).toBe(200);
+
+    const revoke = await authRoutes.request("/revoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken: rawRefreshToken }),
+    });
+    expect(revoke.status).toBe(200);
+    expect(await db.select().from(refreshTokens).where(eq(refreshTokens.userId, userId))).toEqual(
+      [],
     );
-    expect(revokeRoute).toContain("await lockUserSession(tx, userId)");
-    expect(revokeRoute).toContain("pg_advisory_xact_lock");
-    expect(revokeRoute).toContain("used?.successorTokenHash");
-    expect(revokeRoute).toContain("inArray(refreshTokens.tokenHash, hashes)");
   });
 });

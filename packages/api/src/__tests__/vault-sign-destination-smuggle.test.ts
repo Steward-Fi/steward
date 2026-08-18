@@ -102,8 +102,8 @@ describe("approved-addresses /sign destination-smuggle guard (real route)", () =
     const res = await postSign({ to: ATTACKER, destination: ALLOWED });
     const body = (await res.json()) as SignBody;
 
-    // Must NOT be authorized. (403 hard-deny or 202 pending-approval; either way
-    // the smuggle did not pass; pre-fix this returned an authorized/sign path.)
+    // Must not be authorized. A 403 hard denial or 202 pending approval both
+    // prove the smuggled destination did not reach the signing path.
     expect(body.ok).toBe(false);
     // The approved-addresses policy must have FAILED, evaluated against `to`.
     const results = body.data?.results ?? [];

@@ -183,7 +183,7 @@ Steward backup.
 | `STEWARD_PLATFORM_KEYS` | Comma-separated platform operator keys for `/platform/*` | none | Required to use platform routes. Each request sends one key in `X-Steward-Platform-Key`. |
 | `STEWARD_DEFAULT_TENANT_KEY` | API key hash/plain value field for the default tenant bootstrap path | empty string | Only useful for single/default tenant setups. Platform-created tenants return generated API keys. |
 | `RPC_URL` | Default EVM RPC URL | `https://sepolia.base.org` in API/vault code; Compose sets Base mainnet | Must be reachable for balance/broadcast operations. |
-| `CHAIN_ID` | Default EVM chain id | `84532` in auth/platform context, `8453` in some vault routes; Compose sets `8453` | Must parse as an integer. Prefer setting explicitly. |
+| `CHAIN_ID` | Default EVM chain ID | `84532` (Base Sepolia) | Must parse as an integer. Set it explicitly with a matching `RPC_URL` for production networks. |
 | `STEWARD_PLUGINS` | Comma-separated optional API plugins | none | Add `wxmr` to enable the Monero-on-Solana bridge provider, for example `wxmr` or `trading,wxmr`. Unknown names fail startup. |
 | `WXMR_SOLANA_RPC_URL` | Solana mainnet RPC used to verify the wxmr bridge's global and connected-wallet withdrawal fees | `SOLANA_RPC_URL`, then Solana's public mainnet endpoint | Optional; use a reliable operator-controlled HTTPS RPC in production. Plain HTTP is accepted only on loopback. Only used when the `wxmr` plugin is enabled. |
 | `REDIS_URL` | Redis for rate limiting, token/challenge stores, proxy spend tracking/cache | none | Optional when Postgres is available; production fails startup if auth stores cannot initialize on Redis or Postgres. |
@@ -198,6 +198,7 @@ Steward backup.
 | `PASSKEY_ORIGIN` | Expected WebAuthn origin | `http://localhost:3200` in `.env.example`/Compose; code fallback is `https://steward.fi` | Must match browser origin. |
 | `PASSKEY_ALLOWED_ORIGINS` | Additional comma-separated passkey origins | falls back to `PASSKEY_ORIGIN` | Must contain exact origins. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth | none | Required only for Google OAuth. |
+| `GOOGLE_PROVIDER_CLIENT_ID` / `GOOGLE_PROVIDER_CLIENT_SECRET` | Google workspace provider-account OAuth | none | Set the same OAuth client credentials on both API and proxy. Required for provider-account connect, refresh recovery, and governed Google execution. Separate from user sign-in OAuth. |
 | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | Discord OAuth | none | Required only for Discord OAuth. |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | GitHub OAuth | none | Present in `.env.example`; only useful where corresponding routes are enabled. |
 | `TWITTER_CLIENT_ID` / `TWITTER_CLIENT_SECRET` | Twitter/X OAuth | none | Required only for Twitter/X OAuth. |

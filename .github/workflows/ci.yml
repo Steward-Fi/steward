@@ -118,6 +118,7 @@ jobs:
           - packages/mcp
           - packages/erc8004
           - packages/erc8183
+          - packages/examples/waifu-integration
           - packages/adapters
           - packages/proxy-client
           - packages/seed

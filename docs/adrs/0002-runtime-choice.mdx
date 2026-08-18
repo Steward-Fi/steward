@@ -38,7 +38,7 @@ the `oven/bun` base image. All `turbo` scripts shell out to `bun`.
   users starting a local desktop daemon notice.
 - **Built-in test runner.** `bun test` runs our `__tests__/` files with
   minimal config. No jest, no vitest wiring in every package.
-- **`Bun.serve` performance.** Our HTTP surface is not yet a bottleneck, but
+- **`Bun.serve` performance.** Our HTTP surface is not a measured bottleneck, but
   `Bun.serve` routinely benchmarks 2–4× Node's `http` on raw throughput.
   That's headroom, not a feature we rely on.
 - **Workspaces in the package manager itself.** `bun install` resolves

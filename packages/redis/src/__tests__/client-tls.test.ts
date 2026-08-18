@@ -50,6 +50,8 @@ describe("redis transport security (SEC-032)", () => {
     process.env.NODE_ENV = "production";
     delete process.env.STEWARD_ALLOW_INSECURE_REDIS;
     expect(() => assertRedisUrlTls("not a url")).toThrow("valid URL");
+    process.env.STEWARD_ALLOW_INSECURE_REDIS = "true";
+    expect(() => assertRedisUrlTls("not a url")).toThrow("valid URL");
   });
 
   test("rejects non-redis schemes", () => {

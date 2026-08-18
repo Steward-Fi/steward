@@ -1,5 +1,5 @@
 /**
- * provider-case.ts — PR5 correlated case evidence assembler (PURE READ).
+ * provider-case.ts — correlated case-evidence assembler (pure read).
  *
  * Builds a deterministic, offline-verifiable case manifest for one governed
  * provider action and, on demand, packages it alongside the EXISTING signed
@@ -241,8 +241,8 @@ function resolveTerminalState(
       return "denied_policy";
     case "pending_approval":
       return "pending_approval";
-    // Non-approval "allowed" direct path executes via the PR2 stub. These are
-    // terminal for the pre-PR6 (fake-transport) slice; map to succeeded/failed
+    // Non-approval "allowed" direct path executes via the action-creation stub. These are
+    // terminal for the deterministic-transport path; map to succeeded/failed
     // so completeness is honest against the stub outcome. (Full governed
     // execution uses the execution_ready→executing→terminal arm below.)
     case "allowed_stub":
@@ -252,7 +252,7 @@ function resolveTerminalState(
     case "stub_failed":
       return "failed";
     case "approved":
-      // Approved but not yet resumed to execution_ready.
+      // Approved is represented as ready for the explicit execution resume.
       return "execution_ready";
     case "approval_denied":
       return "approval_denied";
@@ -357,7 +357,7 @@ export async function getProviderCaseEvidence(
     };
     bundle = await signAuditBundle(tenantId, 0, 0, empty);
   } else {
-    // Enforce the segment cap BEFORE reading the range (codex P2): a case whose
+    // Enforce the segment cap before reading the range: a case whose
     // contiguous span exceeds MAX_CASE_SEGMENT_EVENTS (pathological same-tenant
     // interleave, KC15) must NOT materialize/sign an unbounded range of
     // unrelated audit rows via /evidence. Fail closed with a typed error the
@@ -473,7 +473,7 @@ function buildManifest(args: BuildManifestArgs): ProviderCaseAssembly {
     action: ev.action,
     // Unknown/drifted actions map to `unclassified`, NEVER `genesis`, so a
     // corrupted or taxonomy-drifted event can never mis-satisfy a required role
-    // and falsely upgrade a case to `complete` (codex P2). Linkage is still
+    // and falsely upgrade a case to `complete`. Linkage is still
     // proven (the seq+hmac stays in the index).
     role: roleForAction(ev.action) ?? "unclassified",
     hmac: ev.hmac,
@@ -503,7 +503,7 @@ function buildManifest(args: BuildManifestArgs): ProviderCaseAssembly {
   };
 
   // Safe-summary re-validation (§3.3): redact then assert no sensitive key
-  // survives; omit-and-flag if a PR2 bug left one.
+  // survives; omit-and-flag if an action-creation bug left one.
   let safeSummary: Record<string, unknown> | null = null;
   const rawSummary = binding.safeSummary ?? null;
   if (rawSummary && typeof rawSummary === "object") {
@@ -515,7 +515,7 @@ function buildManifest(args: BuildManifestArgs): ProviderCaseAssembly {
     }
   }
 
-  // Execution facts (PR4). providerIdempotencyKeyHash is derived from the RAW
+  // Execution facts (execution-authorization). providerIdempotencyKeyHash is derived from the RAW
   // nonce key by HASHING it here — the raw key NEVER enters the manifest (§3.4).
   let execution: ProviderCaseManifestV1["execution"] = null;
   if (nonce && nonce.version === 2) {
@@ -535,7 +535,7 @@ function buildManifest(args: BuildManifestArgs): ProviderCaseAssembly {
   // A case that WENT THROUGH approval has a non-null approvalQueueId. If that
   // referenced queue row failed to load (deleted / corrupted), flag it — do NOT
   // gate on `approvalQueueId == null`, which is the OPPOSITE (a case that never
-  // had a queue, e.g. the allowed-stub direct path). (codex P2)
+  // had a queue, e.g. the allowed-stub direct path).
   if (binding.approvalQueueId != null && !queue) {
     pushReasonList(reasons, PROVIDER_CASE_REASON.QUEUE_ROW_ABSENT_FOR_APPROVAL_PATH);
   }

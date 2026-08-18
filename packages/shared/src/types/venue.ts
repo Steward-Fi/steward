@@ -74,7 +74,7 @@ export const VENUE_METADATA: Record<VenueId, VenueMetadata> = {
   },
 };
 
-// ─── Sprint 4 Day 1-2 (Worker A): trade execution types ─────────────────────
+// ─── Venue-aware trade execution types ───────────────────────────────────────
 // TradeAsset is the asset enum that venue-hyperliquid + trade-sessions use.
 // Keep tight: only assets Steward will actively support for perps trading.
 

@@ -65,7 +65,7 @@ beforeAll(async () => {
     ]);
   agentToken = await signAgentToken({ agentId, tenantId, sub: `agent:${agentId}` } as never, "1h");
 
-  // SEC-208 residual: agent tokens can no longer CREATE the initial policy row
+  // Agent tokens cannot create the initial policy row
   // (creation activates the trade ceilings; it requires a human owner/admin
   // session with recent MFA). Seed the row the way the human path would leave
   // it — platform defaults — so the agent-token PUTs below exercise
@@ -104,7 +104,7 @@ describe("agent trade policy", () => {
     expect(body.data.defaults).toMatchObject({ dailyCap: 1000, perOrderCap: 500, leverageCap: 10 });
   });
 
-  it("rejects agent-token creation of the initial policy row (SEC-208 residual)", async () => {
+  it("rejects agent-token creation of the initial policy row", async () => {
     // missingAgentId has NO policy row: an agent token must not self-CREATE
     // one at platform defaults — creation requires the human admin+MFA path.
     const res = await app.request(`/v1/agents/${missingAgentId}/policy`, {
@@ -377,7 +377,7 @@ describe("agent trade policy", () => {
       },
       body: JSON.stringify({ dailyCap: 1_001, reason: "just above default" }),
     });
-    // SEC-208 residual: creation-by-agent-token is denied outright — the gate
+    // Creation by an agent token is denied outright; the gate
     // fires before the loosening-vs-defaults comparison, whatever the body.
     expect(justAboveDefaults.status).toBe(403);
     expect(((await justAboveDefaults.json()) as { error: string }).error).toContain(

@@ -1,5 +1,5 @@
 /**
- * plugin-host-policy-rules.test.ts — Phase 2b: the plugin host registers a
+ * The plugin host registers a
  * plugin's declared `policyRules` into the policy-engine evaluator registry, and
  * the policy engine then evaluates a rule of that contributed type via the
  * plugin's evaluator.
@@ -53,7 +53,7 @@ function makeRule(type: string, config: Record<string, unknown> = {}): PolicyRul
   return { id: "r1", type: type as PolicyRule["type"], enabled: true, config };
 }
 
-describe("PluginHost — policyRules contribution (Phase 2b)", () => {
+describe("PluginHost — policyRules contribution", () => {
   it("registers a plugin's policy rule into the engine registry; evaluatePolicy runs it", async () => {
     const policyRegistry = new PolicyRuleRegistry();
     const eventRegistry = new WebhookEventRegistry(["tx.pending"]);

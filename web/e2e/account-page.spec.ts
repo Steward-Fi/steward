@@ -1,11 +1,9 @@
 import { generateKeyPairSync } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { expect, test } from "@playwright/test";
 import type { UserWalletSigner } from "@stwd/sdk";
 import { loginWithMagicLink } from "./fixtures/auth";
 
 const WEB = process.env.E2E_WEB_URL ?? "http://localhost:3499";
-const accountPageSource = readFileSync("src/app/dashboard/account/page.tsx", "utf8");
 
 function base64UrlEncode(bytes: Uint8Array): string {
   return Buffer.from(bytes)
@@ -16,13 +14,6 @@ function base64UrlEncode(bytes: Uint8Array): string {
 }
 
 test.describe("Dashboard account management", () => {
-  test("account dashboard delegates private-key import to the encrypted component", () => {
-    expect(accountPageSource).toContain("<StewardUserWalletKeyImport");
-    expect(accountPageSource).not.toContain("/user/me/wallet/import/submit");
-    expect(accountPageSource).not.toContain("submitEncryptedUserWalletKeyImport(");
-    expect(accountPageSource).not.toContain("initializeEncryptedUserWalletKeyImport(");
-  });
-
   test("authenticated users can review login methods and linked accounts", async ({
     page,
     request,

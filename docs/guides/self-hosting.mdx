@@ -75,7 +75,7 @@ DATABASE_URL=postgres://user:pass@localhost:5432/steward
 ```bash
 STEWARD_PORT=3200                           # API port (default: 3200)
 STEWARD_BIND_HOST=0.0.0.0                   # Bind address
-STEWARD_JWT_SECRET=separate-jwt-signing-key  # Defaults to master password if not set
+STEWARD_JWT_SECRET=separate-jwt-signing-key  # Required in production; minimum 32 characters
 STEWARD_PLATFORM_KEY=your-platform-admin-key # For platform-level management
 STEWARD_EMBEDDED=false                       # Set true for PGLite mode
 ```
@@ -83,8 +83,8 @@ STEWARD_EMBEDDED=false                       # Set true for PGLite mode
 ### Blockchain
 
 ```bash
-RPC_URL=https://mainnet.base.org             # Default EVM chain RPC
-CHAIN_ID=8453                                # Default chain ID
+RPC_URL=https://sepolia.base.org             # Safe default: Base Sepolia
+CHAIN_ID=84532                               # Safe default: Base Sepolia
 SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
 ```
 

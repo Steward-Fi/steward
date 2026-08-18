@@ -88,7 +88,7 @@ mock.module("@stwd/db", () => ({
 // NOTE: bun's mock.module replaces the ENTIRE module and is sticky per-process,
 // so this mock must re-export every binding the module-under-test (and any
 // sibling test running in the same process) imports from @stwd/webhooks.
-// Omitting the secret-codec helpers previously cascaded into "export not found"
+// The secret-codec helpers must remain available to the dispatch dependency graph.
 // failures across the webhook + approvals API suites. We mock only the
 // dispatcher and pass the real secret-codec functions through.
 mock.module("@stwd/webhooks", () => ({
@@ -278,7 +278,7 @@ describe("dispatchWebhook", () => {
     expect(insertedDeliveries).toHaveLength(0);
   });
 
-  // ── Phase 2b: plugin-declared event emission ───────────────────────────────
+  // ── Plugin-declared event emission ─────────────────────────────────────────
   it("emits a PLUGIN-declared event to a config that subscribes to it", async () => {
     // a plugin registered this event name into the runtime registry at compose
     // time (host.register merges StewardPlugin.webhookEvents). The core's closed

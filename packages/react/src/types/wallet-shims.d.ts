@@ -197,17 +197,6 @@ declare module "@solana/wallet-adapter-react-ui/styles.css" {
   export default content;
 }
 
-declare module "@solana/wallet-adapter-wallets" {
-  export class Coin98WalletAdapter {}
-  export class CoinbaseWalletAdapter {}
-  export class LedgerWalletAdapter {}
-  export class MathWalletAdapter {}
-  export class PhantomWalletAdapter {}
-  export class SolflareWalletAdapter {}
-  export class TrezorWalletAdapter {}
-  export class TrustWalletAdapter {}
-}
-
 declare module "@solana/web3.js" {
   export class PublicKey {
     constructor(value: string | Uint8Array | number[]);

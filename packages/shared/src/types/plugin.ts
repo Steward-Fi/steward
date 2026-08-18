@@ -69,7 +69,7 @@ export interface ContributedPolicyResult {
  * evaluate a rule type the plugin owns (e.g. a venue-specific gate) WITHOUT the
  * core importing the plugin.
  *
- * WIRED in Phase 2b. The plugin host registers each contribution into the policy
+ * WIRED in plugin policy-rule contribution contract. The plugin host registers each contribution into the policy
  * engine's runtime evaluator registry (fail-closed on a `type` that collides with
  * a core rule type or another plugin's). When `evaluatePolicy` meets a rule whose
  * `type` is not one of the core cases, it consults the registry; the contributed
@@ -104,7 +104,7 @@ export interface PolicyRuleContribution<Ctx = unknown> {
  * created when the plugin is enabled, WITHOUT the core owning the plugin's
  * schema.
  *
- * WIRED in Phase 2c. The host applies these via `@stwd/db`'s
+ * WIRED in plugin migration contribution contract. The host applies these via `@stwd/db`'s
  * `runPluginMigrations`, which runs the plugin's drizzle migrations into a
  * SEPARATE, PER-PLUGIN bookkeeping table derived from `id`
  * (`__drizzle_migrations_plugin_<sanitized id>` in the `drizzle` schema). The
@@ -140,7 +140,7 @@ export interface PluginMigrationSource {
  * (mirrors `packages/adapters` categories) so a plugin can supply a real
  * provider integration (a concrete swap/earn/onramp/.../exchange adapter).
  *
- * WIRED in Phase 2d. The host registers each contribution into the core's
+ * WIRED in plugin adapter contribution contract. The host registers each contribution into the core's
  * {@link AdapterRegistry} via its existing `register(category, provider, adapter)`
  * seam, in `dependsOn` order, FAIL-CLOSED on a `(category, provider)` collision
  * with another plugin's contribution (the host never silently overwrites a real
@@ -198,7 +198,7 @@ export interface StewardPlugin<App = unknown, Ctx = unknown, EvalCtx = unknown> 
    * for shared services and auth gates. may be async (e.g. to lazily resolve a
    * provider). called once, at the composition root, after the core is built.
    *
-   * OPTIONAL as of Phase 2: a plugin may contribute ONLY declaratively (via the
+   * OPTIONAL as of Imperative registration: a plugin may contribute ONLY declaratively (via the
    * contribution points below) without mounting any route/middleware. the
    * trading plugin still uses `register` for back-compat.
    */
@@ -212,13 +212,13 @@ export interface StewardPlugin<App = unknown, Ctx = unknown, EvalCtx = unknown> 
    * webhook dispatcher/config validation accepts a plugin's event without the
    * core's closed union having to know about it ahead of time.
    *
-   * WIRED in Phase 2a — this is the keystone contribution point proven
+   * WIRED in plugin event-contribution contract — this is the keystone contribution point proven
    * end-to-end by the trading plugin.
    */
   readonly webhookEvents?: readonly string[];
 
   /**
-   * policy rules this plugin contributes. WIRED in Phase 2b: the host registers
+   * policy rules this plugin contributes. WIRED in plugin policy-rule contribution contract: the host registers
    * each into the policy engine's runtime evaluator registry (fail-closed on a
    * `type` collision with a core rule type or another plugin's). The policy
    * engine then evaluates a rule of a contributed `type` via the contribution's
@@ -228,7 +228,7 @@ export interface StewardPlugin<App = unknown, Ctx = unknown, EvalCtx = unknown> 
   readonly policyRules?: readonly PolicyRuleContribution<EvalCtx>[];
 
   /**
-   * database migrations this plugin contributes. WIRED in Phase 2c: the host
+   * database migrations this plugin contributes. WIRED in plugin migration contribution contract: the host
    * applies these via `@stwd/db`'s `runPluginMigrations` into a per-plugin
    * namespaced bookkeeping table (`__drizzle_migrations_plugin_<id>`), totally
    * isolated from the core's `drizzle.__drizzle_migrations` journal, AFTER core
@@ -237,7 +237,7 @@ export interface StewardPlugin<App = unknown, Ctx = unknown, EvalCtx = unknown> 
   readonly migrations?: PluginMigrationSource;
 
   /**
-   * adapter integrations this plugin contributes. WIRED in Phase 2d: the host
+   * adapter integrations this plugin contributes. WIRED in plugin adapter contribution contract: the host
    * registers each into the core's adapter registry via its existing
    * `register(category, provider, adapter)` seam, in `dependsOn` order,
    * FAIL-CLOSED on a `(category, provider)` collision with another plugin's

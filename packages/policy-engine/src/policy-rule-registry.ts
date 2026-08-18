@@ -10,7 +10,7 @@
  * owns its own rule type (e.g. a venue-specific gate) cannot have that type
  * evaluated: it falls into `default:` and is denied as "Unknown policy type".
  *
- * Phase 2b of the plugin SDK lets a plugin DECLARE a rule type + evaluator
+ * plugin policy-rule contribution contract of the plugin SDK lets a plugin DECLARE a rule type + evaluator
  * (`StewardPlugin.policyRules`). the plugin host registers those evaluators HERE
  * at composition time. `evaluatePolicy`'s `default:` consults this registry BEFORE
  * returning "Unknown policy type": if a plugin registered an evaluator for the

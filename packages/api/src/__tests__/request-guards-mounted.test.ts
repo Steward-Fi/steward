@@ -86,7 +86,7 @@ describe("mounted request guards (SEC-010/SEC-150)", () => {
     expect(response.status).toBe(403);
   });
 
-  it("covers the previously-missing sensitive prefixes (SEC-150)", async () => {
+  it("covers every sensitive mutation prefix", async () => {
     for (const path of [
       "/v1/kms/keys/key-1/decrypt",
       "/v2/provider-actions/action-1/execute",

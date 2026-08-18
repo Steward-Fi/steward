@@ -71,9 +71,9 @@ owner/admin user session.
 }
 ```
 
-`authorizationDetails` is accepted for schema compatibility, but non-empty
-arrays currently fail closed because multi-approver enforcement is not yet
-implemented on this route.
+`authorizationDetails` is retained for schema compatibility. This route supports
+only an omitted or empty array and rejects non-empty values because it has no
+multi-approver enforcement path.
 
 **Response:**
 

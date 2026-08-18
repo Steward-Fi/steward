@@ -50,6 +50,33 @@ const fakeRedis = {
     ...args: unknown[]
   ) => {
     const raw = redisStore.get(key);
+    if (script.includes("steward-trade-idempotency-claim-v1")) {
+      if (!raw) {
+        redisStore.set(key, args[1] as string);
+        return ["claimed"];
+      }
+      const current = JSON.parse(raw) as {
+        bodyHash?: string;
+        state?: string;
+        response?: unknown;
+      };
+      if (current.bodyHash !== token) return ["conflict"];
+      if (
+        (current.state === "complete" || current.state === "submission_unknown") &&
+        current.response !== undefined
+      ) {
+        return ["replay", raw];
+      }
+      return ["inflight"];
+    }
+    if (script.includes("steward-trade-idempotency-complete-v1")) {
+      if (!raw) return ["missing"];
+      const current = JSON.parse(raw) as { bodyHash?: string; owner?: string };
+      if (current.bodyHash !== token) return ["conflict"];
+      if (current.owner !== args[0]) return ["not_owner"];
+      redisStore.set(key, args[1] as string);
+      return ["stored"];
+    }
     if (!raw) return 0;
     const current = JSON.parse(raw) as { state?: string; claimToken?: string };
     if (current.state !== "pending" || current.claimToken !== token) return 0;
@@ -97,6 +124,7 @@ mock.module("@stwd/redis", () => ({
 }));
 
 const TOKEN_ID = "71321045679252212594626385532706912750332728571942532289631379312455583992563";
+const CONDITION_ID = `0x${"a".repeat(64)}`;
 const DERIVED_CREDS = {
   apiKey: "cache-test-key",
   secret: "cache-test-secret-plaintext",
@@ -191,7 +219,13 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
       ...testCtx(),
       getRedisClient: () => fakeRedis,
     } as unknown as StewardAppContext;
-    const tradeRoutes = createTradeRoutes(ctx);
+    const tradeRoutes = createTradeRoutes(ctx, {
+      resolvePolymarketMarketByToken: async () => ({
+        conditionId: CONDITION_ID,
+        primaryTokenId: TOKEN_ID,
+        secondaryTokenId: "2",
+      }),
+    });
 
     const { tenantId, agentId } = await seedTenantAgent();
     // Real provisioning into the encrypted venue-scoped vault; no key material
@@ -294,7 +328,13 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
       const transplanted = await makeApp(
         secondIdentity.tenantId,
         secondIdentity.agentId,
-        createTradeRoutes(ctx),
+        createTradeRoutes(ctx, {
+          resolvePolymarketMarketByToken: async () => ({
+            conditionId: CONDITION_ID,
+            primaryTokenId: TOKEN_ID,
+            secondaryTokenId: "2",
+          }),
+        }),
       ).request("/v1/trade/polymarket/order", {
         method: "POST",
         headers: { "content-type": "application/json", "Idempotency-Key": crypto.randomUUID() },
@@ -334,7 +374,13 @@ describe("SEC-108: Polymarket L2 creds Redis cache is encrypted at rest", () => 
       ...testCtx(),
       getRedisClient: () => fakeRedis,
     } as unknown as StewardAppContext;
-    const tradeRoutes = createTradeRoutes(ctx);
+    const tradeRoutes = createTradeRoutes(ctx, {
+      resolvePolymarketMarketByToken: async () => ({
+        conditionId: CONDITION_ID,
+        primaryTokenId: TOKEN_ID,
+        secondaryTokenId: "2",
+      }),
+    });
 
     const { tenantId, agentId } = await seedTenantAgent();
     const wallet = await ctx.vault.createWallet({

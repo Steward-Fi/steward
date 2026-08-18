@@ -1,91 +1,14 @@
-# Steward
+# Steward documentation
 
-**Steward is an open-source, self-hostable governed credential proxy and policy and approval layer for agent provider actions and wallets.** Supported integrations use scoped grants and configured routes instead of receiving provider credentials directly. The primary EVM transaction sign path adds a signed, single-use execution authorization before raw signing.
+The documentation site is configured by [`mint.json`](./mint.json). Start with:
 
-## What It Does
+- [Introduction](./introduction.mdx)
+- [Quickstart](./quickstart.mdx)
+- [Architecture](./concepts/architecture.mdx)
+- [Authentication](./auth/overview.mdx)
+- [Policy engine](./concepts/policy-engine.mdx)
+- [Deployment](./deployment.md)
+- [Security threat model](./security/threat-model.mdx)
 
-Agents running inside containers typically get credentials injected as plain environment variables:
-
-```bash
-# Dangerous: raw credentials in the environment
-EVM_PRIVATE_KEY=0xdeadbeef...
-OPENAI_API_KEY=sk-proj-abc123...
-```
-
-Any code running in that container — including code triggered by prompt injection — can exfiltrate them. There's no spending control, no audit trail, no way to rotate without redeployment.
-
-With Steward, agents only get two variables:
-
-```bash
-# Safe: Steward proxy + agent token
-STEWARD_PROXY_URL=http://steward-proxy:8080
-STEWARD_AGENT_TOKEN=stwd_jwt_...
-```
-
-Proxy-bound agent tokens must be minted with the explicit `api:proxy` scope
-(`scopes: ["agent", "api:proxy"]`). Legacy tokens that only carry
-`scope: "agent"` are still accepted by the proxy with a deprecation warning for
-the next 1-2 release cycles, but new deployments should opt in when creating the
-token.
-
-Supported transactions and API calls flow through Steward routes, where they are authenticated, policy-checked, logged, and metered before Vault signing or proxy credential injection happens.
-
-## Core Primitives
-
-| Primitive | What it does |
-|-----------|-------------|
-| **Wallet Vault** | AES-256-GCM encrypted key storage for EVM and Solana keypairs. Governed API routes request signatures without returning private keys to the caller. |
-| **Policy Engine** | Declarative rules evaluated by supported signing routes before Vault calls: spending limits, address whitelists, rate limits, time windows, chain filters, auto-approve thresholds. |
-| **Secret Vault** | Encrypted credential storage. Configured proxy routes inject secrets server-side instead of returning them to the supported agent caller. |
-| **API Proxy** | Routes agent HTTP calls through Steward for credential injection, cost tracking, and audit logging. |
-| **Approval Queue** | Large or unusual transactions queue for human review before execution. |
-| **Webhooks** | Push notifications on `tx.pending`, `tx.signed`, `tx.approved`, `tx.denied`, `policy.violation`, `spend.threshold`. |
-
-## Two Deployment Modes
-
-**Embedded (local)** — Uses PGLite (Postgres-in-WASM). No external database. Ideal for desktop tools, local dev, and single-user deployments.
-
-```bash
-bun run start:local
-```
-
-**PostgreSQL** — Backed by PostgreSQL, optional Redis for rate limiting and spend tracking. For self-hosted production deployments that need a durable third-party database.
-
-```bash
-docker compose up -d
-```
-
-## Packages
-
-| Package | Description |
-|---------|-------------|
-| `packages/api` | Hono REST API server (Bun runtime) |
-| `packages/auth` | Auth primitives: passkeys, email magic links, SIWE, JWT, API keys |
-| `packages/db` | Drizzle ORM schema + PGLite/Postgres client |
-| `packages/vault` | AES-256-GCM key management, EVM + Solana signing |
-| `packages/policy-engine` | Stateless policy evaluator |
-| `packages/sdk` | TypeScript client (`@stwd/sdk`) |
-| `packages/react` | Embeddable React components (`@stwd/react`) |
-| `packages/eliza-plugin` | ElizaOS plugin |
-| `packages/plugin-wxmr` | Opt-in Monero-on-Solana bridge provider |
-| `packages/proxy` | Credential injection proxy |
-| `packages/webhooks` | Signed webhook dispatcher with retry queue |
-| `packages/shared` | Shared types, chain constants, price oracle |
-
-## Documentation
-
-- [**Quickstart**](./quickstart.md) — Up and running in 5 minutes
-- [**Architecture**](./architecture.md) — How the pieces fit together
-- [**Authentication**](./auth.md) — Passkeys, magic links, SIWE, JWT, API keys
-- [**Policy Engine**](./policies.md) — Spending limits, whitelists, rate limits, and more
-- [**Monero on Solana**](./guides/monero-on-solana.mdx) — Configure and use the bidirectional wxmr.io bridge handoff
-- [**SDK Reference**](./sdk.md) — `@stwd/sdk` TypeScript client
-- [**React Components**](./react.md) — `@stwd/react` embeddable UI
-- [**Deployment Guide**](./deployment.md) — Docker, environment variables, database setup
-
-## Who Uses Steward
-
-- **Production multi-agent deployments** — A production deployment managing dozens of AI agents across a node fleet on Base mainnet
-- **Agent developers** — Anyone building autonomous agents that need wallet access or API credential management
-- **Platform operators** — Teams running multi-tenant agent hosting who need security, cost control, and compliance
-- **Desktop apps** — Local mode with PGLite runs as an embedded sidecar with zero external dependencies
+Historical plans and superseded pages live under [`archive/`](./archive/). They are retained for
+context and are not current product documentation.

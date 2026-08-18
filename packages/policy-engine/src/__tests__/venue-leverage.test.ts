@@ -1,4 +1,4 @@
-// Sprint 4 Phase 1 Day 3 tests: venue-allowlist + leverage-cap evaluators.
+// Venue-allowlist and leverage-cap evaluator tests.
 
 import { describe, expect, it } from "bun:test";
 import type { PolicyRule, SignRequest } from "@stwd/shared";

@@ -15,7 +15,7 @@
  * a grant is: agent X may use capability Y (optionally until expiresAt). the
  * grant carries the id of its paired secret_route (per-GRANT pairing - the proxy
  * matches secret_routes by exact agentId, and capabilities are tenant-wide with
- * per-agent grants, so a route materializes once per grant; see PR / index.ts).
+ * per-agent grants, so a route materializes once per grant; see `index.ts`).
  */
 
 import { relations, sql } from "drizzle-orm";

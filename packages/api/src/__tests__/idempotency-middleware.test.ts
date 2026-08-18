@@ -1,6 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { Hono } from "hono";
 import {
   getTenantIdempotencyMetrics,
@@ -11,7 +9,6 @@ import {
 import type { AppVariables } from "../services/context";
 
 const AUTHORIZATION = "Bearer idempotency-test-token";
-const appSource = readFileSync(join(import.meta.dir, "..", "app.ts"), "utf8");
 
 function makeApp() {
   const app = new Hono<{ Variables: AppVariables }>();
@@ -657,28 +654,5 @@ describe("idempotencyMiddleware", () => {
     expect(await first.json()).toEqual({ ok: true, count: 1, value: "metadata" });
     expect(await second.json()).toEqual({ ok: true, count: 1, value: "metadata" });
     expect(count).toBe(1);
-  });
-
-  it("runs global idempotency after protected route authentication middleware", () => {
-    const idempotencyStart = appSource.indexOf('app.use("*", idempotencyMiddleware())');
-    expect(idempotencyStart).toBeGreaterThanOrEqual(0);
-    for (const marker of [
-      'app.use("/agents"',
-      'app.use("/vault/*"',
-      'app.use("/tenants/:id"',
-      'app.use("/dashboard/*"',
-      'app.use("/webhooks"',
-      'app.use("/intents"',
-      'app.use("/policies"',
-      'app.use("/platform"',
-      'app.use("/user"',
-    ]) {
-      const authStart = appSource.indexOf(marker);
-      expect(authStart).toBeGreaterThanOrEqual(0);
-      expect(authStart).toBeLessThan(idempotencyStart);
-    }
-    expect(appSource.indexOf("userSessionAuth", appSource.indexOf('app.use("/user"'))).toBeLessThan(
-      idempotencyStart,
-    );
   });
 });

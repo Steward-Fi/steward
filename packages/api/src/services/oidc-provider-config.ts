@@ -187,12 +187,8 @@ export function normalizeOidcProviders(
           ? entry.pictureClaim.trim()
           : "picture",
       allowedAlgs: allowedAlgs?.length ? allowedAlgs : ["RS256", "ES256"],
-      // SEC-151: default JIT provisioning OFF, matching the SAML plane
-      // (saml-sso-config.ts). Auto-creating user accounts for any holder of a
-      // valid IdP token must be an explicit tenant opt-in. This normalization
-      // runs at config WRITE time and the value is persisted, so existing
-      // tenant configs keep their previously persisted setting — only newly
-      // written configs that omit the field change posture.
+      // Auto-creating an account for a valid IdP token requires an explicit
+      // tenant opt-in, matching the SAML configuration boundary.
       allowJitProvisioning: entry.allowJitProvisioning === true,
     });
   }

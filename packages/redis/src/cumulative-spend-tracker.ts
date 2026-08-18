@@ -17,7 +17,7 @@
  * over its own window, and only then appends the reservation - so concurrent
  * reservers can never collectively cross any cap (TOCTOU-free).
  *
- * STREAM KEY vs CAP THRESHOLDS (codex P1 fix)
+ * Stream key versus cap thresholds
  * -------------------------------------------
  * The Redis ZSET (the "spend stream") is keyed ONLY by the spend-stream identity
  * `(agentId, scope, scopeKey, currency)` - NOT by the cap's window/max. Editing a
@@ -25,7 +25,7 @@
  * accumulated history, never a fresh empty bucket. Cap thresholds are supplied as
  * check parameters per reserve, not baked into the key.
  *
- * MULTIPLE CAPS ON ONE STREAM (codex P2 fix)
+ * Multiple caps on one stream
  * ------------------------------------------
  * A single invoke that is governed by several caps on the same stream (e.g. a 1h
  * AND a 24h cap, or two rules) is reserved ONCE: the atomic script checks ALL
@@ -78,7 +78,7 @@ const MAX_LEGACY_BRIDGE_ENTRIES = 10_000;
 const LEGACY_BRIDGE_VERSION = "steward.cumulative-spend-bridge.v1";
 
 /** The spend-stream identity. Editing a cap does NOT change this key, so history
- *  persists across cap edits (codex P1). */
+ * persists across cap edits. */
 export interface CumulativeSpendStream {
   /** Tenant namespace. New governed callers MUST supply it; omitted only for
    * legacy streams that predate tenant-bound keys. */
@@ -138,7 +138,7 @@ export function __setBeforeCumulativeSpendSumImportForTests(hook?: () => Promise
 
 function streamKey(s: CumulativeSpendStream): string {
   // scopeKey/currency are operator/adapter-derived tags; encode to keep the key
-  // delimiter-safe. Deliberately NO window/max in the key (codex P1): the stream
+  // delimiter-safe. Deliberately no window/max in the key: the stream
   // identity is the spend history, not the current cap threshold.
   const enc = (v: string) => encodeURIComponent(v);
   if (s.tenantId) {
@@ -929,7 +929,7 @@ export async function getCumulativeSpendSum(
  * invoke against EVERY count window governing the operation. The invoke is added
  * to the operation-level `__calls__` stream EXACTLY ONCE (amount=1), and each
  * cap's window is checked atomically - so combining an hourly AND a daily cap
- * never double-counts a single invoke (codex P2), and concurrent invokes cannot
+ * never double-counts a single invoke, and concurrent invokes cannot
  * collectively exceed any cap (single-winner). Returns ok=false when ANY cap is
  * at its limit, plus the per-cap prior counts (same order as `caps`). Returns
  * { ok:false } on a Redis error (fail closed).

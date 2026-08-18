@@ -58,9 +58,9 @@ function normalizeHttpsUrl(value: unknown, field: string): string | undefined | 
   if (url.username || url.password || url.hash) {
     return `${field} must not include credentials or fragments`;
   }
-  // SEC-072: tenant-controlled paymaster/bundler URLs become live server-side
+  // Tenant-controlled paymaster and bundler URLs are server-side
   // fetch sinks the moment a provider adapter is installed, so they must pass
-  // the same string-level public-host guard as the webhook/OIDC/SAML surfaces
+  // fetch destinations, so they must pass the same public-host guard as the webhook/OIDC/SAML surfaces
   // (private/loopback/link-local IPs, .local/.internal names). The explicit
   // localhost exception above (dev/test or STEWARD_ALLOW_LOCAL_PROVIDER_URLS)
   // is the only bypass.

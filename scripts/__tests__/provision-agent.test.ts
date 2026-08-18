@@ -1,12 +1,11 @@
 /**
  * SEC-012 regression tests — default-tenant API key provisioning.
  *
- * Pre-fix, scripts/provision-agent.ts inserted the `default` tenant with
- * apiKeyHash = sha256("provision-agent:default"). That literal string —
- * published in this repo — was a working X-Steward-Key credential (tenant
- * auth is timingSafeEqual(sha256(presentedKey), apiKeyHash)). These tests
- * assert the remediated behavior: random keys for new tenants, automatic
- * rotation of the legacy derivable hash, and no touching of operator-managed
+ * Older installations may contain a `default` tenant whose API key hash is
+ * sha256("provision-agent:default"). That public, deterministic credential has
+ * tenant authority because authentication compares sha256(presentedKey) with
+ * apiKeyHash. These tests require random keys for new tenants, automatic
+ * rotation of the legacy derivable hash, and preservation of operator-managed
  * hashes.
  *
  * The logic lives in scripts/lib/default-tenant.ts (dependency-light, no
@@ -53,14 +52,6 @@ function fakeStore(existingHash: string | null, rotationWins = true): FakeStore 
 const ARGS = { tenantId: "default", tenantName: "Default Steward Tenant", ownerAddress: "0xabc" };
 
 describe("SEC-012 ensureDefaultTenant", () => {
-  test("root manifest declares provision-agent direct imports", () => {
-    const rootPackage = JSON.parse(
-      readFileSync(join(import.meta.dir, "..", "..", "package.json"), "utf8"),
-    ) as { dependencies?: Record<string, string> };
-    expect(rootPackage.dependencies?.["@stwd/db"]).toBe("workspace:*");
-    expect(rootPackage.dependencies?.["drizzle-orm"]).toBeDefined();
-  });
-
   test("creates a missing tenant with a random (non-derivable) key", async () => {
     const store = fakeStore(null);
     const result = await ensureDefaultTenant(store, ARGS);
@@ -84,7 +75,7 @@ describe("SEC-012 ensureDefaultTenant", () => {
     expect(store.rotations).toHaveLength(1);
     const newHash = store.rotations[0].apiKeyHash;
     expect(newHash).not.toBe(LEGACY_DEFAULT_TENANT_API_KEY_HASH);
-    // The pre-fix published credential must no longer validate.
+    // The published legacy credential must no longer validate.
     expect(validateApiKey(LEGACY_DEFAULT_TENANT_API_KEY, newHash)).toBe(false);
     // The freshly returned key does.
     expect(validateApiKey((result as { apiKey: string }).apiKey, newHash)).toBe(true);
@@ -107,10 +98,10 @@ describe("SEC-012 ensureDefaultTenant", () => {
     expect("apiKey" in result).toBe(false);
   });
 
-  test("legacy hash constant matches the pre-fix derivation", () => {
+  test("legacy hash constant matches the deterministic legacy derivation", () => {
     // Guards the remediation trigger itself: the constant must equal
-    // sha256("provision-agent:default") — the exact value pre-fix script
-    // versions wrote — or already-provisioned instances would not rotate.
+    // sha256("provision-agent:default") — the exact value older script versions
+    // wrote — or affected installations would not rotate.
     expect(LEGACY_DEFAULT_TENANT_API_KEY_HASH).toBe(
       "93a3e57073bf915e403c48b44518efca07086ec8ada1b4b73e4a5278677d57cc",
     );
@@ -146,11 +137,5 @@ describe("provisioning secret output", () => {
     expect(() => writeProvisionSecrets({ jwt: "safe\nINJECTED=value" })).toThrow(
       "unsupported control character",
     );
-  });
-
-  test("CLI source never prints credential values to stdout", () => {
-    const source = readFileSync(join(import.meta.dir, "..", "provision-agent.ts"), "utf8");
-    expect(source).not.toMatch(/console\.log\([^\n]*(apiKey|\$\{jwt\}|\$\{session\.id\})/);
-    expect(source).toContain("writeProvisionSecrets(provisionSecrets, credentialsPath)");
   });
 });

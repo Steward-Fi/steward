@@ -58,6 +58,7 @@ let authMiddleware: typeof import("@stwd/proxy/src/middleware/auth")["authMiddle
 let handleProxy: typeof import("@stwd/proxy/src/handlers/proxy")["handleProxy"];
 let setForwardProxyRequestForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setForwardProxyRequestForTests"];
 let setResolveProxyHostForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setResolveProxyHostForTests"];
+let setCheckProxyRateLimitForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setCheckProxyRateLimitForTests"];
 
 interface ForwardedCapture {
   url: string;
@@ -101,6 +102,7 @@ beforeAll(async () => {
   // secret-route host allowlist (so a credential may be injected on it).
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = BROKER_HOST;
   process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS = BROKER_HOST;
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   process.env.STEWARD_PROXY_URL = PROXY_URL;
 
   const { db, client } = await createPGLiteDb("memory://");
@@ -117,10 +119,15 @@ beforeAll(async () => {
     handleProxy,
     __setForwardProxyRequestForTests: setForwardProxyRequestForTests,
     __setResolveProxyHostForTests: setResolveProxyHostForTests,
+    __setCheckProxyRateLimitForTests: setCheckProxyRateLimitForTests,
   } = await import("@stwd/proxy/src/handlers/proxy"));
 
   // deterministic public ip so the DNS-level SSRF guard passes with no network.
   setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
+  // This suite verifies capability policy and broker credential handling. Keep
+  // the proxy gateway's independent host limiter deterministic so requests in
+  // earlier cases cannot consume a later case's allowance.
+  setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
   // the stub broker: capture the forwarded request (to assert the injected token +
   // that the agent body reached the broker), return the seeded JSON body. The
   // forwarder signature is (url, method, headers, body: ReadableStream|null,
@@ -162,6 +169,7 @@ afterAll(async () => {
   delete process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET;
   delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
   delete process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS;
+  delete process.env.STEWARD_PROXY_DEV_MODE;
   delete process.env.STEWARD_PROXY_URL;
 });
 

@@ -91,9 +91,9 @@ import {
 const startTime = Date.now();
 
 /**
- * Phase 1: build the lean core app with global middleware + all CORE per-route
+ * Build the lean core app with global middleware and all core per-route
  * auth middleware. does NOT install the global idempotency middleware and does
- * NOT mount any routes (those are phase 2: {@link mountCoreIdempotencyAndRoutes}).
+ * NOT mount any routes; {@link mountCoreIdempotencyAndRoutes} owns route setup.
  * trading is NOT part of the core — it is registered as an opt-in plugin at the
  * composition root (see compose.ts).
  */
@@ -121,11 +121,9 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
 
   // ─── Global middleware ──────────────────────────────────────────────────────
 
-  // SEC-068: the Bun entry enforces a global in-memory IP rate limit
-  // pre-dispatch (index.ts runtimeGate), which is impossible on Workers (no
-  // cross-isolate state). Mount the shared Redis-backed sliding-window limiter
-  // across all routes for the Workers runtime only, so non-auth endpoints
-  // there are no longer unthrottled.
+  // Bun enforces a process-local IP rate limit before dispatch. Workers have
+  // no cross-isolate state, so they use the shared Redis-backed limiter across
+  // every route instead.
   if (isWorkersRuntime) {
     app.use("*", workersGlobalRateLimit);
   }
@@ -146,17 +144,15 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
     }),
   );
 
-  // ─── Request freshness + signature guards (SEC-010) ────────────────────────
-  // Mounted globally so freshness headers and request signatures are actually
-  // verified on every sensitive mutating route (they were unmounted dead code
-  // while /openapi.json and the tenant security checklist claimed enforcement).
+  // ─── Request freshness + signature guards ──────────────────────────────────
+  // Mounted globally so every sensitive mutating route verifies supplied
+  // freshness and request-signature headers.
   // Default posture is verify-when-present: a request carrying stale/invalid
   // freshness or signature headers fails closed, but the headers are not
   // required unless the operator opts in via STEWARD_REQUIRE_REQUEST_EXPIRY /
   // STEWARD_REQUIRE_AUTH_SIGNATURE. The env opt-in (not NODE_ENV) drives the
   // strict mode so browser/unsigned SDK clients keep working until an operator
-  // has rolled out signing clients. Mounted here (phase 1) so they always run
-  // BEFORE the idempotency middleware (phase 2).
+  // has rolled out signing clients. These guards run before idempotency.
   app.use("*", requestExpiry({ required: process.env.STEWARD_REQUIRE_REQUEST_EXPIRY === "true" }));
   app.use(
     "*",
@@ -185,9 +181,7 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
     // POST /tenants (creation) is intentionally NOT gated here: this middleware
     // is keyed on `/tenants/:id`, a pattern hono never matches against the bare
     // `/tenants` path, so creation is protected solely by the route-level
-    // platformAuthMiddleware() + platform scopes in routes/tenants.ts. (SEC-149:
-    // a previous `POST /tenants` passthrough branch here was dead code and has
-    // been removed so the guard boundary stays honest.)
+    // platformAuthMiddleware() plus platform scopes in routes/tenants.ts.
     // GET /tenants/config (no id) is a public discovery endpoint used by the
     // @stwd/sdk React provider to fetch default-tenant policy/theme/feature
     // flags before the user has authenticated. The :id wildcard would otherwise
@@ -245,12 +239,11 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
 }
 
 /**
- * Phase 2: install the global idempotency middleware + mount all CORE routes onto
- * an app produced by {@link createApp}. KEPT SEPARATE from phase 1 so the
+ * Install the global idempotency middleware and mount all core routes onto
+ * an app produced by {@link createApp}. Kept separate from context setup so the
  * composition root can slot an opt-in plugin's auth middleware in BEFORE
- * idempotency (phase-1 boundary) and its routes AFTER idempotency (this phase).
- * the registration order here is identical to the pre-refactor app.ts, minus
- * trading (which the plugin contributes).
+ * idempotency and its routes after idempotency. Trading is contributed by its
+ * plugin rather than mounted by the core.
  */
 export function mountCoreIdempotencyAndRoutes(
   app: Hono<{ Variables: AppVariables }>,
@@ -305,12 +298,12 @@ export function mountCoreIdempotencyAndRoutes(
   app.route("/v1/adapters", adapterRoutes);
   app.route("/v1/users", fiatRoutes);
   app.route("/policies", policiesStandaloneRoutes);
-  // provider-account X OAuth connect (#195 workstream A). Registered CONCRETELY
+  // Provider-account X OAuth connect. Registered concretely
   // and BEFORE the `/v2` authority sub-app so the specific connect paths win
   // over the authority `/provider-accounts/:id/...` wildcards.
   registerProviderXConnectRoutes(app);
   registerProviderGoogleConnectRoutes(app);
-  // PR5 case/evidence routes: registered CONCRETELY and BEFORE the `/v2`
+  // evidence case/evidence routes: registered CONCRETELY and BEFORE the `/v2`
   // authority sub-app so the specific /provider-actions/:id/{case,evidence}
   // paths win over the authority wildcards (same pattern as provider-actions).
   registerProviderCaseRoutes(app);
@@ -319,7 +312,7 @@ export function mountCoreIdempotencyAndRoutes(
   // middleware directly on the app (see registerProviderActionRoutes) to avoid a
   // second `/v2` sub-app mount colliding with the authority wildcard.
   registerProviderActionRoutes(app);
-  // PR3 approval + safe-resume routes (also registered directly to avoid the
+  // Approval and safe-resume routes (also registered directly to avoid the
   // /v2 authority-wildcard collision).
   registerProviderApprovalRoutes(app);
 

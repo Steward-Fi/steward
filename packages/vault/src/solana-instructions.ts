@@ -27,7 +27,7 @@ import {
  * an instruction — unknown program id, unrecognised discriminator, truncated data,
  * out-of-range account index — the instruction is returned with `unparsed: true`
  * and a reason. The same fail-closed marker is applied to decoded instructions
- * whose side effects are not yet represented in the policy envelope (for example
+ * whose side effects are outside the supported policy envelope (for example
  * SPL approvals/delegates, mint/burn, close-account, or System account creation).
  * The summary's `fullyParsed` flag is false whenever ANY instruction is unparsed
  * or unsupported for policy. Callers MUST refuse to sign a not-fully-parsed

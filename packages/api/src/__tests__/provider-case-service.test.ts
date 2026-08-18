@@ -1,5 +1,5 @@
 /**
- * PR5 provider-case service tests — manifest correlation + mechanical
+ * Provider-case service tests for manifest correlation and mechanical
  * completeness against real seeded cases (PGLite).
  */
 
@@ -21,7 +21,7 @@ import {
 
 const ALL_WS = [F.WORKSPACE, F.WORKSPACE_2];
 
-describe("PR5 provider-case service", () => {
+describe("provider-case service", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY ||= "0".repeat(64);

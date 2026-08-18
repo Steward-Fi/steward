@@ -228,10 +228,9 @@ describe("trade session control-plane gates (real routes)", () => {
     );
   });
 
-  it("SEC-034: a STALE MFA verification (10 min ago) no longer manages trade sessions", async () => {
-    // Presence-only MFA previously passed these gates for a session that
-    // completed MFA hours/days ago. The gates now require recency (5-minute
-    // window), so a 10-minute-old verification is refused exactly like no MFA.
+  it("a stale MFA verification cannot manage trade sessions", async () => {
+    // The five-minute recency window treats a ten-minute-old verification like
+    // a session with no MFA.
     const createRes = await post(await makeApp("session-stale-mfa"), "/sessions", CREATE_BODY);
     expect(createRes.status).toBe(403);
     expect(await errorOf(createRes)).toBe(
@@ -258,7 +257,7 @@ describe("trade session control-plane gates (real routes)", () => {
     expect(row.status).toBe("active");
   });
 
-  it("SEC-034: a future-dated MFA timestamp fails closed", async () => {
+  it("a future-dated MFA timestamp fails closed", async () => {
     const res = await post(await makeApp("session-future-mfa"), "/sessions", CREATE_BODY);
     expect(res.status).toBe(403);
     expect(await errorOf(res)).toBe("Trade session management requires recent MFA verification");

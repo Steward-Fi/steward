@@ -1,12 +1,9 @@
 /**
- * PR3 static boundary test (I15 / spec §14 static import guard). Proves the
- * provider-approval service source has ZERO references to credential decryption,
- * the proxy, nonce claims, network I/O, or the legacy PR #181
- * pending_proxy_requests fallback. PR4 deliberately composes one narrow mint-only
- * service into resume so execution_ready and its v2 authorization commit in the
- * same audited transaction. This source-introspection test permits exactly that
- * PR4 mint seam while continuing to reject any other execution-authorization
- * implementation or claim/dispatch behavior in the PR3 transition owner.
+ * Static boundary test (I15 / spec §14). The provider-approval transition owner
+ * cannot decrypt credentials, dispatch proxy requests, claim nonces, perform
+ * network I/O, or use pending_proxy_requests. Its only execution-authorization
+ * dependency is the mint-only service needed to commit execution_ready and its
+ * v2 authorization in the same audited transaction.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -23,12 +20,12 @@ const svc = raw
   .map((l) => l.replace(/\/\/.*$/, ""))
   .join("\n");
 
-describe("PR3 boundary (I15): no decrypt / proxy / mint / nonce / network in the transition owner", () => {
+describe("provider-approval boundary (I15)", () => {
   const forbidden: Array<[string, RegExp]> = [
     ["credential decryption", /decrypt|getSecretPlaintext|decryptSecret/i],
     ["proxy dispatch", /\bproxy\b|forwardRequest|dispatchProxy|handleProxy/i],
     [
-      "execution-authorization implementation other than the PR4 mint seam",
+      "execution-authorization implementation other than the mint seam",
       /mintExecutionAuthorization|execution-authorization|executionAuthorization(?!WithinTx)/i,
     ],
     ["nonce claim", /executionAuthorizationNonces|claimNonce|nonceClaim/i],
@@ -42,13 +39,13 @@ describe("PR3 boundary (I15): no decrypt / proxy / mint / nonce / network in the
     });
   }
 
-  test("imports only DB + shared + drizzle plus the narrow PR4 mint seam", () => {
+  test("imports only DB + shared + drizzle plus the narrow mint seam", () => {
     // Guard the forbidden package specifiers anywhere in the source.
     expect(svc).not.toMatch(
       /from "@stwd\/proxy|from "@stwd\/vault|from "@stwd\/secrets|proxy-client/,
     );
     // The transition owner pulls from @stwd/db + @stwd/shared + drizzle-orm,
-    // plus exactly one local mint-only service owned by PR4.
+    // plus exactly one local mint-only service.
     expect(svc).toMatch(/from "@stwd\/db"/);
     expect(svc).toMatch(/from "@stwd\/shared"/);
     expect(svc.match(/from "\.\/provider-execution\.js"/g)).toHaveLength(1);

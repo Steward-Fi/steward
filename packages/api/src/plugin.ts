@@ -222,21 +222,21 @@ export interface StewardAppContext {
    * Capability-surface authenticator: verifies the agent JWT and installs the
    * context WITHOUT the legacy `trade:order` scope gate. Capability invoke /
    * manifest / issuance routes use this — their authorization is the
-   * capability grant + capability-intent policy (default-deny), not the
-   * trading scope. It is a NEW field and does NOT replace `requireAgentJwt`.
+   * capability grant plus capability-intent policy (default-deny), not the
+   * trading scope. It does not replace `requireAgentJwt`.
    */
   requireCapabilityAgentJwt: typeof requireCapabilityAgentJwt;
   /**
-   * PR2 provider-action authenticator: verifies the agent JWT and installs the
+   * Provider-action authenticator: verifies the agent JWT and installs the
    * runtime-neutral principal WITHOUT a trading/proxy scope check. Provider-action
-   * routes use this; it is a NEW field and does NOT replace `requireAgentJwt`.
+   * routes use this; it does not replace `requireAgentJwt`.
    */
   requireProviderAgentJwt: typeof requireProviderAgentJwt;
   operatorAuth: typeof operatorAuth;
   tenantAuth: typeof tenantAuth;
   /**
    * the core's adapter registry — the seam a plugin's `adapters` contributions
-   * register a real provider integration into (Phase 2d). defaults to the
+   * register a real provider integration into (plugin adapter contribution contract). defaults to the
    * process-wide {@link adapterRegistry} routes consult; tests inject a fresh
    * {@link AdapterRegistry} (with a controlled env) so adapter resolution is
    * hermetic. the host only CALLS `register(category, provider, adapter)` on it;
@@ -335,18 +335,18 @@ export interface PluginHostDiagnostics {
   webhookEvents: string[];
   /** which plugin contributed which webhook event names (core events excluded). */
   webhookEventContributions: Record<string, string[]>;
-  /** which plugin contributed which policy rule types (Phase 2b). */
+  /** which plugin contributed which policy rule types (plugin policy-rule contribution contract). */
   policyRuleContributions: Record<string, string[]>;
   /**
    * which plugin contributed which adapters, as `"<category>::<provider>"` keys
-   * (Phase 2d). reflects what the host REGISTERED into the adapter registry.
+   * (plugin adapter contribution contract). reflects what the host REGISTERED into the adapter registry.
    */
   adapterContributions: Record<string, string[]>;
   /**
    * which plugin declared a migration source, and the namespaced bookkeeping
    * table its ledger is (or will be) recorded in —
    * `drizzle.__drizzle_migrations_plugin_<id>`, isolated from the core journal
-   * (Phase 2c). Present whether or not {@link PluginHost.runMigrations} has run
+   * (plugin migration contribution contract). Present whether or not {@link PluginHost.runMigrations} has run
    * yet (it reflects the declared sources, not applied state).
    */
   migrationSources: Record<string, { id: string; migrationsTable: string }>;
@@ -423,25 +423,25 @@ function orderByDependencies<Ctx>(
 /**
  * The plugin host: composes one or more plugins onto a steward app.
  *
- * RESPONSIBILITIES (Phase 2a + 2b + 2c + 2d)
+ * RESPONSIBILITIES (plugin event-contribution contract + 2b + 2c + 2d)
  * ------------------------------------------
  *  1. validate unique plugin names + a valid (acyclic, fully-satisfied)
  *     `dependsOn` graph, FAILING CLOSED on any violation.
  *  2. order plugins so each registers AFTER its dependencies.
  *  3. collect each plugin's declared `webhookEvents` into a runtime-extensible
  *     {@link WebhookEventRegistry} (core events ∪ plugin-declared), so the
- *     webhook config/dispatch path accepts a plugin's event type. (Phase 2a)
+ *     webhook config/dispatch path accepts a plugin's event type. (plugin event-contribution contract)
  *  4. register each plugin's declared `policyRules` into the policy engine's
  *     runtime evaluator {@link PolicyRuleRegistry}, FAILING CLOSED on a rule
  *     `type` that collides with a core rule type or another plugin's, so the
  *     policy engine evaluates a contributed rule type via the plugin's
- *     evaluator (core rule evaluation is untouched). (Phase 2b)
+ *     evaluator (core rule evaluation is untouched). (plugin policy-rule contribution contract)
  *  5. call each plugin's `register(app, ctx)` (if present) in dependency order.
  *  6. collect each plugin's declared `migrations` source (in dependency order)
  *     and apply them — via {@link runMigrations}, called by the boot/migrate path
  *     AFTER the core migrator — into a per-plugin NAMESPACED bookkeeping table,
  *     totally isolated from the core's `drizzle.__drizzle_migrations` journal
- *     (Phase 2c). Migrations are NOT run during `register` (route registration
+ *     (plugin migration contribution contract). Migrations are NOT run during `register` (route registration
  *     must not block on a schema migration) and NEVER per request.
  *  7. register each plugin's declared `adapters` into the core adapter registry
  *     (from `ctx.adapterRegistry`) via its existing `register(category, provider,
@@ -450,7 +450,7 @@ function orderByDependencies<Ctx>(
  *     silently overwrites a real money-route adapter) or an invalid contribution
  *     (unknown category, empty provider, missing adapter). The registry's
  *     fail-closed-in-production RESOLUTION is untouched — the host only CALLS
- *     register(). (Phase 2d)
+ *     register(). (plugin adapter contribution contract)
  *  8. expose {@link describe} so ops can see what loaded + what was contributed.
  */
 export class PluginHost<Ctx> {
@@ -461,7 +461,7 @@ export class PluginHost<Ctx> {
   private readonly policyContributions = new Map<string, string[]>();
   /**
    * which plugin contributed which adapters, as `"<category>::<provider>"` keys
-   * (diagnostics). Phase 2d.
+   * (diagnostics). plugin adapter contribution contract.
    */
   private readonly adapterContributions = new Map<string, string[]>();
   /**
@@ -521,7 +521,7 @@ export class PluginHost<Ctx> {
   ): Promise<void> {
     const ordered = orderByDependencies(plugins);
 
-    // Phase 1: merge declared webhook events FIRST, so a plugin's `register`
+    // Event contributions: merge declared webhook events FIRST, so a plugin's `register`
     // (and any concurrent dispatch) sees its own events as already valid.
     for (const plugin of ordered) {
       if (plugin.webhookEvents && plugin.webhookEvents.length > 0) {
@@ -529,8 +529,8 @@ export class PluginHost<Ctx> {
       }
     }
 
-    // Phase 1b: register declared policy rules into the policy-engine evaluator
-    // registry (Phase 2b). Done BEFORE any `register` hook runs, so a plugin's
+    // Policy-rule contributions: register declared policy rules into the policy-engine evaluator
+    // registry (plugin policy-rule contribution contract). Done BEFORE any `register` hook runs, so a plugin's
     // rule type is evaluable as soon as it (or anything) calls into the engine.
     // FAILS CLOSED: a `type` colliding with a core rule type or another plugin's
     // throws PolicyRuleRegistryError from the registry — the host never composes
@@ -556,8 +556,8 @@ export class PluginHost<Ctx> {
       }
     }
 
-    // Phase 1b2: register declared adapter contributions into the core's adapter
-    // registry (Phase 2d), BEFORE any `register` hook runs (so a plugin route
+    // Adapter contributions: register declared adapter contributions into the core's adapter
+    // registry (plugin adapter contribution contract), BEFORE any `register` hook runs (so a plugin route
     // that resolves an adapter during its own registration sees the contributed
     // provider). The registry is taken from `ctx.adapterRegistry`; a plugin that
     // declares `adapters` REQUIRES it. The registry's own fail-closed-in-prod
@@ -639,7 +639,7 @@ export class PluginHost<Ctx> {
       }
     }
 
-    // Phase 1c: collect declared migration sources in dependency order (Phase
+    // Migration contributions: collect declared migration sources in dependency order (Phase
     // 2c). NOT applied here — route registration must not block on a schema
     // migration, and migrations must run AFTER the CORE migrator. They are
     // applied by runMigrations(), called from the boot/migrate path after core
@@ -651,7 +651,7 @@ export class PluginHost<Ctx> {
       }
     }
 
-    // Phase 2: run each plugin's imperative register hook in dependency order.
+    // Imperative registration: run each plugin's imperative register hook in dependency order.
     for (const plugin of ordered) {
       this.loaded.push({ name: plugin.name, version: plugin.version });
       if (plugin.register) {

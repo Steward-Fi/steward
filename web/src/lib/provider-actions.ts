@@ -1,12 +1,12 @@
 /**
- * PR6 minimal trust-UX client for the governed-provider routes (PR3 approval,
- * PR5 case/evidence). These routes are NOT in `@stwd/sdk`, so the two detail
+ * Minimal trust-UX client for governed-provider approval and evidence routes.
+ * These routes are not in `@stwd/sdk`, so the two detail
  * pages fetch them directly with the session bearer + tenant header, exactly
  * like the tenants page does for `/user/me/tenants`.
  *
  * SAFETY:
  * - The approval-detail payload is the SAFE SUMMARY + digests only (the API
- *   never returns canonical bytes or comment text, PR3 §5.3 / U4). This client
+ *   never returns canonical bytes or comment text). This client
  *   only surfaces what the route returns; it adds NO field.
  * - The evidence bundle is downloaded for OFFLINE verification against an
  *   out-of-band key fingerprint (E7); it is never rendered as "verified" by the
@@ -94,7 +94,7 @@ function unwrap<T>(payload: unknown): T {
   return payload as T;
 }
 
-/** GET /v2/provider-actions/:id/approval (PR3): approval detail. */
+/** Fetch the safe approval detail for a provider action. */
 export async function getApprovalDetail(
   id: string,
   token: string | null,
@@ -106,7 +106,7 @@ export async function getApprovalDetail(
   return unwrap<ApprovalDetail>(await readJsonOrThrow(res));
 }
 
-/** POST /v2/provider-actions/:id/approval (PR3): approve/deny with typed reason. */
+/** Approve or deny a provider action with the required typed reason. */
 export async function decideApproval(
   id: string,
   input: {
@@ -148,7 +148,7 @@ export async function decideApproval(
   return readJsonOrThrow(res);
 }
 
-/** GET /v2/provider-actions/:id/case (PR5): case manifest. */
+/** Fetch the correlated case manifest. */
 export async function getCase(
   id: string,
   token: string | null,
@@ -162,7 +162,7 @@ export async function getCase(
   return (payload as { manifest?: CaseManifest }).manifest ?? (payload as CaseManifest);
 }
 
-/** GET /v2/provider-actions/:id/evidence (PR5): signed bundle for offline verify. */
+/** Fetch the signed evidence bundle for offline verification. */
 export async function getEvidence(
   id: string,
   token: string | null,

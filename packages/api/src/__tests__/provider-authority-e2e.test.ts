@@ -1,25 +1,17 @@
 /**
- * PR6 — end-to-end governed provider proof (fake transport).
+ * End-to-end governed-provider proof using a fake transport.
  *
- * This IS the fake CI proof body (§2.5). It drives the IDENTICAL governed code
- * path the real sandbox run uses (`scripts/provider-authority-sandbox.mjs`),
- * differing ONLY in the terminal forwarder (U2): here the terminal forwarder is
- * the deterministic in-process fake (`fake-provider-transport.ts`) injected via
- * the existing `__setForwardProxyRequestForTests` seam (U1). No new authority is
- * minted (U3): every allow/approve/resume/dispatch goes through the real PR1-PR5
+ * It drives the same governed code path as `scripts/provider-authority-sandbox.mjs`,
+ * with the terminal forwarder replaced by the deterministic in-process transport.
+ * Every allow, approve, resume, and dispatch operation uses the real authority
  * service functions.
  *
- * DISPATCH TOPOLOGY (anchor drift C1, see PR6-ANCHORS.md):
- * On develop the ALLOWED READ op terminates at an in-process stub
- * (`executeProviderActionStub`), NOT the governed forwarder. Only the
- * WRITE/APPROVAL path (create → approve → resume → dispatchGovernedExecution)
- * traverses `forwardProxyRequestForHandler` and thus the fake transport. So the
- * forwarder proof rides the WRITE op (M04/M14); the read leg still proves the
- * full access→policy→allow authority path (M02).
+ * DISPATCH TOPOLOGY:
+ * Allowed reads terminate at `executeProviderActionStub`. Consequential writes
+ * traverse `dispatchGovernedExecution` and the injected transport after approval.
  *
- * The matrix (M01-M18) and the negative/concurrency subset run here. UI/a11y
- * rows (M10-M13, PN34-36) live in the web test suite. Static inventory (M01) is
- * `fake-provider-transport-inventory.test.ts` (proxy package).
+ * UI and accessibility coverage lives in the web suite. The proxy package owns
+ * the static fake-transport inventory test.
  */
 
 import {
@@ -55,14 +47,14 @@ import {
 import { KeyStore } from "@stwd/vault";
 import { and, eq, sql } from "drizzle-orm";
 
-// Real PR1-PR5 services (the authority code path under proof).
+// Real authority services (the code path under proof).
 import { providerActionService } from "../services/provider-action-service";
 import { providerApprovalService } from "../services/provider-approval";
 import { getProviderCase } from "../services/provider-case";
 
 setDefaultTimeout(120_000);
 
-// PR4 governed dispatcher + the injectable proxy forwarder seam.
+// Governed dispatcher and injectable proxy forwarder seam.
 type ProxyMod = typeof import("@stwd/proxy/src/handlers/proxy");
 type DispatchMod = typeof import("@stwd/proxy/src/handlers/governed-execution");
 let proxyMod: ProxyMod;
@@ -324,6 +316,7 @@ async function dispatchStateOf(intentId: string): Promise<string | null> {
 }
 
 beforeAll(async () => {
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => client.close());
   proxyMod = await import("@stwd/proxy/src/handlers/proxy");
@@ -331,9 +324,9 @@ beforeAll(async () => {
   ({ dispatchGovernedExecution } = await import("@stwd/proxy/src/handlers/governed-execution"));
   ({ F, principal } = await import("./provider-approval-fixture"));
   ({ seedCaseFixture, wipeCase } = await import("./provider-case-fixture"));
+  proxyMod.__setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
   // Pin DNS to a public address so the SSRF guard passes without a real lookup.
   proxyMod.__setResolveProxyHostForTests(async () => [{ address: "140.82.112.6", family: 4 }]);
-  proxyMod.__setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
   restoreProxyRateLimit = () =>
     proxyMod.__setCheckProxyRateLimitForTests(redisEnforcement.checkProxyRateLimit);
 });
@@ -341,6 +334,7 @@ beforeAll(async () => {
 afterAll(async () => {
   restoreProxyRateLimit?.();
   await closeDb();
+  delete process.env.STEWARD_PROXY_DEV_MODE;
 });
 
 beforeEach(async () => {
@@ -361,7 +355,7 @@ afterEach(async () => {
   fake.reset();
 });
 
-describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)", () => {
+describe("governed provider E2E — fake transport, real authority (U1-U3)", () => {
   it("M14: happy write path create→approve→resume→dispatch→succeeded via fake forwarder", async () => {
     const [op] = await getDb()
       .select({ id: sql<string>`id` })
@@ -535,8 +529,8 @@ describe("PR6 governed provider E2E — fake transport, real authority (U1-U3)",
   });
 
   it("M05/PN17: route revision bumped after resume — claim fails STALE_ROUTE, zero forward", async () => {
-    // Drift note (see PR6-ANCHORS.md): the PR4 claim's LIVE-revision staleness
-    // checks are ROUTE-revision and SECRET-version (the approval commitment is
+    // The claim's live-revision staleness checks are route revision and secret
+    // version. The approval commitment is
     // frozen at mint, so grant IDs+revisions are re-derived from the frozen
     // commitment and cannot drift at claim). Grant REVOCATION is enforced at
     // ACCESS time, not at an already-approved+resumed claim. The claim-time

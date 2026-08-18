@@ -19,6 +19,7 @@ import {
   setNoStoreHeaders,
   verifySessionToken,
 } from "../services/context";
+import { isRecentMfaTimestamp } from "../services/recent-mfa";
 import { getConfiguredVault } from "../services/vault-factory";
 
 type UserSessionPayload = {
@@ -185,7 +186,7 @@ function requestOrigin(c: Context, explicitOrigin?: unknown): string | null {
   // origin, so consent really is origin-bound.
   if (originHeader) return explicit && explicit !== originHeader ? null : originHeader;
   if (refererOrigin) return explicit && explicit !== refererOrigin ? null : refererOrigin;
-  // SEC-212: non-browser callers send no Origin/Referer, so the body `origin`
+  // Non-browser callers send no Origin/Referer, so the body `origin`
   // field is self-asserted. The remaining controls are the app client's
   // allowedOrigins allowlist + user session + recent MFA — "origin-bound
   // consent" is NOT attested for these flows. Consent audits record
@@ -194,7 +195,7 @@ function requestOrigin(c: Context, explicitOrigin?: unknown): string | null {
 }
 
 /** True when the request's origin was observed from an Origin/Referer header
- * (browser traffic) rather than self-asserted in the request body (SEC-212). */
+ * (browser traffic) rather than self-asserted in the request body. */
 function isHeaderObservedOrigin(c: Context): boolean {
   return Boolean(
     normalizeOrigin(c.req.header("Origin")) ?? originFromReferer(c.req.header("Referer")),
@@ -431,13 +432,7 @@ function parseSendTransactionParams(value: unknown):
 }
 
 function hasRecentMfa(c: Context<{ Variables: GlobalWalletVariables }>): boolean {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt >= 0 &&
-    Date.now() - verifiedAt <= MFA_MAX_AGE_MS
-  );
+  return isRecentMfaTimestamp(c.get("sessionMfaVerifiedAt"), MFA_MAX_AGE_MS);
 }
 
 async function getEnabledAppClient(
@@ -731,7 +726,7 @@ globalWalletRoutes.post("/consent/approve", async (c) => {
   }
 
   const now = new Date();
-  // SEC-212: distinguish server-observed (browser header) origins from
+  // Distinguish server-observed (browser header) origins from
   // self-asserted (non-browser body) origins in the consent audit trail.
   const originSource = isHeaderObservedOrigin(c) ? "header" : "client-asserted";
   await writeGlobalWalletAudit(c, {

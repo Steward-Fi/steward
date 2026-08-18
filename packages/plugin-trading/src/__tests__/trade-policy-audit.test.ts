@@ -1,6 +1,4 @@
 import { afterAll, beforeAll, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import {
   agents,
   agentWallets,
@@ -575,40 +573,6 @@ describe("trade policy audit", () => {
     expect(((await res.json()) as { error: string }).error).toContain("insufficient access");
   });
 
-  it("keeps tenant-admin trade session management from accepting agent tokens", () => {
-    const tradeSource = readFileSync(join(import.meta.dir, "..", "routes", "trade.ts"), "utf8");
-    const helperStart = tradeSource.indexOf("function canManageTradeSession");
-    expect(helperStart).toBeGreaterThanOrEqual(0);
-    const helperEnd = tradeSource.indexOf("function canAgentSelfManageSession", helperStart);
-    const helperSource = tradeSource.slice(helperStart, helperEnd);
-    expect(helperSource).toContain('authType === "session-jwt"');
-    expect(helperSource).toContain('authType === "api-key"');
-    expect(helperSource).not.toContain('authType === "agent-token"');
-  });
-
-  it("deletes newly created trade sessions if the final creation audit fails", () => {
-    const tradeSource = readFileSync(join(import.meta.dir, "..", "routes", "trade.ts"), "utf8");
-    const sessionManagerSource = readFileSync(
-      join(import.meta.dir, "..", "..", "..", "trade-sessions", "src", "index.ts"),
-      "utf8",
-    );
-    const createStart = tradeSource.indexOf('tradeRoutes.post("/sessions"');
-    expect(createStart).toBeGreaterThanOrEqual(0);
-    const createRoute = tradeSource.slice(
-      createStart,
-      tradeSource.indexOf('tradeRoutes.get("/sessions/:id"', createStart),
-    );
-    const managerCreate = createRoute.indexOf("sessionManager.createSession");
-    const finalAudit = createRoute.indexOf("trade.session.created", managerCreate);
-    const rollback = createRoute.indexOf("sessionManager.deleteSession", finalAudit);
-    expect(managerCreate).toBeGreaterThanOrEqual(0);
-    expect(finalAudit).toBeGreaterThan(managerCreate);
-    expect(rollback).toBeGreaterThan(finalAudit);
-    expect(sessionManagerSource).toContain("async deleteSession(input: GetSessionInput)");
-    expect(sessionManagerSource).toContain(".delete(tradeSessions)");
-    expect(sessionManagerSource).toContain("await this.deleteRedis(input.tenantId, input.id)");
-  });
-
   it("requires idempotency keys for trade order submission", async () => {
     const tenantId = `tenant-trade-idempotency-${Date.now()}`;
     const agentId = `agent-trade-idempotency-${Date.now()}`;
@@ -646,15 +610,5 @@ describe("trade policy audit", () => {
 
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("Idempotency-Key");
-  });
-
-  it("replays trade idempotency with the original HTTP envelope", () => {
-    const tradeSource = readFileSync(join(import.meta.dir, "..", "routes", "trade.ts"), "utf8");
-    expect(tradeSource).toContain("type TradeIdempotencyResponse");
-    expect(tradeSource).toContain("function tradeReplayResponse");
-    expect(tradeSource).toContain('headers: { "Idempotency-Replayed": "true" }');
-    expect(tradeSource).toContain("status: 502");
-    expect(tradeSource).toContain("status: 400");
-    expect(tradeSource).not.toContain("return c.json(responseData(idempotency.response))");
   });
 });

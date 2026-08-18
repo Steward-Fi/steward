@@ -1,6 +1,6 @@
 /**
  * SEC-169 inventory. Every Drizzle table must appear exactly once. Activation
- * migrations consume these categories to choose direct, join-derived,
+ * migrations will consume these categories to choose direct, join-derived,
  * bootstrap-root, or intentionally-global policy treatment.
  */
 export const DIRECT_TENANT_TABLES = [
@@ -59,6 +59,7 @@ export const DIRECT_TENANT_TABLES = [
   "user_tenants",
   "user_wallet_app_consents",
   "vault_signing_freezes",
+  "wallet_operation_idempotency",
   "webhook_configs",
   "webhook_deliveries",
   "workspaces",

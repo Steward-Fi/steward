@@ -17,12 +17,9 @@ import { handleProxy } from "./proxy";
  * Atomically expire a pending|approved proxy-approval row AND append its
  * tamper-evident `proxy.approval.expired` audit-chain event in ONE transaction.
  *
- * Both the poll-time and claim-time expiry paths previously flipped the row to
- * `expired` in a bare UPDATE and then wrote ONLY a `proxy_audit_log` row via
- * `recordRequiredAudit` — that operational log is NOT the tamper-evident
- * `audit_events` chain, so a proxy-side expiry produced no chain evidence and
- * the state change + its record were not both-or-neither (invariant I14, spec
- * section 11 item #10). This mirrors the api-side `expireProxyApprovals`, using
+ * Poll-time and claim-time expiry require the state transition and tamper-evident
+ * `audit_events` record to commit together (invariant I14, spec section 11 item
+ * #10). This mirrors the API-side `expireProxyApprovals`, using
  * the shared `@stwd/db` `withTenantAuditedTransaction` primitive so the proxy
  * package can extend the chain without importing `@stwd/api`.
  *
@@ -73,7 +70,7 @@ async function expireProxyApprovalWithAudit(
 // Test-only deterministic barrier awaited between digest verification and the
 // atomic approved -> executing claim. Production default is a no-op, so this
 // adds zero behavior outside tests. Tests inject a function here to open the
-// exact TOCTOU window (row read + digest done, claim not yet issued) without
+// exact TOCTOU window between digest verification and claim without
 // millisecond-sleep races. Mirrors __setForwardProxyRequestForTests in proxy.ts.
 type ReleaseClaimBarrier = (row: PendingProxyRequest) => void | Promise<void>;
 let releaseClaimBarrier: ReleaseClaimBarrier = () => {};

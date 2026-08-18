@@ -25,7 +25,7 @@ async function expectRejected(client: PGlite, statement: string) {
 }
 
 describe("0101 operator transfer reservation integrity", () => {
-  test("follows the SigV4 migration without reusing its journal index", async () => {
+  test("has its immutable journal position after the SigV4 migration", async () => {
     const journal = JSON.parse(
       await readFile(join(migrations, "meta", "_journal.json"), "utf8"),
     ) as { entries: Array<{ idx: number; tag: string }> };
@@ -60,9 +60,10 @@ describe("0101 operator transfer reservation integrity", () => {
         tail: string,
       ) => `
         INSERT INTO operator_transfer_reservations
-          (id,tenant_id,agent_id,rail,idempotency_key,destination,amount_base_units,status,finalized_at)
+          (id,tenant_id,agent_id,rail,idempotency_key,request_digest,destination,
+           amount_base_units,status,finalized_at,response_status,response_body)
         VALUES ('${id}','${tenantId}','${agentId}','${rail}','${id}',
-          '0x3333333333333333333333333333333333333333','1',${tail})
+          repeat('a',64),'0x3333333333333333333333333333333333333333','1',${tail})
       `;
 
       await client.exec(
@@ -71,7 +72,7 @@ describe("0101 operator transfer reservation integrity", () => {
           "operator-integrity-a",
           "operator-integrity-agent-a",
           "withdraw",
-          "'pending',NULL",
+          "'pending',NULL,NULL,NULL",
         ),
       );
       await client.exec(
@@ -80,7 +81,7 @@ describe("0101 operator transfer reservation integrity", () => {
           "operator-integrity-a",
           "operator-integrity-agent-a",
           "usd-send",
-          "'final',now()",
+          "'final',now(),200,'{\"ok\":true}'::jsonb",
         ),
       );
       await expectRejected(
@@ -90,7 +91,7 @@ describe("0101 operator transfer reservation integrity", () => {
           "operator-integrity-a",
           "operator-integrity-agent-b",
           "withdraw",
-          "'pending',NULL",
+          "'pending',NULL,NULL,NULL",
         ),
       );
       await expectRejected(
@@ -100,7 +101,7 @@ describe("0101 operator transfer reservation integrity", () => {
           "operator-integrity-a",
           "operator-integrity-agent-a",
           "withdraw ",
-          "'pending',NULL",
+          "'pending',NULL,NULL,NULL",
         ),
       );
       await expectRejected(
@@ -110,7 +111,7 @@ describe("0101 operator transfer reservation integrity", () => {
           "operator-integrity-a",
           "operator-integrity-agent-a",
           "withdraw",
-          "'final',NULL",
+          "'final',NULL,200,'{\"ok\":true}'::jsonb",
         ),
       );
       await expectRejected(
@@ -120,7 +121,7 @@ describe("0101 operator transfer reservation integrity", () => {
           "operator-integrity-a",
           "operator-integrity-agent-a",
           "withdraw",
-          "'pending',now()",
+          "'pending',now(),NULL,NULL",
         ),
       );
       await expectRejected(

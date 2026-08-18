@@ -1,17 +1,26 @@
-import { is, sql } from "drizzle-orm";
+import { is, type SQLWrapper, sql } from "drizzle-orm";
 import { PgTransaction } from "drizzle-orm/pg-core";
 
 declare const trustedTenantContextBrand: unique symbol;
-const trustedTenantContexts = new WeakSet<object>();
 const TENANT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const AUTHORITY_METHOD_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 
 export type TenantRlsDriver = "postgres-js" | "pglite" | "neon-http" | "neon-websocket";
 
+export interface AuthenticatedTenantAuthority {
+  readonly tenantId: string;
+  readonly method: string;
+  readonly subject: string;
+}
+
+export interface InternalJobTenantAuthority {
+  readonly tenantId: string;
+  readonly job: string;
+}
+
 /**
- * An application-internal capability minted only after authentication or by a
- * named background job. Request headers and body fields are not valid inputs to
- * the transaction helper.
+ * A transaction capability issued by one TenantRlsAuthority. It cannot be
+ * constructed, cloned, or accepted by a different authority instance.
  */
 export interface TrustedTenantContext {
   readonly tenantId: string;
@@ -25,26 +34,57 @@ export interface TrustedTenantContext {
   readonly [trustedTenantContextBrand]: true;
 }
 
-function assertTenantId(tenantId: string): void {
-  if (!TENANT_ID_PATTERN.test(tenantId)) {
-    throw new Error("RLS_TENANT_CONTEXT_INVALID");
-  }
+export interface TenantRlsAuthorityVerifier<AuthenticatedProvenance, InternalJobProvenance> {
+  resolveAuthenticatedPrincipal(
+    provenance: AuthenticatedProvenance,
+  ): AuthenticatedTenantAuthority | null;
+  resolveInternalJob(provenance: InternalJobProvenance): InternalJobTenantAuthority | null;
 }
 
-export function tenantContextFromAuthenticatedPrincipal(input: {
-  tenantId: string;
-  method: string;
-  subject: string;
-}): TrustedTenantContext {
+export interface TenantRlsContextIssuer<AuthenticatedProvenance, InternalJobProvenance> {
+  fromAuthenticatedPrincipal(provenance: AuthenticatedProvenance): TrustedTenantContext;
+  forInternalJob(provenance: InternalJobProvenance): TrustedTenantContext;
+}
+
+export interface TenantTransactionExecutor {
+  execute(query: SQLWrapper): Promise<unknown>;
+}
+
+export interface TenantTransactionalDatabase<Tx extends TenantTransactionExecutor> {
+  transaction<T>(callback: (tx: Tx) => Promise<T>): Promise<T>;
+}
+
+export interface TenantRlsTransactions {
+  run<Tx extends TenantTransactionExecutor, T>(
+    db: TenantTransactionalDatabase<Tx>,
+    driver: TenantRlsDriver,
+    context: TrustedTenantContext,
+    callback: (tx: Tx) => Promise<T>,
+  ): Promise<T>;
+}
+
+export interface TenantRlsAuthority<AuthenticatedProvenance, InternalJobProvenance> {
+  /** Retain this capability only in authenticated middleware and named job runners. */
+  readonly issuer: TenantRlsContextIssuer<AuthenticatedProvenance, InternalJobProvenance>;
+  /** This capability is safe to share with code that already receives a trusted context. */
+  readonly transactions: TenantRlsTransactions;
+}
+
+function assertTenantId(tenantId: string): void {
+  if (!TENANT_ID_PATTERN.test(tenantId)) throw new Error("RLS_TENANT_CONTEXT_INVALID");
+}
+
+function authenticatedContext(input: AuthenticatedTenantAuthority): TrustedTenantContext {
   assertTenantId(input.tenantId);
   if (
     !AUTHORITY_METHOD_PATTERN.test(input.method) ||
     input.subject.length === 0 ||
     input.subject.length > 255 ||
     /[\u0000-\u001f\u007f]/.test(input.subject)
-  )
+  ) {
     throw new Error("RLS_TENANT_AUTHORITY_INVALID");
-  const context = Object.freeze({
+  }
+  return Object.freeze({
     tenantId: input.tenantId,
     authority: Object.freeze({
       kind: "authenticated-principal" as const,
@@ -52,24 +92,17 @@ export function tenantContextFromAuthenticatedPrincipal(input: {
       subject: input.subject,
     }),
   }) as TrustedTenantContext;
-  trustedTenantContexts.add(context);
-  return context;
 }
 
-export function tenantContextForInternalJob(input: {
-  tenantId: string;
-  job: string;
-}): TrustedTenantContext {
+function internalJobContext(input: InternalJobTenantAuthority): TrustedTenantContext {
   assertTenantId(input.tenantId);
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.job)) {
     throw new Error("RLS_TENANT_JOB_INVALID");
   }
-  const context = Object.freeze({
+  return Object.freeze({
     tenantId: input.tenantId,
     authority: Object.freeze({ kind: "internal-job" as const, job: input.job }),
   }) as TrustedTenantContext;
-  trustedTenantContexts.add(context);
-  return context;
 }
 
 export function assertTenantRlsDriver(driver: TenantRlsDriver): void {
@@ -78,18 +111,6 @@ export function assertTenantRlsDriver(driver: TenantRlsDriver): void {
       "RLS_TRANSACTION_UNSUPPORTED: neon-http has no callback transactions; use a transaction-capable Workers database transport",
     );
   }
-}
-
-interface TenantTransactionExecutor {
-  execute(query: unknown): Promise<unknown>;
-}
-
-interface TenantTransactionalDatabase<Tx extends TenantTransactionExecutor> {
-  transaction<T>(callback: (tx: Tx) => Promise<T>): Promise<T>;
-}
-
-function hasTrustedBrand(context: unknown): context is TrustedTenantContext {
-  return typeof context === "object" && context !== null && trustedTenantContexts.has(context);
 }
 
 function rowsOf(result: unknown): unknown[] {
@@ -101,52 +122,79 @@ function contextTenantId(result: unknown): unknown {
 }
 
 /**
- * Run one tenant unit of work on one checked-out connection. `set_config(...,
- * true)` is transaction-local, so commit, rollback, and pool reuse clear the
- * context. Never replace this with session-level SET on a pooled connection.
+ * Create one lexical authority boundary at application composition time. Keep
+ * `issuer` in verified authentication middleware and named job runners; pass
+ * only `transactions` and an already-issued context to tenant data access.
  */
-export async function withTenantRlsTransaction<Tx extends TenantTransactionExecutor, T>(
-  db: TenantTransactionalDatabase<Tx>,
-  driver: TenantRlsDriver,
-  context: TrustedTenantContext,
-  callback: (tx: Tx) => Promise<T>,
-): Promise<T> {
-  assertTenantRlsDriver(driver);
-  if (!hasTrustedBrand(context)) throw new Error("RLS_TENANT_CONTEXT_UNTRUSTED");
-  assertTenantId(context.tenantId);
-  // Calling `.transaction()` on a Drizzle PgTransaction opens a savepoint,
-  // not an independent transaction. SET LOCAL would then survive the helper
-  // callback until the unknown outer transaction ends.
-  if (is(db, PgTransaction)) throw new Error("RLS_TENANT_TRANSACTION_NESTED");
+export function createTenantRlsAuthority<AuthenticatedProvenance, InternalJobProvenance>(
+  verifier: TenantRlsAuthorityVerifier<AuthenticatedProvenance, InternalJobProvenance>,
+): TenantRlsAuthority<AuthenticatedProvenance, InternalJobProvenance> {
+  const trustedContexts = new WeakSet<object>();
 
-  const outcome = await db.transaction(async (tx) => {
-    // A non-empty value here means this connection carries a session-level
-    // setting or the helper was nested inside another tenant transaction.
-    // Overwriting either would conceal a lifecycle bug and could restore the
-    // stale session value after commit, so reject before exposing the tx.
-    const prior = await tx.execute(
-      sql`SELECT NULLIF(current_setting('steward.tenant_id', true), '') AS tenant_id`,
-    );
-    if (contextTenantId(prior) != null) {
-      // Clear the session-scoped contamination and commit that cleanup before
-      // reporting the error. Throwing inside this transaction would roll the
-      // reset back and return a still-dangerous connection to the pool.
-      await tx.execute(sql`SELECT set_config('steward.tenant_id', '', false)`);
-      const cleared = await tx.execute(
-        sql`SELECT NULLIF(current_setting('steward.tenant_id', true), '') AS tenant_id`,
-      );
-      if (contextTenantId(cleared) != null) throw new Error("RLS_TENANT_CONTEXT_CLEAR_FAILED");
-      return { kind: "dirty" as const };
-    }
+  function trust(context: TrustedTenantContext): TrustedTenantContext {
+    trustedContexts.add(context);
+    return context;
+  }
 
-    await tx.execute(sql`SELECT set_config('steward.tenant_id', ${context.tenantId}, true)`);
-    const result = await tx.execute(
-      sql`SELECT current_setting('steward.tenant_id', true) AS tenant_id`,
-    );
-    if (contextTenantId(result) !== context.tenantId)
-      throw new Error("RLS_TENANT_CONTEXT_NOT_BOUND");
-    return { kind: "ok" as const, value: await callback(tx) };
+  const issuer: TenantRlsContextIssuer<AuthenticatedProvenance, InternalJobProvenance> =
+    Object.freeze({
+      fromAuthenticatedPrincipal(provenance: AuthenticatedProvenance): TrustedTenantContext {
+        const resolved = verifier.resolveAuthenticatedPrincipal(provenance);
+        if (!resolved) throw new Error("RLS_TENANT_AUTHORITY_UNVERIFIED");
+        return trust(authenticatedContext(resolved));
+      },
+      forInternalJob(provenance: InternalJobProvenance): TrustedTenantContext {
+        const resolved = verifier.resolveInternalJob(provenance);
+        if (!resolved) throw new Error("RLS_TENANT_JOB_UNVERIFIED");
+        return trust(internalJobContext(resolved));
+      },
+    });
+
+  const transactions: TenantRlsTransactions = Object.freeze({
+    async run<Tx extends TenantTransactionExecutor, T>(
+      db: TenantTransactionalDatabase<Tx>,
+      driver: TenantRlsDriver,
+      context: TrustedTenantContext,
+      callback: (tx: Tx) => Promise<T>,
+    ): Promise<T> {
+      assertTenantRlsDriver(driver);
+      if (!trustedContexts.has(context)) throw new Error("RLS_TENANT_CONTEXT_UNTRUSTED");
+      assertTenantId(context.tenantId);
+      // A nested Drizzle transaction is a savepoint. SET LOCAL would survive
+      // this callback until the unknown outer transaction finishes.
+      if (is(db, PgTransaction)) throw new Error("RLS_TENANT_TRANSACTION_NESTED");
+
+      const outcome = await db.transaction(async (tx) => {
+        // Reject session-scoped contamination before exposing the transaction.
+        const prior = await tx.execute(
+          sql`SELECT NULLIF(current_setting('steward.tenant_id', true), '') AS tenant_id`,
+        );
+        if (contextTenantId(prior) != null) {
+          // Commit the cleanup before reporting failure. Throwing here would
+          // roll it back and return the contaminated connection to the pool.
+          await tx.execute(sql`SELECT set_config('steward.tenant_id', '', false)`);
+          const cleared = await tx.execute(
+            sql`SELECT NULLIF(current_setting('steward.tenant_id', true), '') AS tenant_id`,
+          );
+          if (contextTenantId(cleared) != null) {
+            throw new Error("RLS_TENANT_CONTEXT_CLEAR_FAILED");
+          }
+          return { kind: "dirty" as const };
+        }
+
+        await tx.execute(sql`SELECT set_config('steward.tenant_id', ${context.tenantId}, true)`);
+        const result = await tx.execute(
+          sql`SELECT current_setting('steward.tenant_id', true) AS tenant_id`,
+        );
+        if (contextTenantId(result) !== context.tenantId) {
+          throw new Error("RLS_TENANT_CONTEXT_NOT_BOUND");
+        }
+        return { kind: "ok" as const, value: await callback(tx) };
+      });
+      if (outcome.kind === "dirty") throw new Error("RLS_TENANT_CONTEXT_DIRTY");
+      return outcome.value;
+    },
   });
-  if (outcome.kind === "dirty") throw new Error("RLS_TENANT_CONTEXT_DIRTY");
-  return outcome.value;
+
+  return Object.freeze({ issuer, transactions });
 }

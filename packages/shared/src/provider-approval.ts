@@ -1,15 +1,15 @@
 /**
- * provider-approval.ts — PR3 exact-request approval commitment, decision, and
+ * provider-approval.ts — exact-request approval commitment, decision, and
  * audit document schemas + their canonical hashes (spec §5, §7.2, §8.2).
  *
  * SECURITY POSTURE. Every builder here is on the evidence surface. The
  * commitment document is what an approval binds to and what safe resume
  * independently recomputes and compares byte-for-byte. It MUST be built ONLY
  * from persisted/authoritative fields and hashed with the SAME strict RFC 8785
- * JCS implementation PR2 owns (`jcsStringify`), never a bespoke serializer.
+ * action canonicalizer's JCS implementation (`jcsStringify`), never a bespoke serializer.
  *
  * This module is pure (no DB, no crypto beyond sha256HexPrefixed) so it can be
- * reused by the API service AND by an offline verifier (PR5) without pulling in
+ * reused by the API service and by the offline evidence verifier without pulling in
  * server dependencies.
  */
 

@@ -71,14 +71,16 @@ services:
       STEWARD_PLATFORM_KEY: "${STEWARD_PLATFORM_KEY:-}"
       STEWARD_PLATFORM_KEY_SCOPES: "${STEWARD_PLATFORM_KEY_SCOPES:-}"
       STEWARD_PROXY_REQUEST_SIGNING_SECRETS: "${STEWARD_PROXY_REQUEST_SIGNING_SECRETS:-}"
-      RPC_URL: "${RPC_URL:-https://mainnet.base.org}"
-      CHAIN_ID: "${CHAIN_ID:-8453}"
+      RPC_URL: "${RPC_URL:-https://sepolia.base.org}"
+      CHAIN_ID: "${CHAIN_ID:-84532}"
       APP_URL: "${APP_URL:-https://steward.localhost}"
       PASSKEY_RP_NAME: "${PASSKEY_RP_NAME:-Steward}"
       PASSKEY_RP_ID: "${PASSKEY_RP_ID:-steward.localhost}"
       PASSKEY_ORIGIN: "${PASSKEY_ORIGIN:-https://steward.localhost}"
       X_CLIENT_ID: "${X_CLIENT_ID:-}"
       X_CLIENT_SECRET: "${X_CLIENT_SECRET:-}"
+      GOOGLE_PROVIDER_CLIENT_ID: "${GOOGLE_PROVIDER_CLIENT_ID:-}"
+      GOOGLE_PROVIDER_CLIENT_SECRET: "${GOOGLE_PROVIDER_CLIENT_SECRET:-}"
       SKIP_MIGRATIONS: "true"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:?required for the internal plaintext Postgres profile}"
       STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
@@ -120,6 +122,8 @@ services:
       # polls fail closed in production.
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?required}"
       STEWARD_PROXY_REQUEST_SIGNING_SECRETS: "${STEWARD_PROXY_REQUEST_SIGNING_SECRETS:?required}"
+      GOOGLE_PROVIDER_CLIENT_ID: "${GOOGLE_PROVIDER_CLIENT_ID:-}"
+      GOOGLE_PROVIDER_CLIENT_SECRET: "${GOOGLE_PROVIDER_CLIENT_SECRET:-}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:?required for the internal plaintext Postgres profile}"
       STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
     depends_on:
@@ -178,7 +182,18 @@ services:
   redis:
     profiles: ["enterprise-reference"]
     image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
-    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--appendfsync",
+        "everysec",
+        "--maxmemory",
+        "256mb",
+        "--maxmemory-policy",
+        "noeviction",
+      ]
     volumes:
       - redis-data:/data
     healthcheck:

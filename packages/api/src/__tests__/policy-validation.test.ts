@@ -389,7 +389,7 @@ describe("policy rule validation", () => {
     ).toContain("65536 bytes");
   });
 
-  it("accepts a valid typed-data policy (regression: previously rejected as unknown type)", () => {
+  it("accepts a valid typed-data policy", () => {
     expect(
       getPolicyRulesValidationError([
         {

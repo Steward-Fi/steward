@@ -1,4 +1,4 @@
-// Sprint 4 Phase 1 Day 3: tests for the default Sol policy seeder.
+// Tests for the default Solana policy seeder.
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 
@@ -55,7 +55,7 @@ describe("seedSolDefaultPolicy", () => {
     expect(types).toEqual(["leverage-cap", "spending-limit", "venue-allowlist"]);
   });
 
-  test("default config matches the Phase 1 spec", async () => {
+  test("default config matches the supported policy contract", async () => {
     await seedSolDefaultPolicy({ agentId: "sol" });
 
     const rows = await getDb().select().from(policies).where(eq(policies.agentId, "sol"));

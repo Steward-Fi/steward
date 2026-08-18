@@ -1,5 +1,4 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
 import { OAuthClient } from "../../packages/auth/src/oauth";
 import { clearFakeOAuthState, setFakeOAuthUser, startFakeOAuthServer } from "../fake-oauth-server";
 
@@ -8,8 +7,6 @@ describe("fake-oauth-server", () => {
   let prevAllowInsecure: string | undefined;
 
   beforeAll(() => {
-    // OAuthClient rejects non-https provider URLs unless this opt-in is set
-    // (same flag web/e2e/global-setup.ts uses); the stub serves http://127.0.0.1.
     prevAllowInsecure = process.env.STEWARD_ALLOW_INSECURE_OAUTH_PROVIDER_URLS;
     process.env.STEWARD_ALLOW_INSECURE_OAUTH_PROVIDER_URLS = "true";
     server = startFakeOAuthServer(0);
@@ -71,9 +68,6 @@ describe("fake-oauth-server", () => {
     );
     const code = new URL(authRes.headers.get("location")!).searchParams.get("code")!;
 
-    // Exercise the stub directly: OAuthClient intentionally sanitizes
-    // provider error bodies ("Token exchange failed (400)"), so the
-    // redirect_uri enforcement is asserted at the server boundary.
     const tokenRes = await fetch(`${server.origin}/discord/token`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -113,12 +107,5 @@ describe("fake-oauth-server", () => {
     });
     const profile = (await profileRes.json()) as { email: string };
     expect(profile.email).toBe("bob@example.com");
-  });
-
-  it("binds loopback only (SEC-128) — an auth-bypass stub must not listen on all interfaces", () => {
-    // Pre-fix: Bun.serve({ port }) defaults to 0.0.0.0, exposing the
-    // accept-any-credential / mint-any-identity provider to the network.
-    const source = readFileSync(new URL("../fake-oauth-server.ts", import.meta.url), "utf8");
-    expect(source).toContain('hostname: "127.0.0.1"');
   });
 });

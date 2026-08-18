@@ -1,12 +1,9 @@
 /**
  * operator-recovery.ts — Operator fund-recovery endpoints.
  *
- * MOVED from `@stwd/api` (packages/api/src/routes/operator-recovery.ts) into the
- * opt-in trading plugin. behavior is IDENTICAL: every endpoint, auth check,
- * policy evaluation, audit event, and error response is preserved. the only
- * structural change is that core services this route used to import from
- * `../services/context` + `../services/audit` are INJECTED via the plugin
- * context (`StewardAppContext`), so this file does not import `@stwd/api`.
+ * This opt-in trading-plugin route receives core services through
+ * `StewardAppContext`. It does not import `@stwd/api`, which keeps the plugin
+ * dependency directed toward shared contracts rather than the host package.
  *
  * These routes implement the core promise of Steward: a HUMAN OPERATOR must
  * ALWAYS be able to close an agent's positions and withdraw its funds, even
@@ -33,6 +30,7 @@
  * signWithdraw, submitWithdraw) — no signing is reimplemented here.
  */
 
+import { createHash } from "node:crypto";
 import { operatorTransferReservations, policies, proxyAuditLog, transactions } from "@stwd/db";
 import { checkRateLimit } from "@stwd/redis";
 import {
@@ -218,15 +216,9 @@ export function createOperatorRecoveryRoutes(
   const isDefiniteVenueRejection = (error: unknown) =>
     error instanceof Error && error.name === "HyperliquidExchangeRejectedError";
 
-  // ── Idempotency (mirrors trade.ts store) ─────────────────────────────────────
-  // Entries are stored for BOTH successful responses and ambiguous-outcome 502s
-  // (a submit that may have landed at the venue), so a retry with the same key
-  // REPLAYS the recorded outcome instead of re-executing a possibly-completed
-  // fund movement. SEC-043: records are Redis-backed when a client is available
-  // (multi-replica dedup survives restarts); without Redis the store falls back
-  // to a bounded (1_000 entries, expired-only sweep) process-local map. When
-  // that map is full of live records, new claims fail closed rather than
-  // evicting replay protection for an earlier fund movement.
+  // Non-transfer operator actions use the shared bounded cache. Withdraw and
+  // USD-send use the PostgreSQL reservation ledger below because their replay
+  // fence must survive cache expiry and process failure.
   type OperatorIdempotencyRecord = { status: 200 | 409 | 502; body: unknown };
   type OperatorIdempotency = {
     conflict?: boolean;
@@ -304,6 +296,78 @@ export function createOperatorRecoveryRoutes(
     return state.claim ? state.claim() : state;
   }
 
+  type OperatorTransferResult =
+    | { kind: "reserved"; reservationId: string }
+    | { kind: "rejected"; reason: string }
+    | { kind: "response"; status: 200 | 502; body: Record<string, unknown> }
+    | { kind: "conflict" }
+    | { kind: "in-progress" };
+
+  const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+  const legacyOperatorTransferDigest = "0".repeat(64);
+  const operatorTransferRequestDigest = (input: {
+    agentId: string;
+    venue: string;
+    rail: "withdraw" | "usd-send";
+    destination: string;
+    requestedAmountBaseUnits: string | null;
+  }) => sha256(JSON.stringify(input));
+
+  type OperatorTransferQueryDb = Pick<typeof db, "select">;
+  async function readOperatorTransferResult(
+    queryDb: OperatorTransferQueryDb,
+    tenantId: string,
+    rail: "withdraw" | "usd-send",
+    idempotencyKey: string,
+    requestDigest: string,
+  ): Promise<Exclude<OperatorTransferResult, { kind: "reserved" } | { kind: "rejected" }> | null> {
+    const [row] = await queryDb
+      .select({
+        requestDigest: operatorTransferReservations.requestDigest,
+        responseStatus: operatorTransferReservations.responseStatus,
+        responseBody: operatorTransferReservations.responseBody,
+      })
+      .from(operatorTransferReservations)
+      .where(
+        and(
+          eq(operatorTransferReservations.tenantId, tenantId),
+          eq(operatorTransferReservations.rail, rail),
+          eq(operatorTransferReservations.idempotencyKey, idempotencyKey),
+          sql`${operatorTransferReservations.status} in ('pending', 'final')`,
+        ),
+      )
+      .limit(1);
+    if (!row) return null;
+    if (row.requestDigest !== legacyOperatorTransferDigest && row.requestDigest !== requestDigest) {
+      return { kind: "conflict" };
+    }
+    if ((row.responseStatus === 200 || row.responseStatus === 502) && row.responseBody !== null) {
+      return { kind: "response", status: row.responseStatus, body: row.responseBody };
+    }
+    return { kind: "in-progress" };
+  }
+
+  function operatorTransferResponse(
+    c: Context<{ Variables: AppVariables }>,
+    result: Exclude<OperatorTransferResult, { kind: "reserved" } | { kind: "rejected" }> | null,
+  ): Response | undefined {
+    if (!result) return undefined;
+    if (result.kind === "conflict") {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency key reused with a different body" },
+        409,
+      );
+    }
+    if (result.kind === "in-progress") {
+      c.header("Retry-After", "1");
+      return c.json<ApiResponse>(
+        { ok: false, error: "Request with this idempotency key is in progress" },
+        409,
+      );
+    }
+    return c.json(result.body, result.status);
+  }
+
   // ── Operator transfer rate limit (withdraw + usd-send) ────────────────────────
   // The per-call USDC cap bounds one call; this bounds the LOOP. A compromised
   // operator credential cannot drain an arbitrarily large balance by repeating
@@ -364,8 +428,8 @@ export function createOperatorRecoveryRoutes(
    * getTransactionStats(agentId, chainId): the recent-tx counts feed rate-limit
    * rules, and the spend sums — scoped to Arbitrum so they stay in the same
    * native-wei unit the policy gate denominates `value` in — feed daily/weekly
-   * spending-limit rules. Previously both routes hardcoded zeroes here, which
-   * made every rate-limit and daily/weekly spend rule structurally inert.
+   * spending-limit rules. These counters must remain authoritative so every
+   * rate-limit and daily/weekly spend rule applies to operator transfers.
    */
   type OperatorQueryDb = Pick<typeof db, "select">;
   async function getOperatorSpendStats(
@@ -472,9 +536,10 @@ export function createOperatorRecoveryRoutes(
     agentId: string;
     rail: "withdraw" | "usd-send";
     idempotencyKey: string;
+    requestDigest: string;
     destination: string;
     amountBaseUnits: bigint;
-  }): Promise<{ approved: true; reservationId: string } | { approved: false; reason: string }> {
+  }): Promise<OperatorTransferResult> {
     // Preserve configured tenant defaults when the agent has no stored rows.
     // Stored agent policy rows are re-read under the table lock below.
     const defaultPolicySet = await getPolicySet(input.tenantId, input.agentId);
@@ -488,6 +553,14 @@ export function createOperatorRecoveryRoutes(
       if (!pgliteRuntime) {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${input.agentId}, 0))`);
       }
+      const existing = await readOperatorTransferResult(
+        tx,
+        input.tenantId,
+        input.rail,
+        input.idempotencyKey,
+        input.requestDigest,
+      );
+      if (existing) return existing;
       // Stabilize the authorization snapshot until the reservation commits.
       // Policy writes take ROW EXCLUSIVE table locks, which conflict with SHARE;
       // this closes the load-policy -> reserve TOCTOU even though policy mutation
@@ -516,10 +589,7 @@ export function createOperatorRecoveryRoutes(
       // load-balancing even when Redis is unavailable. Count both rails under
       // the same DB lock so parallel requests cannot all pass on stale state.
       if (stats.recentOperatorTransferCount1m >= OPERATOR_TRANSFER_MAX_CALLS) {
-        return {
-          approved: false as const,
-          reason: "Operator transfer rate limit exceeded",
-        };
+        return { kind: "rejected" as const, reason: "Operator transfer rate limit exceeded" };
       }
 
       let value = input.amountBaseUnits.toString();
@@ -527,7 +597,7 @@ export function createOperatorRecoveryRoutes(
         const nativeUsd = await priceOracle.getNativeUsdPrice(ARBITRUM_CHAIN_ID);
         if (nativeUsd === null || !Number.isFinite(nativeUsd) || nativeUsd <= 0) {
           return {
-            approved: false as const,
+            kind: "rejected" as const,
             reason:
               "spending-limit policy cannot be evaluated: no USD price available for the destination chain",
           };
@@ -538,7 +608,7 @@ export function createOperatorRecoveryRoutes(
         const priceScale = 100_000_000n;
         const scaledPrice = BigInt(Math.floor(nativeUsd * Number(priceScale)));
         if (scaledPrice <= 0n) {
-          return { approved: false as const, reason: "invalid native USD price" };
+          return { kind: "rejected" as const, reason: "invalid native USD price" };
         }
         const usdcBaseUnitsToWei = (amount: bigint) => {
           const numerator = amount * 10n ** 18n * priceScale;
@@ -587,7 +657,7 @@ export function createOperatorRecoveryRoutes(
         if (!evaluation.approved) {
           const failed = evaluation.results.find((r) => !r.passed);
           return {
-            approved: false as const,
+            kind: "rejected" as const,
             reason: failed?.reason ?? "transfer destination violates policy",
           };
         }
@@ -610,7 +680,7 @@ export function createOperatorRecoveryRoutes(
         if (!evaluation.approved) {
           const failed = evaluation.results.find((r) => !r.passed);
           return {
-            approved: false as const,
+            kind: "rejected" as const,
             reason: failed?.reason ?? "transfer destination violates policy",
           };
         }
@@ -622,13 +692,14 @@ export function createOperatorRecoveryRoutes(
           agentId: input.agentId,
           rail: input.rail,
           idempotencyKey: input.idempotencyKey,
+          requestDigest: input.requestDigest,
           destination: input.destination,
           amountBaseUnits: input.amountBaseUnits.toString(),
           status: "pending",
         })
         .returning({ id: operatorTransferReservations.id });
       if (!reservation) throw new Error("failed to reserve operator transfer spend");
-      return { approved: true as const, reservationId: reservation.id };
+      return { kind: "reserved" as const, reservationId: reservation.id };
     });
   }
 
@@ -636,11 +707,18 @@ export function createOperatorRecoveryRoutes(
     tenantId: string,
     agentId: string,
     id: string,
-    status: "final" | "released",
+    status: "pending" | "final" | "released",
+    response?: { status: 200 | 502; body: Record<string, unknown> },
   ) {
-    const [finished] = await db
+    const [updated] = await db
       .update(operatorTransferReservations)
-      .set({ status, finalizedAt: new Date() })
+      .set({
+        status,
+        responseStatus: response?.status ?? null,
+        responseBody: response?.body ?? null,
+        updatedAt: new Date(),
+        finalizedAt: status === "pending" ? null : new Date(),
+      })
       .where(
         and(
           eq(operatorTransferReservations.id, id),
@@ -650,21 +728,7 @@ export function createOperatorRecoveryRoutes(
         ),
       )
       .returning({ id: operatorTransferReservations.id });
-    return Boolean(finished);
-  }
-
-  async function releaseOperatorTransfer(
-    tenantId: string,
-    agentId: string,
-    reservationId: string,
-    idempotency: OperatorIdempotency,
-  ) {
-    // Release the durable reservation before freeing the idempotency claim.
-    // If the process stops between these operations, retaining the claim is
-    // fail-closed; the reverse order can admit a retry that then collides with
-    // the still-pending reservation's partial unique index.
-    const released = await finishOperatorReservation(tenantId, agentId, reservationId, "released");
-    if (released) await idempotency.release?.();
+    if (!updated) throw new Error("operator transfer reservation no longer exists");
   }
 
   function operatorActor(c: Context<{ Variables: AppVariables }>): {
@@ -1157,7 +1221,7 @@ export function createOperatorRecoveryRoutes(
     // Validate the USDC amount exactly like /withdraw: reject over-precision the
     // 6-decimal conversion can't represent, and enforce the per-call safety
     // ceiling so a compromised operator client cannot move the whole venue
-    // balance in one call (previously this rail had NO cap at all).
+    // balance in one call.
     if (hasTooManyUsdcDecimals(amount)) {
       return c.json<ApiResponse>(
         { ok: false, error: "amount has more than 6 decimal places" },
@@ -1177,15 +1241,24 @@ export function createOperatorRecoveryRoutes(
         400,
       );
     }
-
-    let idempotency = await getOperatorIdempotency(`${tenantId}:usd-send`, body.idempotencyKey, {
+    const requestDigest = operatorTransferRequestDigest({
       agentId,
       venue,
+      rail: "usd-send",
       destination,
-      amount,
+      requestedAmountBaseUnits: amountBaseUnits.toString(),
     });
-    const replayResponse = operatorIdempotencyResponse(c, idempotency);
-    if (replayResponse) return replayResponse;
+    const durableResponse = operatorTransferResponse(
+      c,
+      await readOperatorTransferResult(
+        db,
+        tenantId,
+        "usd-send",
+        body.idempotencyKey,
+        requestDigest,
+      ),
+    );
+    if (durableResponse) return durableResponse;
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -1207,25 +1280,21 @@ export function createOperatorRecoveryRoutes(
       );
     }
 
-    // ── Policy gate (BEFORE signing) ─────────────────────────────────────────────
-    // usdSend moves USDC to an ARBITRARY Hyperliquid account — functionally a
-    // withdrawal rail. It must satisfy the same policy evaluation as /withdraw
-    // (approved-addresses + spend/rate caps); before this gate a leaked platform
-    // key could drain the full HL balance to any destination in one call.
-    idempotency = await claimOperatorIdempotency(idempotency);
-    const claimResponse = operatorIdempotencyResponse(c, idempotency);
-    if (claimResponse) return claimResponse;
-
     const policy = await evaluateOperatorTransferPolicy({
       tenantId,
       agentId,
       rail: "usd-send",
       idempotencyKey: body.idempotencyKey,
+      requestDigest,
       destination,
       amountBaseUnits,
     });
-    if (!policy.approved) {
-      await idempotency.release?.();
+    if (policy.kind !== "reserved" && policy.kind !== "rejected") {
+      const response = operatorTransferResponse(c, policy);
+      if (response) return response;
+      throw new Error("unreachable operator transfer state");
+    }
+    if (policy.kind === "rejected") {
       await auditRecoveryEvent(c, tenantId, agentId, "trade.usdsend.policy-rejected", {
         venue,
         walletAddress,
@@ -1242,7 +1311,7 @@ export function createOperatorRecoveryRoutes(
     try {
       signedUsdSend = await adapter.signUsdSend({ destination, amount });
     } catch (err) {
-      await releaseOperatorTransfer(tenantId, agentId, policy.reservationId, idempotency);
+      await finishOperatorReservation(tenantId, agentId, policy.reservationId, "released");
       try {
         await auditRecoveryEvent(c, tenantId, agentId, "trade.usdsend.failed", {
           venue,
@@ -1268,9 +1337,7 @@ export function createOperatorRecoveryRoutes(
         amount,
       });
     } catch (_err) {
-      // Nothing has reached the venue yet, so an audit outage is a definite
-      // pre-submit failure and must not poison the durable spend reservation.
-      await releaseOperatorTransfer(tenantId, agentId, policy.reservationId, idempotency);
+      await finishOperatorReservation(tenantId, agentId, policy.reservationId, "released");
       return c.json<ApiResponse>({ ok: false, error: "Failed to audit usdSend request" }, 502);
     }
 
@@ -1279,11 +1346,17 @@ export function createOperatorRecoveryRoutes(
       result = await adapter.submitUsdSend(signedUsdSend);
     } catch (err) {
       const definitelyRejected = isDefiniteVenueRejection(err);
+      const errorBody = {
+        ok: false as const,
+        error: definitelyRejected ? "Hyperliquid rejected usdSend" : "Failed to submit usdSend",
+      };
       if (definitelyRejected) {
-        await releaseOperatorTransfer(tenantId, agentId, policy.reservationId, idempotency);
+        await finishOperatorReservation(tenantId, agentId, policy.reservationId, "released");
       } else {
-        const errorBody = { ok: false as const, error: "Failed to submit usdSend" };
-        await idempotency.storeFailure?.(errorBody);
+        await finishOperatorReservation(tenantId, agentId, policy.reservationId, "pending", {
+          status: 502,
+          body: errorBody,
+        });
       }
       try {
         await auditRecoveryEvent(c, tenantId, agentId, "trade.usdsend.failed", {
@@ -1300,19 +1373,14 @@ export function createOperatorRecoveryRoutes(
           redactedThrownDiagnostics(auditErr),
         );
       }
-      return c.json<ApiResponse>(
-        {
-          ok: false,
-          error: definitelyRejected ? "Hyperliquid rejected usdSend" : "Failed to submit usdSend",
-        },
-        502,
-      );
+      return c.json<ApiResponse>(errorBody, 502);
     }
 
-    await finishOperatorReservation(tenantId, agentId, policy.reservationId, "final");
-
     const response = { venue, walletAddress, destination, amount, result };
-    await idempotency.store?.(response);
+    await finishOperatorReservation(tenantId, agentId, policy.reservationId, "final", {
+      status: 200,
+      body: { ok: true, data: response },
+    });
     try {
       await auditRecoveryEvent(c, tenantId, agentId, "trade.usdsend.completed", {
         venue,
@@ -1716,6 +1784,27 @@ export function createOperatorRecoveryRoutes(
       }
     }
 
+    const explicitIdempotencyAmount =
+      explicitAmountBaseUnits !== null ? explicitAmountBaseUnits.toString() : null;
+    const requestDigest = operatorTransferRequestDigest({
+      agentId,
+      venue,
+      rail: "withdraw",
+      destination,
+      requestedAmountBaseUnits: explicitIdempotencyAmount,
+    });
+    const durableResponse = operatorTransferResponse(
+      c,
+      await readOperatorTransferResult(
+        db,
+        tenantId,
+        "withdraw",
+        body.idempotencyKey,
+        requestDigest,
+      ),
+    );
+    if (durableResponse) return durableResponse;
+
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
 
@@ -1727,22 +1816,8 @@ export function createOperatorRecoveryRoutes(
       );
     }
 
-    const explicitIdempotencyAmount =
-      explicitAmountBaseUnits !== null ? explicitAmountBaseUnits.toString() : null;
-    let idempotency = await getOperatorIdempotency(`${tenantId}:withdraw`, body.idempotencyKey, {
-      agentId,
-      venue,
-      destination,
-      amount: explicitIdempotencyAmount,
-    });
-    const replayResponse = operatorIdempotencyResponse(c, idempotency);
-    if (replayResponse) return replayResponse;
-
-    // Resolve amount after the idempotency cache lookup, so a retry for a
-    // previous full-balance withdraw returns the cached success before reading a
-    // changed live balance.
-    // `amount` stays human-readable for signing; `amountBaseUnits` (USDC 6-decimal
-    // base units) is what the policy gate converts to native wei for the spend-cap.
+    // A key-only ledger lookup occurs before resolving the live balance, so a
+    // replay does not depend on a balance that may have changed after submission.
     let amount = body.amount;
     let amountBaseUnits = explicitAmountBaseUnits;
     if (amount === undefined) {
@@ -1773,14 +1848,6 @@ export function createOperatorRecoveryRoutes(
       );
     }
 
-    // ── Policy gate (BEFORE signing) ─────────────────────────────────────────────
-    // The withdraw destination must be on the agent's approved list AND the amount
-    // must satisfy the spend/rate caps. The shared operator-transfer gate
-    // denominates `value` in native wei (so USD spending limits see the REAL
-    // notional, not 6-decimal USDC misread as wei) and feeds the evaluator the
-    // agent's REAL recent-tx counts + chain-scoped spend counters (the previous
-    // hardcoded zeroes made rate-limit and daily/weekly rules structurally
-    // inert, and the misdenominated `value` disabled even per-tx USD caps).
     const rate = await enforceOperatorTransferRateLimit("withdraw", tenantId, agentId);
     if (!rate.allowed) {
       c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
@@ -1790,20 +1857,21 @@ export function createOperatorRecoveryRoutes(
       );
     }
 
-    idempotency = await claimOperatorIdempotency(idempotency);
-    const claimResponse = operatorIdempotencyResponse(c, idempotency);
-    if (claimResponse) return claimResponse;
-
     const policy = await evaluateOperatorTransferPolicy({
       tenantId,
       agentId,
       rail: "withdraw",
       idempotencyKey: body.idempotencyKey,
+      requestDigest,
       destination,
       amountBaseUnits,
     });
-    if (!policy.approved) {
-      await idempotency.release?.();
+    if (policy.kind !== "reserved" && policy.kind !== "rejected") {
+      const response = operatorTransferResponse(c, policy);
+      if (response) return response;
+      throw new Error("unreachable operator transfer state");
+    }
+    if (policy.kind === "rejected") {
       await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.withdraw.policy-rejected", {
         venue,
         walletAddress,
@@ -1815,15 +1883,11 @@ export function createOperatorRecoveryRoutes(
 
     const adapter = buildAdapter(tenantId, agentId, walletAddress);
 
-    // Signing is local (nothing reaches the venue), so a sign failure is safe to
-    // retry and is NOT stored; a submit failure means the withdraw may have
-    // landed, so the ambiguous outcome IS stored and retries replay it (mirrors
-    // the HL order route's 502 "status unknown" envelope).
     let signedWithdraw: Awaited<ReturnType<HyperliquidAdapter["signWithdraw"]>>;
     try {
       signedWithdraw = await adapter.signWithdraw({ amount, destination });
     } catch (err) {
-      await releaseOperatorTransfer(tenantId, agentId, policy.reservationId, idempotency);
+      await finishOperatorReservation(tenantId, agentId, policy.reservationId, "released");
       try {
         await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.withdraw.failed", {
           venue,
@@ -1847,10 +1911,15 @@ export function createOperatorRecoveryRoutes(
     } catch (err) {
       const definitelyRejected = isDefiniteVenueRejection(err);
       if (definitelyRejected) {
-        await releaseOperatorTransfer(tenantId, agentId, policy.reservationId, idempotency);
+        await finishOperatorReservation(tenantId, agentId, policy.reservationId, "released");
       }
       const errorBody = { ok: false as const, error: "Failed to submit withdraw" };
-      if (!definitelyRejected) await idempotency.storeFailure?.(errorBody);
+      if (!definitelyRejected) {
+        await finishOperatorReservation(tenantId, agentId, policy.reservationId, "pending", {
+          status: 502,
+          body: errorBody,
+        });
+      }
       try {
         await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.withdraw.failed", {
           venue,
@@ -1875,10 +1944,11 @@ export function createOperatorRecoveryRoutes(
       destination,
       amount,
     });
-    await finishOperatorReservation(tenantId, agentId, policy.reservationId, "final");
-
     const response = { venue, walletAddress, destination, amount, result };
-    await idempotency.store?.(response);
+    await finishOperatorReservation(tenantId, agentId, policy.reservationId, "final", {
+      status: 200,
+      body: { ok: true, data: response },
+    });
     return c.json<ApiResponse>({ ok: true, data: response });
   });
 

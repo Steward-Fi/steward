@@ -13,9 +13,9 @@ export function isValidOAuthBearerToken(value: unknown): value is string {
 }
 
 /**
- * Refresh tokens are opaque rather than Bearer-header values, but X token
- * endpoint responses still need a strict storage bound and must not contain
- * controls or whitespace that can create log/form/header ambiguity later.
+ * Refresh tokens are opaque rather than Bearer-header values, but provider
+ * responses still need a strict storage bound and must not contain controls or
+ * whitespace that can create log, form, or header ambiguity later.
  */
 export function isValidOAuthOpaqueToken(value: unknown): value is string {
   return (

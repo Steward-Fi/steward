@@ -1,8 +1,8 @@
 /**
- * provider-approval.ts — PR3 sole transition owner for approval-required
+ * provider-approval.ts — sole transition owner for approval-required
  * provider actions (spec §6). It:
  *
- *   - builds the exact approval commitment at PR2 creation (createApprovalArm),
+ *   - builds the exact approval commitment at action creation (createApprovalArm),
  *   - decides (approve/deny) with current-authority + recent-MFA + exact-request
  *     integrity checks,
  *   - expires and stales through the exact atomic state machine,
@@ -12,9 +12,9 @@
  * Every state transition and its REQUIRED audit event commit atomically through
  * `withTenantAuditedTransaction` (I14). The service NEVER decrypts a credential,
  * calls the proxy, mints execution authorization, claims a nonce, or performs
- * network I/O (I15) — that is PR4.
+ * network I/O (I15); those belong to the execution-authorization boundary.
  *
- * Correlation contract (PR5 C1): every lifecycle audit event sets top-level
+ * Correlation contract (evidence C1): every lifecycle audit event sets top-level
  * `resource_type='provider_action'` and `resource_id=intents.id` in addition to
  * the signed `metadata.intentId`.
  */
@@ -92,7 +92,7 @@ export interface DecideInput {
   tenantId: string;
   authenticatedUserId: string;
   sessionMfaVerifiedAt: number | undefined;
-  requiredMfaAssurance?: string; // reserved; PR1 does not yet supply assurance
+  requiredMfaAssurance?: string; // Reserved; provider operations supply no assurance value.
   decision: "approve" | "deny";
   expectedVersion: number;
   expectedRequestHash: string;
@@ -116,15 +116,15 @@ interface LoadedCase {
   queue: QueueRow;
 }
 
-// ─── Commitment creation (called from the PR2 create tx, spec §6.3) ───────────
+// ─── Commitment creation (called from the action creation tx, spec §6.3) ───────────
 
 type DbBase = ReturnType<typeof getDb>;
 type DbExecutor = DbBase | Parameters<Parameters<DbBase["transaction"]>[0]>[0];
 
 /**
- * Build the exact approval commitment + queue row inside the PR2 create
+ * Build the exact approval commitment + queue row inside the action creation
  * transaction (spec §6.3 steps 3-5). Returns the commitment hash + queue id so
- * the caller can set them on the binding. THROWS if a required PR1 execution
+ * the caller can set them on the binding. THROWS if a required provider-operation execution
  * dependency (route/credential) is missing — creation must fail closed (§5.2).
  *
  * The caller (provider-action-service) has already inserted the intent and is
@@ -218,7 +218,7 @@ export async function buildApprovalArm(args: {
       throw new ApprovalArmError("APPROVAL_QUORUM_CONFIG_INVALID");
     }
 
-    // FAIL CLOSED AT STORE TIME on an UNREACHABLE quorum (codex P2): a
+    // Fail closed at store time on an unreachable quorum: a
     // structurally-valid eligible set can still be unsatisfiable if some listed
     // ids are not real workspace_approvers, are not tenant members, or is the
     // requester (agent owner), all of whom are rejected at decide time. Compute
@@ -522,7 +522,7 @@ class ProviderApprovalService {
     queue: QueueRow,
   ): { ok: true } | { ok: false; code: string } {
     // 2/3. Re-hash the persisted canonical action bytes → action_digest. The
-    // bytes are the UTF-8 of the JCS canonical action (PR2 stores
+    // bytes are the UTF-8 of the JCS canonical action (action-creation stores
     // `jcsStringify(action)` as bytea and digests `sha256HexPrefixed(jcs)`); a
     // raw-byte sha256 is byte-identical to the string form.
     const rawBytes = new Uint8Array(binding.canonicalActionBytes as Uint8Array);
@@ -608,9 +608,9 @@ class ProviderApprovalService {
     if (!agent) return { ok: false, code: "APPROVAL_DEPENDENCY_STALE" };
 
     // Workspace current + EXACT committed revision. The committed value lives in
-    // the persisted PR2 access decision (dependencyRevisions.workspace); a
+    // the persisted action-creation access decision (dependencyRevisions.workspace); a
     // workspace-authority revision bump while the workspace stays active must
-    // stale the action (exact dependency binding, codex P1).
+    // stale the action through exact dependency binding.
     const [workspace] = await tx
       .select()
       .from(workspaces)
@@ -823,17 +823,17 @@ class ProviderApprovalService {
     return { grantIds, bindingIds };
   }
 
-  // ── Current-policy re-evaluation is a commitment-hash equality check for PR3.
+  // ── Current-policy re-evaluation is a commitment-hash equality check for approval-lifecycle.
   // The persisted policy document's revision hash must still match the operation
   // (operation revision equality above already covers rule-set drift because the
   // policy revision hash binds operationRevision). A current hard deny is
   // surfaced by the operation/policy revision changing → APPROVAL_OPERATION_STALE
-  // or APPROVAL_POLICY_STALE. PR3 does not re-run the evaluator here; operation
+  // or APPROVAL_POLICY_STALE. approval-lifecycle does not re-run the evaluator here; operation
   // revision + policy revision hash equality is the exact-binding rule.
 
   /**
    * Current human workspace authority, shared by approval decisions and the
-   * execute-route caller gate. This is the PR3 authority predicate: current
+   * execute-route caller gate. This is the approval-lifecycle authority predicate: current
    * tenant membership plus an active, in-window role binding for the exact
    * workspace and its current environment.
    */
@@ -1029,7 +1029,7 @@ class ProviderApprovalService {
       )
       .returning({ id: approvalQueue.id });
     // Guarded CAS: if a concurrent winner already transitioned the row, do NOT
-    // update the intent or append a duplicate expired event (codex P2).
+    // update the intent or append a duplicate expired event.
     if (won.length === 0) return false;
     await tx
       .update(providerActionBindings)
@@ -1079,7 +1079,7 @@ class ProviderApprovalService {
 
   // ── Stale transition (spec §6.7). One tx moves pending/approved → stale.
   // Returns false if a concurrent winner already moved the row (guarded CAS lost)
-  // so the caller does NOT emit a duplicate transition or audit event (codex P2). ──
+  // so the caller does not emit a duplicate transition or audit event. ──
   private async staleTransition(
     tx: DbExecutor,
     append: (ev: { tenantId: string } & Record<string, unknown>) => Promise<void>,
@@ -1217,7 +1217,7 @@ class ProviderApprovalService {
         // in a DECIDED state (approved/rejected/consumed). If the row later
         // expired/staled (which clears `decision` to NULL but retains the idem
         // hash), an exact retry must NOT report a stale success — it falls through
-        // to the expiry/terminal handling below (codex P2).
+        // to the expiry/terminal handling below.
         if (
           queue.decisionIdempotencyKeyHash &&
           queue.resolvedById === input.authenticatedUserId &&
@@ -1234,7 +1234,7 @@ class ProviderApprovalService {
           return fail("APPROVAL_IDEMPOTENCY_CONFLICT", 409);
         }
 
-        // Cross-action idempotency conflict (codex P2): the same approver reusing
+        // Cross-action idempotency conflict: the same approver reusing
         // this decision key on a DIFFERENT intent would violate the partial
         // unique index (tenant_id, resolved_by_id, decision_idempotency_key_hash)
         // and surface as an opaque 503. Detect it here and return the precise
@@ -1941,7 +1941,7 @@ class ProviderApprovalService {
           // Idempotent: already execution_ready returns same state. BUT a row that
           // reached execution_ready BEFORE this rollout (or via any path that did
           // not mint) has no v2 authorization, and the governed dispatcher REQUIRES
-          // one (codex P2). So the idempotent path ALSO ensures the v2 nonce exists,
+          // one. The idempotent path also ensures the v2 nonce exists,
           // minting it in this same audited tx if absent. The mint is idempotent via
           // exec_auth_nonces_intent_uniq (K22/F01): a repeat resume that already has
           // a nonce is a no-op insert. Fails closed if the secret is absent (X7).
@@ -2228,7 +2228,7 @@ class ProviderApprovalService {
           });
           await this.hook("afterAudit");
 
-          // PR4 mint-within-tx (spec §2.3): mint the v2 execution authorization in
+          // execution-authorization mint-within-tx (spec §2.3): mint the v2 execution authorization in
           // the SAME audited transaction as the resume, so approved→execution_ready
           // →authorization-minted is one atomic step (removes an extra crash window,
           // F01). Idempotent by exec_auth_nonces_intent_uniq (K22). Fails closed if
@@ -2374,7 +2374,7 @@ class ProviderApprovalService {
       false,
     );
     if (!approver.ok) {
-      // Non-enumeration (I16, codex P2): an ineligible tenant member must NOT be
+      // Non-enumeration: an ineligible tenant member must not be
       // able to distinguish an existing approval action from an absent one on
       // this READ path. Membership/role/separation eligibility failures collapse
       // to the same 404 as an absent id. MFA failures are surfaced (they are not

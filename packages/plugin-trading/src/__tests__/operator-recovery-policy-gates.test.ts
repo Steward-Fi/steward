@@ -1,23 +1,7 @@
 /**
- * operator-recovery-policy-gates.test.ts — regression coverage for the operator
- * TRANSFER rail guardrails:
- *
- *   SEC-004 — /usd-send previously moved arbitrary USDC to any address with no
- *     policy gate, no per-call cap, and no rate limit. It now runs the same
- *     policy evaluation as /withdraw (approved-addresses + spend/rate caps),
- *     enforces the per-call 2000 USDC ceiling, and is rate limited.
- *   SEC-042 — /withdraw's policy evaluation was largely inert: recent-tx counts
- *     and spend counters were hardcoded to 0 (rate-limit + daily/weekly rules
- *     could never fire), and `value` was passed as 6-decimal USDC base units
- *     while the spending-limit evaluator prices `value` as native wei (so even
- *     per-tx USD caps never tripped). The gate now denominates `value` in wei
- *     via the price oracle and feeds real chain-scoped counters.
- *   SEC-043 — operator routes stored idempotency records only on success, so a
- *     retry of a possibly-landed submit re-executed. Ambiguous-outcome 502s are
- *     now stored and replayed.
- *
- * The HyperliquidAdapter is mocked (no signing / no network). The price oracle
- * is a deterministic stub injected via the plugin context.
+ * Behavioral coverage for operator transfer policy gates, durable
+ * idempotency, and reservation lifecycle. The venue adapter and price oracle
+ * are deterministic test fixtures; no signing or network access occurs.
  */
 
 import { afterAll, beforeAll, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
@@ -228,7 +212,7 @@ function postTransfer(
 const DEST_A = "0x1111111111111111111111111111111111111111";
 const DEST_B = "0x2222222222222222222222222222222222222222";
 
-describe("SEC-004: usd-send policy gate + caps", () => {
+describe("usd-send policy gate and caps", () => {
   it("rejects a usd-send to a destination NOT in approved-addresses (no adapter call)", async () => {
     const { tenantId, agentId } = await seedAgent({
       policies: [
@@ -373,11 +357,10 @@ describe("SEC-004: usd-send policy gate + caps", () => {
   });
 });
 
-describe("SEC-042: withdraw policy evaluation is real", () => {
+describe("withdraw policy evaluation", () => {
   it("enforces a per-tx USD spending limit against the REAL notional (not USDC-as-wei)", async () => {
-    // maxPerTxUsd 50 with a 100 USDC withdraw. Pre-fix the evaluator priced the
-    // 6-decimal USDC base units (100000000) as wei (~$0.0000004) and approved;
-    // the fixed gate converts to wei first, so the engine sees ~$100 and denies.
+    // The gate converts the USDC amount into the denomination expected by the
+    // policy engine, so a 100 USDC transfer exceeds a $50 per-transaction cap.
     const { tenantId, agentId } = await seedAgent({
       policies: [
         { type: "approved-addresses", config: { mode: "whitelist", addresses: [DEST_A] } },
@@ -453,8 +436,7 @@ describe("SEC-042: withdraw policy evaluation is real", () => {
   });
 
   it("enforces a rate-limit policy using the agent's REAL recent tx count", async () => {
-    // maxTxPerHour 1 with one confirmed tx in the trailing hour. Pre-fix the
-    // route hardcoded recentTxCount1h: 0 and the rule could never fire.
+    // One confirmed transaction in the trailing hour exhausts this policy.
     const { tenantId, agentId } = await seedAgent({
       policies: [
         { type: "approved-addresses", config: { mode: "whitelist", addresses: [DEST_A] } },
@@ -553,30 +535,7 @@ describe("SEC-042: withdraw policy evaluation is real", () => {
   });
 });
 
-describe("SEC-043: operator idempotency stores ambiguous outcomes", () => {
-  it("releases durable spend before freeing the idempotency claim", async () => {
-    const source = await Bun.file(
-      new URL("../routes/operator-recovery.ts", import.meta.url),
-    ).text();
-    const helperStart = source.indexOf("async function releaseOperatorTransfer");
-    const helperEnd = source.indexOf("function operatorActor", helperStart);
-    const helper = source.slice(helperStart, helperEnd);
-    expect(helperStart).toBeGreaterThan(-1);
-    expect(helperEnd).toBeGreaterThan(helperStart);
-    expect(helper.indexOf("finishOperatorReservation")).toBeLessThan(
-      helper.indexOf("idempotency.release"),
-    );
-    expect(helper).toContain("if (released)");
-
-    const finishStart = source.indexOf("async function finishOperatorReservation");
-    const finish = source.slice(finishStart, helperStart);
-    expect(finish).toContain('eq(operatorTransferReservations.status, "pending")');
-    // Operator rails account exclusively through their durable reservation
-    // ledger. Mirroring the same spend into core transactions would make the
-    // cross-path USD aggregate count one transfer twice.
-    expect(source).not.toContain(".insert(transactions)");
-  });
-
+describe("durable operator transfer idempotency", () => {
   it("releases a usd-send reservation after a definite local signing failure", async () => {
     const { tenantId, agentId } = await seedAgent({
       policies: [
@@ -653,10 +612,10 @@ describe("SEC-043: operator idempotency stores ambiguous outcomes", () => {
           agentId,
           rail: index % 2 === 0 ? "withdraw" : "usd-send",
           idempotencyKey: `durable-rate-${index}`,
+          requestDigest: (index + 100).toString(16).padStart(64, "0"),
           destination: DEST_A,
           amountBaseUnits: "1",
-          status: "final",
-          finalizedAt: new Date(),
+          status: "pending",
         })),
       );
     const app = await buildApp();
@@ -678,7 +637,7 @@ describe("SEC-043: operator idempotency stores ambiguous outcomes", () => {
     signWithdrawCalls.length = 0;
     submitWithdrawCalls.length = 0;
     failNextSubmitWithdraw = true;
-    const app = await buildApp();
+    let app = await buildApp();
     const key = `wd-ambiguous-${Date.now()}`;
 
     const first = await postTransfer(
@@ -691,8 +650,9 @@ describe("SEC-043: operator idempotency stores ambiguous outcomes", () => {
     expect(first.status).toBe(502);
     expect(submitWithdrawCalls).toHaveLength(1);
 
-    // Same key + same body: the recorded ambiguous outcome is replayed — the
-    // venue is NOT touched again (no second sign, no second submit).
+    // Recreate the application to prove replay is independent of process-local
+    // state and survives cache expiry or a worker restart.
+    app = await buildApp();
     const retry = await postTransfer(
       app,
       "withdraw",
@@ -703,6 +663,105 @@ describe("SEC-043: operator idempotency stores ambiguous outcomes", () => {
     expect(retry.status).toBe(502);
     expect(signWithdrawCalls).toHaveLength(1);
     expect(submitWithdrawCalls).toHaveLength(1);
+  });
+
+  it("rejects reuse of an active key with a different request after restart", async () => {
+    const { tenantId, agentId } = await seedAgent({
+      policies: [
+        { type: "approved-addresses", config: { mode: "whitelist", addresses: [DEST_A, DEST_B] } },
+      ],
+    });
+    submitWithdrawCalls.length = 0;
+    failNextSubmitWithdraw = true;
+    let app = await buildApp();
+    const key = `wd-conflict-${Date.now()}`;
+
+    const first = await postTransfer(
+      app,
+      "withdraw",
+      tenantId,
+      { agentId, destination: DEST_A, amount: "100" },
+      key,
+    );
+    expect(first.status).toBe(502);
+
+    app = await buildApp();
+    const conflict = await postTransfer(
+      app,
+      "withdraw",
+      tenantId,
+      { agentId, destination: DEST_B, amount: "100" },
+      key,
+    );
+    expect(conflict.status).toBe(409);
+    expect(submitWithdrawCalls).toHaveLength(1);
+  });
+
+  it("replays a terminal success after restart without signing or submitting", async () => {
+    const { tenantId, agentId } = await seedAgent({
+      policies: [
+        { type: "approved-addresses", config: { mode: "whitelist", addresses: [DEST_A] } },
+      ],
+    });
+    signWithdrawCalls.length = 0;
+    submitWithdrawCalls.length = 0;
+    let app = await buildApp();
+    const key = `wd-success-${Date.now()}`;
+    const request = { agentId, destination: DEST_A, amount: "100" };
+
+    const first = await postTransfer(app, "withdraw", tenantId, request, key);
+    expect(first.status).toBe(200);
+    const firstBody = await first.json();
+
+    app = await buildApp();
+    const replay = await postTransfer(app, "withdraw", tenantId, request, key);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(firstBody);
+    expect(signWithdrawCalls).toHaveLength(1);
+    expect(submitWithdrawCalls).toHaveLength(1);
+  });
+
+  it("replays the reconciliation response for a reservation created before durable responses", async () => {
+    const { tenantId, agentId } = await seedAgent({
+      policies: [
+        { type: "approved-addresses", config: { mode: "whitelist", addresses: [DEST_A] } },
+      ],
+    });
+    const key = `legacy-transfer-${Date.now()}`;
+    await getDb()
+      .insert(operatorTransferReservations)
+      .values({
+        tenantId,
+        agentId,
+        rail: "withdraw",
+        idempotencyKey: key,
+        requestDigest: "0".repeat(64),
+        destination: DEST_A,
+        amountBaseUnits: "100000000",
+        status: "pending",
+        responseStatus: 502,
+        responseBody: {
+          ok: false,
+          error: "Operator transfer outcome requires reconciliation",
+        },
+      });
+    signWithdrawCalls.length = 0;
+    submitWithdrawCalls.length = 0;
+
+    const response = await postTransfer(
+      await buildApp(),
+      "withdraw",
+      tenantId,
+      { agentId, destination: DEST_A, amount: "100" },
+      key,
+    );
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: "Operator transfer outcome requires reconciliation",
+    });
+    expect(signWithdrawCalls).toHaveLength(0);
+    expect(submitWithdrawCalls).toHaveLength(0);
   });
 
   it("counts an ambiguous reservation and replays it exactly once", async () => {

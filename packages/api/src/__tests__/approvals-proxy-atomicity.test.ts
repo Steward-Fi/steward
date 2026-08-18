@@ -14,22 +14,16 @@ import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
-// Fault-injection proof for approval/audit ATOMICITY on the PR #181 proxy flow.
-//
-// The PR3 spec (section 11 item #10, invariant I14) flags that the proxy
-// approve/deny/expire transitions committed their state change and their audit
-// event in SEPARATE transactions, so a crash or audit failure between them
-// could leave an approved/denied/expired row with NO audit record.
+// Fault-injection proof for approval/audit atomicity on the proxy flow.
 //
 // This suite drives the real route stack against a PGLite database whose
 // transaction layer is instrumented to throw at the audit INSERT. It proves:
 //   1. both-or-neither: when the required audit write faults, the state
-//      transition is rolled back too (I14);
+//      transition is rolled back too;
 //   2. retry-after-crash is idempotent: a second attempt with the fault cleared
 //      applies the transition exactly once and writes exactly one audit row
 //      (no double-apply, no duplicate audit);
-//   3. mutation proof: reverting the fix (see the paired assertion) makes the
-//      atomicity assertion fail, i.e. state persists while audit is missing.
+//   3. the assertion detects a state transition that persists without its audit.
 //
 // Route under test: packages/api/src/routes/approvals.ts
 //   - approvalRoutes.post("/proxy/:id/approve")
@@ -235,6 +229,15 @@ async function deny(id: string) {
   });
 }
 
+async function approveWithoutMfa(id: string) {
+  const token = await ownerSession();
+  return app.request(`/approvals/proxy/${id}/approve`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+}
+
 describe("proxy approval/audit atomicity (fault injection)", () => {
   it("approve: audit failure rolls back the state transition (both-or-neither)", async () => {
     const id = await seedPendingProxyRequest("pending");
@@ -304,5 +307,21 @@ describe("proxy approval/audit atomicity (fault injection)", () => {
     expect(res.status).toBe(200);
     expect((await fetchProxyRequest(id)).status).toBe("approved");
     expect((await auditRowsFor("proxy.approval.approved", id)).length).toBe(1);
+    expect(res.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    expect(res.headers.get("Pragma")).toBe("no-cache");
+    expect(res.headers.get("Expires")).toBe("0");
+  });
+
+  it("rejects a human approver session without recent MFA before mutation", async () => {
+    const id = await seedPendingProxyRequest("pending");
+    const res = await approveWithoutMfa(id);
+
+    expect(res.status).toBe(403);
+    await expect(res.json()).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("recent MFA"),
+    });
+    expect((await fetchProxyRequest(id)).status).toBe("pending");
+    expect((await auditRowsFor("proxy.approval.approved", id)).length).toBe(0);
   });
 });

@@ -1,8 +1,4 @@
-/**
- * SEC-110 regression coverage: webhook log redaction must recurse into
- * ARRAYS, not just plain objects — batch-shaped payloads (e.g.
- * `items: [{ apiKey: ... }]`) previously logged secrets in the clear.
- */
+/** Webhook log redaction recurses through arrays and plain objects. */
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { logError, logSubmission, logWebhook } from "../logger";
 

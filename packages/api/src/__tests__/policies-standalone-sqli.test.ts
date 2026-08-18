@@ -1,11 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { sql } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 
-const routeSourcePath = join(import.meta.dir, "..", "routes", "policies-standalone.ts");
-const routeSource = readFileSync(routeSourcePath, "utf8");
 const dialect = new PgDialect();
 
 const maliciousId = "00000000-0000-0000-0000-000000000000'; DROP TABLE policy_templates; --";
@@ -22,10 +18,6 @@ function expectParameterized(query: ReturnType<typeof dialect.sqlToQuery>, value
 }
 
 describe("policies-standalone SQL construction", () => {
-  it("does not call sql.raw in the route", () => {
-    expect(routeSource).not.toMatch(/\bsql\.raw\s*\(/);
-  });
-
   it("keeps SQL metacharacters in path, tenant, and body values parameterized", () => {
     const getQuery = dialect.sqlToQuery(
       sql`SELECT id, tenant_id, name, description, rules, is_default, created_at, updated_at

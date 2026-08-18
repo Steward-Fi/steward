@@ -1,7 +1,7 @@
 /**
  * GENERATED FILE — do not edit by hand.
  * Produced by packages/api/scripts/generate-sdk-types.ts from the OpenAPI
- * document (packages/api/openapi.json). Run `bun run openapi:generate` in
+ * document (docs/api-reference/openapi.json). Run `bun run openapi:generate` in
  * @stwd/api to regenerate after a route schema changes.
  */
 

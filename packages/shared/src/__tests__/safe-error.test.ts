@@ -125,7 +125,6 @@ describe("describeThrown — HOSTILE values (NEVER throws, static fallback)", ()
     expect((out as string).length).toBeGreaterThan(0);
   });
 });
-
 describe("redactedThrownDiagnostics", () => {
   it("retains only fixed classes and bounded machine codes", () => {
     const error = Object.assign(new Error("refresh-token-canary"), { code: "ECONNRESET" });

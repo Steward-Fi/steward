@@ -4,11 +4,8 @@
  * (index.ts itself boots a server at module scope and cannot be imported by
  * tests).
  *
- * SEC-014: the limiter previously keyed on the LEFTMOST `x-forwarded-for`
- * value with no trusted-proxy validation, so a client could rotate a spoofed
- * XFF header per request for unlimited requests (and grow the in-memory log
- * unboundedly with unique values). Client-supplied forwarding headers are now
- * honored ONLY when the operator declares how many trusted proxy hops sit in
+ * SEC-014: client-supplied forwarding headers are honored only when the
+ * operator declares how many trusted proxy hops sit in
  * front of the server (`STEWARD_TRUSTED_PROXY_HOPS`):
  *
  *   - each proxy appends the peer it observed, so with N trusted hops the real

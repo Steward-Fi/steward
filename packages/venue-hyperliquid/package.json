@@ -10,10 +10,9 @@
   "scripts": {
     "build": "tsc --noEmit",
     "dev": "tsc --watch",
-    "test": "ls src/**/*.test.ts src/**/*.spec.ts 2>/dev/null | grep -q . && bun test || echo 'no tests'"
+    "test": "bun test src/index.test.ts"
   },
   "dependencies": {
-    "@stwd/shared": "workspace:*",
     "viem": "^2.30.0",
     "zod": "^4.3.6"
   },

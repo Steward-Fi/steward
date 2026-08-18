@@ -30,8 +30,6 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 // STATIC imports (not dynamic): test-preload.ts (bunfig preload) runs first and
 // sets up the PGLite runtime + secrets, so evaluating compose.ts -> app.ts ->
 // route modules -> context.ts at import time is safe. A static import also forces
@@ -312,18 +310,6 @@ describe("parity — migration composition mirrors route composition", () => {
       restore();
     }
   });
-
-  it("the namespaced plugin-migration table convention is locked to per-plugin isolation", () => {
-    // Lock the documented isolation contract at the source level: plugin
-    // migrations are written to a per-plugin NAMESPACED bookkeeping table,
-    // isolated from the core journal `__drizzle_migrations`. This is the
-    // table-name guarantee that pairs with the both-on/both-off collection
-    // parity above (compose.ts documents the same).
-    const pluginSrc = readFileSync(join(import.meta.dir, "..", "plugin.ts"), "utf8");
-    expect(pluginSrc).toContain("__drizzle_migrations_plugin_");
-    const composeSrc = readFileSync(join(import.meta.dir, "..", "compose.ts"), "utf8");
-    expect(composeSrc).toContain("__drizzle_migrations_plugin_");
-  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -415,64 +401,7 @@ describe("parity — resolver matrix drives compose lean/full", () => {
 //    pre-handler, identically to full).
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("parity — LEAN preserves global mw → core auth → idempotency → routes", () => {
-  const appSource = readFileSync(join(import.meta.dir, "..", "app.ts"), "utf8");
-  const composeSource = readFileSync(join(import.meta.dir, "..", "compose.ts"), "utf8");
-
-  it("createApp registers GLOBAL mw before CORE auth mw (source order)", () => {
-    // global mw (security/cors/logger/correlation) lands before any per-route
-    // auth mw, so auth runs with the global context already established.
-    const globalIdx = appSource.indexOf('app.use("*", securityHeaders)');
-    const firstAuthIdx = appSource.indexOf('app.use("/agents"');
-    expect(globalIdx).toBeGreaterThanOrEqual(0);
-    expect(firstAuthIdx).toBeGreaterThanOrEqual(0);
-    expect(globalIdx).toBeLessThan(firstAuthIdx);
-  });
-
-  it("idempotency is installed AFTER all core auth mw and BEFORE core routes", () => {
-    // mountCoreIdempotencyAndRoutes installs idempotency, THEN mounts routes.
-    const idempotencyIdx = appSource.indexOf('app.use("*", idempotencyMiddleware())');
-    const firstRouteIdx = appSource.indexOf('app.route("/", identityDiscoveryRoutes)');
-    expect(idempotencyIdx).toBeGreaterThanOrEqual(0);
-    expect(firstRouteIdx).toBeGreaterThanOrEqual(0);
-    // idempotency before the first route mount
-    expect(idempotencyIdx).toBeLessThan(firstRouteIdx);
-    // every core auth mw declared in createApp() lands BEFORE idempotency (which
-    // is in the later mountCoreIdempotencyAndRoutes section of the same file).
-    for (const marker of [
-      'app.use("/agents"',
-      'app.use("/vault/*"',
-      'app.use("/tenants/:id"',
-      'app.use("/dashboard/*"',
-      'app.use("/webhooks"',
-      'app.use("/intents"',
-      'app.use("/platform"',
-      'app.use("/user"',
-    ]) {
-      const authIdx = appSource.indexOf(marker);
-      expect(authIdx).toBeGreaterThanOrEqual(0);
-      expect(authIdx).toBeLessThan(idempotencyIdx);
-    }
-  });
-
-  it("the LEAN compose branch routes through mountCoreIdempotencyAndRoutes (no plugin defer)", () => {
-    // compose.ts's lean branch calls mountCoreIdempotencyAndRoutes(app) directly
-    // (the deferred-route machinery only exists to slot a plugin's auth mw before
-    // idempotency + its routes after; with no plugin there is nothing to defer),
-    // so the lean order is exactly createApp()'s [global mw + core auth] ->
-    // idempotency -> core routes.
-    expect(composeSource).toContain("mountCoreIdempotencyAndRoutes(app)");
-    // the lean early-return happens before any trading import/registration. the
-    // lean guard is now `enabled.size === 0` (no opt-in plugins), generalized from
-    // the historical trading-only `!enabled.has("trading")` when the capabilities
-    // plugin was added to the enabled set (W-1c).
-    const leanReturnIdx = composeSource.indexOf("if (enabled.size === 0)");
-    const tradingImportIdx = composeSource.indexOf('import("@stwd/plugin-trading")');
-    expect(leanReturnIdx).toBeGreaterThanOrEqual(0);
-    expect(tradingImportIdx).toBeGreaterThanOrEqual(0);
-    expect(leanReturnIdx).toBeLessThan(tradingImportIdx);
-  });
-
+describe("parity — LEAN preserves global middleware and core auth", () => {
   it("BEHAVIORAL: LEAN runs core auth BEFORE the handler (protected route rejects pre-handler)", async () => {
     // A core protected route with NO auth headers must be rejected by the auth mw
     // (which runs before idempotency + before the handler) — never reaching a

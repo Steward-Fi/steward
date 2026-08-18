@@ -540,7 +540,7 @@ describe("parseSolanaTransaction — CreateAccount funding is counted", () => {
 
     const summary = parseSolanaTransaction(legacyToBase64(tx));
     expect(summary.fullyParsed).toBe(true);
-    // Before the fix this was "0" (CreateAccount lamports were parsed but never summed).
+    // CreateAccount funding contributes to the transaction's total lamports.
     expect(summary.totalLamports).toBe(lamports.toString());
     expect(summary.lamportRecipients).toContain(newAccount.toBase58());
 

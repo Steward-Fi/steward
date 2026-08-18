@@ -31,7 +31,7 @@ import {
   workspaces,
 } from "@stwd/db";
 import { getRedis, type SpendReservation, settleReservedSpend } from "@stwd/redis";
-import { isValidOAuthBearerToken, redactedThrownDiagnostics, strictParseJson } from "@stwd/shared";
+import { redactedThrownDiagnostics, strictParseJson } from "@stwd/shared";
 import { SecretVault } from "@stwd/vault";
 import type { Context } from "hono";
 import { boundedPositiveIntegerEnv, isProxyDevMode } from "../config";
@@ -61,6 +61,15 @@ export { __setGoogleExecutionTokenForwarderForTests };
 
 let _secretVault: SecretVault | null = null;
 let checkProxyRateLimitForHandler = checkProxyRateLimit;
+const SAFE_LOG_ERROR_CODES = new Set([
+  "ABORT_ERR",
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
 
 function getSecretVault(): SecretVault {
   if (!_secretVault) {
@@ -183,16 +192,16 @@ export function extractProviderCredentialForHost(host: string, credential: strin
     if (googleHost) throw new Error("invalid Google OAuth credential envelope");
     // A parseable object at the X boundary is an envelope, not a legacy raw
     // token. Unknown/malformed envelopes must never be formatted into a header.
-    if (xHost) {
-      if (typeof parsed === "object" && parsed !== null)
-        throw new Error("invalid X OAuth credential envelope");
-      if (!isValidOAuthBearerToken(credential))
-        throw new Error("invalid X OAuth bearer credential");
-    }
+    if (xHost && typeof parsed === "object" && parsed !== null)
+      throw new Error("invalid X OAuth credential envelope");
     return credential;
   }
   if (!parsedEnvelope) throw new Error("invalid provider OAuth credential envelope");
-  if (!isValidOAuthBearerToken(parsedEnvelope.accessToken))
+  if (
+    typeof parsedEnvelope.accessToken !== "string" ||
+    parsedEnvelope.accessToken.length < 1 ||
+    parsedEnvelope.accessToken.length > 16_384
+  )
     throw new Error(
       googleHost
         ? "invalid Google OAuth credential envelope"
@@ -383,11 +392,9 @@ const PROXY_UPSTREAM_TIMEOUT_MS = boundedPositiveIntegerEnv(
   5 * 60_000,
 );
 /**
- * SEC-100: proxy resource limits fail closed — they cannot be disabled. A `0`
- * (or garbage) env value previously meant "unlimited", silently removing the
- * response-size, stream-duration, and concurrency caps on operator
- * misconfiguration. Reject non-positive / non-integer values at startup
- * (module load) instead.
+ * SEC-100: proxy resource limits fail closed and cannot be disabled. Reject
+ * non-positive or non-integer values at startup so misconfiguration cannot
+ * remove response-size, stream-duration, or concurrency caps.
  */
 const MAX_PROXY_RESPONSE_BYTES = boundedPositiveIntegerEnv(
   "STEWARD_PROXY_RESPONSE_BYTES",
@@ -511,10 +518,9 @@ function releaseWhenBodyCloses(
 function requireSharedProxyReplayStore(): boolean {
   if (process.env.REDIS_REQUIRED === "true") return true;
   if (process.env.STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL === "true") return false;
-  // SEC-175: default-deny — the per-process replay store is a dev-only
-  // fallback and now needs the explicit dev-mode opt-in; an unset NODE_ENV
-  // no longer selects it silently, and a production NODE_ENV overrides a
-  // stray dev-mode flag.
+  // SEC-175: default-deny. The per-process replay store is a development-only
+  // fallback that requires explicit dev-mode opt-in. Production always requires
+  // the shared replay store.
   if (process.env.NODE_ENV === "production") return true;
   return !isProxyDevMode();
 }
@@ -1323,7 +1329,7 @@ export async function handleProxy(c: Context): Promise<Response> {
       403,
     );
   }
-  // ── PR4 governed-route authority gate (spec §5.1, X1/X7) ──────────────────
+  // ── execution-authorization governed-route authority gate (spec §5.1, X1/X7) ──────────────────
   // The gate is on the SELECTED route row, so a governed route is unreachable
   // via direct /proxy, named aliases, or /proxy/<host>/... regardless of how it
   // was addressed. A governed route is permitted ONLY when the request arrived
@@ -1350,11 +1356,11 @@ export async function handleProxy(c: Context): Promise<Response> {
     | undefined;
   // Set once the governed claim is verified against the selected route; the
   // single-use v2 nonce it represents is the replay guard, so a verified governed
-  // dispatch skips the header-based Idempotency-Key claim below (codex P1).
+  // dispatch skips the header-based Idempotency-Key claim below.
   let isVerifiedGovernedDispatch = false;
   if (authorityMode !== "legacy") {
     // The claim must match the SELECTED route by id AND by the exact revision +
-    // secret binding it was minted against (codex P1). A rotated route/secret
+    // secret binding it was minted against. A rotated route/secret
     // after the claim (routeId unchanged) would otherwise decrypt with the CURRENT
     // credential; requiring the claimed authorityRevision + secretId here fails
     // closed on any such drift before the decrypt. The secret VERSION is
@@ -1370,7 +1376,7 @@ export async function handleProxy(c: Context): Promise<Response> {
       governedClaim.routeRevision === routeRevision &&
       governedClaim.secretId !== undefined &&
       governedClaim.secretId === routeSecretId &&
-      // secretVersion is REQUIRED for a verified governed claim (codex P2): a
+      // secretVersion is required for a verified governed claim: a
       // partial claim that omits it must NOT be treated as verified, otherwise the
       // decrypt-time version recheck below (guarded on secretVersion !== undefined)
       // would be skipped and a rotated secret could be decrypted. The live
@@ -1446,7 +1452,7 @@ export async function handleProxy(c: Context): Promise<Response> {
     return c.json({ ok: false, error: "Approved proxy route no longer matches" }, 409);
   }
   if (route.requiresApproval && !approvalReleaseId && !isVerifiedGovernedDispatch) {
-    // NOTE: a verified governed dispatch is EXCLUDED here (codex P1). A governed
+    // A verified governed dispatch is excluded here. A governed
     // route's approval was already adjudicated by the v2 authority flow (the
     // intent is approved + the binding is execution_ready before the nonce is
     // minted); it must NOT re-enter the legacy proxy-approval hold, which would
@@ -1703,7 +1709,7 @@ export async function handleProxy(c: Context): Promise<Response> {
   // consumed by the claim) and an approval-release both carry their OWN replay
   // protection, so neither goes through the header Idempotency-Key claim. Without
   // this, mutating governed actions (POST/PUT/PATCH/DELETE) would 400 for a
-  // missing Idempotency-Key AFTER the nonce was already spent (codex P1) — the
+  // missing Idempotency-Key after the nonce was already spent — the
   // provider-action header allowlist does not even permit that header.
   const replayClaim =
     approvalReleaseId || isVerifiedGovernedDispatch
@@ -1899,10 +1905,28 @@ export async function handleProxy(c: Context): Promise<Response> {
       credential = extractProviderCredentialForHost(target.host, credential);
     }
   } catch (err) {
-    const classified = redactedThrownDiagnostics(err);
+    let errorClass: string = typeof err;
+    try {
+      if (err instanceof TypeError) errorClass = "TypeError";
+      else if (err instanceof RangeError) errorClass = "RangeError";
+      else if (err instanceof SyntaxError) errorClass = "SyntaxError";
+      else if (err instanceof Error) errorClass = "Error";
+    } catch {
+      errorClass = "unknown";
+    }
+    let errorCode: string | null = null;
+    try {
+      const rawCode =
+        typeof err === "object" && err !== null ? Reflect.get(err as object, "code") : undefined;
+      if (typeof rawCode === "string" && SAFE_LOG_ERROR_CODES.has(rawCode)) {
+        errorCode = rawCode;
+      }
+    } catch {
+      // A hostile getter/proxy must not break the fail-closed credential path.
+    }
     console.error("[proxy] Failed to resolve provider credential", {
-      errorClass: classified.errorClass,
-      errorCode: classified.errorCode,
+      errorClass,
+      errorCode,
     });
     await recordAudit({
       agentId,
@@ -1912,12 +1936,12 @@ export async function handleProxy(c: Context): Promise<Response> {
       method,
       statusCode: 500,
       latencyMs: Date.now() - startTime,
-      reason: "credential-resolution-failed",
+      reason: "credential-decrypt-failed",
     });
     await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
     await releaseUnsafeProxyRequest(replayClaim);
     proxySlot.release();
-    return c.json({ ok: false, error: "Failed to resolve credential" }, 500);
+    return c.json({ ok: false, error: "Failed to decrypt credential" }, 500);
   }
 
   if (target.host === "slack.com" && !isSlackBotTokenCredential(credential)) {

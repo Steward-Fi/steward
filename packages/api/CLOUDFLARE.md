@@ -73,7 +73,7 @@ directory. Do NOT put them in `wrangler.toml`.
 | `DATABASE_URL`                  | Neon connection string. Workers use HTTP; migrations need TCP.         |
 | `KV_REST_API_URL`               | Upstash REST endpoint.                                                 |
 | `KV_REST_API_TOKEN`             | Upstash REST token.                                                    |
-| `STEWARD_SESSION_SECRET`        | HS256 JWT signing secret. Canonical name (auth.ts and context.ts).     |
+| `STEWARD_JWT_SECRET`            | Canonical HS256 JWT signing secret; minimum 32 characters.            |
 | `STEWARD_MASTER_PASSWORD`       | Vault keystore master password. Used by `KeyStore` (AES-256-GCM).      |
 | `STEWARD_KDF_SALT`              | Per-deployment hex salt for the KeyStore KDF. Recommended for prod.    |
 | `RESEND_API_KEY`                | Magic-link email delivery.                                             |
@@ -146,7 +146,7 @@ will read `.dev.vars` for secrets — do NOT commit it. Example shape:
 DATABASE_URL=postgres://USER:PASS@ep-XYZ.us-east-2.aws.neon.tech/db?sslmode=require
 KV_REST_API_URL=https://YOUR-DB.upstash.io
 KV_REST_API_TOKEN=YOUR_TOKEN
-STEWARD_SESSION_SECRET=...
+STEWARD_JWT_SECRET=...
 STEWARD_MASTER_PASSWORD=...
 RESEND_API_KEY=...
 ```

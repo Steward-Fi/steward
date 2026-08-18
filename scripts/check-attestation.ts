@@ -104,8 +104,7 @@ const registryPath =
   process.env.STEWARD_MEASUREMENT_REGISTRY ?? "docs/attestation/measurements.json";
 const requiredSignaturesRaw = process.env.STEWARD_REGISTRY_REQUIRED_SIGNATURES ?? "1";
 const requiredSignatures = Number(requiredSignaturesRaw);
-// SEC-007: an empty or malformed count must hard-fail — Number("") === 0 and
-// NaN would otherwise silently disable the registry signature gate.
+// An empty or malformed count must fail before it can disable the signature gate.
 if (!Number.isInteger(requiredSignatures) || requiredSignatures < 1) {
   console.error(
     `STEWARD_REGISTRY_REQUIRED_SIGNATURES must be a positive integer, got "${requiredSignaturesRaw}"`,
@@ -118,8 +117,13 @@ const trustedKeyIds = process.env.STEWARD_REGISTRY_TRUSTED_KEY_IDS?.split(",")
 const trustedKeyFingerprints = process.env.STEWARD_REGISTRY_TRUSTED_KEY_SHA256?.split(",")
   .map((fingerprint) => fingerprint.trim())
   .filter(Boolean);
-// SEC-027: without a pinned trust anchor anyone can re-sign a tampered
-// registry, so require one (or an explicit local-dev opt-out).
+if (trustedKeyFingerprints?.some((fingerprint) => !/^[a-f0-9]{64}$/i.test(fingerprint))) {
+  console.error(
+    "STEWARD_REGISTRY_TRUSTED_KEY_SHA256 must contain comma-separated 64-character hexadecimal SHA-256 fingerprints",
+  );
+  process.exit(2);
+}
+// Without a pinned trust anchor, anyone can replace and re-sign the registry.
 const allowUnpinned = process.env.STEWARD_REGISTRY_ALLOW_UNPINNED === "true";
 if (allowUnpinned && (process.env.NODE_ENV === "production" || process.env.CI === "true")) {
   console.error("STEWARD_REGISTRY_ALLOW_UNPINNED is forbidden in production and CI");
@@ -133,8 +137,7 @@ if (!trustedKeyFingerprints?.length && !allowUnpinned) {
   );
   process.exit(2);
 }
-// SEC-086: optionally pin the registry identity and reject registries older
-// than the last-known-good update (rollback/replay protection).
+// These optional pins prevent registry substitution and rollback.
 const expectedRegistryId = process.env.STEWARD_REGISTRY_ID;
 const minimumUpdatedAt = process.env.STEWARD_REGISTRY_MIN_UPDATED_AT;
 

@@ -93,8 +93,8 @@ export class PersistentQueue {
     const now = new Date();
     const results: WebhookDeliveryResult[] = [];
 
-    // Atomically claim due deliveries before dispatch. The temporary
-    // nextRetryAt push acts as a visibility timeout if a worker crashes mid-send.
+    // Atomically claim due deliveries before dispatch. The nextRetryAt lease is
+    // the visibility timeout if a worker crashes mid-send.
     const claimed = (await db.transaction(async (tx) =>
       tx.execute(sql`
         UPDATE ${webhookDeliveries}

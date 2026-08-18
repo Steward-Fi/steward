@@ -33,15 +33,15 @@ services:
       STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?Set STEWARD_MASTER_PASSWORD in .env}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:-}"
-      STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?Set STEWARD_EXECUTION_AUTH_SECRET in .env - PR4 governed provider actions fail closed if unset - generate: printf 'v1:%s' \"$(openssl rand -hex 32)\"}"
+      STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?Set STEWARD_EXECUTION_AUTH_SECRET in .env - execution-authorization governed provider actions fail closed if unset - generate: printf 'v1:%s' \"$(openssl rand -hex 32)\"}"
       # The API writes required audit-chain events (approval / vault / policy
       # routes via writeAuditEvent / withTenantAuditedTransaction), so it needs
       # the same audit HMAC key as the proxy. Provisioned into .env by
       # deploy/provision-steward-node.sh.
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?Set STEWARD_AUDIT_HMAC_KEY in .env - generate with: openssl rand -hex 32}"
       STEWARD_PLATFORM_KEYS: "${STEWARD_PLATFORM_KEYS:-}"
-      RPC_URL: "${RPC_URL:-https://mainnet.base.org}"
-      CHAIN_ID: "${CHAIN_ID:-8453}"
+      RPC_URL: "${RPC_URL:-https://sepolia.base.org}"
+      CHAIN_ID: "${CHAIN_ID:-84532}"
       STEWARD_PLATFORM_KEY: "${STEWARD_PLATFORM_KEY:-}"
       SOLANA_RPC_URL: "${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}"
       # SEC-079: the production image (ENV NODE_ENV=production) makes KeyStore
@@ -53,6 +53,8 @@ services:
       WXMR_SOLANA_RPC_URL: "${WXMR_SOLANA_RPC_URL:-}"
       X_CLIENT_ID: "${X_CLIENT_ID:-}"
       X_CLIENT_SECRET: "${X_CLIENT_SECRET:-}"
+      GOOGLE_PROVIDER_CLIENT_ID: "${GOOGLE_PROVIDER_CLIENT_ID:-}"
+      GOOGLE_PROVIDER_CLIENT_SECRET: "${GOOGLE_PROVIDER_CLIENT_SECRET:-}"
     volumes:
       - steward-data:/app/data
     depends_on:
@@ -95,6 +97,8 @@ services:
       # them the proxy returns 500/429 on 100% of traffic. See deploy/DEPLOYMENT.md.
       REDIS_URL: "${REDIS_URL:-redis://redis:6379}"
       STEWARD_PROXY_REQUEST_SIGNING_SECRETS: "${STEWARD_PROXY_REQUEST_SIGNING_SECRETS:?Set STEWARD_PROXY_REQUEST_SIGNING_SECRETS in .env (proxy signs/verifies every request in production)}"
+      GOOGLE_PROVIDER_CLIENT_ID: "${GOOGLE_PROVIDER_CLIENT_ID:-}"
+      GOOGLE_PROVIDER_CLIENT_SECRET: "${GOOGLE_PROVIDER_CLIENT_SECRET:-}"
       NODE_ENV: production
     command: ["bun", "run", "packages/proxy/src/index.ts"]
     depends_on:

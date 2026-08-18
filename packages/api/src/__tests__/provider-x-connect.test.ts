@@ -1,5 +1,5 @@
 /**
- * Provider-account X (Twitter) OAuth connect and token lifecycle tests.
+ * Provider-account X (Twitter) OAuth connection and token lifecycle tests.
  *
  * Covers: connect initiate/complete happy path, state mismatch, expired state,
  * reused state, PKCE failure, wrong-role caller (via canConnectProviderAccounts

@@ -1,6 +1,6 @@
 /**
  * plugin-webhook-events.test.ts — proves the trading plugin DECLARES its webhook
- * event names via the Phase 2a contribution point, and that registering it
+ * event names via the plugin contribution point, and that registering it
  * through the host makes those events valid in the runtime event registry (core
  * ∪ plugin-declared) without the plugin's `register` having to run.
  *

@@ -1,5 +1,5 @@
 /**
- * PR5 honest-incompleteness + chain-integrity tests (spec §4.3/§4.6). A broken
+ * Honest-incompleteness and chain-integrity tests (spec §4.3/§4.6). A broken
  * chain segment, an unresolved state, or a missing row must NEVER yield
  * `complete`; they must surface an honest reason code.
  */
@@ -19,7 +19,7 @@ import {
 
 const ALL_WS = [F.WORKSPACE, F.WORKSPACE_2];
 
-describe("PR5 case honesty + chain integrity", () => {
+describe("provider case honesty and chain integrity", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY ||= "0".repeat(64);

@@ -24,7 +24,7 @@ POST /vault/:agentId/sign
   to: string;          // Destination address (0x...)
   value: string;       // Wei amount as string
   data?: string;       // Calldata (hex string)
-  chainId?: number;    // Chain ID (default: server's active chain, typically 8453)
+  chainId?: number;    // Chain ID (safe server fallback: Base Sepolia, 84532)
   broadcast?: boolean; // Broadcast after signing (default: true)
 }
 ```
@@ -150,7 +150,7 @@ Native and selector-gated ERC20 transfer actions return:
 
 Broadcasting actions require idempotency. Set a stable `referenceId` for caller-side dedupe and transaction lookup.
 
-ERC20 transfers require an enabled `contract-allowlist` policy for the token contract and `transfer(address,uint256)` selector (`0xa9059cbb`) with recipient allow/block constraints plus `maxAmount`. Approved ERC20 actions sign or broadcast against the token contract with zero native value, persist token/recipient/amount action metadata, and reject missing allowlists or over-limit amounts before signing. Settled token balance/spend accounting and confirmation polling remain follow-up work.
+ERC20 transfers require an enabled `contract-allowlist` policy for the token contract and `transfer(address,uint256)` selector (`0xa9059cbb`) with recipient allow/block constraints plus `maxAmount`. Approved ERC20 actions sign or broadcast against the token contract with zero native value, persist token/recipient/amount action metadata, and reject missing allowlists or over-limit amounts before signing. This route does not provide settled token balance/spend accounting or confirmation polling; callers must reconcile settlement independently.
 
 ### Create Send-Calls Intent
 

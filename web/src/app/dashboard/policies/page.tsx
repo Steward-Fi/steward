@@ -19,39 +19,14 @@ function randomIdempotencyKey(prefix: string): string {
   return `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Dashboard-local policy shape.
-//
-// The backend `/policies` endpoints return a `PolicyTemplate` with typed
-// `rules: PolicyRule[]` (plus `name`, `description`, `isDefault`). This page
-// pre-dates the typed template API and has historically rendered a
-// UI-categorized shape ("api_access" / "spend_limit" / etc.) with
-// `rules: Record<string, unknown>` and an `assignedAgents: string[]` field
-// that the template endpoint doesn't expose.
-//
-// The JSON editor roundtrips the raw `rules` payload, so values survive the
-// cast even when they don't match the nominal type. Leaving this shape in
-// place keeps the UI identical while the dashboard migrates off the inline
-// client. Flagged for a follow-up: unify this with `PolicyTemplate` and stop
-// pretending `rules` is a bag.
-// ─────────────────────────────────────────────────────────────────────────────
-interface PolicyRecord {
-  id: string;
-  tenantId: string;
-  name: string;
-  description?: string;
-  type: "api_access" | "spend_limit" | "rate_limit" | "transaction";
-  rules: Record<string, unknown>;
+interface PolicyRecord extends PolicyTemplate {
   assignedAgents: string[];
-  createdAt: string;
-  updatedAt: string;
 }
 
 interface PolicyCreatePayload {
   name: string;
   description?: string;
-  type: PolicyRecord["type"];
-  rules: Record<string, unknown>;
+  rules: PolicyRule[];
 }
 
 interface PolicySimulatePayload {
@@ -71,9 +46,9 @@ function fromTemplate(t: PolicyTemplate): PolicyRecord {
     id: t.id,
     tenantId: t.tenantId,
     name: t.name,
-    description: t.description ?? undefined,
-    type: "transaction",
-    rules: t.rules as unknown as Record<string, unknown>,
+    description: t.description,
+    rules: t.rules,
+    isDefault: t.isDefault,
     assignedAgents: [],
     createdAt: t.createdAt,
     updatedAt: t.updatedAt,
@@ -89,86 +64,83 @@ interface Toast {
   kind: "success" | "error";
 }
 
-const POLICY_TYPES: {
-  value: PolicyRecord["type"];
-  label: string;
-  description: string;
-}[] = [
-  {
-    value: "api_access",
-    label: "API Access",
-    description: "Control which external APIs agents can call",
-  },
-  {
-    value: "spend_limit",
-    label: "Spend Limit",
-    description: "Cap daily or per-transaction spend",
-  },
-  {
-    value: "rate_limit",
-    label: "Rate Limit",
-    description: "Throttle request frequency",
-  },
-  {
-    value: "transaction",
-    label: "Transaction",
-    description: "Rules for on-chain transactions",
-  },
-];
-
 const TEMPLATES: Record<
   string,
   {
     name: string;
     description: string;
-    type: PolicyRecord["type"];
-    rules: Record<string, unknown>;
+    rules: PolicyRule[];
   }
 > = {
   "standard-agent": {
     name: "Standard Agent",
     description: "Balanced limits for general-purpose agents",
-    type: "transaction",
-    rules: {
-      maxValuePerTx: "0.1",
-      dailySpendLimit: "1.0",
-      allowedChains: [8453],
-      requireApprovalAbove: "0.05",
-    },
+    rules: [
+      {
+        id: "standard-spend-limit",
+        type: "spending-limit",
+        enabled: true,
+        config: { maxPerTxUsd: 100, maxPerDayUsd: 1_000 },
+      },
+      {
+        id: "standard-allowed-chains",
+        type: "allowed-chains",
+        enabled: true,
+        config: { chains: ["eip155:8453"] },
+      },
+      {
+        id: "standard-approval-threshold",
+        type: "auto-approve-threshold",
+        enabled: true,
+        config: { thresholdUsd: 50 },
+      },
+    ],
   },
   "trading-agent": {
     name: "Trading Agent",
     description: "Higher limits with DEX-focused access controls",
-    type: "spend_limit",
-    rules: {
-      maxValuePerTx: "1.0",
-      dailySpendLimit: "10.0",
-      allowedChains: [8453, 1],
-      requireApprovalAbove: "0.5",
-      allowedContracts: [],
-    },
+    rules: [
+      {
+        id: "trading-spend-limit",
+        type: "spending-limit",
+        enabled: true,
+        config: { maxPerTxUsd: 1_000, maxPerDayUsd: 10_000 },
+      },
+      {
+        id: "trading-allowed-chains",
+        type: "allowed-chains",
+        enabled: true,
+        config: { chains: ["eip155:8453", "eip155:1"] },
+      },
+    ],
   },
   minimal: {
     name: "Minimal",
     description: "Read-only with no spend capability",
-    type: "api_access",
-    rules: {
-      allowedHosts: [],
-      blockAll: false,
-      maxValuePerTx: "0",
-      dailySpendLimit: "0",
-    },
+    rules: [
+      {
+        id: "minimal-rate-limit",
+        type: "rate-limit",
+        enabled: true,
+        config: { maxTxPerHour: 1, maxTxPerDay: 1 },
+      },
+    ],
   },
 };
 
-function typeColor(type: PolicyRecord["type"]) {
-  const map: Record<PolicyRecord["type"], string> = {
-    api_access: "text-violet-400 bg-violet-400/10",
-    spend_limit: "text-amber-400 bg-amber-400/10",
-    rate_limit: "text-blue-400 bg-blue-400/10",
-    transaction: "text-emerald-400 bg-emerald-400/10",
-  };
-  return map[type] || "text-text-tertiary bg-bg-surface";
+function typeColor(type: PolicyRule["type"] | undefined) {
+  if (type === "spending-limit" || type === "auto-approve-threshold") {
+    return "text-amber-400 bg-amber-400/10";
+  }
+  if (type === "rate-limit") return "text-blue-400 bg-blue-400/10";
+  if (type === "allowed-chains" || type === "approved-addresses") {
+    return "text-emerald-400 bg-emerald-400/10";
+  }
+  return "text-violet-400 bg-violet-400/10";
+}
+
+function primaryPolicyType(policy: Pick<PolicyRecord, "rules">): PolicyRule["type"] | undefined {
+  return policy.rules[0]?.type;
 }
 
 export default function PoliciesPage() {
@@ -189,10 +161,9 @@ export default function PoliciesPage() {
   const [createForm, setCreateForm] = useState<PolicyCreatePayload>({
     name: "",
     description: "",
-    type: "transaction",
-    rules: {},
+    rules: [],
   });
-  const [rulesJson, setRulesJson] = useState("{}");
+  const [rulesJson, setRulesJson] = useState("[]");
   const [rulesError, setRulesError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -482,16 +453,28 @@ export default function PoliciesPage() {
     setCreateForm({
       name: tmpl.name,
       description: tmpl.description,
-      type: tmpl.type,
       rules: tmpl.rules,
     });
     setRulesJson(JSON.stringify(tmpl.rules, null, 2));
     setCreateStep("edit");
   }
 
-  function validateJson(val: string): Record<string, unknown> | null {
+  function validateRulesJson(val: string): PolicyRule[] | null {
     try {
-      return JSON.parse(val);
+      const parsed: unknown = JSON.parse(val);
+      if (!Array.isArray(parsed)) return null;
+      const valid = parsed.every(
+        (rule) =>
+          typeof rule === "object" &&
+          rule !== null &&
+          typeof (rule as { id?: unknown }).id === "string" &&
+          typeof (rule as { type?: unknown }).type === "string" &&
+          typeof (rule as { enabled?: unknown }).enabled === "boolean" &&
+          typeof (rule as { config?: unknown }).config === "object" &&
+          (rule as { config?: unknown }).config !== null &&
+          !Array.isArray((rule as { config?: unknown }).config),
+      );
+      return valid ? (parsed as PolicyRule[]) : null;
     } catch {
       return null;
     }
@@ -499,9 +482,9 @@ export default function PoliciesPage() {
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
-    const rules = validateJson(rulesJson);
+    const rules = validateRulesJson(rulesJson);
     if (!rules) {
-      setRulesError("Invalid JSON");
+      setRulesError("Rules must be a JSON array of { id, type, enabled, config } objects");
       return;
     }
     if (!createForm.name) return;
@@ -511,13 +494,9 @@ export default function PoliciesPage() {
       const template = await steward.createPolicyTemplate({
         name: createForm.name,
         description: createForm.description,
-        rules: rules as unknown as PolicyRule[],
+        rules,
       });
-      const p: PolicyRecord = {
-        ...fromTemplate(template),
-        type: createForm.type,
-        description: createForm.description,
-      };
+      const p = fromTemplate(template);
       setPolicies((prev) => [p, ...prev]);
       setShowCreate(false);
       setCreateStep("template");
@@ -525,10 +504,9 @@ export default function PoliciesPage() {
       setCreateForm({
         name: "",
         description: "",
-        type: "transaction",
-        rules: {},
+        rules: [],
       });
-      setRulesJson("{}");
+      setRulesJson("[]");
       toast("Policy created", "success");
     } catch (e: unknown) {
       setCreateError(e instanceof Error ? e.message : "Failed to create policy");
@@ -539,23 +517,20 @@ export default function PoliciesPage() {
 
   async function handleSaveEdit() {
     if (!selected) return;
-    const rules = validateJson(editJson);
+    const rules = validateRulesJson(editJson);
     if (!rules) {
-      setEditJsonError("Invalid JSON");
+      setEditJsonError("Rules must be a JSON array of { id, type, enabled, config } objects");
       return;
     }
     setSaving(true);
     try {
       const updated = fromTemplate(
         await steward.updatePolicyTemplate(selected.id, {
-          rules: rules as unknown as PolicyRule[],
+          rules,
         }),
       );
-      // Preserve dashboard-only fields (type, assignedAgents) that the
-      // template endpoint doesn't round-trip.
       const merged: PolicyRecord = {
         ...updated,
-        type: selected.type,
         assignedAgents: selected.assignedAgents,
       };
       setPolicies((p) => p.map((x) => (x.id === merged.id ? merged : x)));
@@ -715,9 +690,9 @@ export default function PoliciesPage() {
                         <div className="font-display text-sm font-600">{tmpl.name}</div>
                         <div className="text-xs text-text-tertiary">{tmpl.description}</div>
                         <span
-                          className={`inline-block text-xs px-1.5 py-0.5 rounded-sm mt-1 ${typeColor(tmpl.type)}`}
+                          className={`inline-block text-xs px-1.5 py-0.5 rounded-sm mt-1 ${typeColor(primaryPolicyType(tmpl))}`}
                         >
-                          {tmpl.type.replace("_", " ")}
+                          {primaryPolicyType(tmpl) ?? "no rules"}
                         </span>
                       </button>
                     ))}
@@ -727,10 +702,9 @@ export default function PoliciesPage() {
                         setCreateForm({
                           name: "",
                           description: "",
-                          type: "transaction",
-                          rules: {},
+                          rules: [],
                         });
-                        setRulesJson("{}");
+                        setRulesJson("[]");
                         setCreateStep("edit");
                       }}
                       className="text-left p-4 border border-border hover:border-accent/60 hover:bg-bg-surface transition-colors space-y-1.5"
@@ -764,7 +738,7 @@ export default function PoliciesPage() {
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
                     <div>
                       <label className="text-xs text-text-tertiary block mb-1.5">
                         Name <span className="text-accent">*</span>
@@ -776,25 +750,6 @@ export default function PoliciesPage() {
                         placeholder="My Policy"
                         className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
                       />
-                    </div>
-                    <div>
-                      <label className="text-xs text-text-tertiary block mb-1.5">Type</label>
-                      <select
-                        value={createForm.type}
-                        onChange={(e) =>
-                          setCreateForm({
-                            ...createForm,
-                            type: e.target.value as PolicyRecord["type"],
-                          })
-                        }
-                        className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
-                      >
-                        {POLICY_TYPES.map((t) => (
-                          <option key={t.value} value={t.value}>
-                            {t.label}
-                          </option>
-                        ))}
-                      </select>
                     </div>
                   </div>
 
@@ -815,8 +770,14 @@ export default function PoliciesPage() {
                   </div>
 
                   <div>
-                    <label className="text-xs text-text-tertiary block mb-1.5">Rules (JSON)</label>
+                    <label
+                      htmlFor="policy-create-rules"
+                      className="text-xs text-text-tertiary block mb-1.5"
+                    >
+                      Rules (JSON)
+                    </label>
                     <textarea
+                      id="policy-create-rules"
                       value={rulesJson}
                       onChange={(e) => {
                         setRulesJson(e.target.value);
@@ -1257,8 +1218,10 @@ export default function PoliciesPage() {
                         </div>
                       )}
                       <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-                        <span className={`text-xs px-1.5 py-0.5 ${typeColor(policy.type)}`}>
-                          {policy.type.replace("_", " ")}
+                        <span
+                          className={`text-xs px-1.5 py-0.5 ${typeColor(primaryPolicyType(policy))}`}
+                        >
+                          {primaryPolicyType(policy) ?? "no rules"}
                         </span>
                         {policy.assignedAgents?.length > 0 && (
                           <span className="text-xs text-text-tertiary">
@@ -1292,8 +1255,10 @@ export default function PoliciesPage() {
                   <div>
                     <div className="flex items-center gap-2 flex-wrap">
                       <h2 className="font-display text-lg font-700">{selected.name}</h2>
-                      <span className={`text-xs px-1.5 py-0.5 ${typeColor(selected.type)}`}>
-                        {selected.type.replace("_", " ")}
+                      <span
+                        className={`text-xs px-1.5 py-0.5 ${typeColor(primaryPolicyType(selected))}`}
+                      >
+                        {primaryPolicyType(selected) ?? "no rules"}
                       </span>
                     </div>
                     {selected.description && (

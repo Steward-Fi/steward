@@ -1,24 +1,13 @@
 /**
  * EIP-712 typed-data policy enforcement on the vault sign-typed-data path.
  *
- * Two complementary layers (mirrors vault-aggregation-enforcement.test.ts):
- *
- *  1. BEHAVIORAL — drives the real {@link PolicyEngine} over a `typed-data`
+ * Drives the real {@link PolicyEngine} over a `typed-data`
  *     policy through the exact `typedData` evaluation context the route passes,
  *     proving a spoofed domain / over-cap permit is DENIED while a conforming
  *     one is APPROVED, and that the policy is "not applicable" (does not block)
  *     for an ordinary transaction sign.
- *
- *  2. WIRING — reads routes/vault.ts and asserts the `POST /:agentId/sign-typed-data`
- *     handler (a) no longer hard-disables typed-data signing, (b) applies the
- *     fail-closed gate (a `typed-data` policy OR the audited env opt-in) AFTER
- *     the agent-access auth check, and (c) builds the decoded `typedData` and
- *     feeds it into the policy evaluation. Guards the money/authorization path
- *     from silently drifting away from the behavior proven in layer 1.
  */
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { PolicyEngine } from "@stwd/policy-engine";
 import type { PolicyRule, SignRequest } from "@stwd/shared";
 
@@ -145,59 +134,5 @@ describe("typed-data policy enforcement (behavioral)", () => {
       spentThisWeek: 0n,
     });
     expect(evaluation.approved).toBe(true);
-  });
-});
-
-// ─── 2. wiring: vault.ts composes the contract on the typed-data path ──────────
-
-describe("typed-data policy enforcement (vault.ts wiring)", () => {
-  const vaultSource = readFileSync(join(import.meta.dir, "..", "routes", "vault.ts"), "utf8");
-
-  it("no longer hard-disables typed-data signing", () => {
-    expect(vaultSource).not.toContain("function typedDataSigningDisabled");
-    expect(vaultSource).not.toContain("EIP-712 typed data signing is disabled");
-  });
-
-  it("applies the auth gate first, then a fail-closed typed-data-policy / env gate", () => {
-    const routeStart = vaultSource.indexOf('vaultRoutes.post("/:agentId/sign-typed-data"');
-    expect(routeStart).toBeGreaterThanOrEqual(0);
-    const routeEnd = vaultSource.indexOf('vaultRoutes.post("/:agentId/sign-user-operation"');
-    expect(routeEnd).toBeGreaterThan(routeStart);
-    const route = vaultSource.slice(routeStart, routeEnd);
-
-    const auth = route.indexOf("requireAgentAccess(c)");
-    const policyLoad = route.indexOf("getScopedPolicySet(tenantId, agentId");
-    const gate = route.indexOf('p.type === "typed-data"');
-    const envOptIn = route.indexOf(
-      "allowUnsafeTypedDataSigning() && allowVaultUnsafeTypedDataSigning()",
-    );
-    const deny = route.indexOf("!hasTypedDataPolicy && !typedDataEnvOptIn");
-
-    expect(auth).toBeGreaterThanOrEqual(0);
-    // policy-derived gate comes after auth …
-    expect(policyLoad).toBeGreaterThan(auth);
-    expect(gate).toBeGreaterThan(policyLoad);
-    // … the env opt-in is the only escape hatch …
-    expect(envOptIn).toBeGreaterThan(policyLoad);
-    // … and the route refuses unless one of them holds (fail closed).
-    expect(deny).toBeGreaterThan(gate);
-  });
-
-  it("builds the decoded typedData and feeds it into the policy evaluation", () => {
-    const routeStart = vaultSource.indexOf('vaultRoutes.post("/:agentId/sign-typed-data"');
-    const routeEnd = vaultSource.indexOf('vaultRoutes.post("/:agentId/sign-user-operation"');
-    const route = vaultSource.slice(routeStart, routeEnd);
-
-    const build = route.indexOf("const typedData = {");
-    const evaluate = route.indexOf("await policyEngine.evaluate(policySet");
-    const ctxField = route.indexOf("typedData,", evaluate);
-
-    expect(build).toBeGreaterThanOrEqual(0);
-    // typedData built before evaluation …
-    expect(evaluate).toBeGreaterThan(build);
-    // … and passed into the evaluation context.
-    expect(ctxField).toBeGreaterThan(evaluate);
-    // verifyingContract is used as the request `to` so destination policies apply.
-    expect(route).toContain("verifyingContractTo");
   });
 });

@@ -522,7 +522,7 @@ describe("invoke: default-deny + effects", () => {
     const app = buildApp(harness!.db, { agent: true });
     const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({}));
     expect(res.status).toBe(403);
-    // Must NOT be a 500 (the pre-fix escape).
+    // Malformed policy input must fail closed as an authorization denial.
     expect(res.status).not.toBe(500);
   });
 
@@ -652,16 +652,16 @@ describe("invoke: rate limit (count from invocations table)", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PR4 governed-route plugin gate (spec §5.2, X1, P03/P04). A governed_v2 route/
+// Governed-route plugin gate (spec §5.2, X1, P03/P04). A governed_v2 route/
 // operation must NOT be invokable through the capability alias or the OpenAI-
 // compat adapter: the plugin's URLSearchParams path (G4) cannot faithfully
 // represent a governed action's duplicate-query semantics, and governed actions
-// must go through /v2/provider-actions (PR2), never a minted proxy token. When
+// must go through /v2/provider-actions, never a minted proxy token. When
 // the resolved capability maps to a governed route, the plugin denies with
 // GOVERNED_ROUTE_PLUGIN_DENIED (403) and never mints a proxy token — even when
 // the policy ALLOWS and the proxy env is present.
 // ─────────────────────────────────────────────────────────────────────────────
-describe("invoke: PR4 governed-route plugin gate (§5.2, X1)", () => {
+describe("invoke: governed-route plugin gate (§5.2, X1)", () => {
   // The gate fires AFTER authorization (so we prove it blocks an otherwise-
   // allowed forward) but BEFORE any proxy mint. Set the proxy env so, absent the
   // gate, an allowed rule would have proceeded to a mint/forward (=> not 403).

@@ -74,12 +74,6 @@ mock.module("@solana/wallet-adapter-react-ui", () => ({
     React.createElement(React.Fragment, null, children),
 }));
 
-mock.module("@solana/wallet-adapter-wallets", () => ({
-  PhantomWalletAdapter: class {},
-  SolflareWalletAdapter: class {},
-  BackpackWalletAdapter: class {},
-}));
-
 // ─── Imports under test (after mocks are installed) ──────────────────────────
 
 const { WalletLogin } = await import("../components/WalletLogin.js");

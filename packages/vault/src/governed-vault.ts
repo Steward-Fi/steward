@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   canonicalJsonStringify,
+  DEFAULT_CHAIN_ID,
   type ExecutionAuthorization,
   normalizeEvmExecutionPayload,
   type SignRequest,
@@ -64,7 +65,7 @@ export class GovernedVault {
     request: SignRequest,
     options: GovernedSignTransactionOptions,
   ): Promise<string> {
-    const chainId = request.chainId || 8453;
+    const chainId = request.chainId || DEFAULT_CHAIN_ID;
     if (chainId === 101 || chainId === 102) {
       throw new GovernedVaultError(
         "GovernedVault.signTransaction is scoped to the EVM transaction path",

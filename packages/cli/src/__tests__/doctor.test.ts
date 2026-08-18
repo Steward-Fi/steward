@@ -179,7 +179,7 @@ describe("steward doctor secret redaction", () => {
   });
 });
 
-describe("PR6 governed-route prerequisites (strict)", () => {
+describe("governed-route prerequisites (strict)", () => {
   test("passes when exec-auth + audit signing keys present", async () => {
     const dir = mkdtempSync(join(tmpdir(), "steward-doctor-"));
     try {
@@ -207,7 +207,7 @@ describe("PR6 governed-route prerequisites (strict)", () => {
     }
   });
 
-  test("fails closed when the PR4 exec-auth secret is absent", async () => {
+  test("fails closed when the execution-authorization secret is absent", async () => {
     const dir = mkdtempSync(join(tmpdir(), "steward-doctor-"));
     try {
       const envPath = join(dir, ".env");

@@ -311,7 +311,7 @@ export const submitTradeAction: Action = {
     },
     {
       name: "leverage",
-      description: "Order leverage, max 2x by Phase 1 policy",
+      description: "Order leverage, subject to the configured policy (default max 2x)",
       required: false,
       schema: { type: "number", default: DEFAULT_LEVERAGE },
     },

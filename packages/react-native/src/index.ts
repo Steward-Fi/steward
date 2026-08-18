@@ -139,10 +139,8 @@ export async function createStewardNativeAuth({
 export interface StewardNativeClientConfig extends StewardClientConfig {
   /**
    * Convenience alias for `bearerToken`: a static string is forwarded as the
-   * client's bearer token. Function token providers are NOT supported and now
-   * throw at construction — previously they were silently dropped and requests
-   * went out unauthenticated while the type signature claimed auth was
-   * configured (SEC-124). Resolve the token yourself and pass the string.
+   * client's bearer token. Function token providers are not supported and
+   * throw at construction. Resolve the token before creating the client.
    */
   token?: string | (() => string | null | Promise<string | null>);
 }

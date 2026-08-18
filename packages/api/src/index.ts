@@ -12,7 +12,6 @@
  *   - `Bun.serve` plus SIGINT/SIGTERM graceful shutdown
  */
 
-import { createHash, timingSafeEqual } from "node:crypto";
 import { validateJwtSecretEnv } from "@stwd/auth";
 import { closeDb, getDb, getMigrationExpectation, runMigrations } from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
@@ -32,6 +31,7 @@ import {
 import { startGoogleCredentialLifecycleScheduler } from "./services/provider-google-lifecycle-scheduler";
 import { startProviderReservationReconciliationScheduler } from "./services/provider-reservation-reconciliation-scheduler";
 import { startXCredentialLifecycleScheduler } from "./services/provider-x-lifecycle-scheduler";
+import { type ReadinessCheck, readinessChecksForResponse } from "./services/readiness";
 import { startRetentionScheduler } from "./services/retention";
 import {
   InMemoryRateLimiter,
@@ -69,8 +69,8 @@ const capabilitiesEnabled = resolveEnabledPlugins().has("capabilities");
 // ─── In-memory rate-limit log + shutdown guard ───────────────────────────────
 //
 // NOT used by the Workers entry — the Workers runtime mounts the shared
-// Redis-backed sliding-window limiter across all routes instead (SEC-068,
-// see middleware/global-rate-limit.ts, gated on isWorkersRuntime in app.ts).
+// Redis-backed sliding-window limiter across all routes instead (see
+// middleware/global-rate-limit.ts, gated on isWorkersRuntime in app.ts).
 //
 // SEC-014: the limiter keys on the socket peer unless the operator declares
 // STEWARD_TRUSTED_PROXY_HOPS > 0, in which case the client IP is derived from
@@ -122,26 +122,15 @@ const requestLogCleanupTimer = setInterval(() => {
 // Only mounted on the Bun entry. Workers expose `/health` (in app.ts) and rely
 // on the Cloudflare control plane for instance health.
 //
-// SEC-071: the full check payload discloses deployment fingerprint details
+// The full check payload discloses deployment fingerprint details
 // (migration tags, auth-store/Redis backend identity, whether
 // STEWARD_MASTER_PASSWORD is set, DB/proxy clock skew, error strings).
 // Unauthenticated callers get the same 200/503 status plus per-check ok flags
 // only; operators can set STEWARD_READY_PROBE_TOKEN and send it as
 // X-Steward-Probe-Token to receive the full diagnostic detail.
 
-function readyProbeAuthorized(presented: string | undefined): boolean {
-  const expected = process.env.STEWARD_READY_PROBE_TOKEN;
-  if (!expected || !presented) return false;
-  const a = createHash("sha256").update(expected).digest();
-  const b = createHash("sha256").update(presented).digest();
-  return timingSafeEqual(a, b);
-}
-
 app.get("/ready", async (c) => {
-  const checks: Record<
-    string,
-    { ok: boolean; required?: boolean; error?: string; source?: string; detail?: unknown }
-  > = {};
+  const checks: Record<string, ReadinessCheck> = {};
 
   const expectedMigration = getMigrationExpectation();
   checks.migrations = { ok: false, detail: { expected: expectedMigration.tag } };
@@ -269,19 +258,16 @@ app.get("/ready", async (c) => {
   }
 
   const allOk = Object.values(checks).every((check) => check.ok || check.required === false);
-  const verbose = readyProbeAuthorized(c.req.header("x-steward-probe-token"));
-  const publicChecks = Object.fromEntries(
-    Object.entries(checks).map(([name, check]) => [
-      name,
-      { ok: check.ok, ...(check.required === false ? { required: false } : {}) },
-    ]),
-  );
   return c.json(
     {
       status: allOk ? "ready" : "not_ready",
       version: API_VERSION,
       uptime: Math.floor((Date.now() - startTime) / 1000),
-      checks: verbose ? checks : publicChecks,
+      checks: readinessChecksForResponse(
+        checks,
+        process.env.STEWARD_READY_PROBE_TOKEN,
+        c.req.header("x-steward-probe-token"),
+      ),
     },
     allOk ? 200 : 503,
   );
@@ -320,7 +306,7 @@ if (shouldUsePGLite()) {
       console.log("[steward] Migrations already up to date.");
     }
 
-    // Plugin-owned migrations (Phase 2c): applied AFTER the core migrator so a
+    // Plugin-owned migrations (plugin migration contribution contract): applied AFTER the core migrator so a
     // plugin migration may reference core tables via FK. Each plugin's migrations
     // land in its OWN namespaced bookkeeping table
     // (drizzle.__drizzle_migrations_plugin_<id>), totally isolated from the core's

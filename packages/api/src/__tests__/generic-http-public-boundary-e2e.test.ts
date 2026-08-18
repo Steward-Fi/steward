@@ -1,5 +1,5 @@
 /**
- * #201 public-boundary generic-http governed action E2E.
+ * Public-boundary generic HTTP governed action E2E.
  *
  * Unlike the service-focused generic-http suite, this fixture does not insert a
  * provider account, operation, grant, role binding, workspace, or secret route.
@@ -83,7 +83,7 @@ async function expectCreated(response: Response, label: string): Promise<void> {
   }
 }
 
-describe("#201 generic-http true public-boundary E2E", () => {
+describe("generic-http true public-boundary E2E", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_AUDIT_HMAC_KEY = "0".repeat(64);
@@ -91,6 +91,7 @@ describe("#201 generic-http true public-boundary E2E", () => {
     process.env.STEWARD_MASTER_PASSWORD = "generic-public-boundary-master-password";
     process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS = "api.example.com";
     process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.example.com";
+    process.env.STEWARD_PROXY_DEV_MODE = "true";
     process.env.STEWARD_JWT_SECRET =
       "generic-public-boundary-jwt-secret-0123456789abcdef0123456789";
     const signingKeys = generateKeyPairSync("ed25519");
@@ -157,6 +158,7 @@ describe("#201 generic-http true public-boundary E2E", () => {
 
     const proxy = await import("@stwd/proxy/src/handlers/proxy");
     ({ dispatchGovernedExecution } = await import("@stwd/proxy/src/handlers/governed-execution"));
+    proxy.__setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
     proxy.__setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
     proxy.__setForwardProxyRequestForTests(async (url, method, headers, body) => {
       const bytes = body
@@ -173,6 +175,9 @@ describe("#201 generic-http true public-boundary E2E", () => {
   });
 
   afterAll(async () => {
+    const proxy = await import("@stwd/proxy/src/handlers/proxy");
+    const { checkProxyRateLimit } = await import("@stwd/proxy/src/middleware/redis-enforcement");
+    proxy.__setCheckProxyRateLimitForTests(checkProxyRateLimit);
     await closeDb();
     await new Promise<void>((resolve) => jwksServer.close(() => resolve()));
     for (const key of [
@@ -182,6 +187,7 @@ describe("#201 generic-http true public-boundary E2E", () => {
       "STEWARD_MASTER_PASSWORD",
       "STEWARD_SECRET_ROUTE_ALLOWED_HOSTS",
       "STEWARD_PROXY_ALLOWED_HOSTS",
+      "STEWARD_PROXY_DEV_MODE",
       "STEWARD_JWT_SECRET",
       "STEWARD_AUDIT_SIGNING_KEY",
       "ELIZA_CLOUD_JWKS_URL",

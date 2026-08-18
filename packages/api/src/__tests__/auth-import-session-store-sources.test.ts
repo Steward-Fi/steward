@@ -1,6 +1,4 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 
 const redisSetMock = mock(async () => "OK");
 const redisGetMock = mock(async () => null as string | null);
@@ -31,10 +29,6 @@ mock.module("../middleware/redis.js", () => ({
     redisClient = null;
   },
 }));
-
-const apiRoot = join(import.meta.dir, "..");
-const indexSource = readFileSync(join(apiRoot, "index.ts"), "utf8");
-const testSource = readFileSync(import.meta.path, "utf8");
 
 process.env.STEWARD_PGLITE_MEMORY = "true";
 process.env.DATABASE_URL = "postgres://auth-import-session-store-sources.invalid/steward";
@@ -161,32 +155,5 @@ describe("production auth-store startup gate", () => {
         importSession: "memory",
       }),
     ).not.toThrow();
-  });
-});
-
-describe("readiness import-session memory gate", () => {
-  it("keeps this readiness coverage source-only so importing the test does not start the server", () => {
-    expect(testSource).toContain('readFileSync(join(apiRoot, "index.ts"), "utf8")');
-    expect(testSource).not.toContain(`await ${"import"}("../index")`);
-    expect(testSource).not.toContain(`${"from"} "../index"`);
-  });
-
-  it("keeps /ready wired to fail production memory auth storage unless explicitly allowed", () => {
-    // Importing src/index.ts starts migrations, schedulers, and Bun.serve at module load,
-    // so keep this as a focused wiring check around the readiness boundary.
-    const readyRouteStart = indexSource.indexOf('app.get("/ready"');
-    expect(readyRouteStart).toBeGreaterThanOrEqual(0);
-    const readyRouteEnd = indexSource.indexOf("\n// ─── Database migrations", readyRouteStart);
-    const readyRoute = indexSource.slice(
-      readyRouteStart,
-      readyRouteEnd === -1 ? undefined : readyRouteEnd,
-    );
-
-    expect(readyRoute).toContain("getAuthStoreSources()");
-    expect(readyRoute).toContain("checks.authStores");
-    expect(readyRoute).toContain("STEWARD_ALLOW_MEMORY_AUTH_STORES");
-    expect(readyRoute).toContain('process.env.NODE_ENV !== "production"');
-    expect(readyRoute).toContain('source === "memory"');
-    expect(readyRoute).toContain("Production auth stores using memory");
   });
 });

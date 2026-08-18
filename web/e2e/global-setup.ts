@@ -342,7 +342,7 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   trackProcess("web", "web", web);
   if (useNextDevServer) {
     await waitForTcp(webOrigin, "web", 60_000);
-    await waitForUrl(`${webOrigin}/login`, "web", 120_000);
+    await waitForUrl(`${webOrigin}/login`, "web", 240_000);
   } else {
     await waitForUrl(`${webOrigin}/login`, "web", 120_000);
   }

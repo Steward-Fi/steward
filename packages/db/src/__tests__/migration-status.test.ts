@@ -16,12 +16,15 @@ describe("migration expectation", () => {
     });
   });
 
-  test("journals the operator transfer reservation migration for production", () => {
+  test("journals the operator transfer reservation migrations for production", () => {
     const journal = JSON.parse(
       readFileSync(new URL("../../drizzle/meta/_journal.json", import.meta.url), "utf8"),
     ) as { entries: Array<{ tag: string }> };
     expect(
       journal.entries.some((entry) => entry.tag === "0094_operator_transfer_reservations"),
+    ).toBe(true);
+    expect(
+      journal.entries.some((entry) => entry.tag === "0108_operator_transfer_durable_replay"),
     ).toBe(true);
   });
 });

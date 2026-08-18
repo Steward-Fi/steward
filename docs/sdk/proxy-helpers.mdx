@@ -75,27 +75,33 @@ Most LLM SDKs support custom base URLs. Configure them to point at the Steward p
   </Tab>
 </Tabs>
 
-## StewardProxy Helper
+## Signed proxy client
 
-The SDK provides a planned `StewardProxy` helper class for wrapping common SDK clients:
+Use `@stwd/proxy-client` when the proxy requires production request signatures. It attaches the
+agent bearer token, generates idempotency keys for mutations, and computes the request HMAC:
 
 ```typescript
-import { StewardProxy } from "@stwd/sdk";
+import { StewardProxyClient } from "@stwd/proxy-client";
 
-const proxy = new StewardProxy({
+const proxy = new StewardProxyClient({
   proxyUrl: process.env.STEWARD_PROXY_URL!,
-  agentToken: process.env.STEWARD_AGENT_TOKEN!,
+  token: process.env.STEWARD_AGENT_TOKEN!,
+  signingSecret: process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET!,
+  tenantId: process.env.STEWARD_TENANT_ID!,
+  agentId: process.env.STEWARD_AGENT_ID!,
 });
 
-// Get pre-configured OpenAI client
-const openai = proxy.openai();
-
-// Get pre-configured Anthropic client
-const anthropic = proxy.anthropic();
+const response = await proxy.fetch("/openai/v1/chat/completions", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: "Hello" }] }),
+});
 ```
 
 <Note>
-  `StewardProxy` is planned for SDK v0.4.0. For now, use the manual configuration shown above — it's straightforward and works with any SDK.
+  Proxy-bound JWTs require the explicit `api:proxy` scope. Production proxy requests also require
+  a valid HMAC signature; the generic manual examples above are suitable only when request signing
+  is not enforced.
 </Note>
 
 ## Environment Variables
@@ -105,6 +111,9 @@ In your agent container, you need:
 ```bash
 STEWARD_PROXY_URL=http://steward-proxy:8080
 STEWARD_AGENT_TOKEN=stwd_jwt_...
+STEWARD_TENANT_ID=my-tenant
+STEWARD_AGENT_ID=my-agent
+STEWARD_PROXY_REQUEST_SIGNING_SECRET=<agent proof-of-possession secret>
 ```
 
 ## Pattern: Wrapper Function

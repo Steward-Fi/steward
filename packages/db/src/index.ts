@@ -62,12 +62,18 @@ export {
 export * from "./schema";
 export * from "./schema-auth";
 export {
+  type AuthenticatedTenantAuthority,
   assertTenantRlsDriver,
+  createTenantRlsAuthority,
+  type InternalJobTenantAuthority,
+  type TenantRlsAuthority,
+  type TenantRlsAuthorityVerifier,
+  type TenantRlsContextIssuer,
   type TenantRlsDriver,
+  type TenantRlsTransactions,
+  type TenantTransactionalDatabase,
+  type TenantTransactionExecutor,
   type TrustedTenantContext,
-  tenantContextForInternalJob,
-  tenantContextFromAuthenticatedPrincipal,
-  withTenantRlsTransaction,
 } from "./tenant-rls-context";
 
 import type { Agent, Policy, Transaction } from "./schema";

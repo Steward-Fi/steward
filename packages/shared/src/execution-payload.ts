@@ -14,7 +14,7 @@ import type { SignRequest } from "./index.js";
  * fields), NOT the final node-resolved serialized envelope. Node-resolved
  * nonce/gas price may still be finalized inside the Vault after authorization is
  * consumed; those are deliberately outside the bound intent. See
- * SECURITY_SURFACE_OPERATIONS notes and PR #182 for the exact semantics.
+ * `SECURITY_SURFACE_OPERATIONS` for the exact enforcement boundary.
  */
 
 /**

@@ -22,7 +22,12 @@
  */
 
 import type { StewardClient } from "@stwd/sdk";
-import { createPriceOracle, type PriceOracle, redactedThrownDiagnostics } from "@stwd/shared";
+import {
+  createPriceOracle,
+  DEFAULT_CHAIN_ID,
+  type PriceOracle,
+  redactedThrownDiagnostics,
+} from "@stwd/shared";
 import type { PublicClient } from "viem";
 import { createPublicClient, http } from "viem";
 import { base } from "viem/chains";
@@ -252,7 +257,7 @@ export async function fetchAgentState(
   walletAddress: string,
   steward: StewardClient,
 ): Promise<AgentState> {
-  const chainId = agentConfig.chainId ?? 8453;
+  const chainId = agentConfig.chainId ?? DEFAULT_CHAIN_ID;
 
   const [nativeBalance, tokenBalance, quote, history] = await Promise.all([
     getNativeBalance(walletAddress, chainId).catch((err) => {

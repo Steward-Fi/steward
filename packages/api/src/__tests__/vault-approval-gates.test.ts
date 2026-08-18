@@ -1,15 +1,8 @@
 /**
- * REAL behavioral coverage for the vault manual-approval money path
+ * Behavioral coverage for the vault manual-approval money path
  * (`POST /:agentId/approve/:txId`).
  *
- * The deleted vault-trade-audit-gates.test.ts was source-grep theater: it
- * `readFileSync`'d vault.ts and asserted the source *mentioned*
- * `hasTenantAdminSession`, `hasRecentSessionMfa`, a `vault.approve.authorized`
- * audit string, and that the audit `indexOf` came before the sign call. It never
- * ran the route, so a regression that dropped the MFA gate — or moved the audit
- * write to AFTER the irreversible sign — would still pass.
- *
- * This drives the REAL approve handler against an in-memory PGLite DB + the REAL
+ * This drives the approve handler against an in-memory PGLite DB and the
  * PolicyEngine and proves, behaviorally:
  *   1. an api-key principal (no owner/admin session) is refused (403) BEFORE any
  *      state is touched,
@@ -23,7 +16,7 @@
  *      showing the audit row persists while the approval is rolled back to
  *      pending (fail-closed: a sign failure never leaves the tx approved/signed).
  *
- * The only mocked seam (test 4) is `Vault.prototype.signTransaction`, stubbed to
+ * The only mocked seam is `Vault.prototype.signTransaction`, stubbed to
  * throw so the post-audit / pre-sign ordering is observable without real key
  * material. Everything else — auth gates, policy re-evaluation, the audit HMAC
  * chain write, and the rollback — runs for real.

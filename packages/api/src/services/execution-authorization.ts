@@ -18,7 +18,7 @@ import {
   type SignRequest,
 } from "@stwd/shared";
 
-// PR4 v2 signing crypto lives in @stwd/shared (pure, no DB) so the separate
+// execution-authorization v2 signing crypto lives in @stwd/shared (pure, no DB) so the separate
 // proxy process can verify without depending on @stwd/api. Re-export here for
 // existing api-side callers/tests.
 export {
@@ -266,10 +266,11 @@ function signExecutionAuthorization(authorization: ExecutionAuthorization): stri
 }
 
 function executionAuthorizationKey(): Uint8Array {
-  // SEC-074: derive from the dedicated execution-auth secret, NEVER from
-  // STEWARD_JWT_SECRET (the most widely-used secret in the deployment; its
+  // Derive from the dedicated execution-auth secret, never from
+  // STEWARD_JWT_SECRET. A JWT-secret compromise
   // compromise must not yield forgeable execution authorizations). Mirrors the
-  // v2 mint posture (provider-execution.ts, X7): no JWT-secret fallback. v1
+  // must not yield forgeable execution authorizations. Like the v2 mint path,
+  // v1 has no JWT-secret fallback. v1
   // authorizations are minted and consumed inside this process within a 60s
   // TTL, so the active (first) key entry suffices; v1 keeps its own HKDF
   // salt/info above for domain separation from the v2 derived keys.

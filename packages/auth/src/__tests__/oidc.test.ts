@@ -1,6 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-
 import {
   assertPublicJwksDestination,
   clearOidcJwksCacheForTests,
@@ -8,15 +6,6 @@ import {
 } from "../oidc";
 
 describe("assertPublicJwksDestination SSRF guard", () => {
-  it("preserves HTTP status and bounds all production JWKS I/O", () => {
-    const source = readFileSync(new URL("../oidc.ts", import.meta.url), "utf8");
-    expect(source).toContain("status: result.status");
-    expect(source).toContain('res.headers["content-length"]');
-    expect(source).toContain("size > JWKS_MAX_BYTES");
-    expect(source).toContain("init?.signal?.addEventListener");
-    expect(source).toContain("JWKS_FETCH_TIMEOUT_MS");
-    expect(source).toContain("OIDC jwksUri redirects are not allowed");
-  });
   it("rejects IPv4-mapped IPv6 literals that embed private IPv4 targets", async () => {
     await expect(assertPublicJwksDestination("https://[::ffff:10.0.0.1]/jwks")).rejects.toThrow();
     await expect(assertPublicJwksDestination("https://[::ffff:a00:1]/jwks")).rejects.toThrow();

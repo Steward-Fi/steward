@@ -94,7 +94,7 @@ describe("WebhookDispatcher SSRF guard for IP-literal URLs", () => {
     }
   });
 
-  it("rejects IPv4-translated and special-use IPv6 literals (SEC-178)", async () => {
+  it("rejects non-global translation-like and special-use IPv6 literals", async () => {
     const dispatcher = new WebhookDispatcher({
       maxRetries: 0,
       retryDelayMs: 1,
@@ -104,9 +104,10 @@ describe("WebhookDispatcher SSRF guard for IP-literal URLs", () => {
     });
 
     for (const url of [
-      "http://[::ffff:0:7f00:1]/hook", // RFC 8215 translated, embeds 127.0.0.1
-      "http://[::ffff:0:a00:1]/hook", // translated, embeds 10.0.0.1
-      "http://[::ffff:0:ac10:1]/hook", // translated, embeds 172.16.0.1
+      "http://[::ffff:0:7f00:1]/hook", // non-global form resembling IPv4 embedding
+      "http://[::ffff:0:a00:1]/hook",
+      "http://[::ffff:0:ac10:1]/hook",
+      "http://[::ffff:0:808:808]/hook",
       "http://[::ffff:7f00:1]/hook", // IPv4-mapped hex form of 127.0.0.1
       "http://[::7f00:1]/hook", // deprecated IPv4-compatible ::/96 form
       "http://[64:ff9b:1:beef::808:808]/hook", // RFC 8215 local-use /48, public IPv4 payload
@@ -158,6 +159,7 @@ describe("WebhookDispatcher SSRF guard for IP-literal URLs", () => {
       "http://[2620:4f:8000::1]/hook",
       "http://[3fff::1]/hook",
       "http://[4000::1]/hook",
+      "http://[::ffff:1:7f00:1]/hook", // non-global translation-like space outside mapped /96
     ]) {
       const result = await dispatcher.dispatch(makeEvent(), { url, secret: SECRET });
       expect(result.success).toBe(false);

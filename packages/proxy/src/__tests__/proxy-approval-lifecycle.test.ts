@@ -58,6 +58,7 @@ beforeAll(async () => {
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.example.com";
   process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS = "api.example.com";
   process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES = "true";
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
 
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
@@ -99,6 +100,7 @@ afterAll(async () => {
   delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
   delete process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS;
   delete process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES;
+  delete process.env.STEWARD_PROXY_DEV_MODE;
 });
 
 function buildApp() {

@@ -7,7 +7,7 @@ date: 2026-04-24
 # ADR-0001 — Cryptographic choices for vault and secret storage
 
 **Status:** Accepted
-**Last reviewed:** 2026-04-24
+**Last reviewed:** 2026-08-17
 
 ## Context
 
@@ -23,8 +23,8 @@ the API process — at that point the master password is in process memory and
 the keys are decryptable by construction. That bound is documented in
 `docs/security/threat-model.mdx`.
 
-This ADR records the primitives and parameters actually used in
-`packages/vault/src/keystore.ts` and explains the choices.
+This ADR records the primitives used by the local software keystore and the
+additional custody backends supported by the current vault factory.
 
 ## Decision
 
@@ -155,14 +155,16 @@ HS256 via `jose` (`packages/auth/src/session.ts` line ~63, plus
 `packages/api/src/routes/auth.ts` line ~171 and
 `packages/api/src/services/context.ts` lines ~59, ~72).
 
-The signing secret is `STEWARD_SESSION_SECRET` (or, for legacy embedded
-mode, derived from `STEWARD_MASTER_PASSWORD`).
+The canonical signing secret is `STEWARD_JWT_SECRET`.
+`STEWARD_SESSION_SECRET` is accepted only as a deprecated migration alias; a
+development-only embedded mode can derive the value from
+`STEWARD_MASTER_PASSWORD` when explicitly permitted.
 
 **Why HS256 (vs RS256 / ES256):**
 
 - HS256 is symmetric. The issuer and the verifier must share the secret. In
   Steward, **the issuer and the verifier are the same process** (or
-  processes that already share `STEWARD_SESSION_SECRET` via env — API and
+  processes that already share `STEWARD_JWT_SECRET` via env — API and
   proxy, see `docker-compose.yml`). Asymmetric signing buys nothing.
 - RS256/ES256 would matter if third-party services needed to verify Steward
   JWTs without calling back to the API. That is not a use case we support
@@ -170,44 +172,42 @@ mode, derived from `STEWARD_MASTER_PASSWORD`).
   add a second key type, not replace HS256.
 - HS256 avoids key-distribution and JWKS-endpoint surface area.
 
-**Tradeoff accepted:** anyone with `STEWARD_SESSION_SECRET` can forge
+**Tradeoff accepted:** anyone with `STEWARD_JWT_SECRET` can forge
 arbitrary JWTs. This secret is therefore treated with the same care as
 `STEWARD_MASTER_PASSWORD` (and is in the same docker-compose env block).
-The threat model treats "attacker with `STEWARD_SESSION_SECRET`" as
+The threat model treats "attacker with `STEWARD_JWT_SECRET`" as
 equivalent to "attacker with code execution on the API" — total compromise.
 
 We pin `algorithms: ["HS256"]` in `jwtVerify()` (session.ts line ~83) to
 avoid the classic `alg: "none"` and `alg: "RS256" ↔ "HS256"` confusion
 attacks.
 
-### What is explicitly NOT used in v1
+### Custody backends and limits
 
-- **HSM / cloud KMS (AWS KMS, GCP KMS, Azure Key Vault).** Steward v1 holds
-  the master password in the API process. This is a deliberate simplicity
-  choice: self-hosted deployments on a single box should Just Work without
-  a cloud account. The Roadmap in VISION.md lists "Pluggable key storage
-  backends (AWS KMS, Hashicorp Vault)" as a planned follow-up. The
-  abstraction point is `KeyStore` — a future `KmsKeyStore` implements the
-  same `encrypt` / `decrypt` interface and routes to the KMS.
-- **TEE / SGX / Nitro Enclaves.** Out of scope. If a user needs
-  enclave-isolated signing, they should deploy a dedicated signer behind
-  the vault-as-separate-process design sketched in
-  [ADR-0004](./0004-policy-enforcement-model.mdx).
-- **Threshold / MPC signing.** Not a goal. Steward's value proposition is
-  "sober single-party custody with strong policy," not "trust-minimized
-  signing." MPC and threshold-signing platforms are out of scope.
+- **Local software keystore:** `KeyStore` derives an AES key from
+  `STEWARD_MASTER_PASSWORD` and performs AES-256-GCM encryption in process.
+- **Envelope wrapping:** `KmsKeyStore` supports AWS KMS and an operator-supplied
+  PKCS#11 adapter for wrapping the data-encryption key. In envelope modes the
+  application still receives plaintext key material while signing; this is not
+  native HSM signing.
+- **AWS external custody:** the vault factory also supports AWS KMS external
+  custody for the operations implemented by that backend. Its behavior and
+  unsupported operations are documented in
+  [External custody](../security/external-custody.md).
+- **GCP KMS and Azure Key Vault:** no backend is implemented.
+- **TEE / SGX / Nitro Enclaves:** the attestation package can verify supported
+  runtime evidence, but the default vault does not claim enclave-isolated
+  signing.
+- **Threshold / MPC signing:** not implemented or claimed.
 
 ## Consequences
 
-- **Positive:** no native dependencies, no cloud account required, all
-  primitives are in `node:crypto` and the behavior is inspectable in one
-  ~100-line file.
-- **Negative:** the master password is in process memory. Not a unique
-  weakness (every software-only wallet has this), but we should be honest
-  about it rather than hand-wave.
-- **Future flexibility:** the `KeyStore` class is the single point of
-  abstraction. A KMS-backed variant, a different KDF, or an AEAD swap are
-  all contained changes.
+- **Positive:** local deployments require no cloud account, while deployments
+  with stronger custody requirements can select supported AWS KMS or PKCS#11
+  modes explicitly.
+- **Negative:** local and envelope modes expose plaintext key material to the
+  application process at signing time. The custody posture must be evaluated per
+  selected backend rather than inferred from the presence of KMS wrapping.
 
 ## Related
 

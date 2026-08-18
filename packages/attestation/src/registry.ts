@@ -562,9 +562,7 @@ export function verifyRegistrySignatures(
     }
     return { ok: false, reason: "malformed measurement registry" };
   }
-  // SEC-007: an empty/malformed configured count must fail closed, never
-  // silently disable the signature gate (Number("") === 0, NaN comparisons
-  // are always false).
+  // An invalid quorum must fail closed rather than disable signature verification.
   if (!Number.isInteger(requiredSignatureCount) || requiredSignatureCount < 1) {
     return {
       ok: false,
@@ -591,8 +589,7 @@ export function verifyRegistrySignatures(
     return { ok: false, reason: "registry payload exceeded the 1 MiB limit" };
   }
 
-  // SEC-086: bind registry metadata so signed files cannot be swapped across
-  // environments or replayed to roll back retired measurements.
+  // Bind registry metadata so signed files cannot be substituted or replayed.
   if (options?.expectedRegistryId && registryPayload.registryId !== options.expectedRegistryId) {
     return {
       ok: false,
@@ -626,9 +623,8 @@ export function verifyRegistrySignatures(
       trustedPublicKeySha256.map((fingerprint) => fingerprint.toLowerCase()),
     );
   }
-  // SEC-027: with no pinned trust anchor the signature check is pure ceremony
-  // — anyone can re-sign a tampered registry — so fail closed unless the
-  // caller explicitly opts into unpinned verification.
+  // Without a pinned trust anchor, anyone can replace and re-sign the registry.
+  // Unpinned verification therefore requires an explicit local-development opt-in.
   // keyId is metadata inside the attacker-controlled registry file, not a
   // cryptographic identity. It may narrow a fingerprint-pinned key set, but
   // can never establish trust by itself: an attacker can reuse an allowed id
@@ -686,8 +682,7 @@ export function verifyRegistrySignatures(
     };
   }
 
-  // SEC-008: count DISTINCT keys, not signature array entries — the same
-  // signature pasted twice must not satisfy a two-person quorum.
+  // A quorum counts distinct signing keys, not signature array entries.
   const validKeyFingerprints = new Set<string>();
   for (const candidate of candidateSignatures) {
     try {

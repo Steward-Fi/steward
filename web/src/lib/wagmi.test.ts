@@ -1,13 +1,9 @@
 // @ts-nocheck
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
-const wagmiSource = readFileSync(join(import.meta.dir, "wagmi.ts"), "utf8");
-const guardSource = readFileSync(
-  join(import.meta.dir, "..", "..", "scripts", "assert-production-deploy-env.mjs"),
-  "utf8",
-);
+const guard = join(import.meta.dir, "..", "..", "scripts", "assert-production-deploy-env.mjs");
 
 /**
  * SEC-157: the hardcoded shared WalletConnect projectId must not silently
@@ -15,13 +11,24 @@ const guardSource = readFileSync(
  * production builds warn at runtime when the shared fallback is in use.
  */
 describe("WalletConnect projectId fallback is dev-only (SEC-157)", () => {
-  test("production builds warn when the shared fallback is in use", () => {
-    expect(wagmiSource).toContain('process.env.NODE_ENV === "production"');
-    expect(wagmiSource).toContain("SHARED_FALLBACK_PROJECT_ID");
-    expect(wagmiSource).toContain("NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID is unset");
+  test("the production deploy guard fails without a dedicated projectId", () => {
+    const env = { ...process.env };
+    delete env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID;
+    delete env.E2E_ALLOW_INSECURE_HTTP;
+    const result = spawnSync(process.execPath, [guard], { env, encoding: "utf8" });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID is unset");
   });
 
-  test("the production deploy guard requires NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID", () => {
-    expect(guardSource).toContain("!process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID");
+  test("the production deploy guard accepts a dedicated projectId", () => {
+    const result = spawnSync(process.execPath, [guard], {
+      env: {
+        ...process.env,
+        E2E_ALLOW_INSECURE_HTTP: "false",
+        NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: "steward-production-project",
+      },
+      encoding: "utf8",
+    });
+    expect(result.status).toBe(0);
   });
 });

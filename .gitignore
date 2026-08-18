@@ -16,6 +16,12 @@ obj/
 __pycache__/
 *.pyc
 
+# Package-specific compiler outputs
+packages/csharp/**/bin/
+packages/csharp/**/obj/
+packages/python/**/__pycache__/
+packages/swift/.build/
+
 # ─── Environment ───────────────────────────────────────────────────────────────
 .env
 .env.local
@@ -43,6 +49,10 @@ Thumbs.db
 # ─── Testing ───────────────────────────────────────────────────────────────────
 coverage/
 .nyc_output/
+/test-results/
+/web/test-results/
+/web/playwright-report/
+/playwright-report/
 
 # ─── Deployment ────────────────────────────────────────────────────────────────
 .vercel
@@ -55,6 +65,5 @@ docker-compose.override.yml
 # ─── Misc ──────────────────────────────────────────────────────────────────────
 *.tgz
 *.tar.gz
-web/test-results/
 .claude/
 artifacts/

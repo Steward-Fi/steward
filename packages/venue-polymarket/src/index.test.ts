@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { EthersSignerLike, PolymarketAccount } from "./credentials";
 import { listPositions } from "./data";
-import { normalizeGammaMarket } from "./discovery";
+import { getMarketByToken, normalizeGammaMarket } from "./discovery";
 import { sdkEffectiveSize } from "./execution";
 import {
   createPolymarketBuilderConfig,
@@ -26,6 +26,11 @@ import { getBatchPriceHistory, getOrderbooks, getPriceHistory, getPrices } from 
 
 const FUNDER = "0x0985cCC0fD7C568d493874D845471D5F4B1D9c3c";
 const SIGNER_ADDR = "0x1111111111111111111111111111111111111111";
+const MARKET_TOKEN =
+  "71321045679252212594626385532706912750332728571942532289631379312455583992563";
+const OTHER_MARKET_TOKEN =
+  "52114319501245915516055106046884209969926127482827954674443846427813813222426";
+const MARKET_CONDITION = `0x${"ab".repeat(32)}`;
 
 const fakeSigner: EthersSignerLike = {
   address: SIGNER_ADDR,
@@ -52,6 +57,43 @@ function notFetch(): typeof fetch {
     throw new Error("network not allowed in this test");
   }) as unknown as typeof fetch;
 }
+
+describe("getMarketByToken", () => {
+  test("binds the requested token to its authoritative condition", async () => {
+    const result = await getMarketByToken(MARKET_TOKEN, {
+      fetch: (async () =>
+        new Response(
+          JSON.stringify({
+            condition_id: MARKET_CONDITION.toUpperCase().replace("0X", "0x"),
+            primary_token_id: MARKET_TOKEN,
+            secondary_token_id: OTHER_MARKET_TOKEN,
+          }),
+          { status: 200 },
+        )) as typeof fetch,
+    });
+    expect(result).toEqual({
+      conditionId: MARKET_CONDITION,
+      primaryTokenId: MARKET_TOKEN,
+      secondaryTokenId: OTHER_MARKET_TOKEN,
+    });
+  });
+
+  test("rejects a response that does not contain the requested token", async () => {
+    await expect(
+      getMarketByToken(MARKET_TOKEN, {
+        fetch: (async () =>
+          new Response(
+            JSON.stringify({
+              condition_id: MARKET_CONDITION,
+              primary_token_id: "1",
+              secondary_token_id: "2",
+            }),
+            { status: 200 },
+          )) as typeof fetch,
+      }),
+    ).rejects.toThrow("did not bind the requested token");
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Precision rounding — BUY 2dp / SELL 5dp asymmetry

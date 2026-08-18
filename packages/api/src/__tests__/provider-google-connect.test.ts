@@ -25,6 +25,7 @@ import {
   getDb,
   providerAccounts,
   providerGoogleCredentialLifecycles,
+  providerOperations,
   providerRoleBindings,
   secretRoutes,
   secrets,
@@ -337,6 +338,7 @@ afterEach(async () => {
     .delete(providerGoogleCredentialLifecycles)
     .where(eq(providerGoogleCredentialLifecycles.tenantId, TENANT));
   await db.delete(providerAccounts).where(eq(providerAccounts.tenantId, TENANT));
+  await db.delete(secretRoutes).where(eq(secretRoutes.tenantId, TENANT));
   await db.delete(secrets).where(eq(secrets.tenantId, TENANT));
 });
 
@@ -1480,7 +1482,14 @@ describe("refresh", () => {
       runGoogleCredentialLifecycleSweep({
         vault,
         config: CONFIG,
-        now: new Date(Date.now() + 20_000),
+        now: new Date(lifecycle.updatedAt.getTime() + 14_999),
+      }),
+    ).resolves.toMatchObject({ processed: 0, attention: 0 });
+    await expect(
+      runGoogleCredentialLifecycleSweep({
+        vault,
+        config: CONFIG,
+        now: new Date(lifecycle.updatedAt.getTime() + 15_000),
       }),
     ).resolves.toMatchObject({ processed: 1, attention: 1 });
     expect(fake.counters.refresh).toBe(0);
@@ -1842,6 +1851,124 @@ describe("refresh", () => {
 
 // ── Disconnect ────────────────────────────────────────────────────────────────
 describe("disconnect", () => {
+  test("atomically removes credential authority while preserving bound operation topology", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    const db = getDb();
+    const [before] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    const routeId = "50000000-0000-4000-8000-0000000000d1";
+    const operationId = "60000000-0000-4000-8000-0000000000e1";
+    const operatorDisabledRouteId = "50000000-0000-4000-8000-0000000000d2";
+    const operatorDisabledOperationId = "60000000-0000-4000-8000-0000000000e2";
+    await db.insert(secretRoutes).values({
+      id: routeId,
+      tenantId: TENANT,
+      agentId: AGENT,
+      secretId: before.credentialSecretId as string,
+      hostPattern: "www.googleapis.com",
+      pathPattern: "/calendar/v3/calendars/primary/events",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "Authorization",
+      injectFormat: "Bearer {value}",
+    });
+    await db.insert(providerOperations).values({
+      id: operationId,
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      providerAccountId: completed.providerAccountId,
+      operationKey: "google.calendar.events.insert",
+      riskClass: "write",
+      secretRouteId: routeId,
+    });
+    await db.insert(secretRoutes).values({
+      id: operatorDisabledRouteId,
+      tenantId: TENANT,
+      agentId: AGENT,
+      secretId: before.credentialSecretId as string,
+      hostPattern: "www.googleapis.com",
+      pathPattern: "/calendar/v3/calendars/primary/events",
+      method: "GET",
+      injectAs: "header",
+      injectKey: "Authorization",
+      injectFormat: "Bearer {value}",
+      enabled: false,
+    });
+    await db.insert(providerOperations).values({
+      id: operatorDisabledOperationId,
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      providerAccountId: completed.providerAccountId,
+      operationKey: "google.calendar.events.list",
+      riskClass: "read",
+      secretRouteId: operatorDisabledRouteId,
+    });
+
+    const fake = installFakeX();
+    await expect(
+      disconnectGoogleProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        callerUserId: ADMIN,
+        vault,
+        config: CONFIG,
+      }),
+    ).resolves.toMatchObject({ revoked: true });
+
+    const [account] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(account.status).toBe("revoked");
+    expect(account.credentialSecretId).toBeNull();
+    expect(account.credentialVersion).toBeNull();
+    const [route] = await db.select().from(secretRoutes).where(eq(secretRoutes.id, routeId));
+    expect(route.enabled).toBe(false);
+    expect(route.authorityRevision).toBe(2);
+    const [operation] = await db
+      .select()
+      .from(providerOperations)
+      .where(eq(providerOperations.id, operationId));
+    expect(operation.secretRouteId).toBe(routeId);
+    const [oldSecret] = await db
+      .select()
+      .from(secrets)
+      .where(eq(secrets.id, before.credentialSecretId as string));
+    expect(oldSecret.deletedAt).not.toBeNull();
+    expect(fake.counters.revoke).toBe(1);
+    fake.restore();
+
+    const reconnect = await connectHappy(new MemoryConnectStore());
+    expect(reconnect.completed.providerAccountId).toBe(completed.providerAccountId);
+    expect(reconnect.completed.reconnected).toBe(true);
+    const [reconnectedAccount] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    const [reconnectedRoute] = await db
+      .select()
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, routeId));
+    expect(reconnectedRoute.enabled).toBe(true);
+    expect(reconnectedRoute.secretId).toBe(reconnectedAccount.credentialSecretId);
+    expect(reconnectedRoute.authorityRevision).toBe(4);
+    const [stillOperatorDisabled] = await db
+      .select()
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, operatorDisabledRouteId));
+    expect(stillOperatorDisabled.enabled).toBe(false);
+    expect(stillOperatorDisabled.secretId).toBe(reconnectedAccount.credentialSecretId);
+    expect(stillOperatorDisabled.authorityRevision).toBe(2);
+    const [preservedOperation] = await db
+      .select()
+      .from(providerOperations)
+      .where(eq(providerOperations.id, operationId));
+    expect(preservedOperation.secretRouteId).toBe(routeId);
+  });
+
   test("degrades account, best-effort revokes at Google, audits", async () => {
     const store = new MemoryConnectStore();
     const { completed } = await connectHappy(store);
@@ -1959,6 +2086,60 @@ describe("disconnect", () => {
       .where(eq(providerGoogleCredentialLifecycles.id, pending.id));
     expect(terminal.state).toBe("revoked");
     fake.restore();
+  });
+
+  test("recovery claims once across replicas and stops after the retry budget", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    const failing = installFakeX({ revokeStatus: 503 });
+    const restoreHook = __setGoogleDisconnectJournalHookForTests(() => {
+      throw new Error("crash after disconnect journal");
+    });
+    await expect(
+      disconnectGoogleProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        callerUserId: ADMIN,
+        vault,
+        config: CONFIG,
+      }),
+    ).rejects.toThrow("crash after disconnect journal");
+    restoreHook();
+    const [pending] = await getDb()
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.kind, "disconnect_revoke"));
+
+    const firstSweepAt = new Date(pending.updatedAt.getTime() + 15_000);
+    const concurrent = await Promise.all([
+      runGoogleCredentialLifecycleSweep({ vault, config: CONFIG, now: firstSweepAt }),
+      runGoogleCredentialLifecycleSweep({ vault, config: CONFIG, now: firstSweepAt }),
+    ]);
+    expect(concurrent.reduce((sum, result) => sum + result.processed, 0)).toBe(1);
+    expect(failing.counters.revoke).toBe(1);
+
+    for (let attempt = 2; attempt <= 5; attempt += 1) {
+      const result = await runGoogleCredentialLifecycleSweep({
+        vault,
+        config: CONFIG,
+        now: new Date(firstSweepAt.getTime() + attempt * 15_000),
+      });
+      expect(result.processed).toBe(1);
+    }
+    const exhausted = await runGoogleCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: new Date(firstSweepAt.getTime() + 6 * 15_000),
+    });
+    expect(exhausted.processed).toBe(0);
+    expect(failing.counters.revoke).toBe(5);
+    const [terminalAttention] = await getDb()
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.id, pending.id));
+    expect(terminalAttention.state).toBe("needs_attention");
+    expect(terminalAttention.attempts).toBe(5);
+    failing.restore();
   });
 
   test("reconnect cannot race a pending disconnect revoker", async () => {

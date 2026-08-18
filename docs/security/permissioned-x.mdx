@@ -1,13 +1,13 @@
 ---
 title: "Permissioned X — instance-level policy vocabulary"
-status: Design + Phase-1 implementation
+status: Current implementation and limitations
 date: 2026-07-16
 ---
 
 {/*
 This document describes the instance-level policy vocabulary Steward adds ON TOP
 of X's native OAuth2 scope model for governed X provider-actions. It is scoped to
-Phase 1 (the policy dimensions shipped in feat/x-permissioned-policies). It must
+the current implementation. It must
 NOT be read as a claim that Steward enforces X's own server-side limits — it does
 not. Steward enforces its OWN instance-level policy BEFORE an action reaches the
 wire, and classifies certain X server-side denials (summoned-reply 403) as an
@@ -17,7 +17,7 @@ than outcome_unknown.
 
 # Permissioned X
 
-**Status:** Design + Phase-1 implementation. Last reviewed 2026-07-16.
+**Status:** Current implementation and limitations. Last reviewed 2026-07-16.
 **Scope:** the `capability-intent` policy plane for `x.provider-action.v1`
 operations (`x.tweet.create`, `x.tweet.delete`, `x.user.me.read`) on `develop`.
 
@@ -196,16 +196,16 @@ Escalation obeys the plane's canonical precedence: **hard_deny > approval_requir
 > allow**. A hard deny from any rule always wins; escalation can only turn a
 would-be allow into an approval.
 
-### 6. DM / mention / hashtag / quiet-hours (Phase-1 scope note)
+### 6. DM / mention / hashtag / quiet-hours
 
 - **DM restrictions:** the current adapter exposes NO DM operation
   (`x.tweet.*`, `x.user.me.read` only). A DM policy has no operation to gate in
-  Phase 1. It is documented here as a **known gap** and will attach to a future
+  the current implementation. It is documented here as a **known gap** and requires a
   `x.dm.*` operation. We do NOT ship a dead DM rule.
 - **mention/hashtag restrictions:** expressible TODAY via
   `contentPolicy.blockedPatterns` (e.g. block `@competitor`, block `#banned`).
   A dedicated structured surface is deferred; the pattern channel covers the
-  Phase-1 need without a second matcher.
+  current need without a second matcher.
 - **quiet hours:** `quietHours: { startMinuteUtc, endMinuteUtc }` gates writes to
   a UTC minute-of-day window. Evaluated against an authoritative
   `nowMinuteUtc` policy input; unavailable → `POLICY_INPUT_UNAVAILABLE`.
@@ -245,7 +245,7 @@ matched pattern's index/reason code, never the text. This is documented as the
 one place the composer sees text, and it is mutation-proven to stay out of the
 persisted document.
 
-## Fail-closed matrix (Phase 1)
+## Fail-closed matrix
 
 | Situation | Effect | Reason code |
 | --- | --- | --- |
@@ -267,12 +267,12 @@ persisted document.
 | URL post + `urlPostRequiresApproval` | approval_required | `APPROVAL_REQUIRED` |
 | spend over escalation threshold | approval_required | `APPROVAL_REQUIRED` |
 
-## Honest gaps (Phase 1)
+## Current limitations
 
 - **No DM policy operation** — deferred until `x.dm.*` exists.
 - **Estimate, not billing truth** — the price table is a design-time constant;
   Steward does not read X's live billing.
-- **Count/spend/now inputs are wired-or-deny** — Phase 1 proves the evaluation
+- **Count/spend/now inputs are wired-or-deny** — the implementation proves the evaluation
   and the fail-closed behavior; the trailing-window accumulator wiring in the
   live route is a follow-on (the same posture as `invokeCount1h` on develop,
   which is `undefined` in the service and fails closed by design).

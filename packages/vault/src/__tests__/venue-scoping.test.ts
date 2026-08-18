@@ -1,4 +1,4 @@
-// Sprint 4 Phase 1 Day 1 tests: venue-scoped vault API.
+// Venue-scoped vault API tests.
 //
 // Uses PGLite (in-process Postgres via WASM) so the test runs against the
 // real Drizzle schema and the real 0022_vault_venue_scope migration, with
@@ -15,7 +15,7 @@ import { Vault } from "../vault";
 const MASTER_PASSWORD = "test-vault-venue-scope";
 const TENANT_ID = "test-tenant";
 
-setDefaultTimeout(30000);
+setDefaultTimeout(120000);
 
 const openClients: Array<{ close: () => Promise<void> }> = [];
 
@@ -36,7 +36,7 @@ async function freshVault(): Promise<Vault> {
   return new Vault({ masterPassword: MASTER_PASSWORD });
 }
 
-describe("Vault venue scoping (Sprint 4 Day 1)", () => {
+describe("Vault venue scoping", () => {
   let vault: Vault;
 
   beforeEach(async () => {

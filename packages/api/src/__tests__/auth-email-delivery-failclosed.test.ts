@@ -72,8 +72,8 @@ describe("fail-closed email delivery routes (production)", () => {
       { id: TENANT_PARTIAL, name: "Partial Email Config", apiKeyHash: "hash-1" },
       { id: TENANT_LIVE, name: "Live Provider", apiKeyHash: "hash-2" },
     ]);
-    // Partial per-tenant config: an encrypted key blob but NO provider field.
-    // Pre-fix this silently fell back to ConsoleProvider and returned ok:true.
+    // Partial per-tenant config has an encrypted key blob but no provider field;
+    // it must fail closed rather than fall back to ConsoleProvider.
     await dbHandle.insert(tenantConfigs).values({
       tenantId: TENANT_PARTIAL,
       emailConfig: { apiKeyEncrypted: '{"ciphertext":"x","iv":"x","tag":"x","salt":"x"}' },

@@ -50,6 +50,7 @@ let authMiddleware: typeof import("@stwd/proxy/src/middleware/auth")["authMiddle
 let handleProxy: typeof import("@stwd/proxy/src/handlers/proxy")["handleProxy"];
 let setForwardProxyRequestForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setForwardProxyRequestForTests"];
 let setResolveProxyHostForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setResolveProxyHostForTests"];
+let setCheckProxyRateLimitForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setCheckProxyRateLimitForTests"];
 
 interface ForwardedCapture {
   url: string;
@@ -89,6 +90,7 @@ beforeAll(async () => {
   process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
   process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET = SIGNING_SECRET;
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.github.com,api.openai.com";
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   // the invoke route reads these to build its proxy client (fail-closed if absent).
   process.env.STEWARD_PROXY_URL = PROXY_URL;
 
@@ -107,11 +109,16 @@ beforeAll(async () => {
     handleProxy,
     __setForwardProxyRequestForTests: setForwardProxyRequestForTests,
     __setResolveProxyHostForTests: setResolveProxyHostForTests,
+    __setCheckProxyRateLimitForTests: setCheckProxyRateLimitForTests,
   } = await import("@stwd/proxy/src/handlers/proxy"));
 
   // deterministic public ip so route-match -> decrypt -> inject -> forward runs
   // with no external network (mirrors the #149 e2e).
   setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
+  // This suite exercises the capability policy's per-agent maxCalls rule. Keep
+  // the proxy gateway's independent host limiter deterministic and out of the
+  // way so earlier forwarding cases cannot consume this test's allowance.
+  setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
   setForwardProxyRequestForTests(async (url, method, headers, body) => {
     const bodyText = body ? await new Response(body).text() : null;
     lastForwarded = { url: url.toString(), method, headers, bodyText };
@@ -160,6 +167,7 @@ afterAll(async () => {
   delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
   delete process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET;
   delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
+  delete process.env.STEWARD_PROXY_DEV_MODE;
   delete process.env.STEWARD_PROXY_URL;
 });
 

@@ -236,7 +236,10 @@ export interface SignTransactionInput {
   broadcast?: boolean; // default true; set false to get signed tx without broadcasting
 }
 
-export type SignTransactionOptions = StewardSignerAuthOptions;
+export interface SignTransactionOptions extends StewardSignerAuthOptions {
+  /** Stable retry key for requests that may broadcast. */
+  idempotencyKey?: string;
+}
 
 export interface SignTypedDataInput {
   domain: TypedDataDomain;
@@ -904,7 +907,10 @@ export interface TransferActionQuoteInput {
   sponsor?: boolean;
 }
 
-export type WalletActionOptions = StewardSignerAuthOptions;
+export interface WalletActionOptions extends StewardSignerAuthOptions {
+  /** Stable retry key for wallet actions that may broadcast. */
+  idempotencyKey?: string;
+}
 
 export interface UserLinkedAccount {
   id: string;
@@ -1344,7 +1350,7 @@ function parseTxRecord(tx: TxRecord): TxRecord {
   };
 }
 
-function signerHeaders(options?: StewardSignerAuthOptions): HeadersInit | undefined {
+function signerHeaders(options?: StewardSignerAuthOptions): Record<string, string> | undefined {
   if (
     !options?.signerId &&
     !options?.signerSecret &&
@@ -2189,7 +2195,10 @@ export class StewardClient {
       StewardPendingApproval | StewardBroadcastOutcomeUnknown | StewardErrorResponse
     >(`/vault/${encodeURIComponent(agentId)}/sign`, {
       method: "POST",
-      headers: signerHeaders(options),
+      headers: {
+        ...signerHeaders(options),
+        ...(options?.idempotencyKey ? { "Idempotency-Key": options.idempotencyKey } : {}),
+      },
       body: JSON.stringify(tx),
     });
 
@@ -2233,7 +2242,10 @@ export class StewardClient {
       `/vault/${encodeURIComponent(agentId)}/actions/transfer`,
       {
         method: "POST",
-        headers: signerHeaders(options),
+        headers: {
+          ...signerHeaders(options),
+          ...(options?.idempotencyKey ? { "Idempotency-Key": options.idempotencyKey } : {}),
+        },
         body: JSON.stringify(input),
       },
     );

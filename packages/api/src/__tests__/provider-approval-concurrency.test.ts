@@ -1,5 +1,5 @@
 /**
- * PR3 concurrency + fault-injection matrix (spec §13) + C2 crash recovery.
+ * Approval concurrency, fault-injection, and crash-recovery matrix (spec §13).
  * Uses real Promise.all races and the service's named fault hooks (production
  * no-ops; not settable from runtime input). Under PGLite the per-tenant audit
  * queue + unique/revision constraints yield exactly one transition (C14).
@@ -108,7 +108,7 @@ function decideBody(
   };
 }
 
-describe("PR3 concurrency + fault matrix", () => {
+describe("provider approval concurrency and fault matrix", () => {
   const priorExecutionAuthSecret = process.env.STEWARD_EXECUTION_AUTH_SECRET;
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";

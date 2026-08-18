@@ -95,8 +95,8 @@ async function validateAgentCardApiUrl(apiUrl: string): Promise<string | null> {
 }
 
 function publicDiscoveryAgentRow(row: Record<string, unknown>) {
-  // Reputation scores are NOT yet verifiable on-chain (registry contracts are
-  // not deployed; `score_onchain` is never populated by a verified indexer).
+  // Reputation scores are not verifiable on-chain: registry contracts are not
+  // deployed and `score_onchain` has no verified indexer source.
   // We therefore must not surface a numeric score that consumers would treat as
   // an authoritative on-chain reputation. Expose only the identity facts and an
   // explicit unverified flag instead of a fabricated score.
@@ -457,14 +457,14 @@ export const discoveryRoutes = new Hono<{ Variables: AppVariables }>();
 
 // GET /discovery/agents — query registered agents across registries.
 //
-// SEC-213 (decision: intentionally public). This listing is unauthenticated
-// and cross-tenant BY DESIGN: erc8004 registrations are on-chain public
+// This listing is intentionally unauthenticated and cross-tenant because
+// ERC-8004 registrations are on-chain public
 // records, and this endpoint exists so any client can discover them without
 // scraping the chain itself. The exposed fields (token_id, chain_id,
 // registry_address, feedback_count) are all chain-public identity facts — no
 // tenant-internal data (agent names, wallets, policies, owners) is ever
 // selected. Keep it that way: any future column added here must be evaluated
-// against "is this already public on-chain?" before being exposed.
+// against whether it is already public on-chain before being exposed.
 
 discoveryRoutes.get("/agents", async (c) => {
   const rawChainId = c.req.query("chainId");

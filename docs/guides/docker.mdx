@@ -41,8 +41,8 @@ services:
       STEWARD_JWT_SECRET: ${STEWARD_JWT_SECRET}
       STEWARD_PORT: "3200"
       STEWARD_BIND_HOST: "0.0.0.0"
-      RPC_URL: ${RPC_URL:-https://mainnet.base.org}
-      CHAIN_ID: ${CHAIN_ID:-8453}
+      RPC_URL: ${RPC_URL:-https://sepolia.base.org}
+      CHAIN_ID: ${CHAIN_ID:-84532}
       SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
       STEWARD_PLATFORM_KEY: ${STEWARD_PLATFORM_KEY}
     ports:
@@ -69,8 +69,8 @@ STEWARD_MASTER_PASSWORD=your-very-strong-master-password-32-chars-min
 STEWARD_JWT_SECRET=separate-jwt-signing-secret
 
 # Blockchain
-RPC_URL=https://mainnet.base.org
-CHAIN_ID=8453
+RPC_URL=https://sepolia.base.org
+CHAIN_ID=84532
 SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
 
 # Platform admin (optional)

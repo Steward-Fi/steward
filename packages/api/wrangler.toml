@@ -31,7 +31,7 @@ REDIS_DRIVER = "upstash"
 #   KV_REST_API_TOKEN                Upstash REST token
 #
 # Auth / vault
-#   STEWARD_SESSION_SECRET           HS256 JWT signing secret (canonical)
+#   STEWARD_JWT_SECRET               HS256 JWT signing secret (canonical)
 #   STEWARD_MASTER_PASSWORD          Vault keystore master
 #   STEWARD_KDF_SALT                 Per-deployment hex salt for the KeyStore KDF
 #

@@ -421,12 +421,10 @@ async function requireProxyOperator(
 }
 
 async function expireProxyApprovals(tenantId: string): Promise<void> {
-  // Atomicity: the expiry state transition for every row and its
-  // `proxy.approval.expired` audit event commit in ONE transaction. Previously
-  // the bulk UPDATE committed first and the per-row audits were written after in
-  // separate transactions, so a crash mid-loop left expired rows with no audit
-  // record (spec section 11 item #10). Now a crash before commit leaves nothing
-  // expired and the next sweep/API call retries the whole batch idempotently
+  // Atomicity: every expiry state transition and its `proxy.approval.expired`
+  // audit event commit in one transaction (spec section 11 item #10). A crash
+  // before commit leaves nothing expired and the next sweep/API call retries
+  // the whole batch idempotently
   // (the `status IN ('pending','approved')` guard means already-expired rows are
   // not re-selected and cannot be double-audited).
   await withTenantAuditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
@@ -538,11 +536,9 @@ approvalRoutes.post("/proxy/:id/approve", async (c) => {
   await expireProxyApprovals(tenantId);
   const actor = approvalActor(c);
   // Atomicity: the pending -> approved transition and its
-  // `proxy.approval.approved` audit event commit in ONE transaction. Previously
-  // the UPDATE committed first and the audit was written in a separate
-  // transaction, so an audit failure or crash between them could leave an
-  // approved request with no audit record (spec section 11 item #10, invariant
-  // I14). The guarded `status = 'pending'` predicate keeps a retry after a crash
+  // `proxy.approval.approved` audit event commit in one transaction (spec
+  // section 11 item #10, invariant I14). The guarded `status = 'pending'`
+  // predicate keeps a retry after a crash
   // idempotent: only one transaction can flip the row, and a replayed approve of
   // an already-approved row returns 409 without a second transition or audit.
   const row = await withTenantAuditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
@@ -876,14 +872,9 @@ approvalRoutes.post("/:txId/deny", async (c) => {
     },
   });
 
-  // Atomicity: the queue+transaction rejection AND its completion
-  // `approval.deny` audit event commit in ONE transaction (invariant I14).
-  // Previously the state change committed in its own transaction and the
-  // completion audit was written afterwards, guarded only by a best-effort
-  // compensating rollback — a crash between the state commit and either the
-  // audit or the compensation left a rejected transaction with no completion
-  // audit and no rollback. Folding the audit into the same transaction removes
-  // that window entirely; the pre-mutation `approval.deny.authorized` intent log
+  // Atomicity: the queue+transaction rejection and its completion
+  // `approval.deny` audit event commit in one transaction (invariant I14). The
+  // pre-mutation `approval.deny.authorized` intent log
   // above is still written first as a durable record that the decision was
   // attempted. The guarded `status = 'pending'` predicates keep a retry after a
   // crash idempotent (already-rejected rows are not re-selected).

@@ -95,10 +95,10 @@ Fix:
 Run:
 
 ```bash
-/Users/shawwalters/.bun/bin/bun test --timeout 30000 packages/api/src/__tests__/authorization-keys.test.ts
-/Users/shawwalters/.bun/bin/bun test --timeout 30000 packages/api/src/__tests__/adapters-policy-gate.test.ts packages/api/src/__tests__/key-export-plaintext-gate.test.ts packages/api/src/__tests__/wallet-actions.test.ts packages/api/src/__tests__/openapi-contract.test.ts
-/Users/shawwalters/.bun/bin/bun test --timeout 30000 packages/vault/src/__tests__/solana-instructions.test.ts packages/vault/src/__tests__/solana-offline-broadcast.test.ts
-/Users/shawwalters/.bun/bin/bun test --timeout 30000 packages/api/src/__tests__/sign-solana-policy-derivation.test.ts
+bun test --timeout 30000 packages/api/src/__tests__/authorization-keys.test.ts
+bun test --timeout 30000 packages/api/src/__tests__/adapters-policy-gate.test.ts packages/api/src/__tests__/key-export-plaintext-gate.test.ts packages/api/src/__tests__/wallet-actions.test.ts packages/api/src/__tests__/openapi-contract.test.ts
+bun test --timeout 30000 packages/vault/src/__tests__/solana-instructions.test.ts packages/vault/src/__tests__/solana-offline-broadcast.test.ts
+bun test --timeout 30000 packages/api/src/__tests__/sign-solana-policy-derivation.test.ts
 ```
 
 ## Unresolved Risks

@@ -162,19 +162,6 @@ function embeddedIpv4FromIpv6(address: string): string | null {
     words[0] === 0x64 && words[1] === 0xff9b && words[2] === 1 && words[3] === 0;
   if (isNat64LocalUse) return fromWords(words[6], words[7]);
 
-  // RFC 8215 IPv4-translated ::ffff:0:0/96 — distinct from the IPv4-mapped form
-  // (handled by mappedIpv4FromIpv6, which has words[5] === 0xffff). The IPv4 is
-  // embedded in the low 32 bits and is reachable through NAT64/SIIT paths, so it
-  // must face the same non-public checks (SEC-178).
-  const isIpv4Translated =
-    words[0] === 0 &&
-    words[1] === 0 &&
-    words[2] === 0 &&
-    words[3] === 0 &&
-    words[4] === 0xffff &&
-    words[5] === 0;
-  if (isIpv4Translated) return fromWords(words[6], words[7]);
-
   if (words[0] === 0x2002) return fromWords(words[1], words[2]);
   return null;
 }

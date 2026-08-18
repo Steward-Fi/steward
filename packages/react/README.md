@@ -73,7 +73,7 @@ bun add @stwd/react @stwd/sdk
 bun add wagmi viem @rainbow-me/rainbowkit @tanstack/react-query
 # Solana (core)
 bun add @solana/wallet-adapter-react @solana/wallet-adapter-react-ui \
-        @solana/wallet-adapter-wallets @solana/web3.js bs58
+        @solana/web3.js bs58
 # Solana wallet adapters (the curated default set)
 bun add @solana/wallet-adapter-phantom @solana/wallet-adapter-solflare \
         @solana/wallet-adapter-coinbase @solana/wallet-adapter-trust \
@@ -431,7 +431,7 @@ Required:
 Optional, install only what you use:
 
 - EVM: `wagmi ^2.0.0`, `viem ^2.0.0`, `@rainbow-me/rainbowkit ^2.0.0`, `@tanstack/react-query ^5.0.0`
-- Solana: `@solana/wallet-adapter-react ^0.15.0`, `@solana/wallet-adapter-react-ui ^0.9.0`, `@solana/wallet-adapter-wallets ^0.19.38`, `@solana/web3.js ^1.98.0`, `bs58 ^5.0.0`
+- Solana: `@solana/wallet-adapter-react ^0.15.0`, `@solana/wallet-adapter-react-ui ^0.9.0`, `@solana/web3.js ^1.98.0`, `bs58 ^5.0.0`, plus the individual wallet-adapter packages listed above
 
 ## License
 

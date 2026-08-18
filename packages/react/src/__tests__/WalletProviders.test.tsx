@@ -15,34 +15,6 @@ const mockConnectorsForWallets = mock(
 const mockCreateConfig = mock((config: unknown) => ({ kind: "wagmi-config", config }));
 const mockHttp = mock(() => mockHttpTransport);
 
-class PhantomWalletAdapter {
-  name = "Phantom";
-}
-class SolflareWalletAdapter {
-  name = "Solflare";
-}
-class CoinbaseWalletAdapter {
-  name = "Coinbase Wallet";
-}
-class TrustWalletAdapter {
-  name = "Trust Wallet";
-}
-class LedgerWalletAdapter {
-  name = "Ledger";
-}
-class TrezorWalletAdapter {
-  name = "Trezor";
-}
-class MathWalletAdapter {
-  name = "MathWallet";
-}
-class Coin98WalletAdapter {
-  name = "Coin98";
-}
-class BackpackWalletAdapter {
-  name = "Backpack";
-}
-
 mock.module("@rainbow-me/rainbowkit", () => ({
   ConnectButton: () =>
     React.createElement("div", { "data-testid": "rk-connect" }, "[ConnectButton]"),
@@ -92,18 +64,6 @@ mock.module("@solana/wallet-adapter-react-ui", () => ({
     React.createElement("div", { "data-testid": "sol-connect" }, "[WalletMultiButton]"),
   WalletModalProvider: ({ children }: { children?: React.ReactNode }) =>
     React.createElement(React.Fragment, null, children),
-}));
-
-mock.module("@solana/wallet-adapter-wallets", () => ({
-  BackpackWalletAdapter,
-  PhantomWalletAdapter,
-  SolflareWalletAdapter,
-  CoinbaseWalletAdapter,
-  TrustWalletAdapter,
-  LedgerWalletAdapter,
-  TrezorWalletAdapter,
-  MathWalletAdapter,
-  Coin98WalletAdapter,
 }));
 
 mock.module("@tanstack/react-query", () => ({

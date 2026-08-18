@@ -157,7 +157,7 @@ async function sweepFailedTransactions(ctx: RetentionSweepContext): Promise<Swee
 }
 
 async function sweepAuditEvents(ctx: RetentionSweepContext): Promise<SweepResult | null> {
-  // Retention is now tenant-owned and disabled by default. A boolean env
+  // Retention is tenant-owned and disabled by default. A boolean env
   // attestation is never sufficient authority to delete a chain prefix: each
   // enabled tenant is first copied into signed, durable JSONL archive rows and
   // only a sealed receipt can authorize the transactional floor+delete step.

@@ -197,7 +197,9 @@ agentEnrollRoutes.post("/verify", async (c) => {
       resourceType: "agent",
       resourceId: agentId,
       metadata: { decision: "deny", code: result.code },
-    }).catch(() => {});
+    }).catch((error) => {
+      console.error("[agent-enroll] Failed to record denied enrollment:", error);
+    });
     return c.json<ApiResponse>({ ok: false, error: "enrollment denied" }, 401);
   }
 
@@ -220,7 +222,7 @@ agentEnrollRoutes.post("/verify", async (c) => {
     resourceType: "agent",
     resourceId: agentId,
     metadata: { decision: "allow", ttl: ENROLL_TOKEN_TTL },
-  }).catch(() => {});
+  });
 
   c.header("Cache-Control", "no-store, max-age=0");
   c.header("Pragma", "no-cache");

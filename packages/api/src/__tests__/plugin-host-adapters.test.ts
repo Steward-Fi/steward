@@ -1,5 +1,5 @@
 /**
- * plugin-host-adapters.test.ts — focused unit tests for the Phase 2d plugin
+ * Focused unit tests for plugin
  * adapter contribution wiring.
  *
  * Covers the host's load-bearing guarantees for `adapters`:
@@ -56,7 +56,7 @@ function ctxWith(registry: AdapterRegistry) {
   return { adapterRegistry: registry };
 }
 
-describe("PluginHost — adapter contributions (Phase 2d)", () => {
+describe("PluginHost — adapter contributions", () => {
   it("registers a contributed adapter that resolves via the injected registry", async () => {
     // env selects the contributed provider for the swap category.
     const registry = new AdapterRegistry({

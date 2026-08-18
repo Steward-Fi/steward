@@ -40,5 +40,5 @@
 ## 0.10.0
 
 BREAKING-CHANGES:
-- Adds the Sprint 4 trade API surface under `StewardClient.tradeSessions` and `StewardClient.trade.hyperliquid`.
+- Adds the trading-policy trade API surface under `StewardClient.tradeSessions` and `StewardClient.trade.hyperliquid`.
 - Consumers that pin exact SDK versions should upgrade to `0.10.0` before using trade session or Hyperliquid order helpers.

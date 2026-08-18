@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { agents, closeDb, getDb, tenants } from "@stwd/db";
+import { agents, closeDb, conditionSets, eq, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
@@ -7,6 +7,39 @@ import type { AppVariables } from "../services/context";
 const RUN_ISOLATED = process.env.STEWARD_RUN_CONDITION_SET_INTEGRATION === "1";
 const TENANT_ID = `condition-sets-tenant-${Date.now()}`;
 const AGENT_ID = `condition-sets-agent-${Date.now()}`;
+let auditInsertsBeforeFault: number | null = null;
+
+type TxLike = { execute: (query: unknown) => Promise<unknown> };
+
+function installAuditFaultInjection(db: unknown): void {
+  const target = db as {
+    dialect: { sqlToQuery: (query: unknown) => { sql?: string } };
+    transaction: (
+      callback: (tx: TxLike) => Promise<unknown>,
+      ...rest: unknown[]
+    ) => Promise<unknown>;
+  };
+  const originalTransaction = target.transaction.bind(target);
+  target.transaction = (callback, ...rest) =>
+    originalTransaction(
+      async (tx: TxLike) => {
+        const originalExecute = tx.execute.bind(tx);
+        tx.execute = async (query) => {
+          const sql = String(target.dialect.sqlToQuery(query).sql ?? "").toLowerCase();
+          if (auditInsertsBeforeFault !== null && sql.includes("insert into audit_events")) {
+            if (auditInsertsBeforeFault === 0) {
+              auditInsertsBeforeFault = null;
+              throw new Error("injected final audit failure");
+            }
+            auditInsertsBeforeFault -= 1;
+          }
+          return originalExecute(query);
+        };
+        return callback(tx);
+      },
+      ...rest,
+    );
+}
 
 async function makeApp() {
   const [{ conditionSetRoutes }, { policiesStandaloneRoutes }] = await Promise.all([
@@ -38,6 +71,7 @@ describeConditionSets("condition sets", () => {
     process.env.STEWARD_AUDIT_HMAC_KEY = "condition-sets-audit-hmac-key-with-enough-entropy";
 
     const { db, client } = await createPGLiteDb("memory://");
+    installAuditFaultInjection(db);
     setPGLiteOverride(db, async () => {
       await client.close();
     });
@@ -222,6 +256,23 @@ describeConditionSets("condition sets", () => {
     expect(failBody.data.results[0].reason).toContain("not present in condition set");
   });
 
+  it("rolls back condition-set creation when the required completion audit fails", async () => {
+    await getDb().delete(conditionSets).where(eq(conditionSets.tenantId, TENANT_ID));
+    auditInsertsBeforeFault = 1;
+    const response = await app.request("/condition-sets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Must roll back", ownerId: "owner-fault" }),
+    });
+
+    expect(response.status).toBe(500);
+    const persisted = await getDb()
+      .select({ name: conditionSets.name })
+      .from(conditionSets)
+      .where(eq(conditionSets.tenantId, TENANT_ID));
+    expect(persisted).not.toContainEqual({ name: "Must roll back" });
+  });
+
   it("rejects agent-token reads of tenant-wide condition set data", async () => {
     const response = await app.request("/condition-sets", {
       headers: { "x-test-auth-type": "agent" },
@@ -241,7 +292,7 @@ describeConditionSets("condition sets", () => {
             type: "condition-set",
             enabled: true,
             config: {
-              conditionSetId: "00000000-0000-0000-0000-000000000000",
+              conditionSetId: "99999999-9999-4999-8999-999999999999",
               operator: "not_in_condition_set",
             },
           },
@@ -303,7 +354,7 @@ describeConditionSets("condition sets", () => {
             type: "condition-set",
             enabled: true,
             config: {
-              conditionSetId: "00000000-0000-0000-0000-000000000000",
+              conditionSetId: "99999999-9999-4999-8999-999999999999",
               operator: "not_in_condition_set",
             },
           },

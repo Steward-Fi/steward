@@ -1,15 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import {
   redactSignedTransactions,
   toIntentResponse,
   toProviderActionStatusResponse,
 } from "../services/intent-response";
 
-const routeSource = readFileSync(join(import.meta.dir, "..", "routes", "intents.ts"), "utf8");
-
-describe("intent read hardening", () => {
+describe("intent response hardening", () => {
   it("preserves benign generic intent data while redacting signed transactions", () => {
     const value = {
       tokenAddress: "0xabc",
@@ -27,7 +23,6 @@ describe("intent read hardening", () => {
         { signed_tx: "0xsigned-snake", status: "complete" },
       ],
     };
-
     expect(redactSignedTransactions(value)).toEqual({
       ...value,
       nested: [
@@ -37,7 +32,7 @@ describe("intent read hardening", () => {
     });
   });
 
-  it("keeps generic GET, webhook, and persistence on the signedTx-only contract", () => {
+  it("redacts signed transactions without removing benign response fields", () => {
     const authorizationDetails = { authorizationStatus: "required", cookiePolicy: "accepted" };
     const payload = { prose: "token price is rising", privateKeyRequired: false };
     const response = toIntentResponse({
@@ -47,30 +42,15 @@ describe("intent read hardening", () => {
       executionResult: { signedTx: "0xsigned", prose: "secret sauce recipe" },
       createdAt: new Date("2026-08-16T00:00:00.000Z"),
     } as Parameters<typeof toIntentResponse>[0]);
-
     expect(response.authorizationDetails).toBe(authorizationDetails);
     expect(response.payload).toBe(payload);
     expect(response.executionResult).toEqual({
       signedTx: "[redacted]",
       prose: "secret sauce recipe",
     });
-
-    const webhookStart = routeSource.indexOf("function dispatchIntentWebhook");
-    const webhookEnd = routeSource.indexOf(
-      "function dispatchWalletActionSuccessWebhook",
-      webhookStart,
-    );
-    const webhookBody = routeSource.slice(webhookStart, webhookEnd);
-    expect(webhookBody).toContain("authorization_details: row.authorizationDetails");
-    expect(webhookBody).toContain(
-      "execution_result: redactSignedTransactions(row.executionResult)",
-    );
-    expect(routeSource).toContain(
-      "const storedExecutionResult = redactSignedTransactions(executionResult)",
-    );
   });
 
-  it("provider-action status DTO is an explicit scalar allowlist", () => {
+  it("returns provider-action status through an explicit scalar allowlist", () => {
     const canary = "provider-status-canary";
     const hostileInput = {
       id: "pa_00000000-0000-4000-8000-000000000001",
@@ -106,38 +86,5 @@ describe("intent read hardening", () => {
       ].sort(),
     );
     expect(JSON.stringify(status)).not.toContain(canary);
-  });
-
-  it("attributes intent audits to the actual auth type and writes lifecycle authorization audit first", () => {
-    const auditStart = routeSource.indexOf("async function writeIntentAudit");
-    expect(auditStart).toBeGreaterThanOrEqual(0);
-    const auditBody = routeSource.slice(
-      auditStart,
-      routeSource.indexOf("function dispatchIntentWebhook", auditStart),
-    );
-    expect(auditBody).toContain("actorType: auditActorType(c)");
-    expect(auditBody).not.toContain('actorType: "user"');
-
-    const lifecycleUpdateStart = routeSource.indexOf("const lifecycleStatus = status as");
-    expect(lifecycleUpdateStart).toBeGreaterThanOrEqual(0);
-    const authorizedAudit = routeSource.indexOf(
-      "writeIntentAudit(c, `intent.${lifecycleStatus}.authorized`",
-      lifecycleUpdateStart,
-    );
-    const mutation = routeSource.indexOf(".update(intents)", lifecycleUpdateStart);
-    expect(authorizedAudit).toBeGreaterThan(lifecycleUpdateStart);
-    expect(mutation).toBeGreaterThan(lifecycleUpdateStart);
-    expect(authorizedAudit).toBeLessThan(mutation);
-  });
-
-  it("does not allow intent resourceId to choose the transaction primary key", () => {
-    const transferStart = routeSource.indexOf("async function executeTransferIntent");
-    expect(transferStart).toBeGreaterThanOrEqual(0);
-    const transferBody = routeSource.slice(
-      transferStart,
-      routeSource.indexOf("async function executeSendCallsIntent", transferStart),
-    );
-    expect(transferBody).toContain("const txId = row.id");
-    expect(transferBody).not.toContain("row.resourceId || row.id");
   });
 });

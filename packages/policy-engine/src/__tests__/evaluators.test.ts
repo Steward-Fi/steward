@@ -527,7 +527,7 @@ describe("Spending Limit Policy", () => {
     });
     const result = await evaluatePolicy(rule, ctx);
 
-    // Previously the USD branch returned early and the wei cap never fired.
+    // Mixed-unit policies must enforce both independent caps.
     expect(result.passed).toBe(false);
     expect(result.reason).toContain("per-tx limit");
   });

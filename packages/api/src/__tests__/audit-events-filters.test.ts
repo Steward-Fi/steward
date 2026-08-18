@@ -183,6 +183,41 @@ describe("audit event filters", () => {
     return app;
   }
 
+  function appWithGateContext(context: {
+    authType?: "session-jwt" | "api-key";
+    role?: "owner" | "admin" | "member";
+    mfaVerifiedAt?: number;
+  }) {
+    const instance = new Hono<{ Variables: AppVariables }>();
+    instance.use("*", async (c, next) => {
+      c.set("authType", context.authType ?? "session-jwt");
+      c.set("tenantRole", context.role ?? "admin");
+      c.set("tenantId", TENANT_ID);
+      if (context.mfaVerifiedAt !== undefined) {
+        c.set("sessionMfaVerifiedAt", context.mfaVerifiedAt);
+      }
+      await next();
+    });
+    instance.route("/audit", auditRoutesModule.auditRoutes);
+    return instance;
+  }
+
+  it("rejects API keys, members, and sessions without recent MFA at the audit route gate", async () => {
+    for (const context of [
+      { authType: "api-key" as const, role: "admin" as const, mfaVerifiedAt: Date.now() },
+      { authType: "session-jwt" as const, role: "member" as const, mfaVerifiedAt: Date.now() },
+      { authType: "session-jwt" as const, role: "admin" as const },
+      {
+        authType: "session-jwt" as const,
+        role: "owner" as const,
+        mfaVerifiedAt: Date.now() - 10 * 60_000,
+      },
+    ]) {
+      const response = await appWithGateContext(context).request("/audit/events");
+      expect(response.status).toBe(403);
+    }
+  });
+
   it("filters raw audit events and reports a filtered total", async () => {
     const response = await app().request(
       "/audit/events?actorType=user&resourceType=wallet&actorId=user-1&limit=10",

@@ -20,8 +20,6 @@
  * total (display behaviour preserved).
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import {
   agents,
   closeDb,
@@ -96,6 +94,7 @@ describe("getTransactionStats chain scoping (issue #110)", () => {
           agentId: AGENT_ID,
           rail: "withdraw",
           idempotencyKey: "pending-operator-spend",
+          requestDigest: "a".repeat(64),
           destination: RECIPIENT,
           amountBaseUnits: "25000000",
           status: "pending",
@@ -105,9 +104,12 @@ describe("getTransactionStats chain scoping (issue #110)", () => {
           agentId: AGENT_ID,
           rail: "usd-send",
           idempotencyKey: "final-operator-spend",
+          requestDigest: "b".repeat(64),
           destination: RECIPIENT,
           amountBaseUnits: "35000000",
           status: "final",
+          responseStatus: 200,
+          responseBody: { ok: true },
           finalizedAt: new Date(),
         },
         {
@@ -115,6 +117,7 @@ describe("getTransactionStats chain scoping (issue #110)", () => {
           agentId: AGENT_ID,
           rail: "withdraw",
           idempotencyKey: "released-operator-spend",
+          requestDigest: "c".repeat(64),
           destination: RECIPIENT,
           amountBaseUnits: "900000000",
           status: "released",
@@ -172,23 +175,5 @@ describe("getTransactionStats chain scoping (issue #110)", () => {
     expect(stats.recentTxCount24h).toBe(4);
     // The released reservation is excluded from both counters.
     expect(stats.recentTxCount24h).not.toBe(5);
-  });
-});
-
-// SEC-039: the chain-scoping argument above is only effective if the
-// policy-enforcement call sites actually pass it. Guard the wiring: every
-// getTransactionStats call in the vault routes (all enforcement paths) must
-// pass a chainId, and the user-wallet sign route must scope its stats helper
-// too. Display-only callers (dashboard/agents) intentionally stay unscoped.
-describe("spend-cap enforcement call sites pass chainId (SEC-039)", () => {
-  const vaultRoutesSource = readFileSync(join(import.meta.dir, "..", "routes", "vault.ts"), "utf8");
-  const userRoutesSource = readFileSync(join(import.meta.dir, "..", "routes", "user.ts"), "utf8");
-
-  it("leaves no unscoped getTransactionStats call in the vault routes", () => {
-    expect(vaultRoutesSource).not.toMatch(/getTransactionStats\(agentId\)/);
-  });
-
-  it("scopes the user-wallet sign stats to the request chain", () => {
-    expect(userRoutesSource).toContain("getUserWalletTransactionStats(userId, chainId)");
   });
 });

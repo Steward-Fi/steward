@@ -394,8 +394,7 @@ describe("vault EVM execution gateway", () => {
 
   it("fails closed when the transaction action payload is missing/malformed", async () => {
     const txId = "tx-fail-malformed-action-payload";
-    // action_type null + non-transaction payload => getTransactionActionPayload
-    // returns null => previously flipped isPrimaryEvmApproval=false and raw-signed.
+    // A non-transaction payload must not reach the raw-signing fallback.
     await seedPendingEvmApproval(txId, {
       actionPayload: { type: "not-a-transaction", broadcast: false },
     });
@@ -420,11 +419,9 @@ describe("vault EVM execution gateway", () => {
     await expectFailClosed(txId, "stored_digest_mismatch");
   });
 
-  // ── FINDING 1: strict transaction-action-payload validation ────────────────
+  // ── Strict transaction-action-payload validation ──────────────────────────
   // Each stored payload is a well-typed `transaction` action with exactly ONE
-  // malformed present field. Previously these were silently coerced/dropped
-  // (mutating the approved intent) or threw deep in the shared normalizer with
-  // no specific rejection audit. Now every one fails closed with the
+  // malformed present field. Every case fails closed with the
   // malformed_transaction_action_payload reason, no nonce row, and zero raw
   // signer calls.
 
@@ -817,7 +814,7 @@ describe("vault EVM execution gateway", () => {
     }
   });
 
-  it("does not expose credential-bearing provider text through the generic HTTP error path", async () => {
+  it("does not expose credential-bearing provider text through an ambiguous broadcast response", async () => {
     const canary = "SUPER_SECRET_PROVIDER_TOKEN";
     const signSpy = spyOn(Vault.prototype, "signTransaction").mockImplementation(async () => {
       throw new Error(
@@ -840,8 +837,13 @@ describe("vault EVM execution gateway", () => {
         }),
       });
       const text = await res.text();
-      expect(res.status).toBe(500);
-      expect(JSON.parse(text)).toEqual({ ok: false, error: "Internal server error" });
+      expect(res.status).toBe(202);
+      expect(JSON.parse(text)).toMatchObject({
+        ok: false,
+        error:
+          "Broadcast submission outcome is unknown; inspect transaction status before retrying",
+        data: { status: "submission_unknown" },
+      });
       expect(text).not.toContain(canary);
       expect(text).not.toContain("arn:aws:kms");
       expect(text).not.toContain("kms.example.test");
@@ -1070,7 +1072,7 @@ describe("vault EVM execution gateway", () => {
         headers: { "content-type": "application/json" },
         body: "{}",
       });
-      expect(retry.status).toBe(404);
+      expect(retry.status).toBe(409);
       expect(provider.signCalls).toBe(1);
       expect(writes).toBe(2);
     } finally {

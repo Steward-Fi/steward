@@ -1042,7 +1042,7 @@ agentRoutes.post("/", async (c) => {
     }
     return c.json<ApiResponse<AgentIdentity>>({ ok: true, data: identity });
   } catch (e: unknown) {
-    // SEC-210: never return raw internal error text (DB constraint names, RPC
+    // Never return raw internal error text (database constraint names, RPC
     // endpoint details); sanitizeErrorMessage passes through only known-safe
     // client-facing messages.
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 400);
@@ -1493,7 +1493,7 @@ agentRoutes.post("/:agentId/token", async (c) => {
   }
 });
 
-// Create venue-scoped wallet (Sprint 4)
+// Create venue-scoped wallet (trading-policy)
 //
 // POST /agents/:agentId/wallets
 // Body: { venue?: string, scope?: string, chainType: "evm" | "solana" | "bitcoin", purpose?: string }
@@ -1651,7 +1651,7 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
       }>
     >({ ok: true, data: { ...wallet, metadata: redactWalletMetadataSecrets(wallet.metadata) } });
   } catch (e: unknown) {
-    // SEC-210: never return raw internal error text (DB constraint names, RPC
+    // Never return raw internal error text (database constraint names, RPC
     // endpoint details); sanitizeErrorMessage passes through only known-safe
     // client-facing messages.
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 400);
@@ -1699,15 +1699,14 @@ agentRoutes.get("/:agentId/policy", async (c) => {
 });
 
 agentRoutes.put("/:agentId/policy", async (c) => {
-  // SEC-208: two write paths into the trade-policy table —
+  // Two principals can write the trade-policy table:
   //   1. agent token (self-update): TIGHTEN-ONLY against the existing row,
   //      enforced below after validation via policyLooseningViolation, and
   //      forbidden from creating the initial row (creation activates the
   //      trade-route ceilings, so it is reserved for path 2).
   //   2. human owner/admin session with recent MFA: unrestricted (subject to
-  //      the platform ceilings), restoring the human-ceiling administration
-  //      path this route previously lacked.
-  // Tenant API keys stay rejected, as before.
+  //      the platform ceilings).
+  // Tenant API keys are rejected.
   const isAgentSelfUpdate = c.get("authType") === "agent-token";
   if (isAgentSelfUpdate) {
     if (!requireAgentAccess(c)) {
@@ -2083,7 +2082,7 @@ agentRoutes.get("/:agentId/balance", async (c) => {
       },
     });
   } catch (e: unknown) {
-    // SEC-210: never return raw internal error text (DB constraint names, RPC
+    // Never return raw internal error text (database constraint names, RPC
     // endpoint details); sanitizeErrorMessage passes through only known-safe
     // client-facing messages.
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 400);
@@ -2142,7 +2141,7 @@ agentRoutes.get("/:agentId/tokens", async (c) => {
       },
     });
   } catch (e: unknown) {
-    // SEC-210: never return raw internal error text (DB constraint names, RPC
+    // Never return raw internal error text (database constraint names, RPC
     // endpoint details); sanitizeErrorMessage passes through only known-safe
     // client-facing messages.
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 400);
