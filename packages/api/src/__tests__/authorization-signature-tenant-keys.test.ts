@@ -68,25 +68,26 @@ beforeAll(async () => {
     .insert(tenants)
     .values({ id: TENANT_ID, name: "Signature Keys Tenant", apiKeyHash: "h" });
 
-  const encrypted = new KeyStore(process.env.STEWARD_MASTER_PASSWORD, undefined, "secret-vault")
-    .encrypt(TENANT_KEY_SECRET, {
-      tenantId: TENANT_ID,
-      name: `request-signing-key:${KEY_ID}`,
-      version: 1,
-    });
-  await getDb()
-    .insert(tenantRequestSigningKeys)
-    .values({
-      id: KEY_ID,
-      tenantId: TENANT_ID,
-      name: "primary",
-      secretCiphertext: encrypted.ciphertext,
-      secretIv: encrypted.iv,
-      secretAuthTag: encrypted.tag,
-      secretSalt: encrypted.salt,
-      secretPrefix: "stw_sig_test...cret",
-      status: "active",
-    });
+  const encrypted = new KeyStore(
+    process.env.STEWARD_MASTER_PASSWORD,
+    undefined,
+    "secret-vault",
+  ).encrypt(TENANT_KEY_SECRET, {
+    tenantId: TENANT_ID,
+    name: `request-signing-key:${KEY_ID}`,
+    version: 1,
+  });
+  await getDb().insert(tenantRequestSigningKeys).values({
+    id: KEY_ID,
+    tenantId: TENANT_ID,
+    name: "primary",
+    secretCiphertext: encrypted.ciphertext,
+    secretIv: encrypted.iv,
+    secretAuthTag: encrypted.tag,
+    secretSalt: encrypted.salt,
+    secretPrefix: "stw_sig_test...cret",
+    status: "active",
+  });
 });
 
 afterAll(async () => {

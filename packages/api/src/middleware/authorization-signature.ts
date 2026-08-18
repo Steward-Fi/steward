@@ -905,9 +905,7 @@ export function authorizationSignature(options?: AuthorizationSignatureOptions) 
     // requests fall through to the static/app-secret candidates and never
     // trigger tenant-key work — closing the unauthenticated CPU-amplification
     // DoS the global SEC-010 mount exposed.
-    const tenantKeySecrets = signingKeyId
-      ? await tenantRequestSigningKeyCandidates(c.req.raw)
-      : [];
+    const tenantKeySecrets = signingKeyId ? await tenantRequestSigningKeyCandidates(c.req.raw) : [];
     if (signingKeyId && tenantKeySecrets.length === 0) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid signing key id" }, 401);
     }
