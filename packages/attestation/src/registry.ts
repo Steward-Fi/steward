@@ -101,7 +101,46 @@ function isBoundedText(value: unknown, maxBytes: number, allowEmpty = false): va
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>): boolean {
-  return Object.keys(value).every((key) => allowed.has(key));
+  return snapshotDataProperties(value, allowed) !== null;
+}
+
+function snapshotDataProperties(
+  value: unknown,
+  allowed: ReadonlySet<string>,
+): Record<string, unknown> | null {
+  if (!isPlainObject(value)) return null;
+  const snapshot: Record<string, unknown> = {};
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string" || !allowed.has(key)) return null;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !("value" in descriptor)) return null;
+    snapshot[key] = descriptor.value;
+  }
+  return snapshot;
+}
+
+function snapshotBoundedArray(value: unknown, maxItems: number): unknown[] | null {
+  if (!Array.isArray(value)) return null;
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+  if (
+    !lengthDescriptor ||
+    !("value" in lengthDescriptor) ||
+    !Number.isSafeInteger(lengthDescriptor.value) ||
+    lengthDescriptor.value < 0 ||
+    lengthDescriptor.value > maxItems
+  ) {
+    return null;
+  }
+  const length = lengthDescriptor.value as number;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== length + 1 || !keys.includes("length")) return null;
+  const snapshot: unknown[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor?.enumerable || !("value" in descriptor)) return null;
+    snapshot.push(descriptor.value);
+  }
+  return snapshot;
 }
 
 function validateRegistryPayload(payload: unknown): string | null {
@@ -312,20 +351,41 @@ export function verifyRegistrySignatures(
   trustedPublicKeySha256?: readonly string[],
   options?: RegistryVerificationOptions,
 ): RegistryVerificationResult {
-  if (
-    !isPlainObject(registry) ||
-    !hasOnlyKeys(registry, new Set(["payload", "signatures"])) ||
-    !registry.payload ||
-    typeof registry.payload !== "object" ||
-    !Array.isArray(registry.signatures)
-  ) {
+  let registryPayload: MeasurementRegistryPayload;
+  let canonicalPayload: string;
+  let signatureValues: unknown[];
+  try {
+    const envelope = snapshotDataProperties(registry, new Set(["payload", "signatures"]));
+    if (!envelope || !("payload" in envelope) || !("signatures" in envelope)) {
+      return { ok: false, reason: "malformed measurement registry" };
+    }
+    const signatureLength = Object.getOwnPropertyDescriptor(
+      envelope.signatures as object,
+      "length",
+    );
+    if (
+      signatureLength &&
+      "value" in signatureLength &&
+      Number.isSafeInteger(signatureLength.value) &&
+      signatureLength.value > MAX_REGISTRY_SIGNATURES
+    ) {
+      return {
+        ok: false,
+        reason: `registry has too many signatures (max ${MAX_REGISTRY_SIGNATURES})`,
+      };
+    }
+    const signatures = snapshotBoundedArray(envelope.signatures, MAX_REGISTRY_SIGNATURES);
+    if (!signatures) {
+      return { ok: false, reason: "malformed measurement registry" };
+    }
+    signatureValues = signatures;
+    canonicalPayload = canonicalizeJson(envelope.payload);
+    registryPayload = JSON.parse(canonicalPayload) as MeasurementRegistryPayload;
+  } catch (error) {
+    if (error instanceof RegistryPayloadLimitError) {
+      return { ok: false, reason: error.message };
+    }
     return { ok: false, reason: "malformed measurement registry" };
-  }
-  if (registry.signatures.length > MAX_REGISTRY_SIGNATURES) {
-    return {
-      ok: false,
-      reason: `registry has too many signatures (max ${MAX_REGISTRY_SIGNATURES})`,
-    };
   }
   // SEC-007: an empty/malformed configured count must fail closed, never
   // silently disable the signature gate (Number("") === 0, NaN comparisons
@@ -338,14 +398,14 @@ export function verifyRegistrySignatures(
   }
   let payloadError: string | null;
   try {
-    payloadError = validateRegistryPayload(registry.payload);
+    payloadError = validateRegistryPayload(registryPayload);
   } catch {
     return { ok: false, reason: "malformed measurement registry payload" };
   }
   if (payloadError) return { ok: false, reason: payloadError };
   let payload: Buffer;
   try {
-    payload = Buffer.from(canonicalizeJson(registry.payload));
+    payload = Buffer.from(canonicalPayload);
   } catch (error) {
     if (error instanceof RegistryPayloadLimitError) {
       return { ok: false, reason: error.message };
@@ -358,14 +418,14 @@ export function verifyRegistrySignatures(
 
   // SEC-086: bind registry metadata so signed files cannot be swapped across
   // environments or replayed to roll back retired measurements.
-  if (options?.expectedRegistryId && registry.payload.registryId !== options.expectedRegistryId) {
+  if (options?.expectedRegistryId && registryPayload.registryId !== options.expectedRegistryId) {
     return {
       ok: false,
-      reason: `registryId mismatch: expected ${options.expectedRegistryId}, got ${registry.payload.registryId}`,
+      reason: `registryId mismatch: expected ${options.expectedRegistryId}, got ${registryPayload.registryId}`,
     };
   }
   if (options?.minimumUpdatedAt) {
-    const updatedAt = Date.parse(registry.payload.updatedAt);
+    const updatedAt = Date.parse(registryPayload.updatedAt);
     const minimum = Date.parse(options.minimumUpdatedAt);
     if (!Number.isFinite(updatedAt)) {
       return { ok: false, reason: "registry updatedAt is not a valid timestamp" };
@@ -376,7 +436,7 @@ export function verifyRegistrySignatures(
     if (updatedAt < minimum) {
       return {
         ok: false,
-        reason: `registry updatedAt ${registry.payload.updatedAt} is older than minimum ${options.minimumUpdatedAt}`,
+        reason: `registry updatedAt ${registryPayload.updatedAt} is older than minimum ${options.minimumUpdatedAt}`,
       };
     }
   }
@@ -413,13 +473,16 @@ export function verifyRegistrySignatures(
     signatureBytes: Buffer;
   }> = [];
   try {
-    for (const value of registry.signatures as unknown[]) {
-      if (!isPlainObject(value)) {
+    for (const value of signatureValues) {
+      const signatureRecord = snapshotDataProperties(
+        value,
+        new Set(["keyId", "algorithm", "publicKeyPem", "signatureBase64"]),
+      );
+      if (!signatureRecord) {
         return { ok: false, reason: "registry has a malformed signature entry" };
       }
-      const signature = value as unknown as MeasurementRegistrySignature;
+      const signature = signatureRecord as unknown as MeasurementRegistrySignature;
       if (
-        !hasOnlyKeys(value, new Set(["keyId", "algorithm", "publicKeyPem", "signatureBase64"])) ||
         signature.algorithm !== "ed25519" ||
         typeof signature.keyId !== "string" ||
         !REGISTRY_ID_PATTERN.test(signature.keyId)
@@ -486,23 +549,45 @@ export function verifyQuoteAgainstRegistry(
   registry: MeasurementRegistryFile,
   deployment: string,
 ): RegistryVerificationResult {
+  let registryPayload: MeasurementRegistryPayload;
   let payloadError: string | null;
   try {
-    payloadError = validateRegistryPayload(registry?.payload);
+    const envelope = snapshotDataProperties(registry, new Set(["payload", "signatures"]));
+    if (!envelope || !("payload" in envelope) || !("signatures" in envelope)) {
+      return { ok: false, reason: "malformed measurement registry payload" };
+    }
+    registryPayload = JSON.parse(canonicalizeJson(envelope.payload)) as MeasurementRegistryPayload;
+    payloadError = validateRegistryPayload(registryPayload);
   } catch {
     return { ok: false, reason: "malformed measurement registry payload" };
   }
   if (payloadError) return { ok: false, reason: payloadError };
+  let quoteSnapshot: Omit<AttestationQuote, "measurement"> & {
+    measurement: AttestationQuote["measurement"];
+  };
   let malformedQuote: boolean;
   try {
-    const timestamp = isPlainObject(quote) && quote.timestamp;
+    const quoteRecord = snapshotDataProperties(
+      quote,
+      new Set(["provider", "measurement", "timestamp", "verified", "raw"]),
+    );
+    const measurement = snapshotDataProperties(
+      quoteRecord?.measurement,
+      new Set(["imageDigest", "configHash"]),
+    );
+    if (!quoteRecord || !measurement) {
+      return { ok: false, reason: "malformed attestation quote" };
+    }
+    quoteSnapshot = {
+      ...(quoteRecord as unknown as Omit<AttestationQuote, "measurement">),
+      measurement: measurement as unknown as AttestationQuote["measurement"],
+    };
+    const timestamp = quoteSnapshot.timestamp;
     malformedQuote =
-      !isPlainObject(quote) ||
-      typeof quote.verified !== "boolean" ||
-      !PROVIDER_IDS.has(quote.provider as AttestationProviderId) ||
-      !isPlainObject(quote.measurement) ||
-      !isBoundedText(quote.measurement.imageDigest, 1024) ||
-      !isBoundedText(quote.measurement.configHash, 1024) ||
+      typeof quoteSnapshot.verified !== "boolean" ||
+      !PROVIDER_IDS.has(quoteSnapshot.provider as AttestationProviderId) ||
+      !isBoundedText(quoteSnapshot.measurement.imageDigest, 1024) ||
+      !isBoundedText(quoteSnapshot.measurement.configHash, 1024) ||
       !isBoundedText(timestamp, 64) ||
       !Number.isFinite(Date.parse(timestamp)) ||
       new Date(timestamp).toISOString() !== timestamp;
@@ -512,23 +597,24 @@ export function verifyQuoteAgainstRegistry(
   if (malformedQuote) return { ok: false, reason: "malformed attestation quote" };
   if (typeof deployment !== "string" || !REGISTRY_ID_PATTERN.test(deployment))
     return { ok: false, reason: "malformed deployment id" };
-  const entry = Object.hasOwn(registry.payload.deployments, deployment)
-    ? registry.payload.deployments[deployment]
+  const entry = Object.hasOwn(registryPayload.deployments, deployment)
+    ? registryPayload.deployments[deployment]
     : undefined;
   if (!entry) return { ok: false, reason: `unknown deployment: ${deployment}` };
   if (entry.status !== "active")
     return { ok: false, reason: `deployment ${deployment} is ${entry.status}` };
-  if (!quote.verified) return { ok: false, reason: "quote was not cryptographically verified" };
-  if (entry.provider !== quote.provider) {
+  if (!quoteSnapshot.verified)
+    return { ok: false, reason: "quote was not cryptographically verified" };
+  if (entry.provider !== quoteSnapshot.provider) {
     return {
       ok: false,
-      reason: `provider mismatch: expected ${entry.provider}, got ${quote.provider}`,
+      reason: `provider mismatch: expected ${entry.provider}, got ${quoteSnapshot.provider}`,
     };
   }
-  if (entry.measurement.imageDigest !== quote.measurement.imageDigest) {
+  if (entry.measurement.imageDigest !== quoteSnapshot.measurement.imageDigest) {
     return { ok: false, reason: "image digest mismatch" };
   }
-  if (entry.measurement.configHash !== quote.measurement.configHash) {
+  if (entry.measurement.configHash !== quoteSnapshot.measurement.configHash) {
     return { ok: false, reason: "config hash mismatch" };
   }
   return { ok: true, matchedDeployment: deployment };
