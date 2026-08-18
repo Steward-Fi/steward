@@ -150,8 +150,9 @@ describe("getTransactionStats chain scoping (issue #110)", () => {
     const combined = (BigInt(ETH_SPEND) + BigInt(SOL_SPEND)).toString();
     expect(stats.spentToday.toString()).toBe(combined);
     expect(stats.spentThisWeek.toString()).toBe(combined);
-    // Counts remain agent-wide (chain-agnostic) regardless of chain scoping.
-    expect(stats.recentTxCount24h).toBe(2);
+    // Counts remain agent-wide (chain-agnostic) regardless of chain scoping and
+    // include the two active operator transfers seeded above.
+    expect(stats.recentTxCount24h).toBe(4);
   });
 
   it("returns pending and final operator USDC separately from native-chain spend", async () => {
@@ -161,6 +162,14 @@ describe("getTransactionStats chain scoping (issue #110)", () => {
     // Released reservations are reusable and therefore no longer consume cap.
     expect(stats.additionalUsdSpentTodayMicros).not.toBe(960_000_000n);
     expect(stats.spentToday.toString()).toBe(ETH_SPEND);
+  });
+
+  it("counts pending and final operator transfers in core rate limits", async () => {
+    const stats = await getTransactionStats(AGENT_ID, ETH_MAINNET);
+    expect(stats.recentTxCount1h).toBe(4);
+    expect(stats.recentTxCount24h).toBe(4);
+    // The released reservation is excluded from both counters.
+    expect(stats.recentTxCount24h).not.toBe(5);
   });
 });
 

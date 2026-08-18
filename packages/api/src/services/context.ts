@@ -626,6 +626,20 @@ export async function getTransactionStats(agentId: string, chainId?: number) {
     .select({
       recentTxCount1h: sql<number>`count(*) filter (where ${transactions.createdAt} >= ${oneHourAgoStr}::timestamptz)`,
       recentTxCount24h: sql<number>`count(*) filter (where ${transactions.createdAt} >= ${oneDayAgoStr}::timestamptz)`,
+      operatorTxCount1h: sql<number>`
+        (select count(*)
+         from ${operatorTransferReservations}
+         where ${operatorTransferReservations.agentId} = ${agentId}
+           and ${operatorTransferReservations.createdAt} >= ${oneHourAgoStr}::timestamptz
+           and ${operatorTransferReservations.status} in ('pending', 'final'))
+      `,
+      operatorTxCount24h: sql<number>`
+        (select count(*)
+         from ${operatorTransferReservations}
+         where ${operatorTransferReservations.agentId} = ${agentId}
+           and ${operatorTransferReservations.createdAt} >= ${oneDayAgoStr}::timestamptz
+           and ${operatorTransferReservations.status} in ('pending', 'final'))
+      `,
       spentToday: sql<string>`
         coalesce(
           sum(
@@ -669,8 +683,8 @@ export async function getTransactionStats(agentId: string, chainId?: number) {
     );
 
   return {
-    recentTxCount1h: Number(stats?.recentTxCount1h ?? 0),
-    recentTxCount24h: Number(stats?.recentTxCount24h ?? 0),
+    recentTxCount1h: Number(stats?.recentTxCount1h ?? 0) + Number(stats?.operatorTxCount1h ?? 0),
+    recentTxCount24h: Number(stats?.recentTxCount24h ?? 0) + Number(stats?.operatorTxCount24h ?? 0),
     spentToday: BigInt(stats?.spentToday ?? "0"),
     spentThisWeek: BigInt(stats?.spentThisWeek ?? "0"),
     additionalUsdSpentTodayMicros: BigInt(stats?.additionalUsdSpentTodayMicros ?? "0"),
