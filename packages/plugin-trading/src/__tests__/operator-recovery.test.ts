@@ -382,6 +382,48 @@ describe("operator recovery approve-builder", () => {
 });
 
 describe("operator recovery add-margin", () => {
+  it("requires idempotency keys for every operator fund movement", async () => {
+    const tenantId = `tenant-required-idempotency-${Date.now()}`;
+    const app = await buildApp();
+    const cases = [
+      {
+        path: "/v1/trade/hyperliquid/deposit",
+        body: { agentId: "missing-agent", amount: "5" },
+      },
+      {
+        path: "/v1/trade/hyperliquid/add-margin",
+        body: { agentId: "missing-agent", coin: "xyz:SPCX", amountUsdc: "1" },
+      },
+      {
+        path: "/v1/trade/hyperliquid/transfer",
+        body: {
+          agentId: "missing-agent",
+          sourceDex: "xyz",
+          destinationDex: "",
+          amountUsdc: "1",
+        },
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const res = await app.request(testCase.path, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Steward-Platform-Key": PLATFORM_KEY,
+          "X-Steward-Tenant": tenantId,
+        },
+        body: JSON.stringify(testCase.body),
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        ok: false,
+        error: "Idempotency-Key is required and must be at most 256 characters",
+      });
+    }
+  });
+
   it("rejects add-margin without a valid platform key", async () => {
     const app = await buildApp();
     const res = await app.request("/v1/trade/hyperliquid/add-margin", {
@@ -403,6 +445,7 @@ describe("operator recovery add-margin", () => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "Idempotency-Key": `margin-${agentId}`,
         "X-Steward-Platform-Key": PLATFORM_KEY,
         "X-Steward-Tenant": tenantId,
       },

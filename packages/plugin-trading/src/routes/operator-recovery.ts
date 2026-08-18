@@ -756,6 +756,12 @@ export function createOperatorRecoveryRoutes(
       ...parsed.data,
       idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
     };
+    if (!body.idempotencyKey || body.idempotencyKey.length > 256) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency-Key is required and must be at most 256 characters" },
+        400,
+      );
+    }
     const { agentId } = body;
 
     // Parse + validate the USDC amount.
@@ -1005,6 +1011,12 @@ export function createOperatorRecoveryRoutes(
       ...parsed.data,
       idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
     };
+    if (!body.idempotencyKey || body.idempotencyKey.length > 256) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency-Key is required and must be at most 256 characters" },
+        400,
+      );
+    }
     const { agentId, coin } = body;
 
     if (hasTooManyUsdcDecimals(body.amountUsdc)) {
@@ -1423,6 +1435,12 @@ export function createOperatorRecoveryRoutes(
       ...parsed.data,
       idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
     };
+    if (!body.idempotencyKey || body.idempotencyKey.length > 256) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency-Key is required and must be at most 256 characters" },
+        400,
+      );
+    }
     const { agentId, sourceDex, destinationDex } = body;
 
     if (hasTooManyUsdcDecimals(body.amountUsdc)) {
