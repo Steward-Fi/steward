@@ -29,6 +29,10 @@ const trustedKeyFingerprints = process.env.STEWARD_REGISTRY_TRUSTED_KEY_SHA256?.
 // SEC-027: without a pinned trust anchor anyone can re-sign a tampered
 // registry, so require one (or an explicit local-dev opt-out).
 const allowUnpinned = process.env.STEWARD_REGISTRY_ALLOW_UNPINNED === "true";
+if (allowUnpinned && (process.env.NODE_ENV === "production" || process.env.CI === "true")) {
+  console.error("STEWARD_REGISTRY_ALLOW_UNPINNED is forbidden in production and CI");
+  process.exit(2);
+}
 if (!trustedKeyFingerprints?.length && !allowUnpinned) {
   console.error(
     "no cryptographic registry trust anchor configured: set " +

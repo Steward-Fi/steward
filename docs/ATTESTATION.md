@@ -76,7 +76,7 @@ The registry lives at `docs/attestation/measurements.json` and has this shape:
 }
 ```
 
-Registry signatures are over canonical JSON of `payload`. CI **must** pin trusted release-key fingerprints in `STEWARD_REGISTRY_TRUSTED_KEY_SHA256=...`; `STEWARD_REGISTRY_TRUSTED_KEY_IDS` may additionally select among those keys but is not itself a trust anchor because the registry supplies its own key IDs. Unpinned verification fails closed (`STEWARD_REGISTRY_ALLOW_UNPINNED=true` exists for local development only). CI can require more than one valid signature with `STEWARD_REGISTRY_REQUIRED_SIGNATURES=2`; the count must be a positive integer and counts **distinct cryptographic keys**, so reformatting or duplicating one PEM cannot satisfy the intended two-person rule. Any production measurement update must be an explicit PR that reviewers can compare against build/deploy evidence. Optionally pin `STEWARD_REGISTRY_ID` and `STEWARD_REGISTRY_MIN_UPDATED_AT` to bind the expected registry identity and reject registries older than the last-known-good update (replay/rollback protection).
+Registry signatures are over canonical JSON of `payload`. CI **must** pin trusted release-key fingerprints in `STEWARD_REGISTRY_TRUSTED_KEY_SHA256=...`; each fingerprint is lowercase SHA-256 of the canonical DER-encoded SubjectPublicKeyInfo (SPKI), as returned by `publicKeyFingerprint`. `STEWARD_REGISTRY_TRUSTED_KEY_IDS` may additionally select among those keys but is not itself a trust anchor because the registry supplies its own key IDs. Unpinned verification fails closed (`STEWARD_REGISTRY_ALLOW_UNPINNED=true` exists for local development only and is rejected in CI or production). CI can require more than one valid signature with `STEWARD_REGISTRY_REQUIRED_SIGNATURES=2`; the count must be a positive integer and counts **distinct cryptographic keys**, so reformatting or duplicating one PEM cannot satisfy the intended two-person rule. Any production measurement update must be an explicit PR that reviewers can compare against build/deploy evidence. Optionally pin `STEWARD_REGISTRY_ID` and `STEWARD_REGISTRY_MIN_UPDATED_AT` to bind the expected registry identity and reject registries older than the last-known-good update (replay/rollback protection).
 
 ## CI check
 
@@ -88,7 +88,7 @@ STEWARD_ATTESTATION_DEPLOYMENT=phala-prod \
 STEWARD_DSTACK_VERIFIER_URL=http://dstack-verifier:8080 \
 STEWARD_REGISTRY_REQUIRED_SIGNATURES=2 \
 STEWARD_REGISTRY_TRUSTED_KEY_IDS=release-key-1,release-key-2 \
-STEWARD_REGISTRY_TRUSTED_KEY_SHA256=<sha256-public-key-pem>,<sha256-public-key-pem> \
+STEWARD_REGISTRY_TRUSTED_KEY_SHA256=<sha256-spki-der>,<sha256-spki-der> \
 bun run scripts/check-attestation.ts
 ```
 

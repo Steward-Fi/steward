@@ -284,6 +284,12 @@ describe("measurement registry", () => {
         dangerouslyAllowUnpinned: true,
       }).ok,
     ).toBe(false);
+    expect(publicKeyFingerprint(reformatted.signatures[1].publicKeyPem)).toBe(
+      publicKeyFingerprint(registry.signatures[0].publicKeyPem),
+    );
+    expect(
+      verifyRegistrySignatures(reformatted, 1, ["test"], registryFingerprints(registry)).ok,
+    ).toBe(true);
   });
 
   // SEC-086: pin the expected registryId and reject registries older than the
@@ -342,6 +348,48 @@ describe("measurement registry", () => {
       });
     expect(verify).not.toThrow();
     expect(verify().ok).toBe(false);
+
+    const wrongRuntimeType = signRegistry(basePayload()) as unknown as {
+      payload: MeasurementRegistryPayload;
+      signatures: Array<Record<string, unknown>>;
+    };
+    wrongRuntimeType.signatures[0].publicKeyPem = 42;
+    expect(() =>
+      verifyRegistrySignatures(
+        wrongRuntimeType as unknown as MeasurementRegistryFile,
+        1,
+        undefined,
+        ["0".repeat(64)],
+      ),
+    ).not.toThrow();
+    expect(
+      verifyRegistrySignatures(
+        wrongRuntimeType as unknown as MeasurementRegistryFile,
+        1,
+        undefined,
+        ["0".repeat(64)],
+      ).ok,
+    ).toBe(false);
+  });
+
+  test("malformed pins and signatures fail closed", () => {
+    const registry = signRegistry(basePayload());
+    expect(verifyRegistrySignatures(registry, 1, undefined, ["not-a-sha256"]).ok).toBe(false);
+
+    const corrupt = structuredClone(registry);
+    corrupt.signatures[0].signatureBase64 += "garbage";
+    expect(verifyRegistrySignatures(corrupt, 1, undefined, registryFingerprints(registry)).ok).toBe(
+      false,
+    );
+
+    expect(
+      verifyRegistrySignatures(
+        { payload: registry.payload, signatures: Array(65).fill(registry.signatures[0]) },
+        1,
+        undefined,
+        registryFingerprints(registry),
+      ).ok,
+    ).toBe(false);
   });
 });
 
