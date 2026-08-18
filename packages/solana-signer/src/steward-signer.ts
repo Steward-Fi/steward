@@ -66,8 +66,24 @@ function failedRuleSummary(results: PolicyResult[] | undefined): string {
 
 /** Map any thrown value from the Steward client into a StewardSignerError. */
 export function toSignerError(err: unknown): StewardSignerError {
-  if (err instanceof StewardSignerError) return err;
-  if (err instanceof StewardApiError) {
+  try {
+    if (err instanceof StewardSignerError) return err;
+  } catch {
+    return new StewardSignerError("api", "Steward signing service failed");
+  }
+  try {
+    if (!(err instanceof StewardApiError)) {
+      let message = "Steward signing service failed";
+      try {
+        if (err instanceof Error && typeof err.message === "string" && err.message.trim()) {
+          message = err.message;
+        }
+      } catch {
+        // A Proxy or exotic thrown value can trap instanceof/property access.
+        // Error handling must remain fail-closed and non-throwing.
+      }
+      return new StewardSignerError("api", message, { cause: err });
+    }
     const data = (err.data ?? {}) as {
       txId?: string;
       results?: PolicyResult[];
@@ -112,10 +128,12 @@ export function toSignerError(err: unknown): StewardSignerError {
       `Steward API error (${err.status}): ${err.message}`,
       carried,
     );
+  } catch {
+    // Never coerce an unknown thrown value with String(): Symbol.toPrimitive,
+    // valueOf, message, or prototype traps could throw a second time and leave
+    // the bridge request hanging instead of returning a bounded 502.
+    return new StewardSignerError("api", "Steward signing service failed");
   }
-  return new StewardSignerError("api", err instanceof Error ? err.message : String(err), {
-    cause: err,
-  });
 }
 
 export interface StewardSolanaSignerConfig {

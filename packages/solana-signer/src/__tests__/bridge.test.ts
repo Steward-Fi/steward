@@ -245,4 +245,48 @@ describe("bridge shared-secret auth", () => {
     expect((await first).status).toBe(200);
     await concurrentBridge.close();
   });
+
+  it("returns a bounded 502 when the signer throws a hostile value", async () => {
+    const hostile = new Proxy(new Error("secret diagnostic"), {
+      get(_target, property) {
+        if (property === "message") throw new Error("message trap secret");
+        return Reflect.get(_target, property);
+      },
+      getPrototypeOf() {
+        throw new Error("prototype trap secret");
+      },
+    });
+    const hostileSigner: StewardSolanaSigner = {
+      address: signer.address,
+      publicKey: signer.publicKey,
+      async signTransaction(tx) {
+        return tx;
+      },
+      async signAllTransactions(txs) {
+        return txs;
+      },
+      async signSerializedTransaction() {
+        throw hostile;
+      },
+    };
+    const hostileBridge = await startSignerBridge(hostileSigner);
+    try {
+      const transaction = legacyTransfer(signer.publicKey)
+        .serialize({ requireAllSignatures: false })
+        .toString("base64");
+      const response = await fetch(`${hostileBridge.url}/sign-transaction`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          [BRIDGE_TOKEN_HEADER]: hostileBridge.token,
+        },
+        body: JSON.stringify({ transaction }),
+      });
+      expect(response.status).toBe(502);
+      const body = (await response.json()) as { error: string; kind: string };
+      expect(body).toEqual({ error: "Steward signing service failed", kind: "api" });
+    } finally {
+      await hostileBridge.close();
+    }
+  });
 });

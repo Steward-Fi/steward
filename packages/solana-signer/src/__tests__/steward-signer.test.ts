@@ -4,6 +4,7 @@ import {
   createStewardSolanaSigner,
   SOLANA_MAX_TRANSACTION_BYTES,
   StewardSignerError,
+  toSignerError,
 } from "../steward-signer";
 import {
   legacyTransfer,
@@ -265,6 +266,23 @@ describe("signTransaction", () => {
 });
 
 describe("refusal propagation", () => {
+  it("maps hostile thrown values without invoking attacker-controlled coercion", () => {
+    const hostile = new Proxy(new Error("secret backend diagnostic"), {
+      get(_target, property) {
+        if (property === "message") throw new Error("message trap secret");
+        return Reflect.get(_target, property);
+      },
+      getPrototypeOf() {
+        throw new Error("prototype trap secret");
+      },
+    });
+
+    const mapped = toSignerError(hostile);
+    expect(mapped.kind).toBe("api");
+    expect(mapped.message).toBe("Steward signing service failed");
+    expect(mapped.message).not.toContain("secret");
+  });
+
   it("surfaces a policy rejection as StewardSignerError kind policy_rejected", async () => {
     const signer = await newSigner();
     stub.setMode("reject");
