@@ -40,6 +40,7 @@
  */
 
 import {
+  createDbForRequest,
   createNeonTransactionDbForRequest,
   getDb,
   type NeonTransactionDbHandle,
@@ -50,6 +51,9 @@ import { initRedis } from "./middleware/redis";
 export interface Env {
   DATABASE_URL: string;
   DATABASE_DRIVER?: string;
+  NODE_ENV?: string;
+  STEWARD_ALLOW_INSECURE_DB?: string;
+  STEWARD_ALLOW_UNVERIFIED_DB_TLS?: string;
   REDIS_DRIVER?: string;
   KV_REST_API_URL?: string;
   KV_REST_API_TOKEN?: string;
@@ -86,7 +90,14 @@ export interface Env {
 type WorkerDatabaseHandleFactory = (env: {
   DATABASE_URL?: string;
   DATABASE_DRIVER?: string;
+  NODE_ENV?: string;
+  STEWARD_ALLOW_INSECURE_DB?: string;
+  STEWARD_ALLOW_UNVERIFIED_DB_TLS?: string;
 }) => NeonTransactionDbHandle;
+type WorkerHttpDatabaseFactory = (env: {
+  DATABASE_URL?: string;
+  DATABASE_DRIVER?: string;
+}) => ReturnType<typeof getDb>;
 
 /**
  * Run one Worker unit of work with its request-owned database handle.
@@ -100,17 +111,37 @@ type WorkerDatabaseHandleFactory = (env: {
 export async function withWorkerRequestDatabase<T>(
   env: Env,
   callback: () => Promise<T>,
-  options?: { createHandle?: WorkerDatabaseHandleFactory },
+  options?: {
+    createHandle?: WorkerDatabaseHandleFactory;
+    createHttpDb?: WorkerHttpDatabaseFactory;
+  },
 ): Promise<T> {
-  if (env.DATABASE_DRIVER?.trim().toLowerCase() !== "neon-websocket") {
-    return callback();
+  const driver = env.DATABASE_DRIVER?.trim().toLowerCase();
+  if (driver !== "neon-http" && driver !== "neon-websocket") {
+    throw new Error(
+      "WORKER_DATABASE_DRIVER_UNSUPPORTED: DATABASE_DRIVER must be neon-http or neon-websocket",
+    );
+  }
+  if (driver === "neon-http") {
+    const db = (options?.createHttpDb ?? createDbForRequest)(env);
+    return withRequestDatabase(db as unknown as ReturnType<typeof getDb>, callback);
   }
   const handle = (options?.createHandle ?? createNeonTransactionDbForRequest)(env);
+  const noCallbackError = Symbol("no-callback-error");
+  let callbackError: unknown | typeof noCallbackError = noCallbackError;
+  let result: T | undefined;
   try {
-    return await withRequestDatabase(handle.db as unknown as ReturnType<typeof getDb>, callback);
-  } finally {
-    await handle.close();
+    result = await withRequestDatabase(handle.db as unknown as ReturnType<typeof getDb>, callback);
+  } catch (error) {
+    callbackError = error;
   }
+  try {
+    await handle.close();
+  } catch {
+    if (callbackError === noCallbackError) throw new Error("WORKER_DATABASE_CLOSE_FAILED");
+  }
+  if (callbackError !== noCallbackError) throw callbackError;
+  return result as T;
 }
 
 type WorkerLeaseSweepResult = {

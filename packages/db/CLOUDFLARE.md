@@ -95,6 +95,10 @@ TLS policy is evaluated from the Worker bindings passed to the handle, not from
 a Node compatibility shim's `process.env`; because Cloudflare does not provide
 `NODE_ENV` automatically, missing `NODE_ENV` defaults to production enforcement.
 
+Both `neon-http` and `neon-websocket` are bound through request-local async
+context. The context is revoked as soon as the owning callback settles, so any
+detached async task fails before reusing a database handle after cleanup.
+
 `withRequestDatabase()` propagates that explicit handle through the async
 request so existing services calling `getDb()` resolve the request-owned
 Drizzle database rather than an isolate-global singleton. Concurrent contexts

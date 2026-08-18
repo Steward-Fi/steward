@@ -67,4 +67,18 @@ describe("request-scoped database context", () => {
       expect(getDb()).toBe(outer);
     });
   });
+
+  test("revokes the database capability inherited by detached async work", async () => {
+    const requestDb = { marker: "request" } as unknown as ReturnType<typeof getDb>;
+    const release = deferred();
+    let detached!: Promise<ReturnType<typeof getDb>>;
+    await withRequestDatabase(requestDb, async () => {
+      detached = (async () => {
+        await release.promise;
+        return getDb();
+      })();
+    });
+    release.resolve();
+    await expect(detached).rejects.toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+  });
 });

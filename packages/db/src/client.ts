@@ -477,7 +477,11 @@ export function setPGLiteOverride(
 // ─── Request-scoped database propagation ────────────────────────────────────
 
 type RequestDatabase = ReturnType<typeof createDb>["db"];
-const requestDatabaseStorage = new AsyncLocalStorage<RequestDatabase>();
+interface RequestDatabaseContext {
+  db: RequestDatabase;
+  active: boolean;
+}
+const requestDatabaseStorage = new AsyncLocalStorage<RequestDatabaseContext>();
 
 /**
  * Bind one explicitly owned database handle to the current async request.
@@ -495,7 +499,14 @@ export async function withRequestDatabase<T>(
   if (requestDatabaseStorage.getStore()) {
     throw new Error("REQUEST_DATABASE_CONTEXT_NESTED");
   }
-  return requestDatabaseStorage.run(db, callback);
+  const context: RequestDatabaseContext = { db, active: true };
+  try {
+    return await requestDatabaseStorage.run(context, callback);
+  } finally {
+    // Detached tasks inherit AsyncLocalStorage. Revoke their capability before
+    // the owning Worker closes its socket so late getDb() calls fail before I/O.
+    context.active = false;
+  }
 }
 
 // ─── Global singleton ─────────────────────────────────────────────────────────
@@ -530,8 +541,11 @@ function buildGlobalDb(): GlobalDbHandle {
 }
 
 export function getDb() {
-  const requestDb = requestDatabaseStorage.getStore();
-  if (requestDb) return requestDb;
+  const requestContext = requestDatabaseStorage.getStore();
+  if (requestContext) {
+    if (!requestContext.active) throw new Error("REQUEST_DATABASE_CONTEXT_CLOSED");
+    return requestContext.db;
+  }
   if (pgliteOverride) return pgliteOverride.db as ReturnType<typeof createDb>["db"];
   globalDb ??= buildGlobalDb();
   // Both postgres-js and neon-http drivers expose the same Drizzle surface
@@ -552,7 +566,9 @@ export function getDb() {
  * template, which is portable across both.
  */
 export function getSql() {
-  if (requestDatabaseStorage.getStore()) {
+  const requestContext = requestDatabaseStorage.getStore();
+  if (requestContext) {
+    if (!requestContext.active) throw new Error("REQUEST_DATABASE_CONTEXT_CLOSED");
     throw new Error(
       "REQUEST_DATABASE_RAW_SQL_UNAVAILABLE: use the request-scoped Drizzle database",
     );
