@@ -44,6 +44,8 @@ import {
   MAX_UPSTREAM_LEASE_SWEEP_INTERVAL_MS,
   recoverInterruptedUpstreamCredentialLeases,
   revokeUpstreamCredentialLease,
+  runLeaseDatabasePhase,
+  UPSTREAM_LEASE_RUN_DEADLINE_MS,
 } from "./upstream-leases";
 
 export function upstreamLeaseIssuanceAvailableInRuntime(): boolean {
@@ -244,50 +246,55 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
           );
         }
         try {
+          const deadlineAt = Date.now() + UPSTREAM_LEASE_RUN_DEADLINE_MS;
           await recoverInterruptedUpstreamCredentialLeases({
             db: ctx.db,
             tenantId,
             issuer: githubIssuer,
             exerciseToken: ctx.exerciseCredentialLeaseToken,
             auditedTransaction: ctx.withTenantAuditedTransaction,
+            deadlineAt,
+            databasePhase: runLeaseDatabasePhase,
+          });
+          const leased = await issueUpstreamCredentialLease({
+            db: ctx.db,
+            tenantId,
+            agentId,
+            workspaceId: leaseBody.workspaceId,
+            idempotencyKey,
+            ttlSeconds: leaseBody.ttlSeconds,
+            resource: leaseBody.resource,
+            resolved,
+            exerciseSecret: ctx.exerciseCredentialSecret,
+            sealToken: ctx.sealCredentialLeaseToken,
+            auditedTransaction: ctx.withTenantAuditedTransaction,
+            issuer: githubIssuer,
+            deadlineAt,
+            databasePhase: runLeaseDatabasePhase,
+          });
+          if (!leased.ok) {
+            return c.json<ApiResponse>({ ok: false, error: leased.error }, leased.status);
+          }
+          c.header("Cache-Control", "no-store, max-age=0");
+          c.header("Pragma", "no-cache");
+          return c.json<ApiResponse>({
+            ok: true,
+            data: {
+              mode: "token",
+              issuer: GITHUB_APP_LEASE_ISSUER,
+              leaseId: leased.leaseId,
+              token: leased.token,
+              acknowledgementRequired: true,
+              acknowledgementDeadlineSeconds: DELIVERY_ACK_TIMEOUT_MS / 1000,
+              expiresAt: leased.expiresAt,
+              resource: leased.resource,
+              manifest: manifestId,
+              capabilityId: resolved.capability.id,
+            },
           });
         } catch {
           return c.json<ApiResponse>({ ok: false, error: "credential lease recovery failed" }, 503);
         }
-        const leased = await issueUpstreamCredentialLease({
-          db: ctx.db,
-          tenantId,
-          agentId,
-          workspaceId: leaseBody.workspaceId,
-          idempotencyKey,
-          ttlSeconds: leaseBody.ttlSeconds,
-          resource: leaseBody.resource,
-          resolved,
-          exerciseSecret: ctx.exerciseCredentialSecret,
-          sealToken: ctx.sealCredentialLeaseToken,
-          auditedTransaction: ctx.withTenantAuditedTransaction,
-          issuer: githubIssuer,
-        });
-        if (!leased.ok) {
-          return c.json<ApiResponse>({ ok: false, error: leased.error }, leased.status);
-        }
-        c.header("Cache-Control", "no-store, max-age=0");
-        c.header("Pragma", "no-cache");
-        return c.json<ApiResponse>({
-          ok: true,
-          data: {
-            mode: "token",
-            issuer: GITHUB_APP_LEASE_ISSUER,
-            leaseId: leased.leaseId,
-            token: leased.token,
-            acknowledgementRequired: true,
-            acknowledgementDeadlineSeconds: DELIVERY_ACK_TIMEOUT_MS / 1000,
-            expiresAt: leased.expiresAt,
-            resource: leased.resource,
-            manifest: manifestId,
-            capabilityId: resolved.capability.id,
-          },
-        });
       }
 
       const result = await issueCapability({
@@ -332,6 +339,8 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
       token: body.token,
       issuer: githubIssuer,
       auditedTransaction: ctx.withTenantAuditedTransaction,
+      deadlineAt: Date.now() + UPSTREAM_LEASE_RUN_DEADLINE_MS,
+      databasePhase: runLeaseDatabasePhase,
     });
     if (!result.ok) return c.json<ApiResponse>({ ok: false, error: result.error }, result.status);
     c.header("Cache-Control", "no-store, max-age=0");
@@ -355,6 +364,8 @@ export function createManifestRoutes(ctx: StewardAppContext): Hono<{ Variables: 
       leaseId: c.req.param("leaseId"),
       token: body.token,
       auditedTransaction: ctx.withTenantAuditedTransaction,
+      deadlineAt: Date.now() + UPSTREAM_LEASE_RUN_DEADLINE_MS,
+      databasePhase: runLeaseDatabasePhase,
     });
     if (!result.ok) return c.json<ApiResponse>({ ok: false, error: result.error }, result.status);
     c.header("Cache-Control", "no-store, max-age=0");

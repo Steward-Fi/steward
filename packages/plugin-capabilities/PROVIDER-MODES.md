@@ -71,6 +71,24 @@ so token-mode issuance fails closed there; broker mode remains available. The
 long-lived server also refuses token-mode issuance when the sweeper is disabled
 or configured above 15 seconds (half of the delivery acknowledgement window).
 
+GitHub lease issue, acknowledgement, revoke, tenant recovery, and global
+recovery share one absolute deadline. Interactive delivery uses a 30-second
+wall-clock budget. The GitHub transport consumes at most 10 seconds of the
+remaining budget; database work receives only the time still available and a
+new provider or database phase is not started with less than 100ms remaining.
+
+For `postgres-js`, each bounded lifecycle phase owns a fresh, single-connection
+client. Connection establishment and acquisition are therefore included in the
+budget (there is no wait behind the process-wide pool), while PostgreSQL
+`statement_timeout` cancels reads and transaction statements server-side. If a
+callback is idle when its deadline expires, its dedicated connection is closed,
+so a later mutation cannot begin and the connection is never returned to a
+shared pool. A timed-out transaction finishes rollback before its promise
+rejects. For `neon-http`, the absolute deadline is carried by the request's
+`AbortSignal` and cancels a stalled Workers fetch. Both drivers expose only a
+fixed timeout error; SQL, parameters, hosts, and provider diagnostics are not
+included.
+
 ### broker mode
 ```
 POST /capabilities/manifest/discord:bot-token:soliza/issue

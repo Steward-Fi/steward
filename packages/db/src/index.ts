@@ -17,6 +17,7 @@ export {
   appendAuditEventWithinTx,
   redactWebhookSecrets,
   withTenantAuditedTransaction,
+  withTenantAuditedTransactionOnDb,
   withTenantAuditQueue,
   writeAuditEvent,
 } from "./audit-chain";
@@ -27,11 +28,13 @@ export {
   createDbForRequest,
   createNeonHttpDb,
   createPostgresClient,
+  DatabaseDeadlineExceededError,
   getDatabaseDriver,
   getDatabaseUrl,
   getDb,
   getSql,
   setPGLiteOverride,
+  withDatabaseDeadline,
 } from "./client";
 export { runMigrations } from "./migrate";
 export { getMigrationExpectation, type MigrationExpectation } from "./migration-status";

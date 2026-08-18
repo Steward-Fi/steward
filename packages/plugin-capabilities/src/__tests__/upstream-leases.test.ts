@@ -940,6 +940,30 @@ describe("upstream credential leases", () => {
     expect(oldest?.status).toBe("needs_attention");
   });
 
+  test("global recovery does not begin a database phase without the minimum budget", async () => {
+    let databasePhases = 0;
+    const result = await recoverAllInterruptedUpstreamCredentialLeases({
+      db: harness.db,
+      issuer: new FakeIssuer(),
+      exerciseToken,
+      auditedTransaction: auditedTransaction(),
+      deadlineAt: Date.now() + 50,
+      databasePhase: async (_deadlineAt, run) => {
+        databasePhases += 1;
+        return run(harness.db, auditedTransaction());
+      },
+    });
+    expect(databasePhases).toBe(0);
+    expect(result).toMatchObject({
+      tenants: 0,
+      unknown: 0,
+      revoked: 0,
+      attention: 0,
+      expired: 0,
+      remaining: true,
+    });
+  });
+
   test("global ordering chooses older expiry and authority deadlines before interrupted delivery", async () => {
     const issuer = new FakeIssuer();
     const expiring = await issueUpstreamCredentialLease(

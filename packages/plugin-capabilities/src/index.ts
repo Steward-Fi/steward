@@ -83,7 +83,10 @@ export type { CapabilitySpec } from "./store";
 export { AgentNotFoundError, CapabilityStore, GrantExistsError, isExpired } from "./store";
 export {
   type LeaseAuditedTransaction,
+  type LeaseDatabasePhase,
   recoverAllInterruptedUpstreamCredentialLeases,
+  runLeaseDatabasePhase,
+  UPSTREAM_LEASE_RUN_DEADLINE_MS,
 } from "./upstream-leases";
 export {
   createCapabilitySchema,

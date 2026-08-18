@@ -11,6 +11,8 @@ import {
   or,
   upstreamCredentialLeaseEvents,
   upstreamCredentialLeases,
+  withDatabaseDeadline,
+  withTenantAuditedTransactionOnDb,
 } from "@stwd/db";
 import { capabilities, capabilityGrants } from "./schema";
 
@@ -26,6 +28,8 @@ export const UPSTREAM_LEASE_AUTHORITY_RECHECK_INTERVAL_MS = MAX_UPSTREAM_LEASE_S
 const MAX_GITHUB_PERMISSION_COUNT = 100;
 const GITHUB_PERMISSION_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 const MAX_GITHUB_TOKEN_BYTES = 4096;
+export const UPSTREAM_LEASE_RUN_DEADLINE_MS = 30_000;
+export const MIN_UPSTREAM_LEASE_PHASE_BUDGET_MS = 100;
 
 export interface GitHubLeaseResource {
   repositories: string[];
@@ -43,13 +47,16 @@ export interface GitHubAppLeaseConfig {
 }
 
 export interface UpstreamTokenIssuer {
-  issue(input: {
-    appId: string;
-    installationId: string;
-    privateKeyPem: string;
-    resource: GitHubLeaseResource;
-  }): Promise<{ token: string; expiresAt: Date }>;
-  revoke(token: string): Promise<void>;
+  issue(
+    input: {
+      appId: string;
+      installationId: string;
+      privateKeyPem: string;
+      resource: GitHubLeaseResource;
+    },
+    options?: { deadlineAt?: number },
+  ): Promise<{ token: string; expiresAt: Date }>;
+  revoke(token: string, options?: { deadlineAt?: number }): Promise<void>;
 }
 
 export type ExerciseCredentialSecret = <T>(
@@ -79,7 +86,27 @@ export type LeaseAuditedTransaction = <T>(
   fn: (tx: Db, appendRequiredAudit: AppendRequiredAudit) => Promise<T>,
 ) => Promise<T>;
 
+export type LeaseDatabasePhase = <T>(
+  deadlineAt: number,
+  fn: (db: Db, auditedTransaction: LeaseAuditedTransaction) => Promise<T>,
+) => Promise<T>;
+
 type Db = any;
+
+export const runLeaseDatabasePhase: LeaseDatabasePhase = (deadlineAt, fn) =>
+  withDatabaseDeadline(deadlineAt, (db) =>
+    fn(db, (tenantId, callback) =>
+      withTenantAuditedTransactionOnDb(db, tenantId, callback as never, deadlineAt),
+    ),
+  );
+
+function leaseDeadline(deadlineAt?: number): number {
+  return deadlineAt ?? Date.now() + UPSTREAM_LEASE_RUN_DEADLINE_MS;
+}
+
+function hasPhaseBudget(deadlineAt: number): boolean {
+  return deadlineAt - Date.now() >= MIN_UPSTREAM_LEASE_PHASE_BUDGET_MS;
+}
 
 let beforeRecoveryClaimForTests: ((leaseId: string) => Promise<void>) | undefined;
 
@@ -498,7 +525,24 @@ export async function recoverInterruptedUpstreamCredentialLeases(input: {
   auditedTransaction: LeaseAuditedTransaction;
   now?: Date;
   limit?: number;
+  deadlineAt?: number;
+  databasePhase?: LeaseDatabasePhase;
 }): Promise<{ unknown: number; revoked: number; attention: number }> {
+  const deadlineAt = leaseDeadline(input.deadlineAt);
+  if (!hasPhaseBudget(deadlineAt)) {
+    throw new Error("credential lease deadline exceeded");
+  }
+  if (input.databasePhase) {
+    return input.databasePhase(deadlineAt, (db, auditedTransaction) =>
+      recoverInterruptedUpstreamCredentialLeases({
+        ...input,
+        db,
+        auditedTransaction,
+        deadlineAt,
+        databasePhase: undefined,
+      }),
+    );
+  }
   const now = input.now ?? new Date();
   const cutoff = new Date(now.getTime() - DELIVERY_ACK_TIMEOUT_MS);
   const limit = Math.max(1, Math.min(input.limit ?? 100, 500));
@@ -553,6 +597,7 @@ export async function recoverInterruptedUpstreamCredentialLeases(input: {
       auditedTransaction: input.auditedTransaction,
       now,
       mode: "authority_teardown",
+      deadlineAt,
     });
     if (result.ok) revoked += result.revoked;
     else attention += 1;
@@ -646,6 +691,7 @@ export async function recoverInterruptedUpstreamCredentialLeases(input: {
       now,
       mode: "stale_recovery",
       staleCutoff: cutoff,
+      deadlineAt,
     });
     if (result.ok) revoked += result.revoked;
     else attention += 1;
@@ -669,6 +715,7 @@ async function recoverOneDueLease(input: {
   auditedTransaction: LeaseAuditedTransaction;
   now: Date;
   cutoff: Date;
+  deadlineAt: number;
 }): Promise<RecoveryTotals> {
   const { lease } = input;
   if (lease.status === "issuing") {
@@ -723,6 +770,7 @@ async function recoverOneDueLease(input: {
     now: input.now,
     mode: "stale_recovery",
     staleCutoff: input.cutoff,
+    deadlineAt: input.deadlineAt,
   });
   return result.ok
     ? { unknown: 0, revoked: result.revoked, attention: 0 }
@@ -736,6 +784,7 @@ async function recoverOneActiveLease(input: {
   exerciseToken: ExerciseLeaseToken;
   auditedTransaction: LeaseAuditedTransaction;
   now: Date;
+  deadlineAt: number;
 }): Promise<RecoveryTotals> {
   const { lease } = input;
   const live = await readLiveLeaseAuthority(
@@ -775,6 +824,7 @@ async function recoverOneActiveLease(input: {
     auditedTransaction: input.auditedTransaction,
     now: input.now,
     mode: "authority_teardown",
+    deadlineAt: input.deadlineAt,
   });
   return result.ok
     ? { unknown: 0, revoked: result.revoked, attention: 0 }
@@ -826,7 +876,7 @@ async function mapWithDeadline<T>(input: {
   let cursor = 0;
   let started = 0;
   const worker = async () => {
-    while (Date.now() < input.deadlineAt) {
+    while (hasPhaseBudget(input.deadlineAt)) {
       const index = cursor++;
       const item = input.items[index];
       if (item === undefined) return;
@@ -855,6 +905,8 @@ export async function recoverAllInterruptedUpstreamCredentialLeases(input: {
   concurrency?: number;
   /** Stop claiming new work after this wall-clock budget; already claimed work is awaited. */
   runDeadlineMs?: number;
+  deadlineAt?: number;
+  databasePhase?: LeaseDatabasePhase;
 }): Promise<{
   tenants: number;
   unknown: number;
@@ -863,13 +915,38 @@ export async function recoverAllInterruptedUpstreamCredentialLeases(input: {
   expired: number;
   remaining: boolean;
 }> {
+  const requestedRunDeadlineMs = Math.max(
+    100,
+    Math.min(input.runDeadlineMs ?? 5_000, UPSTREAM_LEASE_RUN_DEADLINE_MS),
+  );
+  const outerDeadlineAt = input.deadlineAt ?? Date.now() + requestedRunDeadlineMs;
+  if (!hasPhaseBudget(outerDeadlineAt)) {
+    return {
+      tenants: 0,
+      unknown: 0,
+      revoked: 0,
+      attention: 0,
+      expired: 0,
+      remaining: true,
+    };
+  }
+  if (input.databasePhase) {
+    return input.databasePhase(outerDeadlineAt, (db, auditedTransaction) =>
+      recoverAllInterruptedUpstreamCredentialLeases({
+        ...input,
+        db,
+        auditedTransaction,
+        deadlineAt: outerDeadlineAt,
+        databasePhase: undefined,
+      }),
+    );
+  }
   const now = input.now ?? new Date();
   const cutoff = new Date(now.getTime() - DELIVERY_ACK_TIMEOUT_MS);
   const authorityCutoff = new Date(now.getTime() - UPSTREAM_LEASE_AUTHORITY_RECHECK_INTERVAL_MS);
   const workLimit = Math.max(1, Math.min(input.workLimit ?? 500, 2_000));
   const concurrency = Math.max(1, Math.min(input.concurrency ?? 16, 64));
-  const runDeadlineMs = Math.max(100, Math.min(input.runDeadlineMs ?? 5_000, 10_000));
-  const deadlineAt = Date.now() + runDeadlineMs;
+  const deadlineAt = outerDeadlineAt;
   // Pull at most one global page from each independently indexed deadline
   // class, then merge them by their actual recovery deadline. Fetching
   // workLimit + 1 from each class is sufficient to identify the global first
@@ -978,8 +1055,8 @@ export async function recoverAllInterruptedUpstreamCredentialLeases(input: {
         } else {
           const recovered =
             candidate.phase === "interrupted"
-              ? await recoverOneDueLease({ ...input, lease, now, cutoff })
-              : await recoverOneActiveLease({ ...input, lease, now });
+              ? await recoverOneDueLease({ ...input, lease, now, cutoff, deadlineAt })
+              : await recoverOneActiveLease({ ...input, lease, now, deadlineAt });
           totals.unknown += recovered.unknown;
           totals.revoked += recovered.revoked;
           totals.attention += recovered.attention;
@@ -1012,7 +1089,38 @@ export async function issueUpstreamCredentialLease(input: {
   auditedTransaction: LeaseAuditedTransaction;
   issuer: UpstreamTokenIssuer;
   now?: Date;
+  deadlineAt?: number;
+  databasePhase?: LeaseDatabasePhase;
 }): Promise<LeaseIssueResult> {
+  const deadlineAt = leaseDeadline(input.deadlineAt);
+  if (!hasPhaseBudget(deadlineAt)) {
+    return {
+      ok: false,
+      status: 503,
+      code: "lease_deadline_exceeded",
+      error: "credential lease deadline exceeded",
+    };
+  }
+  if (input.databasePhase) {
+    try {
+      return await input.databasePhase(deadlineAt, (db, auditedTransaction) =>
+        issueUpstreamCredentialLease({
+          ...input,
+          db,
+          auditedTransaction,
+          deadlineAt,
+          databasePhase: undefined,
+        }),
+      );
+    } catch {
+      return {
+        ok: false,
+        status: 503,
+        code: "lease_store_unavailable",
+        error: "credential lease store unavailable",
+      };
+    }
+  }
   try {
     await expireUpstreamCredentialLeases({
       db: input.db,
@@ -1140,12 +1248,15 @@ export async function issueUpstreamCredentialLease(input: {
       input.tenantId,
       input.resolved.capability.secretId,
       async (privateKeyPem) =>
-        input.issuer.issue({
-          appId: config.appId,
-          installationId: config.installationId,
-          privateKeyPem,
-          resource,
-        }),
+        input.issuer.issue(
+          {
+            appId: config.appId,
+            installationId: config.installationId,
+            privateKeyPem,
+            resource,
+          },
+          { deadlineAt },
+        ),
     );
   } catch {
     await recordFailure(
@@ -1167,7 +1278,7 @@ export async function issueUpstreamCredentialLease(input: {
   try {
     sealed = await input.sealToken(input.tenantId, claim.id, issued.token);
   } catch {
-    const revoked = await input.issuer.revoke(issued.token).then(
+    const revoked = await input.issuer.revoke(issued.token, { deadlineAt }).then(
       () => true,
       () => false,
     );
@@ -1213,7 +1324,7 @@ export async function issueUpstreamCredentialLease(input: {
       // A storage outage must not prevent the only in-frame cleanup attempt.
       // If provider revocation is also ambiguous, make one final durable escrow
       // attempt and otherwise propagate rather than pretending cleanup worked.
-      const revoked = await input.issuer.revoke(issued.token).then(
+      const revoked = await input.issuer.revoke(issued.token, { deadlineAt }).then(
         () => true,
         () => false,
       );
@@ -1245,7 +1356,7 @@ export async function issueUpstreamCredentialLease(input: {
         error: "upstream issuer returned an invalid credential",
       };
     }
-    const revoked = await input.issuer.revoke(issued.token).then(
+    const revoked = await input.issuer.revoke(issued.token, { deadlineAt }).then(
       () => true,
       () => false,
     );
@@ -1349,7 +1460,7 @@ export async function issueUpstreamCredentialLease(input: {
       );
     });
     if (authorityInvalidated) {
-      const revoked = await input.issuer.revoke(issued.token).then(
+      const revoked = await input.issuer.revoke(issued.token, { deadlineAt }).then(
         () => true,
         () => false,
       );
@@ -1385,7 +1496,7 @@ export async function issueUpstreamCredentialLease(input: {
     // The token only exists in this frame. If durable finalization fails, revoke
     // it before dropping the reference; a hard kill inside this tiny boundary is
     // the documented provider-lifetime precommit-orphan case.
-    const revoked = await input.issuer.revoke(issued.token).then(
+    const revoked = await input.issuer.revoke(issued.token, { deadlineAt }).then(
       () => true,
       () => false,
     );
@@ -1457,7 +1568,28 @@ export async function acknowledgeUpstreamCredentialLease(input: {
   token: string;
   auditedTransaction: LeaseAuditedTransaction;
   now?: Date;
+  deadlineAt?: number;
+  databasePhase?: LeaseDatabasePhase;
 }): Promise<{ ok: true } | { ok: false; status: 403 | 404 | 409 | 503; error: string }> {
+  const deadlineAt = leaseDeadline(input.deadlineAt);
+  if (!hasPhaseBudget(deadlineAt)) {
+    return { ok: false, status: 503, error: "credential lease deadline exceeded" };
+  }
+  if (input.databasePhase) {
+    try {
+      return await input.databasePhase(deadlineAt, (db, auditedTransaction) =>
+        acknowledgeUpstreamCredentialLease({
+          ...input,
+          db,
+          auditedTransaction,
+          deadlineAt,
+          databasePhase: undefined,
+        }),
+      );
+    } catch {
+      return { ok: false, status: 503, error: "credential lease store unavailable" };
+    }
+  }
   const now = input.now ?? new Date();
   const [lease] = await input.db
     .select()
@@ -1565,7 +1697,28 @@ export async function revokeUpstreamCredentialLease(input: {
   issuer: UpstreamTokenIssuer;
   auditedTransaction: LeaseAuditedTransaction;
   now?: Date;
+  deadlineAt?: number;
+  databasePhase?: LeaseDatabasePhase;
 }): Promise<{ ok: true } | { ok: false; status: 403 | 404 | 409 | 503; error: string }> {
+  const deadlineAt = leaseDeadline(input.deadlineAt);
+  if (!hasPhaseBudget(deadlineAt)) {
+    return { ok: false, status: 503, error: "credential lease deadline exceeded" };
+  }
+  if (input.databasePhase) {
+    try {
+      return await input.databasePhase(deadlineAt, (db, auditedTransaction) =>
+        revokeUpstreamCredentialLease({
+          ...input,
+          db,
+          auditedTransaction,
+          deadlineAt,
+          databasePhase: undefined,
+        }),
+      );
+    } catch {
+      return { ok: false, status: 503, error: "credential lease store unavailable" };
+    }
+  }
   const now = input.now ?? new Date();
   const [lease] = await input.db
     .select()
@@ -1648,7 +1801,7 @@ export async function revokeUpstreamCredentialLease(input: {
     .returning({ id: upstreamCredentialLeases.id });
   if (!claimed) return { ok: false, status: 409, error: "lease is not active" };
   try {
-    await input.issuer.revoke(input.token);
+    await input.issuer.revoke(input.token, { deadlineAt });
   } catch {
     await input
       .auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {
@@ -1754,6 +1907,7 @@ async function revokeExactSealedLease(input: {
   now: Date;
   mode?: "authority_teardown" | "stale_recovery";
   staleCutoff?: Date;
+  deadlineAt?: number;
 }): Promise<{ ok: true; revoked: number } | { ok: false; error: string }> {
   const sealed = sealedTokenFromLease(input.lease);
   if (!sealed) {
@@ -1842,7 +1996,7 @@ async function revokeExactSealedLease(input: {
   }
   try {
     await input.exerciseToken(input.tenantId, input.lease.id, sealed, (token) =>
-      input.issuer.revoke(token),
+      input.issuer.revoke(token, { deadlineAt: input.deadlineAt }),
     );
   } catch {
     await input.auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {

@@ -36,6 +36,39 @@ declare const process: {
 
 export type DatabaseDriver = "postgres-js" | "neon-http";
 
+export class DatabaseDeadlineExceededError extends Error {
+  readonly code = "database_deadline_exceeded";
+
+  constructor() {
+    super("database operation timed out");
+    this.name = "DatabaseDeadlineExceededError";
+  }
+}
+
+export type DeadlineDb = ReturnType<typeof createDb>["db"];
+
+const MIN_DATABASE_DEADLINE_MS = 25;
+const MAX_DATABASE_DEADLINE_MS = 30_000;
+
+function checkedDeadlineMs(deadlineAt: number): number {
+  if (!Number.isFinite(deadlineAt)) throw new DatabaseDeadlineExceededError();
+  const remaining = Math.floor(deadlineAt - Date.now());
+  if (remaining < MIN_DATABASE_DEADLINE_MS) throw new DatabaseDeadlineExceededError();
+  return Math.min(remaining, MAX_DATABASE_DEADLINE_MS);
+}
+
+function isDatabaseTimeout(error: unknown): boolean {
+  if (error instanceof DatabaseDeadlineExceededError) return true;
+  if (!error || typeof error !== "object") return false;
+  const value = error as { name?: unknown; code?: unknown };
+  return (
+    value.name === "AbortError" ||
+    value.name === "TimeoutError" ||
+    value.code === "57014" ||
+    value.code === "CONNECT_TIMEOUT"
+  );
+}
+
 const FULL_SCHEMA = { ...schema, ...schemaAuth };
 type FullSchema = typeof FULL_SCHEMA;
 
@@ -131,11 +164,17 @@ export function assertDatabaseUrlTls(connectionString: string): void {
   );
 }
 
-export function createPostgresClient(connectionString = getDatabaseUrl()) {
+export function createPostgresClient(
+  connectionString = getDatabaseUrl(),
+  options: { max?: number; connectTimeoutSeconds?: number } = {},
+) {
   assertDatabaseUrlTls(connectionString);
   return postgres(connectionString, {
-    max: 10,
+    max: options.max ?? 10,
     prepare: false,
+    ...(options.connectTimeoutSeconds === undefined
+      ? {}
+      : { connect_timeout: options.connectTimeoutSeconds }),
   });
 }
 
@@ -157,14 +196,98 @@ export function createDb(connectionString = getDatabaseUrl()) {
  * Each call returns a fresh client; for per-request use this is intentional —
  * the underlying transport is HTTP, so there is no TCP connection to reuse.
  */
-export function createNeonHttpDb(connectionString = getDatabaseUrl()) {
+export function createNeonHttpDb(
+  connectionString = getDatabaseUrl(),
+  options: { signal?: AbortSignal } = {},
+) {
   assertDatabaseUrlTls(connectionString);
   // Lazy-require so Bun/Node entry points don't pull @neondatabase/serverless
   // into their bundle when the postgres-js driver is in use.
-  const { neon } = require("@neondatabase/serverless") as { neon: (url: string) => any };
-  const client = neon(connectionString);
+  const { neon } = require("@neondatabase/serverless") as {
+    neon: (url: string, options?: { fetchOptions?: Record<string, unknown> }) => any;
+  };
+  const client = neon(connectionString, {
+    fetchOptions: {
+      ...(options.signal ? { signal: options.signal } : {}),
+    },
+  });
   const db = drizzleNeon(client, { schema: FULL_SCHEMA });
   return { client, db };
+}
+
+/**
+ * Run a database phase inside a cancel-safe wall-clock deadline.
+ *
+ * postgres-js uses a fresh single-connection client for each bounded phase.
+ * Its connect timeout therefore covers connection establishment/acquisition,
+ * while PostgreSQL's server-enforced `statement_timeout` cancels statements.
+ * Drizzle transactions opened by the callback inherit that server timeout;
+ * postgres-js observes the cancellation and completes rollback before the
+ * transaction promise rejects.
+ *
+ * neon-http has no pooled connection to acquire. Its per-phase AbortSignal is
+ * passed to the actual fetch request and the timer is kept alive until the
+ * request has settled. A timeout is always normalized and never exposes SQL,
+ * parameters, hosts, or provider diagnostics.
+ */
+export async function withDatabaseDeadline<T>(
+  deadlineAt: number,
+  fn: (db: DeadlineDb) => Promise<T>,
+  options: {
+    driver?: DatabaseDriver;
+    connectionString?: string;
+  } = {},
+): Promise<T> {
+  const budgetMs = checkedDeadlineMs(deadlineAt);
+  const driver = options.driver ?? getDatabaseDriver();
+  const connectionString = options.connectionString ?? getDatabaseUrl();
+
+  if (driver === "neon-http") {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), budgetMs);
+    try {
+      const { db } = createNeonHttpDb(connectionString, {
+        signal: controller.signal,
+      });
+      return await fn(db as unknown as DeadlineDb);
+    } catch (error) {
+      if (controller.signal.aborted || isDatabaseTimeout(error)) {
+        throw new DatabaseDeadlineExceededError();
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  const client = createPostgresClient(connectionString, {
+    max: 1,
+    connectTimeoutSeconds: Math.max(0.025, budgetMs / 1_000),
+  });
+  let expired = false;
+  const timer = setTimeout(() => {
+    expired = true;
+    // This client is dedicated to the bounded phase and is never returned to a
+    // shared pool. Closing it cancels any in-flight statement and makes a later
+    // query fail immediately if the callback was idle when the deadline hit.
+    void client.end({ timeout: 0 }).catch(() => undefined);
+  }, budgetMs);
+  try {
+    const remainingMs = checkedDeadlineMs(deadlineAt);
+    // max:1 makes this setup query acquire the only connection. Every later
+    // query/transaction in fn uses that same session and inherits the timeout.
+    await client`select set_config('statement_timeout', ${`${remainingMs}ms`}, false)`;
+    const db = drizzlePostgres(client, { schema: FULL_SCHEMA });
+    return await fn(db as unknown as DeadlineDb);
+  } catch (error) {
+    if (expired || Date.now() >= deadlineAt || isDatabaseTimeout(error)) {
+      throw new DatabaseDeadlineExceededError();
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    await client.end({ timeout: 1 }).catch(() => undefined);
+  }
 }
 
 /**

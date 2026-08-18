@@ -25,7 +25,7 @@
 import { createHmac } from "node:crypto";
 import { observeSecurityAuditEvent } from "@stwd/shared";
 import { sql } from "drizzle-orm";
-import { getDb } from "./client";
+import { DatabaseDeadlineExceededError, getDb } from "./client";
 
 const ZERO_HASH = new Uint8Array(32);
 
@@ -263,21 +263,51 @@ const tenantAuditQueues = new Map<string, Promise<void>>();
  * guarantee and also gates the real-Postgres advisory-lock acquisition so
  * concurrent appends within one process cannot interleave the seq read/insert.
  */
-export async function withTenantAuditQueue<T>(tenantId: string, fn: () => Promise<T>): Promise<T> {
+export async function withTenantAuditQueue<T>(
+  tenantId: string,
+  fn: () => Promise<T>,
+  deadlineAt?: number,
+): Promise<T> {
   const prior = tenantAuditQueues.get(tenantId) ?? Promise.resolve();
-  const run = prior.catch(() => undefined).then(fn);
+  let cancelled = false;
+  const run = prior
+    .catch(() => undefined)
+    .then(() => {
+      if (cancelled || (deadlineAt !== undefined && Date.now() >= deadlineAt)) {
+        throw new DatabaseDeadlineExceededError();
+      }
+      return fn();
+    });
   const tail = run.then(
     () => undefined,
     () => undefined,
   );
   tenantAuditQueues.set(tenantId, tail);
-
-  try {
-    return await run;
-  } finally {
+  void tail.then(() => {
     if (tenantAuditQueues.get(tenantId) === tail) {
       tenantAuditQueues.delete(tenantId);
     }
+  });
+  if (deadlineAt === undefined) return run;
+
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) {
+    cancelled = true;
+    throw new DatabaseDeadlineExceededError();
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      cancelled = true;
+      reject(new DatabaseDeadlineExceededError());
+    }, remainingMs);
+  });
+  try {
+    // Racing is safe here because cancellation is checked before fn can begin;
+    // no database mutation is abandoned after it starts.
+    return await Promise.race([run, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -462,44 +492,58 @@ export async function withTenantAuditedTransaction<T>(
 ): Promise<T> {
   const db = getDb();
 
-  return withTenantAuditQueue(tenantId, async () => {
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        const committedEvents: AuditEventInput[] = [];
-        const result = await db.transaction(async (tx) => {
-          if (!isPGLiteRuntime()) {
-            await tx.execute(
-              sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_audit_${tenantId}`}, 0))`,
-            );
-          }
-          const appendRequiredAudit: AppendRequiredAudit = async (event) => {
-            if (event.tenantId !== tenantId) {
-              throw new Error(
-                "withTenantAuditedTransaction: audit event tenant does not match transaction tenant",
+  return withTenantAuditedTransactionOnDb(db, tenantId, fn);
+}
+
+/** Deadline-aware variant used when the caller owns a bounded database handle. */
+export async function withTenantAuditedTransactionOnDb<T>(
+  db: ReturnType<typeof getDb>,
+  tenantId: string,
+  fn: (tx: unknown, appendRequiredAudit: AppendRequiredAudit) => Promise<T>,
+  deadlineAt?: number,
+): Promise<T> {
+  return withTenantAuditQueue(
+    tenantId,
+    async () => {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          const committedEvents: AuditEventInput[] = [];
+          const result = await db.transaction(async (tx) => {
+            if (!isPGLiteRuntime()) {
+              await tx.execute(
+                sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_audit_${tenantId}`}, 0))`,
               );
             }
-            await appendAuditEventWithinTx(tx as AuditTxLike, event);
-            committedEvents.push(event);
-          };
-          return await fn(tx, appendRequiredAudit);
-        });
-        for (const event of committedEvents) {
-          try {
-            observeSecurityAuditEvent(event.action, event.metadata);
-          } catch {
-            // Monitoring must never become part of the security decision path.
+            const appendRequiredAudit: AppendRequiredAudit = async (event) => {
+              if (event.tenantId !== tenantId) {
+                throw new Error(
+                  "withTenantAuditedTransaction: audit event tenant does not match transaction tenant",
+                );
+              }
+              await appendAuditEventWithinTx(tx as AuditTxLike, event);
+              committedEvents.push(event);
+            };
+            return await fn(tx, appendRequiredAudit);
+          });
+          for (const event of committedEvents) {
+            try {
+              observeSecurityAuditEvent(event.action, event.metadata);
+            } catch {
+              // Monitoring must never become part of the security decision path.
+            }
           }
+          return result;
+        } catch (err) {
+          if (attempt < 4 && isAuditSequenceConflict(err)) {
+            await new Promise((resolve) => setTimeout(resolve, 5 * (attempt + 1)));
+            continue;
+          }
+          throw err;
         }
-        return result;
-      } catch (err) {
-        if (attempt < 4 && isAuditSequenceConflict(err)) {
-          await new Promise((resolve) => setTimeout(resolve, 5 * (attempt + 1)));
-          continue;
-        }
-        throw err;
       }
-    }
-    // Unreachable: the loop either returns or throws.
-    throw new Error("withTenantAuditedTransaction: exhausted retries");
-  });
+      // Unreachable: the loop either returns or throws.
+      throw new Error("withTenantAuditedTransaction: exhausted retries");
+    },
+    deadlineAt,
+  );
 }

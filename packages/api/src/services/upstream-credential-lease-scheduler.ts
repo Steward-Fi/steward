@@ -40,8 +40,11 @@ export function getUpstreamCredentialLeaseSchedulerHealth(
 }
 
 export async function runUpstreamCredentialLeaseSweep() {
-  const { GitHubAppInstallationTokenIssuer, recoverAllInterruptedUpstreamCredentialLeases } =
-    await import("@stwd/plugin-capabilities");
+  const {
+    GitHubAppInstallationTokenIssuer,
+    recoverAllInterruptedUpstreamCredentialLeases,
+    runLeaseDatabasePhase,
+  } = await import("@stwd/plugin-capabilities");
   const { buildPluginContext } = await import("../plugin");
   const ctx = buildPluginContext();
   if (!ctx.exerciseCredentialLeaseToken) {
@@ -52,6 +55,7 @@ export async function runUpstreamCredentialLeaseSweep() {
     issuer: new GitHubAppInstallationTokenIssuer(),
     exerciseToken: ctx.exerciseCredentialLeaseToken,
     auditedTransaction: ctx.withTenantAuditedTransaction,
+    databasePhase: runLeaseDatabasePhase,
   });
 }
 
