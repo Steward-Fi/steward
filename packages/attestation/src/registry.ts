@@ -48,9 +48,10 @@ export interface RegistryVerificationOptions {
   minimumUpdatedAt?: string;
   /**
    * Explicitly accept a registry with no pinned trust anchor. Without
-   * trustedKeyIds/trustedPublicKeySha256 any tampered file can simply be
-   * re-signed with an attacker key, so unpinned verification fails closed
-   * unless this flag is set. Local development only.
+   * trustedPublicKeySha256 any tampered file can simply be re-signed with an
+   * attacker key. Key ids are registry-controlled selectors, not trust
+   * anchors. Unpinned verification fails closed unless this flag is set.
+   * Local development only.
    */
   dangerouslyAllowUnpinned?: boolean;
 }
@@ -112,16 +113,22 @@ export function verifyRegistrySignatures(
     }
   }
 
-  const trustedIds = trustedKeyIds ? new Set(trustedKeyIds) : undefined;
-  const trustedFingerprints = trustedPublicKeySha256 ? new Set(trustedPublicKeySha256) : undefined;
+  const trustedIds = trustedKeyIds?.length ? new Set(trustedKeyIds) : undefined;
+  const trustedFingerprints = trustedPublicKeySha256?.length
+    ? new Set(trustedPublicKeySha256.map((fingerprint) => fingerprint.toLowerCase()))
+    : undefined;
   // SEC-027: with no pinned trust anchor the signature check is pure ceremony
   // — anyone can re-sign a tampered registry — so fail closed unless the
   // caller explicitly opts into unpinned verification.
-  if (!trustedIds && !trustedFingerprints && !options?.dangerouslyAllowUnpinned) {
+  // keyId is metadata inside the attacker-controlled registry file, not a
+  // cryptographic identity. It may narrow a fingerprint-pinned key set, but
+  // can never establish trust by itself: an attacker can reuse an allowed id
+  // with a newly generated key and re-sign a modified payload.
+  if (!trustedFingerprints && !options?.dangerouslyAllowUnpinned) {
     return {
       ok: false,
       reason:
-        "no registry trust anchor configured: pass trustedKeyIds or trustedPublicKeySha256 " +
+        "no cryptographic registry trust anchor configured: pass trustedPublicKeySha256 " +
         "(or dangerouslyAllowUnpinned for local development only)",
     };
   }
@@ -148,13 +155,24 @@ export function verifyRegistrySignatures(
   const validKeyFingerprints = new Set<string>();
   for (const signature of candidateSignatures) {
     if (signature.algorithm !== "ed25519") continue;
-    const valid = verifySignature(
-      null,
-      payload,
-      createPublicKey(signature.publicKeyPem),
-      Buffer.from(signature.signatureBase64, "base64"),
-    );
-    if (valid) validKeyFingerprints.add(publicKeyFingerprint(signature.publicKeyPem));
+    try {
+      const publicKey = createPublicKey(signature.publicKeyPem);
+      const valid = verifySignature(
+        null,
+        payload,
+        publicKey,
+        Buffer.from(signature.signatureBase64, "base64"),
+      );
+      // Count the canonical SPKI key, not textual PEM formatting. Re-wrapping
+      // one PEM must not turn one signing key into two quorum participants.
+      if (valid) {
+        const spki = publicKey.export({ type: "spki", format: "der" });
+        validKeyFingerprints.add(createHash("sha256").update(spki).digest("hex"));
+      }
+    } catch {
+      // A malformed attacker-supplied key is an invalid signature candidate,
+      // not an exception that may crash the verifier process.
+    }
   }
   const validCount = validKeyFingerprints.size;
 
