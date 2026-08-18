@@ -176,11 +176,8 @@ RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/plugin-trading    node_modules/@stwd/plugin-trading && \
     ln -sf ../../../packages/plugin-wxmr       node_modules/@stwd/plugin-wxmr && \
     ln -sf ../../../packages/provider-github   node_modules/@stwd/provider-github && \
-<<<<<<< HEAD
     ln -sf ../../../packages/provider-slack    node_modules/@stwd/provider-slack && \
-=======
     ln -sf ../../../packages/provider-google   node_modules/@stwd/provider-google && \
->>>>>>> 918f2ed7 (fix(ci): wire Google provider into production build)
     ln -sf ../../../packages/provider-x         node_modules/@stwd/provider-x && \
     ln -sf ../../../packages/proxy-client      node_modules/@stwd/proxy-client && \
     ln -sf ../../../packages/trade-sessions    node_modules/@stwd/trade-sessions && \
