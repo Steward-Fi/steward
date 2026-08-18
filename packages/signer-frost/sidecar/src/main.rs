@@ -149,8 +149,10 @@ struct ShareState {
     key_package: KeyPackage,
     pubkey_package: PublicKeyPackage,
     identifier: Identifier,
-    // Nonces are single-use and kept per commit round, keyed by nonce id.
-    nonces: BTreeMap<String, frost::round1::SigningNonces>,
+    // Nonces are single-use and kept per commit round, keyed by the numeric
+    // nonce counter (nonce ids on the wire are "n<counter>"). BTreeMap order
+    // is ascending counter, so the front entry is the oldest parked round.
+    nonces: BTreeMap<u64, frost::round1::SigningNonces>,
     next_nonce_id: u64,
     // SEC-025: per-share bearer token authenticating the coordinator.
     auth_token: String,
@@ -296,18 +298,24 @@ fn handle(state: &mut ShareState, method: &str, url: &str, body: &str) -> (u16, 
                 .to_string(),
         ),
         ("POST", "/commit") => {
+            // SEC-083 bounds the map; the re-audit follow-up: a hard 429 at
+            // the cap let an authenticated coordinator park 1024 rounds
+            // forever and wedge the signer (availability). Evict the oldest
+            // parked round instead — its /sign will fail closed with
+            // "unknown or reused nonce_id", and an evicted unused nonce is
+            // never signed with, so FROST nonce-reuse safety is preserved.
             if state.nonces.len() >= MAX_PENDING_NONCES {
-                return (429, err_json("too many outstanding commit rounds"));
+                state.nonces.pop_first();
             }
             let mut rng = OsRng;
             let (nonces, commitments) =
                 frost::round1::commit(state.key_package.signing_share(), &mut rng);
-            let nonce_id = format!("n{}", state.next_nonce_id);
+            let nonce_id = state.next_nonce_id;
             state.next_nonce_id += 1;
-            state.nonces.insert(nonce_id.clone(), nonces);
+            state.nonces.insert(nonce_id, nonces);
             let resp = CommitResponse {
                 identifier_hex: hex::encode(state.identifier.serialize()),
-                nonce_id,
+                nonce_id: format!("n{nonce_id}"),
                 commitments_hex: hex::encode(commitments.serialize().expect("ser commitments")),
             };
             (200, serde_json::to_string(&resp).unwrap())
@@ -347,7 +355,11 @@ fn handle(state: &mut ShareState, method: &str, url: &str, body: &str) -> (u16, 
                 Ok(r) => r,
                 Err(e) => return (400, err_json(&format!("bad /sign body: {e}"))),
             };
-            let nonces = match state.nonces.remove(&req.nonce_id) {
+            let nonce_key = req
+                .nonce_id
+                .strip_prefix('n')
+                .and_then(|suffix| suffix.parse::<u64>().ok());
+            let nonces = match nonce_key.and_then(|key| state.nonces.remove(&key)) {
                 Some(n) => n,
                 None => return (400, err_json("unknown or reused nonce_id")),
             };
@@ -492,5 +504,120 @@ fn main() {
             eprintln!("usage: frost-signer <keygen|share> ...");
             std::process::exit(2);
         }
+    }
+}
+
+// --------------------------------- tests ------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_state() -> ShareState {
+        let rng = OsRng;
+        let (shares, pubkey_package) = frost::keys::generate_with_dealer(
+            2,
+            2,
+            frost::keys::IdentifierList::Default,
+            rng,
+        )
+        .expect("trusted-dealer keygen");
+        let (identifier, secret_share) = shares.into_iter().next().expect("one share");
+        let key_package = KeyPackage::try_from(secret_share).expect("share -> key package");
+        ShareState {
+            key_package,
+            pubkey_package,
+            identifier,
+            nonces: BTreeMap::new(),
+            next_nonce_id: 0,
+            auth_token: "test-token".to_string(),
+        }
+    }
+
+    fn commit(state: &mut ShareState) -> (u16, String) {
+        let (code, payload) = handle(state, "POST", "/commit", "");
+        let nonce_id = serde_json::from_str::<serde_json::Value>(&payload)
+            .expect("commit response json")["nonce_id"]
+            .as_str()
+            .expect("nonce_id string")
+            .to_string();
+        (code, nonce_id)
+    }
+
+    // Re-audit: the bare 429 cap let an authenticated coordinator park
+    // MAX_PENDING_NONCES rounds forever and wedge the share service. /commit
+    // must evict the oldest parked round instead of refusing new rounds.
+    #[test]
+    fn commit_evicts_oldest_parked_round_at_the_cap() {
+        let mut state = test_state();
+        for expected in 0..MAX_PENDING_NONCES {
+            let (code, nonce_id) = commit(&mut state);
+            assert_eq!(code, 200);
+            assert_eq!(nonce_id, format!("n{expected}"));
+        }
+        assert_eq!(state.nonces.len(), MAX_PENDING_NONCES);
+
+        // One more commit: succeeds, evicts the oldest round ("n0"), keeps the
+        // map bounded at the cap.
+        let (code, nonce_id) = commit(&mut state);
+        assert_eq!(code, 200);
+        assert_eq!(nonce_id, format!("n{}", MAX_PENDING_NONCES));
+        assert_eq!(state.nonces.len(), MAX_PENDING_NONCES);
+        assert!(!state.nonces.contains_key(&0));
+        assert!(state.nonces.contains_key(&(MAX_PENDING_NONCES as u64)));
+
+        // The evicted round fails closed if the coordinator tries to use it.
+        let (code, payload) = handle(
+            &mut state,
+            "POST",
+            "/sign",
+            &serde_json::json!({ "signing_package_hex": "00", "nonce_id": "n0" }).to_string(),
+        );
+        assert_eq!(code, 400);
+        assert!(payload.contains("unknown or reused nonce_id"));
+    }
+
+    // The nonce id wire format ("n<counter>") round-trips: a parked round is
+    // consumed exactly once by /sign, and unknown or malformed ids fail closed.
+    #[test]
+    fn sign_consumes_a_parked_round_exactly_once() {
+        let mut state = test_state();
+        let (code, nonce_id) = commit(&mut state);
+        assert_eq!(code, 200);
+        assert_eq!(nonce_id, "n0");
+
+        for bad_id in ["n9", "garbage", ""] {
+            let (code, payload) = handle(
+                &mut state,
+                "POST",
+                "/sign",
+                &serde_json::json!({ "signing_package_hex": "00", "nonce_id": bad_id })
+                    .to_string(),
+            );
+            assert_eq!(code, 400, "nonce id {bad_id:?} must fail closed");
+            assert!(payload.contains("unknown or reused nonce_id"));
+        }
+
+        // The parked round is consumed on first use (here failing only on the
+        // deliberately invalid package, AFTER the nonce lookup succeeded) and
+        // cannot be replayed.
+        let (code, payload) = handle(
+            &mut state,
+            "POST",
+            "/sign",
+            &serde_json::json!({ "signing_package_hex": "00", "nonce_id": "n0" }).to_string(),
+        );
+        assert_eq!(code, 400);
+        assert!(payload.contains("bad signing_package_hex"));
+        assert!(!state.nonces.contains_key(&0));
+
+        let (code, payload) = handle(
+            &mut state,
+            "POST",
+            "/sign",
+            &serde_json::json!({ "signing_package_hex": "00", "nonce_id": "n0" }).to_string(),
+        );
+        assert_eq!(code, 400);
+        assert!(payload.contains("unknown or reused nonce_id"));
     }
 }
