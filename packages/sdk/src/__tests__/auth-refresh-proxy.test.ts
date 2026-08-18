@@ -103,8 +103,61 @@ describe("StewardAuth authProxyUrl (SEC-018: HttpOnly refresh-token custody)", (
   let requests: CapturedRequest[];
   let server: { baseUrl: string; close: () => Promise<void> } | null = null;
   let proxyDepositFails: boolean;
+  let originalWindow: typeof globalThis.window | undefined;
+  let originalNavigator: typeof globalThis.navigator | undefined;
+  let logoutEpoch: string | null;
+  let storageListeners: Array<(event: Pick<StorageEvent, "key">) => void>;
+  let lockTail: Promise<void>;
 
   beforeEach(async () => {
+    originalWindow = globalThis.window;
+    originalNavigator = globalThis.navigator;
+    logoutEpoch = null;
+    storageListeners = [];
+    lockTail = Promise.resolve();
+    const sharedLocalStorage = {
+      getItem: (key: string) => (key === "steward_auth_logout_epoch" ? logoutEpoch : null),
+      setItem: (key: string, value: string) => {
+        if (key !== "steward_auth_logout_epoch") return;
+        logoutEpoch = value;
+        for (const listener of storageListeners) listener({ key });
+      },
+      removeItem: () => {},
+      clear: () => {},
+      key: () => null,
+      length: 0,
+    } as Storage;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        document: {},
+        localStorage: sharedLocalStorage,
+        addEventListener: (type: string, listener: (event: StorageEvent) => void) => {
+          if (type === "storage") storageListeners.push(listener);
+        },
+        location: { host: "app.example.test", origin: "https://app.example.test" },
+      },
+    });
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        locks: {
+          request: async (_name: string, callback: () => Promise<unknown>) => {
+            const predecessor = lockTail;
+            let release!: () => void;
+            lockTail = new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            await predecessor;
+            try {
+              return await callback();
+            } finally {
+              release();
+            }
+          },
+        },
+      },
+    });
     storage = new TestStorage();
     requests = [];
     proxyDepositFails = false;
@@ -138,6 +191,14 @@ describe("StewardAuth authProxyUrl (SEC-018: HttpOnly refresh-token custody)", (
     storage.clear();
     await server?.close();
     server = null;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: originalWindow,
+    });
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: originalNavigator,
+    });
   });
 
   function proxyRequests(path: string, method?: string): CapturedRequest[] {
@@ -304,6 +365,65 @@ describe("StewardAuth authProxyUrl (SEC-018: HttpOnly refresh-token custody)", (
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(storage.getItem("steward_session_token")).toBeNull();
     expect(proxyRequests("/proxy/session", "DELETE").length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("cross-tab sign-out wins an in-flight refresh under the shared origin lock", async () => {
+    await server?.close();
+    let cookieLive = true;
+    const orderedMutations: string[] = [];
+    server = await startServer(async (req) => {
+      requests.push(req);
+      if (req.path === "/proxy/refresh") {
+        orderedMutations.push("refresh:start");
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        cookieLive = true;
+        orderedMutations.push("refresh:rotated");
+        return { json: { ok: true, token: fakeJwt({ userId: "stale-user" }), expiresIn: 900 } };
+      }
+      if (req.path === "/proxy/session" && req.method === "DELETE") {
+        orderedMutations.push("cookie:delete");
+        cookieLive = false;
+        return { json: { ok: true } };
+      }
+      if (req.path === "/proxy/revoke") {
+        orderedMutations.push("revoke");
+        cookieLive = false;
+        return { json: { ok: true } };
+      }
+      return { json: { ok: true } };
+    });
+    const storageA = new TestStorage();
+    const storageB = new TestStorage();
+    storageA.setItem("steward_session_token", fakeJwt());
+    storageB.setItem("steward_session_token", fakeJwt());
+    const authA = new StewardAuth({
+      baseUrl: server.baseUrl,
+      storage: storageA,
+      authProxyUrl: `${server.baseUrl}/proxy`,
+    });
+    const authB = new StewardAuth({
+      baseUrl: server.baseUrl,
+      storage: storageB,
+      authProxyUrl: `${server.baseUrl}/proxy`,
+    });
+
+    const refresh = authA.refreshSession();
+    while (!orderedMutations.includes("refresh:start")) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    authB.signOut();
+
+    expect(await refresh).toBeNull();
+    await lockTail;
+    expect(cookieLive).toBe(false);
+    expect(storageA.getItem("steward_session_token")).toBeNull();
+    expect(storageB.getItem("steward_session_token")).toBeNull();
+    expect(orderedMutations).toEqual([
+      "refresh:start",
+      "refresh:rotated",
+      "cookie:delete",
+      "cookie:delete",
+    ]);
   });
 
   test("a 401 from the proxy refresh signs out and clears the proxy cookie", async () => {

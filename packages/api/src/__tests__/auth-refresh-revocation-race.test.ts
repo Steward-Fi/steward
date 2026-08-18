@@ -35,4 +35,29 @@ describe("auth refresh revocation race hardening", () => {
     );
     expect(revokeAll).toContain("revokeUserRefreshSessions(payload.userId)");
   });
+
+  it("validates and atomically rotates an authorized tenant switch", () => {
+    const rotateStart = routeSource.indexOf("async function rotateRefreshTokenForUserSession");
+    const rotateRoute = routeSource.slice(
+      rotateStart,
+      routeSource.indexOf("/** Build", rotateStart),
+    );
+    expect(rotateRoute).toContain("requestedTenantId?: string");
+    expect(rotateRoute).toContain("const targetTenantId = requestedTenantId ?? record.tenantId");
+    expect(rotateRoute).toContain("eq(userTenants.tenantId, targetTenantId)");
+    expect(rotateRoute).toContain("createSessionToken(walletAddress, targetTenantId");
+    expect(rotateRoute).toContain("tenantId: targetTenantId");
+    expect(rotateRoute).toContain('status: "not_member"');
+    expect(rotateRoute).toContain("if (user?.deactivatedAt)");
+
+    const endpointStart = routeSource.indexOf('auth.post("/refresh"');
+    const endpoint = routeSource.slice(
+      endpointStart,
+      routeSource.indexOf("/**\n * POST /revoke", endpointStart),
+    );
+    expect(endpoint).toContain("body.tenantId !== undefined && !isValidTenantId(body.tenantId)");
+    expect(endpoint).toContain(
+      "rotateRefreshTokenForUserSession(body.refreshToken, body.tenantId)",
+    );
+  });
 });

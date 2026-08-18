@@ -67,6 +67,8 @@ const REFRESH_TOKEN_KEY = "steward_refresh_token";
 const OAUTH_STATE_KEY = "steward_oauth_state";
 const OAUTH_VERIFIER_KEY = "steward_oauth_verifier";
 const OAUTH_TENANT_KEY = "steward_oauth_tenant";
+const AUTH_LOGOUT_EPOCH_KEY = "steward_auth_logout_epoch";
+const AUTH_ROTATION_LOCK = "steward-auth-refresh";
 
 /**
  * Header the same-origin auth proxy (see `authProxyUrl`) requires on every
@@ -347,6 +349,15 @@ export class StewardAuth {
     if (onSessionChange) {
       this.listeners.push(onSessionChange);
     }
+
+    if (this.authProxyUrl && isBrowser()) {
+      window.addEventListener("storage", (event) => {
+        if (event.key !== AUTH_LOGOUT_EPOCH_KEY) return;
+        this.sessionGeneration += 1;
+        this.clearLocalTokens();
+        this.notifyListeners(null);
+      });
+    }
   }
 
   getBaseUrl(): string {
@@ -578,6 +589,7 @@ export class StewardAuth {
     // Invalidate any refresh already in flight so its eventual response cannot
     // resurrect a session after the user signed out.
     this.sessionGeneration += 1;
+    this.publishLogoutEpoch();
     this.clearToken();
     this.notifyListeners(null);
   }
@@ -639,23 +651,30 @@ export class StewardAuth {
    * Also clears local session state.
    */
   async revokeSession(): Promise<void> {
+    this.sessionGeneration += 1;
+    if (this.authProxyUrl) {
+      this.publishLogoutEpoch();
+      this.clearLocalTokens();
+      this.notifyListeners(null);
+    }
     await this.runSerializedRotation(async () => this.revokeSessionOnce());
   }
 
   private async revokeSessionOnce(): Promise<void> {
     // The rotation queue guarantees we revoke the newest token, not the stale
     // predecessor of an in-flight refresh. Invalidate any later response too.
-    this.sessionGeneration += 1;
     if (this.authProxyUrl) {
-      // The proxy injects the cookie-held refresh token and clears the cookie.
-      await authRequest(this.authProxyUrl, "/revoke", {
-        method: "POST",
-        headers: AUTH_PROXY_HEADERS,
-        body: JSON.stringify({}),
-      }).catch(() => {
-        /* best-effort */
+      await this.runProxyMutation(async () => {
+        // The proxy injects the cookie-held refresh token and clears the cookie.
+        await authRequest(this.authProxyUrl!, "/revoke", {
+          method: "POST",
+          headers: AUTH_PROXY_HEADERS,
+          body: JSON.stringify({}),
+        }).catch(() => {
+          /* best-effort */
+        });
       });
-      this.clearToken();
+      this.clearLocalTokens();
       this.notifyListeners(null);
       return;
     }
@@ -668,7 +687,7 @@ export class StewardAuth {
         /* best-effort */
       });
     }
-    this.clearToken();
+    this.clearLocalTokens();
     this.notifyListeners(null);
   }
 
@@ -2308,6 +2327,7 @@ export class StewardAuth {
   private async refreshViaProxy(
     tenantId: string | undefined,
     generation: number,
+    logoutEpoch: string | null,
   ): Promise<StewardSession | null> {
     const proxyUrl = this.authProxyUrl;
     if (!proxyUrl) return null;
@@ -2330,10 +2350,15 @@ export class StewardAuth {
       return null;
     }
 
-    if (generation !== this.sessionGeneration) {
+    if (
+      generation !== this.sessionGeneration ||
+      this.readLogoutEpoch() === undefined ||
+      this.readLogoutEpoch() !== logoutEpoch
+    ) {
       // The response may already have rotated the HttpOnly cookie. Clear it
       // again after the stale response so a concurrent sign-out stays final.
-      this.clearToken();
+      this.clearLocalTokens();
+      await this.deleteProxyCookieUnlocked();
       return null;
     }
 
@@ -2351,14 +2376,20 @@ export class StewardAuth {
    */
   private async rotateSession(tenantId?: string): Promise<StewardSession | null> {
     const generation = this.sessionGeneration;
-    const rotate = () =>
-      this.authProxyUrl
-        ? this.refreshViaProxy(tenantId, generation)
-        : this.refreshDirect(tenantId, generation);
-    if (isBrowser() && navigator.locks) {
-      return navigator.locks.request("steward-auth-refresh", rotate);
+    if (this.authProxyUrl) {
+      // Cookie rotation is safe only with both an origin-wide lock and a shared
+      // logout epoch. Without either primitive, fail closed instead of risking
+      // one-time-token replay or cross-tab session resurrection.
+      const logoutEpoch = this.readLogoutEpoch();
+      if (!isBrowser() || !navigator.locks || logoutEpoch === undefined) return null;
+      return navigator.locks.request(AUTH_ROTATION_LOCK, async () => {
+        if (generation !== this.sessionGeneration || this.readLogoutEpoch() !== logoutEpoch) {
+          return null;
+        }
+        return this.refreshViaProxy(tenantId, generation, logoutEpoch);
+      });
     }
-    return rotate();
+    return this.refreshDirect(tenantId, generation);
   }
 
   /** Serialize every one-time refresh-token mutation within this instance. */
@@ -2453,17 +2484,61 @@ export class StewardAuth {
     );
   }
 
-  private clearToken(): void {
+  private clearLocalTokens(): void {
     this.storage.removeItem(STORAGE_KEY);
     this.storage.removeItem(REFRESH_TOKEN_KEY);
+  }
+
+  private readLogoutEpoch(): string | null | undefined {
+    if (!isBrowser()) return undefined;
+    try {
+      return window.localStorage.getItem(AUTH_LOGOUT_EPOCH_KEY);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private publishLogoutEpoch(): void {
+    if (!this.authProxyUrl || !isBrowser()) return;
+    try {
+      const nonce = globalThis.crypto.randomUUID();
+      window.localStorage.setItem(AUTH_LOGOUT_EPOCH_KEY, `${Date.now()}:${nonce}`);
+    } catch {
+      // Proxy rotation subsequently fails closed while shared storage is absent.
+    }
+  }
+
+  private async deleteProxyCookieUnlocked(): Promise<void> {
+    if (!this.authProxyUrl) return;
+    await authRequest(this.authProxyUrl, "/session", {
+      method: "DELETE",
+      headers: AUTH_PROXY_HEADERS,
+      keepalive: true,
+    }).catch(() => {
+      /* best-effort */
+    });
+  }
+
+  private async runProxyMutation(operation: () => Promise<void>): Promise<void> {
+    if (isBrowser()) {
+      if (navigator.locks && this.readLogoutEpoch() !== undefined) {
+        await navigator.locks.request(AUTH_ROTATION_LOCK, operation);
+        return;
+      }
+      // Rotation is disabled when coordination primitives are unavailable, so
+      // an unlocked destructive clear/revoke cannot race a supported rotation.
+      await operation();
+      return;
+    }
+    await operation();
+  }
+
+  private clearToken(): void {
+    this.clearLocalTokens();
     if (this.authProxyUrl) {
       // Best-effort: expire the proxy-held refresh cookie too. keepalive lets
       // the request outlive the page when sign-out is followed by navigation.
-      void authRequest(this.authProxyUrl, "/session", {
-        method: "DELETE",
-        headers: AUTH_PROXY_HEADERS,
-        keepalive: true,
-      }).catch(() => {
+      void this.runProxyMutation(() => this.deleteProxyCookieUnlocked()).catch(() => {
         /* best-effort */
       });
     }

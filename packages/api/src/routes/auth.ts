@@ -912,7 +912,10 @@ async function revokeUserRefreshSessions(userId: string) {
   });
 }
 
-async function rotateRefreshTokenForUserSession(raw: string): Promise<RefreshRotationResult> {
+async function rotateRefreshTokenForUserSession(
+  raw: string,
+  requestedTenantId?: string,
+): Promise<RefreshRotationResult> {
   const db = getDb();
   const now = new Date();
   const tokenHash = hashToken(raw);
@@ -988,10 +991,11 @@ async function rotateRefreshTokenForUserSession(raw: string): Promise<RefreshRot
       return { status: "deactivated", userId: record.userId, tenantId: record.tenantId };
     }
 
+    const targetTenantId = requestedTenantId ?? record.tenantId;
     const [membership] = await tx
       .select({ id: userTenants.id })
       .from(userTenants)
-      .where(and(eq(userTenants.userId, record.userId), eq(userTenants.tenantId, record.tenantId)));
+      .where(and(eq(userTenants.userId, record.userId), eq(userTenants.tenantId, targetTenantId)));
     if (!membership) {
       await tx
         .delete(refreshTokens)
@@ -1013,7 +1017,7 @@ async function rotateRefreshTokenForUserSession(raw: string): Promise<RefreshRot
       (await readMfaJson<Record<string, unknown>>(`refresh:claims:${record.tokenHash}`)) ?? {};
     await getMfaBackend().delete(`refresh:claims:${record.tokenHash}`);
 
-    const newAccessToken = await createSessionToken(walletAddress, record.tenantId, {
+    const newAccessToken = await createSessionToken(walletAddress, targetTenantId, {
       userId: record.userId,
       ...(email ? { email } : {}),
       ...sessionClaims,
@@ -1024,7 +1028,7 @@ async function rotateRefreshTokenForUserSession(raw: string): Promise<RefreshRot
     await tx.insert(refreshTokens).values({
       id: randomBytes(16).toString("hex"),
       userId: record.userId,
-      tenantId: record.tenantId,
+      tenantId: targetTenantId,
       tokenHash: newRefreshTokenHash,
       expiresAt: new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000),
     });
@@ -1036,7 +1040,12 @@ async function rotateRefreshTokenForUserSession(raw: string): Promise<RefreshRot
       );
     }
 
-    return { status: "valid", record, newAccessToken, newRefreshToken };
+    return {
+      status: "valid",
+      record: { ...record, tenantId: targetTenantId },
+      newAccessToken,
+      newRefreshToken,
+    };
   });
 }
 
@@ -7620,12 +7629,15 @@ auth.post("/refresh", async (c) => {
       429,
     );
   }
-  const body = await safeJsonParse<{ refreshToken: string }>(c);
+  const body = await safeJsonParse<{ refreshToken: string; tenantId?: unknown }>(c);
   if (!body?.refreshToken) {
     return c.json<ApiResponse>({ ok: false, error: "refreshToken is required" }, 400);
   }
+  if (body.tenantId !== undefined && !isValidTenantId(body.tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
 
-  const rotatedRefresh = await rotateRefreshTokenForUserSession(body.refreshToken);
+  const rotatedRefresh = await rotateRefreshTokenForUserSession(body.refreshToken, body.tenantId);
   if (rotatedRefresh.status === "reused") {
     const { issuedBefore: revokedBefore } = await revokeUserRefreshSessions(rotatedRefresh.userId);
     await writeAuditEvent({
