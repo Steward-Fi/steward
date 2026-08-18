@@ -109,6 +109,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  clearAgentJwksCacheForTests?.();
+  clearAgentTokenStatusForTests?.();
   globalThis.fetch = originalFetch;
   await closeDb();
   if (originalJwksUrl === undefined) {
