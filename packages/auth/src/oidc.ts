@@ -65,18 +65,6 @@ function claimBoolean(claims: JWTPayload, name: string | undefined): boolean | u
 }
 
 function assertSafeJwksUri(jwksUri: string): URL {
-  if (allowTestJwksFetch()) {
-    let url: URL;
-    try {
-      url = new URL(jwksUri);
-    } catch {
-      throw new Error("OIDC jwksUri must be a public https URL");
-    }
-    if (url.protocol !== "https:" || url.username || url.password) {
-      throw new Error("OIDC jwksUri must be a public https URL");
-    }
-    return url;
-  }
   return assertPublicHttpsEndpoint(jwksUri, "OIDC jwksUri");
 }
 

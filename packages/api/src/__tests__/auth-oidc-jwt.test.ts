@@ -11,6 +11,7 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { assertPublicHttpsEndpoint } from "../../../auth/src/public-endpoint";
 
 const TENANT_A = `oidc-tenant-a-${Date.now()}`;
 const TENANT_B = `oidc-tenant-b-${Date.now()}`;
@@ -26,6 +27,7 @@ const JWKS_URI = "https://issuer.example.com/.well-known/jwks.json";
 const PROVIDER_ID = "primary";
 const ORIGINAL_FETCH = globalThis.fetch;
 const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
+const ORIGINAL_ALLOW_INSECURE_OIDC_JWKS_FETCH = process.env.STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH;
 
 setDefaultTimeout(120_000);
 
@@ -199,7 +201,11 @@ describe("OIDC JWT auth", () => {
     }
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_JWT_SECRET;
-    delete process.env.STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH;
+    if (ORIGINAL_ALLOW_INSECURE_OIDC_JWKS_FETCH === undefined) {
+      delete process.env.STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH;
+    } else {
+      process.env.STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH = ORIGINAL_ALLOW_INSECURE_OIDC_JWKS_FETCH;
+    }
     delete process.env.STEWARD_AUDIT_HMAC_KEY;
   }, 120_000);
 
@@ -228,6 +234,15 @@ describe("OIDC JWT auth", () => {
       .setExpirationTime("5m")
       .sign(privateKey);
   }
+
+  it("keeps production destination validation fail closed for special-use test domains", () => {
+    expect(() =>
+      assertPublicHttpsEndpoint(
+        "https://issuer.example.test/.well-known/jwks.json",
+        "OIDC jwksUri",
+      ),
+    ).toThrow("OIDC jwksUri must be a public https URL");
+  });
 
   it("exchanges a valid tenant OIDC token for a Steward session", async () => {
     const token = await oidcToken("external-user-1", "aud-a");
