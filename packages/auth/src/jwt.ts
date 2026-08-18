@@ -387,16 +387,32 @@ const DURATION_UNIT_SECONDS: Record<string, number> = {
 export const AGENT_TOKEN_EXPIRY_MAX_SECONDS = DURATION_UNIT_SECONDS.y;
 
 /**
- * Validate AGENT_TOKEN_EXPIRY format and bound at startup (SEC-134). A bad
- * value otherwise surfaces as a 500 at token-signing time, and an unbounded
- * value mints effectively-permanent agent tokens.
+ * Parse a relative duration string ("30m", "12h", "5 days") into seconds.
+ * Returns null when the value is not a positive forward duration in the
+ * grammar jose accepts for setExpirationTime.
  */
-export function validateAgentTokenExpiryEnv(value: string = AGENT_TOKEN_EXPIRY): void {
+export function parseDurationSeconds(value: string): number | null {
   const match = DURATION_PATTERN.exec(value.trim());
   const seconds = match
     ? Number.parseFloat(match[1]) * (DURATION_UNIT_SECONDS[match[2].toLowerCase()] ?? Number.NaN)
     : Number.NaN;
-  if (!Number.isFinite(seconds) || seconds <= 0) {
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+}
+
+/**
+ * Validate AGENT_TOKEN_EXPIRY format and bound at startup (SEC-134). A bad
+ * value otherwise surfaces as a 500 at token-signing time, and an unbounded
+ * value mints effectively-permanent agent tokens.
+ *
+ * The default reads process.env at CALL time (not the module-init constant):
+ * on the Workers boot path, bindings are hydrated into process.env per request
+ * (SEC-148) and module-init constants may have been captured before hydration.
+ */
+export function validateAgentTokenExpiryEnv(
+  value: string = process.env.AGENT_TOKEN_EXPIRY || "30d",
+): void {
+  const seconds = parseDurationSeconds(value);
+  if (seconds === null) {
     throw new Error(
       `⛔ AGENT_TOKEN_EXPIRY "${value}" is not a valid positive duration (examples: "30m", "12h", "30d").`,
     );

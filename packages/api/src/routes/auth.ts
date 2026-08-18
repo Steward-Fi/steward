@@ -149,9 +149,10 @@ import {
 } from "../services/auth-abuse";
 import { verifyEip1271 } from "../services/eip1271";
 import {
-  isAllowedOidcClientSecretEnv,
+  isAllowedOidcClientSecretEnvForTenant,
   normalizeOidcProviders,
 } from "../services/oidc-provider-config";
+import { socketPeerFromEnv } from "../services/runtime-gate";
 import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
 import { lockUserSession } from "../services/session-lock";
 import { testAccountOtpMatches } from "../services/test-account-credentials";
@@ -367,10 +368,15 @@ let coarseSubjectWarnedAt = 0;
 
 /**
  * Rate-limit subject for auth endpoints. With a trusted client IP every
- * client gets an independent budget (IPv6 at /64). Without one, requests
+ * client gets an independent budget (IPv6 at /64). Without one, the socket
+ * peer injected by the server entry point (SOCKET_PEER_ENV_KEY — set by the
+ * runtime, never client-influenceable) provides the same per-client budget.
+ * Only when neither exists (e.g. Workers, which has no socket) do requests
  * shard per Host — the edge only routes configured domains here, so Host
  * cannot be rotated to mint unbounded buckets the way client-controlled
- * headers or user-agents can — and checkAuthRateLimit widens the budget by
+ * headers or user-agents can; note this last-resort fallback does rely on
+ * that edge invariant, so deployments should prefer STEWARD_TRUSTED_PROXY_HOPS
+ * or a socket-bearing entry. checkAuthRateLimit widens the coarse budget by
  * AUTH_RATE_LIMIT_FALLBACK_HEADROOM because many clients share each bucket.
  * No configuration yields the old literal "global" chokepoint (#268), and no
  * client-controlled free text ever reaches Redis unhashed.
@@ -378,6 +384,8 @@ let coarseSubjectWarnedAt = 0;
 function authRateLimitSubject(c: Context): { subject: string; coarse: boolean } {
   const ip = trustedClientIp(c);
   if (ip) return { subject: `ip:${clientIpBucket(ip)}`, coarse: false };
+  const peer = socketPeerFromEnv(c.env);
+  if (peer && isIP(peer)) return { subject: `ip:${clientIpBucket(peer)}`, coarse: false };
   const now = Date.now();
   if (process.env.NODE_ENV === "production" && now - coarseSubjectWarnedAt >= 60_000) {
     coarseSubjectWarnedAt = now;
@@ -3427,7 +3435,7 @@ async function getTenantOidcProviders(tenantId: string): Promise<TenantOidcProvi
   // Revalidate persisted JSON on every trust-boundary read. Older rows can
   // predate write-time validation; treating their TypeScript cast as trusted
   // would re-enable unsafe algorithms or malformed endpoint configuration.
-  const normalized = normalizeOidcProviders(row?.oidcProviders ?? []);
+  const normalized = normalizeOidcProviders(row?.oidcProviders ?? [], tenantId);
   return typeof normalized === "string" ? [] : normalized;
 }
 
@@ -5052,6 +5060,7 @@ auth.get("/oidc/:provider/callback", async (c) => {
   try {
     idToken = await exchangeOidcAuthorizationCode({
       provider,
+      tenantId: stateData.tenantId,
       code,
       redirectUri: buildOidcCallbackUrl(c, provider.id),
       codeVerifier: stateData.codeVerifier,
@@ -5451,9 +5460,10 @@ auth.post("/sms/verify", async (c) => {
   if (methodResponse) return methodResponse;
   const otpPurpose = smsLoginPurpose(otpTenantId);
 
-  if (
-    (await getSmsVerifyFailedAttempts(body.phone, otpPurpose)) >= SMS_VERIFY_MAX_FAILED_ATTEMPTS
-  ) {
+  // Claim-first: atomically consume one attempt slot BEFORE verifying, so
+  // concurrent requests cannot both pass a check-then-record boundary and
+  // stretch the attempt budget (~2x under a race).
+  if (!(await claimSmsVerifyAttempt(body.phone, otpPurpose))) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -5465,7 +5475,6 @@ auth.post("/sms/verify", async (c) => {
 
   const result = await getPhoneAuth().verifyOtp(body.phone, body.code, otpPurpose);
   if (!result.valid) {
-    await recordSmsVerifyFailure(body.phone, otpPurpose);
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
   await clearSmsVerifyFailures(body.phone, otpPurpose);
@@ -5622,9 +5631,10 @@ auth.post("/whatsapp/verify", async (c) => {
   if (methodResponse) return methodResponse;
   const otpPurpose = whatsappLoginPurpose(otpTenantId);
 
-  if (
-    (await getSmsVerifyFailedAttempts(body.phone, otpPurpose)) >= SMS_VERIFY_MAX_FAILED_ATTEMPTS
-  ) {
+  // Claim-first: atomically consume one attempt slot BEFORE verifying, so
+  // concurrent requests cannot both pass a check-then-record boundary and
+  // stretch the attempt budget (~2x under a race).
+  if (!(await claimSmsVerifyAttempt(body.phone, otpPurpose))) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -5636,7 +5646,6 @@ auth.post("/whatsapp/verify", async (c) => {
 
   const result = await getPhoneAuth().verifyOtp(body.phone, body.code, otpPurpose);
   if (!result.valid) {
-    await recordSmsVerifyFailure(body.phone, otpPurpose);
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
   await clearSmsVerifyFailures(body.phone, otpPurpose);
@@ -7036,8 +7045,9 @@ auth.post("/mfa/sms/verify", async (c) => {
   if (stepUpResponse) return stepUpResponse;
 
   const pendingPurpose = pending.purpose ?? smsMfaEnrollPurpose(session.payload.userId);
-  const failures = await getSmsVerifyFailedAttempts(pending.phone, pendingPurpose);
-  if (failures >= SMS_VERIFY_MAX_FAILED_ATTEMPTS) {
+  // Claim-first: atomically consume one attempt slot BEFORE verifying, so
+  // concurrent requests cannot both pass a check-then-record boundary.
+  if (!(await claimSmsVerifyAttempt(pending.phone, pendingPurpose))) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many invalid SMS verification attempts. Request a new code." },
       429,
@@ -7046,7 +7056,6 @@ auth.post("/mfa/sms/verify", async (c) => {
 
   const verified = await getPhoneAuth().verifyOtp(pending.phone, body.code, pendingPurpose);
   if (!verified.valid) {
-    await recordSmsVerifyFailure(pending.phone, pendingPurpose);
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
   await clearSmsVerifyFailures(pending.phone, pendingPurpose);
@@ -7164,9 +7173,9 @@ auth.post("/mfa/sms/complete", async (c) => {
   }
 
   const otpPurpose = smsMfaChallengePurpose(body.challengeId);
-  if (
-    (await getSmsVerifyFailedAttempts(smsMfa.phone, otpPurpose)) >= SMS_VERIFY_MAX_FAILED_ATTEMPTS
-  ) {
+  // Claim-first: atomically consume one attempt slot BEFORE verifying, so
+  // concurrent requests cannot both pass a check-then-record boundary.
+  if (!(await claimSmsVerifyAttempt(smsMfa.phone, otpPurpose))) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -7178,7 +7187,6 @@ auth.post("/mfa/sms/complete", async (c) => {
 
   const verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
   if (!verified.valid) {
-    await recordSmsVerifyFailure(smsMfa.phone, otpPurpose);
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
   if ((await getMfaBackend().consume(challengeKey)) === null) {
@@ -7235,9 +7243,9 @@ auth.post("/mfa/sms/step-up", async (c) => {
   }
 
   const otpPurpose = smsMfaManagePurpose(session.payload.userId);
-  if (
-    (await getSmsVerifyFailedAttempts(smsMfa.phone, otpPurpose)) >= SMS_VERIFY_MAX_FAILED_ATTEMPTS
-  ) {
+  // Claim-first: atomically consume one attempt slot BEFORE verifying, so
+  // concurrent requests cannot both pass a check-then-record boundary.
+  if (!(await claimSmsVerifyAttempt(smsMfa.phone, otpPurpose))) {
     return c.json<ApiResponse>(
       { ok: false, error: "Too many invalid SMS verification attempts. Request a new code." },
       429,
@@ -7246,7 +7254,6 @@ auth.post("/mfa/sms/step-up", async (c) => {
 
   const verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
   if (!verified.valid) {
-    await recordSmsVerifyFailure(smsMfa.phone, otpPurpose);
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
   await clearSmsVerifyFailures(smsMfa.phone, otpPurpose);
@@ -7462,9 +7469,9 @@ auth.post("/mfa/sms/unenroll", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "SMS MFA is not enabled" }, 404);
   }
   const otpPurpose = smsMfaManagePurpose(session.payload.userId);
-  if (
-    (await getSmsVerifyFailedAttempts(smsMfa.phone, otpPurpose)) >= SMS_VERIFY_MAX_FAILED_ATTEMPTS
-  ) {
+  // Claim-first: atomically consume one attempt slot BEFORE verifying, so
+  // concurrent requests cannot both pass a check-then-record boundary.
+  if (!(await claimSmsVerifyAttempt(smsMfa.phone, otpPurpose))) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -7475,7 +7482,6 @@ auth.post("/mfa/sms/unenroll", async (c) => {
   }
   const verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
   if (!verified.valid) {
-    await recordSmsVerifyFailure(smsMfa.phone, otpPurpose);
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
   }
   await clearSmsVerifyFailures(smsMfa.phone, otpPurpose);
@@ -10358,11 +10364,12 @@ async function postPublicOidcTokenEndpoint(
 
 async function exchangeOidcAuthorizationCode(opts: {
   provider: TenantOidcProviderConfig;
+  tenantId: string;
   code: string;
   redirectUri: string;
   codeVerifier: string;
 }): Promise<string> {
-  const { provider, code, redirectUri, codeVerifier } = opts;
+  const { provider, tenantId, code, redirectUri, codeVerifier } = opts;
   if (!provider.clientId || !provider.tokenUrl) {
     throw new Error("OIDC provider is not configured for authorization-code login");
   }
@@ -10375,8 +10382,9 @@ async function exchangeOidcAuthorizationCode(opts: {
   });
   if (provider.clientSecretEnv) {
     // Defense in depth: legacy rows may predate the config-time allowlist, so
-    // re-enforce the dedicated env namespace before reading any secret.
-    if (!isAllowedOidcClientSecretEnv(provider.clientSecretEnv)) {
+    // re-enforce the tenant-bound env namespace before reading any secret
+    // (SEC-005: a cross-tenant env reference must never reach the exchange).
+    if (!isAllowedOidcClientSecretEnvForTenant(provider.clientSecretEnv, tenantId)) {
       throw new Error("OIDC client secret env is outside the allowed tenant namespace");
     }
     const secret = process.env[provider.clientSecretEnv];

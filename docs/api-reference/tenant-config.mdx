@@ -326,14 +326,14 @@ Tenant OIDC providers support direct JWT exchange and enterprise authorization-c
   "audience": ["steward-api"],
   "jwksUri": "https://idp.example.com/.well-known/jwks.json",
   "clientId": "steward-dashboard",
-  "clientSecretEnv": "STEWARD_TENANT_OIDC_SECRET_ACME_SSO",
+  "clientSecretEnv": "STEWARD_TENANT_OIDC_SECRET_MY_PLATFORM_ACME_SSO",
   "authorizationUrl": "https://idp.example.com/oauth2/v1/authorize",
   "tokenUrl": "https://idp.example.com/oauth2/v1/token",
   "scopes": ["openid", "email", "profile"]
 }
 ```
 
-`clientSecretEnv` must name an environment variable in the dedicated `STEWARD_TENANT_OIDC_SECRET_*` namespace; arbitrary platform env vars are rejected so tenant config cannot exfiltrate deployment secrets through the token exchange.
+`clientSecretEnv` must name an environment variable in the dedicated `STEWARD_TENANT_OIDC_SECRET_*` namespace **and** embed the configuring tenant's id: the name must start with `STEWARD_TENANT_OIDC_SECRET_<TENANT_KEY>_`, where `<TENANT_KEY>` is the tenant id uppercased with non-`[A-Z0-9_]` characters mapped to `_` (e.g. tenant `my-platform` → `STEWARD_TENANT_OIDC_SECRET_MY_PLATFORM_...`). Arbitrary platform env vars and env vars provisioned for a different tenant are rejected, so tenant config cannot exfiltrate deployment secrets — or another tenant's IdP secret — through the token exchange. The binding is re-enforced at token-exchange time, so pre-existing rows that name an unbound env var fail closed until the env var is renamed and the config rewritten.
 
 `allowJitProvisioning` defaults to `false` when omitted (matching the SAML plane): holders of a valid IdP token for an unknown account are denied until a tenant admin explicitly opts into just-in-time account creation with `"allowJitProvisioning": true`. Configs written before this default changed keep their previously persisted value.
 

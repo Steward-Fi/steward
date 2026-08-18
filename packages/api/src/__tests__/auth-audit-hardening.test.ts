@@ -370,8 +370,13 @@ describe("auth and audit hardening", () => {
       smsVerifyStart,
       authSource.indexOf('auth.post("/mfa/sms/send"', smsVerifyStart),
     );
-    expect(smsVerify).toContain("getSmsVerifyFailedAttempts(pending.phone, pendingPurpose)");
-    expect(smsVerify).toContain("recordSmsVerifyFailure(pending.phone, pendingPurpose)");
+    // Claim-first boundary: the attempt slot is consumed atomically BEFORE
+    // verifyOtp runs; check-then-record must not come back.
+    expect(smsVerify).toContain("claimSmsVerifyAttempt(pending.phone, pendingPurpose)");
+    expect(smsVerify.indexOf("claimSmsVerifyAttempt(pending.phone, pendingPurpose)")).toBeLessThan(
+      smsVerify.indexOf("getPhoneAuth().verifyOtp(pending.phone, body.code, pendingPurpose)"),
+    );
+    expect(smsVerify).not.toContain("recordSmsVerifyFailure(pending.phone, pendingPurpose)");
     expect(smsVerify).toContain("clearSmsVerifyFailures(pending.phone, pendingPurpose)");
   });
 

@@ -28,6 +28,7 @@
 import {
   type AgentSignerResolver,
   issueEnrollChallenge,
+  parseDurationSeconds,
   type ResolvedAgentSigner,
   signAgentToken,
   verifyEnrollResponse,
@@ -47,7 +48,34 @@ import { checkAuthRateLimit, getAuthChallengeStore } from "./auth";
 /** Short-lived enrollment token TTL. Minute-scale: the agent immediately renews
  * (or exchanges for scoped capabilities), and a revoked signer stops enrolling
  * within one cycle. Overridable via env for operators who want a different bound. */
-const ENROLL_TOKEN_TTL = process.env.STEWARD_AGENT_ENROLL_TOKEN_TTL?.trim() || "5m";
+
+/** Hard upper bound for the enrollment token TTL: one hour. Enrollment tokens
+ * exist only to bootstrap renewal/capability exchange, so a longer value would
+ * blunt signer-revocation response (SEC-134-style bound for this env). */
+export const ENROLL_TOKEN_TTL_MAX_SECONDS = 3600;
+
+/** Validate STEWARD_AGENT_ENROLL_TOKEN_TTL at module load (startup), the same
+ * posture SEC-134 applied to AGENT_TOKEN_EXPIRY: a malformed value otherwise
+ * surfaces as a 500 at token-mint time, and an unbounded value mints
+ * long-lived tokens that defeat the minute-scale revocation story. */
+function resolveEnrollTokenTtl(): string {
+  const raw = process.env.STEWARD_AGENT_ENROLL_TOKEN_TTL?.trim();
+  if (!raw) return "5m";
+  const seconds = parseDurationSeconds(raw);
+  if (seconds === null) {
+    throw new Error(
+      `⛔ STEWARD_AGENT_ENROLL_TOKEN_TTL "${raw}" is not a valid positive duration (examples: "5m", "15m", "1h").`,
+    );
+  }
+  if (seconds > ENROLL_TOKEN_TTL_MAX_SECONDS) {
+    throw new Error(
+      `⛔ STEWARD_AGENT_ENROLL_TOKEN_TTL "${raw}" exceeds the one-hour maximum; enrollment tokens must stay minute-scale so signer revocation lands quickly.`,
+    );
+  }
+  return raw;
+}
+
+const ENROLL_TOKEN_TTL = resolveEnrollTokenTtl();
 
 export const agentEnrollRoutes = new Hono<{ Variables: AppVariables }>();
 

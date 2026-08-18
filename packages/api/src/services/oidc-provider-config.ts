@@ -9,8 +9,32 @@ import type { TenantOidcProviderConfig } from "@stwd/shared";
  */
 export const OIDC_CLIENT_SECRET_ENV_PREFIX = "STEWARD_TENANT_OIDC_SECRET_";
 
+/**
+ * SEC-005 residual: the bare namespace above is platform-wide, so a tenant
+ * admin could reference ANOTHER tenant's OIDC secret env var. Bind the env
+ * name to the configuring tenant: it must start with
+ * STEWARD_TENANT_OIDC_SECRET_<TENANT_KEY>_, where TENANT_KEY is the tenant id
+ * uppercased with non-env-safe characters mapped to "_".
+ *
+ * Note: distinct tenant ids whose only differences are separator characters
+ * (e.g. "acme-corp" vs "acme.corp") share a TENANT_KEY. Tenant ids are
+ * provisioned by platform admins, not tenant admins, so this collision cannot
+ * be attacker-created; operators should avoid separator-only-distinct ids.
+ */
+export function oidcClientSecretEnvPrefixForTenant(tenantId: string): string {
+  const tenantKey = tenantId.toUpperCase().replace(/[^A-Z0-9_]/g, "_");
+  return `${OIDC_CLIENT_SECRET_ENV_PREFIX}${tenantKey}_`;
+}
+
 export function isAllowedOidcClientSecretEnv(name: string): boolean {
   return /^[A-Z_][A-Z0-9_]{0,127}$/.test(name) && name.startsWith(OIDC_CLIENT_SECRET_ENV_PREFIX);
+}
+
+export function isAllowedOidcClientSecretEnvForTenant(name: string, tenantId: string): boolean {
+  return (
+    isAllowedOidcClientSecretEnv(name) &&
+    name.startsWith(oidcClientSecretEnvPrefixForTenant(tenantId))
+  );
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -41,7 +65,10 @@ function isPublicOidcIssuer(value: string): boolean {
   }
 }
 
-export function normalizeOidcProviders(value: unknown): TenantOidcProviderConfig[] | string {
+export function normalizeOidcProviders(
+  value: unknown,
+  tenantId: string,
+): TenantOidcProviderConfig[] | string {
   if (!Array.isArray(value)) return "providers must be an array";
   if (value.length > 10) return "at most 10 OIDC providers are allowed per tenant";
   const ids = new Set<string>();
@@ -90,8 +117,8 @@ export function normalizeOidcProviders(value: unknown): TenantOidcProviderConfig
     if (clientId && clientId.length > 256) {
       return `clientId for provider ${id} may be at most 256 characters`;
     }
-    if (clientSecretEnv && !isAllowedOidcClientSecretEnv(clientSecretEnv)) {
-      return `clientSecretEnv for provider ${id} must be an environment variable name starting with ${OIDC_CLIENT_SECRET_ENV_PREFIX}`;
+    if (clientSecretEnv && !isAllowedOidcClientSecretEnvForTenant(clientSecretEnv, tenantId)) {
+      return `clientSecretEnv for provider ${id} must be an environment variable name starting with ${oidcClientSecretEnvPrefixForTenant(tenantId)}`;
     }
     if (
       authorizationUrl &&

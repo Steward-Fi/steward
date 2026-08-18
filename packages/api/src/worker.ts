@@ -157,6 +157,12 @@ async function ensureWorkerInit(env: Env): Promise<void> {
     // Workers bindings are only available inside fetch(). Hydrate process.env
     // before importing app modules that read required env at module init.
     hydrateProcessEnv(env);
+    // SEC-134: the Bun entry (index.ts) runs validateJwtSecretEnv() at startup;
+    // run the same validation on the Workers boot path so a bad/missing JWT
+    // secret or malformed AGENT_TOKEN_EXPIRY fails closed at cold start instead
+    // of surfacing at first token sign/verify.
+    const { validateJwtSecretEnv } = await import("@stwd/auth");
+    validateJwtSecretEnv();
     const redisOk = await initRedis(env);
     // Auth stores (passkey challenges, magic-link tokens, SIWE/SIWS nonces)
     // must be initialized too — without this they stay on the lazy memory

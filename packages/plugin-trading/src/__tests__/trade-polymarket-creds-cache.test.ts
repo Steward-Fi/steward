@@ -71,6 +71,9 @@ const fakeRedis = {
 // With a Redis client present the route's rate limiter calls the real
 // @stwd/redis singleton; keep it in-memory for this harness.
 mock.module("@stwd/redis", () => ({
+  // @stwd/auth's revocation store (SEC-032) statically imports this; the mock
+  // namespace must provide every name importers bind or bun throws at load.
+  assertRedisUrlTls: () => undefined,
   checkRateLimit: async () => ({ allowed: true, remaining: 9, resetMs: 1_000 }),
   checkSpendLimit: async () => ({ allowed: true, spent: 0, remaining: 1 }),
   createUpstashIoredisAdapter: () => ({ ping: async () => "PONG" }),

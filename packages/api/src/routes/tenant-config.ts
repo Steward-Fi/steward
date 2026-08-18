@@ -1748,7 +1748,7 @@ tenantConfigRoutes.put("/:id/oidc-providers", requireTenantId, async (c) => {
   const body = await safeJsonParse<{ providers?: unknown }>(c);
   if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
 
-  const providers = normalizeOidcProviders(body.providers);
+  const providers = normalizeOidcProviders(body.providers, tenantId);
   if (typeof providers === "string") {
     return c.json<ApiResponse>({ ok: false, error: providers }, 400);
   }

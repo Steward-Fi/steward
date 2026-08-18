@@ -84,7 +84,7 @@ describe("tenant-admin OIDC provider config routes", () => {
             audience: ["steward-api"],
             jwksUri: "https://tenant.example.com/.well-known/jwks.json",
             clientId: "enterprise-client",
-            clientSecretEnv: "STEWARD_TENANT_OIDC_SECRET_ACME_SSO",
+            clientSecretEnv: "STEWARD_TENANT_OIDC_SECRET_TENANT_OIDC_PROVIDERS_ACME_SSO",
             authorizationUrl: "https://tenant.example.com/oauth2/v1/authorize",
             tokenUrl: "https://tenant.example.com/oauth2/v1/token",
             scopes: ["openid", "email", "profile"],
@@ -104,7 +104,7 @@ describe("tenant-admin OIDC provider config routes", () => {
         id: "auth0-prod",
         issuer: "https://tenant.example.com",
         clientId: "enterprise-client",
-        clientSecretEnv: "STEWARD_TENANT_OIDC_SECRET_ACME_SSO",
+        clientSecretEnv: "STEWARD_TENANT_OIDC_SECRET_TENANT_OIDC_PROVIDERS_ACME_SSO",
         authorizationUrl: "https://tenant.example.com/oauth2/v1/authorize",
         tokenUrl: "https://tenant.example.com/oauth2/v1/token",
         scopes: ["openid", "email", "profile"],
@@ -190,6 +190,10 @@ describe("tenant-admin OIDC provider config routes", () => {
       "STEWARD_MASTER_PASSWORD",
       "ACME_SSO_CLIENT_SECRET",
       "STEWARD_TENANT_OIDC_SECRET",
+      // SEC-005 residual: the bare namespace without the tenant binding, and a
+      // name bound to a DIFFERENT tenant, must both be rejected.
+      "STEWARD_TENANT_OIDC_SECRET_ACME_SSO",
+      "STEWARD_TENANT_OIDC_SECRET_OTHER_TENANT_ACME_SSO",
     ]) {
       const response = await tenantConfigRoutes.request(`/${TENANT_ID}/oidc-providers`, {
         method: "PUT",
