@@ -7,7 +7,7 @@
 import { hashSha256Hex, importP256PublicKey, revocationStore } from "@stwd/auth";
 import { agentPolicies, toPersistedPolicyRule } from "@stwd/db";
 import { getSpend, getSpendByHost, invalidateCache, type SpendPeriod } from "@stwd/redis";
-import { and, arrayContains, eq, gte, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { isRedisAvailable } from "../middleware/redis";
 import { writeAuditEvent } from "../services/audit";
@@ -1818,9 +1818,19 @@ agentRoutes.put("/:agentId/policy", async (c) => {
     // SEC-208 concurrency fence: the earlier comparison is useful for a clear
     // error, but it is not authorization by itself. Two requests can read the
     // same row, both appear to tighten it, and then overwrite each other. Make
-    // the write conditional on the CURRENT database row still being at least
-    // as permissive as the proposed policy in every dimension. A stale write
-    // therefore fails instead of re-raising a cap or widening an allowlist.
+    // the write conditional on the exact row that was authorized above. This
+    // is stricter than comparing only the proposed caps/allowlists: accepting a
+    // stale-but-stricter proposal would preserve safety, but its audit `before`
+    // snapshot and returned diff would describe a row that was no longer
+    // current. Exact optimistic CAS keeps both the policy and its evidence
+    // linearizable; a stale writer retries from a fresh snapshot.
+    const expected = existing;
+    if (!expected) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Agent policy changed concurrently; retry against the latest policy" },
+        409,
+      );
+    }
     [upserted] = await db
       .update(agentPolicies)
       .set(nextPolicyValues)
@@ -1828,12 +1838,12 @@ agentRoutes.put("/:agentId/policy", async (c) => {
         and(
           eq(agentPolicies.agentId, agentId),
           eq(agentPolicies.tenantId, tenantId),
-          gte(agentPolicies.dailyCapUsd, String(dailyCapValue)),
-          gte(agentPolicies.perOrderCapUsd, String(perOrderCapValue)),
-          gte(agentPolicies.leverageCap, String(leverageCapValue)),
-          arrayContains(agentPolicies.allowedAssets, allowedAssetsValue),
-          arrayContains(agentPolicies.allowedVenues, allowedVenuesValue),
-          allowBuilderPerpsValue ? eq(agentPolicies.allowBuilderPerps, true) : undefined,
+          eq(agentPolicies.dailyCapUsd, expected.dailyCapUsd),
+          eq(agentPolicies.perOrderCapUsd, expected.perOrderCapUsd),
+          eq(agentPolicies.leverageCap, expected.leverageCap),
+          eq(agentPolicies.allowedAssets, expected.allowedAssets),
+          eq(agentPolicies.allowedVenues, expected.allowedVenues),
+          eq(agentPolicies.allowBuilderPerps, expected.allowBuilderPerps),
         ),
       )
       .returning();
