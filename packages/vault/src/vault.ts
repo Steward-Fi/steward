@@ -1241,6 +1241,16 @@ export class Vault {
       (wallet) => wallet.chainFamily === "solana" && wallet.venue === null,
     );
 
+    // A recovery phrase proves the local key identity, but it does not grant
+    // permission to silently switch a wallet that is explicitly routed to an
+    // external custodian back to server-managed custody.
+    if (
+      (evmWallet && isExternalKeyWalletMetadata(evmWallet.metadata)) ||
+      (solanaWallet && isExternalKeyWalletMetadata(solanaWallet.metadata))
+    ) {
+      throw new Error("Cannot restore local mnemonic keys over an external-custody wallet");
+    }
+
     if (existingAgent.walletAddress.toLowerCase() !== material.evmAddress.toLowerCase()) {
       throw new Error("Mnemonic does not match the existing wallet identity");
     }
@@ -1266,6 +1276,31 @@ export class Vault {
     const now = new Date();
 
     await db.transaction(async (tx) => {
+      // Restore writes both venue-less key families. Join the same
+      // custody-transition fence as importKey/importExternalKeyHandle in a
+      // deterministic order, then repeat the guard under the locks so a
+      // concurrent handle import cannot commit between the check and writes.
+      if (usesCustodyAdvisoryLock()) {
+        for (const family of ["evm", "solana"] as const) {
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(tenantId, agentId, family, null)}, 0))`,
+          );
+        }
+      }
+      const lockedWallets = await tx
+        .select({ metadata: agentWallets.metadata })
+        .from(agentWallets)
+        .where(
+          and(
+            eq(agentWallets.agentId, agentId),
+            inArray(agentWallets.chainFamily, ["evm", "solana"]),
+            isNull(agentWallets.venue),
+          ),
+        );
+      if (lockedWallets.some((wallet) => isExternalKeyWalletMetadata(wallet.metadata))) {
+        throw new Error("Cannot restore local mnemonic keys over an external-custody wallet");
+      }
+
       await tx
         .update(agents)
         .set({

@@ -1,5 +1,14 @@
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { agents, encryptedChainKeys, encryptedKeys, getDb, tenants } from "@stwd/db";
+import {
+  agents,
+  agentWallets,
+  and,
+  encryptedChainKeys,
+  encryptedKeys,
+  getDb,
+  isNull,
+  tenants,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
 import { Vault } from "../vault";
@@ -155,5 +164,58 @@ describe("Vault mnemonic restore", () => {
         { walletType: "recoverable_user" },
       ),
     ).rejects.toThrow(/does not match/);
+  });
+
+  test("refuses to restore local keys over an external-custody wallet", async () => {
+    const agentId = "external-recoverable-agent";
+    await vault.createAgentFromMnemonic(
+      TENANT_ID,
+      agentId,
+      "External Recoverable Agent",
+      TEST_MNEMONIC,
+      { walletType: "recoverable_user" },
+    );
+    await getDb().delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
+    await getDb().delete(encryptedChainKeys).where(eq(encryptedChainKeys.agentId, agentId));
+    await getDb()
+      .update(agentWallets)
+      .set({
+        metadata: {
+          custody: "external",
+          externalKey: {
+            providerId: "test-hsm",
+            keyId: "recoverable-key",
+            registeredAt: new Date().toISOString(),
+            exportablePrivateKey: false,
+            signingAvailability: "provider-signing",
+          },
+        },
+      })
+      .where(
+        and(
+          eq(agentWallets.agentId, agentId),
+          eq(agentWallets.chainFamily, "evm"),
+          isNull(agentWallets.venue),
+        ),
+      );
+
+    await expect(
+      vault.restoreAgentFromMnemonic(
+        TENANT_ID,
+        agentId,
+        "External Recoverable Agent",
+        TEST_MNEMONIC,
+        { walletType: "recoverable_user" },
+      ),
+    ).rejects.toThrow(/external-custody/);
+    expect(
+      await getDb().select().from(encryptedKeys).where(eq(encryptedKeys.agentId, agentId)),
+    ).toHaveLength(0);
+    expect(
+      await getDb()
+        .select()
+        .from(encryptedChainKeys)
+        .where(eq(encryptedChainKeys.agentId, agentId)),
+    ).toHaveLength(0);
   });
 });
