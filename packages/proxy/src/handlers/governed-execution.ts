@@ -42,9 +42,9 @@ import {
 } from "@stwd/db";
 import {
   AWS_PROVIDER_ACTION_PROFILE,
-  awsEc2AllowedOriginFromCanonicalBytes,
   type AwsCanonicalActionV1,
   assertRegisteredProfile,
+  awsEc2AllowedOriginFromCanonicalBytes,
   buildProviderExecutionCommitmentV2,
   CanonError,
   computeActionDigest,
