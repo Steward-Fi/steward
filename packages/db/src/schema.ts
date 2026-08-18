@@ -45,10 +45,11 @@ import {
 // drops the tenant predicate is a cross-tenant data leak; the database would
 // not catch it.
 //
-// RLS as defense-in-depth for the highest-value tables (`secrets`,
-// `encrypted_keys`, `accounts`) is a deliberate DEFERRED decision, not an
-// oversight. Enabling it safely requires all of the following, and shipping
-// half of it is worse than none:
+// RLS activation is tracked by SEC-169. The executable transaction-context
+// primitive, complete policy inventory, and rollout gates live in
+// `tenant-rls-context.ts`, `rls-inventory.ts`, and
+// `docs/security/database-rls-rollout.mdx`. Enabling it safely requires all of
+// the following, and shipping half of it is worse than none:
 //   1. a per-request `SET LOCAL app.tenant_id` inside EVERY transaction (the
 //      pooled postgres-js role is shared by all tenants, so the GUC must be
 //      set on the checked-out connection for exactly the unit of work);
