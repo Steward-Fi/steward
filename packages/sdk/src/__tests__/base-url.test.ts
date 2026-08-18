@@ -56,7 +56,7 @@ describe("assertSecureBaseUrl", () => {
   });
 
   test("the insecure opt-out permits HTTP only, never arbitrary URL schemes", () => {
-    expect(() => assertSecureBaseUrl("ftp://api.steward.example", true)).toThrow(/HTTPS/);
+    expect(() => assertSecureBaseUrl("ftp://api.steward.example", true)).toThrow(/HTTP\(S\)/);
   });
 });
 
