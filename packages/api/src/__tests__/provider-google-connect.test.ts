@@ -39,6 +39,8 @@ import {
   __runDefaultGoogleForwardForTests,
   __setGoogleConnectCommitHookForTests,
   __setGoogleCredentialStageHookForTests,
+  __setGoogleDisconnectJournalHookForTests,
+  __setGoogleDisconnectRevokeHookForTests,
   __setGoogleForwardForTests,
   __setGoogleRefreshIntentHookForTests,
   assertGoogleConnectStoreIsSafe,
@@ -56,6 +58,7 @@ import {
   reconcileGoogleRefreshLifecycle,
   refreshGoogleProviderCredential,
   resolveGoogleConnectConfig,
+  runGoogleCredentialLifecycleSweep,
 } from "../services/provider-google-connect";
 
 setDefaultTimeout(120_000);
@@ -300,6 +303,8 @@ afterAll(async () => {
   __setGoogleForwardForTests(null);
   __setGoogleConnectCommitHookForTests(null);
   __setGoogleCredentialStageHookForTests(null);
+  __setGoogleDisconnectJournalHookForTests(null);
+  __setGoogleDisconnectRevokeHookForTests(null);
   __setGoogleRefreshIntentHookForTests(null);
   await closeDb();
 });
@@ -308,6 +313,8 @@ afterEach(async () => {
   __setGoogleForwardForTests(null);
   __setGoogleConnectCommitHookForTests(null);
   __setGoogleCredentialStageHookForTests(null);
+  __setGoogleDisconnectJournalHookForTests(null);
+  __setGoogleDisconnectRevokeHookForTests(null);
   __setGoogleRefreshIntentHookForTests(null);
   // Reset connected accounts + credential secrets between tests.
   const db = getDb();
@@ -1272,6 +1279,52 @@ describe("refresh", () => {
     expect(fake.counters.refresh).toBe(0);
   });
 
+  test("bounded recovery freezes an intent crash without replaying the refresh token", async () => {
+    const store = new MemoryConnectStore();
+    const { completed } = await connectHappy(store);
+    const fake = installFakeX();
+    const restoreHook = __setGoogleRefreshIntentHookForTests(() => {
+      throw new Error("crash after refresh intent");
+    });
+    const refreshInput = {
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      accountId: completed.providerAccountId,
+      vault,
+      config: CONFIG,
+      force: true,
+    };
+    await expect(refreshGoogleProviderCredential(refreshInput)).rejects.toThrow(
+      "crash after refresh intent",
+    );
+    restoreHook();
+    const db = getDb();
+    const [lifecycle] = await db
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.kind, "refresh_rotation"));
+    await db
+      .update(providerGoogleCredentialLifecycles)
+      .set({ updatedAt: new Date(Date.now() - 60_000) })
+      .where(eq(providerGoogleCredentialLifecycles.id, lifecycle.id));
+
+    const result = await runGoogleCredentialLifecycleSweep({ vault, config: CONFIG });
+    expect(result.claimed).toBe(1);
+    expect(result.failed).toBe(1);
+    expect(fake.counters.refresh).toBe(0);
+    const [account] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(account.status).toBe("disabled");
+    const [recovered] = await db
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.id, lifecycle.id));
+    expect(recovered.state).toBe("needs_attention");
+    fake.restore();
+  });
+
   test("a rotated response that cannot be staged disables the unchanged account", async () => {
     const store = new MemoryConnectStore();
     const { completed } = await connectHappy(store);
@@ -1654,6 +1707,101 @@ describe("disconnect", () => {
 
     const events = await readAuditActions(TENANT);
     expect(events.includes("provider.google.disconnect.completed")).toBe(true);
+  });
+
+  test("journals before revoke so a disconnect crash is recoverable", async () => {
+    const store = new MemoryConnectStore();
+    const { completed } = await connectHappy(store);
+    const fake = installFakeX();
+    const restoreHook = __setGoogleDisconnectJournalHookForTests(() => {
+      throw new Error("crash after disconnect journal");
+    });
+    await expect(
+      disconnectGoogleProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        callerUserId: ADMIN,
+        vault,
+        config: CONFIG,
+      }),
+    ).rejects.toThrow("crash after disconnect journal");
+    restoreHook();
+    const db = getDb();
+    const [staged] = await db
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.kind, "disconnect_revoke"));
+    expect(staged.state).toBe("credential_staged");
+    expect(fake.counters.revoke).toBe(0);
+    await db
+      .update(providerGoogleCredentialLifecycles)
+      .set({ updatedAt: new Date(Date.now() - 60_000) })
+      .where(eq(providerGoogleCredentialLifecycles.id, staged.id));
+
+    const result = await runGoogleCredentialLifecycleSweep({ vault, config: CONFIG });
+    expect(result.claimed).toBe(1);
+    expect(result.revoked).toBe(1);
+    expect(fake.counters.revoke).toBe(1);
+    const [account] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(account.status).toBe("revoked");
+    expect(account.credentialSecretId).toBeNull();
+    const [recovered] = await db
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.id, staged.id));
+    expect(recovered.state).toBe("revoked");
+    fake.restore();
+  });
+
+  test("keeps local disconnect truthful when revoke outcome is ambiguous", async () => {
+    const store = new MemoryConnectStore();
+    const { completed } = await connectHappy(store);
+    const fake = installFakeX();
+    const restoreHook = __setGoogleDisconnectRevokeHookForTests(() => {
+      throw new Error("crash after upstream revoke");
+    });
+    await expect(
+      disconnectGoogleProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        callerUserId: ADMIN,
+        vault,
+        config: CONFIG,
+      }),
+    ).rejects.toThrow("crash after upstream revoke");
+    restoreHook();
+    expect(fake.counters.revoke).toBe(1);
+    const db = getDb();
+    const [accountBefore] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(accountBefore.status).toBe("active");
+    const [staged] = await db
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.kind, "disconnect_revoke"));
+    await db
+      .update(providerGoogleCredentialLifecycles)
+      .set({ updatedAt: new Date(Date.now() - 60_000) })
+      .where(eq(providerGoogleCredentialLifecycles.id, staged.id));
+    await runGoogleCredentialLifecycleSweep({ vault, config: CONFIG });
+    const [accountAfter] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(accountAfter.status).toBe("revoked");
+    const [recovered] = await db
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.id, staged.id));
+    expect(recovered.state).toBe("revoked");
+    fake.restore();
   });
 
   test("disconnect of a missing account => GOOGLE_ACCOUNT_NOT_FOUND", async () => {

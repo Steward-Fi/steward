@@ -2074,7 +2074,7 @@ export const providerGoogleCredentialLifecycles = pgTable(
     ),
     kindCheck: check(
       "provider_google_lifecycle_kind_check",
-      sql`${table.kind} IN ('connect_exchange', 'refresh_rotation')`,
+      sql`${table.kind} IN ('connect_exchange', 'refresh_rotation', 'disconnect_revoke')`,
     ),
     accountStateIdx: index("provider_google_lifecycle_account_state_idx").on(
       table.tenantId,

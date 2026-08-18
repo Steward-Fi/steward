@@ -28,6 +28,7 @@ import {
   RATE_LIMIT_MAX_REQUESTS,
   RATE_LIMIT_WINDOW_MS,
 } from "./services/context";
+import { startGoogleCredentialLifecycleScheduler } from "./services/provider-google-lifecycle-scheduler";
 import { startProviderReservationReconciliationScheduler } from "./services/provider-reservation-reconciliation-scheduler";
 import { startRetentionScheduler } from "./services/retention";
 import {
@@ -83,6 +84,7 @@ const rateLimiter = new InMemoryRateLimiter(
 let isShuttingDown = false;
 let cancelRetention: (() => void) | undefined;
 let cancelProviderReservationReconciliation: (() => void) | undefined;
+let cancelGoogleCredentialLifecycleScheduler: (() => void) | undefined;
 let cancelTransactionReceiptPolling: (() => void) | undefined;
 let cancelWebhookRetryScheduler: (() => void) | undefined;
 let cancelUpstreamCredentialLeaseScheduler: (() => Promise<void>) | undefined;
@@ -355,6 +357,7 @@ if (migrationsRan) {
   if (redisOk) {
     cancelProviderReservationReconciliation = startProviderReservationReconciliationScheduler();
   }
+  cancelGoogleCredentialLifecycleScheduler = startGoogleCredentialLifecycleScheduler();
   cancelTransactionReceiptPolling = startTransactionReceiptPollingScheduler();
   cancelWebhookRetryScheduler = startWebhookRetryScheduler();
   if (capabilitiesEnabled) {
@@ -399,6 +402,7 @@ const shutdown = async (signal: string) => {
   if (nonceCleanupTimer) clearInterval(nonceCleanupTimer);
   if (cancelRetention) cancelRetention();
   if (cancelProviderReservationReconciliation) cancelProviderReservationReconciliation();
+  if (cancelGoogleCredentialLifecycleScheduler) cancelGoogleCredentialLifecycleScheduler();
   if (cancelTransactionReceiptPolling) cancelTransactionReceiptPolling();
   if (cancelWebhookRetryScheduler) cancelWebhookRetryScheduler();
   if (cancelUpstreamCredentialLeaseScheduler) await cancelUpstreamCredentialLeaseScheduler();

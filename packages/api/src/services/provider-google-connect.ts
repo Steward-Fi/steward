@@ -254,6 +254,8 @@ export function __setGoogleForwardForTests(fn: GoogleForwardFn | null): () => vo
 let beforeConnectCommitForTests: (() => void | Promise<void>) | null = null;
 let afterGoogleCredentialStageForTests: (() => void | Promise<void>) | null = null;
 let afterGoogleRefreshIntentForTests: (() => void | Promise<void>) | null = null;
+let afterGoogleDisconnectJournalForTests: (() => void | Promise<void>) | null = null;
+let afterGoogleDisconnectRevokeForTests: (() => void | Promise<void>) | null = null;
 
 /** Inject a failure immediately before the connect audit append. Test-only. */
 export function __setGoogleConnectCommitHookForTests(
@@ -285,6 +287,26 @@ export function __setGoogleRefreshIntentHookForTests(
   afterGoogleRefreshIntentForTests = hook;
   return () => {
     afterGoogleRefreshIntentForTests = previous;
+  };
+}
+
+export function __setGoogleDisconnectJournalHookForTests(
+  hook: (() => void | Promise<void>) | null,
+): () => void {
+  const previous = afterGoogleDisconnectJournalForTests;
+  afterGoogleDisconnectJournalForTests = hook;
+  return () => {
+    afterGoogleDisconnectJournalForTests = previous;
+  };
+}
+
+export function __setGoogleDisconnectRevokeHookForTests(
+  hook: (() => void | Promise<void>) | null,
+): () => void {
+  const previous = afterGoogleDisconnectRevokeForTests;
+  afterGoogleDisconnectRevokeForTests = hook;
+  return () => {
+    afterGoogleDisconnectRevokeForTests = previous;
   };
 }
 
@@ -550,7 +572,7 @@ async function stageGoogleCredentialResponse(input: {
   tenantId: string;
   workspaceId: string;
   vault: SecretVault;
-  kind: "connect_exchange" | "refresh_rotation";
+  kind: "connect_exchange" | "refresh_rotation" | "disconnect_revoke";
   token: GoogleTokenResponse;
   providerAccountId?: string;
   expectedAccountRevision?: number;
@@ -625,6 +647,12 @@ async function setGoogleLifecycleState(
         and(
           eq(providerGoogleCredentialLifecycles.tenantId, tenantId),
           eq(providerGoogleCredentialLifecycles.id, lifecycleId),
+          inArray(providerGoogleCredentialLifecycles.state, [
+            "inflight",
+            "credential_staged",
+            "revocation_pending",
+            "needs_attention",
+          ]),
         ),
       )
       .limit(1)
@@ -663,6 +691,143 @@ async function setGoogleLifecycleState(
   });
 }
 
+/**
+ * Complete a disconnect journal only when its account revision still denotes
+ * the credential that was journaled. A reconnect racing this operation must
+ * win by revision and keep its newer active credential untouched.
+ */
+async function finalizeDisconnectLifecycle(
+  tenantId: string,
+  lifecycleId: string,
+  terminalState: "revoked" | "needs_attention" = "revoked",
+  lastErrorCode: string | null = null,
+): Promise<boolean> {
+  return withTenantAuditedTransaction(tenantId, async (txRaw, append) => {
+    const tx = txRaw as DbExecutor;
+    const [lifecycle] = await tx
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(
+        and(
+          eq(providerGoogleCredentialLifecycles.tenantId, tenantId),
+          eq(providerGoogleCredentialLifecycles.id, lifecycleId),
+          eq(providerGoogleCredentialLifecycles.kind, "disconnect_revoke"),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    if (!lifecycle || !lifecycle.providerAccountId || !lifecycle.credentialSecretId) return false;
+    const [account] = await tx
+      .select()
+      .from(providerAccounts)
+      .where(
+        and(
+          eq(providerAccounts.tenantId, tenantId),
+          eq(providerAccounts.id, lifecycle.providerAccountId),
+          eq(providerAccounts.workspaceId, lifecycle.workspaceId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    if (!account) return false;
+    if (account.status === "active" && account.revision !== lifecycle.expectedAccountRevision) {
+      await tx
+        .update(providerGoogleCredentialLifecycles)
+        .set({
+          state: "needs_attention",
+          lastErrorCode: "ACCOUNT_REVISION_CHANGED",
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(providerGoogleCredentialLifecycles.tenantId, tenantId),
+            eq(providerGoogleCredentialLifecycles.id, lifecycleId),
+          ),
+        );
+      return false;
+    }
+    const previousCredentialSecretId = account.credentialSecretId;
+    const [updatedAccount] = await tx
+      .update(providerAccounts)
+      .set({
+        status: "revoked",
+        credentialSecretId: null,
+        credentialVersion: null,
+        ...(account.status === "active" ? { revision: account.revision + 1 } : {}),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(providerAccounts.tenantId, tenantId),
+          eq(providerAccounts.id, account.id),
+          ...(account.status === "active" ? [eq(providerAccounts.revision, account.revision)] : []),
+        ),
+      )
+      .returning({ id: providerAccounts.id });
+    if (!updatedAccount) return false;
+    const [updatedLifecycle] = await tx
+      .update(providerGoogleCredentialLifecycles)
+      .set({
+        state: terminalState,
+        lastErrorCode,
+        ...(terminalState === "revoked" ? { credentialSecretId: null } : {}),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(providerGoogleCredentialLifecycles.tenantId, tenantId),
+          eq(providerGoogleCredentialLifecycles.id, lifecycleId),
+          inArray(providerGoogleCredentialLifecycles.state, [
+            "credential_staged",
+            "revocation_pending",
+            "needs_attention",
+          ]),
+        ),
+      )
+      .returning();
+    if (!updatedLifecycle) return false;
+    if (terminalState === "revoked") {
+      await tx
+        .delete(secrets)
+        .where(and(eq(secrets.tenantId, tenantId), eq(secrets.id, lifecycle.credentialSecretId)));
+    }
+    if (previousCredentialSecretId) {
+      await tx
+        .delete(secrets)
+        .where(and(eq(secrets.tenantId, tenantId), eq(secrets.id, previousCredentialSecretId)));
+    }
+    await append({
+      tenantId,
+      actorType: "system",
+      actorId: "system",
+      action:
+        terminalState === "revoked"
+          ? "provider.google.disconnect.reconciled"
+          : "provider.google.disconnect.needs_attention",
+      resourceType: "provider_account",
+      resourceId: account.id,
+      metadata: { lifecycleId, workspaceId: lifecycle.workspaceId, lastErrorCode },
+    });
+    if (terminalState === "revoked") {
+      await append({
+        tenantId,
+        actorType: "system",
+        actorId: "system",
+        action: "provider.google.disconnect.completed",
+        resourceType: "provider_account",
+        resourceId: account.id,
+        metadata: {
+          lifecycleId,
+          workspaceId: lifecycle.workspaceId,
+          reconciled: true,
+          lastErrorCode,
+        },
+      });
+    }
+    return true;
+  });
+}
+
 /** Retry a durable revocation handle. Terminal rows are strict single-use. */
 export async function reconcileGoogleCredentialRevocation(input: {
   tenantId: string;
@@ -685,7 +850,10 @@ export async function reconcileGoogleCredentialRevocation(input: {
     !row ||
     (row.state !== "revocation_pending" &&
       row.state !== "needs_attention" &&
-      !(row.kind === "connect_exchange" && row.state === "credential_staged"))
+      !(
+        (row.kind === "connect_exchange" || row.kind === "disconnect_revoke") &&
+        row.state === "credential_staged"
+      ))
   ) {
     return "already_terminal";
   }
@@ -723,6 +891,11 @@ export async function reconcileGoogleCredentialRevocation(input: {
       body: new URLSearchParams({ token, client_id: input.config.clientId }).toString(),
     });
     if (!response.ok) throw new Error("revoker rejected handle");
+    if (row.kind === "disconnect_revoke") {
+      return (await finalizeDisconnectLifecycle(input.tenantId, input.lifecycleId))
+        ? "revoked"
+        : "needs_attention";
+    }
     await setGoogleLifecycleState(input.tenantId, input.lifecycleId, "revoked");
     return "revoked";
   } catch {
@@ -2041,14 +2214,18 @@ export interface DisconnectResult {
 }
 
 /**
- * Disconnect a connected Google account: best-effort revoke at Google, degrade the account
- * (status revoked), bump revision, audit. Revocation failure at Google does NOT block
- * the local degrade — we fail CLOSED locally regardless.
+ * Disconnect a connected Google account. The encrypted revoke handle and the
+ * expected account revision commit BEFORE the upstream call, so a crash or
+ * ambiguous provider response is recoverable without leaving local authority
+ * active against an unknown upstream grant.
  */
 export async function disconnectGoogleProviderCredential(
   input: DisconnectInput,
 ): Promise<DisconnectResult> {
-  return withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
+  let lifecycleId = "";
+  let revokeToken: { accessToken: string; refreshToken: string | null } | null = null;
+  let expectedRevision: number | null = null;
+  await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
     const tx = txRaw as DbExecutor;
     const [account] = await tx
       .select()
@@ -2071,64 +2248,117 @@ export async function disconnectGoogleProviderCredential(
         "provider account is not a Google account",
       );
     }
-
-    let revokedAtUpstream = false;
-    if (account.credentialSecretId) {
-      try {
-        const cred = await loadCredential(
-          input.vault,
-          input.tenantId,
-          account.credentialSecretId,
-          tx,
+    if (!account.credentialSecretId) {
+      const [degraded] = await tx
+        .update(providerAccounts)
+        .set({ status: "revoked", revision: account.revision + 1, updatedAt: new Date() })
+        .where(
+          and(
+            eq(providerAccounts.tenantId, input.tenantId),
+            eq(providerAccounts.id, account.id),
+            eq(providerAccounts.revision, account.revision),
+          ),
+        )
+        .returning({ id: providerAccounts.id, revision: providerAccounts.revision });
+      if (!degraded)
+        throw new GoogleConnectError(
+          "GOOGLE_REFRESH_FAILED",
+          409,
+          "account revision conflict on disconnect",
         );
-        revokedAtUpstream = await revokeUpstreamBestEffort(
-          cred.payload.accessToken,
-          cred.refreshToken,
-        );
-      } catch {
-        // Best-effort only. Local degrade proceeds regardless.
-        revokedAtUpstream = false;
-      }
+      await append({
+        tenantId: input.tenantId,
+        actorType: "user",
+        actorId: input.callerUserId,
+        action: "provider.google.disconnect.completed",
+        resourceType: "provider_account",
+        resourceId: account.id,
+        metadata: {
+          workspaceId: input.workspaceId,
+          revokedAtUpstream: false,
+          requestId: input.requestId ?? null,
+        },
+      });
+      return;
     }
-
-    const [degraded] = await tx
-      .update(providerAccounts)
-      .set({ status: "revoked", revision: account.revision + 1, updatedAt: new Date() })
-      .where(
-        and(
-          eq(providerAccounts.tenantId, input.tenantId),
-          eq(providerAccounts.id, account.id),
-          eq(providerAccounts.revision, account.revision),
-        ),
-      )
-      .returning();
-    if (!degraded) {
-      throw new GoogleConnectError(
-        "GOOGLE_REFRESH_FAILED",
-        409,
-        "account revision conflict on disconnect",
-      );
-    }
-
+    const cred = await loadCredential(input.vault, input.tenantId, account.credentialSecretId, tx);
+    lifecycleId = randomUUID();
+    expectedRevision = account.revision;
+    revokeToken = { accessToken: cred.payload.accessToken, refreshToken: cred.refreshToken };
+    const secret = await input.vault.createSecretWithinTx(
+      tx,
+      input.tenantId,
+      `provider-google-lifecycle:${lifecycleId}`,
+      JSON.stringify({
+        schemaVersion: "steward.provider-google.lifecycle.v1",
+        token: {
+          access_token: cred.payload.accessToken,
+          refresh_token: cred.refreshToken ?? undefined,
+        },
+      } satisfies GoogleLifecycleSecret),
+      { description: "Encrypted transient Google OAuth revocation material" },
+    );
+    await tx.insert(providerGoogleCredentialLifecycles).values({
+      id: lifecycleId,
+      tenantId: input.tenantId,
+      workspaceId: input.workspaceId,
+      providerAccountId: account.id,
+      kind: "disconnect_revoke",
+      state: "credential_staged",
+      credentialSecretId: secret.id,
+      expectedAccountRevision: account.revision,
+    });
     await append({
       tenantId: input.tenantId,
       actorType: "user",
       actorId: input.callerUserId,
-      action: "provider.google.disconnect.completed",
-      resourceType: "provider_account",
-      resourceId: account.id,
+      action: "provider.google.disconnect.intent_staged",
+      resourceType: "provider_google_credential_lifecycle",
+      resourceId: lifecycleId,
       metadata: {
         workspaceId: input.workspaceId,
-        googleUserId: account.externalRef,
-        revokedAtUpstream,
-        previousRevision: account.revision,
-        newRevision: degraded.revision,
+        providerAccountId: account.id,
         requestId: input.requestId ?? null,
       },
     });
-
-    return { providerAccountId: account.id, revoked: revokedAtUpstream };
   });
+  // Assignments made inside the transaction callback are intentionally
+  // observed only after its commit; make that boundary explicit to TypeScript.
+  const tokenToRevoke = revokeToken as {
+    accessToken: string;
+    refreshToken: string | null;
+  } | null;
+  if (!lifecycleId || !tokenToRevoke || expectedRevision === null) {
+    return { providerAccountId: input.accountId, revoked: false };
+  }
+  await afterGoogleDisconnectJournalForTests?.();
+
+  let revokedAtUpstream = false;
+  let outcomeUnknown = false;
+  try {
+    revokedAtUpstream = await revokeUpstreamBestEffort(
+      tokenToRevoke.accessToken,
+      tokenToRevoke.refreshToken,
+    );
+  } catch {
+    outcomeUnknown = true;
+  }
+  await afterGoogleDisconnectRevokeForTests?.();
+  const finalized = await finalizeDisconnectLifecycle(
+    input.tenantId,
+    lifecycleId,
+    revokedAtUpstream ? "revoked" : "needs_attention",
+    outcomeUnknown ? "REVOCATION_OUTCOME_UNKNOWN" : "REVOCATION_FAILED",
+  );
+  if (!finalized) {
+    await setGoogleLifecycleState(
+      input.tenantId,
+      lifecycleId,
+      "needs_attention",
+      "ACCOUNT_REVISION_CHANGED",
+    );
+  }
+  return { providerAccountId: input.accountId, revoked: revokedAtUpstream && finalized };
 }
 
 async function revokeUpstreamBestEffort(
@@ -2149,6 +2379,205 @@ async function revokeUpstreamBestEffort(
     body: body.toString(),
   });
   return res.ok;
+}
+
+export const GOOGLE_LIFECYCLE_SWEEP_BATCH_SIZE = 25;
+export const GOOGLE_LIFECYCLE_MAX_ATTEMPTS = 5;
+const GOOGLE_LIFECYCLE_BASE_BACKOFF_MS = 5_000;
+const GOOGLE_LIFECYCLE_MAX_BACKOFF_MS = 5 * 60_000;
+
+export interface GoogleCredentialLifecycleSweepResult {
+  claimed: number;
+  adopted: number;
+  revoked: number;
+  needsAttention: number;
+  failed: number;
+  remaining: boolean;
+}
+
+function googleLifecycleBackoffMs(attempts: number): number {
+  return Math.min(
+    GOOGLE_LIFECYCLE_MAX_BACKOFF_MS,
+    GOOGLE_LIFECYCLE_BASE_BACKOFF_MS * 2 ** Math.max(0, attempts - 1),
+  );
+}
+
+function googleLifecycleRetryableState(
+  state: string,
+): state is "inflight" | "credential_staged" | "revocation_pending" | "needs_attention" {
+  return (
+    state === "inflight" ||
+    state === "credential_staged" ||
+    state === "revocation_pending" ||
+    state === "needs_attention"
+  );
+}
+
+/**
+ * Claim and reconcile a bounded page of lifecycle rows. Claims increment the
+ * attempt counter and refresh `updatedAt` before any provider I/O; a process
+ * crash therefore leaves the row retryable after exponential backoff without
+ * allowing two schedulers to process it concurrently.
+ */
+export async function runGoogleCredentialLifecycleSweep(input: {
+  vault: SecretVault;
+  config: GoogleConnectConfig;
+  batchSize?: number;
+}): Promise<GoogleCredentialLifecycleSweepResult> {
+  const batchSize = Math.min(
+    GOOGLE_LIFECYCLE_SWEEP_BATCH_SIZE,
+    Math.max(1, Math.floor(input.batchSize ?? GOOGLE_LIFECYCLE_SWEEP_BATCH_SIZE)),
+  );
+  const db = getDb() as DbExecutor;
+  const candidates = await db
+    .select()
+    .from(providerGoogleCredentialLifecycles)
+    .where(
+      and(
+        inArray(providerGoogleCredentialLifecycles.state, [
+          "inflight",
+          "credential_staged",
+          "revocation_pending",
+          "needs_attention",
+        ]),
+        sql`${providerGoogleCredentialLifecycles.attempts} < ${GOOGLE_LIFECYCLE_MAX_ATTEMPTS}`,
+      ),
+    )
+    .orderBy(providerGoogleCredentialLifecycles.updatedAt)
+    .limit(batchSize);
+  const result: GoogleCredentialLifecycleSweepResult = {
+    claimed: 0,
+    adopted: 0,
+    revoked: 0,
+    needsAttention: 0,
+    failed: 0,
+    remaining: candidates.length >= batchSize,
+  };
+  for (const candidate of candidates) {
+    const claimed = await withTenantAuditedTransaction(
+      candidate.tenantId,
+      async (txRaw, append) => {
+        const tx = txRaw as DbExecutor;
+        const [row] = await tx
+          .select()
+          .from(providerGoogleCredentialLifecycles)
+          .where(
+            and(
+              eq(providerGoogleCredentialLifecycles.tenantId, candidate.tenantId),
+              eq(providerGoogleCredentialLifecycles.id, candidate.id),
+            ),
+          )
+          .limit(1)
+          .for("update");
+        if (
+          !row ||
+          !googleLifecycleRetryableState(row.state) ||
+          row.attempts >= GOOGLE_LIFECYCLE_MAX_ATTEMPTS ||
+          Date.now() - row.updatedAt.getTime() < googleLifecycleBackoffMs(row.attempts)
+        ) {
+          return null;
+        }
+        const [updated] = await tx
+          .update(providerGoogleCredentialLifecycles)
+          .set({ attempts: row.attempts + 1, updatedAt: new Date() })
+          .where(
+            and(
+              eq(providerGoogleCredentialLifecycles.tenantId, row.tenantId),
+              eq(providerGoogleCredentialLifecycles.id, row.id),
+              eq(providerGoogleCredentialLifecycles.attempts, row.attempts),
+            ),
+          )
+          .returning();
+        if (!updated) return null;
+        await append({
+          tenantId: row.tenantId,
+          actorType: "system",
+          actorId: "system",
+          action: "provider.google.lifecycle.recovery_claimed",
+          resourceType: "provider_google_credential_lifecycle",
+          resourceId: row.id,
+          metadata: { kind: row.kind, attempts: updated.attempts, workspaceId: row.workspaceId },
+        });
+        return updated;
+      },
+    );
+    if (!claimed) continue;
+    result.claimed += 1;
+    try {
+      if (
+        claimed.kind === "refresh_rotation" &&
+        (claimed.state === "inflight" || claimed.state === "credential_staged") &&
+        claimed.providerAccountId
+      ) {
+        await reconcileGoogleRefreshLifecycle({
+          tenantId: claimed.tenantId,
+          workspaceId: claimed.workspaceId,
+          accountId: claimed.providerAccountId,
+          lifecycleId: claimed.id,
+          vault: input.vault,
+          config: input.config,
+        });
+        result.adopted += 1;
+      } else if (
+        claimed.kind === "refresh_rotation" &&
+        (claimed.state === "inflight" || claimed.state === "credential_staged")
+      ) {
+        result.needsAttention += 1;
+        await setGoogleLifecycleState(
+          claimed.tenantId,
+          claimed.id,
+          "needs_attention",
+          "ACCOUNT_BINDING_MISSING",
+        );
+      } else {
+        const outcome = await reconcileGoogleCredentialRevocation({
+          tenantId: claimed.tenantId,
+          lifecycleId: claimed.id,
+          vault: input.vault,
+          config: input.config,
+        });
+        if (outcome === "revoked") result.revoked += 1;
+        else if (outcome === "needs_attention") result.needsAttention += 1;
+      }
+    } catch (error) {
+      result.failed += 1;
+      if (
+        claimed.kind === "refresh_rotation" &&
+        claimed.state === "inflight" &&
+        claimed.providerAccountId
+      ) {
+        try {
+          await disableGoogleAccountForLifecycle(
+            {
+              tenantId: claimed.tenantId,
+              workspaceId: claimed.workspaceId,
+              accountId: claimed.providerAccountId,
+              vault: input.vault,
+              config: input.config,
+            },
+            claimed.id,
+            "RECOVERY_FAILED",
+          );
+        } catch {
+          // The lifecycle remains durable and the next sweep can retry it.
+        }
+      }
+      try {
+        // A staged refresh can have been fully compensated by its own catch
+        // path before the error reaches this boundary. Never turn an adopted
+        // or revoked terminal row back into needs_attention.
+        await setGoogleLifecycleState(
+          claimed.tenantId,
+          claimed.id,
+          "needs_attention",
+          error instanceof GoogleConnectError ? error.code : "RECOVERY_FAILED",
+        );
+      } catch {
+        // Preserve the original failure; the claimed row remains retryable.
+      }
+    }
+  }
+  return result;
 }
 
 // re-export sql for callers/tests that need raw predicates

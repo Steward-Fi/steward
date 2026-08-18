@@ -554,6 +554,13 @@
       "when": 1787020072000,
       "tag": "0098_google_credential_lifecycles",
       "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "7",
+      "when": 1787031494000,
+      "tag": "0099_google_disconnect_lifecycle_kind",
+      "breakpoints": true
     }
   ]
 }
