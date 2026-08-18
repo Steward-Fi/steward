@@ -1,9 +1,22 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  setDefaultTimeout,
+} from "bun:test";
 import { generateApiKey, signAgentToken } from "@stwd/auth";
 import { closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
+
+process.env.ELIZA_CLOUD_JWKS_URL = "https://jwks.example.test/.well-known/jwks.json";
+
+setDefaultTimeout(30_000);
 
 const TENANT_ID = "test-agent-token-expiry";
 const TENANT_NO_KEY_ID = "test-agent-token-expiry-no-key";

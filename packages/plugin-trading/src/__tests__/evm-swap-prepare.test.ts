@@ -25,6 +25,7 @@ process.env.STEWARD_PGLITE_MEMORY = "true";
 process.env.STEWARD_DB_MODE = "pglite";
 process.env.STEWARD_MASTER_PASSWORD = "evm-swap-master-password";
 process.env.STEWARD_AUDIT_HMAC_KEY = "evm-swap-audit-hmac-key-with-enough-entropy";
+process.env.ELIZA_CLOUD_JWKS_URL = "https://jwks.example.test/.well-known/jwks.json";
 
 setDefaultTimeout(30000);
 
