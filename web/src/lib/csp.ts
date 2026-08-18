@@ -6,9 +6,8 @@ import { DEFAULT_STEWARD_API_URL } from "@/lib/steward-api-url";
  *
  * SEC-077: `connect-src` is an explicit allowlist instead of the previous
  * blanket `https: wss:`, which let any injected script exfiltrate data to any
- * origin — undermining the CSP's role as the primary XSS mitigation for the
- * tokens the dashboard handles. The list covers exactly what the wallet dapp
- * needs:
+ * origin via fetch/XHR/WebSocket — the channels that carry structured request
+ * bodies. The list covers exactly what the wallet dapp needs:
  *   - 'self' (same-origin API proxy routes, Next data fetches, dev HMR)
  *   - the configured Steward API origin
  *   - the configured Solana RPC origin (https + its websocket form)
@@ -112,6 +111,15 @@ export function buildCsp(nonce: string, allowInsecureHttp: boolean): string {
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}' 'wasm-unsafe-eval'`,
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    // https: is a deliberate, documented exception to the connect-src
+    // allowlist model: tenant theme logos/favicons (dashboard settings →
+    // appearance) are operator-supplied URLs hosted on arbitrary origins, so
+    // no fixed allowlist can cover them. This leaves a residual GET-only
+    // beacon channel (an injected script could leak via `new Image().src`) —
+    // accepted because image loads cannot read responses, the nonce-gated
+    // script-src is the barrier for script execution in the first place, and
+    // breaking tenant branding is not a trade we can make silently. Never add
+    // a plain `http:` or `*` here.
     "img-src 'self' data: blob: https:",
     "font-src 'self' data: https://fonts.gstatic.com",
     `connect-src ${connectSrc.join(" ")}`,
