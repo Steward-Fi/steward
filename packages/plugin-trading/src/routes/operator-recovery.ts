@@ -404,7 +404,10 @@ export function createOperatorRecoveryRoutes(
         and(
           eq(transactions.agentId, agentId),
           gte(transactions.createdAt, oneWeekAgo),
-          sql`${transactions.status} in ('signed', 'broadcast', 'confirmed')`,
+          // A timed-out broadcast may already have landed. Keep it charged to
+          // both rate and spend counters until reconciliation proves otherwise,
+          // matching the core vault/intents accounting contract.
+          sql`${transactions.status} in ('signed', 'broadcast', 'confirmed', 'outcome_unknown')`,
         ),
       );
 
