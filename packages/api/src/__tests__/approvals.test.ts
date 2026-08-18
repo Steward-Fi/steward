@@ -14,7 +14,7 @@ import {
   users,
   userTenants,
 } from "@stwd/db";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { createSessionToken } from "../routes/auth";
 
 const TEST_PORT = parseInt(process.env.PORT || "3200", 10);
@@ -284,6 +284,40 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
       expect(second.status).toBe(200);
       const secondBody = await second.json();
       expect(secondBody.data.every((entry: { id: string }) => entry.id !== boundary.id)).toBe(true);
+    });
+
+    it("does not skip approvals whose database timestamps differ below JSON precision", async () => {
+      const db = getDb();
+      // Put the lexically smaller ID later at microsecond precision. The API
+      // serializes both values as .123Z, so a correct keyset must deliberately
+      // order and compare at that same precision and then use ID as its tie.
+      await db.execute(sql`
+        UPDATE approval_queue
+        SET requested_at = CASE id
+          WHEN ${TEST_APPROVAL_APPROVE} THEN TIMESTAMPTZ '2030-01-01 00:00:00.123900+00'
+          WHEN ${TEST_APPROVAL_DENY} THEN TIMESTAMPTZ '2030-01-01 00:00:00.123100+00'
+        END
+        WHERE id IN (${TEST_APPROVAL_APPROVE}, ${TEST_APPROVAL_DENY})
+      `);
+
+      const first = await fetch(
+        `${BASE_URL}/approvals?status=pending&agentId=${encodeURIComponent(TEST_AGENT)}&limit=1`,
+        { headers: adminHeaders() },
+      );
+      expect(first.status).toBe(200);
+      const firstBody = await first.json();
+      const boundary = firstBody.data[0] as { id: string; requestedAt: string };
+
+      const second = await fetch(
+        `${BASE_URL}/approvals?status=pending&agentId=${encodeURIComponent(TEST_AGENT)}&limit=1&cursorRequestedAt=${encodeURIComponent(boundary.requestedAt)}&cursorId=${encodeURIComponent(boundary.id)}`,
+        { headers: adminHeaders() },
+      );
+      expect(second.status).toBe(200);
+      const secondBody = await second.json();
+      expect(secondBody.data).toHaveLength(1);
+      expect(new Set([boundary.id, secondBody.data[0]?.id])).toEqual(
+        new Set([TEST_APPROVAL_APPROVE, TEST_APPROVAL_DENY]),
+      );
     });
 
     it("rejects partial, malformed, and offset-combined cursors", async () => {

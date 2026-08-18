@@ -56,6 +56,11 @@ const MAX_APPROVAL_AGENT_ID_LENGTH = 64;
 const MAX_APPROVAL_CURSOR_ID_LENGTH = 128;
 
 const approvalTransactionMatchesQueue = sql`${transactions.agentId} = ${approvalQueue.agentId}`;
+// JSON/JavaScript Date values retain milliseconds while PostgreSQL timestamps
+// may retain microseconds. Use the serialized precision for both ordering and
+// cursor comparisons, with id as the deterministic tie-breaker, so sub-ms rows
+// cannot fall into a gap between pages.
+const approvalRequestedAtMs = sql<Date>`date_trunc('milliseconds', ${approvalQueue.requestedAt})`;
 
 function approvalActor(c: Context<{ Variables: AppVariables }>): string {
   return c.get("userId") ?? `${c.get("authType") ?? "tenant"}:${c.get("tenantId")}`;
@@ -319,15 +324,13 @@ approvalRoutes.get("/", async (c) => {
         statusFilter !== "all" ? eq(approvalQueue.status, statusFilter) : undefined,
         cursorRequestedAt && cursorId
           ? or(
-              lt(approvalQueue.requestedAt, cursorRequestedAt),
-              and(eq(approvalQueue.requestedAt, cursorRequestedAt), lt(approvalQueue.id, cursorId)),
+              lt(approvalRequestedAtMs, cursorRequestedAt),
+              and(eq(approvalRequestedAtMs, cursorRequestedAt), lt(approvalQueue.id, cursorId)),
             )
           : undefined,
       ),
     )
-    // Stable ordering is required for offset pagination when multiple queue
-    // entries share the same requestedAt timestamp.
-    .orderBy(desc(approvalQueue.requestedAt), desc(approvalQueue.id))
+    .orderBy(desc(approvalRequestedAtMs), desc(approvalQueue.id))
     .limit(limit)
     .offset(offset);
 
