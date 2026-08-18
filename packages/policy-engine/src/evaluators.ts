@@ -35,6 +35,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isEvmAddress(value: unknown): value is string {
+  return typeof value === "string" && /^0x[a-f0-9]{40}$/i.test(value);
+}
+
 export interface EvaluatorContext {
   request: SignRequest;
   recentTxCount24h: number;
@@ -610,15 +614,13 @@ function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): Pol
   if (
     !isRecord(rawConfig) ||
     !Array.isArray(rawConfig.addresses) ||
-    !rawConfig.addresses.every((address) => typeof address === "string") ||
-    (rawConfig.mode !== undefined &&
-      rawConfig.mode !== "whitelist" &&
-      rawConfig.mode !== "blacklist")
+    !rawConfig.addresses.every(isEvmAddress) ||
+    (rawConfig.mode !== "whitelist" && rawConfig.mode !== "blacklist")
   ) {
     return {
       ...base,
       passed: false,
-      reason: "Approved addresses must be an array of strings with a valid mode",
+      reason: "Approved addresses must be an array of EVM addresses with a valid mode",
     };
   }
   const config = rawConfig as unknown as ApprovedAddressesConfig;
@@ -634,7 +636,7 @@ function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): Pol
 
   const target = targetAddress.toLowerCase();
   const listed = config.addresses.map((a) => a.toLowerCase());
-  const mode = config.mode ?? "whitelist";
+  const mode = config.mode;
 
   if (mode === "whitelist") {
     if (!listed.includes(target)) {

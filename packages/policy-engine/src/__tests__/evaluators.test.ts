@@ -2005,11 +2005,13 @@ describe("Malformed evaluator config fails closed instead of throwing (SEC-105)"
   it("approved-addresses rejects malformed entries and mode without throwing", async () => {
     for (const config of [
       { addresses: [null], mode: "whitelist" },
+      { addresses: ["not-an-address"], mode: "blacklist" },
+      { addresses: ["0x1234567890123456789012345678901234567890"] },
       { addresses: ["0x1234567890123456789012345678901234567890"], mode: "unknown" },
     ]) {
       const result = await evaluatePolicy(makeAddressRule(config as never), makeContext());
       expect(result.passed).toBe(false);
-      expect(result.reason).toContain("array of strings");
+      expect(result.reason).toContain("array of EVM addresses");
     }
   });
 });

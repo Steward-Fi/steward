@@ -57,10 +57,10 @@ export function dispatchWebhook(
     },
   );
 
-  // SEC-101: tenant-route webhookUrl writes are mirrored into webhook_configs
-  // with a generated, encrypted, per-endpoint secret. The former second fan-out
-  // through a bare URL both duplicate-delivered each event and could only sign
-  // with a process-wide key. The configured path above is now the sole path.
+  // SEC-101: the unverifiable tenant-route webhookUrl field is retired. The
+  // former second fan-out through a bare URL both duplicate-delivered each
+  // event and could only sign with a process-wide key. Persisted /webhooks
+  // endpoints with receiver-known per-endpoint secrets are now the sole path.
 }
 
 export async function dispatchTestWebhook(config: {
