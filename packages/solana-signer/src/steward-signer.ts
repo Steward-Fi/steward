@@ -16,7 +16,7 @@
 //
 // Sign-only by design: this module never broadcasts and never touches keys.
 
-import { createPublicKey, verify } from "node:crypto";
+import { createHash, createPublicKey, verify } from "node:crypto";
 import { PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
 import { type PolicyResult, StewardApiError, StewardClient } from "@stwd/sdk";
 
@@ -147,7 +147,11 @@ export interface StewardSolanaSignerConfig {
   apiKey?: string;
   /** Multi-tenant header (X-Steward-Tenant), when the deployment needs it. */
   tenantId?: string;
-  /** Preconfigured client; wins over baseUrl/bearerToken/apiKey/tenantId. */
+  /** End-to-end Steward request deadline in milliseconds (default: 30s). */
+  requestTimeoutMs?: number;
+  /** Maximum Steward response body bytes accepted by the SDK (default: 8 MiB). */
+  maxResponseBodyBytes?: number;
+  /** Preconfigured client; wins over baseUrl/auth/tenant and request-limit options. */
   client?: StewardClient;
   /** Solana chain id understood by Steward: 101 mainnet (default), 102 devnet. */
   chainId?: number;
@@ -379,6 +383,8 @@ export async function createStewardSolanaSigner(
       bearerToken: config.bearerToken,
       apiKey: config.apiKey,
       tenantId: config.tenantId,
+      requestTimeoutMs: config.requestTimeoutMs,
+      maxResponseBodyBytes: config.maxResponseBodyBytes,
     });
   const { agentId } = config;
 
@@ -430,17 +436,32 @@ export async function createStewardSolanaSigner(
     } catch (err) {
       throw toSignerError(err);
     }
+    const request = {
+      transaction: txBase64,
+      chainId,
+      broadcast: false,
+      ...(hints?.to !== undefined ? { to: hints.to } : {}),
+      ...(hints?.value !== undefined ? { value: hints.value } : {}),
+    };
+    // The API's authenticated idempotency middleware scopes this key to the
+    // tenant and credential, fingerprints the complete request body, and can
+    // replay the signed (never broadcast) response. A caller retry after a
+    // response is lost therefore recovers the same deterministic signature
+    // instead of producing another signing/audit side effect.
+    const idempotencyKey = `steward-solana-sign-v1-${createHash("sha256")
+      .update(agentId)
+      .update("\0")
+      .update(JSON.stringify(request))
+      .digest("hex")}`;
     let result: Awaited<ReturnType<StewardClient["signSolanaTransaction"]>>;
     try {
       // The SDK input type does not model the advisory to/value hints the
       // route accepts, so widen at the call; extra JSON fields ride along.
-      result = await client.signSolanaTransaction(agentId, {
-        transaction: txBase64,
-        chainId,
-        broadcast: false,
-        ...(hints?.to !== undefined ? { to: hints.to } : {}),
-        ...(hints?.value !== undefined ? { value: hints.value } : {}),
-      } as Parameters<StewardClient["signSolanaTransaction"]>[1]);
+      result = await client.signSolanaTransaction(
+        agentId,
+        request as Parameters<StewardClient["signSolanaTransaction"]>[1],
+        { idempotencyKey },
+      );
     } catch (err) {
       throw toSignerError(err);
     }

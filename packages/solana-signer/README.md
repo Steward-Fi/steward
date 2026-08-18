@@ -10,6 +10,12 @@ Every signature is one `POST /vault/:agentId/sign-solana` with
 the signed transaction comes back, and the caller keeps its own send+confirm
 path. This package never broadcasts and never sees a private key.
 
+The signer supplies a stable, request-body-bound idempotency key. Retrying the
+same serialized transaction after a lost response can therefore recover the
+completed non-broadcast signature from Steward's authenticated idempotency
+store. Configure Steward with its durable Redis store when retries may reach
+different API replicas.
+
 ```ts
 import { createStewardSolanaSigner } from "@stwd/solana-signer";
 
@@ -18,6 +24,7 @@ const signer = await createStewardSolanaSigner({
   agentId: "agent-1",
   bearerToken: process.env.STEWARD_AGENT_TOKEN,
   chainId: 102, // devnet; 101 (default) is mainnet
+  requestTimeoutMs: 10_000, // covers headers and bounded response consumption
 });
 
 const signed = await signer.signTransaction(tx); // same object, signatures filled

@@ -269,8 +269,23 @@ describe("StewardClient construction", () => {
       platformKey: "test-platform-key",
       bearerToken: "test-bearer-token",
       tenantId: "test-tenant",
+      requestTimeoutMs: 10_000,
+      maxResponseBodyBytes: 1024 * 1024,
     });
     expect(client).toBeInstanceOf(StewardClient);
+  });
+
+  it("rejects request limits that are unbounded or invalid", () => {
+    for (const requestTimeoutMs of [0, -1, 1.5, 300_001, Number.POSITIVE_INFINITY]) {
+      expect(
+        () => new StewardClient({ baseUrl: "https://api.example.com", requestTimeoutMs }),
+      ).toThrow(/requestTimeoutMs must be a positive integer/);
+    }
+    for (const maxResponseBodyBytes of [0, -1, 1.5, 16 * 1024 * 1024 + 1]) {
+      expect(
+        () => new StewardClient({ baseUrl: "https://api.example.com", maxResponseBodyBytes }),
+      ).toThrow(/maxResponseBodyBytes must be a positive integer/);
+    }
   });
 
   it("creates a client with apiKey only", () => {
@@ -1211,6 +1226,19 @@ describe("HTTP request building", () => {
     expect(lastCapture?.headers["x-steward-signer-id"]).toBe("signer-auth-1");
     expect(lastCapture?.headers["x-steward-signer-secret"]).toBe("secret-auth-1");
     expect(lastCapture?.body).toEqual(input);
+  });
+
+  it("signSolanaTransaction forwards an explicit idempotency key", async () => {
+    installMockFetch({
+      ok: true,
+      data: { txId: "tx-sol-1", signature: "signed", broadcast: false, chainId: 101 },
+    });
+    await makeClient().signSolanaTransaction(
+      "agent-1",
+      { transaction: "dHg=", broadcast: false, chainId: 101 },
+      { idempotencyKey: "stable-solana-signing-key" },
+    );
+    expect(lastCapture?.headers["idempotency-key"]).toBe("stable-solana-signing-key");
   });
 
   it("signTypedData → POST /vault/:agentId/sign-typed-data", async () => {
@@ -4699,7 +4727,83 @@ describe("Error handling", () => {
     expect(caught).not.toBeNull();
     expect(caught?.name).toBe("StewardApiError");
     expect(caught?.status).toBe(0);
-    expect(caught?.message).toContain("Network error");
+    expect(caught?.message).toBe("Network request failed");
+    expect(caught?.message).not.toContain("connection refused");
+  });
+
+  it("bounds stalled response headers with an end-to-end deadline", async () => {
+    global.fetch = (_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        const rejectOnAbort = () => reject(new Error("socket secret from abort rejection"));
+        if (signal?.aborted) rejectOnAbort();
+        else signal?.addEventListener("abort", rejectOnAbort, { once: true });
+      });
+
+    const startedAt = Date.now();
+    const error = await makeClient({ requestTimeoutMs: 25 })
+      .listAgents()
+      .catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(StewardApiError);
+    expect(error.status).toBe(0);
+    expect(error.message).toBe("Steward API request timed out");
+    expect(error.message).not.toContain("socket secret");
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+
+  it("bounds a stalled response body and swallows body-cancel rejection details", async () => {
+    let cancelCalled = false;
+    global.fetch = async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"ok":true,"data":'));
+          },
+          cancel() {
+            cancelCalled = true;
+            return Promise.reject(new Error("stream cancel secret"));
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+
+    const error = await makeClient({ requestTimeoutMs: 25 })
+      .listAgents()
+      .catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(StewardApiError);
+    expect(error.status).toBe(0);
+    expect(error.message).toBe("Steward API request timed out");
+    expect(error.message).not.toContain("stream cancel secret");
+    expect(cancelCalled).toBe(true);
+  });
+
+  it("rejects oversized declared and streaming response bodies without echoing content", async () => {
+    const secret = "upstream-response-secret";
+    global.fetch = async () =>
+      new Response(secret, {
+        status: 200,
+        headers: { "Content-Length": "4096", "Content-Type": "application/json" },
+      });
+    let error = await makeClient({ maxResponseBodyBytes: 32 })
+      .listAgents()
+      .catch((caught) => caught);
+    expect(error).toBeInstanceOf(StewardApiError);
+    expect(error.message).toBe("Steward API response exceeded the configured size limit");
+    expect(error.message).not.toContain(secret);
+
+    global.fetch = async () =>
+      new Response(new TextEncoder().encode(`{"ok":false,"error":"${secret}"}`), {
+        status: 502,
+        headers: { "Content-Type": "application/json" },
+      });
+    error = await makeClient({ maxResponseBodyBytes: 16 })
+      .listAgents()
+      .catch((caught) => caught);
+    expect(error).toBeInstanceOf(StewardApiError);
+    expect(error.message).toBe("Steward API response exceeded the configured size limit");
+    expect(error.message).not.toContain(secret);
   });
 
   it("throws StewardApiError on invalid JSON response", async () => {

@@ -148,6 +148,23 @@ describe("signTransaction", () => {
     for (const body of signBodies) expect(body.broadcast).toBe(false);
   });
 
+  it("uses a stable body-bound idempotency key for lost-response retries", async () => {
+    const signer = await newSigner();
+    await signer.signTransaction(legacyTransfer(signer.publicKey));
+    await signer.signTransaction(legacyTransfer(signer.publicKey));
+    const repeated = stub.requests.filter((request) => request.path.endsWith("/sign-solana"));
+    expect(repeated).toHaveLength(2);
+    const firstKey = repeated[0]?.headers["idempotency-key"];
+    expect(firstKey).toMatch(/^steward-solana-sign-v1-[0-9a-f]{64}$/);
+    expect(repeated[1]?.headers["idempotency-key"]).toBe(firstKey);
+
+    const hintedSigner = await newSigner({
+      hints: () => ({ to: SINK.toBase58(), value: "1000" }),
+    });
+    await hintedSigner.signTransaction(legacyTransfer(hintedSigner.publicKey));
+    expect(stub.requests.at(-1)?.headers["idempotency-key"]).not.toBe(firstKey);
+  });
+
   it("preserves partial signatures added by co-signing keypairs", async () => {
     const signer = await newSigner();
     const mintKeypair = Keypair.fromSeed(new Uint8Array(32).fill(5));
