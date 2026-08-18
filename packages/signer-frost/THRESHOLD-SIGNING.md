@@ -72,9 +72,10 @@ ECDSA (CGGMP21-class) for the first prototype. The short version:
 | POST | `/verify` | verify a provided signature against the group key | public op |
 
 Every endpoint except `GET /health` requires `Authorization: Bearer <token>`.
-Set a random token of at least 32 bytes through `FROST_SHARE_AUTH_TOKEN`; the
-service refuses to start without one. Command-line tokens are intentionally not
-supported because process arguments are commonly visible to other local users.
+Encode at least 32 random bytes (for example, as 64 hex characters) through
+`FROST_SHARE_AUTH_TOKEN`; the service refuses to start with a token shorter than
+32 bytes. Command-line tokens are intentionally not supported because process
+arguments are commonly visible to other local users.
 Use a distinct token per share. The coordinator never trusts the
 aggregating share: after `/aggregate` it re-verifies the signature over the
 original message via a different share, so a single-share (1-of-1) group —

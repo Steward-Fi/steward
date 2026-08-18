@@ -476,9 +476,9 @@ fn arg(args: &[String], key: &str) -> Option<String> {
 
 fn validate_share_auth_token(token: String) -> Result<String, &'static str> {
     // SEC-025: an empty/short token turns the loopback bearer check into a
-    // guessable credential. Require at least 256 bits when represented as a
-    // conventional raw/hex/base64 secret. Operators should supply a randomly
-    // generated token through the environment, never through argv.
+    // guessable credential. Require a 32-byte floor and instruct operators to
+    // encode at least 32 random bytes (for example, as 64 hex characters).
+    // Supply the token through the environment, never through argv.
     if token.len() < 32
         || token
             .bytes()
