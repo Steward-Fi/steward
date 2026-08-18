@@ -3,9 +3,9 @@
 import { CHAIN_PROVIDERS, type ChainProvider } from "./chains/index.js";
 import type { VenueId } from "./types/venue.js";
 
+export * from "./aws-provider-action.js";
 // ─── Chain providers (extensible registry) ───
 export * from "./chains/index.js";
-export * from "./aws-provider-action.js";
 export * from "./execution-contract.js";
 export * from "./execution-payload.js";
 export * from "./generic-http-provider-action.js";
