@@ -4630,9 +4630,9 @@ export class StewardClient {
   }): Promise<ApprovalQueueEntry[]> {
     const params = new URLSearchParams();
     if (opts?.status) params.set("status", opts.status);
-    if (opts?.agentId) params.set("agentId", opts.agentId);
-    if (opts?.limit) params.set("limit", String(opts.limit));
-    if (opts?.offset) params.set("offset", String(opts.offset));
+    if (opts?.agentId !== undefined) params.set("agentId", opts.agentId);
+    if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+    if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
     const qs = params.toString();
     const response = await this.request<ApprovalQueueEntry[], StewardErrorResponse>(
       `/approvals${qs ? `?${qs}` : ""}`,

@@ -15,7 +15,8 @@ import * as React from "react";
 import { renderToString } from "react-dom/server";
 
 const listApprovalsMock = mock(
-  async (_opts?: { status?: string; agentId?: string }) => [] as any[],
+  async (_opts?: { status?: string; agentId?: string; limit?: number; offset?: number }) =>
+    [] as any[],
 );
 const approveVaultTransactionMock = mock(async (_agentId: string, _txId: string) => ({}) as any);
 const denyTransactionMock = mock(async (_txId: string, _reason: string) => ({}) as any);
@@ -89,7 +90,12 @@ describe("useApprovals()", () => {
     const api = captureHook();
     await api.refetch();
     expect(listApprovalsMock).toHaveBeenCalledTimes(1);
-    expect(listApprovalsMock).toHaveBeenCalledWith({ status: "pending", agentId: "agent x" });
+    expect(listApprovalsMock).toHaveBeenCalledWith({
+      status: "pending",
+      agentId: "agent x",
+      limit: 200,
+      offset: 0,
+    });
     // SEC-195: no credential-less raw fetch on any path.
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -116,7 +122,12 @@ describe("useApprovals()", () => {
     const api = captureHook();
     await api.refetch();
 
-    expect(listApprovalsMock).toHaveBeenCalledWith({ status: "pending", agentId: "agent x" });
+    expect(listApprovalsMock).toHaveBeenCalledWith({
+      status: "pending",
+      agentId: "agent x",
+      limit: 200,
+      offset: 0,
+    });
     expect(listApprovalsMock.mock.results[0]?.value).resolves.toEqual([targetApproval]);
   });
 

@@ -193,6 +193,16 @@ function adminHeaders() {
 
 describe.skipIf(SKIP)("Approval Workflow API", () => {
   describe("GET /approvals", () => {
+    it("rejects API-key access even when an agent filter is supplied", async () => {
+      const res = await fetch(`${BASE_URL}/approvals?agentId=${encodeURIComponent(TEST_AGENT)}`, {
+        headers: authHeaders(),
+      });
+
+      expect(res.status).toBe(403);
+      const body = await res.json();
+      expect(body.error).toContain("owner or admin user session");
+    });
+
     it("lists pending approvals for tenant", async () => {
       const res = await fetch(`${BASE_URL}/approvals`, {
         headers: adminHeaders(),
@@ -244,6 +254,17 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
       expect(
         filteredBody.data.some((entry: { id: string }) => entry.id === PAGINATION_TARGET_APPROVAL),
       ).toBe(true);
+    });
+
+    it("rejects empty, padded, and overlong agent filters", async () => {
+      for (const agentId of ["", ` ${TEST_AGENT}`, "x".repeat(65)]) {
+        const res = await fetch(`${BASE_URL}/approvals?agentId=${encodeURIComponent(agentId)}`, {
+          headers: adminHeaders(),
+        });
+        expect(res.status).toBe(400);
+        const body = await res.json();
+        expect(body.error).toContain("agentId must be a non-empty string of at most 64 characters");
+      }
     });
   });
 

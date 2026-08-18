@@ -507,6 +507,11 @@ describe("generated OpenAPI contract", () => {
       "rejected",
       "all",
     ]);
+    expect(approvalsList.parameters.find((param) => param.name === "agentId").schema).toEqual({
+      type: "string",
+      minLength: 1,
+      maxLength: 64,
+    });
     expect(
       approvalsList.responses["200"].content["application/json"].schema.properties.data.items
         .properties.status.enum,

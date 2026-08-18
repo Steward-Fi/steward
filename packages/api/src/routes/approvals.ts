@@ -52,6 +52,7 @@ const APPROVAL_STATUS_FILTERS = new Set<ApprovalStatusFilter>([
 const MAX_APPROVAL_LIST_LIMIT = 200;
 const MAX_APPROVAL_LIST_OFFSET = 10_000;
 const MAX_APPROVAL_TEXT_LENGTH = 1_000;
+const MAX_APPROVAL_AGENT_ID_LENGTH = 64;
 
 const approvalTransactionMatchesQueue = sql`${transactions.agentId} = ${approvalQueue.agentId}`;
 
@@ -164,11 +165,11 @@ function parseApprovalListParams(c: Context<{ Variables: AppVariables }>) {
   const agentId = rawAgentId?.trim();
   if (
     rawAgentId !== undefined &&
-    (!agentId || agentId.length > MAX_APPROVAL_TEXT_LENGTH || agentId !== rawAgentId)
+    (!agentId || agentId.length > MAX_APPROVAL_AGENT_ID_LENGTH || agentId !== rawAgentId)
   ) {
     return {
       ok: false as const,
-      error: `agentId must be a non-empty string of at most ${MAX_APPROVAL_TEXT_LENGTH} characters`,
+      error: `agentId must be a non-empty string of at most ${MAX_APPROVAL_AGENT_ID_LENGTH} characters`,
     };
   }
 
@@ -282,7 +283,9 @@ approvalRoutes.get("/", async (c) => {
         statusFilter !== "all" ? eq(approvalQueue.status, statusFilter) : undefined,
       ),
     )
-    .orderBy(desc(approvalQueue.requestedAt))
+    // Stable ordering is required for offset pagination when multiple queue
+    // entries share the same requestedAt timestamp.
+    .orderBy(desc(approvalQueue.requestedAt), desc(approvalQueue.id))
     .limit(limit)
     .offset(offset);
 

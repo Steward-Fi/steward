@@ -5101,4 +5101,14 @@ describe("StewardClient tenant approvals", () => {
       "https://api.steward.example/approvals?status=pending&agentId=agent+with+spaces&limit=200&offset=50",
     );
   });
+
+  it("does not silently drop explicitly invalid filter and pagination values", async () => {
+    installMockFetch({ ok: true, data: [] });
+
+    await makeClient().listApprovals({ agentId: "", limit: 0, offset: 0 });
+
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/approvals?agentId=&limit=0&offset=0",
+    );
+  });
 });
