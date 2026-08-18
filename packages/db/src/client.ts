@@ -380,8 +380,16 @@ export function createNeonTransactionDbForRequest(env: {
  * @param env  An object with a DATABASE_URL string field. Workers pass in the
  *             whole `env` binding object.
  */
-export function createDbForRequest(env: { DATABASE_URL?: string }) {
-  if (getDatabaseDriver() === "neon-websocket") {
+export function createDbForRequest(env: { DATABASE_URL?: string; DATABASE_DRIVER?: string }) {
+  // Worker bindings are the authority for this request. Falling back to the
+  // process-level selector keeps the helper compatible with Bun/Node callers,
+  // but must not let an explicit WebSocket binding silently create neon-http.
+  const bindingDriver = env.DATABASE_DRIVER?.trim().toLowerCase();
+  if (bindingDriver && bindingDriver !== "neon-http" && bindingDriver !== "neon-websocket") {
+    throw new Error("DATABASE_DRIVER_UNSUPPORTED: createDbForRequest() supports neon-http only");
+  }
+  const driver = bindingDriver || getDatabaseDriver();
+  if (driver === "neon-websocket") {
     throw new Error(
       "RLS_TRANSACTION_HANDLE_REQUIRED: use createNeonTransactionDbForRequest() and await close()",
     );

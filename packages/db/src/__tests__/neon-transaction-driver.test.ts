@@ -19,10 +19,38 @@ describe("transaction-capable Workers database driver", () => {
   });
 
   test("does not silently route a request-scoped socket through the legacy helper", () => {
+    expect(() =>
+      createDbForRequest({
+        DATABASE_DRIVER: " neon-websocket ",
+        DATABASE_URL: "postgresql://example.invalid/steward",
+      }),
+    ).toThrow("RLS_TRANSACTION_HANDLE_REQUIRED");
+  });
+
+  test("also rejects process-level socket selection for non-Worker callers", () => {
     process.env.DATABASE_DRIVER = "neon-websocket";
     expect(() =>
       createDbForRequest({ DATABASE_URL: "postgresql://example.invalid/steward" }),
     ).toThrow("RLS_TRANSACTION_HANDLE_REQUIRED");
+  });
+
+  test("does not let an empty binding bypass process-level socket selection", () => {
+    process.env.DATABASE_DRIVER = "neon-websocket";
+    expect(() =>
+      createDbForRequest({
+        DATABASE_DRIVER: "   ",
+        DATABASE_URL: "postgresql://example.invalid/steward",
+      }),
+    ).toThrow("RLS_TRANSACTION_HANDLE_REQUIRED");
+  });
+
+  test("rejects unknown request driver bindings instead of silently using HTTP", () => {
+    expect(() =>
+      createDbForRequest({
+        DATABASE_DRIVER: "bogus",
+        DATABASE_URL: "postgresql://example.invalid/steward",
+      }),
+    ).toThrow("DATABASE_DRIVER_UNSUPPORTED");
   });
 
   test("requires explicit driver selection before opening a socket", () => {
