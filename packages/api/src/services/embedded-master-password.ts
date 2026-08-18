@@ -1,7 +1,8 @@
+import { randomBytes } from "node:crypto";
 import {
+  chmodSync,
   closeSync,
   constants,
-  chmodSync,
   fchmodSync,
   fstatSync,
   lstatSync,
@@ -10,7 +11,6 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
 const GENERATED_PASSWORD_RE = /^[0-9a-f]{64}$/;
