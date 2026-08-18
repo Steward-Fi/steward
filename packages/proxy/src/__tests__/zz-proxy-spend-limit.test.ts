@@ -26,6 +26,7 @@ const route = {
   pathPattern: "/*",
   method: "*",
   injectAs: "header",
+  injectionStrategy: "header",
   injectKey: "x-api-key",
   injectFormat: "Bearer {value}",
   priority: 0,
@@ -108,6 +109,21 @@ mock.module("@stwd/db", () => {
     workspaces,
     policies,
     proxyAuditLog,
+    // Table/function stubs for modules outside this suite's scope (provider
+    // authority, google/slack credential lifecycles, audit chain). bun
+    // validates named imports against this mock namespace at link time, so
+    // every name any transitively-loaded module imports must exist here.
+    approvalQueue: { id: "id" },
+    auditEvents: { id: "id" },
+    executionAuthorizationNonces: { id: "id" },
+    intents: { id: "id" },
+    providerActionBindings: { id: "id" },
+    providerGoogleCredentialLifecycles: { id: "id" },
+    users: { id: "id" },
+    withTenantAuditedTransaction: async (
+      _tenantId: unknown,
+      fn: (tx: unknown, appendRequiredAudit: (event: unknown) => Promise<void>) => Promise<unknown>,
+    ) => fn({}, async () => {}),
     getDb: () => ({
       select: () => ({
         from: (table: unknown) => ({
