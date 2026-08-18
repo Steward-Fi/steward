@@ -5,17 +5,17 @@ import {
   type GithubOperationKey,
 } from "@stwd/provider-github";
 import {
-  buildSlackAction,
-  SLACK_OPERATION_KEYS,
-  type SlackActionBuild,
-  type SlackOperationKey,
-} from "@stwd/provider-slack";
-import {
   buildGoogleAction,
   GOOGLE_OPERATION_KEYS,
   type GoogleActionBuild,
   type GoogleOperationKey,
 } from "@stwd/provider-google";
+import {
+  buildSlackAction,
+  SLACK_OPERATION_KEYS,
+  type SlackActionBuild,
+  type SlackOperationKey,
+} from "@stwd/provider-slack";
 import {
   buildXAction,
   X_OPERATION_KEYS,

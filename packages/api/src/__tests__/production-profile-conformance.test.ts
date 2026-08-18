@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { GithubOperationKey } from "@stwd/provider-github";
-import type { SlackOperationKey } from "@stwd/provider-slack";
 import type { GoogleOperationKey } from "@stwd/provider-google";
+import type { SlackOperationKey } from "@stwd/provider-slack";
 import type { XOperationKey } from "@stwd/provider-x";
 import { parseGovernedCanonicalActionForDispatch } from "@stwd/proxy/src/handlers/governed-execution";
 import {

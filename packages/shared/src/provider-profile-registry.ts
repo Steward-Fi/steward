@@ -23,7 +23,10 @@
  */
 
 import { GENERIC_HTTP_PROVIDER_ACTION_PROFILE } from "./generic-http-provider-action.js";
-import { GOOGLE_PROVIDER_ACTION_PROFILE } from "./google-provider-action.js";
+import {
+  GOOGLE_ALLOWED_ORIGINS,
+  GOOGLE_PROVIDER_ACTION_PROFILE,
+} from "./google-provider-action.js";
 import { GITHUB_PROVIDER_ACTION_PROFILE } from "./provider-action.js";
 import { SLACK_PROVIDER_ACTION_PROFILE } from "./slack-provider-action.js";
 import { X_PROVIDER_ACTION_PROFILE } from "./x-provider-action.js";
@@ -87,7 +90,7 @@ const REGISTRY: ReadonlyMap<string, ProviderProfileDescriptor> = new Map([
       profile: GOOGLE_PROVIDER_ACTION_PROFILE,
       kind: "adapter-fixed",
       label: "Google Workspace",
-      allowedOrigins: Object.freeze(["https://gmail.googleapis.com", "https://www.googleapis.com"]),
+      allowedOrigins: Object.freeze([...GOOGLE_ALLOWED_ORIGINS]),
     }),
   ],
   [

@@ -35,6 +35,7 @@ import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import {
   GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
   GITHUB_PROVIDER_ACTION_PROFILE,
+  GOOGLE_PROVIDER_ACTION_PROFILE,
   REGISTERED_PROFILES,
   SLACK_PROVIDER_ACTION_PROFILE,
   X_PROVIDER_ACTION_PROFILE,
@@ -88,6 +89,16 @@ const PROFILES = [
     method: "POST",
     path: "/api/chat.postMessage",
     args: { channel: "C12345678", text: "boundary proof" },
+    requestProfile: {},
+  },
+  {
+    profile: GOOGLE_PROVIDER_ACTION_PROFILE,
+    adapterKey: "google",
+    operationKey: "google.calendar.events.list",
+    host: "www.googleapis.com",
+    method: "GET",
+    path: "/calendar/v3/calendars/primary/events",
+    args: { maxResults: 50 },
     requestProfile: {},
   },
   {
@@ -161,8 +172,9 @@ beforeAll(async () => {
   process.env.STEWARD_EXECUTION_AUTH_SECRET = "1".repeat(64);
   process.env.STEWARD_MASTER_PASSWORD = "profile-boundary-master-password";
   process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS =
-    "api.github.com,api.x.com,slack.com,api.example.com";
-  process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.github.com,api.x.com,slack.com,api.example.com";
+    "api.github.com,api.x.com,slack.com,www.googleapis.com,api.example.com";
+  process.env.STEWARD_PROXY_ALLOWED_HOSTS =
+    "api.github.com,api.x.com,slack.com,www.googleapis.com,api.example.com";
   process.env.STEWARD_JWT_SECRET = "profile-boundary-jwt-secret-0123456789abcdef0123456789";
   const signingKeys = generateKeyPairSync("ed25519");
   process.env.STEWARD_AUDIT_SIGNING_KEY = signingKeys.privateKey
@@ -194,6 +206,17 @@ beforeAll(async () => {
   const proxy = await import("@stwd/proxy/src/handlers/proxy");
   proxy.__resetSecretVaultForTests();
   ({ dispatchGovernedExecution } = await import("@stwd/proxy/src/handlers/governed-execution"));
+  proxy.__setCheckProxyRateLimitForTests(async () => ({
+    allowed: true,
+    remaining: Number.POSITIVE_INFINITY,
+    resetMs: 0,
+  }));
+  proxy.__setCheckProxySpendLimitForTests(async () => ({
+    allowed: true,
+    configured: false,
+    spent: 0,
+    remaining: Number.POSITIVE_INFINITY,
+  }));
   proxy.__setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
   // The boundary proof is about canonical provider authority and exact
   // credential injection, not Redis availability. Make the rate-limit seam
@@ -256,7 +279,12 @@ async function runAuthenticatedBoundary(
   const credential =
     fixture.profile === SLACK_PROVIDER_ACTION_PROFILE
       ? "xoxb-profile-boundary-credential"
-      : "profile-boundary-credential";
+      : fixture.profile === GOOGLE_PROVIDER_ACTION_PROFILE
+        ? JSON.stringify({
+            schemaVersion: "steward.provider-google.credential.v1",
+            accessToken: "profile-boundary-credential",
+          })
+        : "profile-boundary-credential";
   const encrypted = vault.encrypt(credential, {
     tenantId: F.TENANT,
     name: "github",
@@ -313,7 +341,11 @@ async function runAuthenticatedBoundary(
       idempotencyKey: `profile-boundary-${fixture.adapterKey}-${options.maliciousOperationDescriptor ? "malicious" : "valid"}`,
     }),
   });
-  expect(actionResponse.status).toBe(202);
+  if (actionResponse.status !== 202) {
+    throw new Error(
+      `${fixture.profile} ingress returned ${actionResponse.status}: ${await actionResponse.text()}`,
+    );
+  }
   const action = (await actionResponse.json()) as {
     id: string;
     requestHash: string;

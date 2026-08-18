@@ -9,6 +9,7 @@ export * from "./execution-contract.js";
 export * from "./execution-payload.js";
 export * from "./generic-http-provider-action.js";
 export * from "./google-provider-action.js";
+export * from "./google-provider-action.js";
 export type { PriceOracle } from "./price-oracle.js";
 export { createPriceOracle } from "./price-oracle.js";
 export * from "./provider-action.js";
@@ -43,7 +44,6 @@ export * from "./types/venue.js";
 export { WebhookEventRegistry } from "./webhook-event-registry.js";
 export * from "./x-provider-action.js";
 export * from "./x-summon-attestation.js";
-export * from "./google-provider-action.js";
 
 // ─── Tenancy ───
 

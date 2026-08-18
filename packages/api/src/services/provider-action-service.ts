@@ -57,15 +57,15 @@ import {
   type GithubOperationKey,
 } from "@stwd/provider-github";
 import {
-  buildSlackAction,
-  type SlackActionBuild,
-  type SlackOperationKey,
-} from "@stwd/provider-slack";
-import {
   buildGoogleAction,
   type GoogleActionBuild,
   type GoogleOperationKey,
 } from "@stwd/provider-google";
+import {
+  buildSlackAction,
+  type SlackActionBuild,
+  type SlackOperationKey,
+} from "@stwd/provider-slack";
 import { buildXAction, type XActionBuild, type XOperationKey } from "@stwd/provider-x";
 import {
   assertRegisteredProfile,

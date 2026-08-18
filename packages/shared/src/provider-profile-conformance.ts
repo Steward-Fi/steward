@@ -6,6 +6,7 @@ import {
   genericDescriptorAllowsExactPath,
   validateGenericHttpDescriptor,
 } from "./generic-http-provider-action.js";
+import { GOOGLE_PROVIDER_ACTION_PROFILE } from "./google-provider-action.js";
 import {
   CanonError,
   decodeUtf8Strict,
@@ -180,6 +181,108 @@ function validSlackConversationsQuery(pairs: Array<[string, string]>): boolean {
   );
 }
 
+function googleInstant(value: string): number | null {
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/.exec(
+      value,
+    );
+  if (!match) return null;
+  const [, year, month, day, hour, minute, second, zone] = match;
+  const instant = Date.parse(value);
+  if (
+    !Number.isFinite(instant) ||
+    Number(hour) > 23 ||
+    Number(minute) > 59 ||
+    Number(second) > 59
+  ) {
+    return null;
+  }
+  const offsetMinutes =
+    zone === "Z"
+      ? 0
+      : (zone.startsWith("-") ? -1 : 1) *
+        (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(4, 6)));
+  if (Math.abs(offsetMinutes) > 14 * 60) return null;
+  const local = new Date(instant + offsetMinutes * 60_000);
+  return local.getUTCFullYear() === Number(year) &&
+    local.getUTCMonth() + 1 === Number(month) &&
+    local.getUTCDate() === Number(day) &&
+    local.getUTCHours() === Number(hour) &&
+    local.getUTCMinutes() === Number(minute) &&
+    local.getUTCSeconds() === Number(second)
+    ? instant
+    : null;
+}
+
+function validGoogleCalendarQuery(pairs: Array<[string, string]>): boolean {
+  const allowed = new Set(["maxResults", "pageToken", "timeMax", "timeMin"]);
+  let previous = "";
+  let hasMaxResults = false;
+  for (const [name, value] of pairs) {
+    if (!allowed.has(name) || name <= previous) return false;
+    previous = name;
+    if (name === "maxResults") {
+      hasMaxResults = /^(?:[1-9][0-9]{0,2}|1[0-9]{3}|2[0-4][0-9]{2}|2500)$/.test(value);
+      if (!hasMaxResults) return false;
+    } else if (name === "pageToken") {
+      if (value.length < 1 || value.length > 2048 || /[\r\n]/.test(value)) return false;
+    } else if (googleInstant(value) === null) {
+      return false;
+    }
+  }
+  return hasMaxResults;
+}
+
+function validGoogleEventBody(value: unknown): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  if (
+    !exactObject(
+      value,
+      Object.hasOwn(value, "attendees")
+        ? ["attendees", "end", "start", "summary"]
+        : ["end", "start", "summary"],
+    )
+  )
+    return false;
+  if (
+    typeof value.summary !== "string" ||
+    value.summary.length < 1 ||
+    value.summary.length > 1024
+  ) {
+    return false;
+  }
+  if (/[\r\n]/.test(value.summary)) return false;
+  const instants: number[] = [];
+  for (const key of ["start", "end"] as const) {
+    const endpoint = value[key];
+    if (!exactObject(endpoint, ["dateTime"]) || typeof endpoint.dateTime !== "string") return false;
+    const instant = googleInstant(endpoint.dateTime);
+    if (instant === null) return false;
+    instants.push(instant);
+  }
+  if (instants[1] <= instants[0]) return false;
+  if (Object.hasOwn(value, "attendees")) {
+    if (
+      !Array.isArray(value.attendees) ||
+      value.attendees.length < 1 ||
+      value.attendees.length > 100
+    ) {
+      return false;
+    }
+    if (
+      !value.attendees.every(
+        (entry) =>
+          exactObject(entry, ["email"]) &&
+          typeof entry.email === "string" &&
+          entry.email.length <= 320 &&
+          /^[^@\s]+@[^@\s]+$/.test(entry.email),
+      )
+    )
+      return false;
+  }
+  return true;
+}
+
 /** Exact adapter-fixed reconstruction contract for every registered operation. */
 function fixedActionMatchesOperation(
   action: ConformanceCanonicalAction,
@@ -285,6 +388,40 @@ function fixedActionMatchesOperation(
         action.selectedHeaders.length === 0 &&
         action.canonicalBody === null
       );
+    case "google.gmail.messages.send":
+      return (
+        action.profile === GOOGLE_PROVIDER_ACTION_PROFILE &&
+        action.origin === "https://gmail.googleapis.com" &&
+        action.method === "POST" &&
+        action.normalizedPath === "/gmail/v1/users/me/messages/send" &&
+        action.orderedQueryPairs.length === 0 &&
+        pairsEqual(action.selectedHeaders, [["content-type", "application/json"]]) &&
+        exactObject(action.canonicalBody, ["raw"]) &&
+        typeof action.canonicalBody.raw === "string" &&
+        action.canonicalBody.raw.length > 0 &&
+        action.canonicalBody.raw.length <= 200_000 &&
+        /^[A-Za-z0-9_-]+$/.test(action.canonicalBody.raw)
+      );
+    case "google.calendar.events.list":
+      return (
+        action.profile === GOOGLE_PROVIDER_ACTION_PROFILE &&
+        action.origin === "https://www.googleapis.com" &&
+        action.method === "GET" &&
+        action.normalizedPath === "/calendar/v3/calendars/primary/events" &&
+        validGoogleCalendarQuery(action.orderedQueryPairs) &&
+        action.selectedHeaders.length === 0 &&
+        action.canonicalBody === null
+      );
+    case "google.calendar.events.insert":
+      return (
+        action.profile === GOOGLE_PROVIDER_ACTION_PROFILE &&
+        action.origin === "https://www.googleapis.com" &&
+        action.method === "POST" &&
+        action.normalizedPath === "/calendar/v3/calendars/primary/events" &&
+        action.orderedQueryPairs.length === 0 &&
+        pairsEqual(action.selectedHeaders, [["content-type", "application/json"]]) &&
+        validGoogleEventBody(action.canonicalBody)
+      );
     default:
       return false;
   }
@@ -341,6 +478,19 @@ export function inspectProviderOperationTargetConformance(
       exact("https://slack.com", "GET", "/api/conversations.list");
     } else if (context.operationKey === "slack.users.info") {
       exact("https://slack.com", "GET", "/api/users.info");
+    } else {
+      violations.push("operation-key-unsupported");
+    }
+    if (!fixedActionMatchesOperation(action, context.operationKey)) {
+      violations.push("operation-action-mismatch");
+    }
+  } else if (action.profile === GOOGLE_PROVIDER_ACTION_PROFILE) {
+    if (context.operationKey === "google.gmail.messages.send") {
+      exact("https://gmail.googleapis.com", "POST", "/gmail/v1/users/me/messages/send");
+    } else if (context.operationKey === "google.calendar.events.list") {
+      exact("https://www.googleapis.com", "GET", "/calendar/v3/calendars/primary/events");
+    } else if (context.operationKey === "google.calendar.events.insert") {
+      exact("https://www.googleapis.com", "POST", "/calendar/v3/calendars/primary/events");
     } else {
       violations.push("operation-key-unsupported");
     }
