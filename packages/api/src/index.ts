@@ -358,7 +358,9 @@ if (migrationsRan) {
   if (process.env.GOOGLE_PROVIDER_CLIENT_ID && process.env.GOOGLE_PROVIDER_CLIENT_SECRET) {
     cancelGoogleCredentialLifecycleScheduler = startGoogleCredentialLifecycleScheduler();
   }
-  cancelXCredentialLifecycleScheduler = startXCredentialLifecycleScheduler();
+  if (process.env.X_CLIENT_ID && process.env.X_CLIENT_SECRET) {
+    cancelXCredentialLifecycleScheduler = startXCredentialLifecycleScheduler();
+  }
   cancelRetention = startRetentionScheduler();
   if (redisOk) {
     cancelProviderReservationReconciliation = startProviderReservationReconciliationScheduler();

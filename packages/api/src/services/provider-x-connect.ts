@@ -15,8 +15,8 @@
  *     verifier, so a store compromise cannot replay a connect or forge the code
  *     exchange. The raw state travels only in the browser round-trip; the raw
  *     verifier is re-derived from a sealed payload the caller carries back.
- *   - State is consumed exactly once, only after the upstream token exchange and
- *     identity fetch succeed, so a bad provider code cannot burn a live attempt.
+ *   - State is consumed exactly once before provider I/O, so concurrent replicas
+ *     cannot exchange one authorization code and orphan a losing grant.
  *   - Tokens land as a NEW versioned vault secret; provider_accounts links the
  *     current {credential_secret_id, credential_version}. Reconnect for the same
  *     X user id updates the version + bumps revision, never duplicates the row.
@@ -350,6 +350,44 @@ export interface PendingConnectRecord {
   createdAt: string;
 }
 
+function isCanonicalIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 32) return false;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
+}
+
+function validatePendingConnectRecord(value: unknown): PendingConnectRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (
+    record.schemaVersion !== "steward.provider-x.pending-connect.v1" ||
+    typeof record.tenantId !== "string" ||
+    record.tenantId.length === 0 ||
+    record.tenantId.length > 64 ||
+    typeof record.workspaceId !== "string" ||
+    record.workspaceId.length > 64 ||
+    typeof record.initiatedByUserId !== "string" ||
+    record.initiatedByUserId.length > 128 ||
+    typeof record.verifierHash !== "string" ||
+    !/^[a-f0-9]{64}$/.test(record.verifierHash) ||
+    typeof record.redirectUri !== "string" ||
+    record.redirectUri.length === 0 ||
+    record.redirectUri.length > 2048 ||
+    !isCanonicalIsoTimestamp(record.createdAt) ||
+    !Array.isArray(record.scopes) ||
+    record.scopes.length === 0 ||
+    record.scopes.length > X_DEFAULT_SCOPES.length ||
+    record.scopes.some(
+      (scope) =>
+        typeof scope !== "string" || !(X_DEFAULT_SCOPES as readonly string[]).includes(scope),
+    ) ||
+    new Set(record.scopes).size !== record.scopes.length
+  ) {
+    return null;
+  }
+  return record as unknown as PendingConnectRecord;
+}
+
 // ── Initiate ──────────────────────────────────────────────────────────────────
 export interface InitiateConnectInput {
   tenantId: string;
@@ -439,12 +477,21 @@ export interface ParsedConnectToken {
 
 export function parseConnectToken(token: string): ParsedConnectToken | null {
   try {
+    if (token.length === 0 || token.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(token)) return null;
     const json = base64ToUtf8(token);
-    const parsed = JSON.parse(json) as ParsedConnectToken;
-    if (typeof parsed.state !== "string" || typeof parsed.verifier !== "string") {
+    if (base64url(Buffer.from(json, "utf8")) !== token) return null;
+    const parsed = JSON.parse(json) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const candidate = parsed as Record<string, unknown>;
+    if (
+      typeof candidate.state !== "string" ||
+      !/^[a-f0-9]{64}$/.test(candidate.state) ||
+      typeof candidate.verifier !== "string" ||
+      !/^[a-f0-9]{96}$/.test(candidate.verifier)
+    ) {
       return null;
     }
-    return parsed;
+    return { state: candidate.state, verifier: candidate.verifier };
   } catch {
     return null;
   }
@@ -483,11 +530,17 @@ export async function completeXConnect(
   const raw = await input.store.get(key);
   if (!raw) throw new XConnectError("X_STATE_INVALID", 401, "unknown or expired connect state");
 
-  let record: PendingConnectRecord;
+  let parsedRecord: unknown;
   try {
-    record = JSON.parse(raw) as PendingConnectRecord;
+    parsedRecord = JSON.parse(raw);
   } catch {
     throw new XConnectError("X_STATE_INVALID", 400, "malformed connect state");
+  }
+  const record = validatePendingConnectRecord(parsedRecord);
+  if (!record) throw new XConnectError("X_STATE_INVALID", 400, "malformed connect state");
+  const recordAgeMs = Date.now() - new Date(record.createdAt).getTime();
+  if (recordAgeMs < 0 || recordAgeMs > X_CONNECT_STATE_TTL_MS) {
+    throw new XConnectError("X_STATE_EXPIRED", 401, "expired connect state");
   }
 
   // Bind the state to THIS tenant/workspace/caller — a state minted for another
@@ -514,59 +567,73 @@ export async function completeXConnect(
     throw new XConnectError("X_PKCE_MISMATCH", 400, "PKCE verifier mismatch");
   }
 
-  // 3. Exchange the code (PKCE). Failure here does NOT consume the state.
+  // 3. Claim the state BEFORE any provider call. Security takes precedence over
+  // retrying a bad authorization code: two replicas must never both exchange a
+  // one-time code and strand the losing callback's newly issued grant.
+  const consumed = await input.store.consume(key);
+  if (consumed !== raw) {
+    throw new XConnectError("X_STATE_REUSED", 401, "connect state already used");
+  }
+
+  // 4. Exchange the code (PKCE).
   const tokenRes = await exchangeAuthorizationCode({
     config: input.config,
     code: input.code,
     redirectUri: input.redirectUri,
     verifier: parsedToken.verifier,
   });
-  const scopesGranted = parseXGrantedScopes(
-    tokenRes.scope,
-    record.scopes,
-    "X_TOKEN_EXCHANGE_FAILED",
-  );
+  try {
+    const scopesGranted = parseXGrantedScopes(
+      tokenRes.scope,
+      record.scopes,
+      "X_TOKEN_EXCHANGE_FAILED",
+    );
 
-  // 4. Identify the connected account.
-  const identity = await fetchXIdentity(tokenRes.access_token);
+    // 5. Identify the connected account.
+    const identity = await fetchXIdentity(tokenRes.access_token);
 
-  // 5. Consume the state EXACTLY ONCE, only after upstream success. A concurrent
-  //    duplicate callback loses the race and gets X_STATE_REUSED.
-  const consumed = await input.store.consume(key);
-  if (consumed !== raw) {
-    throw new XConnectError("X_STATE_REUSED", 401, "connect state already used");
+    const obtainedAt = new Date();
+    const expiresAt =
+      typeof tokenRes.expires_in === "number"
+        ? new Date(obtainedAt.getTime() + tokenRes.expires_in * 1000)
+        : null;
+
+    const payload: XCredentialPayload = {
+      schemaVersion: "steward.provider-x.credential.v1",
+      accessToken: tokenRes.access_token,
+      refreshToken: tokenRes.refresh_token ?? null,
+      scopesGranted,
+      xUserId: identity.id,
+      xUsername: identity.username,
+      obtainedAt: obtainedAt.toISOString(),
+      expiresAt: expiresAt ? expiresAt.toISOString() : null,
+    };
+
+    // 6. Persist tokens as a versioned vault secret + create/update the account,
+    //    all inside one tenant-audited transaction so the audit event commits with
+    //    the state mutation.
+    return await persistConnectedAccount({
+      tenantId: input.tenantId,
+      workspaceId: input.workspaceId,
+      callerUserId: input.callerUserId,
+      vault: input.vault,
+      identity,
+      payload,
+      scopesGranted,
+      requestId: input.requestId ?? null,
+    });
+  } catch (error) {
+    // Once X has issued a grant, any identity or local persistence failure would
+    // otherwise strand a live credential that Steward cannot recover. Revoke the
+    // exact newly issued grant best-effort, while preserving the original,
+    // sanitized application error.
+    await revokeUpstreamBestEffort(
+      input.config,
+      tokenRes.access_token,
+      tokenRes.refresh_token ?? null,
+    ).catch(() => false);
+    throw error;
   }
-
-  const obtainedAt = new Date();
-  const expiresAt =
-    typeof tokenRes.expires_in === "number"
-      ? new Date(obtainedAt.getTime() + tokenRes.expires_in * 1000)
-      : null;
-
-  const payload: XCredentialPayload = {
-    schemaVersion: "steward.provider-x.credential.v1",
-    accessToken: tokenRes.access_token,
-    refreshToken: tokenRes.refresh_token ?? null,
-    scopesGranted,
-    xUserId: identity.id,
-    xUsername: identity.username,
-    obtainedAt: obtainedAt.toISOString(),
-    expiresAt: expiresAt ? expiresAt.toISOString() : null,
-  };
-
-  // 6. Persist tokens as a versioned vault secret + create/update the account,
-  //    all inside one tenant-audited transaction so the audit event commits with
-  //    the state mutation.
-  return persistConnectedAccount({
-    tenantId: input.tenantId,
-    workspaceId: input.workspaceId,
-    callerUserId: input.callerUserId,
-    vault: input.vault,
-    identity,
-    payload,
-    scopesGranted,
-    requestId: input.requestId ?? null,
-  });
 }
 
 interface XIdentity {
@@ -585,7 +652,17 @@ async function fetchXIdentity(accessToken: string): Promise<XIdentity> {
     throw new XConnectError("X_IDENTITY_FAILED", 502, `X identity fetch failed (${res.status})`);
   }
   const data = (res.json as XUserResponse | null)?.data;
-  if (!data || !data.id) {
+  if (
+    !data ||
+    typeof data.id !== "string" ||
+    !/^\d{1,32}$/.test(data.id) ||
+    (data.username !== undefined &&
+      (typeof data.username !== "string" || !/^[A-Za-z0-9_]{1,64}$/.test(data.username))) ||
+    (data.name !== undefined &&
+      (typeof data.name !== "string" ||
+        data.name.length > 128 ||
+        /[\u0000-\u001f\u007f]/.test(data.name)))
+  ) {
     throw new XConnectError("X_IDENTITY_FAILED", 502, "X identity response missing user id");
   }
   return { id: data.id, username: data.username ?? "", name: data.name ?? "" };
@@ -971,6 +1048,9 @@ export async function refreshXProviderCredential(input: RefreshInput): Promise<R
         account.credentialSecretId,
         tx,
       );
+      if (current.payload.xUserId !== account.externalRef) {
+        throw new XConnectError("X_REFRESH_FAILED", 409, "credential account binding mismatch");
+      }
 
       // Single-flight fast path: a concurrent winner already rotated us to a fresh
       // token while we waited for the lock. If not forced and the token is still
@@ -1105,11 +1185,10 @@ export async function refreshXProviderCredential(input: RefreshInput): Promise<R
       }
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    await disableXAccountForLifecycle(input, prepared.lifecycleId, "REFRESH_OUTCOME_UNKNOWN");
     throw new XConnectError(
-      "X_CREDENTIAL_NEEDS_ATTENTION",
+      "X_REFRESH_FAILED",
       409,
-      "X refresh outcome is unknown; reconnect required",
+      "X refresh is already in progress; retry shortly",
     );
   }
 
@@ -1128,11 +1207,26 @@ export async function refreshXProviderCredential(input: RefreshInput): Promise<R
   try {
     await stageXRefreshResponse(input, prepared.lifecycleId, tokenRes.raw);
   } catch (error) {
-    await disableXAccountForLifecycle(
-      input,
-      prepared.lifecycleId,
-      "REFRESH_RESPONSE_STAGING_FAILED",
-    );
+    // The provider may already have rotated the one-time refresh token. Use the
+    // response still held in memory to revoke that exact new grant before it can
+    // become an orphan, then fail closed locally. Reconnect remains the recovery
+    // boundary whether revocation succeeds or the outcome is unknowable.
+    const candidate =
+      tokenRes.raw && typeof tokenRes.raw === "object" && !Array.isArray(tokenRes.raw)
+        ? (tokenRes.raw as Record<string, unknown>)
+        : null;
+    // Revocation uses the exact bounded strings returned by X. A credential may
+    // fail Steward's adoption grammar while still being live at the provider.
+    const accessToken = candidate ? boundedStagedToken(candidate.access_token) : null;
+    const refreshToken = candidate ? boundedStagedToken(candidate.refresh_token) : null;
+    if (accessToken || refreshToken) {
+      await revokeUpstreamBestEffort(
+        input.config,
+        accessToken ?? (refreshToken as string),
+        refreshToken,
+      ).catch(() => false);
+    }
+    await disableXAccountForLifecycle(input, prepared.lifecycleId, "REFRESH_OUTCOME_UNKNOWN");
     throw error;
   }
   await afterXCredentialStageForTests?.();
@@ -1439,6 +1533,9 @@ export async function reconcileXRefreshLifecycle(
         account.credentialSecretId,
         tx,
       );
+      if (current.payload.xUserId !== account.externalRef) {
+        throw new XConnectError("X_REFRESH_FAILED", 409, "credential account binding mismatch");
+      }
       const [stagedSecret] = (await tx
         .select()
         .from(secrets)
@@ -1599,7 +1696,10 @@ export interface XCredentialLifecycleSweepResult {
 }
 
 const X_LIFECYCLE_SWEEP_BATCH_SIZE = 25;
-const X_LIFECYCLE_STALE_AFTER_MS = X_FORWARD_TIMEOUT_MS + 5_000;
+// Provider I/O is capped at 10s, but DB scheduling and encrypted staging occur
+// afterwards. A one-minute lease prevents a recovery replica from racing a
+// healthy slow winner and disabling its account mid-rotation.
+const X_LIFECYCLE_STALE_AFTER_MS = 60_000;
 
 /** Bounded all-tenant recovery for abandoned single-use X refresh rotations. */
 export async function runXCredentialLifecycleSweep(input: {
@@ -1858,7 +1958,21 @@ async function loadCredential(
   if (
     candidate.schemaVersion !== "steward.provider-x.credential.v1" ||
     !isValidOAuthBearerToken(candidate.accessToken) ||
-    !(candidate.refreshToken === null || isValidOAuthOpaqueToken(candidate.refreshToken))
+    !(candidate.refreshToken === null || isValidOAuthOpaqueToken(candidate.refreshToken)) ||
+    !Array.isArray(candidate.scopesGranted) ||
+    candidate.scopesGranted.length === 0 ||
+    candidate.scopesGranted.length > X_DEFAULT_SCOPES.length ||
+    candidate.scopesGranted.some(
+      (scope) =>
+        typeof scope !== "string" || !(X_DEFAULT_SCOPES as readonly string[]).includes(scope),
+    ) ||
+    new Set(candidate.scopesGranted).size !== candidate.scopesGranted.length ||
+    typeof candidate.xUserId !== "string" ||
+    !/^\d{1,32}$/.test(candidate.xUserId) ||
+    typeof candidate.xUsername !== "string" ||
+    (candidate.xUsername !== "" && !/^[A-Za-z0-9_]{1,64}$/.test(candidate.xUsername)) ||
+    !isCanonicalIsoTimestamp(candidate.obtainedAt) ||
+    !(candidate.expiresAt === null || isCanonicalIsoTimestamp(candidate.expiresAt))
   ) {
     throw new XConnectError("X_REFRESH_FAILED", 409, "credential payload invalid");
   }
@@ -1967,6 +2081,9 @@ export async function disconnectXProviderCredential(
           account.credentialSecretId,
           tx,
         );
+        if (cred.payload.xUserId !== account.externalRef) {
+          throw new XConnectError("X_REFRESH_FAILED", 409, "credential account binding mismatch");
+        }
         revokedAtUpstream = await revokeUpstreamBestEffort(
           input.config,
           cred.payload.accessToken,

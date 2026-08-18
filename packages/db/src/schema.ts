@@ -2151,6 +2151,14 @@ export const providerXCredentialLifecycles = pgTable(
       "provider_x_lifecycle_state_check",
       sql`${table.state} IN ('inflight', 'credential_staged', 'revocation_pending', 'adopted', 'revoked', 'needs_attention', 'superseded')`,
     ),
+    revisionCheck: check(
+      "provider_x_lifecycle_revision_check",
+      sql`${table.expectedAccountRevision} >= 1`,
+    ),
+    secretStateCheck: check(
+      "provider_x_lifecycle_secret_state_check",
+      sql`(${table.state} = 'inflight' AND ${table.credentialSecretId} IS NULL) OR (${table.state} IN ('credential_staged', 'revocation_pending') AND ${table.credentialSecretId} IS NOT NULL) OR ${table.state} = 'needs_attention' OR (${table.state} IN ('adopted', 'revoked', 'superseded') AND ${table.credentialSecretId} IS NULL)`,
+    ),
     accountStateIdx: index("provider_x_lifecycle_account_state_idx").on(
       table.tenantId,
       table.providerAccountId,
