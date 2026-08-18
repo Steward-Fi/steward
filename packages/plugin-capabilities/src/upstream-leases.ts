@@ -695,7 +695,7 @@ export async function recoverInterruptedUpstreamCredentialLeases(
     .limit(limit);
   let unknown = 0;
   for (const lease of stale) {
-    if (lease.status === "issuing") {
+    if (lease.status === "issuing" && !sealedTokenFromLease(lease)) {
       const changed = await input.auditedTransaction(
         input.tenantId,
         async (tx: Db, appendRequiredAudit) => {
@@ -773,7 +773,7 @@ async function recoverOneDueLease(input: {
   cutoff: Date;
 }): Promise<RecoveryTotals> {
   const { lease } = input;
-  if (lease.status === "issuing") {
+  if (lease.status === "issuing" && !sealedTokenFromLease(lease)) {
     const changed = await input.auditedTransaction(
       lease.tenantId,
       async (tx: Db, appendRequiredAudit) => {

@@ -1492,6 +1492,28 @@ describe("upstream credential leases", () => {
       );
     expect(recoverable.tokenHash).toBe(sha256(TOKEN));
     expect(recoverable.tokenCiphertext).toBe(Buffer.from(TOKEN).toString("base64"));
+
+    await harness.db
+      .update(upstreamCredentialLeases)
+      .set({ updatedAt: new Date(NOW.getTime() - 31_000) })
+      .where(eq(upstreamCredentialLeases.id, recoverable.id));
+    issuer.failRevoke = false;
+    expect(
+      await recoverInterruptedUpstreamCredentialLeases({
+        db: harness.db,
+        tenantId: TENANT,
+        issuer,
+        exerciseToken,
+        auditedTransaction: auditedTransaction(),
+        now: NOW,
+      }),
+    ).toEqual({ unknown: 0, revoked: 1, attention: 0 });
+    const [recovered] = await harness.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(eq(upstreamCredentialLeases.id, recoverable.id));
+    expect(recovered.status).toBe("revoked");
+    expect(issuer.revokeCalls).toBe(2);
   });
 
   test("stale issuance is truthfully escalated because provider outcome is unknowable", async () => {
