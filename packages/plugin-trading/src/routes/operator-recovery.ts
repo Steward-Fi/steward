@@ -466,14 +466,14 @@ export function createOperatorRecoveryRoutes(
     // Stored agent policy rows are re-read under the table lock below.
     const defaultPolicySet = await getPolicySet(input.tenantId, input.agentId);
     return db.transaction(async (tx) => {
-      // Cross-replica serialization: every operator rail for this tenant+agent
-      // evaluates counters and inserts its reservation under the same lock.
+      // Cross-replica serialization: use the same per-agent spend lock as the
+      // core vault and intent paths. Agent ids are global primary keys, so this
+      // serializes operator reservations with both other operator rails and
+      // on-chain transaction evaluation/commit for the cumulative cap.
       const pgliteRuntime =
         process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true";
       if (!pgliteRuntime) {
-        await tx.execute(
-          sql`select pg_advisory_xact_lock(hashtextextended(${`operator-transfer:${input.tenantId}:${input.agentId}`}, 0))`,
-        );
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${input.agentId}))`);
       }
       // Stabilize the authorization snapshot until the reservation commits.
       // Policy writes take ROW EXCLUSIVE table locks, which conflict with SHARE;
@@ -627,7 +627,7 @@ export function createOperatorRecoveryRoutes(
     id: string,
     status: "final" | "released",
   ) {
-    await db
+    const [finished] = await db
       .update(operatorTransferReservations)
       .set({ status, finalizedAt: new Date() })
       .where(
@@ -635,8 +635,25 @@ export function createOperatorRecoveryRoutes(
           eq(operatorTransferReservations.id, id),
           eq(operatorTransferReservations.tenantId, tenantId),
           eq(operatorTransferReservations.agentId, agentId),
+          eq(operatorTransferReservations.status, "pending"),
         ),
-      );
+      )
+      .returning({ id: operatorTransferReservations.id });
+    return Boolean(finished);
+  }
+
+  async function releaseOperatorTransfer(
+    tenantId: string,
+    agentId: string,
+    reservationId: string,
+    idempotency: OperatorIdempotency,
+  ) {
+    // Release the durable reservation before freeing the idempotency claim.
+    // If the process stops between these operations, retaining the claim is
+    // fail-closed; the reverse order can admit a retry that then collides with
+    // the still-pending reservation's partial unique index.
+    const released = await finishOperatorReservation(tenantId, agentId, reservationId, "released");
+    if (released) await idempotency.release?.();
   }
 
   function operatorActor(c: Context<{ Variables: AppVariables }>): {
@@ -1202,8 +1219,7 @@ export function createOperatorRecoveryRoutes(
     try {
       signedUsdSend = await adapter.signUsdSend({ destination, amount });
     } catch (err) {
-      await idempotency.release?.();
-      await finishOperatorReservation(tenantId, agentId, policy.reservationId, "released");
+      await releaseOperatorTransfer(tenantId, agentId, policy.reservationId, idempotency);
       try {
         await auditRecoveryEvent(c, tenantId, agentId, "trade.usdsend.failed", {
           venue,
@@ -1228,8 +1244,7 @@ export function createOperatorRecoveryRoutes(
     } catch (_err) {
       // Nothing has reached the venue yet, so an audit outage is a definite
       // pre-submit failure and must not poison the durable spend reservation.
-      await idempotency.release?.();
-      await finishOperatorReservation(tenantId, agentId, policy.reservationId, "released");
+      await releaseOperatorTransfer(tenantId, agentId, policy.reservationId, idempotency);
       return c.json<ApiResponse>({ ok: false, error: "Failed to audit usdSend request" }, 502);
     }
 
@@ -1239,8 +1254,7 @@ export function createOperatorRecoveryRoutes(
     } catch (err) {
       const definitelyRejected = isDefiniteVenueRejection(err);
       if (definitelyRejected) {
-        await idempotency.release?.();
-        await finishOperatorReservation(tenantId, agentId, policy.reservationId, "released");
+        await releaseOperatorTransfer(tenantId, agentId, policy.reservationId, idempotency);
       } else {
         const errorBody = { ok: false as const, error: "Failed to submit usdSend" };
         await idempotency.storeFailure?.(errorBody);
@@ -1771,8 +1785,7 @@ export function createOperatorRecoveryRoutes(
     try {
       signedWithdraw = await adapter.signWithdraw({ amount, destination });
     } catch (err) {
-      await idempotency.release?.();
-      await finishOperatorReservation(tenantId, agentId, policy.reservationId, "released");
+      await releaseOperatorTransfer(tenantId, agentId, policy.reservationId, idempotency);
       try {
         await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.withdraw.failed", {
           venue,
@@ -1793,8 +1806,7 @@ export function createOperatorRecoveryRoutes(
     } catch (err) {
       const definitelyRejected = isDefiniteVenueRejection(err);
       if (definitelyRejected) {
-        await idempotency.release?.();
-        await finishOperatorReservation(tenantId, agentId, policy.reservationId, "released");
+        await releaseOperatorTransfer(tenantId, agentId, policy.reservationId, idempotency);
       }
       const errorBody = { ok: false as const, error: "Failed to submit withdraw" };
       if (!definitelyRejected) await idempotency.storeFailure?.(errorBody);

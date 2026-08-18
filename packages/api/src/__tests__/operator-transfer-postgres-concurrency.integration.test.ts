@@ -21,7 +21,8 @@ const realPostgresIt = databaseUrl && !process.env.STEWARD_PGLITE_MEMORY ? it : 
 realPostgresIt("serializes cumulative operator reservations across real connections", async () => {
   const suffix = crypto.randomUUID().replaceAll("-", "");
   const table = `operator_lock_test_${suffix}`;
-  const lockKey = `operator-transfer:test:${suffix}`;
+  // Match the shared per-agent lock used by vault/intents/operator transfers.
+  const agentId = `operator-lock-test-${suffix}`;
   const admin = postgres(databaseUrl!, { max: 1 });
   const first = postgres(databaseUrl!, { max: 1 });
   const second = postgres(databaseUrl!, { max: 1 });
@@ -31,7 +32,7 @@ realPostgresIt("serializes cumulative operator reservations across real connecti
     );
     const reserve = (client: Sql) =>
       client.begin(async (tx) => {
-        await tx`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+        await tx`select pg_advisory_xact_lock(hashtext(${agentId}))`;
         const [row] = await tx.unsafe<{ total: string }[]>(
           `select coalesce(sum(amount), 0)::text as total from "${table}" where status in ('pending', 'final')`,
         );
