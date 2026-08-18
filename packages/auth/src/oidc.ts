@@ -33,8 +33,11 @@ const JWKS_MAX_AGE_MS = (() => {
   if (Number.isFinite(raw) && raw >= 60_000) return raw;
   return 60 * 60 * 1000; // 1 hour default
 })();
-const ALLOW_TEST_JWKS_FETCH =
-  process.env.NODE_ENV === "test" && process.env.STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH === "true";
+function allowTestJwksFetch(): boolean {
+  return (
+    process.env.NODE_ENV === "test" && process.env.STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH === "true"
+  );
+}
 
 export interface VerifiedOidcToken {
   subject: string;
@@ -62,6 +65,18 @@ function claimBoolean(claims: JWTPayload, name: string | undefined): boolean | u
 }
 
 function assertSafeJwksUri(jwksUri: string): URL {
+  if (allowTestJwksFetch()) {
+    let url: URL;
+    try {
+      url = new URL(jwksUri);
+    } catch {
+      throw new Error("OIDC jwksUri must be a public https URL");
+    }
+    if (url.protocol !== "https:" || url.username || url.password) {
+      throw new Error("OIDC jwksUri must be a public https URL");
+    }
+    return url;
+  }
   return assertPublicHttpsEndpoint(jwksUri, "OIDC jwksUri");
 }
 
@@ -119,7 +134,7 @@ export async function getPublicRemoteJWKSet(
     return cached.jwks;
   }
   const url = assertSafeJwksUri(jwksUri);
-  if (!ALLOW_TEST_JWKS_FETCH) {
+  if (!allowTestJwksFetch()) {
     await assertPublicJwksDestination(url.toString());
   }
   const jwks = createRemoteJWKSet(url, {
@@ -132,7 +147,7 @@ export async function getPublicRemoteJWKSet(
 async function fetchPublicJwks(url: string | URL, init?: RequestInit): Promise<Response> {
   const jwksUrl = assertSafeJwksUri(url.toString());
   assertPinnedDnsTransportSupported("OIDC jwksUri");
-  if (ALLOW_TEST_JWKS_FETCH) {
+  if (allowTestJwksFetch()) {
     return fetch(jwksUrl, init);
   }
 
