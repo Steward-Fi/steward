@@ -53,6 +53,20 @@ describe("webhook URL validation", () => {
     }
   });
 
+  it("rejects complete benchmarking and discard-only IPv6 prefixes", () => {
+    for (const url of [
+      "https://[2001:2::1]/hook",
+      "https://[2001:2:0:ffff:ffff:ffff:ffff:ffff]/hook",
+      "https://[100::1]/hook",
+      "https://[100::ffff:ffff:ffff:ffff]/hook",
+    ]) {
+      expect(validateWebhookUrl(url)).toBe("url host must be public");
+    }
+    // Adjacent prefixes are not accidentally widened by the exact word masks.
+    expect(validateWebhookUrl("https://[2001:2:1::1]/hook")).toBeNull();
+    expect(validateWebhookUrl("https://[100:0:0:1::1]/hook")).toBeNull();
+  });
+
   it("rejects IPv6 site-local addresses", () => {
     for (const url of ["https://[fec0::1]/hook", "https://[feff::1]/hook"]) {
       expect(validateWebhookUrl(url)).toBe("url host must be public");
