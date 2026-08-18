@@ -141,6 +141,7 @@ function hasRecentSessionMfa(c: Context<{ Variables: AppVariables }>, maxAgeMs =
   return (
     typeof verifiedAt === "number" &&
     Number.isFinite(verifiedAt) &&
+    Date.now() - verifiedAt >= 0 &&
     Date.now() - verifiedAt <= maxAgeMs
   );
 }

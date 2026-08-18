@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { assertPublicHttpsEndpoint } from "../../../auth/src/public-endpoint";
 
 const ROOT = join(import.meta.dir, "../../../..");
 
@@ -25,6 +26,9 @@ describe("enterprise OIDC authorization-code SSO hardening", () => {
     expect(authorizeRoute).toContain(
       "await assertAllowedOAuthRedirectUri(redirectUri, tenantId, clientId)",
     );
+    expect(authorizeRoute).toContain(
+      'assertPublicHttpsEndpoint(provider.authorizationUrl, "OIDC authorization endpoint")',
+    );
     expect(authorizeRoute).toContain("const nonce = randomBase64Url(24)");
     expect(authorizeRoute).toContain("const codeVerifier = randomBase64Url(48)");
     expect(authorizeRoute).toContain('pkceChallengeForVerifier(codeVerifier, "S256")');
@@ -36,6 +40,9 @@ describe("enterprise OIDC authorization-code SSO hardening", () => {
 
     expect(callbackRoute).toContain("await getChallengeStore().get(stateKey)");
     expect(callbackRoute).toContain("stateData.providerId !== providerId");
+    expect(callbackRoute).toContain("code.length > 4_096 || state.length > 256");
+    expect(callbackRoute).toContain('error: "OIDC authorization failed"');
+    expect(callbackRoute).not.toContain("`OIDC error: ${errorParam}`");
     expect(callbackRoute).toContain("exchangeOidcAuthorizationCode");
     expect(callbackRoute).toContain("verifyOidcJwt(stateData.tenantId, provider, idToken)");
     expect(callbackRoute).toContain("verified.claims.nonce !== stateData.nonce");
@@ -68,22 +75,53 @@ describe("enterprise OIDC authorization-code SSO hardening", () => {
     expect(source).toContain('body.set("client_secret", secret)');
     expect(source).toContain("postPublicOidcTokenEndpoint(provider.tokenUrl, body)");
     expect(source).toContain("OIDC token endpoint redirects are not allowed");
-    expect(source).toContain("assertPublicOidcAddress");
+    expect(source).toContain("createPublicInternetLookup");
     expect(source).toContain("OIDC token endpoint did not return an id_token");
+    expect(source).toContain("OIDC token endpoint request is too large");
+    expect(source).toContain('response.headers["content-length"]');
+    expect(source).toContain('response.on("aborted"');
+    expect(source).toContain('throw new Error("OIDC token endpoint request failed")');
     expect(source).toContain("Direct JWT login is disabled for authorization-code OIDC providers");
   });
 
-  it("screens IPv4-embedding IPv6 transition ranges in the token-endpoint SSRF guard", () => {
+  it("uses the shared public-destination classifier for token URL and DNS answers", () => {
     const source = read("packages/api/src/routes/auth.ts");
-    expect(source).toContain("embeddedTransitionOidcIpv4");
-    expect(source).toContain("words[0] === 0x64 &&");
-    expect(source).toContain("words[0] === 0x2002");
-    expect(source).toContain("words?.[0] === 0x2001 && words[1] === 0");
-    const guardStart = source.indexOf("function isPrivateOidcIpv6");
-    const guardEnd = source.indexOf("\nfunction ", guardStart + 1);
-    const guard = source.slice(guardStart, guardEnd === -1 ? undefined : guardEnd);
-    expect(guard).toContain("embeddedTransitionOidcIpv4(normalized)");
-    expect(guard).toContain("isPrivateOidcIpv4(embedded)");
+    expect(source).toContain('assertPublicHttpsEndpoint(tokenUrl, "OIDC token endpoint")');
+    expect(source).toContain('lookup: createPublicInternetLookup("OIDC token endpoint")');
+    expect(source).not.toContain("function isPrivateOidcIpv4");
+    expect(source).not.toContain("function isPrivateOidcIpv6");
+  });
+
+  it("rejects IPv4-compatible and special-use token endpoint literals", () => {
+    for (const tokenUrl of [
+      "https://[::127.0.0.1]/token",
+      "https://[::ffff:0:127.0.0.1]/token",
+      "https://192.0.2.1/token",
+      "https://198.51.100.1/token",
+      "https://203.0.113.1/token",
+      "https://[100::1]/token",
+      "https://[3fff::1]/token",
+    ]) {
+      expect(() => assertPublicHttpsEndpoint(tokenUrl, "OIDC token endpoint"), tokenUrl).toThrow(
+        "OIDC token endpoint must be a public https URL",
+      );
+    }
+  });
+
+  it("rejects local and special-use browser authorization destinations", () => {
+    for (const authorizationUrl of [
+      "https://[::127.0.0.1]/authorize",
+      "https://[::ffff:0:127.0.0.1]/authorize",
+      "https://192.0.2.1/authorize",
+      "https://[100::1]/authorize",
+      "https://[3fff::1]/authorize",
+      "https://user:secret@idp.example.com/authorize",
+    ]) {
+      expect(
+        () => assertPublicHttpsEndpoint(authorizationUrl, "OIDC authorization endpoint"),
+        authorizationUrl,
+      ).toThrow("OIDC authorization endpoint must be a public https URL");
+    }
   });
 
   it("never echoes the IdP-supplied error string into the token-exchange 502", () => {

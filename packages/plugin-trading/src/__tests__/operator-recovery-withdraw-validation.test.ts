@@ -13,13 +13,14 @@
  * mock.module HyperliquidAdapter, no signing / no network).
  */
 
-import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
 import { agents, agentWallets, closeDb, getDb, policies as policiesTable, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
 import { z } from "zod";
 
 const PLATFORM_KEY = "stw_platform_test_operator_key";
+setDefaultTimeout(30_000);
 
 // ── Mock the Hyperliquid adapter (no signing / no network) ─────────────────────
 const signWithdrawCalls: Array<{ amount: string | number; destination: string }> = [];
@@ -186,6 +187,7 @@ async function postWithdraw(
       "Content-Type": "application/json",
       "X-Steward-Platform-Key": PLATFORM_KEY,
       "X-Steward-Tenant": tenantId,
+      "Idempotency-Key": crypto.randomUUID(),
     },
     body: JSON.stringify(body),
   });

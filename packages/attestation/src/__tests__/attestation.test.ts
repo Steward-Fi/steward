@@ -517,6 +517,21 @@ describe("measurement registry", () => {
       ).ok,
     ).toBe(false);
   });
+
+  test("rejects oversized canonical JSON before constructing a full canonical copy", () => {
+    expect(() => canonicalizeJson({ value: "x".repeat(1024 * 1024 + 1) })).toThrow(
+      "registry payload exceeded the 1 MiB limit",
+    );
+  });
+
+  test("rejects deeply nested canonical JSON without recursive stack exhaustion", () => {
+    let nested: Record<string, unknown> = {};
+    for (let depth = 0; depth < 1000; depth += 1) nested = { nested };
+
+    expect(() => canonicalizeJson(nested)).toThrow(
+      "registry payload exceeded the maximum depth of 64",
+    );
+  });
 });
 
 function basePayload(): MeasurementRegistryPayload {

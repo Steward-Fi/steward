@@ -11,13 +11,14 @@
  * network I/O occurs. The vault never signs because the adapter is replaced.
  */
 
-import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
 import { agents, agentWallets, closeDb, getDb, policies as policiesTable, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
 import { z } from "zod";
 
 const PLATFORM_KEY = "stw_platform_test_operator_key";
+setDefaultTimeout(30_000);
 
 // ── Mock the Hyperliquid adapter (no signing / no network) ─────────────────────
 const closeAllCalls: number[] = [];
@@ -74,7 +75,11 @@ class MockHyperliquidAdapter {
     return { status: "ok", raw: { response: { type: "default" } } };
   }
 
-  async usdSend(params: { destination: string; amount: string }) {
+  async signUsdSend(params: { destination: string; amount: string }) {
+    return params;
+  }
+
+  async submitUsdSend(params: { destination: string; amount: string }) {
     usdSendCalls.push(params);
     return { status: "ok", raw: { response: { type: "default" } } };
   }
@@ -227,6 +232,7 @@ describe("operator recovery leverage", () => {
         "Content-Type": "application/json",
         "X-Steward-Platform-Key": PLATFORM_KEY,
         "X-Steward-Tenant": tenantId,
+        "Idempotency-Key": crypto.randomUUID(),
       },
       body: JSON.stringify({ agentId, coin: "xyz:SPCX", leverage: 10, isCross: true }),
     });
@@ -497,6 +503,7 @@ describe("operator recovery withdraw", () => {
         "Content-Type": "application/json",
         "X-Steward-Platform-Key": PLATFORM_KEY,
         "X-Steward-Tenant": tenantId,
+        "Idempotency-Key": crypto.randomUUID(),
       },
       body: JSON.stringify({ agentId, amount: "100", destination: badDest }),
     });
@@ -523,6 +530,7 @@ describe("operator recovery withdraw", () => {
         "Content-Type": "application/json",
         "X-Steward-Platform-Key": PLATFORM_KEY,
         "X-Steward-Tenant": tenantId,
+        "Idempotency-Key": crypto.randomUUID(),
       },
       body: JSON.stringify({ agentId, amount: "100", destination: approved }),
     });

@@ -613,6 +613,7 @@ function hasReplaySafeAuthenticatedContext(c: { get: (key: keyof AppVariables) =
   return (
     typeof verifiedAt === "number" &&
     Number.isFinite(verifiedAt) &&
+    Date.now() - verifiedAt >= 0 &&
     Date.now() - verifiedAt <= 5 * 60_000
   );
 }

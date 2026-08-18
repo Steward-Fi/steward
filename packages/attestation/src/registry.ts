@@ -58,8 +58,10 @@ export interface RegistryVerificationOptions {
 
 const MAX_REGISTRY_SIGNATURES = 64;
 const MAX_REGISTRY_PAYLOAD_BYTES = 1024 * 1024;
+const MAX_REGISTRY_PAYLOAD_DEPTH = 64;
+const MAX_REGISTRY_PAYLOAD_NODES = 100_000;
 const MAX_PUBLIC_KEY_PEM_BYTES = 16 * 1024;
-export const MAX_MEASUREMENT_REGISTRY_FILE_BYTES = 3 * 1024 * 1024;
+export const MAX_MEASUREMENT_REGISTRY_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_REGISTRY_DEPLOYMENTS = 1024;
 const REGISTRY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const PROVIDER_IDS = new Set<AttestationProviderId>([
@@ -196,34 +198,74 @@ function decodeEd25519Signature(signatureBase64: unknown): Buffer | null {
   return decoded;
 }
 
+class RegistryPayloadLimitError extends Error {}
+
 export function canonicalizeJson(value: unknown): string {
+  const chunks: string[] = [];
+  let bytes = 0;
+  let nodes = 0;
   const ancestors = new Set<object>();
-  const visit = (entry: unknown, depth: number): string => {
-    if (depth > 64) throw new Error("JSON nesting exceeds canonicalization limit");
-    if (entry === null || typeof entry === "boolean") return JSON.stringify(entry);
+
+  const append = (chunk: string): void => {
+    bytes += Buffer.byteLength(chunk, "utf8");
+    if (bytes > MAX_REGISTRY_PAYLOAD_BYTES) {
+      throw new RegistryPayloadLimitError("registry payload exceeded the 1 MiB limit");
+    }
+    chunks.push(chunk);
+  };
+
+  const visit = (entry: unknown, depth: number): void => {
+    if (depth > MAX_REGISTRY_PAYLOAD_DEPTH) {
+      throw new RegistryPayloadLimitError(
+        `registry payload exceeded the maximum depth of ${MAX_REGISTRY_PAYLOAD_DEPTH}`,
+      );
+    }
+    nodes += 1;
+    if (nodes > MAX_REGISTRY_PAYLOAD_NODES) {
+      throw new RegistryPayloadLimitError(
+        `registry payload exceeded the maximum node count of ${MAX_REGISTRY_PAYLOAD_NODES}`,
+      );
+    }
+    if (entry === null || typeof entry === "boolean") {
+      append(JSON.stringify(entry));
+      return;
+    }
     if (typeof entry === "string") {
       if (!isWellFormedUnicode(entry)) throw new Error("JSON string contains a lone surrogate");
-      return JSON.stringify(entry);
+      if (Buffer.byteLength(entry, "utf8") > MAX_REGISTRY_PAYLOAD_BYTES) {
+        throw new RegistryPayloadLimitError("registry payload exceeded the 1 MiB limit");
+      }
+      append(JSON.stringify(entry));
+      return;
     }
     if (typeof entry === "number") {
       if (!Number.isFinite(entry)) throw new Error("non-finite JSON number");
-      return JSON.stringify(entry);
+      append(JSON.stringify(entry));
+      return;
     }
     if (typeof entry !== "object") throw new Error("value is not JSON-serializable");
     if (ancestors.has(entry)) throw new Error("cyclic JSON value");
     ancestors.add(entry);
     try {
       if (Array.isArray(entry)) {
+        if (entry.length > MAX_REGISTRY_PAYLOAD_NODES) {
+          throw new RegistryPayloadLimitError(
+            `registry payload exceeded the maximum node count of ${MAX_REGISTRY_PAYLOAD_NODES}`,
+          );
+        }
         const ownKeys = Reflect.ownKeys(entry);
         if (ownKeys.length !== entry.length + 1 || !ownKeys.includes("length"))
           throw new Error("sparse or decorated JSON array");
-        const items = Array.from({ length: entry.length }, (_, index) => {
+        append("[");
+        for (let index = 0; index < entry.length; index += 1) {
+          if (index > 0) append(",");
           const descriptor = Object.getOwnPropertyDescriptor(entry, String(index));
           if (!descriptor?.enumerable || !("value" in descriptor))
             throw new Error("sparse or decorated JSON array");
-          return visit(descriptor.value, depth + 1);
-        });
-        return `[${items.join(",")}]`;
+          visit(descriptor.value, depth + 1);
+        }
+        append("]");
+        return;
       }
       if (!isPlainObject(entry)) throw new Error("value is not a plain JSON object");
       const entries = Reflect.ownKeys(entry).map((key): [string, unknown] => {
@@ -234,17 +276,29 @@ export function canonicalizeJson(value: unknown): string {
           throw new Error("JSON object has a non-JSON property");
         return [key, descriptor.value];
       });
-      return `{${entries
-        // RFC 8785/JCS orders property names by UTF-16 code units, not the
-        // process locale. localeCompare can produce different signed bytes.
-        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-        .map(([key, item]) => `${JSON.stringify(key)}:${visit(item, depth + 1)}`)
-        .join(",")}}`;
+      if (entries.length > MAX_REGISTRY_PAYLOAD_NODES) {
+        throw new RegistryPayloadLimitError(
+          `registry payload exceeded the maximum node count of ${MAX_REGISTRY_PAYLOAD_NODES}`,
+        );
+      }
+      entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+      append("{");
+      for (const [index, [key, item]] of entries.entries()) {
+        if (index > 0) append(",");
+        if (Buffer.byteLength(key, "utf8") > MAX_REGISTRY_PAYLOAD_BYTES) {
+          throw new RegistryPayloadLimitError("registry payload exceeded the 1 MiB limit");
+        }
+        append(JSON.stringify(key));
+        append(":");
+        visit(item, depth + 1);
+      }
+      append("}");
     } finally {
       ancestors.delete(entry);
     }
   };
-  return visit(value, 0);
+  visit(value, 0);
+  return chunks.join("");
 }
 
 export function registryPayloadDigest(payload: MeasurementRegistryPayload): string {
@@ -292,7 +346,10 @@ export function verifyRegistrySignatures(
   let payload: Buffer;
   try {
     payload = Buffer.from(canonicalizeJson(registry.payload));
-  } catch {
+  } catch (error) {
+    if (error instanceof RegistryPayloadLimitError) {
+      return { ok: false, reason: error.message };
+    }
     return { ok: false, reason: "registry payload is not canonicalizable JSON" };
   }
   if (payload.byteLength > MAX_REGISTRY_PAYLOAD_BYTES) {

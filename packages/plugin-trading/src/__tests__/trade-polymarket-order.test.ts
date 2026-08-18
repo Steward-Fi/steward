@@ -307,10 +307,9 @@ describe("POST /v1/trade/polymarket/order", () => {
     }
   });
 
-  it("SEC-041: SELL with bid BELOW the limit sizes on the limit (no over-denial)", async () => {
-    // best bid 0.40 < limit 0.50 -> notional 100 * 0.50 = 50, exactly the cap
-    // (cap is >-compared, so it passes). The order then fails closed at the
-    // creds gate (409), proving the cap gate let it through.
+  it("SEC-041: SELL caps use the $1/share upper bound despite a lower bid", async () => {
+    // A mutable best-bid snapshot cannot bound the eventual fill. 100 shares
+    // can return up to $100, so a $50 cap must reject even when bid/limit are .40/.50.
     const { tenantId, agentId, sessionId } = await seedSession({
       perOrderCapUsd: "50",
     });
@@ -330,7 +329,8 @@ describe("POST /v1/trade/polymarket/order", () => {
         amount: 100,
         price: 0.5,
       });
-      expect(res.status).toBe(409);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { reason?: string }).reason).toBe("per-order-cap-exceeded");
       expect(await dailySpendOf(sessionId)).toBe(0);
     } finally {
       fetchSpy.mockRestore();

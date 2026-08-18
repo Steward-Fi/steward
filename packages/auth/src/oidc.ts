@@ -9,6 +9,11 @@ import {
   type JWTPayload,
   jwtVerify,
 } from "jose";
+import { assertPublicHttpsEndpoint, assertPublicInternetAddress } from "./public-endpoint";
+import {
+  assertPinnedDnsTransportSupported,
+  createPublicInternetLookup,
+} from "./public-endpoint-node";
 
 interface CachedJwks {
   jwks: ReturnType<typeof createRemoteJWKSet>;
@@ -18,6 +23,7 @@ interface CachedJwks {
 const JWKS_CACHE = new Map<string, CachedJwks>();
 const JWKS_FETCH_TIMEOUT_MS = 5_000;
 const JWKS_MAX_BYTES = 256 * 1024;
+const JWKS_CACHE_MAX_ENTRIES = 256;
 // Hard ceiling on how long a remote JWKS set is cached before it is rebuilt.
 // jose's internal cooldown only limits how *often* it refetches on unknown-kid;
 // it never evicts known keys, so a process-lifetime cache would not pick up an
@@ -28,8 +34,11 @@ const JWKS_MAX_AGE_MS = (() => {
   if (Number.isFinite(raw) && raw >= 60_000) return raw;
   return 60 * 60 * 1000; // 1 hour default
 })();
-const ALLOW_TEST_JWKS_FETCH =
-  process.env.NODE_ENV === "test" && process.env.STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH === "true";
+function allowTestJwksFetch(): boolean {
+  return (
+    process.env.NODE_ENV === "test" && process.env.STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH === "true"
+  );
+}
 
 export interface VerifiedOidcToken {
   subject: string;
@@ -56,157 +65,17 @@ function claimBoolean(claims: JWTPayload, name: string | undefined): boolean | u
   return typeof value === "boolean" ? value : undefined;
 }
 
-function isPrivateIpv4(hostname: string): boolean {
-  const parts = hostname.split(".").map((part) => Number(part));
-  if (
-    parts.length !== 4 ||
-    parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
-  ) {
-    return false;
-  }
-  const [a, b] = parts;
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    (a === 192 && b === 0) ||
-    (a === 198 && (b === 18 || b === 19)) ||
-    a >= 224
-  );
-}
-
-function expandIpv6Words(address: string): number[] | null {
-  let normalized = address.toLowerCase();
-  // Convert a dotted-quad tail (e.g. 64:ff9b::10.0.0.1) to two hex words.
-  if (normalized.includes(".")) {
-    const colonIndex = normalized.lastIndexOf(":");
-    if (colonIndex === -1) return null;
-    const quad = normalized
-      .slice(colonIndex + 1)
-      .split(".")
-      .map((part) => Number(part));
-    if (
-      quad.length !== 4 ||
-      quad.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
-    ) {
-      return null;
-    }
-    normalized = `${normalized.slice(0, colonIndex)}:${((quad[0] << 8) | quad[1]).toString(16)}:${((quad[2] << 8) | quad[3]).toString(16)}`;
-  }
-  const halves = normalized.split("::");
-  if (halves.length > 2) return null;
-
-  const parseWords = (part: string): number[] | null => {
-    if (!part) return [];
-    const words = part.split(":");
-    const parsed = words.map((word) => {
-      if (!/^[0-9a-f]{1,4}$/.test(word)) return Number.NaN;
-      return Number.parseInt(word, 16);
-    });
-    return parsed.some((word) => !Number.isInteger(word) || word < 0 || word > 0xffff)
-      ? null
-      : parsed;
-  };
-
-  const left = parseWords(halves[0]);
-  const right = parseWords(halves[1] ?? "");
-  if (!left || !right) return null;
-
-  const missing = 8 - left.length - right.length;
-  if ((halves.length === 1 && missing !== 0) || missing < 0) return null;
-
-  return [...left, ...Array.from({ length: missing }, () => 0), ...right];
-}
-
-/**
- * Extract the IPv4 address embedded in an IPv6 transition mechanism
- * (NAT64 64:ff9b::/96 per RFC 6052,
- * 6to4 2002::/16 per RFC 3056) so it can be screened against isPrivateIpv4.
- */
-function embeddedTransitionIpv4(address: string): string | null {
-  const words = expandIpv6Words(address);
-  if (!words) return null;
-  const fromWords = (high: number, low: number) =>
-    [high >> 8, high & 0xff, low >> 8, low & 0xff].join(".");
-  const isWellKnownNat64 =
-    words[0] === 0x64 &&
-    words[1] === 0xff9b &&
-    words[2] === 0 &&
-    words[3] === 0 &&
-    words[4] === 0 &&
-    words[5] === 0;
-  if (isWellKnownNat64) return fromWords(words[6], words[7]);
-  if (words[0] === 0x2002) return fromWords(words[1], words[2]);
-  return null;
-}
-
-function isPrivateIpv6(hostname: string): boolean {
-  const normalized = hostname.toLowerCase();
-  const ipv4Mapped = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (ipv4Mapped) return isPrivateIpv4(ipv4Mapped[1]);
-  const hexIpv4Mapped = normalized.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  if (hexIpv4Mapped) {
-    const high = Number.parseInt(hexIpv4Mapped[1], 16);
-    const low = Number.parseInt(hexIpv4Mapped[2], 16);
-    if (Number.isFinite(high) && Number.isFinite(low) && high <= 0xffff && low <= 0xffff) {
-      return isPrivateIpv4(`${(high >> 8) & 255}.${high & 255}.${(low >> 8) & 255}.${low & 255}`);
-    }
-  }
-  const embedded = embeddedTransitionIpv4(normalized);
-  if (embedded) return isPrivateIpv4(embedded);
-  const words = expandIpv6Words(normalized);
-  // RFC 8215 reserves 64:ff9b:1::/48 for local use and explicitly says no
-  // assumption can be made about an embedded IPv4 address or its location.
-  // Treat the entire non-globally-reachable prefix as non-public.
-  if (words?.[0] === 0x64 && words[1] === 0xff9b && words[2] === 1) return true;
-  // Teredo (2001:0000::/32) obfuscates the embedded client IPv4 — block outright.
-  if (words?.[0] === 0x2001 && words[1] === 0) return true;
-  return (
-    normalized === "::" ||
-    normalized === "::1" ||
-    normalized.startsWith("fc") ||
-    normalized.startsWith("fd") ||
-    normalized.startsWith("fe80:") ||
-    normalized.startsWith("ff") ||
-    normalized.startsWith("2001:db8:")
-  );
-}
-
-function isBlockedJwksHost(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  const ipv4Mapped = host.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (ipv4Mapped) return isPrivateIpv4(ipv4Mapped[1]);
-  const literalVersion = isIP(host);
-  return (
-    host === "localhost" ||
-    host.endsWith(".localhost") ||
-    host.endsWith(".internal") ||
-    host.endsWith(".local") ||
-    (literalVersion === 4 && isPrivateIpv4(host)) ||
-    (literalVersion === 6 && isPrivateIpv6(host))
-  );
-}
-
 function assertSafeJwksUri(jwksUri: string): URL {
-  const url = new URL(jwksUri);
-  if (url.protocol !== "https:" || isBlockedJwksHost(url.hostname)) {
-    throw new Error("OIDC jwksUri must be a public https URL");
-  }
-  return url;
+  return assertPublicHttpsEndpoint(jwksUri, "OIDC jwksUri");
 }
 
 function assertPublicJwksAddress(address: string, family: number): void {
-  if ((family === 4 && isPrivateIpv4(address)) || (family === 6 && isPrivateIpv6(address))) {
-    throw new Error("OIDC jwksUri must resolve to a public address");
-  }
+  assertPublicInternetAddress(address, family, "OIDC jwksUri");
 }
 
 export async function assertPublicJwksDestination(jwksUri: string): Promise<void> {
   const url = assertSafeJwksUri(jwksUri);
+  assertPinnedDnsTransportSupported("OIDC jwksUri");
   const hostname = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   const literalVersion = isIP(hostname);
   if (literalVersion !== 0) {
@@ -216,12 +85,23 @@ export async function assertPublicJwksDestination(jwksUri: string): Promise<void
 
   const addresses = await new Promise<Array<{ address: string; family: number }>>(
     (resolve, reject) => {
+      let settled = false;
+      const finish = <T>(fn: (value: T) => void, value: T) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        fn(value);
+      };
+      const deadline = setTimeout(
+        () => finish(reject, new Error("OIDC jwksUri DNS lookup timed out")),
+        JWKS_FETCH_TIMEOUT_MS,
+      );
       dnsLookup(hostname, { all: true, verbatim: true }, (error, resolved) => {
         if (error) {
-          reject(error);
+          finish(reject, new Error("OIDC jwksUri host did not resolve"));
           return;
         }
-        resolve(resolved);
+        finish(resolve, resolved);
       });
     },
   );
@@ -248,56 +128,81 @@ export async function getPublicRemoteJWKSet(
   jwksUri: string,
   cacheKey: string,
 ): Promise<ReturnType<typeof createRemoteJWKSet>> {
+  assertPinnedDnsTransportSupported("OIDC jwksUri");
   const cached = JWKS_CACHE.get(cacheKey);
   if (cached && Date.now() - cached.createdAt <= JWKS_MAX_AGE_MS) {
+    // Refresh insertion order so the bounded map acts as an LRU cache.
+    JWKS_CACHE.delete(cacheKey);
+    JWKS_CACHE.set(cacheKey, cached);
     return cached.jwks;
   }
   const url = assertSafeJwksUri(jwksUri);
-  if (!ALLOW_TEST_JWKS_FETCH) {
-    await assertPublicJwksDestination(url.toString());
-  }
   const jwks = createRemoteJWKSet(url, {
     [customFetch]: (fetchUrl, init) => fetchPublicJwks(fetchUrl, init),
   });
+  JWKS_CACHE.delete(cacheKey);
+  while (JWKS_CACHE.size >= JWKS_CACHE_MAX_ENTRIES) {
+    const oldestKey = JWKS_CACHE.keys().next().value;
+    if (oldestKey === undefined) break;
+    JWKS_CACHE.delete(oldestKey);
+  }
   JWKS_CACHE.set(cacheKey, { jwks, createdAt: Date.now() });
   return jwks;
 }
 
 async function fetchPublicJwks(url: string | URL, init?: RequestInit): Promise<Response> {
   const jwksUrl = assertSafeJwksUri(url.toString());
-  if (ALLOW_TEST_JWKS_FETCH) {
+  assertPinnedDnsTransportSupported("OIDC jwksUri");
+  if (allowTestJwksFetch()) {
     return fetch(jwksUrl, init);
   }
 
-  const body = await new Promise<Uint8Array>((resolve, reject) => {
-    const req = httpsRequest(
+  const result = await new Promise<{
+    body: Uint8Array;
+    headers: Headers;
+    status: number;
+  }>((resolve, reject) => {
+    let settled = false;
+    let req: ReturnType<typeof httpsRequest> | undefined;
+    const finish = <T>(fn: (value: T) => void, value: T) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      init?.signal?.removeEventListener("abort", abortRequest);
+      fn(value);
+    };
+    const abortRequest = () => {
+      req?.destroy();
+      finish(reject, new Error("OIDC JWKS request was aborted"));
+    };
+    const deadline = setTimeout(() => {
+      req?.destroy();
+      finish(reject, new Error("OIDC JWKS request timed out"));
+    }, JWKS_FETCH_TIMEOUT_MS);
+
+    if (init?.signal?.aborted) {
+      abortRequest();
+      return;
+    }
+    init?.signal?.addEventListener("abort", abortRequest, { once: true });
+
+    req = httpsRequest(
       jwksUrl,
       {
         headers: Object.fromEntries(new Headers(init?.headers).entries()),
         method: init?.method ?? "GET",
         timeout: JWKS_FETCH_TIMEOUT_MS,
-        lookup(hostname, options, callback) {
-          dnsLookup(
-            hostname,
-            { all: false, family: options.family, verbatim: true },
-            (error, address, family) => {
-              if (error) {
-                callback(error, address, family);
-                return;
-              }
-              try {
-                assertPublicJwksAddress(address, family);
-                callback(null, address, family);
-              } catch (privateAddressError) {
-                callback(privateAddressError as NodeJS.ErrnoException, address, family);
-              }
-            },
-          );
-        },
+        lookup: createPublicInternetLookup("OIDC jwksUri"),
       },
       (res) => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400) {
-          reject(new Error("OIDC jwksUri redirects are not allowed"));
+          finish(reject, new Error("OIDC jwksUri redirects are not allowed"));
+          res.resume();
+          return;
+        }
+        const declaredLength = Number(res.headers["content-length"]);
+        if (Number.isFinite(declaredLength) && declaredLength > JWKS_MAX_BYTES) {
+          finish(reject, new Error("OIDC JWKS response is too large"));
           res.resume();
           return;
         }
@@ -306,7 +211,8 @@ async function fetchPublicJwks(url: string | URL, init?: RequestInit): Promise<R
         res.on("data", (chunk: Uint8Array) => {
           size += chunk.byteLength;
           if (size > JWKS_MAX_BYTES) {
-            req.destroy(new Error("OIDC JWKS response is too large"));
+            req?.destroy();
+            finish(reject, new Error("OIDC JWKS response is too large"));
             return;
           }
           chunks.push(chunk);
@@ -318,19 +224,36 @@ async function fetchPublicJwks(url: string | URL, init?: RequestInit): Promise<R
             body.set(chunk, offset);
             offset += chunk.byteLength;
           }
-          resolve(body);
+          const headers = new Headers();
+          for (const [name, value] of Object.entries(res.headers)) {
+            if (Array.isArray(value)) {
+              for (const item of value) headers.append(name, item);
+            } else if (value !== undefined) {
+              headers.set(name, value);
+            }
+          }
+          const status =
+            res.statusCode && res.statusCode >= 200 && res.statusCode <= 599 ? res.statusCode : 502;
+          finish(resolve, { body, headers, status });
         });
+        res.on("aborted", () => finish(reject, new Error("OIDC JWKS response was interrupted")));
+        res.on("error", () => finish(reject, new Error("OIDC JWKS response failed")));
       },
     );
 
-    req.on("timeout", () => req.destroy(new Error("OIDC JWKS request timed out")));
-    req.on("error", reject);
+    req.on("timeout", () => {
+      req?.destroy();
+      finish(reject, new Error("OIDC JWKS request timed out"));
+    });
+    req.on("error", () => finish(reject, new Error("OIDC JWKS request failed")));
     req.end();
   });
 
-  const responseBody = new ArrayBuffer(body.byteLength);
-  new Uint8Array(responseBody).set(body);
-  return new Response(responseBody);
+  const responseBody =
+    result.body.byteLength === 0 && (result.status === 204 || result.status === 205)
+      ? null
+      : new Uint8Array(result.body);
+  return new Response(responseBody, { headers: result.headers, status: result.status });
 }
 
 export async function verifyOidcJwt(

@@ -1,11 +1,45 @@
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
 
-import { assertPublicJwksDestination } from "../oidc";
+import {
+  assertPublicJwksDestination,
+  clearOidcJwksCacheForTests,
+  getPublicRemoteJWKSet,
+} from "../oidc";
 
 describe("assertPublicJwksDestination SSRF guard", () => {
+  it("preserves HTTP status and bounds all production JWKS I/O", () => {
+    const source = readFileSync(new URL("../oidc.ts", import.meta.url), "utf8");
+    expect(source).toContain("status: result.status");
+    expect(source).toContain('res.headers["content-length"]');
+    expect(source).toContain("size > JWKS_MAX_BYTES");
+    expect(source).toContain("init?.signal?.addEventListener");
+    expect(source).toContain("JWKS_FETCH_TIMEOUT_MS");
+    expect(source).toContain("OIDC jwksUri redirects are not allowed");
+  });
   it("rejects IPv4-mapped IPv6 literals that embed private IPv4 targets", async () => {
     await expect(assertPublicJwksDestination("https://[::ffff:10.0.0.1]/jwks")).rejects.toThrow();
     await expect(assertPublicJwksDestination("https://[::ffff:a00:1]/jwks")).rejects.toThrow();
+  });
+
+  it("rejects IPv4-compatible and translated IPv6 literals", async () => {
+    await expect(assertPublicJwksDestination("https://[::127.0.0.1]/jwks")).rejects.toThrow();
+    await expect(assertPublicJwksDestination("https://[::7f00:1]/jwks")).rejects.toThrow();
+    await expect(
+      assertPublicJwksDestination("https://[::ffff:0:127.0.0.1]/jwks"),
+    ).rejects.toThrow();
+  });
+
+  it("rejects special-purpose IPv4 and IPv6 literals", async () => {
+    for (const uri of [
+      "https://192.0.2.1/jwks",
+      "https://198.51.100.1/jwks",
+      "https://203.0.113.1/jwks",
+      "https://[100::1]/jwks",
+      "https://[3fff::1]/jwks",
+    ]) {
+      await expect(assertPublicJwksDestination(uri), uri).rejects.toThrow();
+    }
   });
 
   it("rejects NAT64 literals that embed private IPv4 targets", async () => {
@@ -46,5 +80,16 @@ describe("assertPublicJwksDestination SSRF guard", () => {
     await expect(
       assertPublicJwksDestination("https://[2002:808:808::]/jwks"),
     ).resolves.toBeUndefined();
+  });
+
+  it("bounds the tenant-controlled remote JWKS cache", async () => {
+    clearOidcJwksCacheForTests();
+    const first = await getPublicRemoteJWKSet("https://idp.example.com/jwks", "tenant:first");
+    for (let index = 0; index < 256; index += 1) {
+      await getPublicRemoteJWKSet(`https://idp.example.com/jwks/${index}`, `tenant:${index}`);
+    }
+    const reloaded = await getPublicRemoteJWKSet("https://idp.example.com/jwks", "tenant:first");
+    expect(reloaded).not.toBe(first);
+    clearOidcJwksCacheForTests();
   });
 });

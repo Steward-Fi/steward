@@ -1003,6 +1003,7 @@ export async function submitWithdraw(
   );
   const j = await r.json().catch(() => null);
   if (!r.ok) throw new Error(`Hyperliquid exchange returned ${r.status}: ${JSON.stringify(j)}`);
+  throwIfExchangeRejected(j, "withdraw");
   return j;
 }
 
@@ -1178,11 +1179,16 @@ async function postExchange(signed: SignedOrder, transport: HyperliquidTransport
   if (!r.ok) throw new Error(`Hyperliquid exchange returned ${r.status}: ${JSON.stringify(j)}`);
   return j;
 }
+/** A response that definitively says the venue did not accept an action. */
+export class HyperliquidExchangeRejectedError extends Error {
+  readonly name = "HyperliquidExchangeRejectedError";
+}
+
 function throwIfExchangeRejected(raw: unknown, actionName: string): string {
   const status = String((raw as { status?: unknown })?.status ?? "");
   if (status === "err") {
     const detail = (raw as { response?: unknown })?.response;
-    throw new Error(
+    throw new HyperliquidExchangeRejectedError(
       `hyperliquid ${actionName} rejected: ${typeof detail === "string" ? detail : JSON.stringify(detail ?? raw)}`,
     );
   }
