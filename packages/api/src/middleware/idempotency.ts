@@ -592,7 +592,7 @@ const SECRET_BEARING_RESPONSE_PATTERNS = [
   /^\/user\/me\/wallet\/export$/, // POST /user/me/wallet/export — user wallet key material
   /^\/v1\/kms\/keys\/[^/]+\/decrypt$/, // POST /v1/kms/keys/:keyId/decrypt — plaintext
   /^\/secrets(?:\/|$)/, // POST /secrets — secret values
-  /^\/(?:v1\/)?capabilities\/manifest\/[^/]+\/(?:issue|renew)$/, // POST …/issue|renew — one-time upstream credential
+  /^\/(?:v1\/)?capabilities\/manifest\/[^/]+\/(?:issue|renew)\/?$/, // POST …/issue|renew — one-time upstream credential
   // Review-wave extension of the audit's named list (same issue class):
   // recovery setup returns the one-time BIP39 mnemonic ("shown once, not
   // stored"), so its body must never land in the idempotency store either.
