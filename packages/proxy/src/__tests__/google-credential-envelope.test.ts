@@ -68,5 +68,10 @@ describe("X OAuth credential envelope", () => {
     expect(extractProviderCredentialForHost("api.x.com", "legacy-raw-x-access-token")).toBe(
       "legacy-raw-x-access-token",
     );
+    // OAuth bearer values are opaque. Legacy raw credentials that happen to be
+    // valid JSON primitives must not be mistaken for structured envelopes.
+    for (const rawToken of ["1234567890", "true", '"quoted-legacy-token"']) {
+      expect(extractProviderCredentialForHost("api.x.com", rawToken)).toBe(rawToken);
+    }
   });
 });
