@@ -122,6 +122,10 @@ function isNonPublicIpv6(hostname: string): boolean {
   if (words && words.slice(0, 6).every((word) => word === 0) && (words[6] !== 0 || words[7] !== 0))
     return true;
   if (words?.[0] === 0x2001 && (words[1] === 0 || words[1] === 0xdb8)) return true;
+  // Keep registration-time screening aligned with the delivery dispatcher for
+  // the complete benchmarking and discard-only special-use prefixes.
+  if (words?.[0] === 0x2001 && words[1] === 0x0002 && words[2] === 0) return true;
+  if (words?.[0] === 0x0100 && words[1] === 0 && words[2] === 0 && words[3] === 0) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfe80) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfec0) return true;
   return (
