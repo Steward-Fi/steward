@@ -555,7 +555,15 @@ export async function expireUpstreamCredentialLeases(input: {
     for (const row of due) {
       const updated = await tx
         .update(upstreamCredentialLeases)
-        .set({ status: "expired", updatedAt: now })
+        .set({
+          status: "expired",
+          tokenHash: null,
+          tokenCiphertext: null,
+          tokenIv: null,
+          tokenAuthTag: null,
+          tokenSalt: null,
+          updatedAt: now,
+        })
         .where(
           and(
             eq(upstreamCredentialLeases.id, row.id),
@@ -891,7 +899,15 @@ async function expireOneActiveLease(input: {
   return input.auditedTransaction(input.lease.tenantId, async (tx: Db, appendRequiredAudit) => {
     const updated = await tx
       .update(upstreamCredentialLeases)
-      .set({ status: "expired", updatedAt: input.now })
+      .set({
+        status: "expired",
+        tokenHash: null,
+        tokenCiphertext: null,
+        tokenIv: null,
+        tokenAuthTag: null,
+        tokenSalt: null,
+        updatedAt: input.now,
+      })
       .where(
         and(
           eq(upstreamCredentialLeases.id, input.lease.id),
@@ -1794,7 +1810,15 @@ export async function revokeUpstreamCredentialLease(
     await input.auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {
       const expired = await tx
         .update(upstreamCredentialLeases)
-        .set({ status: "expired", updatedAt: now })
+        .set({
+          status: "expired",
+          tokenHash: null,
+          tokenCiphertext: null,
+          tokenIv: null,
+          tokenAuthTag: null,
+          tokenSalt: null,
+          updatedAt: now,
+        })
         .where(
           and(
             eq(upstreamCredentialLeases.id, lease.id),
@@ -1895,7 +1919,17 @@ export async function revokeUpstreamCredentialLease(
     await input.auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {
       const finalized = await tx
         .update(upstreamCredentialLeases)
-        .set({ status: "revoked", revokedAt: now, lastError: null, updatedAt: now })
+        .set({
+          status: "revoked",
+          tokenHash: null,
+          tokenCiphertext: null,
+          tokenIv: null,
+          tokenAuthTag: null,
+          tokenSalt: null,
+          revokedAt: now,
+          lastError: null,
+          updatedAt: now,
+        })
         .where(
           and(
             eq(upstreamCredentialLeases.id, lease.id),
@@ -2083,7 +2117,17 @@ async function revokeExactSealedLease(input: {
     await input.auditedTransaction(input.tenantId, async (tx: Db, appendRequiredAudit) => {
       const finalized = await tx
         .update(upstreamCredentialLeases)
-        .set({ status: "revoked", revokedAt: input.now, lastError: null, updatedAt: input.now })
+        .set({
+          status: "revoked",
+          tokenHash: null,
+          tokenCiphertext: null,
+          tokenIv: null,
+          tokenAuthTag: null,
+          tokenSalt: null,
+          revokedAt: input.now,
+          lastError: null,
+          updatedAt: input.now,
+        })
         .where(
           and(
             eq(upstreamCredentialLeases.id, input.lease.id),

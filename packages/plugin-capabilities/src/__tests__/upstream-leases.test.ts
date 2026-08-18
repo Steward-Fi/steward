@@ -771,6 +771,13 @@ describe("upstream credential leases", () => {
       .from(upstreamCredentialLeases)
       .where(eq(upstreamCredentialLeases.id, issued.leaseId));
     expect(row.status).toBe("expired");
+    expect(row).toMatchObject({
+      tokenHash: null,
+      tokenCiphertext: null,
+      tokenIv: null,
+      tokenAuthTag: null,
+      tokenSalt: null,
+    });
     const events = await harness.db
       .select()
       .from(upstreamCredentialLeaseEvents)
@@ -1513,6 +1520,13 @@ describe("upstream credential leases", () => {
       .from(upstreamCredentialLeases)
       .where(eq(upstreamCredentialLeases.id, recoverable.id));
     expect(recovered.status).toBe("revoked");
+    expect(recovered).toMatchObject({
+      tokenHash: null,
+      tokenCiphertext: null,
+      tokenIv: null,
+      tokenAuthTag: null,
+      tokenSalt: null,
+    });
     expect(issuer.revokeCalls).toBe(2);
   });
 
