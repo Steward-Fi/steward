@@ -596,6 +596,13 @@
       "when": 1787107601000,
       "tag": "0104_x_refresh_rotation_recovery",
       "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1787107602000,
+      "tag": "0105_x_connect_exchange_recovery",
+      "breakpoints": true
     }
   ]
 }

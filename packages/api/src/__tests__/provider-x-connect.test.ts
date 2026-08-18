@@ -1,6 +1,5 @@
 /**
- * Provider-account X (Twitter) OAuth connect + token lifecycle tests
- * (issue #195 workstream A).
+ * Provider-account X (Twitter) OAuth connect and token lifecycle tests.
  *
  * Covers: connect initiate/complete happy path, state mismatch, expired state,
  * reused state, PKCE failure, wrong-role caller (via canConnectProviderAccounts
@@ -39,6 +38,7 @@ import {
   __runDefaultXForwardForTests,
   __setAfterXCredentialStageForTests,
   __setAfterXRefreshIntentForTests,
+  __setAfterXRevocationClaimForTests,
   __setXForwardForTests,
   completeXConnect,
   disconnectXProviderCredential,
@@ -302,9 +302,13 @@ afterEach(async () => {
   __setXForwardForTests(null);
   __setAfterXCredentialStageForTests(null);
   __setAfterXRefreshIntentForTests(null);
+  __setAfterXRevocationClaimForTests(null);
   // Reset connected accounts + credential secrets between tests.
   const db = getDb();
   await db.delete(providerAccounts).where(eq(providerAccounts.tenantId, TENANT));
+  await db
+    .delete(providerXCredentialLifecycles)
+    .where(eq(providerXCredentialLifecycles.tenantId, TENANT));
   await db.delete(secrets).where(eq(secrets.tenantId, TENANT));
 });
 
@@ -773,8 +777,285 @@ describe("connect state validation", () => {
         }),
       ).rejects.toMatchObject({ code: "X_TOKEN_EXCHANGE_FAILED" });
       expect(fake.counters.identity).toBe(0);
+      expect(fake.counters.revoke).toBe(1);
       fake.restore();
     }
+  });
+});
+
+describe("connect exchange recovery", () => {
+  test("a crash after encrypted staging is adopted by the sweep without another code exchange", async () => {
+    const store = new MemoryConnectStore();
+    const fake = installFakeX();
+    const initiated = await initiateXConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+    });
+    __setAfterXCredentialStageForTests(async () => {
+      throw new Error("simulated process crash after connect staging");
+    });
+    await expect(
+      completeXConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store,
+        vault,
+      }),
+    ).rejects.toThrow("simulated process crash");
+    __setAfterXCredentialStageForTests(null);
+
+    const swept = await runXCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: new Date(Date.now() + 70_000),
+    });
+    expect(swept).toMatchObject({ processed: 1, adopted: 1, attention: 0 });
+    expect(fake.counters).toMatchObject({ exchange: 1, identity: 1 });
+    const [lifecycle] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.kind, "connect_exchange"));
+    expect(lifecycle.state).toBe("adopted");
+    expect(lifecycle.credentialSecretId).toBeNull();
+    fake.restore();
+  });
+
+  test("failed identity revocation is durably retried with backoff and a hard ceiling", async () => {
+    const store = new MemoryConnectStore();
+    const fake = installFakeX({ identityStatus: 503, revokeStatuses: [503, 503, 503, 503, 503] });
+    const initiated = await initiateXConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+    });
+    await expect(
+      completeXConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store,
+        vault,
+      }),
+    ).rejects.toMatchObject({ code: "X_IDENTITY_FAILED" });
+
+    let [row] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.kind, "connect_exchange"));
+    const handleId = row.credentialSecretId;
+    expect(row).toMatchObject({ state: "revocation_pending", attempts: 1 });
+    for (let expectedAttempts = 2; expectedAttempts <= 5; expectedAttempts += 1) {
+      const retryAt = row.nextRetryAt as Date;
+      const sweepAt = new Date(retryAt.getTime() + 1_000);
+      await runXCredentialLifecycleSweep({ vault, config: CONFIG, now: sweepAt });
+      [row] = await getDb()
+        .select()
+        .from(providerXCredentialLifecycles)
+        .where(eq(providerXCredentialLifecycles.id, row.id));
+      expect(row.attempts).toBe(expectedAttempts);
+      if (expectedAttempts < 5) {
+        expect((row.nextRetryAt as Date).getTime() - sweepAt.getTime()).toBe(
+          60_000 * 2 ** (expectedAttempts - 1),
+        );
+      }
+    }
+    expect(row.state).toBe("needs_attention");
+    expect(row.nextRetryAt).toBeNull();
+    expect(row.credentialSecretId).toBe(handleId);
+    expect(fake.counters).toMatchObject({ exchange: 1, identity: 1, revoke: 5 });
+    const afterCeiling = await runXCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: new Date(Date.now() + 24 * 60 * 60_000),
+    });
+    expect(afterCeiling.processed).toBe(0);
+    fake.restore();
+  });
+
+  test("a crashed revocation claimant is reclaimed only after its durable lease", async () => {
+    const store = new MemoryConnectStore();
+    const fake = installFakeX({ identityStatus: 503, revokeStatuses: [503, 200] });
+    const initiated = await initiateXConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+    });
+    await expect(
+      completeXConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store,
+        vault,
+      }),
+    ).rejects.toMatchObject({ code: "X_IDENTITY_FAILED" });
+    let [row] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.kind, "connect_exchange"));
+    const firstRetry = row.nextRetryAt as Date;
+    __setAfterXRevocationClaimForTests(async () => {
+      throw new Error("simulated crash after claim");
+    });
+    await expect(
+      runXCredentialLifecycleSweep({
+        vault,
+        config: CONFIG,
+        now: new Date(firstRetry.getTime() + 1_000),
+      }),
+    ).resolves.toMatchObject({ processed: 1, attention: 1 });
+    __setAfterXRevocationClaimForTests(null);
+    [row] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.id, row.id));
+    expect(row.attempts).toBe(2);
+    expect(fake.counters.revoke).toBe(1);
+    expect(
+      (
+        await runXCredentialLifecycleSweep({
+          vault,
+          config: CONFIG,
+          now: new Date((row.nextRetryAt as Date).getTime() - 1),
+        })
+      ).processed,
+    ).toBe(0);
+    await runXCredentialLifecycleSweep({ vault, config: CONFIG, now: row.nextRetryAt as Date });
+    [row] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.id, row.id));
+    expect(row.state).toBe("revoked");
+    expect(fake.counters.revoke).toBe(2);
+    fake.restore();
+  });
+
+  test("an expired fifth crash lease terminalizes with its encrypted handle retained", async () => {
+    const store = new MemoryConnectStore();
+    const fake = installFakeX({ identityStatus: 503, revokeStatuses: Array(20).fill(503) });
+    const initiated = await initiateXConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+    });
+    await expect(
+      completeXConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store,
+        vault,
+      }),
+    ).rejects.toMatchObject({ code: "X_IDENTITY_FAILED" });
+    let [row] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.kind, "connect_exchange"));
+    const handleId = row.credentialSecretId;
+    __setAfterXRevocationClaimForTests(async () => {
+      throw new Error("simulated repeated crash after claim");
+    });
+    for (let attempts = 2; attempts <= 5; attempts += 1) {
+      await runXCredentialLifecycleSweep({
+        vault,
+        config: CONFIG,
+        now: new Date((row.nextRetryAt as Date).getTime() + 1_000),
+      });
+      [row] = await getDb()
+        .select()
+        .from(providerXCredentialLifecycles)
+        .where(eq(providerXCredentialLifecycles.id, row.id));
+      expect(row).toMatchObject({ state: "revocation_pending", attempts });
+    }
+    __setAfterXRevocationClaimForTests(null);
+    await runXCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: new Date((row.nextRetryAt as Date).getTime() + 1_000),
+    });
+    [row] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.id, row.id));
+    expect(row).toMatchObject({
+      state: "needs_attention",
+      attempts: 5,
+      nextRetryAt: null,
+      credentialSecretId: handleId,
+    });
+    fake.restore();
+  });
+
+  test("scope-widened responses revoke the exact bounded refresh handle", async () => {
+    const store = new MemoryConnectStore();
+    const fake = installFakeX({
+      exchangeToken: {
+        access_token: "access-valid",
+        refresh_token: "exact-refresh-handle",
+        scope: "tweet.read admin.write",
+      },
+    });
+    const initiated = await initiateXConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+    });
+    await expect(
+      completeXConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store,
+        vault,
+      }),
+    ).rejects.toMatchObject({ code: "X_TOKEN_EXCHANGE_FAILED" });
+    expect(fake.counters.revoke).toBe(1);
+    expect(new URLSearchParams(fake.counters.revokeBodies[0]).get("token")).toBe(
+      "exact-refresh-handle",
+    );
+    fake.restore();
   });
 });
 
@@ -914,9 +1195,10 @@ describe("refresh", () => {
           and(
             eq(providerXCredentialLifecycles.tenantId, TENANT),
             eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId),
+            eq(providerXCredentialLifecycles.kind, "refresh_rotation"),
           ),
         );
-      expect(lifecycle.state).toBe("needs_attention");
+      expect(lifecycle.state).toBe("revocation_pending");
       expect(lifecycle.credentialSecretId).toBeTruthy();
       expect(JSON.stringify(lifecycle)).not.toContain("refresh-valid");
       expect(await vault.decryptSecret(TENANT, lifecycle.credentialSecretId as string)).toContain(
@@ -971,8 +1253,13 @@ describe("refresh", () => {
     const [pending] = await db
       .select()
       .from(providerXCredentialLifecycles)
-      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
-    expect(pending.state).toBe("needs_attention");
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId),
+          eq(providerXCredentialLifecycles.kind, "refresh_rotation"),
+        ),
+      );
+    expect(pending.state).toBe("revocation_pending");
     const stagedSecretId = pending.credentialSecretId as string;
     const [accountBefore] = await db
       .select()
@@ -987,7 +1274,7 @@ describe("refresh", () => {
       .select()
       .from(providerXCredentialLifecycles)
       .where(eq(providerXCredentialLifecycles.id, pending.id));
-    expect(preserved.state).toBe("needs_attention");
+    expect(preserved.state).toBe("revocation_pending");
     expect(preserved.credentialSecretId).toBe(stagedSecretId);
     const [retainedHandle] = await db
       .select({ id: secrets.id })
@@ -1059,7 +1346,12 @@ describe("refresh", () => {
     const [pending] = await getDb()
       .select()
       .from(providerXCredentialLifecycles)
-      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId),
+          eq(providerXCredentialLifecycles.kind, "refresh_rotation"),
+        ),
+      );
     const handleId = pending.credentialSecretId as string;
 
     const first = await runXCredentialLifecycleSweep({
@@ -1072,7 +1364,7 @@ describe("refresh", () => {
       .select()
       .from(providerXCredentialLifecycles)
       .where(eq(providerXCredentialLifecycles.id, pending.id));
-    expect(retained.state).toBe("needs_attention");
+    expect(retained.state).toBe("revocation_pending");
     expect(retained.credentialSecretId).toBe(handleId);
 
     const second = await runXCredentialLifecycleSweep({
@@ -1159,7 +1451,12 @@ describe("refresh", () => {
     const [lifecycle] = await getDb()
       .select()
       .from(providerXCredentialLifecycles)
-      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId),
+          eq(providerXCredentialLifecycles.kind, "refresh_rotation"),
+        ),
+      );
     expect(lifecycle.state).toBe("adopted");
     expect(lifecycle.credentialSecretId).toBeNull();
     fake.restore();
@@ -1199,7 +1496,12 @@ describe("refresh", () => {
     const [lifecycle] = await getDb()
       .select()
       .from(providerXCredentialLifecycles)
-      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId),
+          eq(providerXCredentialLifecycles.kind, "refresh_rotation"),
+        ),
+      );
     expect(lifecycle.state).toBe("needs_attention");
     expect(lifecycle.credentialSecretId).toBeNull();
     expect(lifecycle.lastErrorCode).toBe("REFRESH_OUTCOME_UNKNOWN");
@@ -1257,7 +1559,12 @@ describe("refresh", () => {
     const [lifecycle] = await getDb()
       .select()
       .from(providerXCredentialLifecycles)
-      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId),
+          eq(providerXCredentialLifecycles.kind, "refresh_rotation"),
+        ),
+      );
     expect(lifecycle).toMatchObject({
       state: "revoked",
       credentialSecretId: null,
@@ -1303,7 +1610,12 @@ describe("refresh", () => {
     const [lifecycle] = await getDb()
       .select()
       .from(providerXCredentialLifecycles)
-      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId),
+          eq(providerXCredentialLifecycles.kind, "refresh_rotation"),
+        ),
+      );
     expect(lifecycle).toMatchObject({
       state: "needs_attention",
       credentialSecretId: null,
@@ -1341,7 +1653,12 @@ describe("refresh", () => {
     const [stillInflight] = await getDb()
       .select()
       .from(providerXCredentialLifecycles)
-      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId),
+          eq(providerXCredentialLifecycles.kind, "refresh_rotation"),
+        ),
+      );
     expect(stillInflight.state).toBe("inflight");
 
     const swept = await runXCredentialLifecycleSweep({
@@ -1358,7 +1675,12 @@ describe("refresh", () => {
     const [lifecycle] = await getDb()
       .select()
       .from(providerXCredentialLifecycles)
-      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId),
+          eq(providerXCredentialLifecycles.kind, "refresh_rotation"),
+        ),
+      );
     expect(lifecycle.state).toBe("needs_attention");
     expect(lifecycle.lastErrorCode).toBe("REFRESH_OUTCOME_UNKNOWN");
     await expect(refreshXProviderCredential(input)).rejects.toMatchObject({
