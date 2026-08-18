@@ -47,4 +47,20 @@ describeWithPostgres("cancel-safe deadline on real Postgres", () => {
     const rows = await admin.client.unsafe(`SELECT id FROM ${tableName} WHERE id = $1`, [id]);
     expect(rows).toHaveLength(0);
   });
+
+  test("a callback paused across the deadline cannot mutate through the closed handle", async () => {
+    const id = randomUUID();
+    await expect(
+      withDatabaseDeadline(Date.now() + 1_200, async (db) => {
+        await Bun.sleep(1_500);
+        await db.execute(sql.raw(`INSERT INTO ${tableName} (id) VALUES ('${id}')`));
+      }),
+    ).rejects.toThrow(DATABASE_DEADLINE_EXCEEDED_MESSAGE);
+
+    // The deadline owns and destroys the dedicated handle. A callback that was
+    // idle in user code cannot resume later and enqueue a mutation on a shared
+    // pool connection after the caller has already observed the timeout.
+    const rows = await admin.client.unsafe(`SELECT id FROM ${tableName} WHERE id = $1`, [id]);
+    expect(rows).toHaveLength(0);
+  });
 });
