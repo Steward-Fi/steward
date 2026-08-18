@@ -123,11 +123,9 @@ describe("CI test inventory", () => {
       "    steps:",
       "      - run: bun test packages/a || true",
     ].join("\n");
-    const backgrounded = [
-      "  dedicated:",
-      "    steps:",
-      "      - run: bun test packages/a &",
-    ].join("\n");
+    const backgrounded = ["  dedicated:", "    steps:", "      - run: bun test packages/a &"].join(
+      "\n",
+    );
     const piped = [
       "  dedicated:",
       "    steps:",
@@ -144,22 +142,41 @@ describe("CI test inventory", () => {
     expect(jobExecutesPackageTests(extractJob(unrelated, "dedicated"), "packages/a")).toBe(false);
     expect(jobExecutesPackageTests(extractJob(echoed, "dedicated"), "packages/a")).toBe(false);
     expect(jobExecutesPackageTests(extractJob(envPrefixed, "dedicated"), "packages/a")).toBe(true);
-    expect(jobExecutesPackageTests(extractJob(unauditableBlock, "dedicated"), "packages/a")).toBe(false);
-    expect(jobExecutesPackageTests(extractJob(heredocDecoy, "dedicated"), "packages/a")).toBe(false);
-    expect(jobExecutesPackageTests(extractJob(maskedFailure, "dedicated"), "packages/a")).toBe(false);
-    expect(jobExecutesPackageTests(extractJob(backgrounded, "dedicated"), "packages/a")).toBe(false);
+    expect(jobExecutesPackageTests(extractJob(unauditableBlock, "dedicated"), "packages/a")).toBe(
+      false,
+    );
+    expect(jobExecutesPackageTests(extractJob(heredocDecoy, "dedicated"), "packages/a")).toBe(
+      false,
+    );
+    expect(jobExecutesPackageTests(extractJob(maskedFailure, "dedicated"), "packages/a")).toBe(
+      false,
+    );
+    expect(jobExecutesPackageTests(extractJob(backgrounded, "dedicated"), "packages/a")).toBe(
+      false,
+    );
     expect(jobExecutesPackageTests(extractJob(piped, "dedicated"), "packages/a")).toBe(false);
-    expect(jobExecutesPackageTests(extractJob(skippedMaven, "dedicated"), "packages/a")).toBe(false);
+    expect(jobExecutesPackageTests(extractJob(skippedMaven, "dedicated"), "packages/a")).toBe(
+      false,
+    );
   });
 
   test("recognizes every shipped SDK test runner without accepting echoed commands", () => {
     const cases = [
       ["packages/android", "mvn -B -f packages/android/pom.xml test"],
-      ["packages/csharp", "dotnet run --project packages/csharp/tests/Steward.Tests/Steward.Tests.csproj"],
+      [
+        "packages/csharp",
+        "dotnet run --project packages/csharp/tests/Steward.Tests/Steward.Tests.csproj",
+      ],
       ["packages/go", "go test ./..."],
       ["packages/java", "mvn -B -f packages/java/pom.xml test"],
-      ["packages/python", "PYTHONPATH=packages/python python3 -m unittest discover -s packages/python/tests"],
-      ["packages/ruby", `ruby -Ipackages/ruby/lib -e 'Dir["packages/ruby/test/**/*_test.rb"].each { |file| require file }'`],
+      [
+        "packages/python",
+        "PYTHONPATH=packages/python python3 -m unittest discover -s packages/python/tests",
+      ],
+      [
+        "packages/ruby",
+        `ruby -Ipackages/ruby/lib -e 'Dir["packages/ruby/test/**/*_test.rb"].each { |file| require file }'`,
+      ],
       ["packages/rust", "cargo test --locked --manifest-path packages/rust/Cargo.toml"],
       ["packages/swift", "swift test --package-path packages/swift"],
     ] as const;

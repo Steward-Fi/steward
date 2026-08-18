@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 const WORKFLOWS = [".github/workflows/pr.yml", ".github/workflows/ci.yml"] as const;
@@ -170,7 +170,8 @@ function extractRunSteps(job: string): WorkflowStep[] {
 }
 
 export function jobExecutesPackageTests(job: string, packagePath: string): boolean {
-  const executableTestCommand = /^(?:\(?\s*)?(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]+)\s+)*(?:(?:bun|cargo|flutter|go|mvn|swift)\b[^\n]*\b(?:test|run-tests)\b|dotnet\s+run\b|python3?\s+-m\s+unittest\b|ruby\b[^\n]*\btest\/[^\s]*_test\.rb\b)/;
+  const executableTestCommand =
+    /^(?:\(?\s*)?(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]+)\s+)*(?:(?:bun|cargo|flutter|go|mvn|swift)\b[^\n]*\b(?:test|run-tests)\b|dotnet\s+run\b|python3?\s+-m\s+unittest\b|ruby\b[^\n]*\btest\/[^\s]*_test\.rb\b)/;
   return extractRunSteps(job).some((step) => {
     // Only an inline scalar can be checked as one shell command without a
     // shell parser. Literal/folded blocks can hide apparent runner lines in a
@@ -183,12 +184,12 @@ export function jobExecutesPackageTests(job: string, packagePath: string): boole
       .split(/\r?\n/)
       .map((line) => line.trim())
       .some((line) => {
-        const shellSyntax = line
-          .replace(/'(?:[^']*)'/g, "")
-          .replace(/"(?:\\.|[^"\\])*"/g, "");
+        const shellSyntax = line.replace(/'(?:[^']*)'/g, "").replace(/"(?:\\.|[^"\\])*"/g, "");
         // A command that masks its own failure or explicitly disables tests is
         // not CI evidence even if its spelling otherwise resembles a runner.
-        if (/[;&|`]|\$\(|--no-run\b|-DskipTests\b|-Dmaven\.test\.skip(?:=true)?\b/.test(shellSyntax)) {
+        if (
+          /[;&|`]|\$\(|--no-run\b|-DskipTests\b|-Dmaven\.test\.skip(?:=true)?\b/.test(shellSyntax)
+        ) {
           return false;
         }
         if (!executableTestCommand.test(line)) return false;
