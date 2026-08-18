@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq, sql } from "drizzle-orm";
-import { verifyAuditChain, writeAuditEvent } from "../services/audit";
+import { trackAuditEvent, verifyAuditChain, writeAuditEvent } from "../services/audit";
 
 const TENANT_ID = `audit-strict-${Date.now()}`;
 const EMPTY_TENANT_ID = `audit-strict-empty-${Date.now()}`;
@@ -98,5 +98,46 @@ describe("strict audit chain verification", () => {
       metadata: Record<string, unknown>;
     }>;
     expect(rows[0]?.metadata).toEqual({ absent: null, present: "yes" });
+  });
+
+  it("redacts thrown audit-writer diagnostics before best-effort logging", async () => {
+    const canary = "DATABASE_PASSWORD_AND_TOKEN_CANARY";
+    const metadata: Record<string, unknown> = {};
+    Object.defineProperty(metadata, "safe", {
+      enumerable: true,
+      get() {
+        throw new Error(canary);
+      },
+    });
+    const originalError = console.error;
+    const logged: unknown[][] = [];
+    let resolveLogged: (() => void) | undefined;
+    const logObserved = new Promise<void>((resolve) => {
+      resolveLogged = resolve;
+    });
+    console.error = (...args: unknown[]) => {
+      logged.push(args);
+      resolveLogged?.();
+    };
+    try {
+      trackAuditEvent({
+        tenantId: TENANT_ID,
+        actorType: "system",
+        action: "test.audit.redacted-failure",
+        metadata,
+      });
+      await Promise.race([
+        logObserved,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("audit failure was not logged")), 2_000),
+        ),
+      ]);
+    } finally {
+      console.error = originalError;
+    }
+
+    expect(JSON.stringify(logged)).not.toContain(canary);
+    expect(logged).toHaveLength(1);
+    expect(logged[0]?.[1]).toEqual({ errorClass: "Error", errorCode: null });
   });
 });

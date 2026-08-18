@@ -27,7 +27,7 @@ import {
   withTenantAuditQueue,
   writeAuditEvent,
 } from "@stwd/db";
-import { observeAuditCheckpoint } from "@stwd/shared";
+import { observeAuditCheckpoint, redactedThrownDiagnostics } from "@stwd/shared";
 import { sql } from "drizzle-orm";
 import {
   type CheckpointEventContent,
@@ -219,7 +219,10 @@ function rowsFromExecute<T>(result: unknown): T[] {
  */
 export function trackAuditEvent(ev: AuditEventInput): void {
   writeAuditEvent(ev).catch((err) => {
-    console.error(`[audit] Failed to write event ${ev.action} for tenant ${ev.tenantId}:`, err);
+    console.error(
+      `[audit] Failed to write event ${ev.action} for tenant ${ev.tenantId}`,
+      redactedThrownDiagnostics(err),
+    );
   });
 }
 
