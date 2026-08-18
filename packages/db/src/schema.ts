@@ -985,6 +985,15 @@ export const operatorTransferReservations = pgTable(
       table.agentId,
       table.createdAt,
     ),
+    tenantAgentFk: foreignKey({
+      columns: [table.tenantId, table.agentId],
+      foreignColumns: [agents.tenantId, agents.id],
+      name: "operator_transfer_reservations_tenant_agent_fk",
+    }).onDelete("cascade"),
+    railValid: check(
+      "operator_transfer_reservation_rail_chk",
+      sql`${table.rail} in ('withdraw', 'usd-send')`,
+    ),
     amountIsUsdc: check(
       "operator_transfer_reservation_amount_base_units_chk",
       sql`${table.amountBaseUnits} ~ '^[0-9]+$'`,
@@ -992,6 +1001,11 @@ export const operatorTransferReservations = pgTable(
     statusValid: check(
       "operator_transfer_reservation_status_chk",
       sql`${table.status} in ('pending', 'final', 'released')`,
+    ),
+    statusFinalizedShape: check(
+      "operator_transfer_reservation_status_finalized_chk",
+      sql`(${table.status} = 'pending' and ${table.finalizedAt} is null)
+          or (${table.status} in ('final', 'released') and ${table.finalizedAt} is not null)`,
     ),
   }),
 );

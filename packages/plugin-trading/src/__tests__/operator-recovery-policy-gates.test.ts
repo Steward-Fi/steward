@@ -656,6 +656,7 @@ describe("SEC-043: operator idempotency stores ambiguous outcomes", () => {
           destination: DEST_A,
           amountBaseUnits: "1",
           status: "final",
+          finalizedAt: new Date(),
         })),
       );
     const app = await buildApp();

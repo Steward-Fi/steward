@@ -108,6 +108,7 @@ describe("getTransactionStats chain scoping (issue #110)", () => {
           destination: RECIPIENT,
           amountBaseUnits: "35000000",
           status: "final",
+          finalizedAt: new Date(),
         },
         {
           tenantId: TENANT_ID,
@@ -117,6 +118,7 @@ describe("getTransactionStats chain scoping (issue #110)", () => {
           destination: RECIPIENT,
           amountBaseUnits: "900000000",
           status: "released",
+          finalizedAt: new Date(),
         },
       ]);
   });
