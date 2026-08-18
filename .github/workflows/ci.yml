@@ -494,6 +494,11 @@ jobs:
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
 
+      - name: Vault custody transition race proof (real Postgres)
+        run: bun test packages/vault/src/__tests__/custody-transition-race.real-pg.test.ts
+        env:
+          DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
+
       - name: Start API test server
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
