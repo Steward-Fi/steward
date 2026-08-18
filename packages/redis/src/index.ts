@@ -22,7 +22,8 @@ export {
   isKnownHost,
 } from "./cost-estimator.js";
 export {
-  type CumulativeSpendBatchEntry,
+  type CumulativeSpendBatchGroup,
+  type CumulativeSpendBatchResult,
   type CumulativeSpendCap,
   type CumulativeSpendScope,
   type CumulativeSpendSnapshot,
@@ -32,6 +33,8 @@ export {
   type ReserveCumulativeSpendInput,
   type ReserveCumulativeSpendResult,
   releaseCumulativeSpend,
+  releaseLegacyCumulativeSpendAfterCutover,
+  releaseLegacyWindowedInvokeAfterCutover,
   releaseWindowedInvoke,
   reserveCumulativeSpend,
   reserveCumulativeSpendBatch,

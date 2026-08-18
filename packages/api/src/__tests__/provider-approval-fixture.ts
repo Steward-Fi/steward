@@ -5,6 +5,8 @@
  * an approval-required provider action can be created and decided end-to-end.
  */
 
+import { randomUUID } from "node:crypto";
+
 import {
   agents,
   approvalQueue,
@@ -297,7 +299,7 @@ export async function approveRowCount(intentId: string): Promise<number> {
 }
 
 /** Create an approval-required provider action and return its intentId. */
-export async function createApprovalRequired(idem = "aaaaaaaa"): Promise<{
+export async function createApprovalRequired(idem = randomUUID()): Promise<{
   intentId: string;
   requestHash: string;
   actionDigest: string;
