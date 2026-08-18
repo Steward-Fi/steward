@@ -34,6 +34,7 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import {
+  AWS_PROVIDER_ACTION_PROFILE,
   GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
   GITHUB_PROVIDER_ACTION_PROFILE,
   GOOGLE_PROVIDER_ACTION_PROFILE,
@@ -101,6 +102,16 @@ const PROFILES = [
     method: "GET",
     path: "/calendar/v3/calendars/primary/events",
     args: { maxResults: 50 },
+    requestProfile: {},
+  },
+  {
+    profile: AWS_PROVIDER_ACTION_PROFILE,
+    adapterKey: "aws",
+    operationKey: "aws.ec2.DescribeInstances",
+    host: "ec2.us-west-2.amazonaws.com",
+    method: "POST",
+    path: "/",
+    args: { region: "us-west-2", instanceIds: ["i-0123456789abcdef0"] },
     requestProfile: {},
   },
   {
@@ -174,9 +185,9 @@ beforeAll(async () => {
   process.env.STEWARD_EXECUTION_AUTH_SECRET = "1".repeat(64);
   process.env.STEWARD_MASTER_PASSWORD = "profile-boundary-master-password";
   process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS =
-    "api.github.com,api.x.com,slack.com,www.googleapis.com,api.example.com";
+    "api.github.com,api.x.com,slack.com,www.googleapis.com,ec2.us-west-2.amazonaws.com,api.example.com";
   process.env.STEWARD_PROXY_ALLOWED_HOSTS =
-    "api.github.com,api.x.com,slack.com,www.googleapis.com,api.example.com";
+    "api.github.com,api.x.com,slack.com,www.googleapis.com,ec2.us-west-2.amazonaws.com,api.example.com";
   process.env.STEWARD_JWT_SECRET = "profile-boundary-jwt-secret-0123456789abcdef0123456789";
   const signingKeys = generateKeyPairSync("ed25519");
   process.env.STEWARD_AUDIT_SIGNING_KEY = signingKeys.privateKey
@@ -305,7 +316,12 @@ async function prepareAuthenticatedBoundary(
             refreshToken: "profile-boundary-refresh",
             scopesGranted: ["openid", "email", "https://www.googleapis.com/auth/calendar.readonly"],
           })
-        : "profile-boundary-credential";
+        : fixture.profile === AWS_PROVIDER_ACTION_PROFILE
+          ? JSON.stringify({
+              accessKeyId: "AKIDEXAMPLE123456",
+              secretAccessKey: "profile-boundary-secret-key-material",
+            })
+          : "profile-boundary-credential";
   const encrypted = vault.encrypt(credential, {
     tenantId: F.TENANT,
     name: "github",
@@ -341,6 +357,11 @@ async function prepareAuthenticatedBoundary(
       agentId: F.AGENT,
       authorityMode: "governed_v2",
       providerOperationId: F.OP,
+      injectionStrategy: fixture.profile === AWS_PROVIDER_ACTION_PROFILE ? "sigv4" : "header",
+      injectionConfig:
+        fixture.profile === AWS_PROVIDER_ACTION_PROFILE
+          ? { service: "ec2", region: "us-west-2" }
+          : {},
     })
     .where(and(eq(secretRoutes.tenantId, F.TENANT), eq(secretRoutes.id, F.ROUTE)));
 
@@ -516,7 +537,7 @@ describe("#220 real production profile boundaries", () => {
       );
     };
     proxy.__setGoogleExecutionTokenForwarderForTests(async () => {
-      const error = Object.assign(new Error(canary), { code: "ECONNRESET" });
+      const error = Object.assign(new Error(canary), { name: canary, code: canary });
       throw error;
     });
     try {
@@ -536,7 +557,7 @@ describe("#220 real production profile boundaries", () => {
     expect(audits.some((audit) => audit.reason === "credential-decrypt-failed")).toBeTrue();
     expect(JSON.stringify(audits)).not.toContain(canary);
     expect(logged.join("\n")).toContain('"errorClass":"Error"');
-    expect(logged.join("\n")).toContain('"errorCode":"ECONNRESET"');
+    expect(logged.join("\n")).toContain('"errorCode":null');
     expect(logged.join("\n")).not.toContain(canary);
   });
 });

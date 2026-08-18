@@ -61,6 +61,15 @@ export { __setGoogleExecutionTokenForwarderForTests };
 
 let _secretVault: SecretVault | null = null;
 let checkProxyRateLimitForHandler = checkProxyRateLimit;
+const SAFE_LOG_ERROR_CODES = new Set([
+  "ABORT_ERR",
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
 
 function getSecretVault(): SecretVault {
   if (!_secretVault) {
@@ -1896,15 +1905,27 @@ export async function handleProxy(c: Context): Promise<Response> {
       credential = extractProviderCredentialForHost(target.host, credential);
     }
   } catch (err) {
-    const errorCode =
-      typeof err === "object" &&
-      err !== null &&
-      "code" in err &&
-      typeof (err as { code?: unknown }).code === "string"
-        ? ((err as { code: string }).code ?? null)
-        : null;
+    let errorClass: string = typeof err;
+    try {
+      if (err instanceof TypeError) errorClass = "TypeError";
+      else if (err instanceof RangeError) errorClass = "RangeError";
+      else if (err instanceof SyntaxError) errorClass = "SyntaxError";
+      else if (err instanceof Error) errorClass = "Error";
+    } catch {
+      errorClass = "unknown";
+    }
+    let errorCode: string | null = null;
+    try {
+      const rawCode =
+        typeof err === "object" && err !== null ? Reflect.get(err as object, "code") : undefined;
+      if (typeof rawCode === "string" && SAFE_LOG_ERROR_CODES.has(rawCode)) {
+        errorCode = rawCode;
+      }
+    } catch {
+      // A hostile getter/proxy must not break the fail-closed credential path.
+    }
     console.error("[proxy] Failed to resolve provider credential", {
-      errorClass: err instanceof Error ? err.name : typeof err,
+      errorClass,
       errorCode,
     });
     await recordAudit({
