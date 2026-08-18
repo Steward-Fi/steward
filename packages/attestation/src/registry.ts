@@ -60,6 +60,8 @@ const MAX_REGISTRY_SIGNATURES = 64;
 const MAX_REGISTRY_PAYLOAD_BYTES = 1024 * 1024;
 const MAX_REGISTRY_PAYLOAD_DEPTH = 64;
 const MAX_REGISTRY_PAYLOAD_NODES = 100_000;
+const MAX_REGISTRY_JSON_DEPTH = MAX_REGISTRY_PAYLOAD_DEPTH + 8;
+const MAX_REGISTRY_JSON_STRUCTURAL_TOKENS = 100_000;
 const MAX_PUBLIC_KEY_PEM_BYTES = 16 * 1024;
 export const MAX_MEASUREMENT_REGISTRY_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_REGISTRY_DEPLOYMENTS = 1024;
@@ -239,6 +241,65 @@ function decodeEd25519Signature(signatureBase64: unknown): Buffer | null {
 
 class RegistryPayloadLimitError extends Error {}
 
+/** Parse a registry file through the same byte and complexity limits as the verifier. */
+export function parseMeasurementRegistryJson(bytes: Uint8Array): MeasurementRegistryFile {
+  if (bytes.byteLength > MAX_MEASUREMENT_REGISTRY_FILE_BYTES) {
+    throw new Error("measurement registry file exceeded the 4 MiB ingestion limit");
+  }
+
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("measurement registry file is not valid UTF-8 JSON");
+  }
+
+  let depth = 0;
+  let structuralTokens = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      structuralTokens += 1;
+    } else if (character === "{" || character === "[") {
+      depth += 1;
+      structuralTokens += 1;
+      if (depth > MAX_REGISTRY_JSON_DEPTH) {
+        throw new Error(
+          `measurement registry JSON exceeded the maximum depth of ${MAX_REGISTRY_JSON_DEPTH}`,
+        );
+      }
+    } else if (character === "}" || character === "]") {
+      depth -= 1;
+      if (depth < 0) throw new Error("measurement registry file is not valid JSON");
+    } else if (character === ":" || character === ",") {
+      structuralTokens += 1;
+    }
+    if (structuralTokens > MAX_REGISTRY_JSON_STRUCTURAL_TOKENS) {
+      throw new Error("measurement registry JSON exceeded the structural token limit");
+    }
+  }
+
+  if (inString || depth !== 0) throw new Error("measurement registry file is not valid JSON");
+  try {
+    return JSON.parse(text) as MeasurementRegistryFile;
+  } catch {
+    throw new Error("measurement registry file is not valid JSON");
+  }
+}
+
 export function canonicalizeJson(value: unknown): string {
   const chunks: string[] = [];
   let bytes = 0;
@@ -307,7 +368,13 @@ export function canonicalizeJson(value: unknown): string {
         return;
       }
       if (!isPlainObject(entry)) throw new Error("value is not a plain JSON object");
-      const entries = Reflect.ownKeys(entry).map((key): [string, unknown] => {
+      const ownKeys = Reflect.ownKeys(entry);
+      if (ownKeys.length > MAX_REGISTRY_PAYLOAD_NODES) {
+        throw new RegistryPayloadLimitError(
+          `registry payload exceeded the maximum node count of ${MAX_REGISTRY_PAYLOAD_NODES}`,
+        );
+      }
+      const entries = ownKeys.map((key): [string, unknown] => {
         if (typeof key !== "string" || !isWellFormedUnicode(key))
           throw new Error("JSON object has a non-JSON property key");
         const descriptor = Object.getOwnPropertyDescriptor(entry, key);
@@ -315,11 +382,6 @@ export function canonicalizeJson(value: unknown): string {
           throw new Error("JSON object has a non-JSON property");
         return [key, descriptor.value];
       });
-      if (entries.length > MAX_REGISTRY_PAYLOAD_NODES) {
-        throw new RegistryPayloadLimitError(
-          `registry payload exceeded the maximum node count of ${MAX_REGISTRY_PAYLOAD_NODES}`,
-        );
-      }
       entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
       append("{");
       for (const [index, [key, item]] of entries.entries()) {

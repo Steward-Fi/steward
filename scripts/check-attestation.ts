@@ -2,34 +2,79 @@
 import { open } from "node:fs/promises";
 import {
   createDstackTdxProvider,
+  MAX_MEASUREMENT_REGISTRY_FILE_BYTES,
   type MeasurementRegistryFile,
+  parseMeasurementRegistryJson,
   verifyQuoteAgainstRegistry,
   verifyRegistrySignatures,
 } from "@stwd/attestation";
 
-const MAX_REGISTRY_FILE_BYTES = 4 * 1024 * 1024;
-
-class RegistryFileLimitError extends Error {}
+const MAX_QUOTE_RESPONSE_BYTES = 1024 * 1024;
+const QUOTE_REQUEST_TIMEOUT_MS = 10_000;
 
 async function readBoundedRegistry(path: string): Promise<MeasurementRegistryFile> {
   const handle = await open(path, "r");
   try {
-    const bytes = Buffer.alloc(MAX_REGISTRY_FILE_BYTES + 1);
+    const bytes = Buffer.alloc(MAX_MEASUREMENT_REGISTRY_FILE_BYTES + 1);
     let offset = 0;
     while (offset < bytes.byteLength) {
       const { bytesRead } = await handle.read(bytes, offset, bytes.byteLength - offset, null);
       if (bytesRead === 0) break;
       offset += bytesRead;
     }
-    if (offset > MAX_REGISTRY_FILE_BYTES) {
-      throw new RegistryFileLimitError(
-        "measurement registry file exceeded the 4 MiB ingestion limit",
-      );
+    if (offset > MAX_MEASUREMENT_REGISTRY_FILE_BYTES) {
+      throw new Error("measurement registry file exceeded the 4 MiB ingestion limit");
     }
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, offset));
-    return JSON.parse(text) as MeasurementRegistryFile;
+    return parseMeasurementRegistryJson(bytes.subarray(0, offset));
   } finally {
     await handle.close();
+  }
+}
+
+async function readBoundedQuoteResponse(response: Response): Promise<unknown> {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_QUOTE_RESPONSE_BYTES) {
+    await response.body?.cancel();
+    throw new Error("quote endpoint response exceeded the 1 MiB limit");
+  }
+  if (!response.body) throw new Error("quote endpoint returned an empty response");
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_QUOTE_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new Error("quote endpoint response exceeded the 1 MiB limit");
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    if (
+      error instanceof Error &&
+      error.message === "quote endpoint response exceeded the 1 MiB limit"
+    ) {
+      throw error;
+    }
+    throw new Error("quote endpoint response could not be read");
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return JSON.parse(text);
+  } catch {
+    throw new Error("quote endpoint returned invalid JSON");
   }
 }
 
@@ -84,13 +129,11 @@ let registry: MeasurementRegistryFile;
 try {
   registry = await readBoundedRegistry(registryPath);
 } catch (error) {
-  if (error instanceof RegistryFileLimitError) {
-    console.error(error.message);
-  } else if (error instanceof SyntaxError || error instanceof TypeError) {
-    console.error(`measurement registry is not valid UTF-8 JSON: ${registryPath}`);
-  } else {
-    console.error(`measurement registry could not be read: ${registryPath}`);
-  }
+  const safeMessage =
+    error instanceof Error && error.message.startsWith("measurement registry")
+      ? error.message
+      : "measurement registry file could not be read";
+  console.error(safeMessage);
   process.exit(2);
 }
 const registryOk = verifyRegistrySignatures(
@@ -106,19 +149,38 @@ if (!registryOk.ok) {
 }
 
 const nonce = crypto.randomUUID();
-const response = await fetch(
-  `${endpoint}${endpoint.includes("?") ? "&" : "?"}nonce=${encodeURIComponent(nonce)}`,
-);
+let response: Response;
+try {
+  response = await fetch(
+    `${endpoint}${endpoint.includes("?") ? "&" : "?"}nonce=${encodeURIComponent(nonce)}`,
+    {
+      redirect: "error",
+      signal: AbortSignal.timeout(QUOTE_REQUEST_TIMEOUT_MS),
+    },
+  );
+} catch {
+  console.error("quote endpoint request failed");
+  process.exit(1);
+}
 if (!response.ok && response.status !== 503) {
-  console.error(`quote endpoint failed: ${response.status} ${await response.text()}`);
+  await response.body?.cancel().catch(() => undefined);
+  console.error(`quote endpoint failed with HTTP ${response.status}`);
   process.exit(1);
 }
 
-const rawQuote = await response.json();
+let rawQuote: unknown;
+try {
+  rawQuote = await readBoundedQuoteResponse(response);
+} catch (error) {
+  console.error(error instanceof Error ? error.message : "quote endpoint response was invalid");
+  process.exit(1);
+}
 const provider = createDstackTdxProvider();
-const verifiedQuote = await provider.verifyQuote(rawQuote.raw?.quote ?? rawQuote.raw ?? rawQuote, {
-  nonce,
-});
+const quoteEnvelope = rawQuote as { raw?: { quote?: unknown } | unknown };
+const raw = quoteEnvelope?.raw;
+const quote =
+  raw && typeof raw === "object" && "quote" in raw ? (raw as { quote: unknown }).quote : raw;
+const verifiedQuote = await provider.verifyQuote(quote ?? rawQuote, { nonce });
 const match = verifyQuoteAgainstRegistry(verifiedQuote, registry, deployment);
 if (!match.ok) {
   console.error(`attestation measurement check failed: ${match.reason}`);

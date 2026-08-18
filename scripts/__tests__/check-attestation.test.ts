@@ -1,20 +1,32 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, createPublicKey } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 
-function runCheck(registryPath: string) {
-  return Bun.spawnSync([process.execPath, "scripts/check-attestation.ts"], {
-    cwd: join(import.meta.dir, "../.."),
-    env: {
-      ...process.env,
-      STEWARD_ATTESTATION_ENDPOINT: "http://127.0.0.1:1/never-requested",
-      STEWARD_MEASUREMENT_REGISTRY: registryPath,
-      STEWARD_REGISTRY_ALLOW_UNPINNED: "true",
-    },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+const ROOT = join(import.meta.dir, "../..");
+const VALID_REGISTRY_PATH = join(ROOT, "docs/attestation/measurements.json");
+const validRegistry = JSON.parse(readFileSync(VALID_REGISTRY_PATH, "utf8")) as {
+  signatures: Array<{ publicKeyPem: string }>;
+};
+const TRUSTED_FINGERPRINT = createHash("sha256")
+  .update(
+    createPublicKey(validRegistry.signatures[0]?.publicKeyPem).export({
+      format: "der",
+      type: "spki",
+    }),
+  )
+  .digest("hex");
+
+function cliEnv(registryPath: string, endpoint: string): Record<string, string | undefined> {
+  return {
+    ...process.env,
+    STEWARD_ATTESTATION_ENDPOINT: endpoint,
+    STEWARD_MEASUREMENT_REGISTRY: registryPath,
+    STEWARD_REGISTRY_TRUSTED_KEY_SHA256: TRUSTED_FINGERPRINT,
+    STEWARD_REGISTRY_ALLOW_UNPINNED: undefined,
+  };
 }
 
 describe("check-attestation bounded registry ingestion", () => {
@@ -23,7 +35,12 @@ describe("check-attestation bounded registry ingestion", () => {
     const registryPath = join(directory, "oversized.json");
     try {
       writeFileSync(registryPath, Buffer.alloc(4 * 1024 * 1024 + 1, 0x20));
-      const result = runCheck(registryPath);
+      const result = Bun.spawnSync([process.execPath, "scripts/check-attestation.ts"], {
+        cwd: ROOT,
+        env: cliEnv(registryPath, "http://127.0.0.1:1/never-requested"),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
 
       expect(result.exitCode).not.toBe(0);
       expect(result.stderr.toString()).toContain(
@@ -35,18 +52,85 @@ describe("check-attestation bounded registry ingestion", () => {
     }
   });
 
-  test("rejects malformed UTF-8 before network access", () => {
+  test("rejects malformed registry UTF-8 without exposing parser diagnostics", () => {
     const directory = mkdtempSync(join(tmpdir(), "steward-attestation-"));
     const registryPath = join(directory, "invalid-utf8.json");
     try {
-      writeFileSync(registryPath, Buffer.from([0x7b, 0x22, 0xff, 0x22, 0x7d]));
-      const result = runCheck(registryPath);
-
-      expect(result.exitCode).toBe(2);
-      expect(result.stderr.toString()).toContain("not valid UTF-8 JSON");
-      expect(result.stderr.toString()).not.toContain("fetch");
+      writeFileSync(registryPath, Uint8Array.from([0x7b, 0xff, 0x7d]));
+      const result = Bun.spawnSync([process.execPath, "scripts/check-attestation.ts"], {
+        cwd: ROOT,
+        env: cliEnv(registryPath, "http://127.0.0.1:1/never-requested"),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr.toString()).toContain(
+        "measurement registry file is not valid UTF-8 JSON",
+      );
+      expect(result.stderr.toString()).not.toContain("SyntaxError");
     } finally {
       rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("cancels a streamed quote response over the decoded byte limit", async () => {
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => {
+        let chunks = 0;
+        return new Response(
+          new ReadableStream({
+            pull(controller) {
+              if (chunks >= 17) {
+                controller.close();
+                return;
+              }
+              chunks += 1;
+              controller.enqueue(new Uint8Array(64 * 1024).fill(0x20));
+            },
+          }),
+        );
+      },
+    });
+    try {
+      const processHandle = Bun.spawn([process.execPath, "scripts/check-attestation.ts"], {
+        cwd: ROOT,
+        env: cliEnv(VALID_REGISTRY_PATH, `${server.url}quote`),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const stderr = await new Response(processHandle.stderr).text();
+      expect(await processHandle.exited).not.toBe(0);
+      expect(stderr).toContain("quote endpoint response exceeded the 1 MiB limit");
+      expect(stderr).not.toContain("padding");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("applies the quote cap after gzip decompression", async () => {
+    const compressed = gzipSync(new Uint8Array(1024 * 1024 + 1).fill(0x20));
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () =>
+        new Response(compressed, {
+          headers: { "content-encoding": "gzip", "content-type": "application/json" },
+        }),
+    });
+    try {
+      const processHandle = Bun.spawn([process.execPath, "scripts/check-attestation.ts"], {
+        cwd: ROOT,
+        env: cliEnv(VALID_REGISTRY_PATH, `${server.url}quote`),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const stderr = await new Response(processHandle.stderr).text();
+      expect(await processHandle.exited).not.toBe(0);
+      expect(stderr).toContain("quote endpoint response exceeded the 1 MiB limit");
+    } finally {
+      server.stop(true);
     }
   });
 });
