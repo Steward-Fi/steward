@@ -34,6 +34,10 @@ import {
   workspaces,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import {
+  __setGoogleExecutionTokenForwarderForTests,
+  mintGoogleExecutionAccessToken,
+} from "@stwd/proxy/src/handlers/google-execution-credential";
 import { SecretVault } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import { providerAuthorityStore } from "../services/provider-authority-store";
@@ -486,6 +490,111 @@ describe("connect", () => {
     expect(rows.length).toBe(1);
     expect(rows[0].revision).toBe(2);
     expect(rows[0].credentialVersion).toBe(2);
+  });
+
+  test("reconnect supersedes an unresolved refresh lifecycle and restores minting without replay", async () => {
+    const first = await connectHappy(new MemoryConnectStore());
+    const db = getDb();
+    const [beforeAccount] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, first.completed.providerAccountId));
+    const strandedHandle = await vault.createSecret(
+      TENANT,
+      `provider-google-lifecycle:${crypto.randomUUID()}`,
+      JSON.stringify({
+        schemaVersion: "steward.provider-google.lifecycle.v1",
+        token: { access_token: "stranded-access", refresh_token: "stranded-refresh" },
+      }),
+    );
+    const lifecycleId = crypto.randomUUID();
+    await db.insert(providerGoogleCredentialLifecycles).values({
+      id: lifecycleId,
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      providerAccountId: beforeAccount.id,
+      kind: "refresh_rotation",
+      state: "needs_attention",
+      credentialSecretId: strandedHandle.id,
+      expectedAccountRevision: beforeAccount.revision,
+      lastErrorCode: "REFRESH_OUTCOME_UNKNOWN",
+    });
+
+    let tokenRequests = 0;
+    __setGoogleExecutionTokenForwarderForTests(async () => {
+      tokenRequests += 1;
+      return Response.json({
+        access_token: "execution-access-after-reconnect",
+        token_type: "Bearer",
+        expires_in: 3600,
+      });
+    });
+    try {
+      const blockedRefresh = installFakeX();
+      try {
+        await expect(
+          refreshGoogleProviderCredential({
+            tenantId: TENANT,
+            workspaceId: WORKSPACE,
+            accountId: beforeAccount.id,
+            vault,
+            config: CONFIG,
+            force: true,
+          }),
+        ).rejects.toMatchObject({ code: "GOOGLE_CREDENTIAL_NEEDS_ATTENTION" });
+        expect(blockedRefresh.counters.refresh).toBe(0);
+      } finally {
+        blockedRefresh.restore();
+      }
+
+      await expect(
+        mintGoogleExecutionAccessToken({
+          tenantId: TENANT,
+          workspaceId: WORKSPACE,
+          accountId: beforeAccount.id,
+          accountRevision: beforeAccount.revision,
+          credential: JSON.stringify(await decryptCredential(beforeAccount.id)),
+          vault,
+          clientId: CONFIG.clientId,
+          clientSecret: CONFIG.clientSecret,
+        }),
+      ).rejects.toThrow("Google credential refresh lifecycle must be reconciled before token mint");
+      expect(tokenRequests).toBe(0);
+
+      const second = await connectHappy(new MemoryConnectStore());
+      expect(second.completed.reconnected).toBe(true);
+      const [afterAccount] = await db
+        .select()
+        .from(providerAccounts)
+        .where(eq(providerAccounts.id, beforeAccount.id));
+      const [superseded] = await db
+        .select()
+        .from(providerGoogleCredentialLifecycles)
+        .where(eq(providerGoogleCredentialLifecycles.id, lifecycleId));
+      expect(superseded.state).toBe("superseded");
+      expect(superseded.credentialSecretId).toBeNull();
+      expect(await db.select().from(secrets).where(eq(secrets.id, strandedHandle.id))).toHaveLength(
+        0,
+      );
+
+      const minted = await mintGoogleExecutionAccessToken({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: afterAccount.id,
+        accountRevision: afterAccount.revision,
+        credential: JSON.stringify(await decryptCredential(afterAccount.id)),
+        vault,
+        clientId: CONFIG.clientId,
+        clientSecret: CONFIG.clientSecret,
+      });
+      expect(minted).toBe("execution-access-after-reconnect");
+      expect(tokenRequests).toBe(1);
+      expect(await readAuditActions(TENANT)).toContain(
+        "provider.google.refresh.superseded_by_reconnect",
+      );
+    } finally {
+      __setGoogleExecutionTokenForwarderForTests(null);
+    }
   });
 
   test("injected initial persistence failure rolls back secret/account and revokes issued grant", async () => {

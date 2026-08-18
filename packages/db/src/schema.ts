@@ -2089,7 +2089,7 @@ export const providerGoogleCredentialLifecycles = pgTable(
     }).onDelete("restrict"),
     stateCheck: check(
       "provider_google_lifecycle_state_check",
-      sql`${table.state} IN ('inflight', 'credential_staged', 'revocation_pending', 'adopted', 'revoked', 'needs_attention')`,
+      sql`${table.state} IN ('inflight', 'credential_staged', 'revocation_pending', 'adopted', 'revoked', 'needs_attention', 'superseded')`,
     ),
     kindCheck: check(
       "provider_google_lifecycle_kind_check",
