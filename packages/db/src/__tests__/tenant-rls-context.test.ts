@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { PgTransaction } from "drizzle-orm/pg-core";
 import {
   assertTenantRlsDriver,
   tenantContextForInternalJob,
@@ -14,7 +15,7 @@ describe("tenant RLS transaction context", () => {
       async execute() {
         executeCount += 1;
         calls.push(`execute-${executeCount}`);
-        return executeCount === 2 ? [{ tenant_id: "tenant-a" }] : [];
+        return executeCount === 3 ? [{ tenant_id: "tenant-a" }] : [];
       },
     };
     const db = {
@@ -33,7 +34,7 @@ describe("tenant RLS transaction context", () => {
       return 42;
     });
     expect(result).toBe(42);
-    expect(calls).toEqual(["transaction", "execute-1", "execute-2", "callback"]);
+    expect(calls).toEqual(["transaction", "execute-1", "execute-2", "execute-3", "callback"]);
     expect(Object.isFrozen(context)).toBe(true);
     expect(Object.isFrozen(context.authority)).toBe(true);
   });
@@ -49,6 +50,13 @@ describe("tenant RLS transaction context", () => {
     expect(() => tenantContextForInternalJob({ tenantId: "tenant-a", job: "" })).toThrow(
       "RLS_TENANT_JOB_INVALID",
     );
+    expect(() =>
+      tenantContextFromAuthenticatedPrincipal({
+        tenantId: "tenant-a",
+        method: "session-jwt\nforged",
+        subject: "user:1",
+      }),
+    ).toThrow("RLS_TENANT_AUTHORITY_INVALID");
     expect(() => assertTenantRlsDriver("neon-http")).toThrow("RLS_TRANSACTION_UNSUPPORTED");
 
     const db = { transaction: async () => undefined };
@@ -63,6 +71,64 @@ describe("tenant RLS transaction context", () => {
         async () => undefined,
       ),
     ).rejects.toThrow("RLS_TENANT_CONTEXT_UNTRUSTED");
+
+    const genuine = tenantContextForInternalJob({ tenantId: "tenant-a", job: "retention" });
+    const cloned = Object.assign({}, genuine, { tenantId: "tenant-b" });
+    await expect(
+      withTenantRlsTransaction(db as never, "postgres-js", cloned as never, async () => undefined),
+    ).rejects.toThrow("RLS_TENANT_CONTEXT_UNTRUSTED");
+  });
+
+  test("rejects a dirty connection before changing or exposing it", async () => {
+    let callbackCalled = false;
+    let executeCount = 0;
+    const tx = {
+      async execute() {
+        executeCount += 1;
+        return executeCount === 1 ? [{ tenant_id: "tenant-from-prior-session" }] : [];
+      },
+    };
+    const db = {
+      async transaction<T>(callback: (value: typeof tx) => Promise<T>) {
+        return callback(tx);
+      },
+    };
+    await expect(
+      withTenantRlsTransaction(
+        db,
+        "postgres-js",
+        tenantContextForInternalJob({ tenantId: "tenant-a", job: "retention" }),
+        async () => {
+          callbackCalled = true;
+        },
+      ),
+    ).rejects.toThrow("RLS_TENANT_CONTEXT_DIRTY");
+    expect(executeCount).toBe(3);
+    expect(callbackCalled).toBe(false);
+  });
+
+  test("rejects a nested transaction before binding tenant authority", async () => {
+    let executeCount = 0;
+    const tx = {
+      async execute() {
+        executeCount += 1;
+        return [];
+      },
+    };
+    const db = Object.assign(Object.create(PgTransaction.prototype), {
+      async transaction<T>(callback: (value: typeof tx) => Promise<T>) {
+        return callback(tx);
+      },
+    });
+    await expect(
+      withTenantRlsTransaction(
+        db,
+        "postgres-js",
+        tenantContextForInternalJob({ tenantId: "tenant-a", job: "retention" }),
+        async () => undefined,
+      ),
+    ).rejects.toThrow("RLS_TENANT_TRANSACTION_NESTED");
+    expect(executeCount).toBe(0);
   });
 
   test("fails before opening a transaction on neon-http", async () => {

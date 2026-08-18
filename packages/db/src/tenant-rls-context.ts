@@ -1,7 +1,10 @@
-import { sql } from "drizzle-orm";
+import { is, sql } from "drizzle-orm";
+import { PgTransaction } from "drizzle-orm/pg-core";
 
-const trustedTenantContextBrand: unique symbol = Symbol("steward.trusted-tenant-context");
-const TENANT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+declare const trustedTenantContextBrand: unique symbol;
+const trustedTenantContexts = new WeakSet<object>();
+const TENANT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+const AUTHORITY_METHOD_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 
 export type TenantRlsDriver = "postgres-js" | "pglite" | "neon-http";
 
@@ -34,16 +37,23 @@ export function tenantContextFromAuthenticatedPrincipal(input: {
   subject: string;
 }): TrustedTenantContext {
   assertTenantId(input.tenantId);
-  if (!input.method || !input.subject) throw new Error("RLS_TENANT_AUTHORITY_INVALID");
-  return Object.freeze({
+  if (
+    !AUTHORITY_METHOD_PATTERN.test(input.method) ||
+    input.subject.length === 0 ||
+    input.subject.length > 255 ||
+    /[\u0000-\u001f\u007f]/.test(input.subject)
+  )
+    throw new Error("RLS_TENANT_AUTHORITY_INVALID");
+  const context = Object.freeze({
     tenantId: input.tenantId,
     authority: Object.freeze({
       kind: "authenticated-principal" as const,
       method: input.method,
       subject: input.subject,
     }),
-    [trustedTenantContextBrand]: true as const,
-  });
+  }) as TrustedTenantContext;
+  trustedTenantContexts.add(context);
+  return context;
 }
 
 export function tenantContextForInternalJob(input: {
@@ -54,11 +64,12 @@ export function tenantContextForInternalJob(input: {
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.job)) {
     throw new Error("RLS_TENANT_JOB_INVALID");
   }
-  return Object.freeze({
+  const context = Object.freeze({
     tenantId: input.tenantId,
     authority: Object.freeze({ kind: "internal-job" as const, job: input.job }),
-    [trustedTenantContextBrand]: true as const,
-  });
+  }) as TrustedTenantContext;
+  trustedTenantContexts.add(context);
+  return context;
 }
 
 export function assertTenantRlsDriver(driver: TenantRlsDriver): void {
@@ -77,8 +88,16 @@ interface TenantTransactionalDatabase<Tx extends TenantTransactionExecutor> {
   transaction<T>(callback: (tx: Tx) => Promise<T>): Promise<T>;
 }
 
-function hasTrustedBrand(context: TrustedTenantContext): boolean {
-  return context[trustedTenantContextBrand] === true;
+function hasTrustedBrand(context: unknown): context is TrustedTenantContext {
+  return typeof context === "object" && context !== null && trustedTenantContexts.has(context);
+}
+
+function rowsOf(result: unknown): unknown[] {
+  return Array.isArray(result) ? result : ((result as { rows?: unknown[] } | null)?.rows ?? []);
+}
+
+function contextTenantId(result: unknown): unknown {
+  return (rowsOf(result)[0] as { tenant_id?: unknown } | undefined)?.tenant_id;
 }
 
 /**
@@ -95,17 +114,39 @@ export async function withTenantRlsTransaction<Tx extends TenantTransactionExecu
   assertTenantRlsDriver(driver);
   if (!hasTrustedBrand(context)) throw new Error("RLS_TENANT_CONTEXT_UNTRUSTED");
   assertTenantId(context.tenantId);
+  // Calling `.transaction()` on a Drizzle PgTransaction opens a savepoint,
+  // not an independent transaction. SET LOCAL would then survive the helper
+  // callback until the unknown outer transaction ends.
+  if (is(db, PgTransaction)) throw new Error("RLS_TENANT_TRANSACTION_NESTED");
 
-  return db.transaction(async (tx) => {
+  const outcome = await db.transaction(async (tx) => {
+    // A non-empty value here means this connection carries a session-level
+    // setting or the helper was nested inside another tenant transaction.
+    // Overwriting either would conceal a lifecycle bug and could restore the
+    // stale session value after commit, so reject before exposing the tx.
+    const prior = await tx.execute(
+      sql`SELECT NULLIF(current_setting('steward.tenant_id', true), '') AS tenant_id`,
+    );
+    if (contextTenantId(prior) != null) {
+      // Clear the session-scoped contamination and commit that cleanup before
+      // reporting the error. Throwing inside this transaction would roll the
+      // reset back and return a still-dangerous connection to the pool.
+      await tx.execute(sql`SELECT set_config('steward.tenant_id', '', false)`);
+      const cleared = await tx.execute(
+        sql`SELECT NULLIF(current_setting('steward.tenant_id', true), '') AS tenant_id`,
+      );
+      if (contextTenantId(cleared) != null) throw new Error("RLS_TENANT_CONTEXT_CLEAR_FAILED");
+      return { kind: "dirty" as const };
+    }
+
     await tx.execute(sql`SELECT set_config('steward.tenant_id', ${context.tenantId}, true)`);
     const result = await tx.execute(
       sql`SELECT current_setting('steward.tenant_id', true) AS tenant_id`,
     );
-    const rows = Array.isArray(result)
-      ? result
-      : ((result as { rows?: unknown[] } | null)?.rows ?? []);
-    const tenantId = (rows[0] as { tenant_id?: unknown } | undefined)?.tenant_id;
-    if (tenantId !== context.tenantId) throw new Error("RLS_TENANT_CONTEXT_NOT_BOUND");
-    return callback(tx);
+    if (contextTenantId(result) !== context.tenantId)
+      throw new Error("RLS_TENANT_CONTEXT_NOT_BOUND");
+    return { kind: "ok" as const, value: await callback(tx) };
   });
+  if (outcome.kind === "dirty") throw new Error("RLS_TENANT_CONTEXT_DIRTY");
+  return outcome.value;
 }

@@ -24,6 +24,23 @@ unit of work on that same transaction object, and releases it. The `true`
 argument is load-bearing: it makes the setting transaction-local and prevents
 pool reuse from inheriting a prior tenant.
 
+Before binding, the helper also requires the connection's tenant setting to be
+empty. A non-empty value indicates session-level contamination and fails
+closed. The helper clears that session-level value, commits the cleanup, and
+only then reports the error; throwing before commit would roll the reset back
+and return a contaminated connection to the pool. It also rejects a Drizzle
+`PgTransaction` as its database argument: a `SET LOCAL` issued by a nested
+`.transaction()` runs inside a savepoint and would otherwise survive its
+release until the caller's outer transaction ended. Tenant contexts are tracked
+by object identity, not a copyable property, so cloning a context cannot change
+its tenant authority.
+
+Custom PostgreSQL settings are assignable by the application role. This design
+therefore catches missing application predicates and connection-lifecycle bugs;
+it is not a boundary against SQL injection or arbitrary SQL execution by a
+compromised application process. Tenant transaction callbacks must never
+execute claimant-supplied SQL or expose a general-purpose query interface.
+
 `neon-http` has no callback transaction support in the current Drizzle version.
 Workers must move to a transaction-capable transport (Neon WebSockets or
 Cloudflare Hyperdrive with a PostgreSQL driver) before RLS activation. The
@@ -43,12 +60,14 @@ fixed-shape, SQL-language SECURITY DEFINER functions for these lookups:
 | `agent_subject(agent_id, tenant_id, jti)` | agent JWT signature, issuer, audience, expiry, and scope checks | exact agent and optional session-signer state |
 | `app_client_subject(tenant_id, client_id)` | syntactically valid app id | active/retiring secret hashes and client status |
 
-Each function must set `search_path = pg_catalog, public`, use no dynamic SQL,
-select explicit columns, return at most the rows needed for credential
-verification, and be owned by a role that the application cannot assume.
-Revoke all schema/function privileges from `PUBLIC`; grant EXECUTE only to the
-NO-BYPASS application role. No general-purpose bootstrap query or arbitrary
-tenant setter is permitted.
+Each function must set `search_path = pg_catalog`, fully schema-qualify every
+application relation, use no dynamic SQL, select explicit columns, return at
+most the rows needed for credential verification, and be owned by a role that
+the application cannot assume. Do not put `public` or any application-writable
+schema on a SECURITY DEFINER search path. Revoke `CREATE` on schema `public`
+and all bootstrap schema/function privileges from `PUBLIC`; grant EXECUTE only
+to the NO-BYPASS application role. No general-purpose bootstrap query or
+arbitrary tenant setter is permitted.
 
 After a bootstrap credential is verified, the application mints the trusted
 context and starts a tenant transaction. Bootstrap output is not itself tenant

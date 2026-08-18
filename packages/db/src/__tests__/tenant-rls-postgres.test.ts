@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
 import { createDb } from "../client";
 import { tenantContextForInternalJob, withTenantRlsTransaction } from "../tenant-rls-context";
 
@@ -91,6 +93,34 @@ describeWithPostgres("SEC-169 transaction context on a real Postgres pool", () =
     );
   });
 
+  test("detects and clears a session-contaminated pooled connection", async () => {
+    const contaminatedClient = postgres(process.env.DATABASE_URL as string, {
+      max: 1,
+      prepare: false,
+    });
+    const contaminatedDb = drizzle(contaminatedClient);
+    try {
+      await contaminatedClient`SELECT set_config('steward.tenant_id', 'tenant-b', false)`;
+      await expect(
+        withTenantRlsTransaction(
+          contaminatedDb,
+          "postgres-js",
+          tenantContextForInternalJob({
+            tenantId: "tenant-a",
+            job: "rls-dirty-session-test",
+          }),
+          async () => undefined,
+        ),
+      ).rejects.toThrow("RLS_TENANT_CONTEXT_DIRTY");
+      const setting = await contaminatedClient`
+        SELECT NULLIF(current_setting('steward.tenant_id', true), '') AS tenant_id
+      `;
+      expect(setting[0]?.tenant_id ?? null).toBeNull();
+    } finally {
+      await contaminatedClient.end();
+    }
+  });
+
   test("concurrent pooled transactions cannot cross tenants or leak context", async () => {
     const tasks = Array.from({ length: 24 }, async (_, index) => {
       const tenantId = index % 2 === 0 ? "tenant-a" : "tenant-b";
@@ -125,5 +155,41 @@ describeWithPostgres("SEC-169 transaction context on a real Postgres pool", () =
         ),
       ),
     );
+  });
+
+  test("rollback clears context and nesting cannot replace an outer tenant", async () => {
+    const context = tenantContextForInternalJob({
+      tenantId: "tenant-a",
+      job: "rls-rollback-test",
+    });
+    await expect(
+      withTenantRlsTransaction(handle.db as never, "postgres-js", context, async () => {
+        throw new Error("ROLL_BACK_ME");
+      }),
+    ).rejects.toThrow("ROLL_BACK_ME");
+    const postRollback = await Promise.all(
+      Array.from({ length: 12 }, () => handle.client.unsafe(`SELECT * FROM ${tableName}`)),
+    );
+    expect(postRollback.every((rows) => rows.length === 0)).toBe(true);
+
+    await handle.db.transaction(async (outerTx) => {
+      await expect(
+        withTenantRlsTransaction(
+          outerTx as never,
+          "postgres-js",
+          tenantContextForInternalJob({
+            tenantId: "tenant-b",
+            job: "rls-nested-transaction-test",
+          }),
+          async () => undefined,
+        ),
+      ).rejects.toThrow("RLS_TENANT_TRANSACTION_NESTED");
+      const tenantSetting = rowsOf(
+        await outerTx.execute(
+          sql`SELECT NULLIF(current_setting('steward.tenant_id', true), '') AS tenant_id`,
+        ),
+      );
+      expect(tenantSetting[0]?.tenant_id ?? null).toBeNull();
+    });
   });
 });
