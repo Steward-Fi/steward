@@ -2035,10 +2035,13 @@ describe("Malformed evaluator config fails closed instead of throwing (SEC-105)"
     }
   });
 
-  it("approved-addresses supports multichain families without lowercasing base58", async () => {
+  it("approved-addresses supports exact multichain families without lowercasing base58", async () => {
     const solana = "7J9kqM5kV8Fh1Q3b6N2pR4tYwLcXzAaBbCcDdEeFfGg";
     const matching = await evaluatePolicy(
-      makeAddressRule({ addresses: [solana], mode: "whitelist" }),
+      makeAddressRule({
+        addresses: ["0x1234567890123456789012345678901234567890", solana],
+        mode: "whitelist",
+      }),
       makeContext({ request: { ...makeContext().request, to: solana, chainId: 101 } }),
     );
     expect(matching.passed).toBe(true);
@@ -2050,5 +2053,45 @@ describe("Malformed evaluator config fails closed instead of throwing (SEC-105)"
     );
     expect(wrongCase.passed).toBe(false);
     expect(wrongCase.reason).toContain("not in whitelist");
+
+    const bitcoin = "tb1q50rtrmj2f8vl9tem8qpfw36ylw5jg9j20l03x8";
+    const bitcoinMatch = await evaluatePolicy(
+      makeAddressRule({ addresses: [bitcoin], mode: "whitelist" }),
+      makeContext({ request: { ...makeContext().request, to: bitcoin, chainId: 202 } }),
+    );
+    expect(bitcoinMatch.passed).toBe(true);
+
+    const monero =
+      "49wsWmQA1WyM4gNpPkx1cRUCAamWaSBbMMmiGWNWGfWZRiXUH9DdMMi5ZJUM98K2xk62AEX3C6pCDMp1iXt2PLqX54LVKjA";
+    const moneroMatch = await evaluatePolicy(
+      makeAddressRule({ addresses: [monero], mode: "whitelist" }),
+      makeContext({ request: { ...makeContext().request, to: monero, chainId: 301 } }),
+    );
+    expect(moneroMatch.passed).toBe(true);
+  });
+
+  it("approved-addresses rejects malformed and cross-chain address inputs", async () => {
+    const evm = "0x1234567890123456789012345678901234567890";
+    for (const address of [
+      "1111111111111111111111111111111",
+      "tb1Q50rtrmj2f8vl9tem8qpfw36ylw5jg9j20l03x8",
+      "tb1q50rtrmj2f8vl9tem8qpfw36ylw5jg9j20l03x9",
+      "4".repeat(94),
+      "not-an-address",
+    ]) {
+      const result = await evaluatePolicy(
+        makeAddressRule({ addresses: [address], mode: "whitelist" }),
+        makeContext(),
+      );
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("supported address family");
+    }
+
+    const crossChain = await evaluatePolicy(
+      makeAddressRule({ addresses: [evm], mode: "whitelist" }),
+      makeContext({ request: { ...makeContext().request, to: evm, chainId: 101 } }),
+    );
+    expect(crossChain.passed).toBe(false);
+    expect(crossChain.reason).toContain("destination chain");
   });
 });

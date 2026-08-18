@@ -11,12 +11,23 @@ import {
   Transaction,
   type TransactionInstruction,
 } from "@solana/web3.js";
+
 import { getKnownToken } from "@stwd/shared";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
 } from "./solana-instructions";
+
+/** Return true only for a canonical base58 encoding of one 32-byte Solana public key. */
+export function isValidSolanaPublicKey(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    return new PublicKey(value).toBase58() === value;
+  } catch {
+    return false;
+  }
+}
 
 // ─── Internal helpers ──────────────────────────────────────────────────────
 

@@ -42,21 +42,105 @@ function isEvmAddress(value: unknown): value is string {
 
 type PolicyAddressFamily = "evm" | "solana" | "bitcoin" | "monero";
 
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const BECH32_ALPHABET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+function decodeBase58(value: string): Uint8Array | null {
+  let number = 0n;
+  for (const character of value) {
+    const digit = BASE58_ALPHABET.indexOf(character);
+    if (digit < 0) return null;
+    number = number * 58n + BigInt(digit);
+  }
+  const bytes: number[] = [];
+  while (number > 0n) {
+    bytes.push(Number(number & 0xffn));
+    number >>= 8n;
+  }
+  for (let index = 0; index < value.length && value[index] === "1"; index += 1) bytes.push(0);
+  return Uint8Array.from(bytes.reverse());
+}
+
+function bech32Polymod(values: readonly number[]): number {
+  const generators = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+  let checksum = 1;
+  for (const value of values) {
+    const top = checksum >>> 25;
+    checksum = ((checksum & 0x1ffffff) << 5) ^ value;
+    for (let bit = 0; bit < 5; bit += 1) {
+      if ((top >>> bit) & 1) checksum ^= generators[bit];
+    }
+  }
+  return checksum >>> 0;
+}
+
+function decodeSegwitAddress(value: string): { hrp: string; version: number } | null {
+  if (value.length > 90 || (value !== value.toLowerCase() && value !== value.toUpperCase())) {
+    return null;
+  }
+  const normalized = value.toLowerCase();
+  const separator = normalized.lastIndexOf("1");
+  if (separator < 1 || separator + 7 > normalized.length) return null;
+  const hrp = normalized.slice(0, separator);
+  if (hrp !== "bc" && hrp !== "tb" && hrp !== "bcrt") return null;
+  const data = [...normalized.slice(separator + 1)].map((character) =>
+    BECH32_ALPHABET.indexOf(character),
+  );
+  if (data.some((digit) => digit < 0)) return null;
+  const expanded = [
+    ...[...hrp].map((character) => character.charCodeAt(0) >>> 5),
+    0,
+    ...[...hrp].map((character) => character.charCodeAt(0) & 31),
+    ...data,
+  ];
+  const polymod = bech32Polymod(expanded);
+  const version = data[0];
+  if (version > 16 || (version === 0 ? polymod !== 1 : polymod !== 0x2bc830a3)) return null;
+
+  let accumulator = 0;
+  let bits = 0;
+  const program: number[] = [];
+  for (const digit of data.slice(1, -6)) {
+    accumulator = (accumulator << 5) | digit;
+    bits += 5;
+    while (bits >= 8) {
+      bits -= 8;
+      program.push((accumulator >>> bits) & 0xff);
+    }
+  }
+  if (bits >= 5 || ((accumulator << (8 - bits)) & 0xff) !== 0) return null;
+  if (program.length < 2 || program.length > 40) return null;
+  if (version === 0 && program.length !== 20 && program.length !== 32) return null;
+  return { hrp, version };
+}
+
 function isPolicyAddressForFamily(value: unknown, family: PolicyAddressFamily): value is string {
   if (typeof value !== "string") return false;
   switch (family) {
     case "evm":
       return isEvmAddress(value);
-    case "solana":
-      return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value);
-    case "bitcoin":
-      return (
-        /^(?:bc1|tb1|bcrt1)[ac-hj-np-z02-9]{6,87}$/i.test(value) ||
-        /^[123mn2][1-9A-HJ-NP-Za-km-z]{25,34}$/.test(value)
-      );
+    case "solana": {
+      const decoded = decodeBase58(value);
+      return decoded?.length === 32;
+    }
+    case "bitcoin": {
+      if (decodeSegwitAddress(value)) return true;
+      if (!/^[123mn2][1-9A-HJ-NP-Za-km-z]{25,34}$/.test(value)) return false;
+      const decoded = decodeBase58(value);
+      return decoded?.length === 25 && [0x00, 0x05, 0x6f, 0xc4].includes(decoded[0]);
+    }
     case "monero":
-      return /^[1-9A-HJ-NP-Za-km-z]{95}$|^[1-9A-HJ-NP-Za-km-z]{106}$/.test(value);
+      return /^(?:[1-9A-HJ-NP-Za-km-z]{95}|[1-9A-HJ-NP-Za-km-z]{106})$/.test(value);
   }
+}
+
+function isSupportedPolicyAddress(value: unknown): value is string {
+  return (
+    isPolicyAddressForFamily(value, "evm") ||
+    isPolicyAddressForFamily(value, "solana") ||
+    isPolicyAddressForFamily(value, "bitcoin") ||
+    isPolicyAddressForFamily(value, "monero")
+  );
 }
 
 function normalizePolicyAddress(value: string, family: PolicyAddressFamily): string {
@@ -679,12 +763,13 @@ function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): Pol
   if (
     !family ||
     !isPolicyAddressForFamily(targetAddress, family) ||
-    !config.addresses.every((address) => isPolicyAddressForFamily(address, family))
+    !config.addresses.every(isSupportedPolicyAddress)
   ) {
     return {
       ...base,
       passed: false,
-      reason: "Approved addresses must match the destination address family",
+      reason:
+        "Approved addresses must use a supported address family and match the destination chain",
     };
   }
 
@@ -1051,9 +1136,8 @@ function evaluateContractAllowlist(rule: PolicyRule, ctx: EvaluatorContext): Pol
   // contract/selector gating) but a common misconfiguration seam: operators
   // who expect contract-allowlist to also constrain native sends MUST pair it
   // with an approved-addresses rule (note: the write validator restricts
-  // approved-addresses to EVM addresses, so on Solana/Monero paths that rule
-  // can never match and always denies — native-transfer gating there needs a
-  // chain-appropriate rule). Flipping this branch to deny would silently
+  // approved-addresses to known chain address families and evaluates against
+  // the request's chain family). Flipping this branch to deny would silently
   // break existing tenants that rely on the documented behavior, so the
   // decision to gate native transfers explicitly is deferred (see SEC-183).
   if (!data || data === "0x") {

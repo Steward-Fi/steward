@@ -168,6 +168,7 @@ export {
   generateSolanaKeypair,
   getSolanaBalance,
   getSplTokenBalances,
+  isValidSolanaPublicKey,
   restoreSolanaKeypair,
   signSolanaMessage,
   signSolanaTransaction,
