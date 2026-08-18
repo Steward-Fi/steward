@@ -42,31 +42,59 @@ export function computeScaledLimit(config: ReputationScalingConfig, score: numbe
     return base + ((max - base) * ratioFixed) / 10000n;
   }
 
-  // Linear: base + (max - base) * (score / 100)
+  // Linear: base + (max - base) * (score / 100). Reputation scores may be
+  // fractional, so use the same fixed-point strategy as the logarithmic path
+  // rather than calling BigInt(72.5), which throws.
   const range = max - base;
-  return base + (range * BigInt(clampedScore)) / 100n;
+  const scoreFixed = BigInt(Math.round(clampedScore * 10_000));
+  return base + (range * scoreFixed) / 1_000_000n;
 }
 
 export function evaluateReputationScaling(
   rule: PolicyRule,
   ctx: ReputationScalingContext,
 ): PolicyResult {
-  const config = rule.config as unknown as ReputationScalingConfig;
+  const rawConfig: unknown = rule.config;
   const base = { policyId: rule.id, type: rule.type } as const;
 
-  // Fail closed with a structured deny on malformed config instead of throwing
-  // inside `BigInt(...)` (SEC-105) — consistent with the other defensive
-  // evaluators.
-  if (!/^\d+$/.test(config.baseMaxPerTx) || !/^\d+$/.test(config.maxMaxPerTx)) {
+  // Mirror the complete write-time contract at runtime. A hand-edited row must
+  // not throw, silently select the linear curve, or invert base/max limits.
+  const isUint256 = (value: unknown): value is string => {
+    if (typeof value !== "string" || !/^\d+$/.test(value)) return false;
+    const normalized = value.replace(/^0+/, "") || "0";
+    const uint256Max =
+      "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+    return (
+      normalized.length < uint256Max.length ||
+      (normalized.length === uint256Max.length && normalized <= uint256Max)
+    );
+  };
+  if (
+    typeof rawConfig !== "object" ||
+    rawConfig === null ||
+    Array.isArray(rawConfig) ||
+    !("baseMaxPerTx" in rawConfig) ||
+    !isUint256(rawConfig.baseMaxPerTx) ||
+    !("maxMaxPerTx" in rawConfig) ||
+    !isUint256(rawConfig.maxMaxPerTx) ||
+    BigInt(rawConfig.maxMaxPerTx) < BigInt(rawConfig.baseMaxPerTx) ||
+    !("curve" in rawConfig) ||
+    (rawConfig.curve !== "linear" && rawConfig.curve !== "logarithmic")
+  ) {
     return {
       ...base,
       passed: false,
-      reason: "Reputation-scaling limits must be base-10 wei strings",
+      reason:
+        "Reputation-scaling config is malformed; limits must be ordered uint256 wei strings with a supported curve",
     };
   }
+  const config = rawConfig as ReputationScalingConfig;
 
   // Default to score 0 (lowest limit) when no score available
   const score = ctx.reputationScore ?? 0;
+  if (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 100) {
+    return { ...base, passed: false, reason: "Invalid reputation score" };
+  }
   const limit = computeScaledLimit(config, score);
 
   if (ctx.txValue <= limit) {

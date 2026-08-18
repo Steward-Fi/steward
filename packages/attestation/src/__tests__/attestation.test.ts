@@ -163,6 +163,7 @@ describe("measurement registry", () => {
     );
     expect(registryPayloadDigest(payload)).toHaveLength(64);
     expect(canonicalizeJson({ b: 1, a: 2 })).toBe('{"a":2,"b":1}');
+    expect(canonicalizeJson({ ä: 1, z: 2 })).toBe('{"z":2,"ä":1}');
     expect(
       verifyQuoteAgainstRegistry(
         {
@@ -370,6 +371,19 @@ describe("measurement registry", () => {
         ["0".repeat(64)],
       ).ok,
     ).toBe(false);
+
+    const valid = signRegistry(basePayload());
+    expect(
+      verifyRegistrySignatures(
+        {
+          ...valid,
+          signatures: [valid.signatures[0], { ...valid.signatures[0], unexpected: true } as never],
+        },
+        1,
+        undefined,
+        registryFingerprints(valid),
+      ).ok,
+    ).toBe(false);
   });
 
   test("malformed pins and signatures fail closed", () => {
@@ -385,6 +399,118 @@ describe("measurement registry", () => {
     expect(
       verifyRegistrySignatures(
         { payload: registry.payload, signatures: Array(65).fill(registry.signatures[0]) },
+        1,
+        undefined,
+        registryFingerprints(registry),
+      ).ok,
+    ).toBe(false);
+  });
+
+  test("registry structure and canonicalization are bounded and fail closed", () => {
+    const registry = signRegistry(basePayload());
+    for (const payload of [
+      { ...basePayload(), updatedAt: "2026-07-30" },
+      { ...basePayload(), unexpected: true },
+      { ...basePayload(), deployments: [] },
+      {
+        ...basePayload(),
+        deployments: {
+          prod: {
+            ...basePayload().deployments.prod,
+            measurement: { imageDigest: "x".repeat(1025), configHash: "compose" },
+          },
+        },
+      },
+    ]) {
+      expect(
+        verifyRegistrySignatures(
+          { ...registry, payload: payload as never },
+          1,
+          undefined,
+          registryFingerprints(registry),
+        ).ok,
+      ).toBe(false);
+    }
+
+    const tooManyDeployments = Object.fromEntries(
+      Array.from({ length: 1025 }, (_, index) => [
+        `deployment-${index}`,
+        basePayload().deployments.prod,
+      ]),
+    );
+    expect(
+      verifyRegistrySignatures(
+        { ...registry, payload: { ...basePayload(), deployments: tooManyDeployments } },
+        1,
+        undefined,
+        registryFingerprints(registry),
+      ).ok,
+    ).toBe(false);
+
+    expect(() => canonicalizeJson({ value: Number.NaN })).toThrow();
+    expect(() => canonicalizeJson({ value: undefined })).toThrow();
+    expect(() => canonicalizeJson({ value: "\ud800" })).toThrow();
+    expect(() => canonicalizeJson({ "\udc00": true })).toThrow();
+    const decoratedArray = [1];
+    Object.assign(decoratedArray, { extra: true });
+    expect(() => canonicalizeJson(decoratedArray)).toThrow();
+    const disguisedSparseArray = Array(2);
+    disguisedSparseArray[1] = 1;
+    Object.assign(disguisedSparseArray, { extra: true });
+    expect(() => canonicalizeJson(disguisedSparseArray)).toThrow();
+    const symbolDecorated = { value: 1 };
+    Object.assign(symbolDecorated, { [Symbol("extra")]: true });
+    expect(() => canonicalizeJson(symbolDecorated)).toThrow();
+    const accessorDecorated = {};
+    Object.defineProperty(accessorDecorated, "value", { enumerable: true, get: () => 1 });
+    expect(() => canonicalizeJson(accessorDecorated)).toThrow();
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    expect(() => canonicalizeJson(cyclic)).toThrow();
+
+    const malformedQuote = () =>
+      verifyQuoteAgainstRegistry({ verified: true, measurement: null } as never, registry, "prod");
+    expect(malformedQuote).not.toThrow();
+    expect(malformedQuote().ok).toBe(false);
+    expect(
+      verifyQuoteAgainstRegistry(
+        {
+          provider: "dstack-tdx",
+          measurement: { imageDigest: "sha256:img", configHash: "compose" },
+          timestamp: new Date().toISOString(),
+          verified: "true",
+          raw: {},
+        } as never,
+        registry,
+        "prod",
+      ).ok,
+    ).toBe(false);
+    expect(
+      verifyQuoteAgainstRegistry(
+        {
+          provider: "dstack-tdx",
+          measurement: { imageDigest: "sha256:img", configHash: "compose" },
+          timestamp: 42,
+          verified: true,
+          raw: {},
+        } as never,
+        registry,
+        "prod",
+      ).ok,
+    ).toBe(false);
+    const throwingQuote = Object.defineProperty({}, "timestamp", {
+      enumerable: true,
+      get() {
+        throw new Error("hostile accessor");
+      },
+    });
+    expect(() =>
+      verifyQuoteAgainstRegistry(throwingQuote as never, registry, "prod"),
+    ).not.toThrow();
+    expect(verifyQuoteAgainstRegistry(throwingQuote as never, registry, "prod").ok).toBe(false);
+    expect(
+      verifyRegistrySignatures(
+        { ...registry, unsignedMetadata: "misleading" } as never,
         1,
         undefined,
         registryFingerprints(registry),

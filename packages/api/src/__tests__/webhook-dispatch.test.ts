@@ -230,7 +230,7 @@ describe("dispatchWebhook", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(insertedDeliveries).toHaveLength(1);
-    expect(dispatches).toHaveLength(2);
+    expect(dispatches).toHaveLength(1);
     expect(insertedDeliveries[0]).toMatchObject({
       tenantId: "tenant-1",
       agentId: "agent-1",
@@ -255,16 +255,8 @@ describe("dispatchWebhook", () => {
     const configuredDispatch = dispatches.find(
       (dispatch) => dispatch.event.type === "transaction.failed",
     );
-    const legacyDispatch = dispatches.find((dispatch) => dispatch.event.type === "tx_failed");
     expect(configuredDispatch?.event).toMatchObject({
       type: "transaction.failed",
-      data: {
-        error: { privateKey: "[REDACTED]" },
-        replacement: { secret: "[REDACTED]" },
-      },
-    });
-    expect(legacyDispatch?.event).toMatchObject({
-      type: "tx_failed",
       data: {
         error: { privateKey: "[REDACTED]" },
         replacement: { secret: "[REDACTED]" },
@@ -276,15 +268,14 @@ describe("dispatchWebhook", () => {
     expect(JSON.stringify(dispatches)).not.toContain("should-not-leak");
   });
 
-  it("preserves tenant config webhook dispatch when no configured webhook accepts an event", async () => {
+  it("never falls back to the process-wide legacy signing path", async () => {
     tenantConfigs.set("tenant-1", { webhookUrl: "https://tenant-config.example.com/hook" });
 
     dispatchWebhook("tenant-1", "agent-1", "tx_unknown_state", { txId: "tx-1" });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(dispatches).toHaveLength(1);
-    expect(dispatches[0]?.event.type).toBe("tx_unknown_state");
-    expect(dispatches[0]?.webhook).toBe("https://tenant-config.example.com/hook");
+    expect(dispatches).toHaveLength(0);
+    expect(insertedDeliveries).toHaveLength(0);
   });
 
   // ── Phase 2b: plugin-declared event emission ───────────────────────────────

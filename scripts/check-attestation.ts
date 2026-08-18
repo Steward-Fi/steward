@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import {
   createDstackTdxProvider,
+  MAX_MEASUREMENT_REGISTRY_FILE_BYTES,
   type MeasurementRegistryFile,
   verifyQuoteAgainstRegistry,
   verifyRegistrySignatures,
@@ -53,7 +54,20 @@ if (!endpoint) {
   process.exit(2);
 }
 
-const registry = (await Bun.file(registryPath).json()) as MeasurementRegistryFile;
+const registryFile = Bun.file(registryPath);
+if (registryFile.size > MAX_MEASUREMENT_REGISTRY_FILE_BYTES) {
+  console.error(
+    `measurement registry exceeds ${MAX_MEASUREMENT_REGISTRY_FILE_BYTES} bytes: ${registryPath}`,
+  );
+  process.exit(2);
+}
+let registry: MeasurementRegistryFile;
+try {
+  registry = (await registryFile.json()) as MeasurementRegistryFile;
+} catch {
+  console.error(`measurement registry is not valid JSON: ${registryPath}`);
+  process.exit(2);
+}
 const registryOk = verifyRegistrySignatures(
   registry,
   requiredSignatures,

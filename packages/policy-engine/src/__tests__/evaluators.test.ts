@@ -1338,7 +1338,7 @@ describe("Time Window Policy", () => {
     // Combine a never-matching window with an always-matching one
     const rule = makeTimeWindowRule({
       allowedHours: [
-        { start: 24, end: 25 }, // never matches
+        { start: 23, end: 23 }, // valid but zero-length, never matches
         { start: 0, end: 24 }, // always matches
       ],
       allowedDays: [],
@@ -1969,6 +1969,18 @@ describe("Malformed evaluator config fails closed instead of throwing (SEC-105)"
     }
   });
 
+  it("time-window with malformed nested windows returns a structured deny", async () => {
+    for (const config of [
+      { allowedDays: [], allowedHours: [null] },
+      { allowedDays: ["monday"], allowedHours: [] },
+      { allowedDays: [], allowedHours: [{ start: 9, end: "17" }] },
+    ]) {
+      const result = await evaluatePolicy(makeTimeWindowRule(config as never), makeContext());
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("must be arrays");
+    }
+  });
+
   it("allowed-chains with a non-array chains config returns a structured deny", async () => {
     const rule: PolicyRule = {
       id: "chains-bad",
@@ -1988,5 +2000,18 @@ describe("Malformed evaluator config fails closed instead of throwing (SEC-105)"
     );
     expect(result.passed).toBe(false);
     expect(result.reason).toContain("must be an array");
+  });
+
+  it("approved-addresses rejects malformed entries and mode without throwing", async () => {
+    for (const config of [
+      { addresses: [null], mode: "whitelist" },
+      { addresses: ["not-an-address"], mode: "blacklist" },
+      { addresses: ["0x1234567890123456789012345678901234567890"] },
+      { addresses: ["0x1234567890123456789012345678901234567890"], mode: "unknown" },
+    ]) {
+      const result = await evaluatePolicy(makeAddressRule(config as never), makeContext());
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("array of EVM addresses");
+    }
   });
 });

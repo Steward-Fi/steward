@@ -158,6 +158,36 @@ describe("reputation-threshold evaluator", () => {
     expect(result.passed).toBe(true);
   });
 
+  it("fails closed without throwing on malformed persisted configuration", () => {
+    const malformedConfigs: unknown[] = [
+      null,
+      { ...config, minScore: Number.NaN },
+      { ...config, minScore: -1 },
+      { ...config, minScore: 101 },
+      { ...config, action: "allow" },
+      { ...config, source: "caller" },
+      { ...config, fallbackAction: "allow" },
+    ];
+
+    for (const malformedConfig of malformedConfigs) {
+      const rule = makeRule("reputation-threshold", malformedConfig as Record<string, unknown>);
+      expect(() => evaluateReputationThreshold(rule, { reputationScore: 75 })).not.toThrow();
+      const result = evaluateReputationThreshold(rule, { reputationScore: 75 });
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("Malformed");
+    }
+  });
+
+  it("fails closed on non-finite and out-of-range authority scores", () => {
+    for (const reputationScore of [Number.NaN, Number.POSITIVE_INFINITY, -1, 101]) {
+      const result = evaluateReputationThreshold(makeRule("reputation-threshold", config), {
+        reputationScore,
+      });
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("Invalid reputation score");
+    }
+  });
+
   it("integrates through evaluatePolicy switch", async () => {
     const rule = makeRule("reputation-threshold", config);
     const ctx = makeEvalCtx({ reputationScore: 75 });
@@ -285,7 +315,7 @@ describe("reputation-scaling malformed input (SEC-105)", () => {
     expect(result.reason).toContain("wei strings");
   });
 
-  it("treats a non-finite score as 0 instead of throwing inside BigInt(NaN)", () => {
+  it("fails closed on a non-finite score instead of throwing inside BigInt(NaN)", () => {
     const limit = computeScaledLimit(linearConfig as any, Number.NaN);
     expect(limit).toBe(BigInt("100000000000000000")); // base limit at score 0
     const rule = makeRule("reputation-scaling", linearConfig);
@@ -293,6 +323,54 @@ describe("reputation-scaling malformed input (SEC-105)", () => {
       reputationScore: Number.NaN,
       txValue: BigInt("100000000000000000"),
     });
-    expect(result.passed).toBe(true); // exactly at the score-0 base limit
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("Invalid reputation score");
+  });
+
+  it("supports fractional linear scores without throwing", () => {
+    const limit = computeScaledLimit(
+      { baseMaxPerTx: "0", maxMaxPerTx: "1000000", curve: "linear" },
+      72.5,
+    );
+    expect(limit).toBe(725000n);
+  });
+
+  it("fails closed on non-finite and out-of-range scaling authority scores", () => {
+    for (const reputationScore of [Number.NaN, Number.POSITIVE_INFINITY, -1, 101]) {
+      const result = evaluateReputationScaling(makeRule("reputation-scaling", linearConfig), {
+        reputationScore,
+        txValue: 0n,
+      });
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("Invalid reputation score");
+    }
+  });
+
+  it("rejects wei limits above uint256", () => {
+    const result = evaluateReputationScaling(
+      makeRule("reputation-scaling", {
+        ...linearConfig,
+        maxMaxPerTx:
+          "115792089237316195423570985008687907853269984665640564039457584007913129639936",
+      }),
+      { reputationScore: 50, txValue: 1n },
+    );
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("uint256");
+  });
+
+  it("rejects the complete malformed runtime shape instead of silently choosing a curve", () => {
+    for (const config of [
+      { ...linearConfig, curve: "surprise" },
+      { ...linearConfig, baseMaxPerTx: "100", maxMaxPerTx: "10" },
+      null,
+    ]) {
+      const result = evaluateReputationScaling(makeRule("reputation-scaling", config as never), {
+        reputationScore: 50,
+        txValue: 1n,
+      });
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("malformed");
+    }
   });
 });

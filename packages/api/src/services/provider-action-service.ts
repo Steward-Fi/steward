@@ -378,21 +378,25 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 /**
- * SEC-182: lift the adapter-derived X security signals from the validated
- * `policyArgs` onto the composer's typed `ctx.x` channel, so the reply/URL/
- * length gates no longer depend solely on the caller-influenced args bag.
- * Only correctly-shaped values are lifted; anything else stays unwired and a
- * dependent rule fails closed (POLICY_INPUT_UNAVAILABLE).
+ * SEC-182: lift signals the adapter actually DERIVES from canonical action
+ * content onto the composer's typed `ctx.x` channel. `summoned` is deliberately
+ * excluded: the current X adapter only validates the caller's boolean assertion
+ * and does not attest the referenced post, so presenting it as authoritative
+ * would let callers bypass summoned-only reply policy. Until an authenticated X
+ * lookup supplies that fact, summoned-only fails closed.
  */
 function xPolicySignalsFrom(args: Record<string, unknown>): {
   isReply?: boolean;
-  summoned?: boolean;
+  summoned?: false;
   hasUrl?: boolean;
   textCodePointLength?: number;
 } {
   return {
     ...(typeof args.isReply === "boolean" ? { isReply: args.isReply } : {}),
-    ...(typeof args.summoned === "boolean" ? { summoned: args.summoned } : {}),
+    // A negative assertion cannot grant authority, so it is safe to preserve
+    // the specific not-summoned deny. A positive assertion remains unavailable
+    // until independently attested.
+    ...(args.summoned === false ? { summoned: false as const } : {}),
     ...(typeof args.hasUrl === "boolean" ? { hasUrl: args.hasUrl } : {}),
     ...(typeof args.textCodePointLength === "number" && Number.isInteger(args.textCodePointLength)
       ? { textCodePointLength: args.textCodePointLength }
@@ -2386,10 +2390,10 @@ class ProviderActionService {
         // fails closed (POLICY_INPUT_UNAVAILABLE) until the trailing-window
         // accumulator lands. Content/reply/URL rules need no external input and are
         // fully live now.
-        // SEC-182: the adapter-derived content signals (isReply / summoned /
-        // hasUrl / textCodePointLength) ARE wired — lifted from the adapter's
-        // validated policyArgs onto the typed channel the composer prefers over
-        // the caller-influenced args bag.
+        // SEC-182: only adapter-DERIVED content signals are wired. The caller's
+        // `summoned` assertion is intentionally not promoted to this trusted
+        // channel; a summoned-only rule denies until an authenticated adapter
+        // attestation is available.
         x: xPolicySignalsFrom(build.policyArgs),
       };
 

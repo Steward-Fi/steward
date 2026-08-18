@@ -22,7 +22,6 @@ POST /tenants
   id: string;               // Unique tenant ID (1-64 alphanumeric, _ - . :)
   name: string;             // Display name
   apiKeyHash: string;       // SHA-256 hash of the API key (or raw key — Steward hashes it)
-  webhookUrl?: string;      // URL for event webhooks
   defaultPolicies?: PolicyRule[];  // Default policies for new agents
 }
 ```
@@ -63,7 +62,6 @@ GET /tenants/:id
   "data": {
     "id": "my-org",
     "name": "My Organization",
-    "webhookUrl": "https://my-server.com/webhooks",
     "defaultPolicies": []
   }
 }
@@ -71,9 +69,9 @@ GET /tenants/:id
 
 ---
 
-## Update Webhook
+## Update Default Policies
 
-Configure the webhook URL and default policies for a tenant.
+Update the default policies for a tenant. The historical `webhookUrl` field is retired and returns HTTP 410; it could not securely provision a receiver-known signing secret.
 
 ```
 PUT /tenants/:id/webhook
@@ -85,7 +83,6 @@ PUT /tenants/:id/webhook
 
 ```typescript
 {
-  webhookUrl?: string;          // Webhook URL (or null to remove)
   defaultPolicies?: PolicyRule[];  // Default policies for new agents
 }
 ```
@@ -98,7 +95,6 @@ PUT /tenants/:id/webhook
   "data": {
     "id": "my-org",
     "name": "My Organization",
-    "webhookUrl": "https://my-server.com/webhooks",
     "defaultPolicies": [
       { "type": "spending-limit", "enabled": true, "config": { "maxPerDay": "1000000000000000000" } }
     ]
@@ -106,9 +102,11 @@ PUT /tenants/:id/webhook
 }
 ```
 
-### Webhook Events
+### Webhook Migration and Events
 
-When configured, Steward dispatches HTTP POST requests to your webhook URL for:
+Create signed webhook endpoints with `POST /webhooks`. The response returns the endpoint secret exactly once; store it in the receiver and use it to verify deliveries. Historical tenant `webhookUrl` values are inert and are not silently backfilled with an undisclosed random secret.
+
+When configured through `/webhooks`, Steward dispatches HTTP POST requests for:
 
 | Event | Trigger |
 |-------|---------|
