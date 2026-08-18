@@ -440,6 +440,7 @@ class ProviderApprovalService {
       | "afterIntegrity"
       | "afterAuthority"
       | "afterPolicyReserve"
+      | "afterPolicyReserveCrash"
       | "afterMfa"
       | "beforeAudit"
       | "afterAudit"
@@ -2136,6 +2137,13 @@ class ProviderApprovalService {
             return fail(executionPolicy.code, executionPolicy.httpStatus);
           }
           executionHandlesToRelease = executionPolicy.handles;
+          // Test-only hard-crash simulation. Nulling the compensator models a
+          // dead process (no catch/finally runs), leaving the deterministic
+          // intent+generation member for the retry to adopt exactly once.
+          if (this.faultHooks.afterPolicyReserveCrash) {
+            executionHandlesToRelease = null;
+            await this.hook("afterPolicyReserveCrash");
+          }
           await this.hook("afterPolicyReserve");
 
           if (executionPolicy.handles) {
@@ -2276,7 +2284,7 @@ class ProviderApprovalService {
       if (executionHandlesToRelease !== null) {
         const { providerActionService } = await import("./provider-action-service.js");
         await providerActionService
-          .releasePolicyReservationHandles(executionHandlesToRelease)
+          .releasePolicyReservationHandles(executionHandlesToRelease, input.tenantId)
           .catch((releaseError) =>
             console.error(
               "[provider-approval] failed to release rolled-back reservation:",

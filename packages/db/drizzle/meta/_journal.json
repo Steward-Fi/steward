@@ -505,6 +505,13 @@
       "when": 1785004800000,
       "tag": "0091_external_custody_outcome_reconciliation",
       "breakpoints": true
+    },
+    {
+      "idx": 92,
+      "version": "7",
+      "when": 1785091200000,
+      "tag": "0092_provider_budget_tenant_reservation_handles",
+      "breakpoints": true
     }
   ]
 }
