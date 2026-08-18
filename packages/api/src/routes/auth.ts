@@ -149,7 +149,7 @@ import {
 } from "../services/auth-abuse";
 import { verifyEip1271 } from "../services/eip1271";
 import {
-  isAllowedOidcClientSecretEnv,
+  isAllowedOidcClientSecretEnvForTenant,
   normalizeOidcProviders,
 } from "../services/oidc-provider-config";
 import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
@@ -5052,6 +5052,7 @@ auth.get("/oidc/:provider/callback", async (c) => {
   try {
     idToken = await exchangeOidcAuthorizationCode({
       provider,
+      tenantId: stateData.tenantId,
       code,
       redirectUri: buildOidcCallbackUrl(c, provider.id),
       codeVerifier: stateData.codeVerifier,
@@ -10358,11 +10359,12 @@ async function postPublicOidcTokenEndpoint(
 
 async function exchangeOidcAuthorizationCode(opts: {
   provider: TenantOidcProviderConfig;
+  tenantId: string;
   code: string;
   redirectUri: string;
   codeVerifier: string;
 }): Promise<string> {
-  const { provider, code, redirectUri, codeVerifier } = opts;
+  const { provider, tenantId, code, redirectUri, codeVerifier } = opts;
   if (!provider.clientId || !provider.tokenUrl) {
     throw new Error("OIDC provider is not configured for authorization-code login");
   }
@@ -10375,8 +10377,9 @@ async function exchangeOidcAuthorizationCode(opts: {
   });
   if (provider.clientSecretEnv) {
     // Defense in depth: legacy rows may predate the config-time allowlist, so
-    // re-enforce the dedicated env namespace before reading any secret.
-    if (!isAllowedOidcClientSecretEnv(provider.clientSecretEnv)) {
+    // re-enforce the tenant-bound env namespace before reading any secret
+    // (SEC-005: a cross-tenant env reference must never reach the exchange).
+    if (!isAllowedOidcClientSecretEnvForTenant(provider.clientSecretEnv, tenantId)) {
       throw new Error("OIDC client secret env is outside the allowed tenant namespace");
     }
     const secret = process.env[provider.clientSecretEnv];
