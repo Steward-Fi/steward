@@ -65,7 +65,12 @@ jobs:
           # Compare the immutable commits captured by the pull_request event.
           # The base branch can advance while this job runs; diffing its live
           # remote tip would then attribute unrelated merged changes to the PR.
-          git fetch --no-tags origin "${BASE_SHA}" "${HEAD_SHA}"
+          # checkout uses fetch-depth: 0 and the pull_request merge ref, so both
+          # immutable parent commits are already present. Do not fetch HEAD_SHA
+          # from origin: fork commits are not public branch tips in the base repo
+          # and a SHA fetch is not a portable upload-pack contract.
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git cat-file -e "${HEAD_SHA}^{commit}"
           changed_files=$(git diff --name-only "${BASE_SHA}...${HEAD_SHA}")
 
           status=0
