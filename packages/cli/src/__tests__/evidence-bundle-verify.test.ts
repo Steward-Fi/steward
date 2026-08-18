@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -92,6 +93,22 @@ describe("evidence bundle offline verification", () => {
 
       expect(() => writeOwnerOnlyFile(output, "sensitive")).toThrow();
       expect(readFileSync(target, "utf8")).toBe("untouched");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("owner-only output refuses hard links without mutating the target", () => {
+    const dir = mkdtempSync(join(tmpdir(), "steward-cli-output-"));
+    try {
+      const target = join(dir, "target");
+      const output = join(dir, "output");
+      writeFileSync(target, "untouched", { mode: 0o644 });
+      linkSync(target, output);
+
+      expect(() => writeOwnerOnlyFile(output, "sensitive")).toThrow(/hard-linked/);
+      expect(readFileSync(target, "utf8")).toBe("untouched");
+      expect(statSync(target).mode & 0o777).toBe(0o644);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -8,6 +8,7 @@ import {
   fchmodSync,
   constants as fsConstants,
   fstatSync,
+  ftruncateSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -43,19 +44,23 @@ const MAX_ARCHIVE_ENVELOPE_BYTES = 1024 * 1024;
 export function writeOwnerOnlyFile(path: string, contents: string): void {
   const fd = openSync(
     path,
-    fsConstants.O_WRONLY |
-      fsConstants.O_CREAT |
-      fsConstants.O_TRUNC |
-      fsConstants.O_NOFOLLOW |
-      fsConstants.O_NONBLOCK,
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
     0o600,
   );
   try {
-    if (!fstatSync(fd).isFile()) {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) {
       throw new Error(`Sensitive output is not a regular file: ${path}`);
+    }
+    if (stat.nlink !== 1) {
+      throw new Error(`Sensitive output must not be hard-linked: ${path}`);
     }
     // The open() mode is creation-only. Tighten reused output before writing.
     fchmodSync(fd, 0o600);
+    // Truncate only after the descriptor has passed the type/link checks and
+    // its permissions have been tightened. O_TRUNC would destroy the previous
+    // target before those validations ran.
+    ftruncateSync(fd, 0);
     writeFileSync(fd, contents, { encoding: "utf8" });
   } finally {
     closeSync(fd);
