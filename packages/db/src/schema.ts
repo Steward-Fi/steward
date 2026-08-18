@@ -2155,7 +2155,7 @@ export const providerXCredentialLifecycles = pgTable(
     ),
     kindCheck: check(
       "provider_x_lifecycle_kind_check",
-      sql`${table.kind} IN ('connect_exchange', 'refresh_rotation')`,
+      sql`${table.kind} IN ('connect_exchange', 'refresh_rotation', 'disconnect_revoke')`,
     ),
     revisionCheck: check(
       "provider_x_lifecycle_revision_check",
@@ -2163,7 +2163,7 @@ export const providerXCredentialLifecycles = pgTable(
     ),
     refreshBindingCheck: check(
       "provider_x_lifecycle_refresh_binding_check",
-      sql`${table.kind} <> 'refresh_rotation' OR (${table.providerAccountId} IS NOT NULL AND ${table.expectedAccountRevision} IS NOT NULL)`,
+      sql`${table.kind} = 'connect_exchange' OR (${table.providerAccountId} IS NOT NULL AND ${table.expectedAccountRevision} IS NOT NULL)`,
     ),
     retryCheck: check(
       "provider_x_lifecycle_retry_check",
