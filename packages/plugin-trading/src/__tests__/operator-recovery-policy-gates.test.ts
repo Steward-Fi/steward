@@ -310,6 +310,55 @@ describe("SEC-004: usd-send policy gate + caps", () => {
     expect(res.status).toBe(429);
     expect(usdSendCalls).toHaveLength(10);
   });
+
+  it("fails closed (429) when the process-local rate-limit map is saturated with live windows", async () => {
+    // The fallback map caps at 1_000 keys. Under a distinct-agent flood the
+    // limiter must deny new keys instead of growing unbounded or resetting
+    // live budgets. The rate limiter runs BEFORE the agent-exists check, so
+    // unknown agents still consume map slots (404s below).
+    const { tenantId, agentId } = await seedAgent({
+      policies: [
+        { type: "approved-addresses", config: { mode: "whitelist", addresses: [DEST_A] } },
+      ],
+    });
+    usdSendCalls.length = 0;
+    const app = await buildApp();
+
+    // One real call so the agent has a LIVE window recorded.
+    const first = await postTransfer(app, "usd-send", tenantId, {
+      agentId,
+      destination: DEST_A,
+      amount: "1",
+    });
+    expect(first.status).toBe(200);
+
+    // Fill the remaining 999 slots with distinct keys.
+    for (let i = 0; i < 999; i++) {
+      await postTransfer(app, "usd-send", tenantId, {
+        agentId: `flood-agent-${i}`,
+        destination: DEST_A,
+        amount: "1",
+      });
+    }
+
+    // The real agent's live window survived the flood: its next call is
+    // counted, not reset or dropped.
+    const second = await postTransfer(app, "usd-send", tenantId, {
+      agentId,
+      destination: DEST_A,
+      amount: "1",
+    });
+    expect(second.status).toBe(200);
+
+    // A NEW key beyond the cap is denied (fail closed), not tracked.
+    const overflow = await postTransfer(app, "usd-send", tenantId, {
+      agentId: "flood-agent-overflow",
+      destination: DEST_A,
+      amount: "1",
+    });
+    expect(overflow.status).toBe(429);
+    expect(usdSendCalls).toHaveLength(2);
+  });
 });
 
 describe("SEC-042: withdraw policy evaluation is real", () => {

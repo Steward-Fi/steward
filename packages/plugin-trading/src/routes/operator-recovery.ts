@@ -327,14 +327,17 @@ export function createOperatorRecoveryRoutes(
     const current = operatorTransferRateLimit.get(key);
     if (!current || current.resetAt <= now) {
       if (operatorTransferRateLimit.size >= 1_000) {
+        // Expired-sweep ONLY: evicting a live window under pressure would
+        // silently reset that agent's budget. When the map stays full of live
+        // windows, fail closed (deny as rate-limited) instead of growing the
+        // process-local map without bound — a flooded distinct key always
+        // getting a fresh budget is precisely the loop this limiter exists to
+        // close when Redis is unconfigured.
         for (const [k, v] of operatorTransferRateLimit) {
           if (v.resetAt <= now) operatorTransferRateLimit.delete(k);
         }
-        // All entries may still be live. Keep the fallback strictly bounded;
-        // Map iteration order makes this an oldest-entry eviction.
         if (operatorTransferRateLimit.size >= 1_000) {
-          const oldest = operatorTransferRateLimit.keys().next().value;
-          if (oldest !== undefined) operatorTransferRateLimit.delete(oldest);
+          return { allowed: false, resetMs: OPERATOR_TRANSFER_RATE_WINDOW_MS };
         }
       }
       operatorTransferRateLimit.set(key, {
