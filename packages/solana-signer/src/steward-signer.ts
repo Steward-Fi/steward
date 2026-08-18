@@ -444,8 +444,16 @@ export async function createStewardSolanaSigner(
     } catch (err) {
       throw toSignerError(err);
     }
+    let signedTransaction: string;
     try {
-      if (!result || typeof result !== "object" || typeof result.signature !== "string") {
+      if (!result || typeof result !== "object") {
+        throw new Error("signing response is not an object with a signature");
+      }
+      // Capture every response field once. A custom StewardClient may return
+      // accessors or a Proxy; validation must cover the exact bytes returned to
+      // the caller rather than reading a mutable `signature` property again.
+      signedTransaction = result.signature;
+      if (typeof signedTransaction !== "string") {
         throw new Error("signing response is not an object with a signature");
       }
       if (result.broadcast !== false) {
@@ -457,14 +465,14 @@ export async function createStewardSolanaSigner(
       if (result.chainId !== chainId) {
         throw new StewardSignerError("api", "Steward returned a mismatched Solana chainId");
       }
-      const returned = deserializeTransaction(decodeCanonicalTransactionBase64(result.signature));
+      const returned = deserializeTransaction(decodeCanonicalTransactionBase64(signedTransaction));
       validateSignedResponse(submitted, returned, publicKey);
     } catch (err) {
       throw malformedSuccessResponse("Steward returned a malformed signing response", err);
     }
     // With broadcast:false the route returns the FULL signed transaction,
     // base64-serialized, in the `signature` field.
-    return result.signature;
+    return signedTransaction;
   }
 
   async function signOne<T extends Transaction | VersionedTransaction>(tx: T): Promise<T> {

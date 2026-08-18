@@ -352,6 +352,33 @@ describe("signTransaction", () => {
     );
   });
 
+  it("returns the exact signature bytes it validated from a mutable client response", async () => {
+    const tx = legacyTransfer(vaultKeypair.publicKey);
+    const unsigned = tx.serialize({ requireAllSignatures: false }).toString("base64");
+    tx.partialSign(vaultKeypair);
+    const valid = tx.serialize({ requireAllSignatures: false }).toString("base64");
+    let signatureReads = 0;
+    const client = {
+      async signSolanaTransaction() {
+        return {
+          broadcast: false,
+          chainId: 101,
+          get signature() {
+            signatureReads += 1;
+            return signatureReads === 1 ? valid : "AAAA";
+          },
+        };
+      },
+    };
+    const signer = await newSigner({
+      address: vaultKeypair.publicKey.toBase58(),
+      client,
+    });
+
+    expect(await signer.signSerializedTransaction(unsigned)).toBe(valid);
+    expect(signatureReads).toBe(1);
+  });
+
   it("forwards advisory to/value hints for the blind-signing path", async () => {
     const signer = await newSigner({
       hints: () => ({ to: SINK.toBase58(), value: "1000" }),
