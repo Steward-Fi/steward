@@ -156,6 +156,12 @@ export async function tenantCors(c: Context, next: Next): Promise<Response | und
   const origin = c.req.header("origin") ?? "";
   const tenantId = c.req.header("X-Steward-Tenant");
 
+  // Set this before any lookup or early deny. A shared cache must never reuse
+  // a 403/error produced for one origin or tenant hint for another request.
+  // This is harmless for the explicit development wildcard and keeps every
+  // exit path (including DB failures) on the same cache contract.
+  c.header("Vary", "Origin, X-Steward-Tenant");
+
   let allowOrigin = devWildcardAllowed() ? "*" : "";
 
   if (!tenantId && origin) {
@@ -223,12 +229,6 @@ export async function tenantCors(c: Context, next: Next): Promise<Response | und
     c.header("Access-Control-Allow-Headers", ALLOW_HEADERS);
     c.header("Access-Control-Expose-Headers", EXPOSE_HEADERS);
     c.header("Access-Control-Max-Age", MAX_AGE);
-  }
-
-  if (allowOrigin !== "*") {
-    // Let caches vary on Origin (selective allow) and on the tenant header,
-    // which also determines the emitted Access-Control-Allow-Origin value.
-    c.header("Vary", "Origin, X-Steward-Tenant");
   }
 
   if (c.req.method === "OPTIONS") {

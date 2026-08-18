@@ -67,6 +67,14 @@ describe("middleware security hardening", () => {
     expect(tenantCorsSource).not.toContain('origins.includes("*")');
     // ACAO depends on both Origin and the tenant header (SEC-067).
     expect(tenantCorsSource).toContain('"Origin, X-Steward-Tenant"');
+    // Vary is established before DB lookups/early 403s so denied responses
+    // cannot poison a shared cache for another origin or tenant.
+    const tenantCorsBody = tenantCorsSource.slice(
+      tenantCorsSource.indexOf("export async function tenantCors"),
+    );
+    expect(tenantCorsBody.indexOf('c.header("Vary"')).toBeLessThan(
+      tenantCorsBody.indexOf("await getAllAllowedOrigins()"),
+    );
     expect(tenantCorsSource).toContain("X-Steward-Request-Timestamp");
     expect(tenantCorsSource).toContain("X-Steward-Request-Expires-At");
     expect(contextSource).toContain("headerTenant && headerTenant !== payload.tenantId");
