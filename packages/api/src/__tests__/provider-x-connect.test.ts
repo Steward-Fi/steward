@@ -754,7 +754,7 @@ describe("refresh", () => {
     }
   });
 
-  test("reconnect supersedes an unresolved rotation and restores refresh without replay", async () => {
+  test("reconnect preserves a staged rotating credential until it is reconciled", async () => {
     const store = new MemoryConnectStore();
     const { completed } = await connectHappy(store);
     const invalid = installFakeX({
@@ -789,39 +789,35 @@ describe("refresh", () => {
       .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
     expect(pending.state).toBe("needs_attention");
     const stagedSecretId = pending.credentialSecretId as string;
+    const [accountBefore] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
 
     const reconnectStore = new MemoryConnectStore();
-    const reconnected = await connectHappy(reconnectStore);
-    expect(reconnected.completed.providerAccountId).toBe(completed.providerAccountId);
-    const [superseded] = await db
+    await expect(connectHappy(reconnectStore)).rejects.toMatchObject({
+      code: "X_CREDENTIAL_NEEDS_ATTENTION",
+    });
+    const [preserved] = await db
       .select()
       .from(providerXCredentialLifecycles)
       .where(eq(providerXCredentialLifecycles.id, pending.id));
-    expect(superseded.state).toBe("superseded");
-    expect(superseded.credentialSecretId).toBeNull();
-    const [deletedHandle] = await db
+    expect(preserved.state).toBe("needs_attention");
+    expect(preserved.credentialSecretId).toBe(stagedSecretId);
+    const [retainedHandle] = await db
       .select({ id: secrets.id })
       .from(secrets)
       .where(eq(secrets.id, stagedSecretId));
-    expect(deletedHandle).toBeUndefined();
-
-    const refreshed = installFakeX();
-    const result = await refreshXProviderCredential({
-      tenantId: TENANT,
-      workspaceId: WORKSPACE,
-      accountId: completed.providerAccountId,
-      vault,
-      config: CONFIG,
-      force: true,
-    });
-    expect(result.refreshed).toBe(true);
-    expect(refreshed.counters.refresh).toBe(1);
+    expect(retainedHandle.id).toBe(stagedSecretId);
+    const [accountAfter] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(accountAfter.credentialSecretId).toBe(accountBefore.credentialSecretId);
+    expect(accountAfter.credentialVersion).toBe(accountBefore.credentialVersion);
+    expect(accountAfter.revision).toBe(accountBefore.revision);
     expect(invalid.counters.refresh).toBe(1);
-    refreshed.restore();
     invalid.restore();
-
-    const events = await readAuditActions(TENANT);
-    expect(events).toContain("provider.x.refresh.superseded_by_reconnect");
   });
 
   test("a crash after encrypted staging adopts on retry without a second provider call", async () => {
@@ -896,6 +892,18 @@ describe("refresh", () => {
     expect(lifecycle.credentialSecretId).toBeNull();
     expect(lifecycle.lastErrorCode).toBe("REFRESH_OUTCOME_UNKNOWN");
     restore();
+
+    const reconnectStore = new MemoryConnectStore();
+    const reconnected = await connectHappy(reconnectStore);
+    expect(reconnected.completed.providerAccountId).toBe(completed.providerAccountId);
+    const [superseded] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.id, lifecycle.id));
+    expect(superseded.state).toBe("superseded");
+    expect(superseded.credentialSecretId).toBeNull();
+    const events = await readAuditActions(TENANT);
+    expect(events).toContain("provider.x.refresh.superseded_by_reconnect");
   });
 
   test("the autonomous sweep fails closed a crashed pre-provider intent", async () => {
@@ -916,6 +924,15 @@ describe("refresh", () => {
     await expect(refreshXProviderCredential(input)).rejects.toThrow("simulated exit");
     expect(fake.counters.refresh).toBe(0);
     restoreCrash();
+
+    await expect(connectHappy(new MemoryConnectStore())).rejects.toMatchObject({
+      code: "X_CREDENTIAL_NEEDS_ATTENTION",
+    });
+    const [stillInflight] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
+    expect(stillInflight.state).toBe("inflight");
 
     const swept = await runXCredentialLifecycleSweep({
       vault,

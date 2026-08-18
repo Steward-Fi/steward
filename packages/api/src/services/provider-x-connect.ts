@@ -679,19 +679,12 @@ export function xCredentialSecretName(workspaceId: string, xUserId: string): str
 }
 
 async function persistConnectedAccount(input: PersistInput): Promise<CompleteConnectResult> {
-  // Write the credential secret OUTSIDE the audited tx (the vault owns its own
-  // encryption + version row); then link + audit atomically. createSecret always
-  // writes version 1; a reconnect uses rotateSecret to bump the version so the
-  // lineage (secret name) is stable and the OLD ciphertext is soft-deleted.
+  // Serialize reconnect against the account/lifecycle rows, then write the
+  // credential and account link in the same transaction. Do not rotate the
+  // active secret until every unresolved refresh is safe to supersede: a staged
+  // response is a live provider handle, not garbage.
   const secretName = xCredentialSecretName(input.workspaceId, input.identity.id);
   const serialized = JSON.stringify(input.payload);
-
-  const existing = await input.vault.getSecret(input.tenantId, secretName);
-  const meta = existing
-    ? await input.vault.rotateSecret(input.tenantId, secretName, serialized)
-    : await input.vault.createSecret(input.tenantId, secretName, serialized, {
-        description: "X (Twitter) provider-account OAuth credential",
-      });
 
   return withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
     const tx = txRaw as DbExecutor;
@@ -712,7 +705,13 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
 
     const unresolvedRefreshes = account
       ? await tx
-          .select()
+          .select({
+            id: providerXCredentialLifecycles.id,
+            state: providerXCredentialLifecycles.state,
+            credentialSecretId: providerXCredentialLifecycles.credentialSecretId,
+            expectedAccountRevision: providerXCredentialLifecycles.expectedAccountRevision,
+            lastErrorCode: providerXCredentialLifecycles.lastErrorCode,
+          })
           .from(providerXCredentialLifecycles)
           .where(
             and(
@@ -726,8 +725,45 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
               ]),
             ),
           )
+          .orderBy(asc(providerXCredentialLifecycles.createdAt))
           .for("update")
       : [];
+
+    const supersedableRefreshes = account
+      ? unresolvedRefreshes.filter(
+          (row) =>
+            row.state === "needs_attention" &&
+            row.credentialSecretId === null &&
+            row.lastErrorCode === "REFRESH_OUTCOME_UNKNOWN" &&
+            row.expectedAccountRevision !== null &&
+            row.expectedAccountRevision <= account.revision,
+        )
+      : [];
+    if (supersedableRefreshes.length !== unresolvedRefreshes.length) {
+      throw new XConnectError(
+        "X_CREDENTIAL_NEEDS_ATTENTION",
+        409,
+        "previous X refresh must be reconciled before reconnect",
+      );
+    }
+
+    const [existingSecret] = await tx
+      .select({ id: secrets.id })
+      .from(secrets)
+      .where(
+        and(
+          eq(secrets.tenantId, input.tenantId),
+          eq(secrets.name, secretName),
+          sql`${secrets.deletedAt} IS NULL`,
+        ),
+      )
+      .limit(1)
+      .for("update");
+    const meta = existingSecret
+      ? await input.vault.rotateSecretWithinTx(tx, input.tenantId, secretName, serialized)
+      : await input.vault.createSecretWithinTx(tx, input.tenantId, secretName, serialized, {
+          description: "X (Twitter) provider-account OAuth credential",
+        });
 
     const displayName = input.identity.username ? `@${input.identity.username}` : input.identity.id;
 
@@ -795,36 +831,33 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
       },
     });
 
-    if (unresolvedRefreshes.length > 0) {
-      const lifecycleIds = unresolvedRefreshes.map((row) => row.id).sort();
-      const transientSecretIds = unresolvedRefreshes
-        .map((row) => row.credentialSecretId)
-        .filter((id): id is string => id !== null);
-      await tx
+    if (supersedableRefreshes.length > 0) {
+      const lifecycleIds = supersedableRefreshes.map((row) => row.id).sort();
+      const superseded = await tx
         .update(providerXCredentialLifecycles)
         .set({
           state: "superseded",
-          credentialSecretId: null,
           lastErrorCode: "SUPERSEDED_BY_RECONNECT",
           updatedAt: new Date(),
         })
         .where(
           and(
             eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+            eq(providerXCredentialLifecycles.workspaceId, input.workspaceId),
+            eq(providerXCredentialLifecycles.providerAccountId, providerAccountId),
             inArray(providerXCredentialLifecycles.id, lifecycleIds),
-            inArray(providerXCredentialLifecycles.state, [
-              "inflight",
-              "credential_staged",
-              "needs_attention",
-            ]),
+            eq(providerXCredentialLifecycles.state, "needs_attention"),
+            sql`${providerXCredentialLifecycles.credentialSecretId} IS NULL`,
+            eq(providerXCredentialLifecycles.lastErrorCode, "REFRESH_OUTCOME_UNKNOWN"),
           ),
+        )
+        .returning({ id: providerXCredentialLifecycles.id });
+      if (superseded.length !== supersedableRefreshes.length) {
+        throw new XConnectError(
+          "X_CREDENTIAL_NEEDS_ATTENTION",
+          409,
+          "X refresh lifecycle changed during reconnect",
         );
-      if (transientSecretIds.length > 0) {
-        await tx
-          .delete(secrets)
-          .where(
-            and(eq(secrets.tenantId, input.tenantId), inArray(secrets.id, transientSecretIds)),
-          );
       }
       await append({
         tenantId: input.tenantId,
@@ -836,7 +869,7 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
         metadata: {
           workspaceId: input.workspaceId,
           lifecycleIds,
-          priorStates: unresolvedRefreshes.map((row) => row.state).sort(),
+          priorStates: supersedableRefreshes.map((row) => row.state).sort(),
           newAccountRevision: account ? account.revision + 1 : 1,
           requestId: input.requestId,
         },
