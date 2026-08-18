@@ -8,6 +8,7 @@
  * back to in-memory state suitable only for single-instance/embedded mode.
  */
 
+import { assertRedisUrlTls } from "@stwd/redis";
 import { Redis } from "ioredis";
 
 export class TokenRevokedError extends Error {
@@ -149,6 +150,10 @@ class RedisRevocationStore implements RevocationStore {
       return null;
     }
     if (!this.redis) {
+      // SEC-032: enforce the same rediss:// production TLS assertion as the
+      // shared client in @stwd/redis — revocation state is auth data and must
+      // not cross a cleartext link.
+      assertRedisUrlTls(process.env.REDIS_URL);
       this.redis = new Redis(process.env.REDIS_URL, {
         maxRetriesPerRequest: 1,
         lazyConnect: false,

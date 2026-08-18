@@ -141,6 +141,43 @@ describe("session revocation", () => {
     expect(await sessions.verifySession(refresh)).toBeNull();
   });
 
+  it("refuses a cleartext non-localhost REDIS_URL in production (SEC-032)", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousRedisUrl = process.env.REDIS_URL;
+    const previousAllowInsecure = process.env.STEWARD_ALLOW_INSECURE_REDIS;
+    process.env.NODE_ENV = "production";
+    process.env.REDIS_URL = "redis://redis.internal.example.com:6379";
+    delete process.env.STEWARD_ALLOW_INSECURE_REDIS;
+
+    try {
+      // Fresh module instance so the lazily-built client starts clean — the
+      // TLS assertion must fire before any connection is attempted.
+      const { revocationStore: freshStore } = await import(`../revocation?sec032=${Date.now()}`);
+      await expect(freshStore.isRevoked("sec032-probe")).rejects.toThrow(
+        "rediss:// (TLS) in production",
+      );
+      await expect(freshStore.revokeToken("sec032-probe", Date.now() + 60_000)).rejects.toThrow(
+        "rediss:// (TLS) in production",
+      );
+    } finally {
+      if (previousNodeEnv === undefined) {
+        delete process.env.NODE_ENV;
+      } else {
+        process.env.NODE_ENV = previousNodeEnv;
+      }
+      if (previousRedisUrl === undefined) {
+        delete process.env.REDIS_URL;
+      } else {
+        process.env.REDIS_URL = previousRedisUrl;
+      }
+      if (previousAllowInsecure === undefined) {
+        delete process.env.STEWARD_ALLOW_INSECURE_REDIS;
+      } else {
+        process.env.STEWARD_ALLOW_INSECURE_REDIS = previousAllowInsecure;
+      }
+    }
+  });
+
   it("warns loudly when revocation degrades to per-process memory (SEC-056)", async () => {
     const previousNodeEnv = process.env.NODE_ENV;
     const previousRedisUrl = process.env.REDIS_URL;
