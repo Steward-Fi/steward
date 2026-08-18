@@ -33,7 +33,7 @@
  * signWithdraw, submitWithdraw) — no signing is reimplemented here.
  */
 
-import { proxyAuditLog, transactions } from "@stwd/db";
+import { operatorTransferReservations, proxyAuditLog, transactions } from "@stwd/db";
 import { checkRateLimit } from "@stwd/redis";
 import type { ApiResponse, AppVariables } from "@stwd/shared";
 import {
@@ -350,11 +350,18 @@ export function createOperatorRecoveryRoutes(
    * spending-limit rules. Previously both routes hardcoded zeroes here, which
    * made every rate-limit and daily/weekly spend rule structurally inert.
    */
-  async function getOperatorSpendStats(agentId: string): Promise<{
+  type OperatorQueryDb = Pick<typeof db, "select">;
+  async function getOperatorSpendStats(
+    tenantId: string,
+    agentId: string,
+    queryDb: OperatorQueryDb = db,
+  ): Promise<{
     recentTxCount1h: number;
     recentTxCount24h: number;
     spentToday: bigint;
     spentThisWeek: bigint;
+    operatorSpentTodayBaseUnits: bigint;
+    operatorSpentThisWeekBaseUnits: bigint;
   }> {
     const now = new Date();
     const oneHourAgo = new Date(now.getTime() - 3600_000).toISOString();
@@ -362,7 +369,7 @@ export function createOperatorRecoveryRoutes(
     const oneWeekAgo = new Date(now.getTime() - 604800_000);
     const chainFilter = sql` and ${transactions.chainId} = ${ARBITRUM_CHAIN_ID}`;
 
-    const [stats] = await db
+    const [stats] = await queryDb
       .select({
         recentTxCount1h: sql<number>`count(*) filter (where ${transactions.createdAt} >= ${oneHourAgo}::timestamptz)`,
         recentTxCount24h: sql<number>`count(*) filter (where ${transactions.createdAt} >= ${oneDayAgo}::timestamptz)`,
@@ -388,11 +395,32 @@ export function createOperatorRecoveryRoutes(
         ),
       );
 
+    const [operatorStats] = await queryDb
+      .select({
+        recentTxCount1h: sql<number>`count(*) filter (where ${operatorTransferReservations.createdAt} >= ${oneHourAgo}::timestamptz)`,
+        recentTxCount24h: sql<number>`count(*) filter (where ${operatorTransferReservations.createdAt} >= ${oneDayAgo}::timestamptz)`,
+        spentToday: sql<string>`coalesce(sum((${operatorTransferReservations.amountBaseUnits})::numeric) filter (where ${operatorTransferReservations.createdAt} >= ${oneDayAgo}::timestamptz), 0)::text`,
+        spentThisWeek: sql<string>`coalesce(sum((${operatorTransferReservations.amountBaseUnits})::numeric), 0)::text`,
+      })
+      .from(operatorTransferReservations)
+      .where(
+        and(
+          eq(operatorTransferReservations.tenantId, tenantId),
+          eq(operatorTransferReservations.agentId, agentId),
+          gte(operatorTransferReservations.createdAt, oneWeekAgo),
+          sql`${operatorTransferReservations.status} in ('pending', 'final')`,
+        ),
+      );
+
     return {
-      recentTxCount1h: Number(stats?.recentTxCount1h ?? 0),
-      recentTxCount24h: Number(stats?.recentTxCount24h ?? 0),
+      recentTxCount1h:
+        Number(stats?.recentTxCount1h ?? 0) + Number(operatorStats?.recentTxCount1h ?? 0),
+      recentTxCount24h:
+        Number(stats?.recentTxCount24h ?? 0) + Number(operatorStats?.recentTxCount24h ?? 0),
       spentToday: BigInt(stats?.spentToday ?? "0"),
       spentThisWeek: BigInt(stats?.spentThisWeek ?? "0"),
+      operatorSpentTodayBaseUnits: BigInt(operatorStats?.spentToday ?? "0"),
+      operatorSpentThisWeekBaseUnits: BigInt(operatorStats?.spentThisWeek ?? "0"),
     };
   }
 
@@ -419,9 +447,11 @@ export function createOperatorRecoveryRoutes(
   async function evaluateOperatorTransferPolicy(input: {
     tenantId: string;
     agentId: string;
+    rail: "withdraw" | "usd-send";
+    idempotencyKey: string;
     destination: string;
     amountBaseUnits: bigint;
-  }): Promise<{ approved: true } | { approved: false; reason: string }> {
+  }): Promise<{ approved: true; reservationId: string } | { approved: false; reason: string }> {
     const policySet = await getPolicySet(input.tenantId, input.agentId);
     const hasSpendingLimit = policySet.some(
       (rule) => rule.type === "spending-limit" && rule.enabled,
@@ -439,31 +469,93 @@ export function createOperatorRecoveryRoutes(
       }
       value = valueWei;
     }
-    const stats = await getOperatorSpendStats(input.agentId);
-    const evaluation = await policyEngine.evaluate(policySet, {
-      request: {
-        agentId: input.agentId,
-        tenantId: input.tenantId,
-        to: input.destination,
-        value,
-        chainId: ARBITRUM_CHAIN_ID, // Arbitrum HL withdraw destination chain
-      },
-      // `venue` must be top-level on the evaluation context: the engine reads
-      // `ctx.venue` (engine.ts) for the venue-allowlist evaluator. Nesting it
-      // inside `request` leaves ctx.venue undefined → venue-allowlist fails closed.
-      venue: "hyperliquid" as const,
-      recentTxCount1h: stats.recentTxCount1h,
-      recentTxCount24h: stats.recentTxCount24h,
-      spentToday: stats.spentToday,
-      spentThisWeek: stats.spentThisWeek,
-      priceOracle,
+    return db.transaction(async (tx) => {
+      // Cross-replica serialization: every operator rail for this tenant+agent
+      // evaluates counters and inserts its reservation under the same lock.
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`operator-transfer:${input.tenantId}:${input.agentId}`}, 0))`,
+      );
+      const stats = await getOperatorSpendStats(input.tenantId, input.agentId, tx);
+      let operatorSpentToday = 0n;
+      let operatorSpentThisWeek = 0n;
+      if (hasSpendingLimit) {
+        const [todayWei, weekWei] = await Promise.all([
+          priceOracle.usdToWei(
+            Number(stats.operatorSpentTodayBaseUnits) / 10 ** USDC_DECIMALS,
+            ARBITRUM_CHAIN_ID,
+          ),
+          priceOracle.usdToWei(
+            Number(stats.operatorSpentThisWeekBaseUnits) / 10 ** USDC_DECIMALS,
+            ARBITRUM_CHAIN_ID,
+          ),
+        ]);
+        if (todayWei === null || weekWei === null) {
+          return {
+            approved: false as const,
+            reason: "spending-limit policy cannot price prior operator transfers",
+          };
+        }
+        operatorSpentToday = BigInt(todayWei);
+        operatorSpentThisWeek = BigInt(weekWei);
+      }
+      const evaluation = await policyEngine.evaluate(policySet, {
+        request: {
+          agentId: input.agentId,
+          tenantId: input.tenantId,
+          to: input.destination,
+          value,
+          chainId: ARBITRUM_CHAIN_ID, // Arbitrum HL withdraw destination chain
+        },
+        // `venue` must be top-level on the evaluation context: the engine reads
+        // `ctx.venue` (engine.ts) for the venue-allowlist evaluator. Nesting it
+        // inside `request` leaves ctx.venue undefined → venue-allowlist fails closed.
+        venue: "hyperliquid" as const,
+        recentTxCount1h: stats.recentTxCount1h,
+        recentTxCount24h: stats.recentTxCount24h,
+        spentToday: stats.spentToday + operatorSpentToday,
+        spentThisWeek: stats.spentThisWeek + operatorSpentThisWeek,
+        priceOracle,
+      });
+      if (!evaluation.approved) {
+        const failed = evaluation.results.find((r) => !r.passed);
+        return {
+          approved: false as const,
+          reason: failed?.reason ?? "transfer destination violates policy",
+        };
+      }
+      const [reservation] = await tx
+        .insert(operatorTransferReservations)
+        .values({
+          tenantId: input.tenantId,
+          agentId: input.agentId,
+          rail: input.rail,
+          idempotencyKey: input.idempotencyKey,
+          destination: input.destination,
+          amountBaseUnits: input.amountBaseUnits.toString(),
+          status: "pending",
+        })
+        .returning({ id: operatorTransferReservations.id });
+      if (!reservation) throw new Error("failed to reserve operator transfer spend");
+      return { approved: true as const, reservationId: reservation.id };
     });
-    if (evaluation.approved) return { approved: true };
-    const failed = evaluation.results.find((r) => !r.passed);
-    return {
-      approved: false,
-      reason: failed?.reason ?? "transfer destination violates policy",
-    };
+  }
+
+  async function finishOperatorReservation(
+    tenantId: string,
+    agentId: string,
+    id: string,
+    status: "final" | "released",
+  ) {
+    await db
+      .update(operatorTransferReservations)
+      .set({ status, finalizedAt: new Date() })
+      .where(
+        and(
+          eq(operatorTransferReservations.id, id),
+          eq(operatorTransferReservations.tenantId, tenantId),
+          eq(operatorTransferReservations.agentId, agentId),
+        ),
+      );
   }
 
   function operatorActor(c: Context<{ Variables: AppVariables }>): {
@@ -934,6 +1026,12 @@ export function createOperatorRecoveryRoutes(
       idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
     };
     const { agentId, destination, amount } = body;
+    if (!body.idempotencyKey || body.idempotencyKey.length > 256) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency-Key is required and must be at most 256 characters" },
+        400,
+      );
+    }
 
     // Validate the USDC amount exactly like /withdraw: reject over-precision the
     // 6-decimal conversion can't represent, and enforce the per-call safety
@@ -959,15 +1057,6 @@ export function createOperatorRecoveryRoutes(
       );
     }
 
-    const rate = await enforceOperatorTransferRateLimit("usd-send", tenantId, agentId);
-    if (!rate.allowed) {
-      c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
-      return c.json<ApiResponse>(
-        { ok: false, error: "Operator transfer rate limit exceeded" },
-        429,
-      );
-    }
-
     let idempotency = await getOperatorIdempotency(`${tenantId}:usd-send`, body.idempotencyKey, {
       agentId,
       venue,
@@ -976,6 +1065,15 @@ export function createOperatorRecoveryRoutes(
     });
     const replayResponse = operatorIdempotencyResponse(c, idempotency);
     if (replayResponse) return replayResponse;
+
+    const rate = await enforceOperatorTransferRateLimit("usd-send", tenantId, agentId);
+    if (!rate.allowed) {
+      c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
+      return c.json<ApiResponse>(
+        { ok: false, error: "Operator transfer rate limit exceeded" },
+        429,
+      );
+    }
 
     const agent = await ensureAgentForTenant(tenantId, agentId);
     if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
@@ -993,13 +1091,20 @@ export function createOperatorRecoveryRoutes(
     // withdrawal rail. It must satisfy the same policy evaluation as /withdraw
     // (approved-addresses + spend/rate caps); before this gate a leaked platform
     // key could drain the full HL balance to any destination in one call.
+    idempotency = await claimOperatorIdempotency(idempotency);
+    const claimResponse = operatorIdempotencyResponse(c, idempotency);
+    if (claimResponse) return claimResponse;
+
     const policy = await evaluateOperatorTransferPolicy({
       tenantId,
       agentId,
+      rail: "usd-send",
+      idempotencyKey: body.idempotencyKey,
       destination,
       amountBaseUnits,
     });
     if (!policy.approved) {
+      await idempotency.release?.();
       await auditRecoveryEvent(c, tenantId, agentId, "trade.usdsend.policy-rejected", {
         venue,
         walletAddress,
@@ -1019,9 +1124,6 @@ export function createOperatorRecoveryRoutes(
       amount,
     });
 
-    idempotency = await claimOperatorIdempotency(idempotency);
-    const claimResponse = operatorIdempotencyResponse(c, idempotency);
-    if (claimResponse) return claimResponse;
     let result: unknown;
     try {
       result = await adapter.usdSend({ destination, amount });
@@ -1047,6 +1149,7 @@ export function createOperatorRecoveryRoutes(
       destination,
       amount,
     });
+    await finishOperatorReservation(tenantId, agentId, policy.reservationId, "final");
 
     const response = { venue, walletAddress, destination, amount, result };
     await idempotency.store?.(response);
@@ -1394,6 +1497,12 @@ export function createOperatorRecoveryRoutes(
       ...parsed.data,
       idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
     };
+    if (!body.idempotencyKey || body.idempotencyKey.length > 256) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency-Key is required and must be at most 256 characters" },
+        400,
+      );
+    }
     const { agentId, destination } = body;
 
     if (!isValidAnyAddress(destination)) {
@@ -1502,13 +1611,20 @@ export function createOperatorRecoveryRoutes(
       );
     }
 
+    idempotency = await claimOperatorIdempotency(idempotency);
+    const claimResponse = operatorIdempotencyResponse(c, idempotency);
+    if (claimResponse) return claimResponse;
+
     const policy = await evaluateOperatorTransferPolicy({
       tenantId,
       agentId,
+      rail: "withdraw",
+      idempotencyKey: body.idempotencyKey,
       destination,
       amountBaseUnits,
     });
     if (!policy.approved) {
+      await idempotency.release?.();
       await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.withdraw.policy-rejected", {
         venue,
         walletAddress,
@@ -1524,9 +1640,6 @@ export function createOperatorRecoveryRoutes(
     // retry and is NOT stored; a submit failure means the withdraw may have
     // landed, so the ambiguous outcome IS stored and retries replay it (mirrors
     // the HL order route's 502 "status unknown" envelope).
-    idempotency = await claimOperatorIdempotency(idempotency);
-    const claimResponse = operatorIdempotencyResponse(c, idempotency);
-    if (claimResponse) return claimResponse;
     let signedWithdraw: Awaited<ReturnType<HyperliquidAdapter["signWithdraw"]>>;
     try {
       signedWithdraw = await adapter.signWithdraw({ amount, destination });
@@ -1539,6 +1652,7 @@ export function createOperatorRecoveryRoutes(
         error: err instanceof Error ? err.message : String(err),
       });
       await idempotency.release?.();
+      await finishOperatorReservation(tenantId, agentId, policy.reservationId, "released");
       return c.json<ApiResponse>({ ok: false, error: "Failed to sign withdraw" }, 502);
     }
 
@@ -1564,6 +1678,7 @@ export function createOperatorRecoveryRoutes(
       destination,
       amount,
     });
+    await finishOperatorReservation(tenantId, agentId, policy.reservationId, "final");
 
     const response = { venue, walletAddress, destination, amount, result };
     await idempotency.store?.(response);

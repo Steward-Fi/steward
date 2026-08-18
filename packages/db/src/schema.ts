@@ -955,6 +955,49 @@ export const transactions = pgTable(
   }),
 );
 
+/** Durable reservations for off-chain operator fund movements. Pending rows
+ * are intentionally counted: after a venue timeout the transfer may have
+ * landed, so excluding it would permit a retry to overspend the policy cap. */
+export const operatorTransferReservations = pgTable(
+  "operator_transfer_reservations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: varchar("agent_id", { length: 64 })
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    rail: varchar("rail", { length: 16 }).notNull(),
+    idempotencyKey: varchar("idempotency_key", { length: 256 }).notNull(),
+    destination: varchar("destination", { length: 128 }).notNull(),
+    amountBaseUnits: text("amount_base_units").notNull(),
+    status: varchar("status", { length: 16 }).notNull().default("pending"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    finalizedAt: timestamp("finalized_at", { withTimezone: true }),
+  },
+  (table) => ({
+    requestUnique: uniqueIndex("operator_transfer_reservation_request_uidx").on(
+      table.tenantId,
+      table.rail,
+      table.idempotencyKey,
+    ),
+    agentCreatedIdx: index("operator_transfer_reservation_agent_created_idx").on(
+      table.tenantId,
+      table.agentId,
+      table.createdAt,
+    ),
+    amountIsUsdc: check(
+      "operator_transfer_reservation_amount_base_units_chk",
+      sql`${table.amountBaseUnits} ~ '^[0-9]+$'`,
+    ),
+    statusValid: check(
+      "operator_transfer_reservation_status_chk",
+      sql`${table.status} in ('pending', 'final', 'released')`,
+    ),
+  }),
+);
+
 export const executionAuthorizationNonces = pgTable(
   "execution_authorization_nonces",
   {

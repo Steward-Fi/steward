@@ -20,18 +20,20 @@
  * is a deterministic stub injected via the plugin context.
  */
 
-import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
 import {
   agents,
   agentWallets,
   closeDb,
   getDb,
+  operatorTransferReservations,
   policies as policiesTable,
   tenants,
   transactions,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import type { PriceOracle } from "@stwd/shared";
+import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { StewardAppContext } from "../context";
@@ -40,6 +42,7 @@ const PLATFORM_KEY = "stw_platform_test_operator_gates_key";
 const ARBITRUM_CHAIN_ID = 42161;
 // Deterministic stub ETH price for the spending-limit denomination tests.
 const STUB_ETH_USD = 4000;
+setDefaultTimeout(30_000);
 
 // ── Mock the Hyperliquid adapter (no signing / no network) ────────────────────
 const signWithdrawCalls: Array<{ amount: string | number; destination: string }> = [];
@@ -198,7 +201,7 @@ function postTransfer(
       "Content-Type": "application/json",
       "X-Steward-Platform-Key": PLATFORM_KEY,
       "X-Steward-Tenant": tenantId,
-      ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+      "Idempotency-Key": idempotencyKey ?? crypto.randomUUID(),
     },
     body: JSON.stringify(body),
   });
@@ -411,5 +414,82 @@ describe("SEC-043: operator idempotency stores ambiguous outcomes", () => {
     expect(retry.status).toBe(502);
     expect(signWithdrawCalls).toHaveLength(1);
     expect(submitWithdrawCalls).toHaveLength(1);
+  });
+
+  it("counts an ambiguous reservation and replays it exactly once", async () => {
+    const { tenantId, agentId } = await seedAgent({
+      policies: [
+        { type: "approved-addresses", config: { mode: "whitelist", addresses: [DEST_A] } },
+        { type: "spending-limit", config: { maxPerDayUsd: 150 } },
+      ],
+    });
+    const app = await buildApp({ priceOracle: stubPriceOracle });
+    submitWithdrawCalls.length = 0;
+    failNextSubmitWithdraw = true;
+    const key = crypto.randomUUID();
+    const first = await postTransfer(
+      app,
+      "withdraw",
+      tenantId,
+      { agentId, destination: DEST_A, amount: "100" },
+      key,
+    );
+    expect(first.status).toBe(502);
+    const replay = await postTransfer(
+      app,
+      "withdraw",
+      tenantId,
+      { agentId, destination: DEST_A, amount: "100" },
+      key,
+    );
+    expect(replay.status).toBe(502);
+    expect(submitWithdrawCalls).toHaveLength(1);
+
+    const blocked = await postTransfer(app, "withdraw", tenantId, {
+      agentId,
+      destination: DEST_A,
+      amount: "100",
+    });
+    expect(blocked.status).toBe(400);
+    const rows = await getDb()
+      .select({ status: operatorTransferReservations.status })
+      .from(operatorTransferReservations)
+      .where(
+        and(
+          eq(operatorTransferReservations.tenantId, tenantId),
+          eq(operatorTransferReservations.agentId, agentId),
+        ),
+      );
+    expect(rows).toEqual([{ status: "pending" }]);
+  });
+
+  it("serializes parallel policy checks and finalizes the single admitted transfer", async () => {
+    const { tenantId, agentId } = await seedAgent({
+      policies: [
+        { type: "approved-addresses", config: { mode: "whitelist", addresses: [DEST_A] } },
+        { type: "spending-limit", config: { maxPerDayUsd: 100 } },
+      ],
+    });
+    const app = await buildApp({ priceOracle: stubPriceOracle });
+    submitWithdrawCalls.length = 0;
+    const responses = await Promise.all([
+      postTransfer(app, "withdraw", tenantId, {
+        agentId,
+        destination: DEST_A,
+        amount: "60",
+      }),
+      postTransfer(app, "withdraw", tenantId, {
+        agentId,
+        destination: DEST_A,
+        amount: "60",
+      }),
+    ]);
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 400]);
+    expect(submitWithdrawCalls).toHaveLength(1);
+    const rows = await getDb()
+      .select({ status: operatorTransferReservations.status })
+      .from(operatorTransferReservations)
+      .where(eq(operatorTransferReservations.tenantId, tenantId));
+    expect(rows).toEqual([{ status: "final" }]);
   });
 });
