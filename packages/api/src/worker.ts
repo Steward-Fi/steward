@@ -39,6 +39,12 @@
  *                                   configured Redis is unreachable
  */
 
+import {
+  createNeonTransactionDbForRequest,
+  getDb,
+  type NeonTransactionDbHandle,
+  withRequestDatabase,
+} from "@stwd/db";
 import { initRedis } from "./middleware/redis";
 
 export interface Env {
@@ -75,6 +81,36 @@ export interface Env {
   STEWARD_TRUST_CLOUDFLARE?: string;
   STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX?: string;
   [key: string]: unknown;
+}
+
+type WorkerDatabaseHandleFactory = (env: {
+  DATABASE_URL?: string;
+  DATABASE_DRIVER?: string;
+}) => NeonTransactionDbHandle;
+
+/**
+ * Run one Worker unit of work with its request-owned database handle.
+ *
+ * neon-http remains the shipped default and needs no persistent cleanup. The
+ * transaction-capable WebSocket driver is explicit: its handle is bound to the
+ * async request so every legacy getDb() call resolves the same Drizzle object,
+ * then close() is awaited on success and failure. No handle is cached on the
+ * isolate.
+ */
+export async function withWorkerRequestDatabase<T>(
+  env: Env,
+  callback: () => Promise<T>,
+  options?: { createHandle?: WorkerDatabaseHandleFactory },
+): Promise<T> {
+  if (env.DATABASE_DRIVER?.trim().toLowerCase() !== "neon-websocket") {
+    return callback();
+  }
+  const handle = (options?.createHandle ?? createNeonTransactionDbForRequest)(env);
+  try {
+    return await withRequestDatabase(handle.db as unknown as ReturnType<typeof getDb>, callback);
+  } finally {
+    await handle.close();
+  }
 }
 
 type WorkerLeaseSweepResult = {
@@ -215,10 +251,13 @@ async function ensureWorkerInit(env: Env): Promise<void> {
     const dbUrl = (env.DATABASE_URL || "").toLowerCase();
     // Best-effort boot telemetry (a one-time observability breadcrumb of the
     // TLS/HSTS posture at cold start) — NOT a security mutation or a tamper-
-    // evident control event, and there is no client action to deny. So this
-    // intentionally stays fire-and-forget: a write failure here must not abort
-    // worker init. Security/compliance events use awaited writeAuditEvent.
-    trackAuditEvent({
+    // evident control event, and there is no client action to deny. A write
+    // failure here must not abort worker init. Security/compliance events use
+    // awaited writeAuditEvent.
+    // Await even this best-effort breadcrumb before releasing a request-owned
+    // WebSocket handle. trackAuditEvent absorbs/logs its own failure, so boot
+    // still proceeds without leaving background DB work on a closed handle.
+    await trackAuditEvent({
       tenantId: "system",
       actorType: "system",
       action: "system.tls.config",
@@ -273,9 +312,11 @@ export default {
     // request (not once per isolate) so rotated bindings take effect promptly;
     // the once-per-isolate init below only bootstraps stores/imports.
     hydrateProcessEnv(env);
-    await ensureWorkerInit(env);
-    const app = await getComposedApp();
-    return app.fetch(request, env, ctx as never);
+    return withWorkerRequestDatabase(env, async () => {
+      await ensureWorkerInit(env);
+      const app = await getComposedApp();
+      return app.fetch(request, env, ctx as never);
+    });
   },
   async scheduled(
     _controller: unknown,
@@ -284,9 +325,9 @@ export default {
   ) {
     ctx.waitUntil(
       Promise.all([
-        runWorkerUpstreamCredentialLeaseSweep(env),
-        runWorkerGoogleCredentialLifecycleSweep(env),
-        runWorkerXCredentialLifecycleSweep(env),
+        withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
+        withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),
+        withWorkerRequestDatabase(env, () => runWorkerXCredentialLifecycleSweep(env)),
       ]),
     );
   },

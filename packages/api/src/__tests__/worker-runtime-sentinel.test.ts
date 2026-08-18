@@ -1,9 +1,11 @@
 import { expect, test } from "bun:test";
+import { getDb } from "@stwd/db";
 import {
   hydrateProcessEnv,
   runWorkerGoogleCredentialLifecycleSweep,
   runWorkerUpstreamCredentialLeaseSweep,
   runWorkerXCredentialLifecycleSweep,
+  withWorkerRequestDatabase,
 } from "../worker";
 
 test("Worker hydration cannot be overridden by a STEWARD_RUNTIME binding", () => {
@@ -18,6 +20,66 @@ test("Worker hydration cannot be overridden by a STEWARD_RUNTIME binding", () =>
     if (previous === undefined) delete process.env.STEWARD_RUNTIME;
     else process.env.STEWARD_RUNTIME = previous;
   }
+});
+
+test("Worker request database is exact, request-owned, and always closed", async () => {
+  const requestDb = { marker: "worker-request" } as unknown as ReturnType<typeof getDb>;
+  let closes = 0;
+  const createHandle = () => ({
+    driver: "neon-websocket" as const,
+    db: requestDb as never,
+    async close() {
+      closes += 1;
+    },
+  });
+  const env = {
+    DATABASE_URL: "postgresql://worker.invalid/steward",
+    DATABASE_DRIVER: "neon-websocket",
+  };
+
+  expect(
+    await withWorkerRequestDatabase(
+      env,
+      async () => {
+        await Promise.resolve();
+        expect(getDb()).toBe(requestDb);
+        return "ok";
+      },
+      { createHandle },
+    ),
+  ).toBe("ok");
+  expect(closes).toBe(1);
+
+  await expect(
+    withWorkerRequestDatabase(
+      env,
+      async () => {
+        expect(getDb()).toBe(requestDb);
+        throw new Error("handler failed");
+      },
+      { createHandle },
+    ),
+  ).rejects.toThrow("handler failed");
+  expect(closes).toBe(2);
+});
+
+test("Worker HTTP mode creates no persistent request handle", async () => {
+  let created = 0;
+  const result = await withWorkerRequestDatabase(
+    {
+      DATABASE_URL: "postgresql://worker.invalid/steward",
+      DATABASE_DRIVER: "neon-http",
+    },
+    async () => "http",
+    {
+      createHandle: () => {
+        created += 1;
+        throw new Error("must not create socket handle");
+      },
+    },
+  );
+  expect(result).toBe("http");
+  expect(created).toBe(0);
 });
 
 test("Worker scheduled recovery processes pre-existing leases when capabilities are enabled", async () => {
