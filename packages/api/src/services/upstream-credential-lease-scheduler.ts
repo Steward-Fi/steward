@@ -24,12 +24,12 @@ function configuredInterval(): number {
  */
 export async function startUpstreamCredentialLeaseScheduler(options?: {
   intervalMs?: number;
-  sweep?: (afterTenantId?: string) => Promise<{
+  sweep?: () => Promise<{
     unknown: number;
     revoked: number;
     attention: number;
     expired: number;
-    nextTenantId?: string | null;
+    remaining?: boolean;
   }>;
 }): Promise<() => Promise<void>> {
   if (process.env.STEWARD_UPSTREAM_LEASE_SWEEPER === "false") return async () => {};
@@ -42,29 +42,36 @@ export async function startUpstreamCredentialLeaseScheduler(options?: {
       throw new Error("credential lease recovery is not configured");
     }
     const issuer = new GitHubAppInstallationTokenIssuer();
-    sweep = (afterTenantId) =>
+    sweep = () =>
       recoverAllInterruptedUpstreamCredentialLeases({
         db: ctx.db,
         issuer,
         exerciseToken: ctx.exerciseCredentialLeaseToken,
         auditedTransaction: ctx.withTenantAuditedTransaction,
-        afterTenantId,
       });
   }
   let active: Promise<void> | undefined;
   let stopped = false;
-  let afterTenantId: string | undefined;
+  let rerunRequested = false;
   const tick = () => {
-    if (active || stopped) return;
-    active = sweep(afterTenantId)
+    if (stopped) return;
+    if (active) {
+      rerunRequested = true;
+      return;
+    }
+    active = sweep()
       .then((result) => {
-        afterTenantId = result.nextTenantId ?? undefined;
+        rerunRequested ||= result.remaining === true;
         const changed = result.unknown + result.revoked + result.attention + result.expired;
         if (changed > 0) console.log(`[upstream-leases] reconciled ${changed} lease(s)`);
       })
       .catch((error) => console.error("[upstream-leases] sweep failed:", error))
       .finally(() => {
         active = undefined;
+        if (rerunRequested && !stopped) {
+          rerunRequested = false;
+          queueMicrotask(tick);
+        }
       });
   };
   const timer = setInterval(tick, options?.intervalMs ?? configuredInterval());

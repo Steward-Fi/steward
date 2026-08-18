@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { eq, upstreamCredentialLeaseEvents, upstreamCredentialLeases } from "@stwd/db";
+import {
+  agents,
+  eq,
+  tenants,
+  upstreamCredentialLeaseEvents,
+  upstreamCredentialLeases,
+  workspaces,
+} from "@stwd/db";
 import { sql } from "drizzle-orm";
 import { capabilities, capabilityGrants } from "../schema";
 import {
@@ -750,6 +757,120 @@ describe("upstream credential leases", () => {
     expect(row.status).toBe("revoked");
   });
 
+  test("global deadline ordering drains over 100 tenants despite a slow failing oldest tenant", async () => {
+    const [baseWorkspace] = await harness.db
+      .select()
+      .from(workspaces)
+      .where(eq(workspaces.id, workspaceId));
+    if (!baseWorkspace) throw new Error("expected base workspace");
+    const count = 101;
+    const tenantRows = Array.from({ length: count }, (_, index) => ({
+      id: `lease-load-${index.toString().padStart(3, "0")}`,
+      name: `Lease load ${index}`,
+      apiKeyHash: `lease-load-hash-${index}`,
+    }));
+    const uuid = (index: number, suffix: number) =>
+      `${index.toString(16).padStart(8, "0")}-0000-4000-8000-${suffix
+        .toString(16)
+        .padStart(12, "0")}`;
+    const workspaceRows = tenantRows.map((tenant, index) => ({
+      id: uuid(index + 1, 1),
+      tenantId: tenant.id,
+      key: "lease-load",
+      name: "Lease load",
+      environment: "production" as const,
+      createdBy: baseWorkspace.createdBy,
+    }));
+    await harness.db.transaction(async (tx: any) => {
+      await tx.insert(tenants).values(tenantRows);
+      await tx.insert(agents).values(
+        tenantRows.map((tenant, index) => ({
+          id: `lease-load-agent-${index}`,
+          tenantId: tenant.id,
+          name: "Lease load agent",
+          walletAddress: "0x0000000000000000000000000000000000000001",
+        })),
+      );
+      await tx.insert(workspaces).values(workspaceRows);
+      await tx.insert(upstreamCredentialLeases).values(
+        tenantRows.map((tenant, index) => ({
+          id: uuid(index + 1, 2),
+          tenantId: tenant.id,
+          workspaceId: workspaceRows[index]!.id,
+          agentId: `lease-load-agent-${index}`,
+          grantId: "20000000-0000-4000-8000-000000000099",
+          capabilityId: "10000000-0000-4000-8000-000000000099",
+          issuer: GITHUB_APP_LEASE_ISSUER,
+          resource: { repositories: ["steward"], permissions: { contents: "read" } },
+          resourceHash: sha256(`load-resource-${index}`),
+          authorityDigest: sha256(`load-authority-${index}`),
+          idempotencyKeyHash: sha256(`load-idempotency-${index}`),
+          tokenHash: sha256(`${TOKEN}-${index}`),
+          tokenCiphertext: Buffer.from(`${TOKEN}-${index}`).toString("base64"),
+          tokenIv: "iv",
+          tokenAuthTag: "tag",
+          tokenSalt: "salt",
+          status: "delivery_pending",
+          expiresAt: new Date(NOW.getTime() + 3_590_000),
+          updatedAt: new Date(NOW.getTime() - 60_000 + index),
+        })),
+      );
+    });
+
+    let releaseOldest!: () => void;
+    const oldestBarrier = new Promise<void>((resolve) => {
+      releaseOldest = resolve;
+    });
+    let oldestEntered!: () => void;
+    const oldestStarted = new Promise<void>((resolve) => {
+      oldestEntered = resolve;
+    });
+    const issuer: UpstreamTokenIssuer = {
+      async issue() {
+        throw new Error("not used");
+      },
+      async revoke(token) {
+        if (token !== `${TOKEN}-0`) return;
+        oldestEntered();
+        await oldestBarrier;
+        throw new Error("oldest tenant revoker unavailable");
+      },
+    };
+    const recovery = recoverAllInterruptedUpstreamCredentialLeases({
+      db: harness.db,
+      issuer,
+      exerciseToken,
+      auditedTransaction: auditedTransaction(),
+      now: NOW,
+      workLimit: 200,
+      concurrency: 16,
+      runDeadlineMs: 5_000,
+    });
+    await oldestStarted;
+    const lastId = uuid(count, 2);
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const [last] = await harness.db
+        .select({ status: upstreamCredentialLeases.status })
+        .from(upstreamCredentialLeases)
+        .where(eq(upstreamCredentialLeases.id, lastId));
+      if (last?.status === "revoked") break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const [lastBeforeRelease] = await harness.db
+      .select({ status: upstreamCredentialLeases.status })
+      .from(upstreamCredentialLeases)
+      .where(eq(upstreamCredentialLeases.id, lastId));
+    expect(lastBeforeRelease?.status).toBe("revoked");
+    releaseOldest();
+    const result = await recovery;
+    expect(result).toMatchObject({ tenants: 101, revoked: 100, attention: 1, remaining: false });
+    const [oldest] = await harness.db
+      .select({ status: upstreamCredentialLeases.status })
+      .from(upstreamCredentialLeases)
+      .where(eq(upstreamCredentialLeases.id, uuid(1, 2)));
+    expect(oldest?.status).toBe("needs_attention");
+  });
+
   test("stale exact-token revocation claims are idempotently reconciled", async () => {
     const issuer = new FakeIssuer();
     const issued = await issueUpstreamCredentialLease(
@@ -1150,15 +1271,14 @@ describe("upstream credential leases", () => {
       .set({ enabled: false })
       .where(eq(capabilities.id, CAPABILITY));
     expect(
-      await recoverInterruptedUpstreamCredentialLeases({
+      await recoverAllInterruptedUpstreamCredentialLeases({
         db: harness.db,
-        tenantId: TENANT,
         issuer,
         exerciseToken,
         auditedTransaction: auditedTransaction(),
         now: NOW,
       }),
-    ).toEqual({ unknown: 0, revoked: 1, attention: 0 });
+    ).toMatchObject({ tenants: 1, unknown: 0, revoked: 1, attention: 0 });
     const [row] = await harness.db
       .select()
       .from(upstreamCredentialLeases)

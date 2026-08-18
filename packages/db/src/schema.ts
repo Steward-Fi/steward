@@ -2402,6 +2402,14 @@ export const upstreamCredentialLeases = pgTable(
       table.status,
       table.expiresAt,
     ),
+    statusUpdatedIdx: index("upstream_credential_leases_status_updated_idx").on(
+      table.status,
+      table.updatedAt,
+    ),
+    statusAuthorityCheckedIdx: index("upstream_credential_leases_status_authority_checked_idx").on(
+      table.status,
+      table.authorityCheckedAt,
+    ),
     bindingIdx: index("upstream_credential_leases_binding_idx").on(
       table.tenantId,
       table.workspaceId,

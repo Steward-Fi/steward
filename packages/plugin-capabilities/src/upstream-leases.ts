@@ -629,60 +629,349 @@ export async function recoverInterruptedUpstreamCredentialLeases(input: {
   return { unknown, revoked, attention };
 }
 
-/** Process-bounded autonomous sweep entrypoint. It discovers tenants from the
- * durable lease table so abandoned deliveries are recovered even when that
- * tenant never performs another issuance request. */
+type RecoveryTotals = { unknown: number; revoked: number; attention: number; expired?: number };
+type LeaseRow = typeof upstreamCredentialLeases.$inferSelect;
+
+async function recoverOneDueLease(input: {
+  db: Db;
+  lease: LeaseRow;
+  issuer: UpstreamTokenIssuer;
+  exerciseToken: ExerciseLeaseToken;
+  auditedTransaction: LeaseAuditedTransaction;
+  now: Date;
+  cutoff: Date;
+}): Promise<RecoveryTotals> {
+  const { lease } = input;
+  if (lease.status === "issuing") {
+    const changed = await input.auditedTransaction(
+      lease.tenantId,
+      async (tx: Db, appendRequiredAudit) => {
+        const updated = await tx
+          .update(upstreamCredentialLeases)
+          .set({
+            status: "needs_attention",
+            lastError: "issuer outcome unknown after interrupted issuance",
+            updatedAt: input.now,
+          })
+          .where(
+            and(
+              eq(upstreamCredentialLeases.id, lease.id),
+              eq(upstreamCredentialLeases.tenantId, lease.tenantId),
+              eq(upstreamCredentialLeases.status, "issuing"),
+              eq(upstreamCredentialLeases.updatedAt, lease.updatedAt),
+              lte(upstreamCredentialLeases.updatedAt, input.cutoff),
+            ),
+          )
+          .returning({ id: upstreamCredentialLeases.id });
+        if (updated.length === 0) return false;
+        await tx.insert(upstreamCredentialLeaseEvents).values({
+          leaseId: lease.id,
+          tenantId: lease.tenantId,
+          action: "lease.issuer_outcome_unknown",
+          decision: "deny",
+        });
+        await appendRequiredAudit(
+          coreAuditEvent({
+            tenantId: lease.tenantId,
+            leaseId: lease.id,
+            action: "upstream_credential_lease.issuer_outcome_unknown",
+            metadata: { grantId: lease.grantId, capabilityId: lease.capabilityId },
+          }),
+        );
+        return true;
+      },
+    );
+    return { unknown: changed ? 1 : 0, revoked: 0, attention: 0 };
+  }
+  await beforeRecoveryClaimForTests?.(lease.id);
+  const result = await revokeExactSealedLease({
+    db: input.db,
+    tenantId: lease.tenantId,
+    lease,
+    issuer: input.issuer,
+    exerciseToken: input.exerciseToken,
+    auditedTransaction: input.auditedTransaction,
+    now: input.now,
+    mode: "stale_recovery",
+    staleCutoff: input.cutoff,
+  });
+  return result.ok
+    ? { unknown: 0, revoked: result.revoked, attention: 0 }
+    : { unknown: 0, revoked: 0, attention: 1 };
+}
+
+async function recoverOneActiveLease(input: {
+  db: Db;
+  lease: LeaseRow;
+  issuer: UpstreamTokenIssuer;
+  exerciseToken: ExerciseLeaseToken;
+  auditedTransaction: LeaseAuditedTransaction;
+  now: Date;
+}): Promise<RecoveryTotals> {
+  const { lease } = input;
+  const live = await readLiveLeaseAuthority(
+    input.db,
+    {
+      tenantId: lease.tenantId,
+      agentId: lease.agentId,
+      capabilityId: lease.capabilityId,
+      grantId: lease.grantId,
+    },
+    input.now,
+  );
+  const authorityValid =
+    live !== null &&
+    live.config.workspaceId === lease.workspaceId &&
+    leaseAuthorityDigest(live.secretId, live.config) === lease.authorityDigest;
+  if (authorityValid) {
+    await input.db
+      .update(upstreamCredentialLeases)
+      .set({ authorityCheckedAt: input.now })
+      .where(
+        and(
+          eq(upstreamCredentialLeases.id, lease.id),
+          eq(upstreamCredentialLeases.tenantId, lease.tenantId),
+          eq(upstreamCredentialLeases.status, "active"),
+          eq(upstreamCredentialLeases.authorityCheckedAt, lease.authorityCheckedAt),
+        ),
+      );
+    return { unknown: 0, revoked: 0, attention: 0 };
+  }
+  const result = await revokeExactSealedLease({
+    db: input.db,
+    tenantId: lease.tenantId,
+    lease,
+    issuer: input.issuer,
+    exerciseToken: input.exerciseToken,
+    auditedTransaction: input.auditedTransaction,
+    now: input.now,
+    mode: "authority_teardown",
+  });
+  return result.ok
+    ? { unknown: 0, revoked: result.revoked, attention: 0 }
+    : { unknown: 0, revoked: 0, attention: 1 };
+}
+
+async function expireOneActiveLease(input: {
+  lease: LeaseRow;
+  auditedTransaction: LeaseAuditedTransaction;
+  now: Date;
+}): Promise<number> {
+  return input.auditedTransaction(input.lease.tenantId, async (tx: Db, appendRequiredAudit) => {
+    const updated = await tx
+      .update(upstreamCredentialLeases)
+      .set({ status: "expired", updatedAt: input.now })
+      .where(
+        and(
+          eq(upstreamCredentialLeases.id, input.lease.id),
+          eq(upstreamCredentialLeases.tenantId, input.lease.tenantId),
+          eq(upstreamCredentialLeases.status, "active"),
+          lte(upstreamCredentialLeases.expiresAt, input.now),
+        ),
+      )
+      .returning({ id: upstreamCredentialLeases.id });
+    if (updated.length === 0) return 0;
+    await tx.insert(upstreamCredentialLeaseEvents).values({
+      leaseId: input.lease.id,
+      tenantId: input.lease.tenantId,
+      action: "lease.expire",
+      decision: "allow",
+    });
+    await appendRequiredAudit(
+      coreAuditEvent({
+        tenantId: input.lease.tenantId,
+        leaseId: input.lease.id,
+        action: "upstream_credential_lease.expired",
+      }),
+    );
+    return 1;
+  });
+}
+
+async function mapWithDeadline<T>(input: {
+  items: T[];
+  concurrency: number;
+  deadlineAt: number;
+  run: (item: T) => Promise<void>;
+}): Promise<number> {
+  let cursor = 0;
+  let started = 0;
+  const worker = async () => {
+    while (Date.now() < input.deadlineAt) {
+      const index = cursor++;
+      const item = input.items[index];
+      if (item === undefined) return;
+      started += 1;
+      await input.run(item);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(input.concurrency, input.items.length) }, () => worker()),
+  );
+  return started;
+}
+
+/** Process-bounded autonomous sweep entrypoint. Deadline-due leases are read
+ * globally from durable state and handled by a bounded worker pool, so neither
+ * tenant-id pagination nor one slow provider call can starve another tenant. */
 export async function recoverAllInterruptedUpstreamCredentialLeases(input: {
   db: Db;
   issuer: UpstreamTokenIssuer;
   exerciseToken: ExerciseLeaseToken;
   auditedTransaction: LeaseAuditedTransaction;
   now?: Date;
-  tenantLimit?: number;
-  leaseLimitPerTenant?: number;
-  afterTenantId?: string;
+  /** Global work cap. Ordering is by the oldest recovery deadline, never tenant id. */
+  workLimit?: number;
+  /** Provider calls are isolated behind a bounded pool so one tenant cannot block another. */
+  concurrency?: number;
+  /** Stop claiming new work after this wall-clock budget; already claimed work is awaited. */
+  runDeadlineMs?: number;
 }): Promise<{
   tenants: number;
   unknown: number;
   revoked: number;
   attention: number;
   expired: number;
-  nextTenantId: string | null;
+  remaining: boolean;
 }> {
-  const tenantLimit = Math.max(1, Math.min(input.tenantLimit ?? 100, 500));
-  const tenants = await input.db
-    .selectDistinct({ tenantId: upstreamCredentialLeases.tenantId })
+  const now = input.now ?? new Date();
+  const cutoff = new Date(now.getTime() - DELIVERY_ACK_TIMEOUT_MS);
+  const workLimit = Math.max(1, Math.min(input.workLimit ?? 500, 2_000));
+  const concurrency = Math.max(1, Math.min(input.concurrency ?? 16, 64));
+  const runDeadlineMs = Math.max(100, Math.min(input.runDeadlineMs ?? 5_000, 10_000));
+  const deadlineAt = Date.now() + runDeadlineMs;
+  const due: LeaseRow[] = await input.db
+    .select()
     .from(upstreamCredentialLeases)
     .where(
-      input.afterTenantId ? gt(upstreamCredentialLeases.tenantId, input.afterTenantId) : undefined,
+      or(
+        and(
+          eq(upstreamCredentialLeases.status, "issuing"),
+          lte(upstreamCredentialLeases.updatedAt, cutoff),
+        ),
+        and(
+          eq(upstreamCredentialLeases.status, "delivery_pending"),
+          lte(upstreamCredentialLeases.updatedAt, cutoff),
+        ),
+        and(
+          eq(upstreamCredentialLeases.status, "acknowledging"),
+          lte(upstreamCredentialLeases.updatedAt, cutoff),
+        ),
+        and(
+          eq(upstreamCredentialLeases.status, "needs_attention"),
+          isNotNull(upstreamCredentialLeases.tokenCiphertext),
+          lte(upstreamCredentialLeases.updatedAt, cutoff),
+        ),
+        and(
+          eq(upstreamCredentialLeases.status, "revoking"),
+          isNotNull(upstreamCredentialLeases.tokenCiphertext),
+          lte(upstreamCredentialLeases.updatedAt, cutoff),
+        ),
+      ),
     )
-    .orderBy(asc(upstreamCredentialLeases.tenantId))
-    .limit(tenantLimit);
+    .orderBy(asc(upstreamCredentialLeases.updatedAt), asc(upstreamCredentialLeases.id))
+    .limit(workLimit + 1);
+  const candidates = due.slice(0, workLimit);
+  const touchedTenants = new Set<string>();
   const totals = {
-    tenants: tenants.length,
+    tenants: 0,
     unknown: 0,
     revoked: 0,
     attention: 0,
     expired: 0,
-    nextTenantId: tenants.length === tenantLimit ? (tenants.at(-1)?.tenantId ?? null) : null,
+    remaining: due.length > workLimit,
   };
-  for (const { tenantId } of tenants) {
-    const recovered = await recoverInterruptedUpstreamCredentialLeases({
-      ...input,
-      tenantId,
-      limit: input.leaseLimitPerTenant,
+  const started = await mapWithDeadline({
+    items: candidates,
+    concurrency,
+    deadlineAt,
+    run: async (lease) => {
+      touchedTenants.add(lease.tenantId);
+      try {
+        const recovered = await recoverOneDueLease({ ...input, lease, now, cutoff });
+        totals.unknown += recovered.unknown;
+        totals.revoked += recovered.revoked;
+        totals.attention += recovered.attention;
+      } catch {
+        // A failed tenant transaction or provider must not starve other due leases.
+        totals.attention += 1;
+      }
+    },
+  });
+  let remainingCapacity = workLimit - started;
+  if (remainingCapacity > 0 && Date.now() < deadlineAt) {
+    const expired: LeaseRow[] = await input.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(
+        and(
+          eq(upstreamCredentialLeases.status, "active"),
+          lte(upstreamCredentialLeases.expiresAt, now),
+        ),
+      )
+      .orderBy(asc(upstreamCredentialLeases.expiresAt), asc(upstreamCredentialLeases.id))
+      .limit(remainingCapacity + 1);
+    const expiredCandidates = expired.slice(0, remainingCapacity);
+    const expiredStarted = await mapWithDeadline({
+      items: expiredCandidates,
+      concurrency,
+      deadlineAt,
+      run: async (lease) => {
+        touchedTenants.add(lease.tenantId);
+        try {
+          totals.expired += await expireOneActiveLease({
+            lease,
+            auditedTransaction: input.auditedTransaction,
+            now,
+          });
+        } catch {
+          totals.attention += 1;
+        }
+      },
     });
-    totals.unknown += recovered.unknown;
-    totals.revoked += recovered.revoked;
-    totals.attention += recovered.attention;
-    totals.expired += await expireUpstreamCredentialLeases({
-      db: input.db,
-      auditedTransaction: input.auditedTransaction,
-      tenantId,
-      now: input.now,
-      limit: input.leaseLimitPerTenant,
-    });
+    remainingCapacity -= expiredStarted;
+    totals.remaining ||=
+      expired.length > expiredCandidates.length || expiredStarted < expiredCandidates.length;
   }
+  if (remainingCapacity > 0 && Date.now() < deadlineAt) {
+    const active: LeaseRow[] = await input.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(
+        and(
+          eq(upstreamCredentialLeases.status, "active"),
+          gt(upstreamCredentialLeases.expiresAt, now),
+        ),
+      )
+      .orderBy(
+        asc(upstreamCredentialLeases.authorityCheckedAt),
+        asc(upstreamCredentialLeases.expiresAt),
+        asc(upstreamCredentialLeases.id),
+      )
+      .limit(remainingCapacity + 1);
+    const activeCandidates = active.slice(0, remainingCapacity);
+    const activeStarted = await mapWithDeadline({
+      items: activeCandidates,
+      concurrency,
+      deadlineAt,
+      run: async (lease) => {
+        touchedTenants.add(lease.tenantId);
+        try {
+          const recovered = await recoverOneActiveLease({ ...input, lease, now });
+          totals.unknown += recovered.unknown;
+          totals.revoked += recovered.revoked;
+          totals.attention += recovered.attention;
+          totals.expired += recovered.expired ?? 0;
+        } catch {
+          totals.attention += 1;
+        }
+      },
+    });
+    totals.remaining ||=
+      active.length > remainingCapacity || activeStarted < activeCandidates.length;
+  }
+  totals.tenants = touchedTenants.size;
+  totals.remaining ||= started < candidates.length;
   return totals;
 }
 

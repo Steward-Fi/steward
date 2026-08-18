@@ -23,8 +23,8 @@ test("lease scheduler runs at startup, repeats, and stops cleanly", async () => 
   expect(calls).toBe(stoppedAt);
 });
 
-test("lease scheduler advances its tenant cursor and waits for an in-flight sweep on stop", async () => {
-  const cursors: Array<string | undefined> = [];
+test("lease scheduler immediately drains remaining work and waits for an in-flight sweep on stop", async () => {
+  let calls = 0;
   let release!: () => void;
   const blocked = new Promise<void>((resolve) => {
     release = resolve;
@@ -35,13 +35,12 @@ test("lease scheduler advances its tenant cursor and waits for an in-flight swee
   });
   const stop = await startUpstreamCredentialLeaseScheduler({
     intervalMs: 5,
-    sweep: async (cursor) => {
-      cursors.push(cursor);
-      if (cursors.length === 1)
-        return { unknown: 0, revoked: 0, attention: 0, expired: 0, nextTenantId: "tenant-100" };
+    sweep: async () => {
+      calls += 1;
+      if (calls === 1) return { unknown: 0, revoked: 0, attention: 0, expired: 0, remaining: true };
       entered();
       await blocked;
-      return { unknown: 0, revoked: 0, attention: 0, expired: 0, nextTenantId: null };
+      return { unknown: 0, revoked: 0, attention: 0, expired: 0, remaining: false };
     },
   });
   await secondEntered;
@@ -53,7 +52,7 @@ test("lease scheduler advances its tenant cursor and waits for an in-flight swee
   expect(stopped).toBe(false);
   release();
   await stopping;
-  expect(cursors).toEqual([undefined, "tenant-100"]);
+  expect(calls).toBe(2);
 });
 
 test("lease scheduler rejects a production interval that cannot honor the ACK deadline", async () => {

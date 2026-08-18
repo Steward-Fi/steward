@@ -32,6 +32,10 @@ CREATE UNIQUE INDEX "upstream_credential_leases_replay_uniq" ON "upstream_creden
 --> statement-breakpoint
 CREATE INDEX "upstream_credential_leases_status_expiry_idx" ON "upstream_credential_leases" ("status", "expires_at");
 --> statement-breakpoint
+CREATE INDEX "upstream_credential_leases_status_updated_idx" ON "upstream_credential_leases" ("status", "updated_at");
+--> statement-breakpoint
+CREATE INDEX "upstream_credential_leases_status_authority_checked_idx" ON "upstream_credential_leases" ("status", "authority_checked_at");
+--> statement-breakpoint
 CREATE INDEX "upstream_credential_leases_binding_idx" ON "upstream_credential_leases" ("tenant_id", "workspace_id", "agent_id", "grant_id");
 --> statement-breakpoint
 CREATE TABLE "upstream_credential_lease_events" (
