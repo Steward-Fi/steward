@@ -19,9 +19,9 @@ describe("CI test inventory", () => {
   test("direct Bun test-file commands use explicit relative paths", () => {
     for (const workflow of [".github/workflows/ci.yml", ".github/workflows/pr.yml"]) {
       const source = readFileSync(workflow, "utf8");
-      expect(source.match(/\bbun test packages\/[^\s]+\.(?:test|spec)\.[cm]?[jt]sx?/g) ?? []).toEqual(
-        [],
-      );
+      expect(
+        source.match(/\bbun test packages\/[^\s]+\.(?:test|spec)\.[cm]?[jt]sx?/g) ?? [],
+      ).toEqual([]);
     }
   });
 
