@@ -7,6 +7,7 @@ import {
   type MeasurementRegistryFile,
   type MeasurementRegistryPayload,
   normalizeReportData,
+  parseMeasurementRegistryJson,
   publicKeyFingerprint,
   registryPayloadDigest,
   verifyQuoteAgainstRegistry,
@@ -581,6 +582,36 @@ describe("measurement registry", () => {
 
     expect(() => canonicalizeJson(nested)).toThrow(
       "registry payload exceeded the maximum depth of 64",
+    );
+  });
+
+  test("rejects malformed UTF-8 before parsing a registry file", () => {
+    expect(() => parseMeasurementRegistryJson(Uint8Array.from([0x7b, 0xff, 0x7d]))).toThrow(
+      "measurement registry file is not valid UTF-8 JSON",
+    );
+  });
+
+  test("rejects excessive JSON depth and structure before JSON.parse", () => {
+    const deep = Buffer.from(`${"[".repeat(73)}0${"]".repeat(73)}`);
+    expect(() => parseMeasurementRegistryJson(deep)).toThrow(
+      "measurement registry JSON exceeded the maximum depth of 72",
+    );
+
+    const wide = Buffer.from(`[${"0,".repeat(100_001)}0]`);
+    expect(() => parseMeasurementRegistryJson(wide)).toThrow(
+      "measurement registry JSON exceeded the structural token limit",
+    );
+  });
+
+  test("counts canonical UTF-8 bytes, escaped bytes, keys, and nodes", () => {
+    expect(() => canonicalizeJson({ value: "\u0000".repeat(200_000) })).toThrow(
+      "registry payload exceeded the 1 MiB limit",
+    );
+    expect(() => canonicalizeJson({ ["💥".repeat(262_145)]: true })).toThrow(
+      "registry payload exceeded the 1 MiB limit",
+    );
+    expect(() => canonicalizeJson(Array.from({ length: 100_001 }, () => null))).toThrow(
+      "registry payload exceeded the maximum node count of 100000",
     );
   });
 });
