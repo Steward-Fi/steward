@@ -1,5 +1,3 @@
-import { isIP } from "node:net";
-
 function ipv4ToUint32(address: string): number | null {
   const octets = address.split(".").map((part) => Number(part));
   if (
@@ -126,6 +124,9 @@ function isPublicIpv6(address: string): boolean {
   if (words[0] === 0x2001 && words[1] <= 0x01ff) return false; // 2001::/23
   if (words[0] === 0x2001 && words[1] === 0x0db8) return false; // documentation
   if (words[0] === 0x2002) return false; // deprecated 6to4 when not handled above
+  if (words[0] === 0x2620 && words[1] === 0x004f && words[2] === 0x8000) {
+    return false; // Direct Delegation AS112 service
+  }
   if (words[0] === 0x3fff && (words[1] & 0xf000) === 0) return false; // 3fff::/20 docs
 
   return true;
@@ -140,7 +141,8 @@ export function isPublicInternetAddress(address: string, family?: number): boole
     .toLowerCase()
     .replace(/^\[|\]$/g, "")
     .trim();
-  const detected = isIP(normalized);
+  const detected =
+    ipv4ToUint32(normalized) !== null ? 4 : expandIpv6Words(normalized) !== null ? 6 : 0;
   if (family !== undefined && family !== 4 && family !== 6) return false;
   if (family !== undefined && detected !== family) return false;
   if (detected === 4) return isPublicIpv4(normalized);
@@ -170,7 +172,8 @@ export function assertPublicHttpsEndpoint(value: string, resource: string): URL 
     .replace(/^\[|\]$/g, "")
     .replace(/\.+$/g, "")
     .toLowerCase();
-  const literalFamily = isIP(hostname);
+  const literalFamily =
+    ipv4ToUint32(hostname) !== null ? 4 : expandIpv6Words(hostname) !== null ? 6 : 0;
   const blockedDnsSuffixes = [
     ".localhost",
     ".local",

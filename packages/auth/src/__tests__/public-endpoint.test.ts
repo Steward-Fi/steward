@@ -4,6 +4,7 @@ import {
   assertPublicInternetAddress,
   isPublicInternetAddress,
 } from "../public-endpoint";
+import { assertPinnedDnsTransportSupported } from "../public-endpoint-node";
 
 describe("public Internet destination classifier", () => {
   it("rejects IPv4-compatible, translated, and mapped private IPv6 targets", () => {
@@ -48,6 +49,7 @@ describe("public Internet destination classifier", () => {
       "2001::1",
       "2001:db8::1",
       "2002:7f00:1::",
+      "2620:4f:8000::1",
       "3fff::1",
       "5f00::1",
       "fc00::1",
@@ -87,6 +89,9 @@ describe("public HTTPS endpoint validator", () => {
       "https://idp.onion/token",
       "https://user:secret@idp.example.com/token",
       "https://192.0.2.1/token",
+      "https://127.1/token",
+      "https://2130706433/token",
+      "https://0x7f000001/token",
       "https://[::7f00:1]/token",
       "https://[::ffff:0:7f00:1]/token",
       "https://[3fff::1]/token",
@@ -104,5 +109,21 @@ describe("public HTTPS endpoint validator", () => {
     expect(assertPublicHttpsEndpoint("https://8.8.8.8/token", "OIDC token endpoint").href).toBe(
       "https://8.8.8.8/token",
     );
+    expect(
+      assertPublicHttpsEndpoint("https://idp.example.com:8443/token", "OIDC token endpoint").port,
+    ).toBe("8443");
+  });
+
+  it("fails closed explicitly when connect-time pinning is unavailable on Workers", () => {
+    const originalRuntime = process.env.STEWARD_RUNTIME;
+    process.env.STEWARD_RUNTIME = "workers";
+    try {
+      expect(() => assertPinnedDnsTransportSupported("OIDC token endpoint")).toThrow(
+        "OIDC token endpoint requires connect-time DNS validation unavailable in Workers",
+      );
+    } finally {
+      if (originalRuntime === undefined) delete process.env.STEWARD_RUNTIME;
+      else process.env.STEWARD_RUNTIME = originalRuntime;
+    }
   });
 });

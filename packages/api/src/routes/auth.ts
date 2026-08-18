@@ -45,19 +45,19 @@
 // If any of these fail at runtime on Workers, fall back to tweetnacl for
 // ed25519 verify (lightweight, edge-compatible).
 import { createPublicKey, randomBytes, verify as verifySignature } from "node:crypto";
-import { lookup as dnsLookup } from "node:dns";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
 import {
   ACCESS_TOKEN_EXPIRY,
   ACCESS_TOKEN_EXPIRY_SECONDS,
+  assertPinnedDnsTransportSupported,
   assertPublicHttpsEndpoint,
-  assertPublicInternetAddress,
   assertTokenNotRevoked,
   buildBackend,
   buildOtpauthUri,
   buildSamlAuthorizeUrl,
   ChallengeStore,
+  createPublicInternetLookup,
   EmailAuth,
   type EmailAuthConfig,
   EmailDeliveryError,
@@ -10219,6 +10219,7 @@ async function postPublicOidcTokenEndpoint(
   body: URLSearchParams,
 ): Promise<{ ok: boolean; status: number; text: string }> {
   const url = assertPublicHttpsEndpoint(tokenUrl, "OIDC token endpoint");
+  assertPinnedDnsTransportSupported("OIDC token endpoint");
   const bodyText = body.toString();
 
   return new Promise((resolve, reject) => {
@@ -10241,24 +10242,7 @@ async function postPublicOidcTokenEndpoint(
           "Content-Type": "application/x-www-form-urlencoded",
           "Content-Length": new TextEncoder().encode(bodyText).length.toString(),
         },
-        lookup(hostname, options, callback) {
-          dnsLookup(
-            hostname,
-            { all: false, family: options.family, verbatim: true },
-            (error, address, family) => {
-              if (error) {
-                callback(error, address, family);
-                return;
-              }
-              try {
-                assertPublicInternetAddress(address, family, "OIDC token endpoint");
-                callback(null, address, family);
-              } catch (privateAddressError) {
-                callback(privateAddressError as NodeJS.ErrnoException, address, family);
-              }
-            },
-          );
-        },
+        lookup: createPublicInternetLookup("OIDC token endpoint"),
       },
       (response) => {
         if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400) {

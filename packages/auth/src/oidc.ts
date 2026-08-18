@@ -10,6 +10,10 @@ import {
   jwtVerify,
 } from "jose";
 import { assertPublicHttpsEndpoint, assertPublicInternetAddress } from "./public-endpoint";
+import {
+  assertPinnedDnsTransportSupported,
+  createPublicInternetLookup,
+} from "./public-endpoint-node";
 
 interface CachedJwks {
   jwks: ReturnType<typeof createRemoteJWKSet>;
@@ -67,6 +71,7 @@ function assertPublicJwksAddress(address: string, family: number): void {
 
 export async function assertPublicJwksDestination(jwksUri: string): Promise<void> {
   const url = assertSafeJwksUri(jwksUri);
+  assertPinnedDnsTransportSupported("OIDC jwksUri");
   const hostname = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   const literalVersion = isIP(hostname);
   if (literalVersion !== 0) {
@@ -108,6 +113,7 @@ export async function getPublicRemoteJWKSet(
   jwksUri: string,
   cacheKey: string,
 ): Promise<ReturnType<typeof createRemoteJWKSet>> {
+  assertPinnedDnsTransportSupported("OIDC jwksUri");
   const cached = JWKS_CACHE.get(cacheKey);
   if (cached && Date.now() - cached.createdAt <= JWKS_MAX_AGE_MS) {
     return cached.jwks;
@@ -125,6 +131,7 @@ export async function getPublicRemoteJWKSet(
 
 async function fetchPublicJwks(url: string | URL, init?: RequestInit): Promise<Response> {
   const jwksUrl = assertSafeJwksUri(url.toString());
+  assertPinnedDnsTransportSupported("OIDC jwksUri");
   if (ALLOW_TEST_JWKS_FETCH) {
     return fetch(jwksUrl, init);
   }
@@ -136,24 +143,7 @@ async function fetchPublicJwks(url: string | URL, init?: RequestInit): Promise<R
         headers: Object.fromEntries(new Headers(init?.headers).entries()),
         method: init?.method ?? "GET",
         timeout: JWKS_FETCH_TIMEOUT_MS,
-        lookup(hostname, options, callback) {
-          dnsLookup(
-            hostname,
-            { all: false, family: options.family, verbatim: true },
-            (error, address, family) => {
-              if (error) {
-                callback(error, address, family);
-                return;
-              }
-              try {
-                assertPublicJwksAddress(address, family);
-                callback(null, address, family);
-              } catch (privateAddressError) {
-                callback(privateAddressError as NodeJS.ErrnoException, address, family);
-              }
-            },
-          );
-        },
+        lookup: createPublicInternetLookup("OIDC jwksUri"),
       },
       (res) => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400) {

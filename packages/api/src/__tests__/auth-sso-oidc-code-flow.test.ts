@@ -72,7 +72,7 @@ describe("enterprise OIDC authorization-code SSO hardening", () => {
     expect(source).toContain('body.set("client_secret", secret)');
     expect(source).toContain("postPublicOidcTokenEndpoint(provider.tokenUrl, body)");
     expect(source).toContain("OIDC token endpoint redirects are not allowed");
-    expect(source).toContain("assertPublicInternetAddress");
+    expect(source).toContain("createPublicInternetLookup");
     expect(source).toContain("OIDC token endpoint did not return an id_token");
     expect(source).toContain("Direct JWT login is disabled for authorization-code OIDC providers");
   });
@@ -80,7 +80,7 @@ describe("enterprise OIDC authorization-code SSO hardening", () => {
   it("uses the shared public-destination classifier for token URL and DNS answers", () => {
     const source = read("packages/api/src/routes/auth.ts");
     expect(source).toContain('assertPublicHttpsEndpoint(tokenUrl, "OIDC token endpoint")');
-    expect(source).toContain('assertPublicInternetAddress(address, family, "OIDC token endpoint")');
+    expect(source).toContain('lookup: createPublicInternetLookup("OIDC token endpoint")');
     expect(source).not.toContain("function isPrivateOidcIpv4");
     expect(source).not.toContain("function isPrivateOidcIpv6");
   });
