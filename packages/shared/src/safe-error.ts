@@ -52,8 +52,8 @@ const SAFE_ERROR_CODES = new Set([
  * Return bounded, non-secret diagnostics for logs at credential boundaries.
  * Both `instanceof` and property access are guarded because hostile proxies can
  * throw from either operation. Arbitrary error names and codes are never
- * returned: names can contain secrets, while codes are limited to the usual
- * uppercase machine-code grammar.
+ * returned: names and arbitrary machine-looking codes can contain secrets, so
+ * codes are limited to a fixed allowlist of transport failures.
  */
 export function redactedThrownDiagnostics(value: unknown): RedactedThrownDiagnostics {
   let errorClass: string = typeof value;
