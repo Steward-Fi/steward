@@ -596,6 +596,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Verify Redis revocation monotonicity
+        run: bun test packages/auth/src/__tests__/redis-revocation.integration.test.ts
+
       - name: Start embedded API
         env:
           PORT: "3200"

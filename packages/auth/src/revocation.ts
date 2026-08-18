@@ -60,11 +60,19 @@ end
 -- A stale revocation request must not shorten the current revocation line.
 -- Retain the longer of the existing and incoming TTLs for every value update.
 local effectiveTtlMs = ttlMs
-if existingTtlMs > effectiveTtlMs then
+if existingTtlMs == -1 then
+  -- A persistent line is safer than any expiring replacement. Preserve it if
+  -- legacy/operator data ever lacks the expected TTL.
+  effectiveTtlMs = -1
+elseif existingTtlMs > effectiveTtlMs then
   effectiveTtlMs = existingTtlMs
 end
 if issuedBefore > existing then
-  redis.call("SET", latestKey, ARGV[1], "PX", effectiveTtlMs)
+  if effectiveTtlMs == -1 then
+    redis.call("SET", latestKey, ARGV[1])
+  else
+    redis.call("SET", latestKey, ARGV[1], "PX", effectiveTtlMs)
+  end
 elseif effectiveTtlMs > existingTtlMs then
   redis.call("PEXPIRE", latestKey, effectiveTtlMs)
 end
