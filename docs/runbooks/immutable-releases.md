@@ -15,6 +15,11 @@ The release action is pinned to a full commit SHA. A published immutable
 release's tag, metadata, and assets are not an operator repair surface. Publish
 a new patch version instead.
 
+Release workflow runs are serialized per tag with cancellation disabled. A
+manual rerun waits for an in-progress publication and then repeats the
+published-release preflight; it must not execute registry writes concurrently
+with the original run.
+
 ## Legacy `v0.3.16` draft
 
 The repository has a legacy `v0.3.16` draft created on 2026-05-21. It has no

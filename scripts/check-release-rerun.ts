@@ -10,16 +10,39 @@ type ReleasePayload = {
 };
 
 async function readBoundedJson(response: Response): Promise<unknown> {
+  const maxBytes = 64 * 1024;
   const contentLength = Number(response.headers.get("content-length") ?? "0");
-  if (Number.isFinite(contentLength) && contentLength > 64 * 1024) {
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
     throw new Error("GitHub release lookup response exceeded 64 KiB");
   }
-  const body = await response.text();
-  if (new TextEncoder().encode(body).byteLength > 64 * 1024) {
-    throw new Error("GitHub release lookup response exceeded 64 KiB");
+
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("GitHub release lookup returned an empty response");
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel();
+        throw new Error("GitHub release lookup response exceeded 64 KiB");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
   }
   try {
-    return JSON.parse(body) as unknown;
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
   } catch {
     throw new Error("GitHub release lookup returned invalid JSON");
   }

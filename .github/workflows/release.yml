@@ -6,6 +6,13 @@ on:
   push:
     tags: ["v*"]
 
+# A second run for the same tag must wait for the first run to publish its
+# release. It will then fail the immutable-release preflight instead of racing
+# through the same registry writes.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest

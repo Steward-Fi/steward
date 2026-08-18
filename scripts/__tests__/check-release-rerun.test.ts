@@ -2,6 +2,14 @@ import { describe, expect, it } from "bun:test";
 import { checkReleaseRerun, classifyReleaseResponse } from "../check-release-rerun";
 
 describe("release rerun preflight", () => {
+  it("serializes release runs per tag so concurrent reruns cannot pass together", async () => {
+    const workflow = await Bun.file(
+      new URL("../../.github/workflows/release.yml", import.meta.url),
+    ).text();
+    expect(workflow).toContain("group: release-${{ github.ref }}");
+    expect(workflow).toContain("cancel-in-progress: false");
+  });
+
   it("permits a missing release and recoverable draft", () => {
     expect(classifyReleaseResponse(404, undefined, "v1.2.3")).toBe("missing");
     expect(classifyReleaseResponse(200, { draft: true, tag_name: "v1.2.3" }, "v1.2.3")).toBe(
@@ -21,6 +29,24 @@ describe("release rerun preflight", () => {
       classifyReleaseResponse(200, { draft: true, tag_name: "v9.9.9" }, "v1.2.3"),
     ).toThrow();
     expect(() => classifyReleaseResponse(403, undefined, "v1.2.3")).toThrow();
+  });
+
+  it("rejects an oversized chunked response before parsing it", async () => {
+    const oversized = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`{"padding":"${"x".repeat(64 * 1024)}`));
+        controller.enqueue(new TextEncoder().encode('"}'));
+        controller.close();
+      },
+    });
+    await expect(
+      checkReleaseRerun(
+        "Steward-Fi/steward",
+        "v1.2.3",
+        "token",
+        (async () => new Response(oversized, { status: 200 })) as typeof fetch,
+      ),
+    ).rejects.toThrow("exceeded 64 KiB");
   });
 
   it("finds a tagless draft through the bounded authenticated release list", async () => {
