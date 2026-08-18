@@ -198,6 +198,8 @@ beforeAll(async () => {
   const address = jwksServer.address();
   const port = typeof address === "object" && address ? address.port : 0;
   process.env.ELIZA_CLOUD_JWKS_URL = `http://127.0.0.1:${port}/jwks`;
+  process.env.GOOGLE_PROVIDER_CLIENT_ID = "boundary-google-client";
+  process.env.GOOGLE_PROVIDER_CLIENT_SECRET = "boundary-google-secret";
   const { clearAgentJwksCacheForTests } = await import("../middleware/agent-jwt");
   clearAgentJwksCacheForTests();
   const { resetCheckpointSignerCache } = await import("../services/audit-checkpoint");
@@ -227,6 +229,14 @@ beforeAll(async () => {
     forwardCount += 1;
     return new Response('{"ok":true}', { status: 201 });
   });
+  proxy.__setGoogleExecutionTokenForwarderForTests(async () =>
+    Response.json({
+      access_token: "profile-boundary-ephemeral-access",
+      token_type: "Bearer",
+      scope: "openid email https://www.googleapis.com/auth/calendar.readonly",
+      expires_in: 3600,
+    }),
+  );
 });
 
 beforeEach(async () => {
@@ -255,6 +265,8 @@ afterAll(async () => {
     "STEWARD_JWT_SECRET",
     "STEWARD_AUDIT_SIGNING_KEY",
     "ELIZA_CLOUD_JWKS_URL",
+    "GOOGLE_PROVIDER_CLIENT_ID",
+    "GOOGLE_PROVIDER_CLIENT_SECRET",
   ]) {
     delete process.env[key];
   }
@@ -282,7 +294,9 @@ async function runAuthenticatedBoundary(
       : fixture.profile === GOOGLE_PROVIDER_ACTION_PROFILE
         ? JSON.stringify({
             schemaVersion: "steward.provider-google.credential.v1",
-            accessToken: "profile-boundary-credential",
+            accessToken: "profile-boundary-stale-access",
+            refreshToken: "profile-boundary-refresh",
+            scopesGranted: ["openid", "email", "https://www.googleapis.com/auth/calendar.readonly"],
           })
         : "profile-boundary-credential";
   const encrypted = vault.encrypt(credential, {

@@ -28,6 +28,7 @@ import {
   RATE_LIMIT_MAX_REQUESTS,
   RATE_LIMIT_WINDOW_MS,
 } from "./services/context";
+import { startGoogleCredentialLifecycleScheduler } from "./services/provider-google-lifecycle-scheduler";
 import { startProviderReservationReconciliationScheduler } from "./services/provider-reservation-reconciliation-scheduler";
 import { startRetentionScheduler } from "./services/retention";
 import {
@@ -86,6 +87,7 @@ let cancelProviderReservationReconciliation: (() => void) | undefined;
 let cancelTransactionReceiptPolling: (() => void) | undefined;
 let cancelWebhookRetryScheduler: (() => void) | undefined;
 let cancelUpstreamCredentialLeaseScheduler: (() => Promise<void>) | undefined;
+let cancelGoogleCredentialLifecycleScheduler: (() => Promise<void>) | undefined;
 
 function runtimeGate(request: Request, peerAddress: string | null): Response | null {
   const url = new URL(request.url);
@@ -351,6 +353,9 @@ assertAuthStoresAreSafe();
 // ─── Data retention scheduler (SOC2 CC2) ────────────────────────────────────
 
 if (migrationsRan) {
+  if (process.env.GOOGLE_PROVIDER_CLIENT_ID && process.env.GOOGLE_PROVIDER_CLIENT_SECRET) {
+    cancelGoogleCredentialLifecycleScheduler = startGoogleCredentialLifecycleScheduler();
+  }
   cancelRetention = startRetentionScheduler();
   if (redisOk) {
     cancelProviderReservationReconciliation = startProviderReservationReconciliationScheduler();
@@ -402,6 +407,7 @@ const shutdown = async (signal: string) => {
   if (cancelTransactionReceiptPolling) cancelTransactionReceiptPolling();
   if (cancelWebhookRetryScheduler) cancelWebhookRetryScheduler();
   if (cancelUpstreamCredentialLeaseScheduler) await cancelUpstreamCredentialLeaseScheduler();
+  if (cancelGoogleCredentialLifecycleScheduler) await cancelGoogleCredentialLifecycleScheduler();
   rateLimiter.clear();
 
   try {
