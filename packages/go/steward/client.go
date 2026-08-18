@@ -140,10 +140,20 @@ func stewardRedirectPolicy(req *http.Request, via []*http.Request) error {
 	if len(via) == 0 {
 		return nil
 	}
-	if len(via) >= 10 {
+	if req == nil || req.URL == nil || via[0] == nil || via[0].URL == nil {
+		return errors.New("refusing redirect with missing origin metadata")
+	}
+	return stewardRedirectPolicyFromOrigin(req, via[0].URL, len(via))
+}
+
+func stewardRedirectPolicyFromOrigin(req *http.Request, origin *url.URL, redirectCount int) error {
+	if redirectCount >= 10 {
 		return errors.New("stopped after 10 redirects")
 	}
-	if req.URL.User != nil || !sameOrigin(req.URL, via[0].URL) {
+	if req == nil || req.URL == nil || origin == nil {
+		return errors.New("refusing redirect with missing origin metadata")
+	}
+	if req.URL.User != nil || !sameOrigin(req.URL, origin) {
 		return fmt.Errorf("refusing cross-origin or credential-bearing redirect to %q", req.URL.Redacted())
 	}
 	return nil
@@ -175,6 +185,16 @@ func NewClient(config Config) (*Client, error) {
 		if err := stewardRedirectPolicy(req, via); err != nil {
 			return err
 		}
+		// Snapshot the trusted origin before invoking caller-controlled policy.
+		// The callback receives the mutable `via` requests as well as `req`; if we
+		// re-read via[0] afterwards it can rewrite both sides of the comparison and
+		// bypass the mandatory origin boundary.
+		var originalOrigin url.URL
+		if len(via) > 0 && via[0] != nil && via[0].URL != nil {
+			originalOrigin = *via[0].URL
+		} else {
+			return errors.New("refusing redirect with missing origin metadata")
+		}
 		if configuredRedirect != nil {
 			if err := configuredRedirect(req, via); err != nil {
 				return err
@@ -183,7 +203,7 @@ func NewClient(config Config) (*Client, error) {
 		// A caller policy is allowed to mutate req. Re-enforce Steward's mandatory
 		// boundary after it runs so mutation cannot redirect credentials or turn
 		// the client into an SSRF primitive after the initial check.
-		return stewardRedirectPolicy(req, via)
+		return stewardRedirectPolicyFromOrigin(req, &originalOrigin, len(via))
 	}
 	httpClient = &httpClientCopy
 	now := config.Now
