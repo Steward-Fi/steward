@@ -48,11 +48,54 @@ export interface RegistryVerificationOptions {
   minimumUpdatedAt?: string;
   /**
    * Explicitly accept a registry with no pinned trust anchor. Without
-   * trustedKeyIds/trustedPublicKeySha256 any tampered file can simply be
-   * re-signed with an attacker key, so unpinned verification fails closed
-   * unless this flag is set. Local development only.
+   * trustedPublicKeySha256 any tampered file can simply be re-signed with an
+   * attacker key. Key ids are registry-controlled selectors, not trust
+   * anchors. Unpinned verification fails closed unless this flag is set.
+   * Local development only.
    */
   dangerouslyAllowUnpinned?: boolean;
+}
+
+const MAX_REGISTRY_SIGNATURES = 64;
+const MAX_REGISTRY_PAYLOAD_BYTES = 1024 * 1024;
+const MAX_PUBLIC_KEY_PEM_BYTES = 16 * 1024;
+
+function parseEd25519PublicKey(publicKeyPem: unknown): {
+  key: ReturnType<typeof createPublicKey>;
+  fingerprint: string;
+} | null {
+  if (
+    typeof publicKeyPem !== "string" ||
+    Buffer.byteLength(publicKeyPem, "utf8") > MAX_PUBLIC_KEY_PEM_BYTES ||
+    !publicKeyPem.trim().startsWith("-----BEGIN PUBLIC KEY-----") ||
+    !publicKeyPem.trim().endsWith("-----END PUBLIC KEY-----")
+  ) {
+    return null;
+  }
+  try {
+    const key = createPublicKey(publicKeyPem);
+    if (key.asymmetricKeyType !== "ed25519") return null;
+    const spki = key.export({ type: "spki", format: "der" });
+    return {
+      key,
+      fingerprint: createHash("sha256").update(spki).digest("hex"),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function decodeEd25519Signature(signatureBase64: unknown): Buffer | null {
+  if (
+    typeof signatureBase64 !== "string" ||
+    signatureBase64.length !== 88 ||
+    !/^[A-Za-z0-9+/]{86}==$/.test(signatureBase64)
+  ) {
+    return null;
+  }
+  const decoded = Buffer.from(signatureBase64, "base64");
+  if (decoded.byteLength !== 64 || decoded.toString("base64") !== signatureBase64) return null;
+  return decoded;
 }
 
 export function canonicalizeJson(value: unknown): string {
@@ -75,6 +118,21 @@ export function verifyRegistrySignatures(
   trustedPublicKeySha256?: readonly string[],
   options?: RegistryVerificationOptions,
 ): RegistryVerificationResult {
+  if (
+    !registry ||
+    typeof registry !== "object" ||
+    !registry.payload ||
+    typeof registry.payload !== "object" ||
+    !Array.isArray(registry.signatures)
+  ) {
+    return { ok: false, reason: "malformed measurement registry" };
+  }
+  if (registry.signatures.length > MAX_REGISTRY_SIGNATURES) {
+    return {
+      ok: false,
+      reason: `registry has too many signatures (max ${MAX_REGISTRY_SIGNATURES})`,
+    };
+  }
   // SEC-007: an empty/malformed configured count must fail closed, never
   // silently disable the signature gate (Number("") === 0, NaN comparisons
   // are always false).
@@ -112,29 +170,50 @@ export function verifyRegistrySignatures(
     }
   }
 
-  const trustedIds = trustedKeyIds ? new Set(trustedKeyIds) : undefined;
-  const trustedFingerprints = trustedPublicKeySha256 ? new Set(trustedPublicKeySha256) : undefined;
+  const trustedIds = trustedKeyIds?.length ? new Set(trustedKeyIds) : undefined;
+  let trustedFingerprints: Set<string> | undefined;
+  if (trustedPublicKeySha256?.length) {
+    if (trustedPublicKeySha256.some((fingerprint) => !/^[a-f0-9]{64}$/i.test(fingerprint))) {
+      return { ok: false, reason: "trusted public-key fingerprints must be 64 hex characters" };
+    }
+    trustedFingerprints = new Set(
+      trustedPublicKeySha256.map((fingerprint) => fingerprint.toLowerCase()),
+    );
+  }
   // SEC-027: with no pinned trust anchor the signature check is pure ceremony
   // — anyone can re-sign a tampered registry — so fail closed unless the
   // caller explicitly opts into unpinned verification.
-  if (!trustedIds && !trustedFingerprints && !options?.dangerouslyAllowUnpinned) {
+  // keyId is metadata inside the attacker-controlled registry file, not a
+  // cryptographic identity. It may narrow a fingerprint-pinned key set, but
+  // can never establish trust by itself: an attacker can reuse an allowed id
+  // with a newly generated key and re-sign a modified payload.
+  if (!trustedFingerprints && !options?.dangerouslyAllowUnpinned) {
     return {
       ok: false,
       reason:
-        "no registry trust anchor configured: pass trustedKeyIds or trustedPublicKeySha256 " +
+        "no cryptographic registry trust anchor configured: pass trustedPublicKeySha256 " +
         "(or dangerouslyAllowUnpinned for local development only)",
     };
   }
-  const candidateSignatures = registry.signatures.filter((signature) => {
-    if (trustedIds && !trustedIds.has(signature.keyId)) return false;
+  const candidateSignatures: Array<{
+    signature: MeasurementRegistrySignature;
+    key: ReturnType<typeof createPublicKey>;
+    fingerprint: string;
+  }> = [];
+  for (const value of registry.signatures as unknown[]) {
+    if (!value || typeof value !== "object") continue;
+    const signature = value as MeasurementRegistrySignature;
     if (
-      trustedFingerprints &&
-      !trustedFingerprints.has(publicKeyFingerprint(signature.publicKeyPem))
+      signature.algorithm !== "ed25519" ||
+      typeof signature.keyId !== "string" ||
+      (trustedIds && !trustedIds.has(signature.keyId))
     ) {
-      return false;
+      continue;
     }
-    return true;
-  });
+    const parsed = parseEd25519PublicKey(signature.publicKeyPem);
+    if (!parsed || (trustedFingerprints && !trustedFingerprints.has(parsed.fingerprint))) continue;
+    candidateSignatures.push({ signature, ...parsed });
+  }
   if (candidateSignatures.length < requiredSignatureCount) {
     return {
       ok: false,
@@ -142,19 +221,32 @@ export function verifyRegistrySignatures(
     };
   }
 
-  const payload = Buffer.from(canonicalizeJson(registry.payload));
+  let payload: Buffer;
+  try {
+    payload = Buffer.from(canonicalizeJson(registry.payload));
+  } catch {
+    return { ok: false, reason: "registry payload is not canonicalizable JSON" };
+  }
+  if (payload.byteLength > MAX_REGISTRY_PAYLOAD_BYTES) {
+    return { ok: false, reason: "registry payload exceeded the 1 MiB limit" };
+  }
   // SEC-008: count DISTINCT keys, not signature array entries — the same
   // signature pasted twice must not satisfy a two-person quorum.
   const validKeyFingerprints = new Set<string>();
-  for (const signature of candidateSignatures) {
-    if (signature.algorithm !== "ed25519") continue;
-    const valid = verifySignature(
-      null,
-      payload,
-      createPublicKey(signature.publicKeyPem),
-      Buffer.from(signature.signatureBase64, "base64"),
-    );
-    if (valid) validKeyFingerprints.add(publicKeyFingerprint(signature.publicKeyPem));
+  for (const candidate of candidateSignatures) {
+    const signatureBytes = decodeEd25519Signature(candidate.signature.signatureBase64);
+    if (!signatureBytes) continue;
+    try {
+      const valid = verifySignature(null, payload, candidate.key, signatureBytes);
+      // Count the canonical SPKI key, not textual PEM formatting. Re-wrapping
+      // one PEM must not turn one signing key into two quorum participants.
+      if (valid) {
+        validKeyFingerprints.add(candidate.fingerprint);
+      }
+    } catch {
+      // A malformed attacker-supplied key is an invalid signature candidate,
+      // not an exception that may crash the verifier process.
+    }
   }
   const validCount = validKeyFingerprints.size;
 
@@ -168,7 +260,9 @@ export function verifyRegistrySignatures(
 }
 
 export function publicKeyFingerprint(publicKeyPem: string): string {
-  return createHash("sha256").update(publicKeyPem.replace(/\r\n/g, "\n").trim()).digest("hex");
+  const parsed = parseEd25519PublicKey(publicKeyPem);
+  if (!parsed) throw new Error("public key must be a bounded Ed25519 SPKI PEM");
+  return parsed.fingerprint;
 }
 
 export function verifyQuoteAgainstRegistry(

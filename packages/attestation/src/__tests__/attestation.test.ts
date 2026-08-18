@@ -7,6 +7,7 @@ import {
   type MeasurementRegistryFile,
   type MeasurementRegistryPayload,
   normalizeReportData,
+  publicKeyFingerprint,
   registryPayloadDigest,
   verifyQuoteAgainstRegistry,
   verifyRegistrySignatures,
@@ -157,7 +158,9 @@ describe("measurement registry", () => {
       },
     };
     const registry = signRegistry(payload);
-    expect(verifyRegistrySignatures(registry, 1, ["test"]).ok).toBe(true);
+    expect(verifyRegistrySignatures(registry, 1, ["test"], registryFingerprints(registry)).ok).toBe(
+      true,
+    );
     expect(registryPayloadDigest(payload)).toHaveLength(64);
     expect(canonicalizeJson({ b: 1, a: 2 })).toBe('{"a":2,"b":1}');
     expect(
@@ -237,7 +240,9 @@ describe("measurement registry", () => {
     for (const bad of [0, Number.NaN, -1, 1.5]) {
       expect(verifyRegistrySignatures(registry, bad, ["test"]).ok).toBe(false);
     }
-    expect(verifyRegistrySignatures(registry, 1, ["test"]).ok).toBe(true);
+    expect(verifyRegistrySignatures(registry, 1, ["test"], registryFingerprints(registry)).ok).toBe(
+      true,
+    );
   });
 
   // SEC-008: the same signature pasted twice must not satisfy a two-person
@@ -248,7 +253,12 @@ describe("measurement registry", () => {
       payload: registry.payload,
       signatures: [registry.signatures[0], registry.signatures[0]],
     };
-    const denied = verifyRegistrySignatures(duplicated, 2, ["test"]);
+    const denied = verifyRegistrySignatures(
+      duplicated,
+      2,
+      ["test"],
+      registryFingerprints(registry),
+    );
     expect(denied.ok).toBe(false);
     expect(denied.reason).toContain("1 valid trusted signature(s)");
 
@@ -258,7 +268,27 @@ describe("measurement registry", () => {
         twoKeys,
         2,
         twoKeys.signatures.map((s) => s.keyId),
+        registryFingerprints(twoKeys),
       ).ok,
+    ).toBe(true);
+
+    const reformatted: MeasurementRegistryFile = {
+      payload: registry.payload,
+      signatures: [
+        registry.signatures[0],
+        { ...registry.signatures[0], publicKeyPem: rewrapPem(registry.signatures[0].publicKeyPem) },
+      ],
+    };
+    expect(
+      verifyRegistrySignatures(reformatted, 2, ["test"], undefined, {
+        dangerouslyAllowUnpinned: true,
+      }).ok,
+    ).toBe(false);
+    expect(publicKeyFingerprint(reformatted.signatures[1].publicKeyPem)).toBe(
+      publicKeyFingerprint(registry.signatures[0].publicKeyPem),
+    );
+    expect(
+      verifyRegistrySignatures(reformatted, 1, ["test"], registryFingerprints(registry)).ok,
     ).toBe(true);
   });
 
@@ -267,26 +297,99 @@ describe("measurement registry", () => {
   test("registry metadata is bound: registryId and updatedAt freshness", () => {
     const registry = signRegistry(basePayload());
     expect(
-      verifyRegistrySignatures(registry, 1, ["test"], undefined, {
+      verifyRegistrySignatures(registry, 1, ["test"], registryFingerprints(registry), {
         expectedRegistryId: "other-registry",
       }).ok,
     ).toBe(false);
     expect(
-      verifyRegistrySignatures(registry, 1, ["test"], undefined, {
+      verifyRegistrySignatures(registry, 1, ["test"], registryFingerprints(registry), {
         expectedRegistryId: "test",
       }).ok,
     ).toBe(true);
 
-    const stale = verifyRegistrySignatures(registry, 1, ["test"], undefined, {
+    const stale = verifyRegistrySignatures(registry, 1, ["test"], registryFingerprints(registry), {
       minimumUpdatedAt: "2026-07-31T00:00:00.000Z",
     });
     expect(stale.ok).toBe(false);
     expect(stale.reason).toContain("older than minimum");
     expect(
-      verifyRegistrySignatures(registry, 1, ["test"], undefined, {
+      verifyRegistrySignatures(registry, 1, ["test"], registryFingerprints(registry), {
         minimumUpdatedAt: "2026-07-30T00:00:00.000Z",
       }).ok,
     ).toBe(true);
+  });
+
+  test("key IDs alone cannot authorize an attacker-substituted signing key", () => {
+    const trusted = signRegistry(basePayload());
+    const attacker = signRegistry({
+      ...basePayload(),
+      deployments: {
+        ...basePayload().deployments,
+        prod: {
+          ...basePayload().deployments.prod,
+          measurement: { imageDigest: "attacker-image", configHash: "attacker-config" },
+        },
+      },
+    });
+    // Both files claim keyId "test". Only the trusted file owns the pinned
+    // public key fingerprint.
+    expect(verifyRegistrySignatures(attacker, 1, ["test"]).ok).toBe(false);
+    expect(verifyRegistrySignatures(attacker, 1, ["test"], registryFingerprints(trusted)).ok).toBe(
+      false,
+    );
+  });
+
+  test("malformed public keys fail closed without throwing", () => {
+    const registry = signRegistry(basePayload());
+    registry.signatures[0].publicKeyPem = "not a public key";
+    const verify = () =>
+      verifyRegistrySignatures(registry, 1, undefined, undefined, {
+        dangerouslyAllowUnpinned: true,
+      });
+    expect(verify).not.toThrow();
+    expect(verify().ok).toBe(false);
+
+    const wrongRuntimeType = signRegistry(basePayload()) as unknown as {
+      payload: MeasurementRegistryPayload;
+      signatures: Array<Record<string, unknown>>;
+    };
+    wrongRuntimeType.signatures[0].publicKeyPem = 42;
+    expect(() =>
+      verifyRegistrySignatures(
+        wrongRuntimeType as unknown as MeasurementRegistryFile,
+        1,
+        undefined,
+        ["0".repeat(64)],
+      ),
+    ).not.toThrow();
+    expect(
+      verifyRegistrySignatures(
+        wrongRuntimeType as unknown as MeasurementRegistryFile,
+        1,
+        undefined,
+        ["0".repeat(64)],
+      ).ok,
+    ).toBe(false);
+  });
+
+  test("malformed pins and signatures fail closed", () => {
+    const registry = signRegistry(basePayload());
+    expect(verifyRegistrySignatures(registry, 1, undefined, ["not-a-sha256"]).ok).toBe(false);
+
+    const corrupt = structuredClone(registry);
+    corrupt.signatures[0].signatureBase64 += "garbage";
+    expect(verifyRegistrySignatures(corrupt, 1, undefined, registryFingerprints(registry)).ok).toBe(
+      false,
+    );
+
+    expect(
+      verifyRegistrySignatures(
+        { payload: registry.payload, signatures: Array(65).fill(registry.signatures[0]) },
+        1,
+        undefined,
+        registryFingerprints(registry),
+      ).ok,
+    ).toBe(false);
   });
 });
 
@@ -307,6 +410,18 @@ function basePayload(): MeasurementRegistryPayload {
 
 function signRegistry(payload: MeasurementRegistryPayload): MeasurementRegistryFile {
   return signRegistryWithKeys(payload, 1);
+}
+
+function registryFingerprints(registry: MeasurementRegistryFile): string[] {
+  return registry.signatures.map((signature) => publicKeyFingerprint(signature.publicKeyPem));
+}
+
+function rewrapPem(pem: string): string {
+  const body = pem
+    .split(/\r?\n/)
+    .filter((line) => line && !line.startsWith("-----"))
+    .join("");
+  return `-----BEGIN PUBLIC KEY-----\n${body.match(/.{1,32}/g)?.join("\n")}\n-----END PUBLIC KEY-----\n`;
 }
 
 function signRegistryWithKeys(
