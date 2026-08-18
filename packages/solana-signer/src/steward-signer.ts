@@ -345,6 +345,21 @@ function deserializeTransaction(bytes: Uint8Array): Transaction | VersionedTrans
   return transaction;
 }
 
+function serializeTransaction(tx: Transaction | VersionedTransaction): Uint8Array {
+  return isVersioned(tx)
+    ? tx.serialize()
+    : tx.serialize({ requireAllSignatures: false, verifySignatures: false });
+}
+
+function malformedSuccessResponse(message: string, cause: unknown): StewardSignerError {
+  try {
+    if (cause instanceof StewardSignerError) return cause;
+  } catch {
+    // A hostile Proxy can trap prototype access. Always return a bounded error.
+  }
+  return new StewardSignerError("api", message, { cause });
+}
+
 /** Build a signer for one Steward agent. Async because it resolves the agent's
  *  Solana address from the vault unless `address` is supplied. */
 export async function createStewardSolanaSigner(
@@ -369,13 +384,26 @@ export async function createStewardSolanaSigner(
 
   let address = config.address;
   if (!address) {
-    let addresses: Array<{ chainFamily: string; address: string }>;
+    let response: Awaited<ReturnType<StewardClient["getAddresses"]>>;
     try {
-      ({ addresses } = await client.getAddresses(agentId));
+      response = await client.getAddresses(agentId);
     } catch (err) {
       throw toSignerError(err);
     }
-    address = addresses.find((a) => a.chainFamily === "solana")?.address;
+    try {
+      if (!response || !Array.isArray(response.addresses)) {
+        throw new Error("addresses is not an array");
+      }
+      address = response.addresses.find(
+        (entry) =>
+          entry !== null &&
+          typeof entry === "object" &&
+          entry.chainFamily === "solana" &&
+          typeof entry.address === "string",
+      )?.address;
+    } catch (err) {
+      throw malformedSuccessResponse("Steward returned a malformed address response", err);
+    }
     if (!address) {
       throw new StewardSignerError(
         "api",
@@ -416,18 +444,23 @@ export async function createStewardSolanaSigner(
     } catch (err) {
       throw toSignerError(err);
     }
-    if (result.broadcast !== false) {
-      throw new StewardSignerError("api", "Steward did not prove that broadcast:false was honored");
-    }
-    if (result.chainId !== chainId) {
-      throw new StewardSignerError("api", "Steward returned a mismatched Solana chainId");
-    }
-    let returned: Transaction | VersionedTransaction;
     try {
-      returned = deserializeTransaction(decodeCanonicalTransactionBase64(result.signature));
+      if (!result || typeof result !== "object" || typeof result.signature !== "string") {
+        throw new Error("signing response is not an object with a signature");
+      }
+      if (result.broadcast !== false) {
+        throw new StewardSignerError(
+          "api",
+          "Steward did not prove that broadcast:false was honored",
+        );
+      }
+      if (result.chainId !== chainId) {
+        throw new StewardSignerError("api", "Steward returned a mismatched Solana chainId");
+      }
+      const returned = deserializeTransaction(decodeCanonicalTransactionBase64(result.signature));
       validateSignedResponse(submitted, returned, publicKey);
     } catch (err) {
-      throw toSignerError(err);
+      throw malformedSuccessResponse("Steward returned a malformed signing response", err);
     }
     // With broadcast:false the route returns the FULL signed transaction,
     // base64-serialized, in the `signature` field.
@@ -437,13 +470,26 @@ export async function createStewardSolanaSigner(
   async function signOne<T extends Transaction | VersionedTransaction>(tx: T): Promise<T> {
     // requireAllSignatures:false preserves partial signatures already added by
     // co-signing keypairs (mint keypairs, protocol minters) through the round trip.
-    const bytes = isVersioned(tx)
-      ? tx.serialize()
-      : tx.serialize({ requireAllSignatures: false, verifySignatures: false });
-    const signedB64 = await signSerializedTransaction(
-      Buffer.from(bytes).toString("base64"),
-      config.hints?.(tx),
-    );
+    const bytes = serializeTransaction(tx);
+    const hints = config.hints?.(tx);
+    let currentBytes: Uint8Array;
+    try {
+      currentBytes = serializeTransaction(tx);
+    } catch (err) {
+      throw new StewardSignerError("api", "caller transaction changed while preparing signing", {
+        cause: err,
+      });
+    }
+    assertSameBytes(currentBytes, bytes, "caller transaction changed while preparing signing");
+    const signedB64 = await signSerializedTransaction(Buffer.from(bytes).toString("base64"), hints);
+    try {
+      currentBytes = serializeTransaction(tx);
+    } catch (err) {
+      throw new StewardSignerError("api", "caller transaction changed during signing", {
+        cause: err,
+      });
+    }
+    assertSameBytes(currentBytes, bytes, "caller transaction changed during signing");
     const signedBytes = Buffer.from(signedB64, "base64");
     // Copy signatures back onto the caller's object so identity is preserved,
     // the way in-process keypair signers mutate and return the same tx.

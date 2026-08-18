@@ -1,5 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import { Keypair, SystemProgram, Transaction } from "@solana/web3.js";
+import {
+  Keypair,
+  MessageV0,
+  SystemProgram,
+  Transaction,
+  VersionedTransaction,
+} from "@solana/web3.js";
 import {
   createStewardSolanaSigner,
   SOLANA_MAX_TRANSACTION_BYTES,
@@ -44,6 +50,22 @@ function newSigner(overrides: Record<string, unknown> = {}) {
   });
 }
 
+function versionedMultiSignerTransfer(
+  payer: Keypair["publicKey"],
+  coSigner: Keypair["publicKey"],
+): VersionedTransaction {
+  return new VersionedTransaction(
+    MessageV0.compile({
+      payerKey: payer,
+      recentBlockhash: STUB_BLOCKHASH,
+      instructions: [
+        SystemProgram.transfer({ fromPubkey: payer, toPubkey: SINK, lamports: 1_000 }),
+        SystemProgram.transfer({ fromPubkey: coSigner, toPubkey: SINK, lamports: 1 }),
+      ],
+    }),
+  );
+}
+
 describe("createStewardSolanaSigner", () => {
   it("resolves the agent's Solana address from the vault and sends the bearer JWT", async () => {
     const signer = await newSigner();
@@ -81,6 +103,16 @@ describe("createStewardSolanaSigner", () => {
     await expect(newSigner({ agentId: " " })).rejects.toThrow(/agentId/);
     await expect(newSigner({ chainId: 1 })).rejects.toThrow(/101.*102/);
     expect(stub.requests).toHaveLength(0);
+  });
+
+  it("normalizes a malformed successful address response", async () => {
+    stub.setMode("malformed-addresses");
+    const err = await newSigner().catch((cause: unknown) => cause);
+    expect(err).toBeInstanceOf(StewardSignerError);
+    expect((err as StewardSignerError).kind).toBe("api");
+    expect((err as StewardSignerError).message).toBe(
+      "Steward returned a malformed address response",
+    );
   });
 });
 
@@ -252,6 +284,72 @@ describe("signTransaction", () => {
       return copy.signatures[0];
     })();
     expect(Buffer.from(vtx.signatures[0]).equals(Buffer.from(expected))).toBe(true);
+  });
+
+  it("preserves existing and empty v0 co-signer slots byte-for-byte", async () => {
+    const signer = await newSigner();
+    const coSigner = Keypair.fromSeed(new Uint8Array(32).fill(16));
+
+    const signedCoSigner = versionedMultiSignerTransfer(signer.publicKey, coSigner.publicKey);
+    signedCoSigner.sign([coSigner]);
+    const prior = signedCoSigner.signatures[1].slice();
+    await signer.signTransaction(signedCoSigner);
+    expect(Buffer.from(signedCoSigner.signatures[1]).equals(Buffer.from(prior))).toBe(true);
+
+    const emptyCoSigner = versionedMultiSignerTransfer(signer.publicKey, coSigner.publicKey);
+    const empty = emptyCoSigner.signatures[1].slice();
+    await signer.signTransaction(emptyCoSigner);
+    expect(Buffer.from(emptyCoSigner.signatures[1]).equals(Buffer.from(empty))).toBe(true);
+  });
+
+  it("rejects changed and injected v0 co-signer slots", async () => {
+    const signer = await newSigner();
+    const coSigner = Keypair.fromSeed(new Uint8Array(32).fill(17));
+    const changed = versionedMultiSignerTransfer(signer.publicKey, coSigner.publicKey);
+    changed.sign([coSigner]);
+    stub.setMode("changed-cosigner");
+    await expect(signer.signTransaction(changed)).rejects.toThrow(/changed a co-signer/);
+
+    const injected = versionedMultiSignerTransfer(signer.publicKey, coSigner.publicKey);
+    stub.setMode("injected-cosigner");
+    await expect(signer.signTransaction(injected)).rejects.toThrow(/changed a co-signer/);
+  });
+
+  it("rejects transaction mutation by hints or while signing", async () => {
+    const mutatedByHints = legacyTransfer(vaultKeypair.publicKey);
+    const hintSigner = await newSigner({
+      address: vaultKeypair.publicKey.toBase58(),
+      hints: (tx: Transaction) => {
+        tx.recentBlockhash = new Keypair().publicKey.toBase58();
+        return undefined;
+      },
+    });
+    const before = stub.requests.length;
+    await expect(hintSigner.signTransaction(mutatedByHints)).rejects.toThrow(
+      /changed while preparing signing/,
+    );
+    expect(stub.requests.length).toBe(before);
+
+    const signer = await newSigner();
+    const mutatedInFlight = legacyTransfer(signer.publicKey);
+    stub.setMode("slow-sign");
+    const pending = signer.signTransaction(mutatedInFlight);
+    await Bun.sleep(5);
+    mutatedInFlight.recentBlockhash = new Keypair().publicKey.toBase58();
+    await expect(pending).rejects.toThrow(/changed during signing/);
+  });
+
+  it("normalizes a malformed successful signing response", async () => {
+    const signer = await newSigner();
+    stub.setMode("malformed-sign-result");
+    const err = await signer
+      .signTransaction(legacyTransfer(signer.publicKey))
+      .catch((cause: unknown) => cause);
+    expect(err).toBeInstanceOf(StewardSignerError);
+    expect((err as StewardSignerError).kind).toBe("api");
+    expect((err as StewardSignerError).message).toBe(
+      "Steward returned a malformed signing response",
+    );
   });
 
   it("forwards advisory to/value hints for the blind-signing path", async () => {

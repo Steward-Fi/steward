@@ -27,6 +27,9 @@ export type StubMode =
   | "invalid-signature"
   | "changed-cosigner"
   | "injected-cosigner"
+  | "malformed-addresses"
+  | "malformed-sign-result"
+  | "slow-sign"
   | "trailing-response-bytes"
   | "missing-broadcast-proof"
   | "wrong-chain";
@@ -78,6 +81,9 @@ export function startStubSteward(kp: Keypair): StubSteward {
       requests.push({ method: req.method, path: url.pathname, headers, body });
 
       if (req.method === "GET" && /^\/vault\/[^/]+\/addresses$/.test(url.pathname)) {
+        if (mode === "malformed-addresses") {
+          return json({ ok: true, data: { addresses: null } });
+        }
         return json({
           ok: true,
           data: {
@@ -91,6 +97,10 @@ export function startStubSteward(kp: Keypair): StubSteward {
       }
 
       if (req.method === "POST" && /^\/vault\/[^/]+\/sign-solana$/.test(url.pathname)) {
+        if (mode === "malformed-sign-result") {
+          return json({ ok: true, data: null });
+        }
+        if (mode === "slow-sign") await Bun.sleep(25);
         if (mode === "forbidden") {
           return json({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
         }
@@ -142,6 +152,12 @@ export function startStubSteward(kp: Keypair): StubSteward {
         if (isVersionedTransactionBytes(bytes)) {
           const vtx = VersionedTransaction.deserialize(bytes);
           vtx.sign([kp]);
+          if (mode === "changed-cosigner" && vtx.signatures[1]) {
+            vtx.signatures[1][0] ^= 1;
+          }
+          if (mode === "injected-cosigner" && vtx.signatures[1]) {
+            vtx.signatures[1] = new Uint8Array(64).fill(1);
+          }
           signed = vtx.serialize();
         } else {
           const tx = Transaction.from(bytes);
