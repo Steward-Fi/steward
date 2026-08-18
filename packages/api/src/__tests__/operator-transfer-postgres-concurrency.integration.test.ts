@@ -138,3 +138,58 @@ realPostgresIt(
     }
   },
 );
+
+realPostgresIt(
+  "preserves ambiguous cross-rail counters and releases only reconciled failures",
+  async () => {
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const tenantId = `operator-stats-tenant-${suffix}`;
+    const agentId = `operator-stats-agent-${suffix}`;
+    const otherAgentId = `operator-stats-other-${suffix}`;
+    const admin = postgres(databaseUrl!, { max: 1 });
+    try {
+      await admin`insert into tenants (id, name, api_key_hash) values (${tenantId}, ${tenantId}, ${`hash-${tenantId}`})`;
+      await admin`
+        insert into agents (id, tenant_id, name, wallet_address) values
+          (${agentId}, ${tenantId}, ${agentId}, '0x1234567890123456789012345678901234567890'),
+          (${otherAgentId}, ${tenantId}, ${otherAgentId}, '0x2234567890123456789012345678901234567890')
+      `;
+      await admin`
+        insert into transactions (id, agent_id, status, to_address, value, chain_id, policy_results) values
+          (${`unknown-${suffix}`}, ${agentId}, 'outcome_unknown', '0x3234567890123456789012345678901234567890', '95', 42161, '[]'::jsonb),
+          (${`failed-${suffix}`}, ${agentId}, 'failed', '0x3234567890123456789012345678901234567890', '999', 42161, '[]'::jsonb),
+          (${`other-${suffix}`}, ${otherAgentId}, 'confirmed', '0x3234567890123456789012345678901234567890', '777', 42161, '[]'::jsonb)
+      `;
+      await admin`
+        insert into operator_transfer_reservations
+          (tenant_id, agent_id, rail, idempotency_key, destination, amount_base_units, status, finalized_at)
+        values
+          (${tenantId}, ${agentId}, 'withdraw', ${`pending-${suffix}`}, '0x4234567890123456789012345678901234567890', '60000000', 'pending', null),
+          (${tenantId}, ${agentId}, 'usd-send', ${`final-${suffix}`}, '0x4234567890123456789012345678901234567890', '10000000', 'final', now()),
+          (${tenantId}, ${agentId}, 'withdraw', ${`released-${suffix}`}, '0x4234567890123456789012345678901234567890', '999000000', 'released', now()),
+          (${tenantId}, ${otherAgentId}, 'withdraw', ${`other-${suffix}`}, '0x4234567890123456789012345678901234567890', '888000000', 'final', now())
+      `;
+
+      const { getTransactionStats } = await import("../services/context");
+      const ambiguous = await getTransactionStats(agentId, 42161);
+      expect(ambiguous.recentTxCount1h).toBe(3);
+      expect(ambiguous.recentTxCount24h).toBe(3);
+      expect(ambiguous.spentToday).toBe(95n);
+      expect(ambiguous.additionalUsdSpentTodayMicros).toBe(70_000_000n);
+
+      await admin`update transactions set status = 'failed' where id = ${`unknown-${suffix}`}`;
+      await admin`
+        update operator_transfer_reservations set status = 'released', finalized_at = now()
+        where tenant_id = ${tenantId} and agent_id = ${agentId} and idempotency_key = ${`pending-${suffix}`}
+      `;
+      const reconciled = await getTransactionStats(agentId, 42161);
+      expect(reconciled.recentTxCount1h).toBe(1);
+      expect(reconciled.recentTxCount24h).toBe(1);
+      expect(reconciled.spentToday).toBe(0n);
+      expect(reconciled.additionalUsdSpentTodayMicros).toBe(10_000_000n);
+    } finally {
+      await admin`delete from tenants where id = ${tenantId}`;
+      await admin.end();
+    }
+  },
+);

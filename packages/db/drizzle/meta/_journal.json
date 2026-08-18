@@ -568,6 +568,13 @@
       "when": 1787031495000,
       "tag": "0100_sigv4_injection",
       "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "7",
+      "when": 1787106472000,
+      "tag": "0101_operator_transfer_integrity",
+      "breakpoints": true
     }
   ]
 }
