@@ -4,6 +4,7 @@ import {
   checkCiTestInventory,
   extractJob,
   extractUnitMatrix,
+  jobExecutesPackageTests,
 } from "../check-ci-test-inventory";
 
 describe("CI test inventory", () => {
@@ -45,5 +46,35 @@ describe("CI test inventory", () => {
     expect(extractUnitMatrix(workflow)).toEqual(["packages/a", "scripts/__tests__"]);
     expect(extractJob(workflow, "dedicated")).toContain("bun test packages/b");
     expect(extractJob(workflow, "dedicated")).not.toContain("later");
+  });
+
+  test("dedicated coverage requires an actual package test command", () => {
+    const valid = [
+      "  dedicated:",
+      "    steps:",
+      "      - name: Test package",
+      "        working-directory: packages/a",
+      "        run: bun run test",
+    ].join("\n");
+    const commentOnly = [
+      "  dedicated:",
+      "    # bun test packages/a",
+      "    steps:",
+      "      - name: packages/a bun test",
+      "        run: bun run build",
+    ].join("\n");
+    const unrelated = [
+      "  dedicated:",
+      "    steps:",
+      "      - name: Test another package",
+      "        working-directory: packages/b",
+      "        run: |",
+      "          bun test packages/b",
+      "          echo packages/a",
+    ].join("\n");
+
+    expect(jobExecutesPackageTests(extractJob(valid, "dedicated"), "packages/a")).toBe(true);
+    expect(jobExecutesPackageTests(extractJob(commentOnly, "dedicated"), "packages/a")).toBe(false);
+    expect(jobExecutesPackageTests(extractJob(unrelated, "dedicated"), "packages/a")).toBe(false);
   });
 });

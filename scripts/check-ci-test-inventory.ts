@@ -72,6 +72,64 @@ export function extractJob(workflow: string, jobName: string): string {
   return lines.slice(start, end < 0 ? undefined : end).join("\n");
 }
 
+interface WorkflowStep {
+  workingDirectory?: string;
+  run?: string;
+}
+
+function extractRunSteps(job: string): WorkflowStep[] {
+  const lines = job.split(/\r?\n/);
+  const steps: WorkflowStep[] = [];
+  let current: WorkflowStep | undefined;
+
+  const finishStep = () => {
+    if (current) steps.push(current);
+    current = undefined;
+  };
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^ {6}- /.test(line)) {
+      finishStep();
+      current = {};
+      continue;
+    }
+    if (!current) continue;
+
+    const workingDirectory = line.match(/^ {8}working-directory:\s*["']?([^"'\s]+)["']?\s*$/);
+    if (workingDirectory) {
+      current.workingDirectory = workingDirectory[1];
+      continue;
+    }
+
+    const inlineRun = line.match(/^ {8}run:\s*(?![|>][-+]?\s*$)(.+)$/);
+    if (inlineRun) {
+      current.run = inlineRun[1].trim();
+      continue;
+    }
+
+    if (/^ {8}run:\s*[|>][-+]?\s*$/.test(line)) {
+      const command: string[] = [];
+      while (index + 1 < lines.length && /^(?: {10,}\S|\s*$)/.test(lines[index + 1])) {
+        index += 1;
+        command.push(lines[index].replace(/^ {10}/, ""));
+      }
+      current.run = command.join("\n");
+    }
+  }
+  finishStep();
+  return steps;
+}
+
+export function jobExecutesPackageTests(job: string, packagePath: string): boolean {
+  return extractRunSteps(job).some((step) => {
+    if (!step.run || !/(?:^|[;&|()\s])(?:bun|cargo|flutter)(?:\s|$)[^\n]*\b(?:test|run-tests)\b/m.test(step.run)) {
+      return false;
+    }
+    return step.workingDirectory === packagePath || step.run.includes(packagePath);
+  });
+}
+
 export function assertCompleteCoverage(
   workspaceTests: string[],
   matrix: string[],
@@ -115,7 +173,7 @@ export function checkCiTestInventory(rootDir = resolve(import.meta.dir, "..")): 
 
     for (const [packagePath, jobName] of Object.entries(DEDICATED_JOBS)) {
       const job = extractJob(workflow, jobName);
-      if (!job.includes(packagePath) || !/(?:bun|cargo|flutter).*?(?:test|run-tests)/s.test(job)) {
+      if (!jobExecutesPackageTests(job, packagePath)) {
         throw new Error(
           `${workflowPath} job ${jobName} does not visibly execute the ${packagePath} test suite`,
         );
