@@ -8,9 +8,11 @@ const MAX_APPROVAL_PAGES = 51;
 /**
  * Load an agent's complete pending approval queue through the credentialed SDK.
  *
- * Offset pagination over a newest-first queue can shift while it is read. A
- * duplicate ID proves an insertion shifted the snapshot, so retry once rather
- * than showing a duplicated or partial security-sensitive queue.
+ * Offset pagination over a newest-first queue can shift while it is read. Each
+ * page after the first deliberately overlaps the preceding page by one row.
+ * A changed boundary detects both forward shifts (inserts) and backward shifts
+ * (resolutions/deletes), so retry once rather than showing a partial
+ * security-sensitive queue.
  */
 export async function getAllPendingApprovals(
   client: Pick<StewardClient, "listApprovals">,
@@ -29,7 +31,16 @@ export async function getAllPendingApprovals(
         limit: APPROVAL_PAGE_SIZE,
         offset,
       });
-      for (const approval of page) {
+      let pageStart = 0;
+      if (pageNumber > 0) {
+        const expectedBoundaryId = approvals.at(-1)?.id;
+        if (!expectedBoundaryId || page[0]?.id !== expectedBoundaryId) {
+          shifted = true;
+          break;
+        }
+        pageStart = 1;
+      }
+      for (const approval of page.slice(pageStart)) {
         if (seen.has(approval.id)) {
           shifted = true;
           break;
@@ -39,7 +50,10 @@ export async function getAllPendingApprovals(
       }
       if (shifted) break;
       if (page.length < APPROVAL_PAGE_SIZE) return approvals;
-      offset += page.length;
+      // Keep the final row as an overlap sentinel for the next page. Without
+      // this, a resolved row before the offset can shift an unseen approval
+      // backward and make it disappear from the assembled queue.
+      offset += page.length - 1;
     }
 
     if (!shifted) {
