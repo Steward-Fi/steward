@@ -258,6 +258,8 @@ export function __setGoogleForwardForTests(fn: GoogleForwardFn | null): () => vo
 let beforeConnectCommitForTests: (() => void | Promise<void>) | null = null;
 let afterGoogleCredentialStageForTests: (() => void | Promise<void>) | null = null;
 let afterGoogleRefreshIntentForTests: (() => void | Promise<void>) | null = null;
+let afterGoogleDisconnectJournalForTests: (() => void | Promise<void>) | null = null;
+let afterGoogleDisconnectRevokeForTests: (() => void | Promise<void>) | null = null;
 
 /** Inject a failure immediately before the connect audit append. Test-only. */
 export function __setGoogleConnectCommitHookForTests(
@@ -289,6 +291,28 @@ export function __setGoogleRefreshIntentHookForTests(
   afterGoogleRefreshIntentForTests = hook;
   return () => {
     afterGoogleRefreshIntentForTests = previous;
+  };
+}
+
+/** Inject a crash after local authority is revoked and the revoke handle commits. */
+export function __setGoogleDisconnectJournalHookForTests(
+  hook: (() => void | Promise<void>) | null,
+): () => void {
+  const previous = afterGoogleDisconnectJournalForTests;
+  afterGoogleDisconnectJournalForTests = hook;
+  return () => {
+    afterGoogleDisconnectJournalForTests = previous;
+  };
+}
+
+/** Inject a crash after the upstream revoke returns but before terminalization. */
+export function __setGoogleDisconnectRevokeHookForTests(
+  hook: (() => void | Promise<void>) | null,
+): () => void {
+  const previous = afterGoogleDisconnectRevokeForTests;
+  afterGoogleDisconnectRevokeForTests = hook;
+  return () => {
+    afterGoogleDisconnectRevokeForTests = previous;
   };
 }
 
@@ -554,7 +578,7 @@ async function stageGoogleCredentialResponse(input: {
   tenantId: string;
   workspaceId: string;
   vault: SecretVault;
-  kind: "connect_exchange" | "refresh_rotation";
+  kind: "connect_exchange" | "refresh_rotation" | "disconnect_revoke";
   token: GoogleTokenResponse;
   providerAccountId?: string;
   expectedAccountRevision?: number;
@@ -629,6 +653,12 @@ async function setGoogleLifecycleState(
         and(
           eq(providerGoogleCredentialLifecycles.tenantId, tenantId),
           eq(providerGoogleCredentialLifecycles.id, lifecycleId),
+          inArray(providerGoogleCredentialLifecycles.state, [
+            "inflight",
+            "credential_staged",
+            "revocation_pending",
+            "needs_attention",
+          ]),
         ),
       )
       .limit(1)
@@ -646,6 +676,12 @@ async function setGoogleLifecycleState(
         and(
           eq(providerGoogleCredentialLifecycles.tenantId, tenantId),
           eq(providerGoogleCredentialLifecycles.id, lifecycleId),
+          inArray(providerGoogleCredentialLifecycles.state, [
+            "inflight",
+            "credential_staged",
+            "revocation_pending",
+            "needs_attention",
+          ]),
         ),
       )
       .returning();
@@ -689,7 +725,10 @@ export async function reconcileGoogleCredentialRevocation(input: {
     !row ||
     (row.state !== "revocation_pending" &&
       row.state !== "needs_attention" &&
-      !(row.kind === "connect_exchange" && row.state === "credential_staged"))
+      !(
+        (row.kind === "connect_exchange" || row.kind === "disconnect_revoke") &&
+        row.state === "credential_staged"
+      ))
   ) {
     return "already_terminal";
   }
@@ -1049,6 +1088,35 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
       )
       .limit(1)
       .for("update");
+
+    if (account) {
+      const [pendingDisconnect] = await tx
+        .select({ id: providerGoogleCredentialLifecycles.id })
+        .from(providerGoogleCredentialLifecycles)
+        .where(
+          and(
+            eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
+            eq(providerGoogleCredentialLifecycles.workspaceId, input.workspaceId),
+            eq(providerGoogleCredentialLifecycles.providerAccountId, account.id),
+            eq(providerGoogleCredentialLifecycles.kind, "disconnect_revoke"),
+            inArray(providerGoogleCredentialLifecycles.state, [
+              "inflight",
+              "credential_staged",
+              "revocation_pending",
+              "needs_attention",
+            ]),
+          ),
+        )
+        .limit(1)
+        .for("update");
+      if (pendingDisconnect) {
+        throw new GoogleConnectError(
+          "GOOGLE_CREDENTIAL_NEEDS_ATTENTION",
+          409,
+          "previous Google disconnect is still awaiting upstream revocation",
+        );
+      }
+    }
 
     const [existingSecret] = await tx
       .select({ id: secrets.id })
@@ -2161,14 +2229,15 @@ export interface DisconnectResult {
 }
 
 /**
- * Disconnect a connected Google account: best-effort revoke at Google, degrade the account
- * (status revoked), bump revision, audit. Revocation failure at Google does NOT block
- * the local degrade — we fail CLOSED locally regardless.
+ * Disconnect a connected Google account. Local authority is revoked in the
+ * same transaction that commits an encrypted upstream-revocation handle. A
+ * crash can therefore delay provider cleanup, but can never leave the old
+ * credential executable or race a reconnect into the pending revoker.
  */
 export async function disconnectGoogleProviderCredential(
   input: DisconnectInput,
 ): Promise<DisconnectResult> {
-  return withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
+  const prepared = await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
     const tx = txRaw as DbExecutor;
     const [account] = await tx
       .select()
@@ -2191,26 +2260,20 @@ export async function disconnectGoogleProviderCredential(
         "provider account is not a Google account",
       );
     }
-
-    let revokedAtUpstream = false;
-    if (account.credentialSecretId) {
-      try {
-        const cred = await loadCredential(
-          input.vault,
-          input.tenantId,
-          account.credentialSecretId,
-          tx,
-        );
-        revokedAtUpstream = await revokeUpstreamBestEffort(
-          cred.payload.accessToken,
-          cred.refreshToken,
-        );
-      } catch {
-        // Best-effort only. Local degrade proceeds regardless.
-        revokedAtUpstream = false;
-      }
+    if (account.status === "revoked") {
+      return { lifecycleId: null, accessToken: null, refreshToken: null };
     }
 
+    let credential: LoadedCredential | null = null;
+    if (account.credentialSecretId) {
+      credential = await loadCredential(
+        input.vault,
+        input.tenantId,
+        account.credentialSecretId,
+        tx,
+      );
+    }
+    const lifecycleId = credential ? randomUUID() : null;
     const [degraded] = await tx
       .update(providerAccounts)
       .set({ status: "revoked", revision: account.revision + 1, updatedAt: new Date() })
@@ -2230,6 +2293,41 @@ export async function disconnectGoogleProviderCredential(
       );
     }
 
+    if (credential && lifecycleId) {
+      const secret = await input.vault.createSecretWithinTx(
+        tx,
+        input.tenantId,
+        `provider-google-lifecycle:${lifecycleId}`,
+        JSON.stringify({
+          schemaVersion: "steward.provider-google.lifecycle.v1",
+          token: {
+            access_token: credential.payload.accessToken,
+            refresh_token: credential.refreshToken ?? undefined,
+          },
+        } satisfies GoogleLifecycleSecret),
+        { description: "Encrypted transient Google OAuth revocation material" },
+      );
+      await tx.insert(providerGoogleCredentialLifecycles).values({
+        id: lifecycleId,
+        tenantId: input.tenantId,
+        workspaceId: input.workspaceId,
+        providerAccountId: account.id,
+        kind: "disconnect_revoke",
+        state: "revocation_pending",
+        credentialSecretId: secret.id,
+        expectedAccountRevision: degraded.revision,
+      });
+      await append({
+        tenantId: input.tenantId,
+        actorType: "user",
+        actorId: input.callerUserId,
+        action: "provider.google.disconnect.intent_staged",
+        resourceType: "provider_google_credential_lifecycle",
+        resourceId: lifecycleId,
+        metadata: { workspaceId: input.workspaceId, providerAccountId: account.id },
+      });
+    }
+
     await append({
       tenantId: input.tenantId,
       actorType: "user",
@@ -2240,15 +2338,38 @@ export async function disconnectGoogleProviderCredential(
       metadata: {
         workspaceId: input.workspaceId,
         googleUserId: account.externalRef,
-        revokedAtUpstream,
+        revokedAtUpstream: false,
+        upstreamRevocationPending: Boolean(lifecycleId),
         previousRevision: account.revision,
         newRevision: degraded.revision,
         requestId: input.requestId ?? null,
       },
     });
-
-    return { providerAccountId: account.id, revoked: revokedAtUpstream };
+    return {
+      lifecycleId,
+      accessToken: credential?.payload.accessToken ?? null,
+      refreshToken: credential?.refreshToken ?? null,
+    };
   });
+
+  if (!prepared.lifecycleId || !prepared.accessToken) {
+    return { providerAccountId: input.accountId, revoked: false };
+  }
+  await afterGoogleDisconnectJournalForTests?.();
+  let revokedAtUpstream = false;
+  try {
+    revokedAtUpstream = await revokeUpstreamBestEffort(prepared.accessToken, prepared.refreshToken);
+  } catch {
+    revokedAtUpstream = false;
+  }
+  await afterGoogleDisconnectRevokeForTests?.();
+  await setGoogleLifecycleState(
+    input.tenantId,
+    prepared.lifecycleId,
+    revokedAtUpstream ? "revoked" : "needs_attention",
+    revokedAtUpstream ? null : "REVOCATION_FAILED",
+  );
+  return { providerAccountId: input.accountId, revoked: revokedAtUpstream };
 }
 
 async function revokeUpstreamBestEffort(

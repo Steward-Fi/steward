@@ -151,6 +151,15 @@ describe("Google provider authority registration", () => {
         secretRouteId: wrongInjectionRouteId,
       }),
     ).rejects.toMatchObject({ code: "forbidden", status: 403 });
+    const [rejectedRoute] = await getDb()
+      .select({
+        authorityMode: secretRoutes.authorityMode,
+        providerOperationId: secretRoutes.providerOperationId,
+      })
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, wrongInjectionRouteId));
+    expect(rejectedRoute.authorityMode).toBe("legacy");
+    expect(rejectedRoute.providerOperationId).toBeNull();
     await getDb()
       .update(secretRoutes)
       .set({ enabled: false })

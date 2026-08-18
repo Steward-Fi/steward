@@ -136,11 +136,10 @@ function validateResponse(
     (response.token_type !== undefined &&
       (typeof response.token_type !== "string" ||
         response.token_type.toLowerCase() !== "bearer")) ||
-    (response.expires_in !== undefined &&
-      (typeof response.expires_in !== "number" ||
-        !Number.isSafeInteger(response.expires_in) ||
-        response.expires_in < 1 ||
-        response.expires_in > 86_400))
+    typeof response.expires_in !== "number" ||
+    !Number.isSafeInteger(response.expires_in) ||
+    response.expires_in < 300 ||
+    response.expires_in > 86_400
   ) {
     throw new Error("invalid Google refresh response");
   }
@@ -345,8 +344,20 @@ export async function mintGoogleExecutionAccessToken(
   try {
     validateResponse(raw, envelope.scopesGranted);
   } catch (error) {
-    await withTenantAuditedTransaction(input.tenantId, async (txRaw) => {
+    await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
       const tx = txRaw as DbExecutor;
+      await tx
+        .update(providerAccounts)
+        .set({ status: "disabled", revision: input.accountRevision + 1, updatedAt: new Date() })
+        .where(
+          and(
+            eq(providerAccounts.tenantId, input.tenantId),
+            eq(providerAccounts.workspaceId, input.workspaceId),
+            eq(providerAccounts.id, input.accountId),
+            eq(providerAccounts.revision, input.accountRevision),
+            eq(providerAccounts.status, "active"),
+          ),
+        );
       await tx
         .update(providerGoogleCredentialLifecycles)
         .set({
@@ -360,6 +371,15 @@ export async function mintGoogleExecutionAccessToken(
             eq(providerGoogleCredentialLifecycles.id, lifecycleId),
           ),
         );
+      await append({
+        tenantId: input.tenantId,
+        actorType: "system",
+        actorId: "credential-proxy",
+        action: "provider.google.refresh.invalid_response",
+        resourceType: "provider_account",
+        resourceId: input.accountId,
+        metadata: { lifecycleId, workspaceId: input.workspaceId },
+      });
     });
     throw error;
   }

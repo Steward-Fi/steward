@@ -183,4 +183,84 @@ describe("Google execution-time token mint", () => {
       .where(eq(providerGoogleCredentialLifecycles.providerAccountId, accountId));
     expect(rows.some((row) => row.state === "needs_attention")).toBeTrue();
   });
+
+  test("rejects a newly minted token that is still too close to expiry", async () => {
+    await getDb()
+      .update(providerGoogleCredentialLifecycles)
+      .set({ state: "adopted", credentialSecretId: null })
+      .where(eq(providerGoogleCredentialLifecycles.providerAccountId, accountId));
+    const [account] = await getDb()
+      .update(providerAccounts)
+      .set({ status: "active", revision: 4 })
+      .where(eq(providerAccounts.id, accountId))
+      .returning();
+    __setGoogleExecutionTokenForwarderForTests(async () =>
+      Response.json({
+        access_token: "ephemeral-too-short",
+        token_type: "Bearer",
+        scope: "openid email https://www.googleapis.com/auth/gmail.send",
+        expires_in: 299,
+      }),
+    );
+    await expect(
+      mintGoogleExecutionAccessToken({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId,
+        accountRevision: account.revision,
+        credential,
+        vault,
+        clientId: "provider-client",
+        clientSecret: "provider-secret",
+      }),
+    ).rejects.toThrow("invalid Google refresh response");
+    const [disabled] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, accountId));
+    expect(disabled.status).toBe("disabled");
+  });
+
+  test("rejects scope widening and freezes the account before another mint", async () => {
+    await getDb()
+      .update(providerGoogleCredentialLifecycles)
+      .set({ state: "adopted", credentialSecretId: null })
+      .where(eq(providerGoogleCredentialLifecycles.providerAccountId, accountId));
+    const [account] = await getDb()
+      .update(providerAccounts)
+      .set({ status: "active", revision: 6 })
+      .where(eq(providerAccounts.id, accountId))
+      .returning();
+    __setGoogleExecutionTokenForwarderForTests(async () =>
+      Response.json({
+        access_token: "ephemeral-widened",
+        token_type: "Bearer",
+        scope:
+          "openid email https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/calendar.events",
+        expires_in: 3600,
+      }),
+    );
+    await expect(
+      mintGoogleExecutionAccessToken({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId,
+        accountRevision: account.revision,
+        credential,
+        vault,
+        clientId: "provider-client",
+        clientSecret: "provider-secret",
+      }),
+    ).rejects.toThrow("Google refresh widened OAuth scope");
+    const [disabled] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, accountId));
+    expect(disabled.status).toBe("disabled");
+    const rows = await getDb()
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.providerAccountId, accountId));
+    expect(rows.some((row) => row.state === "revocation_pending")).toBeTrue();
+  });
 });
