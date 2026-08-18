@@ -4,6 +4,7 @@ import {
   type AutoApproveConfig,
   type ConditionSetConfig,
   type ContractAllowlistConfig,
+  chainFromNumeric,
   type PolicyResult,
   type PolicyRule,
   type PriceOracle,
@@ -37,6 +38,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isEvmAddress(value: unknown): value is string {
   return typeof value === "string" && /^0x[a-f0-9]{40}$/i.test(value);
+}
+
+type PolicyAddressFamily = "evm" | "solana" | "bitcoin" | "monero";
+
+function isPolicyAddressForFamily(value: unknown, family: PolicyAddressFamily): value is string {
+  if (typeof value !== "string") return false;
+  switch (family) {
+    case "evm":
+      return isEvmAddress(value);
+    case "solana":
+      return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value);
+    case "bitcoin":
+      return (
+        /^(?:bc1|tb1|bcrt1)[ac-hj-np-z02-9]{6,87}$/i.test(value) ||
+        /^[123mn2][1-9A-HJ-NP-Za-km-z]{25,34}$/.test(value)
+      );
+    case "monero":
+      return /^[1-9A-HJ-NP-Za-km-z]{95}$|^[1-9A-HJ-NP-Za-km-z]{106}$/.test(value);
+  }
+}
+
+function normalizePolicyAddress(value: string, family: PolicyAddressFamily): string {
+  return family === "evm" || (family === "bitcoin" && /^(?:bc1|tb1|bcrt1)/i.test(value))
+    ? value.toLowerCase()
+    : value;
 }
 
 export interface EvaluatorContext {
@@ -624,18 +650,18 @@ function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): Pol
   const base = { policyId: rule.id, type: rule.type } as const;
 
   // Validate the complete runtime shape, not just the outer array: a hand-edited
-  // row containing `null`/numbers used to throw in `.toLowerCase()`, while an
+  // row containing `null`/numbers used to throw during normalization, while an
   // unknown mode silently fell into blacklist semantics and could pass.
   if (
     !isRecord(rawConfig) ||
     !Array.isArray(rawConfig.addresses) ||
-    !rawConfig.addresses.every(isEvmAddress) ||
+    !rawConfig.addresses.every((address) => typeof address === "string") ||
     (rawConfig.mode !== "whitelist" && rawConfig.mode !== "blacklist")
   ) {
     return {
       ...base,
       passed: false,
-      reason: "Approved addresses must be an array of EVM addresses with a valid mode",
+      reason: "Approved addresses must be an array of strings with a valid mode",
     };
   }
   const config = rawConfig as unknown as ApprovedAddressesConfig;
@@ -649,8 +675,21 @@ function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): Pol
     };
   }
 
-  const target = targetAddress.toLowerCase();
-  const listed = config.addresses.map((a) => a.toLowerCase());
+  const family = chainFromNumeric(ctx.request.chainId)?.family;
+  if (
+    !family ||
+    !isPolicyAddressForFamily(targetAddress, family) ||
+    !config.addresses.every((address) => isPolicyAddressForFamily(address, family))
+  ) {
+    return {
+      ...base,
+      passed: false,
+      reason: "Approved addresses must match the destination address family",
+    };
+  }
+
+  const target = normalizePolicyAddress(targetAddress, family);
+  const listed = config.addresses.map((address) => normalizePolicyAddress(address, family));
   const mode = config.mode;
 
   if (mode === "whitelist") {

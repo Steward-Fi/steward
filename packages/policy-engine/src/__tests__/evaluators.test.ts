@@ -2031,7 +2031,24 @@ describe("Malformed evaluator config fails closed instead of throwing (SEC-105)"
     ]) {
       const result = await evaluatePolicy(makeAddressRule(config as never), makeContext());
       expect(result.passed).toBe(false);
-      expect(result.reason).toContain("array of EVM addresses");
+      expect(result.reason).toMatch(/array of strings|address family/);
     }
+  });
+
+  it("approved-addresses supports multichain families without lowercasing base58", async () => {
+    const solana = "7J9kqM5kV8Fh1Q3b6N2pR4tYwLcXzAaBbCcDdEeFfGg";
+    const matching = await evaluatePolicy(
+      makeAddressRule({ addresses: [solana], mode: "whitelist" }),
+      makeContext({ request: { ...makeContext().request, to: solana, chainId: 101 } }),
+    );
+    expect(matching.passed).toBe(true);
+
+    const wrongCaseAddress = solana.replace("J", "j");
+    const wrongCase = await evaluatePolicy(
+      makeAddressRule({ addresses: [wrongCaseAddress], mode: "whitelist" }),
+      makeContext({ request: { ...makeContext().request, to: solana, chainId: 101 } }),
+    );
+    expect(wrongCase.passed).toBe(false);
+    expect(wrongCase.reason).toContain("not in whitelist");
   });
 });
