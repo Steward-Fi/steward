@@ -282,12 +282,14 @@ services:
     image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
     container_name: steward-redis
     restart: unless-stopped
+    # Spend/rate-limit keys are enforcement state: reject writes at the memory
+    # bound so callers fail closed instead of silently evicting them.
     command: >
       redis-server
       --appendonly yes
       --appendfsync everysec
       --maxmemory 256mb
-      --maxmemory-policy allkeys-lru
+      --maxmemory-policy noeviction
     volumes:
       - redis-data:/data
     healthcheck:

@@ -37,8 +37,10 @@
   },
   "dependencies": {
     "@stwd/attestation": "workspace:*",
+    "@stwd/db": "workspace:*",
     "@stwd/venue-hyperliquid": "workspace:*",
     "@stwd/venue-polymarket": "workspace:*",
+    "drizzle-orm": "^0.44.5",
     "ioredis": "^5.10.1",
     "jose": "^6.2.1",
     "siwe": "^3.0.0",

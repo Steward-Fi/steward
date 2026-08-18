@@ -60,6 +60,7 @@ import type {
   PolicyRuleContribution,
 } from "@stwd/shared";
 import { describeThrown } from "@stwd/shared";
+import { RE2 } from "re2-wasm";
 import type { EvaluatorContext } from "./evaluators";
 
 /** the contributed rule-type discriminator. */
@@ -68,10 +69,9 @@ export const CAPABILITY_INTENT_RULE_TYPE = "capability-intent" as const;
 /**
  * ReDoS blast-radius bounds for operator-supplied patterns (SEC-107).
  * `argMatches` / X `blockedPatterns` regexes come from tenant-admin policy
- * config and run against agent-influenced invoke args / tweet text with no
- * engine-side match timeout, so a catastrophically-backtracking pattern (even
- * pasted innocently) could hang the API event loop. Both the pattern and the
- * matched input are length-capped; anything over the cap fails closed (deny).
+ * config and run against agent-influenced invoke args / tweet text. They are
+ * evaluated with RE2's linear-time engine; length caps remain defense in depth
+ * for compile/match cost and bound policy-controlled memory use.
  */
 export const MAX_POLICY_PATTERN_LENGTH = 256;
 export const MAX_POLICY_PATTERN_INPUT_LENGTH = 8_192;
@@ -1048,10 +1048,10 @@ function evaluateConstraints(
           reason: `capability-intent: regex for arg "${key}" missing or exceeds ${MAX_POLICY_PATTERN_LENGTH} chars`,
         };
       }
-      let re: RegExp;
+      let re: RE2;
       try {
         // anchor full-string so a partial match can't slip a governed arg.
-        re = new RegExp(`^(?:${pattern})$`);
+        re = new RE2(`^(?:${pattern})$`, "u");
       } catch {
         return {
           ...base,
@@ -1505,8 +1505,9 @@ export interface ProviderPolicyContext {
     /** adapter-derived "the post is a reply" signal (replyPolicy). PREFERRED
      *  over the same-named `args` entry, which is caller-influenced (SEC-182). */
     readonly isReply?: boolean;
-    /** adapter-derived "the user summoned the agent" signal (replyPolicy
-     *  summoned-only). PREFERRED over `args` (SEC-182). */
+    /** authoritative "the user summoned the agent" signal (replyPolicy
+     *  summoned-only). It must come from an authenticated adapter lookup, not a
+     *  caller assertion (SEC-182). */
     readonly summoned?: boolean;
     /** adapter-derived "the post body contains a URL" signal (allowUrls /
      *  spend / escalation policies). PREFERRED over `args` (SEC-182). */
@@ -1792,9 +1793,9 @@ function evaluateProviderConstraints(
       if (typeof pattern !== "string" || pattern.length > MAX_POLICY_PATTERN_LENGTH) {
         return PROVIDER_POLICY_REASON.CONFIGURATION_INVALID;
       }
-      let re: RegExp;
+      let re: RE2;
       try {
-        re = new RegExp(`^(?:${pattern})$`);
+        re = new RE2(`^(?:${pattern})$`, "u");
       } catch {
         return PROVIDER_POLICY_REASON.CONFIGURATION_INVALID;
       }
@@ -1936,34 +1937,24 @@ export type XConstraintVerdict =
   | { kind: "escalate" };
 
 /**
- * Read a REQUIRED boolean policy arg. Returns the boolean value, or `undefined`
- * when the arg is absent or not a boolean. A permissioned-X policy that DEPENDS
- * on this signal must fail closed (POLICY_INPUT_UNAVAILABLE) on `undefined` — we
- * NEVER coerce a missing/mistyped signal to `false`, because that would let a
- * URL/reply gate silently pass on an operation whose build doesn't carry the
- * signal (e.g. x.tweet.delete / x.user.me.read, or a malformed context). This is
- * the content-shape fail-closed contract (codex P2, PR review).
- */
-function readBool(args: Record<string, unknown>, key: string): boolean | undefined {
-  const v = args[key];
-  return typeof v === "boolean" ? v : undefined;
-}
-
-/**
- * Read an X security signal, PREFERRING the typed, adapter-populated `ctx.x`
- * channel over the caller-influenced `args` bag (SEC-182). The engine cannot
- * distinguish adapter-derived values from pass-through caller args inside
- * `args`; the typed channel is populated server-side from the adapter's
- * validated build. The args read remains as the legacy fallback for adapters
- * that do not wire the typed fields yet — the fail-closed contract (missing =>
- * POLICY_INPUT_UNAVAILABLE) is unchanged either way.
+ * Read X security signals exclusively from the typed, server-populated channel.
+ * The generic args bag is caller-influenced, including when no typed channel is
+ * present, so it can never be an authority fallback (SEC-182).
  */
 function xBoolSignal(
   ctx: ProviderPolicyContext,
   key: "isReply" | "summoned" | "hasUrl",
 ): boolean | undefined {
   const typed = ctx.x?.[key];
-  return typeof typed === "boolean" ? typed : readBool(ctx.args, key);
+  return typeof typed === "boolean" ? typed : undefined;
+}
+
+function xIntegerSignal(
+  ctx: ProviderPolicyContext,
+  key: "textCodePointLength",
+): number | undefined {
+  const typed = ctx.x?.[key];
+  return typeof typed === "number" && Number.isInteger(typed) ? typed : undefined;
 }
 
 /**
@@ -1988,8 +1979,6 @@ export function evaluateXConstraints(
   if (!ctx.operationKey.startsWith("x.")) {
     return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.CONFIGURATION_INVALID };
   }
-
-  const { args } = ctx;
 
   // ── replyPolicy ──
   // A replyPolicy DEPENDS on the `isReply` signal; absent/non-boolean => fail
@@ -2034,9 +2023,7 @@ export function evaluateXConstraints(
       }
     }
     if (x.contentPolicy.maxLength !== undefined) {
-      // SEC-182: prefer the typed, adapter-populated length signal over the
-      // caller-influenced `args` bag (same fallback contract as xBoolSignal).
-      const len = ctx.x?.textCodePointLength ?? args.textCodePointLength;
+      const len = xIntegerSignal(ctx, "textCodePointLength");
       // A content-length policy REQUIRES the length signal. Absent => fail closed.
       if (typeof len !== "number" || !Number.isInteger(len)) {
         return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE };
@@ -2063,9 +2050,9 @@ export function evaluateXConstraints(
         if (typeof pattern !== "string" || pattern.length > MAX_POLICY_PATTERN_LENGTH) {
           return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.CONFIGURATION_INVALID };
         }
-        let re: RegExp;
+        let re: RE2;
         try {
-          re = new RegExp(pattern);
+          re = new RE2(pattern, "u");
         } catch {
           // Invalid regex in config => fail closed (never throw).
           return { kind: "deny", reasonCode: PROVIDER_POLICY_REASON.CONFIGURATION_INVALID };

@@ -115,7 +115,7 @@ constraint and a cost lever:
 - `maxLength: number` — deny a post whose adapter-counted code-point length
   exceeds the cap (`POLICY_X_CONTENT_TOO_LONG`). This is stricter-or-equal to X's
   280 weighted limit (the adapter already bounds 1..280).
-- `blockedPatterns: string[]` — each is an anchored regex; a match on the text
+- `blockedPatterns: string[]` — each is a linear-time RE2-compatible regex; a match on the text
   denies (`POLICY_X_CONTENT_BLOCKED`). An **invalid** regex in config denies
   (`POLICY_CONFIGURATION_INVALID`) — fail closed, never throw.
 

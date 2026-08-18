@@ -34,7 +34,11 @@ export interface DefaultTenantStore {
     apiKeyHash: string;
     ownerAddress: string;
   }): Promise<void>;
-  rotateApiKeyHash(tenantId: string, apiKeyHash: string): Promise<void>;
+  rotateApiKeyHash(
+    tenantId: string,
+    expectedApiKeyHash: string,
+    apiKeyHash: string,
+  ): Promise<boolean>;
 }
 
 export type EnsureDefaultTenantResult =
@@ -63,7 +67,11 @@ export async function ensureDefaultTenant(
   // already-provisioned instances are fixed instead of staying vulnerable.
   if (existingHash === LEGACY_DEFAULT_TENANT_API_KEY_HASH) {
     const { key, hash } = generateApiKey();
-    await store.rotateApiKeyHash(args.tenantId, hash);
+    const rotated = await store.rotateApiKeyHash(args.tenantId, existingHash, hash);
+    // Another provisioner or operator may have rotated the key after our
+    // read. Never overwrite that newer operator-managed credential or print a
+    // key that was not actually stored.
+    if (!rotated) return { status: "existing" };
     return { status: "rotated", apiKey: key };
   }
 

@@ -33,21 +33,32 @@ function ctx(
   args: Record<string, unknown> = {},
   extra: Partial<ProviderPolicyContext> = {},
 ): ProviderPolicyContext {
+  const builtArgs = {
+    isReply: false,
+    hasUrl: false,
+    summoned: false,
+    textCodePointLength: 5,
+    textByteLength: 5,
+    ...args,
+  };
+  const { x: extraX, ...rest } = extra;
   return {
     operationKey: OP_TWEET,
-    args: {
-      isReply: false,
-      hasUrl: false,
-      summoned: false,
-      textCodePointLength: 5,
-      textByteLength: 5,
-      ...args,
-    },
+    args: builtArgs,
     method: "POST",
     host: "api.x.com",
     path: "/2/tweets",
     invokeCount1h: 0,
-    ...extra,
+    x: {
+      ...(typeof builtArgs.isReply === "boolean" ? { isReply: builtArgs.isReply } : {}),
+      ...(typeof builtArgs.hasUrl === "boolean" ? { hasUrl: builtArgs.hasUrl } : {}),
+      ...(typeof builtArgs.summoned === "boolean" ? { summoned: builtArgs.summoned } : {}),
+      ...(typeof builtArgs.textCodePointLength === "number"
+        ? { textCodePointLength: builtArgs.textCodePointLength }
+        : {}),
+      ...extraX,
+    },
+    ...rest,
   };
 }
 
@@ -131,7 +142,7 @@ describe("permissioned-X: contentPolicy", () => {
     const x: XConstraints = { contentPolicy: { maxLength: 10 } };
     const c = ctx();
     // strip the length signal
-    (c.args as Record<string, unknown>).textCodePointLength = undefined;
+    delete (c.x as { textCodePointLength?: number }).textCodePointLength;
     expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
 
@@ -150,6 +161,15 @@ describe("permissioned-X: contentPolicy", () => {
     expect(decide(maxLen, ctx({}, { x: { textCodePointLength: 11 } })).reasonCodes).toContain(
       R.X_CONTENT_TOO_LONG,
     );
+  });
+
+  it("does not fall back to caller args when a typed signal is missing (SEC-182)", () => {
+    const x: XConstraints = { replyPolicy: { mode: "summoned-only" } };
+    const c = ctx({ isReply: true, summoned: true });
+    delete (c.x as { summoned?: boolean }).summoned;
+    const decision = decide(x, c);
+    expect(decision.effect).toBe("hard_deny");
+    expect(decision.reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
 
   it("blockedPatterns denies a matching text via the in-memory policyText channel", () => {
@@ -237,7 +257,10 @@ describe("permissioned-X: spendPolicy (estimated-spend cap)", () => {
   it("denies when accumulated + this action exceeds the cap (URL post)", () => {
     // cap 250000; already spent 100000; url post adds 200000 => 300000 > cap
     const x: XConstraints = { spendPolicy: { maxSpendMicros: 250_000 } };
-    const d = decide(x, ctx({ hasUrl: true }, { x: { accumulatedSpendMicros: 100_000 } }));
+    const d = decide(
+      x,
+      ctx({ hasUrl: true }, { x: { accumulatedSpendMicros: 100_000, hasUrl: true } }),
+    );
     expect(d.effect).toBe("hard_deny");
     expect(d.reasonCodes).toContain(R.X_SPEND_CAP_EXCEEDED);
   });
@@ -246,16 +269,21 @@ describe("permissioned-X: spendPolicy (estimated-spend cap)", () => {
     const x: XConstraints = { spendPolicy: { maxSpendMicros: 250_000 } };
     // 100000 + 15000 = 115000 <= 250000
     expect(
-      decide(x, ctx({ hasUrl: false }, { x: { accumulatedSpendMicros: 100_000 } })).effect,
+      decide(x, ctx({ hasUrl: false }, { x: { accumulatedSpendMicros: 100_000, hasUrl: false } }))
+        .effect,
     ).toBe("allow");
   });
 
   it("accumulation crosses the cap across two plain posts", () => {
     const x: XConstraints = { spendPolicy: { maxSpendMicros: 20_000 } };
     // first plain post: accumulated 0 + 15000 = 15000 <= 20000 => allow
-    expect(decide(x, ctx({}, { x: { accumulatedSpendMicros: 0 } })).effect).toBe("allow");
+    expect(decide(x, ctx({}, { x: { accumulatedSpendMicros: 0, hasUrl: false } })).effect).toBe(
+      "allow",
+    );
     // second plain post: accumulated 15000 + 15000 = 30000 > 20000 => deny
-    expect(decide(x, ctx({}, { x: { accumulatedSpendMicros: 15_000 } })).effect).toBe("hard_deny");
+    expect(
+      decide(x, ctx({}, { x: { accumulatedSpendMicros: 15_000, hasUrl: false } })).effect,
+    ).toBe("hard_deny");
   });
 
   it("fails closed when the accumulated-spend input is unavailable", () => {
@@ -307,13 +335,13 @@ describe("permissioned-X: escalation", () => {
       escalation: { spendOverMicrosRequiresApproval: 100_000 },
     };
     // url post: 200000 > 100000 => escalate
-    expect(decide(x, ctx({ hasUrl: true }, { x: { accumulatedSpendMicros: 0 } })).effect).toBe(
-      "approval_required",
-    );
+    expect(
+      decide(x, ctx({ hasUrl: true }, { x: { accumulatedSpendMicros: 0, hasUrl: true } })).effect,
+    ).toBe("approval_required");
     // plain post: 15000 <= 100000 => allow
-    expect(decide(x, ctx({ hasUrl: false }, { x: { accumulatedSpendMicros: 0 } })).effect).toBe(
-      "allow",
-    );
+    expect(
+      decide(x, ctx({ hasUrl: false }, { x: { accumulatedSpendMicros: 0, hasUrl: false } })).effect,
+    ).toBe("allow");
   });
 
   it("a hard deny is NEVER softened into an approval by escalation", () => {
@@ -381,7 +409,7 @@ describe("permissioned-X: scoping + fail-closed", () => {
   it("allowUrls=false fails closed when the hasUrl signal is absent", () => {
     const x: XConstraints = { contentPolicy: { allowUrls: false } };
     const c = ctx();
-    delete (c.args as Record<string, unknown>).hasUrl;
+    delete (c.x as { hasUrl?: boolean }).hasUrl;
     const d = decide(x, c);
     expect(d.effect).toBe("hard_deny");
     expect(d.reasonCodes).toContain(R.INPUT_UNAVAILABLE);
@@ -396,28 +424,28 @@ describe("permissioned-X: scoping + fail-closed", () => {
   it("replyPolicy fails closed when the isReply signal is absent", () => {
     const x: XConstraints = { replyPolicy: { mode: "none" } };
     const c = ctx();
-    delete (c.args as Record<string, unknown>).isReply;
+    delete (c.x as { isReply?: boolean }).isReply;
     expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
 
   it("summoned-only fails closed when the summoned signal is absent on a reply", () => {
     const x: XConstraints = { replyPolicy: { mode: "summoned-only" } };
     const c = ctx({ isReply: true });
-    delete (c.args as Record<string, unknown>).summoned;
+    delete (c.x as { summoned?: boolean }).summoned;
     expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
 
   it("url escalation fails closed when hasUrl is absent", () => {
     const x: XConstraints = { escalation: { urlPostRequiresApproval: true } };
     const c = ctx();
-    delete (c.args as Record<string, unknown>).hasUrl;
+    delete (c.x as { hasUrl?: boolean }).hasUrl;
     expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
 
   it("spendPolicy fails closed when hasUrl is absent (cannot price the action)", () => {
     const x: XConstraints = { spendPolicy: { maxSpendMicros: 1_000_000 } };
     const c = ctx({}, { x: { accumulatedSpendMicros: 0 } });
-    delete (c.args as Record<string, unknown>).hasUrl;
+    delete (c.x as { hasUrl?: boolean }).hasUrl;
     expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
 

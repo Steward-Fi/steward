@@ -270,6 +270,7 @@ describe("SEC-022 DEPLOYMENT.md installs shipped hardened units, no root units o
 
 describe("SEC-021 deploy/docker-compose.yml redis persists enforcement counters", () => {
   const compose = read("docker-compose.yml");
+  const rootCompose = readFileSync(join(DEPLOY_DIR, "..", "docker-compose.yml"), "utf8");
 
   test("redis runs with AOF persistence and a bounded memory policy", () => {
     // Redis holds spend-limit / rate-limit counters. Pre-fix it ran
@@ -283,11 +284,18 @@ describe("SEC-021 deploy/docker-compose.yml redis persists enforcement counters"
     expect(compose).toContain('"everysec"');
     expect(compose).toContain('"--maxmemory"');
     expect(compose).toContain('"--maxmemory-policy"');
+    expect(compose).toContain('"noeviction"');
+    expect(compose).not.toContain('"allkeys-lru"');
   });
 
   test("redis AOF data dir is on a named volume", () => {
     expect(/steward-redis-data:\s*\/data/.test(compose)).toBe(true);
     expect(/^\s{2}steward-redis-data:\s*$/m.test(compose)).toBe(true);
+  });
+
+  test("root development compose also never evicts enforcement state", () => {
+    expect(rootCompose).toContain("--maxmemory-policy noeviction");
+    expect(rootCompose).not.toContain("--maxmemory-policy allkeys-lru");
   });
 });
 
@@ -302,7 +310,47 @@ describe("SEC-020 deploy/migrate-agent-keys.sh keeps the platform key off every 
     // The remote shell resolves the key itself (sed on the node's 0600 .env,
     // or cat from ssh stdin for the deprecated arg path).
     expect(script).toContain("sed -n 's/^STEWARD_PLATFORM_KEY=//p'");
-    expect(script).toContain("X-Steward-Platform-Key: \\${PK}");
+    expect(script).not.toContain("[platform-key]");
+    expect(script).not.toContain("printf '%s' \"${PLATFORM_KEY}\"");
+    expect(script).not.toContain("X-Steward-Platform-Key: \\${PK}");
+    expect(script).toContain("AUTH_HEADER_SNIPPET");
+    expect(script).toContain('-H \\"@\\${AUTH_FILE}\\"');
+  });
+
+  test("legacy positional key input is rejected without echoing the credential", () => {
+    const marker = "secret-platform-key-must-not-echo";
+    const result = Bun.spawnSync(
+      ["bash", join(DEPLOY_DIR, "migrate-agent-keys.sh"), "127.0.0.1", marker],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const output = `${result.stdout.toString()}${result.stderr.toString()}`;
+    expect(result.exitCode).not.toBe(0);
+    expect(output).not.toContain(marker);
+    expect(output).toContain("platform keys are never accepted on argv");
+  });
+
+  test("remote commands use an argv-safe ssh array and reject injectable metadata", () => {
+    expect(script).toContain("SSH_CMD=(ssh -o StrictHostKeyChecking=");
+    expect(script).toContain('"${SSH_CMD[@]}"');
+    expect(script).not.toMatch(/\$\{SSH_CMD\}\s+"/);
+    expect(script).toContain("Unsafe AGENT_NAME metadata ignored");
+    expect(script).toContain("Invalid tenant ID");
+    expect(script).toContain("Invalid daily limit");
+  });
+
+  test("provisioning and operator docs also pass platform headers by file", () => {
+    const provision = read("provision-steward-node.sh");
+    const doc = read("DEPLOYMENT.md");
+    const readme = read("README.md");
+    expect(provision).not.toContain("X-Steward-Platform-Key: \\${PK}");
+    expect(provision).toContain('-H \\"@\\${AUTH_FILE}\\"');
+    expect(doc).not.toContain("X-Steward-Platform-Key: \\${PK}");
+    expect(doc).toContain('-H \\"@\\${AUTH_FILE}\\"');
+    expect(doc).not.toContain('-H "X-Steward-Platform-Key: $PK"');
+    expect(doc).not.toContain("X-Steward-Platform-Key: <key>");
+    expect(doc).not.toContain('-H "X-Steward-Key: $API_KEY"');
+    expect(doc).toContain('> "$WEBHOOK_RESPONSE"');
+    expect(readme).not.toContain('-H "X-Steward-Platform-Key: $PLATFORM_KEY"');
   });
 
   test("agent tokens are written to a mode-0600 file, not echoed to stdout", () => {

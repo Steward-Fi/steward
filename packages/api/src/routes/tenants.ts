@@ -11,8 +11,7 @@ import {
   secretRoutes as secretRouteRows,
   secrets as secretRows,
 } from "@stwd/db";
-import { encryptWebhookSecret } from "@stwd/webhooks";
-import { and, eq, ne } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { type Context, Hono, type Next } from "hono";
 import { writeAuditEvent } from "../services/audit";
 import {
@@ -33,55 +32,12 @@ import {
   tenantAuth,
   tenantConfigs,
   tenants,
-  webhookConfigs,
 } from "../services/context";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
-import { validateWebhookUrlResolved } from "../services/webhook-url";
 
 export const tenantRoutes = new Hono<{ Variables: AppVariables }>();
-const LEGACY_TENANT_WEBHOOK_DESCRIPTION = "legacy:tenant-webhook";
-type LegacyTenantWebhookConfig = typeof webhookConfigs.$inferSelect;
-
-function generateWebhookSecret(): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  return `whsec_${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-}
-
-async function upsertLegacyTenantWebhook(tenantId: string, url: string): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx
-      .update(webhookConfigs)
-      .set({ enabled: false, updatedAt: new Date() })
-      .where(
-        and(
-          eq(webhookConfigs.tenantId, tenantId),
-          eq(webhookConfigs.description, LEGACY_TENANT_WEBHOOK_DESCRIPTION),
-          ne(webhookConfigs.url, url),
-        ),
-      );
-
-    await tx
-      .insert(webhookConfigs)
-      .values({
-        tenantId,
-        url,
-        secret: encryptWebhookSecret(generateWebhookSecret()),
-        events: [],
-        enabled: true,
-        description: LEGACY_TENANT_WEBHOOK_DESCRIPTION,
-      })
-      .onConflictDoUpdate({
-        target: [webhookConfigs.tenantId, webhookConfigs.url],
-        set: {
-          events: [],
-          enabled: true,
-          description: LEGACY_TENANT_WEBHOOK_DESCRIPTION,
-          updatedAt: new Date(),
-        },
-      });
-  });
-}
+const LEGACY_WEBHOOK_DEPRECATION_ERROR =
+  "webhookUrl is retired because it cannot provision a receiver-verifiable signing secret; create a webhook with POST /webhooks instead (the secret is returned once)";
 
 // Per-route auth that pins the JWT's tenantId to the URL :id path param.
 // Applied directly on handlers below so the "public discovery" route in
@@ -131,40 +87,6 @@ async function tenantIdHasRetainedState(tenantId: string): Promise<boolean> {
   return Boolean(secret || secretRoute || proxyAudit || auditEvent);
 }
 
-async function snapshotLegacyTenantWebhooks(
-  tenantId: string,
-): Promise<LegacyTenantWebhookConfig[]> {
-  return db
-    .select()
-    .from(webhookConfigs)
-    .where(
-      and(
-        eq(webhookConfigs.tenantId, tenantId),
-        eq(webhookConfigs.description, LEGACY_TENANT_WEBHOOK_DESCRIPTION),
-      ),
-    );
-}
-
-async function restoreLegacyTenantWebhooks(
-  tenantId: string,
-  snapshot: LegacyTenantWebhookConfig[],
-): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx
-      .delete(webhookConfigs)
-      .where(
-        and(
-          eq(webhookConfigs.tenantId, tenantId),
-          eq(webhookConfigs.description, LEGACY_TENANT_WEBHOOK_DESCRIPTION),
-        ),
-      );
-
-    if (snapshot.length > 0) {
-      await tx.insert(webhookConfigs).values(snapshot);
-    }
-  });
-}
-
 function requireTenantAdminSession(c: Parameters<typeof requireTenantLevel>[0]): boolean {
   const role = c.get("tenantRole");
   return c.get("authType") === "session-jwt" && (role === "owner" || role === "admin");
@@ -201,8 +123,12 @@ function getTenantPayloadForRequest(
   tenant: Tenant,
 ): Omit<Tenant, "apiKeyHash"> & Partial<TenantConfig> {
   const payload = getTenantPayload(tenant);
-  if (requireTenantAdminSession(c) && hasRecentSessionMfa(c)) return payload;
+  // Historical webhookUrl values are inert after retirement. Never present one
+  // as an active configuration; /webhooks is the sole signed delivery plane.
   const { webhookUrl: _webhookUrl, defaultPolicies: _defaultPolicies, ...redacted } = payload;
+  if (requireTenantAdminSession(c) && hasRecentSessionMfa(c)) {
+    return { ...redacted, defaultPolicies: payload.defaultPolicies };
+  }
   return redacted;
 }
 
@@ -259,10 +185,7 @@ tenantRoutes.post("/", platformAuthMiddleware(), async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "apiKeyHash is required" }, 400);
   }
   if (body.webhookUrl !== undefined) {
-    const urlError = isNonEmptyString(body.webhookUrl)
-      ? await validateWebhookUrlResolved(body.webhookUrl)
-      : "webhookUrl must be a non-empty string";
-    if (urlError) return c.json<ApiResponse>({ ok: false, error: urlError }, 400);
+    return c.json<ApiResponse>({ ok: false, error: LEGACY_WEBHOOK_DEPRECATION_ERROR }, 410);
   }
   if (body.defaultPolicies !== undefined) {
     if (!Array.isArray(body.defaultPolicies)) {
@@ -320,10 +243,6 @@ tenantRoutes.post("/", platformAuthMiddleware(), async (c) => {
       apiKeyHash,
     })
     .returning();
-
-  if (body.webhookUrl) {
-    await upsertLegacyTenantWebhook(body.id, body.webhookUrl);
-  }
 
   tenantConfigs.set(body.id, {
     id: body.id,
@@ -386,10 +305,7 @@ tenantRoutes.put("/:id/webhook", requireTenantId, async (c) => {
   }
 
   if (body.webhookUrl !== undefined) {
-    const urlError = isNonEmptyString(body.webhookUrl)
-      ? await validateWebhookUrlResolved(body.webhookUrl)
-      : "webhookUrl must be a non-empty string";
-    if (urlError) return c.json<ApiResponse>({ ok: false, error: urlError }, 400);
+    return c.json<ApiResponse>({ ok: false, error: LEGACY_WEBHOOK_DEPRECATION_ERROR }, 410);
   }
 
   if (body.defaultPolicies !== undefined && !Array.isArray(body.defaultPolicies)) {
@@ -409,13 +325,11 @@ tenantRoutes.put("/:id/webhook", requireTenantId, async (c) => {
     ...tenantConfig,
     id: tenant.id,
     name: tenant.name,
-    webhookUrl: body.webhookUrl ?? tenantConfig.webhookUrl,
+    // Clear any historical inert value when the tenant is next updated.
+    webhookUrl: undefined,
     defaultPolicies: body.defaultPolicies ?? tenantConfig.defaultPolicies,
   };
   const previousConfig: TenantConfig = { ...tenantConfig };
-  const legacyWebhookSnapshot =
-    body.webhookUrl !== undefined ? await snapshotLegacyTenantWebhooks(tenant.id) : [];
-
   await writeAuditEvent({
     tenantId: tenant.id,
     actorType: "user",
@@ -431,10 +345,6 @@ tenantRoutes.put("/:id/webhook", requireTenantId, async (c) => {
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
   });
-
-  if (body.webhookUrl) {
-    await upsertLegacyTenantWebhook(tenant.id, body.webhookUrl);
-  }
 
   tenantConfigs.set(tenant.id, updatedConfig);
 
@@ -456,9 +366,6 @@ tenantRoutes.put("/:id/webhook", requireTenantId, async (c) => {
     });
   } catch (error) {
     tenantConfigs.set(tenant.id, previousConfig);
-    if (body.webhookUrl !== undefined) {
-      await restoreLegacyTenantWebhooks(tenant.id, legacyWebhookSnapshot);
-    }
     throw error;
   }
 
