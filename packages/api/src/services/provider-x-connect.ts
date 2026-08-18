@@ -15,8 +15,8 @@
  *     verifier, so a store compromise cannot replay a connect or forge the code
  *     exchange. The raw state travels only in the browser round-trip; the raw
  *     verifier is re-derived from a sealed payload the caller carries back.
- *   - State is consumed exactly once, only after the upstream token exchange and
- *     identity fetch succeed, so a bad provider code cannot burn a live attempt.
+ *   - State is consumed exactly once before provider I/O, so concurrent replicas
+ *     cannot exchange one authorization code and orphan a losing grant.
  *   - Tokens land as a NEW versioned vault secret; provider_accounts links the
  *     current {credential_secret_id, credential_version}. Reconnect for the same
  *     X user id updates the version + bumps revision, never duplicates the row.
@@ -32,18 +32,27 @@
  * withTenantAuditedTransaction / appendRequiredAudit.
  */
 
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   and,
+  asc,
   eq,
   getDb,
+  inArray,
+  lte,
   providerAccounts,
+  providerXCredentialLifecycles,
   type Secret,
+  secretRoutes,
   secrets,
   sql,
   withTenantAuditedTransaction,
 } from "@stwd/db";
-import { isValidOAuthBearerToken, isValidOAuthOpaqueToken } from "@stwd/shared";
+import {
+  isValidOAuthBearerToken,
+  isValidOAuthOpaqueToken,
+  MAX_OAUTH_TOKEN_LENGTH,
+} from "@stwd/shared";
 import type { SecretVault } from "@stwd/vault";
 
 type DbBase = ReturnType<typeof getDb>;
@@ -88,6 +97,7 @@ export type XConnectErrorCode =
   | "X_ACCOUNT_NOT_X"
   | "X_REFRESH_TOKEN_MISSING"
   | "X_REFRESH_REVOKED"
+  | "X_CREDENTIAL_NEEDS_ATTENTION"
   | "X_REFRESH_FAILED";
 
 export class XConnectError extends Error {
@@ -191,6 +201,9 @@ async function defaultForward(req: XForwardRequest): Promise<XForwardResponse> {
     method: req.method,
     headers: req.headers,
     body: req.body,
+    // OAuth requests carry credentials in both headers and bodies. Never let a
+    // provider redirect replay them to a different endpoint or origin.
+    redirect: "error",
     signal: AbortSignal.timeout(X_FORWARD_TIMEOUT_MS),
   });
   const text = await readBoundedXResponse(res);
@@ -209,6 +222,8 @@ export function __runDefaultXForwardForTests(req: XForwardRequest): Promise<XFor
 }
 
 let forwardImpl: XForwardFn = defaultForward;
+let afterXRefreshIntentForTests: (() => Promise<void>) | null = null;
+let afterXCredentialStageForTests: (() => Promise<void>) | null = null;
 
 /**
  * Test-only seam setter. Mirrors the repo's `__setForwardProxyRequestForTests`
@@ -219,6 +234,24 @@ export function __setXForwardForTests(fn: XForwardFn | null): () => void {
   forwardImpl = fn ?? defaultForward;
   return () => {
     forwardImpl = previous;
+  };
+}
+
+/** Test-only crash seam after durable staging and before adoption. */
+export function __setAfterXCredentialStageForTests(fn: (() => Promise<void>) | null): () => void {
+  const previous = afterXCredentialStageForTests;
+  afterXCredentialStageForTests = fn;
+  return () => {
+    afterXCredentialStageForTests = previous;
+  };
+}
+
+/** Test-only crash seam after the durable intent and before provider I/O. */
+export function __setAfterXRefreshIntentForTests(fn: (() => Promise<void>) | null): () => void {
+  const previous = afterXRefreshIntentForTests;
+  afterXRefreshIntentForTests = fn;
+  return () => {
+    afterXRefreshIntentForTests = previous;
   };
 }
 
@@ -317,6 +350,44 @@ export interface PendingConnectRecord {
   createdAt: string;
 }
 
+function isCanonicalIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 32) return false;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
+}
+
+function validatePendingConnectRecord(value: unknown): PendingConnectRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (
+    record.schemaVersion !== "steward.provider-x.pending-connect.v1" ||
+    typeof record.tenantId !== "string" ||
+    record.tenantId.length === 0 ||
+    record.tenantId.length > 64 ||
+    typeof record.workspaceId !== "string" ||
+    record.workspaceId.length > 64 ||
+    typeof record.initiatedByUserId !== "string" ||
+    record.initiatedByUserId.length > 128 ||
+    typeof record.verifierHash !== "string" ||
+    !/^[a-f0-9]{64}$/.test(record.verifierHash) ||
+    typeof record.redirectUri !== "string" ||
+    record.redirectUri.length === 0 ||
+    record.redirectUri.length > 2048 ||
+    !isCanonicalIsoTimestamp(record.createdAt) ||
+    !Array.isArray(record.scopes) ||
+    record.scopes.length === 0 ||
+    record.scopes.length > X_DEFAULT_SCOPES.length ||
+    record.scopes.some(
+      (scope) =>
+        typeof scope !== "string" || !(X_DEFAULT_SCOPES as readonly string[]).includes(scope),
+    ) ||
+    new Set(record.scopes).size !== record.scopes.length
+  ) {
+    return null;
+  }
+  return record as unknown as PendingConnectRecord;
+}
+
 // ── Initiate ──────────────────────────────────────────────────────────────────
 export interface InitiateConnectInput {
   tenantId: string;
@@ -406,12 +477,21 @@ export interface ParsedConnectToken {
 
 export function parseConnectToken(token: string): ParsedConnectToken | null {
   try {
+    if (token.length === 0 || token.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(token)) return null;
     const json = base64ToUtf8(token);
-    const parsed = JSON.parse(json) as ParsedConnectToken;
-    if (typeof parsed.state !== "string" || typeof parsed.verifier !== "string") {
+    if (base64url(Buffer.from(json, "utf8")) !== token) return null;
+    const parsed = JSON.parse(json) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const candidate = parsed as Record<string, unknown>;
+    if (
+      typeof candidate.state !== "string" ||
+      !/^[a-f0-9]{64}$/.test(candidate.state) ||
+      typeof candidate.verifier !== "string" ||
+      !/^[a-f0-9]{96}$/.test(candidate.verifier)
+    ) {
       return null;
     }
-    return parsed;
+    return { state: candidate.state, verifier: candidate.verifier };
   } catch {
     return null;
   }
@@ -450,11 +530,17 @@ export async function completeXConnect(
   const raw = await input.store.get(key);
   if (!raw) throw new XConnectError("X_STATE_INVALID", 401, "unknown or expired connect state");
 
-  let record: PendingConnectRecord;
+  let parsedRecord: unknown;
   try {
-    record = JSON.parse(raw) as PendingConnectRecord;
+    parsedRecord = JSON.parse(raw);
   } catch {
     throw new XConnectError("X_STATE_INVALID", 400, "malformed connect state");
+  }
+  const record = validatePendingConnectRecord(parsedRecord);
+  if (!record) throw new XConnectError("X_STATE_INVALID", 400, "malformed connect state");
+  const recordAgeMs = Date.now() - new Date(record.createdAt).getTime();
+  if (recordAgeMs < 0 || recordAgeMs > X_CONNECT_STATE_TTL_MS) {
+    throw new XConnectError("X_STATE_EXPIRED", 401, "expired connect state");
   }
 
   // Bind the state to THIS tenant/workspace/caller — a state minted for another
@@ -481,57 +567,73 @@ export async function completeXConnect(
     throw new XConnectError("X_PKCE_MISMATCH", 400, "PKCE verifier mismatch");
   }
 
-  // 3. Exchange the code (PKCE). Failure here does NOT consume the state.
+  // 3. Claim the state BEFORE any provider call. Security takes precedence over
+  // retrying a bad authorization code: two replicas must never both exchange a
+  // one-time code and strand the losing callback's newly issued grant.
+  const consumed = await input.store.consume(key);
+  if (consumed !== raw) {
+    throw new XConnectError("X_STATE_REUSED", 401, "connect state already used");
+  }
+
+  // 4. Exchange the code (PKCE).
   const tokenRes = await exchangeAuthorizationCode({
     config: input.config,
     code: input.code,
     redirectUri: input.redirectUri,
     verifier: parsedToken.verifier,
   });
+  try {
+    const scopesGranted = parseXGrantedScopes(
+      tokenRes.scope,
+      record.scopes,
+      "X_TOKEN_EXCHANGE_FAILED",
+    );
 
-  // 4. Identify the connected account.
-  const identity = await fetchXIdentity(tokenRes.access_token);
+    // 5. Identify the connected account.
+    const identity = await fetchXIdentity(tokenRes.access_token);
 
-  // 5. Consume the state EXACTLY ONCE, only after upstream success. A concurrent
-  //    duplicate callback loses the race and gets X_STATE_REUSED.
-  const consumed = await input.store.consume(key);
-  if (consumed !== raw) {
-    throw new XConnectError("X_STATE_REUSED", 401, "connect state already used");
+    const obtainedAt = new Date();
+    const expiresAt =
+      typeof tokenRes.expires_in === "number"
+        ? new Date(obtainedAt.getTime() + tokenRes.expires_in * 1000)
+        : null;
+
+    const payload: XCredentialPayload = {
+      schemaVersion: "steward.provider-x.credential.v1",
+      accessToken: tokenRes.access_token,
+      refreshToken: tokenRes.refresh_token ?? null,
+      scopesGranted,
+      xUserId: identity.id,
+      xUsername: identity.username,
+      obtainedAt: obtainedAt.toISOString(),
+      expiresAt: expiresAt ? expiresAt.toISOString() : null,
+    };
+
+    // 6. Persist tokens as a versioned vault secret + create/update the account,
+    //    all inside one tenant-audited transaction so the audit event commits with
+    //    the state mutation.
+    return await persistConnectedAccount({
+      tenantId: input.tenantId,
+      workspaceId: input.workspaceId,
+      callerUserId: input.callerUserId,
+      vault: input.vault,
+      identity,
+      payload,
+      scopesGranted,
+      requestId: input.requestId ?? null,
+    });
+  } catch (error) {
+    // Once X has issued a grant, any identity or local persistence failure would
+    // otherwise strand a live credential that Steward cannot recover. Revoke the
+    // exact newly issued grant best-effort, while preserving the original,
+    // sanitized application error.
+    await revokeUpstreamBestEffort(
+      input.config,
+      tokenRes.access_token,
+      tokenRes.refresh_token ?? null,
+    ).catch(() => false);
+    throw error;
   }
-
-  const scopesGranted = tokenRes.scope
-    ? tokenRes.scope.split(/\s+/).filter(Boolean)
-    : record.scopes;
-  const obtainedAt = new Date();
-  const expiresAt =
-    typeof tokenRes.expires_in === "number"
-      ? new Date(obtainedAt.getTime() + tokenRes.expires_in * 1000)
-      : null;
-
-  const payload: XCredentialPayload = {
-    schemaVersion: "steward.provider-x.credential.v1",
-    accessToken: tokenRes.access_token,
-    refreshToken: tokenRes.refresh_token ?? null,
-    scopesGranted,
-    xUserId: identity.id,
-    xUsername: identity.username,
-    obtainedAt: obtainedAt.toISOString(),
-    expiresAt: expiresAt ? expiresAt.toISOString() : null,
-  };
-
-  // 6. Persist tokens as a versioned vault secret + create/update the account,
-  //    all inside one tenant-audited transaction so the audit event commits with
-  //    the state mutation.
-  return persistConnectedAccount({
-    tenantId: input.tenantId,
-    workspaceId: input.workspaceId,
-    callerUserId: input.callerUserId,
-    vault: input.vault,
-    identity,
-    payload,
-    scopesGranted,
-    requestId: input.requestId ?? null,
-  });
 }
 
 interface XIdentity {
@@ -550,7 +652,17 @@ async function fetchXIdentity(accessToken: string): Promise<XIdentity> {
     throw new XConnectError("X_IDENTITY_FAILED", 502, `X identity fetch failed (${res.status})`);
   }
   const data = (res.json as XUserResponse | null)?.data;
-  if (!data || !data.id) {
+  if (
+    !data ||
+    typeof data.id !== "string" ||
+    !/^\d{1,32}$/.test(data.id) ||
+    (data.username !== undefined &&
+      (typeof data.username !== "string" || !/^[A-Za-z0-9_]{1,64}$/.test(data.username))) ||
+    (data.name !== undefined &&
+      (typeof data.name !== "string" ||
+        data.name.length > 128 ||
+        /[\u0000-\u001f\u007f]/.test(data.name)))
+  ) {
     throw new XConnectError("X_IDENTITY_FAILED", 502, "X identity response missing user id");
   }
   return { id: data.id, username: data.username ?? "", name: data.name ?? "" };
@@ -586,7 +698,16 @@ async function exchangeAuthorizationCode(input: ExchangeInput): Promise<XTokenRe
     !res.ok ||
     !parsed ||
     !isValidOAuthBearerToken(parsed.access_token) ||
-    (parsed.refresh_token !== undefined && !isValidOAuthOpaqueToken(parsed.refresh_token))
+    (parsed.refresh_token !== undefined && !isValidOAuthOpaqueToken(parsed.refresh_token)) ||
+    (parsed.token_type !== undefined &&
+      (typeof parsed.token_type !== "string" || parsed.token_type.toLowerCase() !== "bearer")) ||
+    (parsed.expires_in !== undefined &&
+      (typeof parsed.expires_in !== "number" ||
+        !Number.isSafeInteger(parsed.expires_in) ||
+        parsed.expires_in <= 0 ||
+        parsed.expires_in > 86_400)) ||
+    (parsed.scope !== undefined &&
+      (typeof parsed.scope !== "string" || parsed.scope.length === 0 || parsed.scope.length > 4096))
   ) {
     throw new XConnectError(
       "X_TOKEN_EXCHANGE_FAILED",
@@ -595,6 +716,27 @@ async function exchangeAuthorizationCode(input: ExchangeInput): Promise<XTokenRe
     );
   }
   return parsed;
+}
+
+function parseXGrantedScopes(
+  raw: unknown,
+  allowedScopes: string[],
+  errorCode: "X_TOKEN_EXCHANGE_FAILED" | "X_REFRESH_FAILED",
+): string[] {
+  if (raw === undefined) return [...new Set(allowedScopes)].sort();
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > 4096) {
+    throw new XConnectError(errorCode, 502, "X OAuth scope is invalid");
+  }
+  const scopes = raw.split(/\s+/).filter(Boolean);
+  if (
+    scopes.length === 0 ||
+    scopes.length > 64 ||
+    scopes.some((scope) => !/^[A-Za-z0-9._:-]{1,128}$/.test(scope)) ||
+    scopes.some((scope) => !allowedScopes.includes(scope))
+  ) {
+    throw new XConnectError(errorCode, 502, "X OAuth scope is invalid");
+  }
+  return [...new Set(scopes)].sort();
 }
 
 /** X token endpoint accepts confidential-client creds via HTTP Basic. */
@@ -621,19 +763,12 @@ export function xCredentialSecretName(workspaceId: string, xUserId: string): str
 }
 
 async function persistConnectedAccount(input: PersistInput): Promise<CompleteConnectResult> {
-  // Write the credential secret OUTSIDE the audited tx (the vault owns its own
-  // encryption + version row); then link + audit atomically. createSecret always
-  // writes version 1; a reconnect uses rotateSecret to bump the version so the
-  // lineage (secret name) is stable and the OLD ciphertext is soft-deleted.
+  // Serialize reconnect against the account/lifecycle rows, then write the
+  // credential and account link in the same transaction. Do not rotate the
+  // active secret until every unresolved refresh is safe to supersede: a staged
+  // response is a live provider handle, not garbage.
   const secretName = xCredentialSecretName(input.workspaceId, input.identity.id);
   const serialized = JSON.stringify(input.payload);
-
-  const existing = await input.vault.getSecret(input.tenantId, secretName);
-  const meta = existing
-    ? await input.vault.rotateSecret(input.tenantId, secretName, serialized)
-    : await input.vault.createSecret(input.tenantId, secretName, serialized, {
-        description: "X (Twitter) provider-account OAuth credential",
-      });
 
   return withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
     const tx = txRaw as DbExecutor;
@@ -651,6 +786,69 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
       )
       .limit(1)
       .for("update");
+
+    const unresolvedRefreshes = account
+      ? await tx
+          .select({
+            id: providerXCredentialLifecycles.id,
+            state: providerXCredentialLifecycles.state,
+            credentialSecretId: providerXCredentialLifecycles.credentialSecretId,
+            expectedAccountRevision: providerXCredentialLifecycles.expectedAccountRevision,
+            lastErrorCode: providerXCredentialLifecycles.lastErrorCode,
+          })
+          .from(providerXCredentialLifecycles)
+          .where(
+            and(
+              eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+              eq(providerXCredentialLifecycles.workspaceId, input.workspaceId),
+              eq(providerXCredentialLifecycles.providerAccountId, account.id),
+              inArray(providerXCredentialLifecycles.state, [
+                "inflight",
+                "credential_staged",
+                "revocation_pending",
+                "needs_attention",
+              ]),
+            ),
+          )
+          .orderBy(asc(providerXCredentialLifecycles.createdAt))
+          .for("update")
+      : [];
+
+    const supersedableRefreshes = account
+      ? unresolvedRefreshes.filter(
+          (row) =>
+            row.state === "needs_attention" &&
+            row.credentialSecretId === null &&
+            row.lastErrorCode === "REFRESH_OUTCOME_UNKNOWN" &&
+            row.expectedAccountRevision !== null &&
+            row.expectedAccountRevision <= account.revision,
+        )
+      : [];
+    if (supersedableRefreshes.length !== unresolvedRefreshes.length) {
+      throw new XConnectError(
+        "X_CREDENTIAL_NEEDS_ATTENTION",
+        409,
+        "previous X refresh must be reconciled before reconnect",
+      );
+    }
+
+    const [existingSecret] = await tx
+      .select({ id: secrets.id })
+      .from(secrets)
+      .where(
+        and(
+          eq(secrets.tenantId, input.tenantId),
+          eq(secrets.name, secretName),
+          sql`${secrets.deletedAt} IS NULL`,
+        ),
+      )
+      .limit(1)
+      .for("update");
+    const meta = existingSecret
+      ? await input.vault.rotateSecretWithinTx(tx, input.tenantId, secretName, serialized)
+      : await input.vault.createSecretWithinTx(tx, input.tenantId, secretName, serialized, {
+          description: "X (Twitter) provider-account OAuth credential",
+        });
 
     const displayName = input.identity.username ? `@${input.identity.username}` : input.identity.id;
 
@@ -718,6 +916,51 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
       },
     });
 
+    if (supersedableRefreshes.length > 0) {
+      const lifecycleIds = supersedableRefreshes.map((row) => row.id).sort();
+      const superseded = await tx
+        .update(providerXCredentialLifecycles)
+        .set({
+          state: "superseded",
+          lastErrorCode: "SUPERSEDED_BY_RECONNECT",
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+            eq(providerXCredentialLifecycles.workspaceId, input.workspaceId),
+            eq(providerXCredentialLifecycles.providerAccountId, providerAccountId),
+            inArray(providerXCredentialLifecycles.id, lifecycleIds),
+            eq(providerXCredentialLifecycles.state, "needs_attention"),
+            sql`${providerXCredentialLifecycles.credentialSecretId} IS NULL`,
+            eq(providerXCredentialLifecycles.lastErrorCode, "REFRESH_OUTCOME_UNKNOWN"),
+          ),
+        )
+        .returning({ id: providerXCredentialLifecycles.id });
+      if (superseded.length !== supersedableRefreshes.length) {
+        throw new XConnectError(
+          "X_CREDENTIAL_NEEDS_ATTENTION",
+          409,
+          "X refresh lifecycle changed during reconnect",
+        );
+      }
+      await append({
+        tenantId: input.tenantId,
+        actorType: "user",
+        actorId: input.callerUserId,
+        action: "provider.x.refresh.superseded_by_reconnect",
+        resourceType: "provider_account",
+        resourceId: providerAccountId,
+        metadata: {
+          workspaceId: input.workspaceId,
+          lifecycleIds,
+          priorStates: supersedableRefreshes.map((row) => row.state).sort(),
+          newAccountRevision: account ? account.revision + 1 : 1,
+          requestId: input.requestId,
+        },
+      });
+    }
+
     return {
       providerAccountId,
       xUserId: input.identity.id,
@@ -756,22 +999,26 @@ export interface RefreshResult {
 
 /**
  * Refresh a connected X account's access token. SINGLE-FLIGHT per account: the
- * SELECT ... FOR UPDATE on the provider_accounts row inside the tenant-audited
- * transaction serializes concurrent callers, so the rotating refresh token is
- * spent exactly once. A loser blocks until the winner commits, then observes the
- * already-rotated credential version and returns without a second token call.
+ * A durable lifecycle intent serializes concurrent callers before provider I/O,
+ * so the rotating refresh token is spent exactly once. A loser observes the
+ * staged/adopted lifecycle and never makes a second token call.
  *
  * On upstream `invalid_grant` (revoked) the account is degraded + audited and we
- * throw X_REFRESH_REVOKED (fail closed). The vault write happens INSIDE the
- * critical section so a crash after the network call cannot leave the DB
- * pointing at a superseded (already-rotated-away) refresh token.
+ * throw X_REFRESH_REVOKED (fail closed). Every successful one-time response is
+ * encrypted before semantic validation; crashes adopt the staged response, and
+ * ambiguous outcomes disable the exact account revision until reconnect.
  */
 export async function refreshXProviderCredential(input: RefreshInput): Promise<RefreshResult> {
-  // The tx returns a discriminated outcome. A `revoked` outcome COMMITS the
-  // degrade + audit, then we throw AFTER the commit so the failure signal does
-  // not roll back the very degrade it is reporting (fail closed + durable).
-  type Outcome = { kind: "ok"; result: RefreshResult } | { kind: "revoked" };
-  const outcome = await withTenantAuditedTransaction<Outcome>(
+  type Prepared =
+    | { kind: "fresh"; result: RefreshResult }
+    | { kind: "wait"; lifecycleId: string }
+    | {
+        kind: "call";
+        lifecycleId: string;
+        refreshToken: string;
+        allowedScopes: string[];
+      };
+  const prepared = await withTenantAuditedTransaction<Prepared>(
     input.tenantId,
     async (txRaw, append) => {
       const tx = txRaw as DbExecutor;
@@ -789,28 +1036,7 @@ export async function refreshXProviderCredential(input: RefreshInput): Promise<R
         .limit(1)
         .for("update");
 
-      if (!account)
-        throw new XConnectError("X_ACCOUNT_NOT_FOUND", 404, "provider account not found");
-      // Cross-workspace IDOR guard: the account MUST belong to the workspace the
-      // caller was authorized for. 404 (not 403) so account existence in another
-      // workspace does not leak.
-      if (account.workspaceId !== input.workspaceId) {
-        throw new XConnectError("X_ACCOUNT_NOT_FOUND", 404, "provider account not found");
-      }
-      if (account.adapterKey !== X_ADAPTER_KEY) {
-        throw new XConnectError("X_ACCOUNT_NOT_X", 400, "provider account is not an X account");
-      }
-      // Do NOT resurrect a locally revoked/disconnected account via refresh. A
-      // revoked account requires a fresh OAuth connect to become active again;
-      // silently reactivating it (especially after a best-effort upstream revoke
-      // failed) would restore an account the operator intended to kill.
-      if (account.status !== "active") {
-        throw new XConnectError(
-          "X_REFRESH_REVOKED",
-          409,
-          "provider account is not active; reconnect required",
-        );
-      }
+      assertXRefreshAccount(account, input.workspaceId);
       if (!account.credentialSecretId || account.credentialVersion == null) {
         throw new XConnectError("X_REFRESH_TOKEN_MISSING", 409, "account has no credential");
       }
@@ -822,13 +1048,16 @@ export async function refreshXProviderCredential(input: RefreshInput): Promise<R
         account.credentialSecretId,
         tx,
       );
+      if (current.payload.xUserId !== account.externalRef) {
+        throw new XConnectError("X_REFRESH_FAILED", 409, "credential account binding mismatch");
+      }
 
       // Single-flight fast path: a concurrent winner already rotated us to a fresh
       // token while we waited for the lock. If not forced and the token is still
       // valid, skip the network call entirely.
       if (!input.force && !isNearExpiry(current.expiresAt)) {
         return {
-          kind: "ok",
+          kind: "fresh",
           result: {
             refreshed: false,
             credentialVersion: account.credentialVersion,
@@ -840,64 +1069,545 @@ export async function refreshXProviderCredential(input: RefreshInput): Promise<R
       if (!current.refreshToken) {
         throw new XConnectError("X_REFRESH_TOKEN_MISSING", 409, "no refresh token on record");
       }
-
-      // Spend the rotating refresh token exactly once (still holding the lock).
-      const tokenRes = await refreshUpstream(input.config, current.refreshToken);
-
-      if (tokenRes.revoked) {
-        const [degraded] = await tx
-          .update(providerAccounts)
-          .set({ status: "revoked", revision: account.revision + 1, updatedAt: new Date() })
+      const [activeLifecycle] = await tx
+        .select({
+          id: providerXCredentialLifecycles.id,
+          state: providerXCredentialLifecycles.state,
+        })
+        .from(providerXCredentialLifecycles)
+        .where(
+          and(
+            eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+            eq(providerXCredentialLifecycles.providerAccountId, account.id),
+            inArray(providerXCredentialLifecycles.state, [
+              "inflight",
+              "credential_staged",
+              "revocation_pending",
+              "needs_attention",
+            ]),
+          ),
+        )
+        .limit(1);
+      if (activeLifecycle) {
+        if (
+          activeLifecycle.state === "needs_attention" ||
+          activeLifecycle.state === "revocation_pending"
+        ) {
+          throw new XConnectError(
+            "X_CREDENTIAL_NEEDS_ATTENTION",
+            409,
+            "X refresh outcome must be recovered by reconnect",
+          );
+        }
+        return { kind: "wait", lifecycleId: activeLifecycle.id };
+      }
+      const lifecycleId = randomUUID();
+      await tx.insert(providerXCredentialLifecycles).values({
+        id: lifecycleId,
+        tenantId: input.tenantId,
+        workspaceId: account.workspaceId,
+        providerAccountId: account.id,
+        state: "inflight",
+        expectedAccountRevision: account.revision,
+      });
+      await append({
+        tenantId: input.tenantId,
+        actorType: input.actorId ? "user" : "system",
+        actorId: input.actorId ?? "system",
+        action: "provider.x.refresh.intent_staged",
+        resourceType: "provider_x_credential_lifecycle",
+        resourceId: lifecycleId,
+        metadata: {
+          workspaceId: account.workspaceId,
+          providerAccountId: account.id,
+          expectedAccountRevision: account.revision,
+          requestId: input.requestId ?? null,
+        },
+      });
+      return {
+        kind: "call",
+        lifecycleId,
+        refreshToken: current.refreshToken,
+        allowedScopes: current.payload.scopesGranted,
+      };
+    },
+  );
+  if (prepared.kind === "fresh") return prepared.result;
+  if (prepared.kind === "wait") {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const [row] = await (getDb() as DbExecutor)
+        .select({ state: providerXCredentialLifecycles.state })
+        .from(providerXCredentialLifecycles)
+        .where(
+          and(
+            eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+            eq(providerXCredentialLifecycles.id, prepared.lifecycleId),
+          ),
+        )
+        .limit(1);
+      if (row?.state === "credential_staged") {
+        return reconcileXRefreshLifecycle({ ...input, lifecycleId: prepared.lifecycleId });
+      }
+      if (row?.state === "adopted") {
+        const [account] = await (getDb() as DbExecutor)
+          .select()
+          .from(providerAccounts)
           .where(
             and(
               eq(providerAccounts.tenantId, input.tenantId),
-              eq(providerAccounts.id, account.id),
-              eq(providerAccounts.revision, account.revision),
+              eq(providerAccounts.id, input.accountId),
             ),
           )
-          .returning();
-        await append({
-          tenantId: input.tenantId,
-          actorType: input.actorId ? "user" : "system",
-          actorId: input.actorId ?? "system",
-          action: "provider.x.refresh.revoked",
-          resourceType: "provider_account",
-          resourceId: account.id,
-          metadata: {
-            workspaceId: account.workspaceId,
-            xUserId: account.externalRef,
-            previousRevision: account.revision,
-            newRevision: degraded?.revision ?? null,
-            requestId: input.requestId ?? null,
-          },
-        });
-        // COMMIT the degrade + audit; the caller-facing failure is thrown below.
-        return { kind: "revoked" };
+          .limit(1);
+        if (account?.credentialSecretId && account.credentialVersion != null) {
+          const credential = await loadCredential(
+            input.vault,
+            input.tenantId,
+            account.credentialSecretId,
+          );
+          return {
+            refreshed: false,
+            credentialVersion: account.credentialVersion,
+            expiresAt: credential.expiresAt,
+          };
+        }
       }
+      if (
+        row?.state === "needs_attention" ||
+        row?.state === "revocation_pending" ||
+        row?.state === "revoked"
+      ) {
+        throw new XConnectError(
+          "X_CREDENTIAL_NEEDS_ATTENTION",
+          409,
+          "concurrent X refresh did not complete",
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new XConnectError(
+      "X_REFRESH_FAILED",
+      409,
+      "X refresh is already in progress; retry shortly",
+    );
+  }
 
-      // Rotate the vault secret to a new version with the freshly issued tokens.
+  await afterXRefreshIntentForTests?.();
+  let tokenRes: RefreshUpstreamResult;
+  try {
+    tokenRes = await refreshUpstream(input.config, prepared.refreshToken);
+  } catch (error) {
+    await disableXAccountForLifecycle(input, prepared.lifecycleId, "REFRESH_OUTCOME_UNKNOWN");
+    throw error;
+  }
+  if (tokenRes.revoked) {
+    await revokeXAccountForLifecycle(input, prepared.lifecycleId);
+    throw new XConnectError("X_REFRESH_REVOKED", 409, "X refresh token revoked");
+  }
+  try {
+    await stageXRefreshResponse(input, prepared.lifecycleId, tokenRes.raw);
+  } catch (error) {
+    // The provider may already have rotated the one-time refresh token. Use the
+    // response still held in memory to revoke that exact new grant before it can
+    // become an orphan, then fail closed locally. Reconnect remains the recovery
+    // boundary whether revocation succeeds or the outcome is unknowable.
+    const candidate =
+      tokenRes.raw && typeof tokenRes.raw === "object" && !Array.isArray(tokenRes.raw)
+        ? (tokenRes.raw as Record<string, unknown>)
+        : null;
+    // Revocation uses the exact bounded strings returned by X. A credential may
+    // fail Steward's adoption grammar while still being live at the provider.
+    const accessToken = candidate ? boundedStagedToken(candidate.access_token) : null;
+    const refreshToken = candidate ? boundedStagedToken(candidate.refresh_token) : null;
+    const revokedAtUpstream =
+      accessToken || refreshToken
+        ? await revokeUpstreamBestEffort(
+            input.config,
+            accessToken ?? (refreshToken as string),
+            refreshToken,
+          ).catch(() => false)
+        : false;
+    if (revokedAtUpstream) {
+      await revokeXAccountForLifecycle(
+        input,
+        prepared.lifecycleId,
+        "ROTATED_GRANT_REVOKED_AFTER_STAGING_FAILURE",
+      );
+    } else {
+      // There is no durable handle because staging itself failed. Keep this
+      // lifecycle non-supersedable: reconnect must not proceed while the new
+      // rotated grant may still be live upstream.
+      await disableXAccountForLifecycle(
+        input,
+        prepared.lifecycleId,
+        "REFRESH_RESPONSE_STAGING_FAILED",
+      );
+    }
+    throw error;
+  }
+  await afterXCredentialStageForTests?.();
+  return reconcileXRefreshLifecycle({
+    ...input,
+    lifecycleId: prepared.lifecycleId,
+    allowedScopes: prepared.allowedScopes,
+  });
+}
+
+interface XRefreshLifecycleSecret {
+  schemaVersion: "steward.provider-x.lifecycle.v1";
+  token: unknown;
+}
+
+function assertXRefreshAccount(
+  account: typeof providerAccounts.$inferSelect | undefined,
+  workspaceId: string,
+): asserts account is typeof providerAccounts.$inferSelect {
+  if (!account || account.workspaceId !== workspaceId) {
+    throw new XConnectError("X_ACCOUNT_NOT_FOUND", 404, "provider account not found");
+  }
+  if (account.adapterKey !== X_ADAPTER_KEY) {
+    throw new XConnectError("X_ACCOUNT_NOT_X", 400, "provider account is not an X account");
+  }
+  if (account.status !== "active") {
+    throw new XConnectError(
+      "X_REFRESH_REVOKED",
+      409,
+      "provider account is not active; reconnect required",
+    );
+  }
+}
+
+async function stageXRefreshResponse(
+  input: RefreshInput,
+  lifecycleId: string,
+  raw: unknown,
+): Promise<void> {
+  await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
+    const tx = txRaw as DbExecutor;
+    const secret = await input.vault.createSecretWithinTx(
+      tx,
+      input.tenantId,
+      `provider-x-lifecycle:${lifecycleId}`,
+      JSON.stringify({
+        schemaVersion: "steward.provider-x.lifecycle.v1",
+        token: raw,
+      } satisfies XRefreshLifecycleSecret),
+      { description: "Encrypted transient X OAuth rotation response" },
+    );
+    const [updated] = await tx
+      .update(providerXCredentialLifecycles)
+      .set({ state: "credential_staged", credentialSecretId: secret.id, updatedAt: new Date() })
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+          eq(providerXCredentialLifecycles.id, lifecycleId),
+          eq(providerXCredentialLifecycles.state, "inflight"),
+        ),
+      )
+      .returning();
+    if (!updated) {
+      throw new XConnectError(
+        "X_CREDENTIAL_NEEDS_ATTENTION",
+        409,
+        "X refresh lifecycle changed before staging",
+      );
+    }
+    await append({
+      tenantId: input.tenantId,
+      actorType: "system",
+      actorId: "system",
+      action: "provider.x.refresh.credential_staged",
+      resourceType: "provider_x_credential_lifecycle",
+      resourceId: lifecycleId,
+      metadata: { providerAccountId: input.accountId, workspaceId: input.workspaceId },
+    });
+  });
+}
+
+async function disableXAccountForLifecycle(
+  input: RefreshInput,
+  lifecycleId: string,
+  reason: string,
+): Promise<void> {
+  await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
+    const tx = txRaw as DbExecutor;
+    const [lifecycle] = await tx
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+          eq(providerXCredentialLifecycles.id, lifecycleId),
+          eq(providerXCredentialLifecycles.workspaceId, input.workspaceId),
+          eq(providerXCredentialLifecycles.providerAccountId, input.accountId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    let accountDisabled = false;
+    if (lifecycle) {
+      const [disabled] = await tx
+        .update(providerAccounts)
+        .set({
+          status: "disabled",
+          revision: sql`${providerAccounts.revision} + 1`,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(providerAccounts.tenantId, input.tenantId),
+            eq(providerAccounts.workspaceId, input.workspaceId),
+            eq(providerAccounts.id, input.accountId),
+            eq(providerAccounts.revision, lifecycle.expectedAccountRevision),
+          ),
+        )
+        .returning({ id: providerAccounts.id });
+      accountDisabled = Boolean(disabled);
+      await tx
+        .update(providerXCredentialLifecycles)
+        .set({ state: "needs_attention", lastErrorCode: reason, updatedAt: new Date() })
+        .where(
+          and(
+            eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+            eq(providerXCredentialLifecycles.id, lifecycleId),
+            inArray(providerXCredentialLifecycles.state, [
+              "inflight",
+              "credential_staged",
+              "revocation_pending",
+              "needs_attention",
+            ]),
+          ),
+        );
+    }
+    await append({
+      tenantId: input.tenantId,
+      actorType: "system",
+      actorId: "system",
+      action: "provider.x.refresh.needs_attention",
+      resourceType: "provider_account",
+      resourceId: input.accountId,
+      metadata: { lifecycleId, reason, workspaceId: input.workspaceId, accountDisabled },
+    });
+  });
+}
+
+async function revokeXAccountForLifecycle(
+  input: RefreshInput,
+  lifecycleId: string,
+  reason = "INVALID_GRANT",
+): Promise<void> {
+  await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
+    const tx = txRaw as DbExecutor;
+    const [lifecycle] = await tx
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+          eq(providerXCredentialLifecycles.id, lifecycleId),
+          eq(providerXCredentialLifecycles.workspaceId, input.workspaceId),
+          eq(providerXCredentialLifecycles.providerAccountId, input.accountId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    let accountRevoked = false;
+    if (lifecycle) {
+      const [revoked] = await tx
+        .update(providerAccounts)
+        .set({
+          status: "revoked",
+          revision: sql`${providerAccounts.revision} + 1`,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(providerAccounts.tenantId, input.tenantId),
+            eq(providerAccounts.workspaceId, input.workspaceId),
+            eq(providerAccounts.id, input.accountId),
+            eq(providerAccounts.revision, lifecycle.expectedAccountRevision),
+          ),
+        )
+        .returning({ id: providerAccounts.id });
+      accountRevoked = Boolean(revoked);
+      await tx
+        .update(providerXCredentialLifecycles)
+        .set({ state: "revoked", lastErrorCode: reason, updatedAt: new Date() })
+        .where(
+          and(
+            eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+            eq(providerXCredentialLifecycles.id, lifecycleId),
+          ),
+        );
+    }
+    await append({
+      tenantId: input.tenantId,
+      actorType: input.actorId ? "user" : "system",
+      actorId: input.actorId ?? "system",
+      action: "provider.x.refresh.revoked",
+      resourceType: "provider_account",
+      resourceId: input.accountId,
+      metadata: { lifecycleId, workspaceId: input.workspaceId, accountRevoked, reason },
+    });
+  });
+}
+
+interface ValidatedXRefreshResponse {
+  accessToken: string;
+  refreshToken: string;
+  scopes: string[];
+  expiresIn?: number;
+}
+
+function validateXRefreshResponse(
+  raw: unknown,
+  allowedScopes: string[],
+): ValidatedXRefreshResponse {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new XConnectError("X_REFRESH_FAILED", 502, "X refresh response is invalid");
+  }
+  const token = raw as Record<string, unknown>;
+  if (
+    !isValidOAuthBearerToken(token.access_token) ||
+    !isValidOAuthOpaqueToken(token.refresh_token)
+  ) {
+    throw new XConnectError("X_REFRESH_FAILED", 502, "X refresh response is invalid");
+  }
+  if (
+    token.token_type !== undefined &&
+    (typeof token.token_type !== "string" || token.token_type.toLowerCase() !== "bearer")
+  ) {
+    throw new XConnectError("X_REFRESH_FAILED", 502, "X refresh token_type is invalid");
+  }
+  if (
+    token.expires_in !== undefined &&
+    (typeof token.expires_in !== "number" ||
+      !Number.isSafeInteger(token.expires_in) ||
+      token.expires_in <= 0 ||
+      token.expires_in > 86_400)
+  ) {
+    throw new XConnectError("X_REFRESH_FAILED", 502, "X refresh expires_in is invalid");
+  }
+  const scopes = parseXGrantedScopes(token.scope, allowedScopes, "X_REFRESH_FAILED");
+  return {
+    accessToken: token.access_token,
+    refreshToken: token.refresh_token,
+    scopes,
+    expiresIn: token.expires_in as number | undefined,
+  };
+}
+
+/** Adopt an encrypted single-use X refresh response without another provider call. */
+export async function reconcileXRefreshLifecycle(
+  input: RefreshInput & { lifecycleId: string; allowedScopes?: string[] },
+): Promise<RefreshResult> {
+  try {
+    return await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
+      const tx = txRaw as DbExecutor;
+      const [lifecycle] = await tx
+        .select()
+        .from(providerXCredentialLifecycles)
+        .where(
+          and(
+            eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+            eq(providerXCredentialLifecycles.id, input.lifecycleId),
+            eq(providerXCredentialLifecycles.workspaceId, input.workspaceId),
+            eq(providerXCredentialLifecycles.providerAccountId, input.accountId),
+          ),
+        )
+        .limit(1)
+        .for("update");
+      if (!lifecycle || lifecycle.state !== "credential_staged" || !lifecycle.credentialSecretId) {
+        throw new XConnectError(
+          "X_CREDENTIAL_NEEDS_ATTENTION",
+          409,
+          "no staged X refresh credential",
+        );
+      }
+      const [account] = await tx
+        .select()
+        .from(providerAccounts)
+        .where(
+          and(
+            eq(providerAccounts.tenantId, input.tenantId),
+            eq(providerAccounts.id, input.accountId),
+          ),
+        )
+        .limit(1)
+        .for("update");
+      assertXRefreshAccount(account, input.workspaceId);
+      if (
+        account.revision !== lifecycle.expectedAccountRevision ||
+        !account.credentialSecretId ||
+        account.credentialVersion == null
+      ) {
+        throw new XConnectError(
+          "X_CREDENTIAL_NEEDS_ATTENTION",
+          409,
+          "X refresh account revision changed",
+        );
+      }
+      const current = await loadCredential(
+        input.vault,
+        input.tenantId,
+        account.credentialSecretId,
+        tx,
+      );
+      if (current.payload.xUserId !== account.externalRef) {
+        throw new XConnectError("X_REFRESH_FAILED", 409, "credential account binding mismatch");
+      }
+      const [stagedSecret] = (await tx
+        .select()
+        .from(secrets)
+        .where(
+          and(eq(secrets.tenantId, input.tenantId), eq(secrets.id, lifecycle.credentialSecretId)),
+        )
+        .limit(1)) as Secret[];
+      if (!stagedSecret) {
+        throw new XConnectError(
+          "X_CREDENTIAL_NEEDS_ATTENTION",
+          409,
+          "staged X refresh credential is missing",
+        );
+      }
+      const staged = JSON.parse(
+        input.vault.decryptSecretRow(input.tenantId, stagedSecret),
+      ) as XRefreshLifecycleSecret;
+      if (staged.schemaVersion !== "steward.provider-x.lifecycle.v1") {
+        throw new XConnectError("X_REFRESH_FAILED", 502, "staged X refresh response is invalid");
+      }
+      const token = validateXRefreshResponse(
+        staged.token,
+        input.allowedScopes ?? current.payload.scopesGranted,
+      );
       const obtainedAt = new Date();
       const expiresAt =
-        typeof tokenRes.expiresIn === "number"
-          ? new Date(obtainedAt.getTime() + tokenRes.expiresIn * 1000)
-          : null;
-      const newPayload: XCredentialPayload = {
+        token.expiresIn === undefined
+          ? null
+          : new Date(obtainedAt.getTime() + token.expiresIn * 1000);
+      const payload: XCredentialPayload = {
         ...current.payload,
-        accessToken: tokenRes.accessToken,
-        // X rotates the refresh token; fall back to the prior one only if upstream
-        // omits it (should not happen with offline.access).
-        refreshToken: tokenRes.refreshToken ?? current.refreshToken,
-        scopesGranted: tokenRes.scopes ?? current.payload.scopesGranted,
+        accessToken: token.accessToken,
+        refreshToken: token.refreshToken,
+        scopesGranted: token.scopes,
         obtainedAt: obtainedAt.toISOString(),
-        expiresAt: expiresAt ? expiresAt.toISOString() : null,
+        expiresAt: expiresAt?.toISOString() ?? null,
       };
       const meta = await input.vault.rotateSecretWithinTx(
         tx,
         input.tenantId,
         current.secretName,
-        JSON.stringify(newPayload),
+        JSON.stringify(payload),
       );
-
+      await tx
+        .update(secretRoutes)
+        .set({ secretId: meta.id })
+        .where(
+          and(
+            eq(secretRoutes.tenantId, input.tenantId),
+            eq(secretRoutes.secretId, account.credentialSecretId),
+          ),
+        );
       const [updated] = await tx
         .update(providerAccounts)
         .set({
@@ -914,11 +1624,28 @@ export async function refreshXProviderCredential(input: RefreshInput): Promise<R
             eq(providerAccounts.revision, account.revision),
           ),
         )
-        .returning();
+        .returning({ id: providerAccounts.id });
       if (!updated) {
-        throw new XConnectError("X_REFRESH_FAILED", 409, "account revision conflict on refresh");
+        throw new XConnectError(
+          "X_CREDENTIAL_NEEDS_ATTENTION",
+          409,
+          "X refresh account changed before adoption",
+        );
       }
-
+      await tx
+        .update(providerXCredentialLifecycles)
+        .set({ state: "adopted", credentialSecretId: null, updatedAt: new Date() })
+        .where(
+          and(
+            eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+            eq(providerXCredentialLifecycles.id, lifecycle.id),
+          ),
+        );
+      await tx
+        .delete(secrets)
+        .where(
+          and(eq(secrets.tenantId, input.tenantId), eq(secrets.id, lifecycle.credentialSecretId)),
+        );
       await append({
         tenantId: input.tenantId,
         actorType: input.actorId ? "user" : "system",
@@ -927,29 +1654,292 @@ export async function refreshXProviderCredential(input: RefreshInput): Promise<R
         resourceType: "provider_account",
         resourceId: account.id,
         metadata: {
-          workspaceId: account.workspaceId,
-          xUserId: account.externalRef,
-          credentialSecretId: meta.id,
+          lifecycleId: lifecycle.id,
+          workspaceId: input.workspaceId,
           credentialVersion: meta.version,
           requestId: input.requestId ?? null,
         },
       });
-
-      return {
-        kind: "ok",
-        result: {
-          refreshed: true,
-          credentialVersion: meta.version,
-          expiresAt: newPayload.expiresAt,
-        },
-      };
-    },
-  );
-
-  if (outcome.kind === "revoked") {
-    throw new XConnectError("X_REFRESH_REVOKED", 409, "X refresh token revoked");
+      return { refreshed: true, credentialVersion: meta.version, expiresAt: payload.expiresAt };
+    });
+  } catch (error) {
+    const adopted = await readAdoptedXRefreshResult(input);
+    if (adopted) return adopted;
+    await disableXAccountForLifecycle(input, input.lifecycleId, "STAGED_ADOPTION_FAILED");
+    throw error;
   }
-  return outcome.result;
+}
+
+async function readAdoptedXRefreshResult(
+  input: RefreshInput & { lifecycleId: string },
+): Promise<RefreshResult | null> {
+  const db = getDb() as DbExecutor;
+  const [lifecycle] = await db
+    .select({ state: providerXCredentialLifecycles.state })
+    .from(providerXCredentialLifecycles)
+    .where(
+      and(
+        eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+        eq(providerXCredentialLifecycles.id, input.lifecycleId),
+        eq(providerXCredentialLifecycles.workspaceId, input.workspaceId),
+        eq(providerXCredentialLifecycles.providerAccountId, input.accountId),
+      ),
+    )
+    .limit(1);
+  if (lifecycle?.state !== "adopted") return null;
+  const [account] = await db
+    .select()
+    .from(providerAccounts)
+    .where(
+      and(
+        eq(providerAccounts.tenantId, input.tenantId),
+        eq(providerAccounts.workspaceId, input.workspaceId),
+        eq(providerAccounts.id, input.accountId),
+      ),
+    )
+    .limit(1);
+  if (!account?.credentialSecretId || account.credentialVersion == null) return null;
+  const credential = await loadCredential(input.vault, input.tenantId, account.credentialSecretId);
+  return {
+    refreshed: false,
+    credentialVersion: account.credentialVersion,
+    expiresAt: credential.expiresAt,
+  };
+}
+
+export interface XCredentialLifecycleSweepResult {
+  processed: number;
+  adopted: number;
+  revoked: number;
+  attention: number;
+  remaining: boolean;
+}
+
+const X_LIFECYCLE_SWEEP_BATCH_SIZE = 25;
+// Provider I/O is capped at 10s, but DB scheduling and encrypted staging occur
+// afterwards. A one-minute lease prevents a recovery replica from racing a
+// healthy slow winner and disabling its account mid-rotation.
+const X_LIFECYCLE_STALE_AFTER_MS = 60_000;
+
+/** Bounded all-tenant recovery for abandoned single-use X refresh rotations. */
+export async function runXCredentialLifecycleSweep(input: {
+  vault: SecretVault;
+  config: XConnectConfig;
+  limit?: number;
+  now?: Date;
+}): Promise<XCredentialLifecycleSweepResult> {
+  const limit = Math.min(
+    X_LIFECYCLE_SWEEP_BATCH_SIZE,
+    Math.max(1, Math.floor(input.limit ?? X_LIFECYCLE_SWEEP_BATCH_SIZE)),
+  );
+  const now = input.now ?? new Date();
+  const staleBefore = new Date(now.getTime() - X_LIFECYCLE_STALE_AFTER_MS);
+  const rows = await (getDb() as DbExecutor)
+    .select()
+    .from(providerXCredentialLifecycles)
+    .where(
+      and(
+        inArray(providerXCredentialLifecycles.state, [
+          "inflight",
+          "credential_staged",
+          "revocation_pending",
+          "needs_attention",
+        ]),
+        sql`(${providerXCredentialLifecycles.state} IN ('inflight', 'credential_staged') OR ${providerXCredentialLifecycles.credentialSecretId} IS NOT NULL)`,
+        lte(providerXCredentialLifecycles.updatedAt, staleBefore),
+      ),
+    )
+    .orderBy(asc(providerXCredentialLifecycles.updatedAt))
+    .limit(limit);
+  const result: XCredentialLifecycleSweepResult = {
+    processed: 0,
+    adopted: 0,
+    revoked: 0,
+    attention: 0,
+    remaining: false,
+  };
+  for (const row of rows) {
+    result.processed += 1;
+    const recoveryInput: RefreshInput & { lifecycleId: string } = {
+      tenantId: row.tenantId,
+      workspaceId: row.workspaceId,
+      accountId: row.providerAccountId,
+      lifecycleId: row.id,
+      vault: input.vault,
+      config: { clientId: "recovery", clientSecret: "recovery" },
+      force: true,
+    };
+    try {
+      if (row.state === "credential_staged") {
+        await reconcileXRefreshLifecycle(recoveryInput);
+        result.adopted += 1;
+      } else if (row.state === "needs_attention" || row.state === "revocation_pending") {
+        const revoked = await reconcileStagedXRefreshRevocation({
+          ...recoveryInput,
+          config: input.config,
+          expectedUpdatedAt: row.updatedAt,
+        });
+        if (revoked) result.revoked += 1;
+        else result.attention += 1;
+      } else {
+        await disableXAccountForLifecycle(recoveryInput, row.id, "REFRESH_OUTCOME_UNKNOWN");
+        result.attention += 1;
+      }
+    } catch {
+      result.attention += 1;
+    }
+  }
+  result.remaining = rows.length === limit && result.attention === 0;
+  return result;
+}
+
+async function reconcileStagedXRefreshRevocation(
+  input: RefreshInput & { lifecycleId: string; expectedUpdatedAt: Date },
+): Promise<boolean> {
+  const claimed = await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
+    const tx = txRaw as DbExecutor;
+    const [lifecycle] = await tx
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+          eq(providerXCredentialLifecycles.id, input.lifecycleId),
+          eq(providerXCredentialLifecycles.workspaceId, input.workspaceId),
+          eq(providerXCredentialLifecycles.providerAccountId, input.accountId),
+          inArray(providerXCredentialLifecycles.state, ["needs_attention", "revocation_pending"]),
+          eq(providerXCredentialLifecycles.updatedAt, input.expectedUpdatedAt),
+          sql`${providerXCredentialLifecycles.credentialSecretId} IS NOT NULL`,
+        ),
+      )
+      .limit(1)
+      .for("update");
+    if (!lifecycle?.credentialSecretId) return null;
+    const claimedAt = new Date();
+    const [updated] = await tx
+      .update(providerXCredentialLifecycles)
+      .set({ state: "revocation_pending", updatedAt: claimedAt })
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+          eq(providerXCredentialLifecycles.id, lifecycle.id),
+          eq(providerXCredentialLifecycles.updatedAt, input.expectedUpdatedAt),
+        ),
+      )
+      .returning({ credentialSecretId: providerXCredentialLifecycles.credentialSecretId });
+    if (!updated?.credentialSecretId) return null;
+    await append({
+      tenantId: input.tenantId,
+      actorType: "system",
+      actorId: "system",
+      action: "provider.x.refresh.revocation_claimed",
+      resourceType: "provider_x_credential_lifecycle",
+      resourceId: lifecycle.id,
+      metadata: { providerAccountId: input.accountId, workspaceId: input.workspaceId },
+    });
+    return { credentialSecretId: updated.credentialSecretId, claimedAt };
+  });
+  if (!claimed) return false;
+
+  let accessToken: string | null = null;
+  let refreshToken: string | null = null;
+  try {
+    const [secret] = (await (getDb() as DbExecutor)
+      .select()
+      .from(secrets)
+      .where(and(eq(secrets.tenantId, input.tenantId), eq(secrets.id, claimed.credentialSecretId)))
+      .limit(1)) as Secret[];
+    if (!secret) throw new Error("staged secret missing");
+    const staged = JSON.parse(
+      input.vault.decryptSecretRow(input.tenantId, secret),
+    ) as XRefreshLifecycleSecret;
+    const token = staged?.token;
+    if (!token || typeof token !== "object" || Array.isArray(token)) {
+      throw new Error("staged token invalid");
+    }
+    const raw = token as Record<string, unknown>;
+    // Adoption applies the strict token grammar. Revocation instead uses the
+    // exact bounded string X returned: a rotated refresh credential that fails
+    // Steward's grammar may still be live upstream and must not be discarded.
+    accessToken = boundedStagedToken(raw.access_token);
+    refreshToken = boundedStagedToken(raw.refresh_token);
+    if (!accessToken && !refreshToken) throw new Error("no revocable staged token");
+  } catch {
+    await finishStagedXRefreshRevocation(input, claimed, false, "STAGED_REVOCATION_HANDLE_INVALID");
+    return false;
+  }
+
+  let revoked = false;
+  try {
+    revoked = await revokeUpstreamBestEffort(
+      input.config,
+      accessToken ?? (refreshToken as string),
+      refreshToken,
+    );
+  } catch {
+    revoked = false;
+  }
+  await finishStagedXRefreshRevocation(
+    input,
+    claimed,
+    revoked,
+    revoked ? "STAGED_CREDENTIAL_REVOKED" : "STAGED_REVOCATION_FAILED",
+  );
+  return revoked;
+}
+
+function boundedStagedToken(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_OAUTH_TOKEN_LENGTH
+    ? value
+    : null;
+}
+
+async function finishStagedXRefreshRevocation(
+  input: RefreshInput & { lifecycleId: string },
+  claimed: { credentialSecretId: string; claimedAt: Date },
+  revoked: boolean,
+  reason: string,
+): Promise<void> {
+  await withTenantAuditedTransaction(input.tenantId, async (txRaw, append) => {
+    const tx = txRaw as DbExecutor;
+    const [updated] = await tx
+      .update(providerXCredentialLifecycles)
+      .set({
+        state: revoked ? "revoked" : "needs_attention",
+        credentialSecretId: revoked ? null : claimed.credentialSecretId,
+        lastErrorCode: reason,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.tenantId, input.tenantId),
+          eq(providerXCredentialLifecycles.id, input.lifecycleId),
+          eq(providerXCredentialLifecycles.state, "revocation_pending"),
+          eq(providerXCredentialLifecycles.credentialSecretId, claimed.credentialSecretId),
+          eq(providerXCredentialLifecycles.updatedAt, claimed.claimedAt),
+        ),
+      )
+      .returning({ id: providerXCredentialLifecycles.id });
+    if (!updated) return;
+    if (revoked) {
+      await tx
+        .delete(secrets)
+        .where(
+          and(eq(secrets.tenantId, input.tenantId), eq(secrets.id, claimed.credentialSecretId)),
+        );
+    }
+    await append({
+      tenantId: input.tenantId,
+      actorType: "system",
+      actorId: "system",
+      action: revoked
+        ? "provider.x.refresh.staged_credential_revoked"
+        : "provider.x.refresh.staged_revocation_failed",
+      resourceType: "provider_x_credential_lifecycle",
+      resourceId: input.lifecycleId,
+      metadata: { providerAccountId: input.accountId, workspaceId: input.workspaceId, reason },
+    });
+  });
 }
 
 interface LoadedCredential {
@@ -988,7 +1978,21 @@ async function loadCredential(
   if (
     candidate.schemaVersion !== "steward.provider-x.credential.v1" ||
     !isValidOAuthBearerToken(candidate.accessToken) ||
-    !(candidate.refreshToken === null || isValidOAuthOpaqueToken(candidate.refreshToken))
+    !(candidate.refreshToken === null || isValidOAuthOpaqueToken(candidate.refreshToken)) ||
+    !Array.isArray(candidate.scopesGranted) ||
+    candidate.scopesGranted.length === 0 ||
+    candidate.scopesGranted.length > X_DEFAULT_SCOPES.length ||
+    candidate.scopesGranted.some(
+      (scope) =>
+        typeof scope !== "string" || !(X_DEFAULT_SCOPES as readonly string[]).includes(scope),
+    ) ||
+    new Set(candidate.scopesGranted).size !== candidate.scopesGranted.length ||
+    typeof candidate.xUserId !== "string" ||
+    !/^\d{1,32}$/.test(candidate.xUserId) ||
+    typeof candidate.xUsername !== "string" ||
+    (candidate.xUsername !== "" && !/^[A-Za-z0-9_]{1,64}$/.test(candidate.xUsername)) ||
+    !isCanonicalIsoTimestamp(candidate.obtainedAt) ||
+    !(candidate.expiresAt === null || isCanonicalIsoTimestamp(candidate.expiresAt))
   ) {
     throw new XConnectError("X_REFRESH_FAILED", 409, "credential payload invalid");
   }
@@ -1009,10 +2013,7 @@ function isNearExpiry(expiresAtIso: string | null): boolean {
 
 interface RefreshUpstreamResult {
   revoked: boolean;
-  accessToken: string;
-  refreshToken?: string;
-  scopes?: string[];
-  expiresIn?: number;
+  raw: unknown;
 }
 
 async function refreshUpstream(
@@ -1038,24 +2039,14 @@ async function refreshUpstream(
   if (!res.ok) {
     // invalid_grant => the refresh token was revoked or already rotated away.
     if (parsed?.error === "invalid_grant") {
-      return { revoked: true, accessToken: "" };
+      return { revoked: true, raw: parsed };
     }
     throw new XConnectError("X_REFRESH_FAILED", 502, `X refresh failed (${res.status})`);
   }
-  if (
-    !parsed ||
-    !isValidOAuthBearerToken(parsed.access_token) ||
-    (parsed.refresh_token !== undefined && !isValidOAuthOpaqueToken(parsed.refresh_token))
-  ) {
-    throw new XConnectError("X_REFRESH_FAILED", 502, "X refresh response missing access_token");
-  }
-  return {
-    revoked: false,
-    accessToken: parsed.access_token,
-    refreshToken: parsed.refresh_token,
-    scopes: parsed.scope ? parsed.scope.split(/\s+/).filter(Boolean) : undefined,
-    expiresIn: parsed.expires_in,
-  };
+  // Successful rotating responses are intentionally returned unparsed. The
+  // caller encrypts the exact response before token/scope/time validation so a
+  // malformed one-time response can never strand the account on a spent token.
+  return { revoked: false, raw: res.json };
 }
 
 // ── Disconnect ────────────────────────────────────────────────────────────────
@@ -1110,6 +2101,9 @@ export async function disconnectXProviderCredential(
           account.credentialSecretId,
           tx,
         );
+        if (cred.payload.xUserId !== account.externalRef) {
+          throw new XConnectError("X_REFRESH_FAILED", 409, "credential account binding mismatch");
+        }
         revokedAtUpstream = await revokeUpstreamBestEffort(
           input.config,
           cred.payload.accessToken,
@@ -1181,7 +2175,10 @@ async function revokeUpstreamBestEffort(
     },
     body: body.toString(),
   });
-  return res.ok;
+  // RFC 7009 specifies HTTP 200 for a processed revocation request, including
+  // an already-invalid token. Do not treat an arbitrary 2xx (especially an
+  // asynchronous 202) as proof strong enough to destroy our only staged handle.
+  return res.status === 200;
 }
 
 // re-export sql for callers/tests that need raw predicates

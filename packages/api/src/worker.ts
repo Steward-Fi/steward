@@ -64,6 +64,8 @@ export interface Env {
   GITHUB_CLIENT_SECRET?: string;
   TWITTER_CLIENT_ID?: string;
   TWITTER_CLIENT_SECRET?: string;
+  X_CLIENT_ID?: string;
+  X_CLIENT_SECRET?: string;
   PASSKEY_RP_ID?: string;
   PASSKEY_ORIGIN?: string;
   PASSKEY_RP_NAME?: string;
@@ -122,6 +124,26 @@ export async function runWorkerGoogleCredentialLifecycleSweep(
     options?.sweep ??
     (await import("./services/provider-google-lifecycle-scheduler"))
       .runGoogleCredentialLifecycleRecoverySweep;
+  return sweep();
+}
+
+export async function runWorkerXCredentialLifecycleSweep(
+  env: Env,
+  options?: { sweep?: () => Promise<unknown> },
+): Promise<unknown | null> {
+  hydrateProcessEnv(env);
+  if (
+    process.env.STEWARD_X_LIFECYCLE_SWEEPER === "false" ||
+    !process.env.X_CLIENT_ID ||
+    !process.env.X_CLIENT_SECRET ||
+    !process.env.STEWARD_MASTER_PASSWORD
+  ) {
+    return null;
+  }
+  const sweep =
+    options?.sweep ??
+    (await import("./services/provider-x-lifecycle-scheduler"))
+      .runXCredentialLifecycleRecoverySweep;
   return sweep();
 }
 
@@ -262,6 +284,7 @@ export default {
       Promise.all([
         runWorkerUpstreamCredentialLeaseSweep(env),
         runWorkerGoogleCredentialLifecycleSweep(env),
+        runWorkerXCredentialLifecycleSweep(env),
       ]),
     );
   },

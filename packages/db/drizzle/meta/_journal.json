@@ -589,6 +589,13 @@
       "when": 1787107600000,
       "tag": "0103_google_refresh_reconnect_recovery",
       "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1787107601000,
+      "tag": "0104_x_refresh_rotation_recovery",
+      "breakpoints": true
     }
   ]
 }

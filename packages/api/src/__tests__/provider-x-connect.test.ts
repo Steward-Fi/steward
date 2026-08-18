@@ -24,6 +24,7 @@ import {
   getDb,
   providerAccounts,
   providerRoleBindings,
+  providerXCredentialLifecycles,
   secrets,
   tenants,
   users,
@@ -36,12 +37,15 @@ import { and, eq } from "drizzle-orm";
 import { providerAuthorityStore } from "../services/provider-authority-store";
 import {
   __runDefaultXForwardForTests,
+  __setAfterXCredentialStageForTests,
+  __setAfterXRefreshIntentForTests,
   __setXForwardForTests,
   completeXConnect,
   disconnectXProviderCredential,
   initiateXConnect,
   type PendingConnectStore,
   refreshXProviderCredential,
+  runXCredentialLifecycleSweep,
   X_ADAPTER_KEY,
   XConnectError,
   type XCredentialPayload,
@@ -116,6 +120,7 @@ interface FakeXOptions {
     access_token: string;
     refresh_token: string;
     scope: string;
+    token_type: string;
     expires_in: number;
   }>;
   exchangeStatus?: number;
@@ -126,6 +131,7 @@ interface FakeXOptions {
     body: Record<string, unknown>;
     delayMs?: number;
   }>;
+  revokeStatuses?: number[];
 }
 
 interface FakeXCounters {
@@ -133,13 +139,20 @@ interface FakeXCounters {
   identity: number;
   refresh: number;
   revoke: number;
+  revokeBodies: string[];
 }
 
 function installFakeX(opts: FakeXOptions = {}): {
   counters: FakeXCounters;
   restore: () => void;
 } {
-  const counters: FakeXCounters = { exchange: 0, identity: 0, refresh: 0, revoke: 0 };
+  const counters: FakeXCounters = {
+    exchange: 0,
+    identity: 0,
+    refresh: 0,
+    revoke: 0,
+    revokeBodies: [],
+  };
   let refreshIdx = 0;
   const fn = async (req: XForwardRequest): Promise<XForwardResponse> => {
     // Token endpoint: distinguish exchange vs refresh by grant_type.
@@ -175,12 +188,14 @@ function installFakeX(opts: FakeXOptions = {}): {
       counters.identity += 1;
       const status = opts.identityStatus ?? 200;
       if (status !== 200) return jsonResponse(status, {});
-      const identity = opts.identity ?? { id: "x-user-123", username: "solsundial", name: "Sol" };
+      const identity = opts.identity ?? { id: "1234567890", username: "solsundial", name: "Sol" };
       return jsonResponse(200, { data: identity });
     }
     if (req.url.includes("/oauth2/revoke")) {
       counters.revoke += 1;
-      return jsonResponse(200, {});
+      counters.revokeBodies.push(req.body ?? "");
+      const status = opts.revokeStatuses?.[counters.revoke - 1] ?? 200;
+      return jsonResponse(status, status === 200 ? {} : { error: "temporarily_unavailable" });
     }
     throw new Error(`unexpected X call: ${req.url}`);
   };
@@ -285,6 +300,8 @@ afterAll(async () => {
 
 afterEach(async () => {
   __setXForwardForTests(null);
+  __setAfterXCredentialStageForTests(null);
+  __setAfterXRefreshIntentForTests(null);
   // Reset connected accounts + credential secrets between tests.
   const db = getDb();
   await db.delete(providerAccounts).where(eq(providerAccounts.tenantId, TENANT));
@@ -379,7 +396,7 @@ describe("connect", () => {
     const store = new MemoryConnectStore();
     const { completed } = await connectHappy(store);
     expect(completed.reconnected).toBe(false);
-    expect(completed.xUserId).toBe("x-user-123");
+    expect(completed.xUserId).toBe("1234567890");
     expect(completed.xUsername).toBe("solsundial");
     expect(completed.credentialVersion).toBe(1);
 
@@ -389,7 +406,7 @@ describe("connect", () => {
       .from(providerAccounts)
       .where(eq(providerAccounts.id, completed.providerAccountId));
     expect(acct.adapterKey).toBe(X_ADAPTER_KEY);
-    expect(acct.externalRef).toBe("x-user-123");
+    expect(acct.externalRef).toBe("1234567890");
     expect(acct.displayName).toBe("@solsundial");
     expect(acct.status).toBe("active");
     expect(acct.credentialSecretId).toBeTruthy();
@@ -398,7 +415,7 @@ describe("connect", () => {
     const cred = await decryptCredential(completed.providerAccountId);
     expect(cred.accessToken).toBe("access-initial");
     expect(cred.refreshToken).toBe("refresh-initial");
-    expect(cred.xUserId).toBe("x-user-123");
+    expect(cred.xUserId).toBe("1234567890");
 
     const events = await readAuditActions(TENANT);
     expect(events.includes("provider.x.connect.completed")).toBe(true);
@@ -424,7 +441,7 @@ describe("connect", () => {
         and(
           eq(providerAccounts.tenantId, TENANT),
           eq(providerAccounts.adapterKey, X_ADAPTER_KEY),
-          eq(providerAccounts.externalRef, "x-user-123"),
+          eq(providerAccounts.externalRef, "1234567890"),
         ),
       );
     expect(rows.length).toBe(1);
@@ -571,7 +588,7 @@ describe("connect state validation", () => {
     fake.restore();
   });
 
-  test("token exchange failure does NOT consume the state (retryable)", async () => {
+  test("claims state before token exchange so a failed callback cannot be replayed", async () => {
     const store = new MemoryConnectStore();
     const failing = installFakeX({ exchangeStatus: 400 });
     const initiated = await initiateXConnect({
@@ -597,12 +614,126 @@ describe("connect state validation", () => {
     await expect(completeXConnect(args)).rejects.toMatchObject({
       code: "X_TOKEN_EXCHANGE_FAILED",
     });
+    expect(failing.counters.exchange).toBe(1);
     failing.restore();
-    // The state must still be present for a retry.
+    // Security-fail-closed: retrying requires a fresh connect attempt. Keeping
+    // the state live would let two replicas exchange one code and orphan the
+    // losing callback's newly issued grant.
     const ok = installFakeX();
-    const retried = await completeXConnect(args);
-    expect(retried.xUserId).toBe("x-user-123");
+    await expect(completeXConnect(args)).rejects.toMatchObject({ code: "X_STATE_INVALID" });
+    expect(ok.counters.exchange).toBe(0);
     ok.restore();
+  });
+
+  test("rejects malformed or oversized connect tokens before decoding", async () => {
+    const store = new MemoryConnectStore();
+    const fake = installFakeX();
+    const initiated = await initiateXConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+    });
+    for (const connectToken of ["A".repeat(1025), `${initiated.connectToken}=`, "***"]) {
+      await expect(
+        completeXConnect({
+          tenantId: TENANT,
+          workspaceId: WORKSPACE,
+          callerUserId: ADMIN,
+          code: "auth-code",
+          state: initiated.state,
+          connectToken,
+          redirectUri: REDIRECT,
+          config: CONFIG,
+          store,
+          vault,
+        }),
+      ).rejects.toMatchObject({ code: "X_PKCE_MISMATCH" });
+    }
+    expect(fake.counters.exchange).toBe(0);
+    fake.restore();
+  });
+
+  test("rejects malformed provider identities before persistence", async () => {
+    for (const identity of [
+      { id: "not-numeric", username: "valid_name", name: "Name" },
+      { id: "1".repeat(33), username: "valid_name", name: "Name" },
+      { id: "123", username: "bad-name", name: "Name" },
+      { id: "123", username: "valid_name", name: "Name\nInjected" },
+    ]) {
+      const store = new MemoryConnectStore();
+      const fake = installFakeX({ identity });
+      const initiated = await initiateXConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        initiatedByUserId: ADMIN,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store,
+      });
+      await expect(
+        completeXConnect({
+          tenantId: TENANT,
+          workspaceId: WORKSPACE,
+          callerUserId: ADMIN,
+          code: "auth-code",
+          state: initiated.state,
+          connectToken: initiated.connectToken,
+          redirectUri: REDIRECT,
+          config: CONFIG,
+          store,
+          vault,
+        }),
+      ).rejects.toMatchObject({ code: "X_IDENTITY_FAILED" });
+      expect(fake.counters.identity).toBe(1);
+      expect(fake.counters.revoke).toBe(1);
+      fake.restore();
+    }
+  });
+
+  test("revokes the new grant when reconnect persistence fails", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    await getDb().insert(providerXCredentialLifecycles).values({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      providerAccountId: completed.providerAccountId,
+      state: "inflight",
+      expectedAccountRevision: 1,
+    });
+
+    const store = new MemoryConnectStore();
+    const fake = installFakeX();
+    const initiated = await initiateXConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+    });
+    await expect(
+      completeXConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store,
+        vault,
+      }),
+    ).rejects.toMatchObject({ code: "X_CREDENTIAL_NEEDS_ATTENTION" });
+    expect(fake.counters).toMatchObject({ exchange: 1, identity: 1, revoke: 1 });
+    const [account] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(account.credentialVersion).toBe(1);
+    fake.restore();
   });
 
   test("rejects malformed token endpoint credentials before identity fetch or persistence", async () => {
@@ -613,6 +744,9 @@ describe("connect state validation", () => {
       { refresh_token: "" },
       { refresh_token: "refresh\rcontrol" },
       { refresh_token: "r".repeat(16_385) },
+      { token_type: "mac" },
+      { expires_in: Number.NaN },
+      { scope: "tweet.read admin.write" },
     ]) {
       const store = new MemoryConnectStore();
       const fake = installFakeX({ exchangeToken });
@@ -646,6 +780,67 @@ describe("connect state validation", () => {
 
 // ── Refresh: rotation, single-flight, revoke ──────────────────────────────────
 describe("refresh", () => {
+  test("rejects a credential secret whose X identity does not match the account", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    const current = await decryptCredential(completed.providerAccountId);
+    const wrong = await vault.createSecret(
+      TENANT,
+      "provider-x/wrong-account-binding",
+      JSON.stringify({ ...current, xUserId: "999999999" }),
+    );
+    await getDb()
+      .update(providerAccounts)
+      .set({ credentialSecretId: wrong.id, credentialVersion: wrong.version })
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    const fake = installFakeX();
+    await expect(
+      refreshXProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        vault,
+        config: CONFIG,
+        force: true,
+      }),
+    ).rejects.toThrow("credential account binding mismatch");
+    expect(fake.counters.refresh).toBe(0);
+    fake.restore();
+  });
+
+  test("database constraints reject invalid lifecycle revision and secret-state shapes", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    const base = {
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      providerAccountId: completed.providerAccountId,
+    };
+    await expect(
+      Promise.resolve(
+        getDb()
+          .insert(providerXCredentialLifecycles)
+          .values({
+            ...base,
+            state: "inflight",
+            expectedAccountRevision: 0,
+          })
+          .returning(),
+      ),
+    ).rejects.toThrow();
+    await expect(
+      Promise.resolve(
+        getDb()
+          .insert(providerXCredentialLifecycles)
+          .values({
+            ...base,
+            state: "credential_staged",
+            expectedAccountRevision: 1,
+            credentialSecretId: null,
+          })
+          .returning(),
+      ),
+    ).rejects.toThrow();
+  });
+
   test("force refresh rotates token to a new credential version + audit", async () => {
     const store = new MemoryConnectStore();
     const { completed } = await connectHappy(store);
@@ -672,14 +867,28 @@ describe("refresh", () => {
     expect(events.includes("provider.x.refresh.completed")).toBe(true);
   });
 
-  test("rejects malformed refresh credentials without rotating the stored secret", async () => {
+  test("malformed rotating responses disable the account, retain an encrypted handle, and never replay", async () => {
     for (const body of [
       { access_token: "bad token", refresh_token: "refresh-valid" },
       { access_token: "access-valid", refresh_token: "r".repeat(16_385) },
+      {
+        access_token: "access-valid",
+        refresh_token: "refresh-valid",
+        scope: "tweet.read offline.access admin.write",
+      },
+      {
+        access_token: "access-valid",
+        refresh_token: "refresh-valid",
+        expires_in: "7200",
+      },
+      {
+        access_token: "access-valid",
+        refresh_token: "refresh-valid",
+        token_type: "mac",
+      },
     ]) {
       const store = new MemoryConnectStore();
       const { completed } = await connectHappy(store);
-      const before = await decryptCredential(completed.providerAccountId);
       const fake = installFakeX({ refreshResponses: [{ status: 200, body }] });
       await expect(
         refreshXProviderCredential({
@@ -691,12 +900,472 @@ describe("refresh", () => {
           force: true,
         }),
       ).rejects.toMatchObject({ code: "X_REFRESH_FAILED" });
-      const after = await decryptCredential(completed.providerAccountId);
-      expect(after).toEqual(before);
+      expect(fake.counters.refresh).toBe(1);
+      const db = getDb();
+      const [account] = await db
+        .select()
+        .from(providerAccounts)
+        .where(eq(providerAccounts.id, completed.providerAccountId));
+      expect(account.status).toBe("disabled");
+      const [lifecycle] = await db
+        .select()
+        .from(providerXCredentialLifecycles)
+        .where(
+          and(
+            eq(providerXCredentialLifecycles.tenantId, TENANT),
+            eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId),
+          ),
+        );
+      expect(lifecycle.state).toBe("needs_attention");
+      expect(lifecycle.credentialSecretId).toBeTruthy();
+      expect(JSON.stringify(lifecycle)).not.toContain("refresh-valid");
+      expect(await vault.decryptSecret(TENANT, lifecycle.credentialSecretId as string)).toContain(
+        '"schemaVersion":"steward.provider-x.lifecycle.v1"',
+      );
+      await expect(
+        refreshXProviderCredential({
+          tenantId: TENANT,
+          workspaceId: WORKSPACE,
+          accountId: completed.providerAccountId,
+          vault,
+          config: CONFIG,
+          force: true,
+        }),
+      ).rejects.toMatchObject({ code: "X_REFRESH_REVOKED" });
+      expect(fake.counters.refresh).toBe(1);
       fake.restore();
-      await getDb().delete(providerAccounts).where(eq(providerAccounts.tenantId, TENANT));
-      await getDb().delete(secrets).where(eq(secrets.tenantId, TENANT));
+      await db.delete(providerAccounts).where(eq(providerAccounts.tenantId, TENANT));
+      await db.delete(secrets).where(eq(secrets.tenantId, TENANT));
     }
+  });
+
+  test("reconnect preserves a staged credential until autonomous exact-token revocation", async () => {
+    const store = new MemoryConnectStore();
+    const { completed } = await connectHappy(store);
+    const invalid = installFakeX({
+      refreshResponses: [
+        {
+          status: 200,
+          body: {
+            access_token: "bad token",
+            refresh_token: "rotated-one-time-refresh",
+            scope: "tweet.read tweet.write users.read offline.access",
+            expires_in: 7200,
+          },
+        },
+      ],
+    });
+    await expect(
+      refreshXProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        vault,
+        config: CONFIG,
+        force: true,
+      }),
+    ).rejects.toMatchObject({ code: "X_REFRESH_FAILED" });
+    expect(invalid.counters.refresh).toBe(1);
+
+    const db = getDb();
+    const [pending] = await db
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
+    expect(pending.state).toBe("needs_attention");
+    const stagedSecretId = pending.credentialSecretId as string;
+    const [accountBefore] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+
+    const reconnectStore = new MemoryConnectStore();
+    await expect(connectHappy(reconnectStore)).rejects.toMatchObject({
+      code: "X_CREDENTIAL_NEEDS_ATTENTION",
+    });
+    const [preserved] = await db
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.id, pending.id));
+    expect(preserved.state).toBe("needs_attention");
+    expect(preserved.credentialSecretId).toBe(stagedSecretId);
+    const [retainedHandle] = await db
+      .select({ id: secrets.id })
+      .from(secrets)
+      .where(eq(secrets.id, stagedSecretId));
+    expect(retainedHandle.id).toBe(stagedSecretId);
+    const [accountAfter] = await db
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(accountAfter.credentialSecretId).toBe(accountBefore.credentialSecretId);
+    expect(accountAfter.credentialVersion).toBe(accountBefore.credentialVersion);
+    expect(accountAfter.revision).toBe(accountBefore.revision);
+    expect(invalid.counters.refresh).toBe(1);
+    invalid.restore();
+    const revoker = installFakeX();
+
+    const swept = await runXCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: new Date(Date.now() + 70_000),
+    });
+    expect(swept).toMatchObject({ processed: 1, revoked: 1, attention: 0 });
+    expect(revoker.counters.revoke).toBe(1);
+    expect(invalid.counters.refresh).toBe(1);
+    const [revoked] = await db
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.id, pending.id));
+    expect(revoked.state).toBe("revoked");
+    expect(revoked.credentialSecretId).toBeNull();
+    const [deletedHandle] = await db
+      .select({ id: secrets.id })
+      .from(secrets)
+      .where(eq(secrets.id, stagedSecretId));
+    expect(deletedHandle).toBeUndefined();
+    revoker.restore();
+
+    const reconnected = await connectHappy(new MemoryConnectStore());
+    expect(reconnected.completed.providerAccountId).toBe(completed.providerAccountId);
+    expect(reconnected.completed.reconnected).toBe(true);
+  });
+
+  test("non-200 2xx revocation retains the exact handle and retries without refresh", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    const invalid = installFakeX({
+      refreshResponses: [
+        {
+          status: 200,
+          body: {
+            access_token: "access-valid",
+            refresh_token: "rotated-one-time-refresh",
+            scope: "tweet.read offline.access admin.write",
+          },
+        },
+      ],
+      revokeStatuses: [202, 200],
+    });
+    await expect(
+      refreshXProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        vault,
+        config: CONFIG,
+        force: true,
+      }),
+    ).rejects.toMatchObject({ code: "X_REFRESH_FAILED" });
+    const [pending] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
+    const handleId = pending.credentialSecretId as string;
+
+    const first = await runXCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: new Date(Date.now() + 70_000),
+    });
+    expect(first).toMatchObject({ processed: 1, revoked: 0, attention: 1 });
+    const [retained] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.id, pending.id));
+    expect(retained.state).toBe("needs_attention");
+    expect(retained.credentialSecretId).toBe(handleId);
+
+    const second = await runXCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: new Date(Date.now() + 140_000),
+    });
+    expect(second).toMatchObject({ processed: 1, revoked: 1, attention: 0 });
+    expect(invalid.counters).toMatchObject({ refresh: 1, revoke: 2 });
+    const [revoked] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.id, pending.id));
+    expect(revoked.state).toBe("revoked");
+    expect(revoked.credentialSecretId).toBeNull();
+    invalid.restore();
+  });
+
+  test("revokes the exact bounded rotated refresh token even when adoption rejects its grammar", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    const invalidRefresh = "rotated refresh with spaces";
+    const fake = installFakeX({
+      refreshResponses: [
+        {
+          status: 200,
+          body: {
+            access_token: "access-valid",
+            refresh_token: invalidRefresh,
+            scope: "tweet.read tweet.write users.read offline.access",
+          },
+        },
+      ],
+    });
+    await expect(
+      refreshXProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        vault,
+        config: CONFIG,
+        force: true,
+      }),
+    ).rejects.toMatchObject({ code: "X_REFRESH_FAILED" });
+
+    const swept = await runXCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: new Date(Date.now() + 70_000),
+    });
+    expect(swept).toMatchObject({ processed: 1, revoked: 1, attention: 0 });
+    expect(fake.counters.refresh).toBe(1);
+    expect(fake.counters.revoke).toBe(1);
+    expect(new URLSearchParams(fake.counters.revokeBodies[0]).get("token")).toBe(invalidRefresh);
+    expect(new URLSearchParams(fake.counters.revokeBodies[0]).get("token_type_hint")).toBe(
+      "refresh_token",
+    );
+    fake.restore();
+  });
+
+  test("a crash after encrypted staging adopts on retry without a second provider call", async () => {
+    const store = new MemoryConnectStore();
+    const { completed } = await connectHappy(store);
+    const fake = installFakeX();
+    const restoreCrash = __setAfterXCredentialStageForTests(async () => {
+      throw new Error("simulated process exit after durable stage");
+    });
+    const input = {
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      accountId: completed.providerAccountId,
+      vault,
+      config: CONFIG,
+      force: true,
+    } as const;
+    await expect(refreshXProviderCredential(input)).rejects.toThrow("simulated process exit");
+    expect(fake.counters.refresh).toBe(1);
+    restoreCrash();
+
+    const recovered = await refreshXProviderCredential(input);
+    expect(recovered.credentialVersion).toBe(2);
+    expect(fake.counters.refresh).toBe(1);
+    const credential = await decryptCredential(completed.providerAccountId);
+    expect(credential.refreshToken).toBe("refresh-rotated-1");
+    const [lifecycle] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
+    expect(lifecycle.state).toBe("adopted");
+    expect(lifecycle.credentialSecretId).toBeNull();
+    fake.restore();
+  });
+
+  test("an ambiguous provider outcome disables the account and cannot replay the old token", async () => {
+    const store = new MemoryConnectStore();
+    const { completed } = await connectHappy(store);
+    let refreshCalls = 0;
+    const restore = __setXForwardForTests(async (request) => {
+      if (request.url === "https://api.x.com/2/oauth2/token") {
+        refreshCalls += 1;
+        throw new Error("connection lost after provider accepted rotation");
+      }
+      throw new Error("unexpected request");
+    });
+    const input = {
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      accountId: completed.providerAccountId,
+      vault,
+      config: CONFIG,
+      force: true,
+    } as const;
+    await expect(refreshXProviderCredential(input)).rejects.toThrow("connection lost");
+    expect(refreshCalls).toBe(1);
+    await expect(refreshXProviderCredential(input)).rejects.toMatchObject({
+      code: "X_REFRESH_REVOKED",
+    });
+    expect(refreshCalls).toBe(1);
+
+    const [account] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(account.status).toBe("disabled");
+    const [lifecycle] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
+    expect(lifecycle.state).toBe("needs_attention");
+    expect(lifecycle.credentialSecretId).toBeNull();
+    expect(lifecycle.lastErrorCode).toBe("REFRESH_OUTCOME_UNKNOWN");
+    restore();
+
+    const reconnectStore = new MemoryConnectStore();
+    const reconnected = await connectHappy(reconnectStore);
+    expect(reconnected.completed.providerAccountId).toBe(completed.providerAccountId);
+    const [superseded] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.id, lifecycle.id));
+    expect(superseded.state).toBe("superseded");
+    expect(superseded.credentialSecretId).toBeNull();
+    const events = await readAuditActions(TENANT);
+    expect(events).toContain("provider.x.refresh.superseded_by_reconnect");
+  });
+
+  test("revokes a rotated grant held in memory when encrypted staging fails", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    const fake = installFakeX({ revokeStatuses: [200] });
+    const originalCreate = vault.createSecretWithinTx;
+    Object.defineProperty(vault, "createSecretWithinTx", {
+      configurable: true,
+      value: async (...args: Parameters<typeof originalCreate>) => {
+        if (String(args[2]).startsWith("provider-x-lifecycle:")) {
+          throw new Error("simulated encrypted staging failure");
+        }
+        return originalCreate.apply(vault, args);
+      },
+    });
+    try {
+      await expect(
+        refreshXProviderCredential({
+          tenantId: TENANT,
+          workspaceId: WORKSPACE,
+          accountId: completed.providerAccountId,
+          vault,
+          config: CONFIG,
+          force: true,
+        }),
+      ).rejects.toThrow("simulated encrypted staging failure");
+    } finally {
+      Object.defineProperty(vault, "createSecretWithinTx", {
+        configurable: true,
+        value: originalCreate,
+      });
+    }
+    expect(fake.counters).toMatchObject({ refresh: 1, revoke: 1 });
+    const [account] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(account.status).toBe("revoked");
+    const [lifecycle] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
+    expect(lifecycle).toMatchObject({
+      state: "revoked",
+      credentialSecretId: null,
+      lastErrorCode: "ROTATED_GRANT_REVOKED_AFTER_STAGING_FAILURE",
+    });
+    fake.restore();
+
+    const reconnected = await connectHappy(new MemoryConnectStore());
+    expect(reconnected.completed.providerAccountId).toBe(completed.providerAccountId);
+  });
+
+  test("blocks reconnect when a rotated grant cannot be staged or confirmed revoked", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    const fake = installFakeX({ revokeStatuses: [503] });
+    const originalCreate = vault.createSecretWithinTx;
+    Object.defineProperty(vault, "createSecretWithinTx", {
+      configurable: true,
+      value: async (...args: Parameters<typeof originalCreate>) => {
+        if (String(args[2]).startsWith("provider-x-lifecycle:")) {
+          throw new Error("simulated encrypted staging failure");
+        }
+        return originalCreate.apply(vault, args);
+      },
+    });
+    try {
+      await expect(
+        refreshXProviderCredential({
+          tenantId: TENANT,
+          workspaceId: WORKSPACE,
+          accountId: completed.providerAccountId,
+          vault,
+          config: CONFIG,
+          force: true,
+        }),
+      ).rejects.toThrow("simulated encrypted staging failure");
+    } finally {
+      Object.defineProperty(vault, "createSecretWithinTx", {
+        configurable: true,
+        value: originalCreate,
+      });
+    }
+    expect(fake.counters).toMatchObject({ refresh: 1, revoke: 1 });
+    const [lifecycle] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
+    expect(lifecycle).toMatchObject({
+      state: "needs_attention",
+      credentialSecretId: null,
+      lastErrorCode: "REFRESH_RESPONSE_STAGING_FAILED",
+    });
+    fake.restore();
+
+    await expect(connectHappy(new MemoryConnectStore())).rejects.toMatchObject({
+      code: "X_CREDENTIAL_NEEDS_ATTENTION",
+    });
+  });
+
+  test("the autonomous sweep fails closed a crashed pre-provider intent", async () => {
+    const store = new MemoryConnectStore();
+    const { completed } = await connectHappy(store);
+    const fake = installFakeX();
+    const restoreCrash = __setAfterXRefreshIntentForTests(async () => {
+      throw new Error("simulated exit after durable intent");
+    });
+    const input = {
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      accountId: completed.providerAccountId,
+      vault,
+      config: CONFIG,
+      force: true,
+    } as const;
+    await expect(refreshXProviderCredential(input)).rejects.toThrow("simulated exit");
+    expect(fake.counters.refresh).toBe(0);
+    restoreCrash();
+
+    await expect(connectHappy(new MemoryConnectStore())).rejects.toMatchObject({
+      code: "X_CREDENTIAL_NEEDS_ATTENTION",
+    });
+    const [stillInflight] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
+    expect(stillInflight.state).toBe("inflight");
+
+    const swept = await runXCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: new Date(Date.now() + 70_000),
+    });
+    expect(swept).toMatchObject({ processed: 1, adopted: 0, attention: 1 });
+    const [account] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(account.status).toBe("disabled");
+    const [lifecycle] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(eq(providerXCredentialLifecycles.providerAccountId, completed.providerAccountId));
+    expect(lifecycle.state).toBe("needs_attention");
+    expect(lifecycle.lastErrorCode).toBe("REFRESH_OUTCOME_UNKNOWN");
+    await expect(refreshXProviderCredential(input)).rejects.toMatchObject({
+      code: "X_REFRESH_REVOKED",
+    });
+    expect(fake.counters.refresh).toBe(0);
+    fake.restore();
   });
 
   test("SINGLE-FLIGHT: two concurrent refreshes of a near-expiry token make exactly ONE token call", async () => {
@@ -761,6 +1430,53 @@ describe("refresh", () => {
 
     const cred = await decryptCredential(completed.providerAccountId);
     expect(cred.accessToken).toBe("access-refreshed-1");
+    fake.restore();
+  });
+
+  test("a slow healthy refresh is not disabled by a concurrent waiter timeout", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore(), {
+      exchangeToken: { expires_in: 1 },
+    });
+    const fake = installFakeX({
+      refreshResponses: [
+        {
+          status: 200,
+          delayMs: 2_500,
+          body: {
+            access_token: "access-slow-winner",
+            refresh_token: "refresh-slow-winner",
+            scope: "tweet.read tweet.write users.read offline.access",
+            expires_in: 7200,
+          },
+        },
+      ],
+    });
+    const input = {
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      accountId: completed.providerAccountId,
+      vault,
+      config: CONFIG,
+    } as const;
+    const results = await Promise.allSettled([
+      refreshXProviderCredential(input),
+      refreshXProviderCredential(input),
+    ]);
+    expect(fake.counters.refresh).toBe(1);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((result) => result.status === "rejected");
+    expect(rejected).toMatchObject({
+      status: "rejected",
+      reason: { code: "X_REFRESH_FAILED", httpStatus: 409 },
+    });
+    const [account] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(account.status).toBe("active");
+    expect((await decryptCredential(completed.providerAccountId)).refreshToken).toBe(
+      "refresh-slow-winner",
+    );
     fake.restore();
   });
 
@@ -950,7 +1666,7 @@ describe("disconnect", () => {
 
 // ── Sanity: secret lineage name is deterministic per (workspace, x user) ──────
 test("credential secret name is stable per workspace+x user (reconnect lineage)", () => {
-  expect(xCredentialSecretName(WORKSPACE, "x-user-123")).toBe(`provider-x/${WORKSPACE}/x-user-123`);
+  expect(xCredentialSecretName(WORKSPACE, "1234567890")).toBe(`provider-x/${WORKSPACE}/1234567890`);
 });
 
 test("XConnectError carries code + http status", () => {
@@ -961,11 +1677,14 @@ test("XConnectError carries code + http status", () => {
 
 test("real X transport rejects oversized provider responses before parsing", async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () =>
-    new Response("{}", {
+  let redirect: RequestRedirect | undefined;
+  globalThis.fetch = (async (_input, init) => {
+    redirect = init?.redirect;
+    return new Response("{}", {
       status: 200,
       headers: { "content-type": "application/json", "content-length": "1048577" },
-    })) as typeof fetch;
+    });
+  }) as typeof fetch;
   try {
     await expect(
       __runDefaultXForwardForTests({
@@ -974,6 +1693,29 @@ test("real X transport rejects oversized provider responses before parsing", asy
         headers: { accept: "application/json" },
       }),
     ).rejects.toThrow("X provider response exceeded maximum size");
+    expect(redirect).toBe("error");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("real X transport refuses redirects before credentials can be replayed", async () => {
+  const originalFetch = globalThis.fetch;
+  let redirectMode: RequestRedirect | undefined;
+  globalThis.fetch = (async (_input, init) => {
+    redirectMode = init?.redirect;
+    throw new TypeError("redirect blocked");
+  }) as typeof fetch;
+  try {
+    await expect(
+      __runDefaultXForwardForTests({
+        url: "https://api.x.com/2/oauth2/token",
+        method: "POST",
+        headers: { authorization: "Basic secret-canary" },
+        body: "refresh_token=refresh-secret-canary",
+      }),
+    ).rejects.toThrow("redirect blocked");
+    expect(redirectMode).toBe("error");
   } finally {
     globalThis.fetch = originalFetch;
   }

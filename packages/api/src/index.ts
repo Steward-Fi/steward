@@ -30,6 +30,7 @@ import {
 } from "./services/context";
 import { startGoogleCredentialLifecycleScheduler } from "./services/provider-google-lifecycle-scheduler";
 import { startProviderReservationReconciliationScheduler } from "./services/provider-reservation-reconciliation-scheduler";
+import { startXCredentialLifecycleScheduler } from "./services/provider-x-lifecycle-scheduler";
 import { startRetentionScheduler } from "./services/retention";
 import {
   InMemoryRateLimiter,
@@ -88,6 +89,7 @@ let cancelTransactionReceiptPolling: (() => void) | undefined;
 let cancelWebhookRetryScheduler: (() => void) | undefined;
 let cancelUpstreamCredentialLeaseScheduler: (() => Promise<void>) | undefined;
 let cancelGoogleCredentialLifecycleScheduler: (() => Promise<void>) | undefined;
+let cancelXCredentialLifecycleScheduler: (() => Promise<void>) | undefined;
 
 function runtimeGate(request: Request, peerAddress: string | null): Response | null {
   const url = new URL(request.url);
@@ -356,6 +358,9 @@ if (migrationsRan) {
   if (process.env.GOOGLE_PROVIDER_CLIENT_ID && process.env.GOOGLE_PROVIDER_CLIENT_SECRET) {
     cancelGoogleCredentialLifecycleScheduler = startGoogleCredentialLifecycleScheduler();
   }
+  if (process.env.X_CLIENT_ID && process.env.X_CLIENT_SECRET) {
+    cancelXCredentialLifecycleScheduler = startXCredentialLifecycleScheduler();
+  }
   cancelRetention = startRetentionScheduler();
   if (redisOk) {
     cancelProviderReservationReconciliation = startProviderReservationReconciliationScheduler();
@@ -408,6 +413,7 @@ const shutdown = async (signal: string) => {
   if (cancelWebhookRetryScheduler) cancelWebhookRetryScheduler();
   if (cancelUpstreamCredentialLeaseScheduler) await cancelUpstreamCredentialLeaseScheduler();
   if (cancelGoogleCredentialLifecycleScheduler) await cancelGoogleCredentialLifecycleScheduler();
+  if (cancelXCredentialLifecycleScheduler) await cancelXCredentialLifecycleScheduler();
   rateLimiter.clear();
 
   try {

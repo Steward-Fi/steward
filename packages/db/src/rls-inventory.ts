@@ -37,6 +37,7 @@ export const DIRECT_TENANT_TABLES = [
   "provider_grants",
   "provider_operations",
   "provider_role_bindings",
+  "provider_x_credential_lifecycles",
   "proxy_audit_log",
   "refresh_tokens",
   "secret_routes",

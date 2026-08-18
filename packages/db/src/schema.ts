@@ -2108,6 +2108,70 @@ export const providerGoogleCredentialLifecycles = pgTable(
   }),
 );
 
+/**
+ * Durable hand-off journal for X OAuth refresh-token rotation. X refresh
+ * tokens are single use, so a provider response must be encrypted before any
+ * semantic validation that can fail. Reconnect is the explicit recovery
+ * boundary for unresolved outcomes.
+ */
+export const providerXCredentialLifecycles = pgTable(
+  "provider_x_credential_lifecycles",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    providerAccountId: uuid("provider_account_id").notNull(),
+    state: varchar("state", { length: 32 }).notNull(),
+    credentialSecretId: uuid("credential_secret_id"),
+    expectedAccountRevision: integer("expected_account_revision").notNull(),
+    lastErrorCode: varchar("last_error_code", { length: 64 }),
+    ...timestamps,
+  },
+  (table) => ({
+    workspaceFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId],
+      foreignColumns: [workspaces.tenantId, workspaces.id],
+      name: "provider_x_lifecycle_workspace_fk",
+    }).onDelete("cascade"),
+    accountFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId, table.providerAccountId],
+      foreignColumns: [
+        providerAccounts.tenantId,
+        providerAccounts.workspaceId,
+        providerAccounts.id,
+      ],
+      name: "provider_x_lifecycle_account_fk",
+    }).onDelete("cascade"),
+    secretFk: foreignKey({
+      columns: [table.tenantId, table.credentialSecretId],
+      foreignColumns: [secrets.tenantId, secrets.id],
+      name: "provider_x_lifecycle_secret_fk",
+    }).onDelete("restrict"),
+    stateCheck: check(
+      "provider_x_lifecycle_state_check",
+      sql`${table.state} IN ('inflight', 'credential_staged', 'revocation_pending', 'adopted', 'revoked', 'needs_attention', 'superseded')`,
+    ),
+    revisionCheck: check(
+      "provider_x_lifecycle_revision_check",
+      sql`${table.expectedAccountRevision} >= 1`,
+    ),
+    secretStateCheck: check(
+      "provider_x_lifecycle_secret_state_check",
+      sql`(${table.state} = 'inflight' AND ${table.credentialSecretId} IS NULL) OR (${table.state} IN ('credential_staged', 'revocation_pending') AND ${table.credentialSecretId} IS NOT NULL) OR ${table.state} = 'needs_attention' OR (${table.state} IN ('adopted', 'revoked', 'superseded') AND ${table.credentialSecretId} IS NULL)`,
+    ),
+    accountStateIdx: index("provider_x_lifecycle_account_state_idx").on(
+      table.tenantId,
+      table.providerAccountId,
+      table.state,
+    ),
+    activeRefreshIdx: uniqueIndex("provider_x_lifecycle_active_refresh_idx")
+      .on(table.tenantId, table.providerAccountId)
+      .where(
+        sql`${table.state} IN ('inflight', 'credential_staged', 'revocation_pending', 'needs_attention')`,
+      ),
+  }),
+);
+
 // NOTE: owner immutability enforced by `provider_operations_immutable_owner`
 // trigger in 0079 raw SQL. Not visible to drizzle-kit.
 export const providerOperations = pgTable(
