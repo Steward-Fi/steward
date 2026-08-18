@@ -92,7 +92,8 @@ Worker request finishes. Connection acquisition is capped at 10 seconds; query,
 statement, lock, idle-connection, and idle-in-transaction phases are capped at
 30 seconds (with PostgreSQL cancellation scheduled slightly earlier). Production
 TLS policy is evaluated from the Worker bindings passed to the handle, not from
-a Node compatibility shim's `process.env`.
+a Node compatibility shim's `process.env`; because Cloudflare does not provide
+`NODE_ENV` automatically, missing `NODE_ENV` defaults to production enforcement.
 
 This is a transport primitive, not RLS activation. The shipped Worker remains
 on `DATABASE_DRIVER=neon-http` until authenticated request middleware can mint

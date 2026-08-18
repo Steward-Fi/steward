@@ -64,6 +64,15 @@ describe("transaction-capable Workers database driver", () => {
   });
 
   test("uses Worker bindings as the production TLS authority", () => {
+    // Cloudflare's checked-in bindings do not define NODE_ENV. The transaction
+    // transport must therefore default to production enforcement, not skip it.
+    expect(() =>
+      createNeonTransactionDbForRequest({
+        DATABASE_DRIVER: "neon-websocket",
+        DATABASE_URL: "postgresql://db.example.test/steward",
+      }),
+    ).toThrow("DATABASE_URL must include sslmode=verify-full");
+
     expect(() =>
       createNeonTransactionDbForRequest({
         DATABASE_DRIVER: "neon-websocket",
@@ -104,6 +113,7 @@ describe("transaction-capable Workers database driver", () => {
     const handle = createNeonTransactionDbForRequest({
       DATABASE_DRIVER: "neon-websocket",
       DATABASE_URL: "postgresql://example.invalid/steward",
+      NODE_ENV: "test",
     });
     expect(handle.driver).toBe("neon-websocket");
     expect(typeof handle.db.transaction).toBe("function");

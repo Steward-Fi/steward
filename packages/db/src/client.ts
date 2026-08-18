@@ -365,8 +365,13 @@ export function __buildNeonTransactionPoolConfigForTests(
   }
 
   // Worker bindings, not a Node compatibility shim's process.env, are the
-  // deployment authority. Enforce production TLS against that exact object.
-  assertDatabaseUrlTls(connectionString, env);
+  // deployment authority. Cloudflare does not synthesize NODE_ENV, so fail
+  // secure: a request-owned production transport is the default unless the
+  // caller explicitly declares a non-production environment.
+  assertDatabaseUrlTls(connectionString, {
+    ...env,
+    NODE_ENV: env.NODE_ENV ?? "production",
+  });
   const serverMs = NEON_TRANSACTION_DEADLINE_MS - DATABASE_DEADLINE_CLEANUP_GRACE_MS;
   return {
     connectionString: withServerDeadlineInUrl(connectionString, NEON_TRANSACTION_DEADLINE_MS),
