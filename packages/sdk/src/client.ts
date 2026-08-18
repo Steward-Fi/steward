@@ -200,6 +200,16 @@ export interface StewardClientConfig {
    * required by default so credentials never travel cleartext off-loopback.
    */
   allowInsecureBaseUrl?: boolean;
+  /**
+   * End-to-end request deadline, including request-header signing, receipt of
+   * response headers, and consumption of the response body. Defaults to 30s.
+   */
+  requestTimeoutMs?: number;
+  /**
+   * Maximum decoded response-body bytes accepted from the API. Defaults to
+   * 8 MiB and can never exceed the SDK's 16 MiB safety ceiling.
+   */
+  maxResponseBodyBytes?: number;
 }
 
 export interface QuorumSignerCredential {
@@ -1392,6 +1402,24 @@ function isBrowserRuntime(): boolean {
   return typeof globalThis.window !== "undefined" && typeof globalThis.document !== "undefined";
 }
 
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const MAX_REQUEST_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_MAX_RESPONSE_BODY_BYTES = 8 * 1024 * 1024;
+const MAX_RESPONSE_BODY_BYTES = 16 * 1024 * 1024;
+
+function boundedPositiveInteger(
+  name: string,
+  value: number | undefined,
+  fallback: number,
+  maximum: number,
+): number {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved <= 0 || resolved > maximum) {
+    throw new StewardApiError(`${name} must be a positive integer no greater than ${maximum}`, 0);
+  }
+  return resolved;
+}
+
 export class StewardClient {
   private readonly baseUrl: string;
   private readonly apiKey?: string;
@@ -1402,6 +1430,8 @@ export class StewardClient {
   private readonly tenantId?: string;
   private readonly requestSigningSecret?: string;
   private readonly requestSigningKeyId?: string;
+  private readonly requestTimeoutMs: number;
+  private readonly maxResponseBodyBytes: number;
 
   constructor({
     baseUrl,
@@ -1415,6 +1445,8 @@ export class StewardClient {
     requestSigningKeyId,
     allowUnsafeBrowserSecrets,
     allowInsecureBaseUrl,
+    requestTimeoutMs,
+    maxResponseBodyBytes,
   }: StewardClientConfig) {
     if (
       isBrowserRuntime() &&
@@ -1436,6 +1468,18 @@ export class StewardClient {
     this.tenantId = tenantId;
     this.requestSigningSecret = requestSigningSecret;
     this.requestSigningKeyId = requestSigningKeyId;
+    this.requestTimeoutMs = boundedPositiveInteger(
+      "requestTimeoutMs",
+      requestTimeoutMs,
+      DEFAULT_REQUEST_TIMEOUT_MS,
+      MAX_REQUEST_TIMEOUT_MS,
+    );
+    this.maxResponseBodyBytes = boundedPositiveInteger(
+      "maxResponseBodyBytes",
+      maxResponseBodyBytes,
+      DEFAULT_MAX_RESPONSE_BODY_BYTES,
+      MAX_RESPONSE_BODY_BYTES,
+    );
   }
 
   readonly tradeSessions = {
@@ -2679,11 +2723,15 @@ export class StewardClient {
   async signSolanaTransaction(
     agentId: string,
     input: SignSolanaTransactionInput,
+    options?: IdempotencyOptions,
   ): Promise<SignSolanaTransactionResult> {
     const response = await this.request<SignSolanaTransactionResult, StewardErrorResponse>(
       `/vault/${encodeURIComponent(agentId)}/sign-solana`,
       {
         method: "POST",
+        headers: options?.idempotencyKey
+          ? { "Idempotency-Key": options.idempotencyKey }
+          : undefined,
         body: JSON.stringify(input),
       },
     );
@@ -5688,22 +5736,10 @@ export class StewardClient {
     path: string,
     init: RequestInit = {},
   ): Promise<ApiRequestResult<TSuccess, TFailure>> {
-    let response: Response;
-
-    try {
-      const headers = await this.buildRequestHeaders(path, init);
-      response = await fetch(`${this.baseUrl}${path}`, {
-        ...init,
-        headers,
-      });
-    } catch (error) {
-      throw new StewardApiError(
-        error instanceof Error ? error.message : "Network request failed",
-        0,
-      );
-    }
-
-    const payload = await this.parseJson<ApiResponse<TSuccess | TFailure>>(response);
+    const { response, payload } = await this.fetchJson<ApiResponse<TSuccess | TFailure>>(
+      path,
+      init,
+    );
 
     if (!payload.ok) {
       return {
@@ -5727,20 +5763,7 @@ export class StewardClient {
 
   /** Handle lifecycle endpoints whose successful response is intentionally raw. */
   private async requestRawJson<T>(path: string, init: RequestInit = {}): Promise<T> {
-    let response: Response;
-    try {
-      response = await fetch(`${this.baseUrl}${path}`, {
-        ...init,
-        headers: await this.buildRequestHeaders(path, init),
-      });
-    } catch (error) {
-      throw new StewardApiError(
-        error instanceof Error ? error.message : "Network request failed",
-        0,
-      );
-    }
-
-    const payload = await this.parseJson<unknown>(response);
+    const { response, payload } = await this.fetchJson<unknown>(path, init);
     if (!response.ok) {
       let message = `Request failed with status ${response.status}`;
       if (payload && typeof payload === "object") {
@@ -5835,8 +5858,101 @@ export class StewardClient {
     return headers;
   }
 
-  private async parseJson<T>(response: Response): Promise<T> {
-    const text = await response.text();
+  private async fetchJson<T>(
+    path: string,
+    init: RequestInit,
+  ): Promise<{ response: Response; payload: T }> {
+    const controller = new AbortController();
+    const deadlineAt = Date.now() + this.requestTimeoutMs;
+    const callerSignal = init.signal;
+    let timedOut = false;
+    let callerCancelled = callerSignal?.aborted ?? false;
+    const cancelFromCaller = () => {
+      callerCancelled = true;
+      controller.abort();
+    };
+    callerSignal?.addEventListener("abort", cancelFromCaller, { once: true });
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.requestTimeoutMs);
+
+    try {
+      if (callerCancelled) throw new DOMException("Request cancelled", "AbortError");
+      const headers = await this.buildRequestHeaders(path, init);
+      if (controller.signal.aborted) throw new DOMException("Request aborted", "AbortError");
+      const response = await fetch(`${this.baseUrl}${path}`, {
+        ...init,
+        headers,
+        signal: controller.signal,
+      });
+      const payload = await this.parseJson<T>(response, controller.signal);
+      if (Date.now() >= deadlineAt) {
+        timedOut = true;
+        controller.abort();
+        throw new DOMException("Request deadline elapsed", "AbortError");
+      }
+      return { response, payload };
+    } catch (error) {
+      if (timedOut) throw new StewardApiError("Steward API request timed out", 0);
+      if (callerCancelled) throw new StewardApiError("Steward API request was cancelled", 0);
+      if (error instanceof StewardApiError) throw error;
+      throw new StewardApiError("Network request failed", 0);
+    } finally {
+      clearTimeout(timeout);
+      callerSignal?.removeEventListener("abort", cancelFromCaller);
+    }
+  }
+
+  private async parseJson<T>(response: Response, signal: AbortSignal): Promise<T> {
+    const declaredLength = response.headers.get("content-length");
+    if (declaredLength !== null) {
+      const parsedLength = Number(declaredLength);
+      if (Number.isFinite(parsedLength) && parsedLength > this.maxResponseBodyBytes) {
+        void response.body?.cancel().catch(() => undefined);
+        throw new StewardApiError(
+          "Steward API response exceeded the configured size limit",
+          response.status,
+        );
+      }
+    }
+
+    const reader = response.body?.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    if (reader) {
+      try {
+        while (true) {
+          const { done, value } = await this.readResponseChunk(reader, signal);
+          if (done) break;
+          totalBytes += value.byteLength;
+          if (totalBytes > this.maxResponseBodyBytes) {
+            void reader.cancel().catch(() => undefined);
+            throw new StewardApiError(
+              "Steward API response exceeded the configured size limit",
+              response.status,
+            );
+          }
+          chunks.push(value);
+        }
+      } finally {
+        if (signal.aborted) void reader.cancel().catch(() => undefined);
+        try {
+          reader.releaseLock();
+        } catch {
+          // An abort may leave a hostile/custom stream's read pending. The
+          // controller and cancel above still ensure this request stops waiting.
+        }
+      }
+    }
+
+    const body = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const text = new TextDecoder().decode(body);
 
     if (!text) {
       return { ok: response.ok } as T;
@@ -5846,6 +5962,23 @@ export class StewardClient {
       return JSON.parse(text) as T;
     } catch {
       throw new StewardApiError("Received invalid JSON from Steward API", response.status);
+    }
+  }
+
+  private async readResponseChunk(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    signal: AbortSignal,
+  ): Promise<{ done: false; value: Uint8Array } | { done: true; value?: Uint8Array }> {
+    if (signal.aborted) throw new DOMException("Request aborted", "AbortError");
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(new DOMException("Request aborted", "AbortError"));
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([reader.read(), aborted]);
+    } finally {
+      if (onAbort) signal.removeEventListener("abort", onAbort);
     }
   }
 
