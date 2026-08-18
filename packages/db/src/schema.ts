@@ -2109,9 +2109,9 @@ export const providerGoogleCredentialLifecycles = pgTable(
 );
 
 /**
- * Durable hand-off journal for X OAuth code exchange and refresh rotation.
- * One-time provider responses are encrypted before semantic validation, then
- * either adopted transactionally or retained for bounded revocation recovery.
+ * Durable hand-off journal for X OAuth code exchange, refresh rotation, and
+ * disconnect cleanup. Provider responses and disconnect handles are encrypted
+ * before fallible work, then adopted or revoked through bounded recovery.
  */
 export const providerXCredentialLifecycles = pgTable(
   "provider_x_credential_lifecycles",
@@ -2127,6 +2127,10 @@ export const providerXCredentialLifecycles = pgTable(
     attempts: integer("attempts").notNull().default(0),
     nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
     lastErrorCode: varchar("last_error_code", { length: 64 }),
+    disabledRoutes: jsonb("disabled_routes")
+      .$type<Array<{ id: string; authorityRevision: number }>>()
+      .notNull()
+      .default([]),
     ...timestamps,
   },
   (table) => ({
@@ -2168,6 +2172,10 @@ export const providerXCredentialLifecycles = pgTable(
     retryCheck: check(
       "provider_x_lifecycle_retry_check",
       sql`${table.attempts} >= 0 AND ${table.attempts} <= 5 AND (${table.state} <> 'revocation_pending' OR ${table.nextRetryAt} IS NOT NULL)`,
+    ),
+    disabledRoutesArrayCheck: check(
+      "provider_x_lifecycle_disabled_routes_array_check",
+      sql`jsonb_typeof(${table.disabledRoutes}) = 'array'`,
     ),
     secretStateCheck: check(
       "provider_x_lifecycle_secret_state_check",

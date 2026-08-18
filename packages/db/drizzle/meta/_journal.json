@@ -610,6 +610,13 @@
       "when": 1787111200000,
       "tag": "0106_x_disconnect_recovery_bounds",
       "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1787111201000,
+      "tag": "0107_x_disconnect_route_recovery",
+      "breakpoints": true
     }
   ]
 }
