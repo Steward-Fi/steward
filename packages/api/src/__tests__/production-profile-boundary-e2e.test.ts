@@ -194,6 +194,11 @@ beforeAll(async () => {
   const proxy = await import("@stwd/proxy/src/handlers/proxy");
   ({ dispatchGovernedExecution } = await import("@stwd/proxy/src/handlers/governed-execution"));
   proxy.__setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
+  // The boundary proof is about canonical provider authority and exact
+  // credential injection, not Redis availability. Make the rate-limit seam
+  // deterministic so an unrelated process-local fallback cannot turn every
+  // dispatch into a 429 when this file runs in a larger suite.
+  proxy.__setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
   proxy.__setForwardProxyRequestForTests(async () => {
     forwardCount += 1;
     return new Response('{"ok":true}', { status: 201 });
@@ -247,7 +252,11 @@ async function runAuthenticatedBoundary(
     undefined,
     "secret-vault",
   );
-  const encrypted = vault.encrypt("profile-boundary-credential", {
+  const credential =
+    fixture.profile === SLACK_PROVIDER_ACTION_PROFILE
+      ? "xoxb-profile-boundary-credential"
+      : "profile-boundary-credential";
+  const encrypted = vault.encrypt(credential, {
     tenantId: F.TENANT,
     name: "github",
     version: 1,
