@@ -36,6 +36,7 @@ import { getConfiguredVault } from "../services/vault-factory";
 const TENANT_ID = `gateway-tenant-${Date.now()}`;
 const AGENT_ID = `gateway-agent-${Date.now()}`;
 const USER_ID = "00000000-0000-4000-8000-000000000123";
+const SOLANA_RECIPIENT = "11111111111111111111111111111111";
 const ORIGINAL_REDIS_URL = process.env.REDIS_URL;
 const ORIGINAL_REDIS_REQUIRED = process.env.REDIS_REQUIRED;
 setDefaultTimeout(30_000);
@@ -100,7 +101,7 @@ describe("vault EVM execution gateway", () => {
         enabled: true,
         config: {
           mode: "whitelist",
-          addresses: ["0x1111111111111111111111111111111111111111"],
+          addresses: ["0x1111111111111111111111111111111111111111", SOLANA_RECIPIENT],
         },
       });
   });
@@ -164,7 +165,7 @@ describe("vault EVM execution gateway", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          to: "0x1111111111111111111111111111111111111111",
+          to: SOLANA_RECIPIENT,
           value: "1",
           data: "0x12345678",
           chainId: 101,
