@@ -58,14 +58,15 @@ jobs:
 
       - name: Check public package version bumps
         env:
-          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          # Checkout above is intentionally unshallow. Keep it that way: a
-          # depth-1 fetch can rewrite origin/${BASE_REF} as a shallow tip and
-          # remove the merge base needed by the three-dot diff below.
-          git fetch --no-tags origin "${BASE_REF}"
-          changed_files=$(git diff --name-only "origin/${BASE_REF}...HEAD")
+          # Compare the immutable commits captured by the pull_request event.
+          # The base branch can advance while this job runs; diffing its live
+          # remote tip would then attribute unrelated merged changes to the PR.
+          git fetch --no-tags origin "${BASE_SHA}" "${HEAD_SHA}"
+          changed_files=$(git diff --name-only "${BASE_SHA}...${HEAD_SHA}")
 
           status=0
           for pkg in sdk react eliza-plugin; do
