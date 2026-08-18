@@ -567,10 +567,11 @@ describe("#220 real production profile boundaries", () => {
       .select()
       .from(proxyAuditLog)
       .where(eq(proxyAuditLog.tenantId, F.TENANT));
-    expect(audits.some((audit) => audit.reason === "credential-decrypt-failed")).toBeTrue();
+    expect(audits.some((audit) => audit.reason === "credential-resolution-failed")).toBeTrue();
     expect(JSON.stringify(audits)).not.toContain(canary);
     expect(logged.join("\n")).toContain('"errorClass":"Error"');
     expect(logged.join("\n")).toContain('"errorCode":null');
     expect(logged.join("\n")).not.toContain(canary);
+    expect(logged.join("\n")).not.toContain("profile-boundary-name-canary");
   });
 });

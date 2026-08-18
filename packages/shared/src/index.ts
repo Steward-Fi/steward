@@ -22,7 +22,11 @@ export * from "./provider-execution-auth.js";
 export * from "./provider-profile-conformance.js";
 export * from "./provider-profile-registry.js";
 // ─── Non-throwing description of an arbitrary thrown value (fail-closed catches) ───
-export { describeThrown, UNPRINTABLE_THROWN_VALUE } from "./safe-error.js";
+export {
+  describeThrown,
+  redactedThrownDiagnostics,
+  UNPRINTABLE_THROWN_VALUE,
+} from "./safe-error.js";
 export * from "./secret-route-matching.js";
 export * from "./security-surface.js";
 export * from "./sensitive-keys.js";

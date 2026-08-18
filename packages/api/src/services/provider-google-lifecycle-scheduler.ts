@@ -1,3 +1,4 @@
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { SecretVault } from "@stwd/vault";
 import {
   type GoogleCredentialLifecycleSweepResult,
@@ -8,42 +9,6 @@ import {
 const DEFAULT_INTERVAL_MS = 60_000;
 const MIN_INTERVAL_MS = 5_000;
 const MAX_INTERVAL_MS = 5 * 60_000;
-const SAFE_ERROR_CODES = new Set([
-  "ABORT_ERR",
-  "EAI_AGAIN",
-  "ECONNREFUSED",
-  "ECONNRESET",
-  "ENOTFOUND",
-  "ETIMEDOUT",
-  "UND_ERR_CONNECT_TIMEOUT",
-]);
-
-function classifySweepFailure(error: unknown): {
-  errorClass: string;
-  errorCode: string | null;
-} {
-  let errorClass: string = typeof error;
-  try {
-    if (error instanceof TypeError) errorClass = "TypeError";
-    else if (error instanceof RangeError) errorClass = "RangeError";
-    else if (error instanceof SyntaxError) errorClass = "SyntaxError";
-    else if (error instanceof Error) errorClass = "Error";
-  } catch {
-    errorClass = "unknown";
-  }
-  let errorCode: string | null = null;
-  try {
-    const rawCode =
-      typeof error === "object" && error !== null
-        ? Reflect.get(error as object, "code")
-        : undefined;
-    if (typeof rawCode === "string" && SAFE_ERROR_CODES.has(rawCode)) errorCode = rawCode;
-  } catch {
-    // A hostile getter/proxy must not break the scheduler's rejection handler.
-  }
-  return { errorClass, errorCode };
-}
-
 function configuredInterval(): number {
   const raw = process.env.STEWARD_GOOGLE_LIFECYCLE_SWEEP_INTERVAL_MS;
   if (raw === undefined) return DEFAULT_INTERVAL_MS;
@@ -91,7 +56,7 @@ export function startGoogleCredentialLifecycleScheduler(options?: {
         }
       })
       .catch((error) => {
-        const classified = classifySweepFailure(error);
+        const classified = redactedThrownDiagnostics(error);
         console.error("[provider-google] lifecycle sweep failed", {
           errorClass: classified.errorClass,
           errorCode: classified.errorCode,

@@ -31,7 +31,11 @@ import {
   workspaces,
 } from "@stwd/db";
 import { getRedis, type SpendReservation, settleReservedSpend } from "@stwd/redis";
-import { isValidOAuthBearerToken, strictParseJson } from "@stwd/shared";
+import {
+  isValidOAuthBearerToken,
+  redactedThrownDiagnostics,
+  strictParseJson,
+} from "@stwd/shared";
 import { SecretVault } from "@stwd/vault";
 import type { Context } from "hono";
 import { boundedPositiveIntegerEnv, isProxyDevMode } from "../config";
@@ -61,15 +65,6 @@ export { __setGoogleExecutionTokenForwarderForTests };
 
 let _secretVault: SecretVault | null = null;
 let checkProxyRateLimitForHandler = checkProxyRateLimit;
-const SAFE_LOG_ERROR_CODES = new Set([
-  "ABORT_ERR",
-  "EAI_AGAIN",
-  "ECONNREFUSED",
-  "ECONNRESET",
-  "ENOTFOUND",
-  "ETIMEDOUT",
-  "UND_ERR_CONNECT_TIMEOUT",
-]);
 
 function getSecretVault(): SecretVault {
   if (!_secretVault) {
@@ -1905,28 +1900,10 @@ export async function handleProxy(c: Context): Promise<Response> {
       credential = extractProviderCredentialForHost(target.host, credential);
     }
   } catch (err) {
-    let errorClass: string = typeof err;
-    try {
-      if (err instanceof TypeError) errorClass = "TypeError";
-      else if (err instanceof RangeError) errorClass = "RangeError";
-      else if (err instanceof SyntaxError) errorClass = "SyntaxError";
-      else if (err instanceof Error) errorClass = "Error";
-    } catch {
-      errorClass = "unknown";
-    }
-    let errorCode: string | null = null;
-    try {
-      const rawCode =
-        typeof err === "object" && err !== null ? Reflect.get(err as object, "code") : undefined;
-      if (typeof rawCode === "string" && SAFE_LOG_ERROR_CODES.has(rawCode)) {
-        errorCode = rawCode;
-      }
-    } catch {
-      // A hostile getter/proxy must not break the fail-closed credential path.
-    }
+    const classified = redactedThrownDiagnostics(err);
     console.error("[proxy] Failed to resolve provider credential", {
-      errorClass,
-      errorCode,
+      errorClass: classified.errorClass,
+      errorCode: classified.errorCode,
     });
     await recordAudit({
       agentId,
@@ -1936,12 +1913,12 @@ export async function handleProxy(c: Context): Promise<Response> {
       method,
       statusCode: 500,
       latencyMs: Date.now() - startTime,
-      reason: "credential-decrypt-failed",
+      reason: "credential-resolution-failed",
     });
     await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
     await releaseUnsafeProxyRequest(replayClaim);
     proxySlot.release();
-    return c.json({ ok: false, error: "Failed to decrypt credential" }, 500);
+    return c.json({ ok: false, error: "Failed to resolve credential" }, 500);
   }
 
   if (target.host === "slack.com" && !isSlackBotTokenCredential(credential)) {

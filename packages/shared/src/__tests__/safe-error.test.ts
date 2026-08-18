@@ -6,7 +6,11 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { describeThrown, UNPRINTABLE_THROWN_VALUE } from "../safe-error.js";
+import {
+  describeThrown,
+  redactedThrownDiagnostics,
+  UNPRINTABLE_THROWN_VALUE,
+} from "../safe-error.js";
 
 describe("describeThrown — well-behaved values (message preserved)", () => {
   it("returns the message of a normal Error", () => {
@@ -119,5 +123,43 @@ describe("describeThrown — HOSTILE values (NEVER throws, static fallback)", ()
     }).not.toThrow();
     expect(typeof out).toBe("string");
     expect((out as string).length).toBeGreaterThan(0);
+  });
+});
+
+describe("redactedThrownDiagnostics", () => {
+  it("retains only fixed classes and bounded machine codes", () => {
+    const error = Object.assign(new Error("refresh-token-canary"), { code: "ECONNRESET" });
+    error.name = "secret-name-canary";
+    expect(redactedThrownDiagnostics(error)).toEqual({
+      errorClass: "Error",
+      errorCode: "ECONNRESET",
+    });
+    expect(
+      redactedThrownDiagnostics(
+        Object.assign(new Error("message-canary"), { code: "SECRET code canary" }),
+      ),
+    ).toEqual({ errorClass: "Error", errorCode: null });
+  });
+
+  it("never throws when instanceof or code access is hostile", () => {
+    const hostile = new Proxy(
+      {},
+      {
+        getPrototypeOf() {
+          throw new Error("prototype-canary");
+        },
+        has() {
+          throw new Error("has-canary");
+        },
+        get() {
+          throw new Error("get-canary");
+        },
+      },
+    );
+    expect(() => redactedThrownDiagnostics(hostile)).not.toThrow();
+    expect(redactedThrownDiagnostics(hostile)).toEqual({
+      errorClass: "object",
+      errorCode: null,
+    });
   });
 });
