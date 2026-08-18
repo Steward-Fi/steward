@@ -43,7 +43,29 @@ function usdMicrosToConservativeNumber(value: bigint): number {
   // Number conversion above MAX_SAFE_INTEGER may round down. A finite policy
   // limit cannot safely admit such a balance, so reject it via Infinity.
   if (value > BigInt(Number.MAX_SAFE_INTEGER)) return Number.POSITIVE_INFINITY;
-  return Number(value) / 1_000_000;
+  const converted = Number(value) / 1_000_000;
+  if (converted === 0) return 0;
+
+  // Division can round a safe integer micros value downward (for example,
+  // 9007199254740983n). Compare the exact IEEE-754 rational against the source
+  // integer and advance one ULP only when needed; always advancing would deny
+  // an exact cap boundary that converted without loss.
+  const bits = new DataView(new ArrayBuffer(8));
+  bits.setFloat64(0, converted, false);
+  const encoded = bits.getBigUint64(0, false);
+  const exponentBits = Number((encoded >> 52n) & 0x7ffn);
+  const fraction = encoded & ((1n << 52n) - 1n);
+  const significand = exponentBits === 0 ? fraction : (1n << 52n) | fraction;
+  const exponent = (exponentBits === 0 ? -1022 : exponentBits - 1023) - 52;
+  const scaledSignificand = significand * 1_000_000n;
+  const roundedDown =
+    exponent >= 0
+      ? scaledSignificand << BigInt(exponent) < value
+      : scaledSignificand < value << BigInt(-exponent);
+  if (!roundedDown) return converted;
+
+  bits.setBigUint64(0, encoded + 1n, false);
+  return bits.getFloat64(0, false);
 }
 
 function isEvmAddress(value: unknown): value is string {

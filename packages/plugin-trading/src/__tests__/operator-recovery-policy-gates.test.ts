@@ -361,6 +361,36 @@ describe("SEC-042: withdraw policy evaluation is real", () => {
     expect(submitWithdrawCalls).toHaveLength(1);
   });
 
+  it("keeps prior operator USDC out of a conjunctive native-wei cap", async () => {
+    const { tenantId, agentId } = await seedAgent({
+      policies: [
+        { type: "approved-addresses", config: { mode: "whitelist", addresses: [DEST_A] } },
+        {
+          type: "spending-limit",
+          config: { maxPerDay: "20000000000000000", maxPerDayUsd: 200 },
+        },
+      ],
+    });
+    const app = await buildApp({ priceOracle: stubPriceOracle });
+
+    const first = await postTransfer(app, "withdraw", tenantId, {
+      agentId,
+      destination: DEST_A,
+      amount: "60",
+    });
+    const second = await postTransfer(app, "withdraw", tenantId, {
+      agentId,
+      destination: DEST_A,
+      amount: "60",
+    });
+
+    // Each request is 0.015 ETH at the pinned quote and fits the 0.02 ETH raw
+    // cap. Their $120 cumulative operator spend is enforced only by the $200
+    // USD cap; adding prior USDC-as-quoted-wei would corrupt the raw counter.
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+  });
+
   it("enforces a rate-limit policy using the agent's REAL recent tx count", async () => {
     // maxTxPerHour 1 with one confirmed tx in the trailing hour. Pre-fix the
     // route hardcoded recentTxCount1h: 0 and the rule could never fire.
@@ -415,6 +445,10 @@ describe("SEC-043: operator idempotency stores ambiguous outcomes", () => {
     const finishStart = source.indexOf("async function finishOperatorReservation");
     const finish = source.slice(finishStart, helperStart);
     expect(finish).toContain('eq(operatorTransferReservations.status, "pending")');
+    // Operator rails account exclusively through their durable reservation
+    // ledger. Mirroring the same spend into core transactions would make the
+    // cross-path USD aggregate count one transfer twice.
+    expect(source).not.toContain(".insert(transactions)");
   });
 
   it("releases a usd-send reservation after a definite local signing failure", async () => {

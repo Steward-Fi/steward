@@ -581,6 +581,24 @@ describe("Spending Limit Policy", () => {
     expect(result.passed).toBe(true);
   });
 
+  it("never rounds a safe-integer operator micro balance below its exact USD value", async () => {
+    const micros = 9_007_199_254_740_983n;
+    const roundedDownLimit = Number(micros) / 1_000_000;
+    const rule = makeSpendingRule({ maxPerDayUsd: roundedDownLimit });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, value: "0" },
+        spentToday: 0n,
+        additionalUsdSpentTodayMicros: micros,
+        priceOracle: ethPriceOracle,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("daily USD spending limit");
+  });
+
   it("enforces a mixed daily wei cap when maxPerTx is omitted", async () => {
     const rule = makeSpendingRule({
       maxPerDay: "1000000000000000000", // 1 ETH

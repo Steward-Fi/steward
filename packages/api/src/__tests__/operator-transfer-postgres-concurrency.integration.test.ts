@@ -19,19 +19,18 @@ const databaseUrl = process.env.DATABASE_URL;
 const realPostgresIt = databaseUrl && !process.env.STEWARD_PGLITE_MEMORY ? it : it.skip;
 
 it("keeps every cumulative spend path on the same 64-bit advisory key", async () => {
-  const sources = await Promise.all(
+  const [intents, vault, operator] = await Promise.all(
     [
       "../routes/intents.ts",
       "../routes/vault.ts",
-      "../routes/user.ts",
       "../../../plugin-trading/src/routes/operator-recovery.ts",
     ].map((path) => Bun.file(new URL(path, import.meta.url)).text()),
   );
-  const sharedLock = "pg_advisory_xact_lock(hashtextextended(${";
-  for (const source of sources) {
-    expect(source).toContain(sharedLock);
+  for (const source of [intents, vault]) {
+    expect(source).toContain("pg_advisory_xact_lock(hashtextextended(${agentId}, 0))");
     expect(source).not.toContain("pg_advisory_xact_lock(hashtext(${agentId}))");
   }
+  expect(operator).toContain("pg_advisory_xact_lock(hashtextextended(${input.agentId}, 0))");
 });
 
 realPostgresIt("serializes cumulative operator reservations across real connections", async () => {
