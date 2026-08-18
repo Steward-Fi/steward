@@ -71,4 +71,20 @@ describe("OIDC provider public destination validation", () => {
       expect(result).toBe("allowedAlgs for provider enterprise may only include RS256 or ES256");
     }
   });
+
+  it("defaults allowJitProvisioning to OFF when the field is omitted (SEC-151)", () => {
+    const result = normalizeOidcProviders([validProvider]);
+    expect(Array.isArray(result)).toBe(true);
+    if (!Array.isArray(result)) return;
+    // Auto-creating user accounts for any holder of a valid IdP token must be
+    // an explicit tenant opt-in — an omitted field must never normalize to on.
+    expect(result[0]?.allowJitProvisioning).toBe(false);
+  });
+
+  it("honors an explicit allowJitProvisioning opt-in", () => {
+    const result = normalizeOidcProviders([{ ...validProvider, allowJitProvisioning: true }]);
+    expect(Array.isArray(result)).toBe(true);
+    if (!Array.isArray(result)) return;
+    expect(result[0]?.allowJitProvisioning).toBe(true);
+  });
 });
