@@ -16,7 +16,8 @@
  *        platform admin key to stdout.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const DEPLOY_DIR = join(import.meta.dir, "..", "..", "..", "..", "deploy");
@@ -154,10 +155,44 @@ describe("SEC-081 enterprise backup service keeps the DSN out of container env a
     // DSN is sourced from the mounted env file instead.
     expect(backup).toContain("/run/steward/env");
     expect(backup).toContain("./.env:/run/steward/env:ro");
+    expect(backup).not.toMatch(/(?:^|[;\s])\.\s+\/run\/steward\/env/);
+    expect(backup).toContain("read_steward_env_value");
   });
 
   test("dumps are written owner-only (umask 077)", () => {
     expect(backup).toContain("umask 077");
+  });
+
+  test("dotenv values are read as inert data under sh and dash", () => {
+    const loaderStart = backup.indexOf("        read_steward_env_value() {");
+    const loaderEnd = backup.indexOf("        umask 077");
+    expect(loaderStart).toBeGreaterThanOrEqual(0);
+    expect(loaderEnd).toBeGreaterThan(loaderStart);
+    const dir = mkdtempSync(join(tmpdir(), "steward-backup-env-"));
+    try {
+      const envPath = join(dir, ".env");
+      const canary = join(dir, "shell-evaluation-canary");
+      const databaseUrl = `postgresql://steward:p@postgres:5432/steward?application_name=$(touch\${IFS}${canary})&sslmode=require`;
+      writeFileSync(envPath, `DATABASE_URL=${databaseUrl}\nPOSTGRES_PASSWORD=fallback\n`);
+      const loader = backup
+        .slice(loaderStart, loaderEnd)
+        .split("\n")
+        .map((line) => line.replace(/^ {8}/, ""))
+        .join("\n")
+        .replaceAll("$$", "$")
+        .replaceAll("/run/steward/env", envPath);
+      for (const shell of ["sh", "dash"]) {
+        const result = Bun.spawnSync([shell, "-c", `${loader}\nprintf '%s' "$DATABASE_URL"`], {
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout.toString()).toBe(databaseUrl);
+        expect(existsSync(canary)).toBe(false);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("pg_dump argv carries no password — DSN userinfo is stripped, PGPASSWORD used (SEC-050)", () => {
@@ -191,8 +226,8 @@ describe("SEC-081 enterprise backup service keeps the DSN out of container env a
       .map((line) => line.replace(/^ {8}/, ""))
       .join("\n")
       .replaceAll("$$", "$");
-    const runParser = (databaseUrl: string) =>
-      Bun.spawnSync(["sh", "-c", `${parser}\nprintf '%s\\n%s' "$dsn" "\${PGPASSWORD-}"`], {
+    const runParser = (databaseUrl: string, shell = "sh") =>
+      Bun.spawnSync([shell, "-c", `${parser}\nprintf '%s\\n%s' "$dsn" "\${PGPASSWORD-}"`], {
         env: {
           PATH: process.env.PATH ?? "/usr/bin:/bin",
           DATABASE_URL: databaseUrl,
@@ -210,6 +245,21 @@ describe("SEC-081 enterprise backup service keeps the DSN out of container env a
     expect(
       parse("postgresql://steward:p%40ss%3Aword@postgres:5432/steward?sslmode=require"),
     ).toEqual(["postgresql://steward@postgres:5432/steward?sslmode=require", "p@ss:word"]);
+
+    // libpq accepts a raw '?' in userinfo. It must remain part of the password,
+    // not be mistaken for the query delimiter and leaked in pg_dump argv. Run
+    // this proof under dash as well as the platform's /bin/sh.
+    for (const shell of ["sh", "dash"]) {
+      const result = runParser(
+        "postgresql://steward:p?ss@postgres:5432/steward?sslmode=require",
+        shell,
+      );
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString().split("\n")).toEqual([
+        "postgresql://steward@postgres:5432/steward?sslmode=require",
+        "p?ss",
+      ]);
+    }
 
     expect(
       parse("postgresql://steward@postgres:5432/steward?user=alice&password=query%40secret"),
@@ -239,6 +289,10 @@ describe("SEC-081 enterprise backup service keeps the DSN out of container env a
       "postgresql://steward:p%ZZword@postgres:5432/steward",
       "postgresql://steward:p%00word@postgres:5432/steward",
       "postgresql://steward@postgres:5432/steward?password=bad%ZZsecret",
+      "postgresql://steward:secret@postgres:5432/steward#fragment",
+      // With no slash, libpq's raw-userinfo extension is indistinguishable
+      // from an @ in a query value. Reject rather than leak either reading.
+      "postgresql://steward:p?ss@postgres:5432",
     ]) {
       const result = runParser(malformed);
       expect(result.exitCode).not.toBe(0);

@@ -205,12 +205,35 @@ services:
     #    operator account, and encrypt/prune dumps per your retention policy.
     command:
       - |
-        set -a; . /run/steward/env; set +a
+        # Never source the dotenv file as shell code. `steward init` accepts an
+        # operator-supplied DATABASE_URL, and URI bytes such as '&' and '$()'
+        # must remain inert data rather than becoming shell syntax. Read only
+        # the two keys this one-shot backup needs, without eval/`.`.
+        read_steward_env_value() {
+          steward_env_key="$$1"
+          steward_env_value="$$(sed -n "s/^$${steward_env_key}=//p" /run/steward/env | sed -n '1p')"
+          case "$$steward_env_value" in
+            \'*\') steward_env_value="$${steward_env_value#\'}"; steward_env_value="$${steward_env_value%\'}" ;;
+            \"*\") steward_env_value="$${steward_env_value#\"}"; steward_env_value="$${steward_env_value%\"}" ;;
+            \'*|\"*) echo "Malformed quoted $$steward_env_key in Steward env file" >&2; return 1 ;;
+          esac
+          printf '%s' "$$steward_env_value"
+        }
+        DATABASE_URL="$$(read_steward_env_value DATABASE_URL)"
+        POSTGRES_PASSWORD="$$(read_steward_env_value POSTGRES_PASSWORD)"
+        export DATABASE_URL POSTGRES_PASSWORD
         umask 077
         # Never inherit a separately supplied password into pg_dump. The only
         # credential allowed below is one decoded from DATABASE_URL itself.
         unset PGPASSWORD
         dsn="$${DATABASE_URL:-postgresql://steward:$${POSTGRES_PASSWORD:?}@postgres:5432/steward}"
+        # libpq accepts a raw '?' inside userinfo even though RFC 3986 normally
+        # requires it to be percent-encoded. A fragment, however, is never a
+        # supported connection target and makes delimiter parsing ambiguous.
+        # Reject it before any password-bearing value can reach pg_dump argv.
+        case "$$dsn" in
+          *\#*) echo 'DATABASE_URL fragments are not supported' >&2; exit 1 ;;
+        esac
         # POSIX-portable percent-decoder (octal printf works in dash/BusyBox ash;
         # printf '%b' with \xHH does not). Defined before first use.
         pg_url_decode() {
@@ -252,10 +275,17 @@ services:
           postgres://*|postgresql://*)
             pg_scheme="$${dsn%%://*}"
             pg_rest="$${dsn#*://}"
-            # Isolate the authority before looking for userinfo. Matching a
-            # colon and @ across the whole DSN mistakes host ports plus an @
-            # in a path/query value for credentials and corrupts the target.
-            pg_authority="$$(printf '%s' "$$pg_rest" | sed 's|[/?#].*||')"
+            # Isolate the authority before looking for userinfo. When a path is
+            # present, '/' is the unambiguous authority terminator; importantly,
+            # libpq accepts a raw '?' in userinfo, so treating '?' as the first
+            # terminator can leave the password-bearing DSN on pg_dump argv.
+            # Without a path, '?' followed by '@' is intrinsically ambiguous
+            # (raw userinfo vs. a query value), so reject it fail-closed.
+            case "$$pg_rest" in
+              */*) pg_authority="$${pg_rest%%/*}" ;;
+              *\?*@*) echo 'DATABASE_URL contains ambiguous user information' >&2; exit 1 ;;
+              *) pg_authority="$$(printf '%s' "$$pg_rest" | sed 's|[?].*||')" ;;
+            esac
             pg_suffix="$${pg_rest#"$$pg_authority"}"
             case "$$pg_authority" in
               *:*@*)
