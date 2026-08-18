@@ -33,6 +33,7 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import {
+  AWS_PROVIDER_ACTION_PROFILE,
   GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
   GITHUB_PROVIDER_ACTION_PROFILE,
   GOOGLE_PROVIDER_ACTION_PROFILE,
@@ -99,6 +100,21 @@ const PROFILES = [
     method: "GET",
     path: "/calendar/v3/calendars/primary/events",
     args: { maxResults: 50 },
+    requestProfile: {},
+  },
+  {
+    // AWS resolves its one permitted origin dynamically from the canonical
+    // action bytes (registry dynamicOriginPolicy "aws-ec2-region"), so the
+    // host below MUST equal `ec2.${args.region}.amazonaws.com` and the route
+    // must carry the exact SigV4 binding (see the credential/route
+    // special-cases in runAuthenticatedBoundary).
+    profile: AWS_PROVIDER_ACTION_PROFILE,
+    adapterKey: "aws",
+    operationKey: "aws.ec2.DescribeInstances",
+    host: "ec2.us-west-2.amazonaws.com",
+    method: "POST",
+    path: "/",
+    args: { region: "us-west-2" },
     requestProfile: {},
   },
   {
@@ -172,9 +188,9 @@ beforeAll(async () => {
   process.env.STEWARD_EXECUTION_AUTH_SECRET = "1".repeat(64);
   process.env.STEWARD_MASTER_PASSWORD = "profile-boundary-master-password";
   process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS =
-    "api.github.com,api.x.com,slack.com,www.googleapis.com,api.example.com";
+    "api.github.com,api.x.com,slack.com,www.googleapis.com,api.example.com,ec2.us-west-2.amazonaws.com";
   process.env.STEWARD_PROXY_ALLOWED_HOSTS =
-    "api.github.com,api.x.com,slack.com,www.googleapis.com,api.example.com";
+    "api.github.com,api.x.com,slack.com,www.googleapis.com,api.example.com,ec2.us-west-2.amazonaws.com";
   process.env.STEWARD_JWT_SECRET = "profile-boundary-jwt-secret-0123456789abcdef0123456789";
   const signingKeys = generateKeyPairSync("ed25519");
   process.env.STEWARD_AUDIT_SIGNING_KEY = signingKeys.privateKey
@@ -298,7 +314,15 @@ async function runAuthenticatedBoundary(
             refreshToken: "profile-boundary-refresh",
             scopesGranted: ["openid", "email", "https://www.googleapis.com/auth/calendar.readonly"],
           })
-        : "profile-boundary-credential";
+        : fixture.profile === AWS_PROVIDER_ACTION_PROFILE
+          ? // Strict SigV4 credential schema (packages/proxy/src/sigv4.ts):
+            // accessKeyId is /^[A-Z0-9]{16,128}$/, secretAccessKey 16..256
+            // printable chars, optional sessionToken. No other keys allowed.
+            JSON.stringify({
+              accessKeyId: "AKIAPROFILEBOUNDARY0",
+              secretAccessKey: "profile-boundary-aws-secret-key",
+            })
+          : "profile-boundary-credential";
   const encrypted = vault.encrypt(credential, {
     tenantId: F.TENANT,
     name: "github",
@@ -334,6 +358,17 @@ async function runAuthenticatedBoundary(
       agentId: F.AGENT,
       authorityMode: "governed_v2",
       providerOperationId: F.OP,
+      // The AWS profile dispatches through the SigV4 final-boundary signer,
+      // which requires the route's exact sigv4 binding (service ec2 + the
+      // region the fixture host commits to). Both assertAwsCredentialRouteBinding
+      // (ingress) and injectAwsSigV4AtFinalBoundary (dispatch) fail closed
+      // without it. Other profiles keep the seeded header-injection strategy.
+      ...(fixture.profile === AWS_PROVIDER_ACTION_PROFILE
+        ? {
+            injectionStrategy: "sigv4",
+            injectionConfig: { service: "ec2", region: "us-west-2" },
+          }
+        : {}),
     })
     .where(and(eq(secretRoutes.tenantId, F.TENANT), eq(secretRoutes.id, F.ROUTE)));
 
