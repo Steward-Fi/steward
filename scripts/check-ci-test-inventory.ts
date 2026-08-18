@@ -3,18 +3,42 @@ import { dirname, resolve } from "node:path";
 
 const WORKFLOWS = [".github/workflows/pr.yml", ".github/workflows/ci.yml"] as const;
 const NON_WORKSPACE_MATRIX_ENTRIES = ["scripts/__tests__"] as const;
+const PACKAGE_TEST_FILE_PATTERNS = [
+  "src/**/*.test.ts",
+  "src/**/*.spec.ts",
+  "src/**/*.test.tsx",
+  "src/**/*.spec.tsx",
+] as const;
+const EXTRA_TEST_TARGETS = {
+  "packages/flutter": ["test/**/*_test.dart"],
+} as const;
 
 // These suites need infrastructure or a non-Bun toolchain that the generic
 // unit matrix does not provide. Keep the mapping explicit so an omitted suite
 // cannot be disguised as a comment-only exception.
 const DEDICATED_JOBS = {
+  "packages/agent-trader": "unit-agent-trader",
   "packages/api": "integration",
   "packages/eliza-plugin": "unit-eliza-plugin",
+  "packages/flutter": "unit-flutter",
   "packages/redis": "unit-redis",
   "packages/signer-frost": "unit-signer-frost",
+  web: "unit-web",
 } as const;
 
-function workspacePackagePaths(rootDir: string): string[] {
+function hasMatchingFiles(
+  rootDir: string,
+  directory: string,
+  patterns: readonly string[],
+): boolean {
+  return patterns.some(
+    (pattern) =>
+      new Bun.Glob(pattern).scanSync({ cwd: resolve(rootDir, directory) }).next().value !==
+      undefined,
+  );
+}
+
+function repositoryTestTargets(rootDir: string): string[] {
   const rootPackage = JSON.parse(readFileSync(resolve(rootDir, "package.json"), "utf8")) as {
     workspaces?: string[];
   };
@@ -33,13 +57,13 @@ function workspacePackagePaths(rootDir: string): string[] {
   }
 
   return [...packageJsonPaths]
-    .filter((manifest) => {
-      const pkg = JSON.parse(readFileSync(resolve(rootDir, manifest), "utf8")) as {
-        scripts?: { test?: unknown };
-      };
-      return typeof pkg.scripts?.test === "string" && pkg.scripts.test.trim().length > 0;
-    })
     .map((manifest) => dirname(manifest))
+    .filter((directory) => hasMatchingFiles(rootDir, directory, PACKAGE_TEST_FILE_PATTERNS))
+    .concat(
+      Object.entries(EXTRA_TEST_TARGETS)
+        .filter(([directory, patterns]) => hasMatchingFiles(rootDir, directory, patterns))
+        .map(([directory]) => directory),
+    )
     .sort();
 }
 
@@ -122,35 +146,45 @@ function extractRunSteps(job: string): WorkflowStep[] {
 }
 
 export function jobExecutesPackageTests(job: string, packagePath: string): boolean {
+  const executableTestCommand =
+    /^(?:\(?\s*)?(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]+)\s+)*(?:bun|cargo|flutter)\b[^\n]*\b(?:test|run-tests)\b/;
   return extractRunSteps(job).some((step) => {
-    if (!step.run || !/(?:^|[;&|()\s])(?:bun|cargo|flutter)(?:\s|$)[^\n]*\b(?:test|run-tests)\b/m.test(step.run)) {
+    if (!step.run) {
       return false;
     }
+    const executesTest = step.run
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .some((line) => executableTestCommand.test(line));
+    if (!executesTest) return false;
     return step.workingDirectory === packagePath || step.run.includes(packagePath);
   });
 }
 
 export function assertCompleteCoverage(
-  workspaceTests: string[],
+  testTargets: string[],
   matrix: string[],
   dedicatedPaths: string[],
 ): void {
-  const duplicates = matrix.filter((entry, index) => matrix.indexOf(entry) !== index);
+  const declaredTargets = [...matrix, ...dedicatedPaths];
+  const duplicates = declaredTargets.filter(
+    (entry, index) => declaredTargets.indexOf(entry) !== index,
+  );
   if (duplicates.length > 0) {
-    throw new Error(`duplicate unit matrix entries: ${[...new Set(duplicates)].join(", ")}`);
+    throw new Error(`duplicate CI test inventory entries: ${[...new Set(duplicates)].join(", ")}`);
   }
 
-  const covered = new Set([...matrix, ...dedicatedPaths]);
-  const missing = workspaceTests.filter((path) => !covered.has(path));
-  const stale = [...covered].filter((path) => !workspaceTests.includes(path));
+  const covered = new Set(declaredTargets);
+  const missing = testTargets.filter((path) => !covered.has(path));
+  const stale = [...covered].filter((path) => !testTargets.includes(path));
   if (missing.length > 0)
-    throw new Error(`workspace test packages missing from CI: ${missing.join(", ")}`);
+    throw new Error(`test-bearing targets missing from CI: ${missing.join(", ")}`);
   if (stale.length > 0)
-    throw new Error(`CI inventory contains non-test workspace packages: ${stale.join(", ")}`);
+    throw new Error(`CI inventory contains non-test targets: ${stale.join(", ")}`);
 }
 
 export function checkCiTestInventory(rootDir = resolve(import.meta.dir, "..")): void {
-  const workspaceTests = workspacePackagePaths(rootDir);
+  const testTargets = repositoryTestTargets(rootDir);
   const dedicatedPaths = Object.keys(DEDICATED_JOBS);
   let canonicalMatrix: string[] | undefined;
 
@@ -163,7 +197,7 @@ export function checkCiTestInventory(rootDir = resolve(import.meta.dir, "..")): 
           entry as (typeof NON_WORKSPACE_MATRIX_ENTRIES)[number],
         ),
     );
-    assertCompleteCoverage(workspaceTests, workspaceMatrix, dedicatedPaths);
+    assertCompleteCoverage(testTargets, workspaceMatrix, dedicatedPaths);
 
     for (const nonWorkspaceEntry of NON_WORKSPACE_MATRIX_ENTRIES) {
       if (!matrix.includes(nonWorkspaceEntry)) {
@@ -186,9 +220,7 @@ export function checkCiTestInventory(rootDir = resolve(import.meta.dir, "..")): 
     canonicalMatrix = matrix;
   }
 
-  console.log(
-    `CI test inventory covers all ${workspaceTests.length} test-bearing workspace packages`,
-  );
+  console.log(`CI test inventory covers all ${testTargets.length} test-bearing targets`);
 }
 
 if (import.meta.main) checkCiTestInventory();

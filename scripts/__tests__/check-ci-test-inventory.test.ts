@@ -15,16 +15,19 @@ describe("CI test inventory", () => {
   test("a future unlisted test package fails closed", () => {
     expect(() =>
       assertCompleteCoverage(["packages/a", "packages/new"], ["packages/a"], []),
-    ).toThrow("workspace test packages missing from CI: packages/new");
+    ).toThrow("test-bearing targets missing from CI: packages/new");
   });
 
   test("duplicate and stale declarations are rejected", () => {
     expect(() => assertCompleteCoverage(["packages/a"], ["packages/a", "packages/a"], [])).toThrow(
-      "duplicate unit matrix entries: packages/a",
+      "duplicate CI test inventory entries: packages/a",
+    );
+    expect(() => assertCompleteCoverage(["packages/a"], ["packages/a"], ["packages/a"])).toThrow(
+      "duplicate CI test inventory entries: packages/a",
     );
     expect(() =>
       assertCompleteCoverage(["packages/a"], ["packages/a"], ["packages/removed"]),
-    ).toThrow("CI inventory contains non-test workspace packages: packages/removed");
+    ).toThrow("CI inventory contains non-test targets: packages/removed");
   });
 
   test("workflow extraction is scoped to the unit and dedicated job blocks", () => {
@@ -72,9 +75,20 @@ describe("CI test inventory", () => {
       "          bun test packages/b",
       "          echo packages/a",
     ].join("\n");
+    const echoed = ["  dedicated:", "    steps:", "      - run: echo bun test packages/a"].join(
+      "\n",
+    );
+    const envPrefixed = [
+      "  dedicated:",
+      "    steps:",
+      "      - name: Isolated package runner",
+      "        run: TEST_JOBS=1 bun packages/a/scripts/run-tests-isolated.ts",
+    ].join("\n");
 
     expect(jobExecutesPackageTests(extractJob(valid, "dedicated"), "packages/a")).toBe(true);
     expect(jobExecutesPackageTests(extractJob(commentOnly, "dedicated"), "packages/a")).toBe(false);
     expect(jobExecutesPackageTests(extractJob(unrelated, "dedicated"), "packages/a")).toBe(false);
+    expect(jobExecutesPackageTests(extractJob(echoed, "dedicated"), "packages/a")).toBe(false);
+    expect(jobExecutesPackageTests(extractJob(envPrefixed, "dedicated"), "packages/a")).toBe(true);
   });
 });
