@@ -278,14 +278,15 @@ describe("auth proxy route handlers (SEC-018)", () => {
   });
 
   test("production cookies stay Secure behind an internal HTTP reverse proxy", () => {
-    const originalNodeEnv = process.env.NODE_ENV;
-    process.env.NODE_ENV = "production";
+    const mutableEnv = process.env as Record<string, string | undefined>;
+    const originalNodeEnv = mutableEnv.NODE_ENV;
+    mutableEnv.NODE_ENV = "production";
     try {
       expect(isHttpsRequest(new Request("http://app.example.test/api/auth/session"))).toBe(true);
       expect(isHttpsRequest(new Request("http://127.0.0.1/api/auth/session"))).toBe(false);
     } finally {
-      if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
-      else process.env.NODE_ENV = originalNodeEnv;
+      if (originalNodeEnv === undefined) delete mutableEnv.NODE_ENV;
+      else mutableEnv.NODE_ENV = originalNodeEnv;
     }
   });
 });
