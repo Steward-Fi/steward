@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
-import { agentPolicies, agents, closeDb, getDb, tenants } from "@stwd/db";
+import { agentPolicies, agents, auditEvents, closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
@@ -137,5 +137,40 @@ describe("agent trade policy admin path (SEC-208)", () => {
       .from(agentPolicies)
       .where(eq(agentPolicies.agentId, AGENT_ID));
     expect(row?.updatedBy).toBe("trade-policy-admin");
+  });
+
+  it("serializes concurrent human partial patches and audits the exact committed chain", async () => {
+    const app = await makeApp("admin");
+    const reasons = ["concurrent human daily patch", "concurrent human leverage patch"];
+    const responses = await Promise.all([
+      putPolicy(app, { dailyCap: 4500, reason: reasons[0] }),
+      putPolicy(app, { leverageCap: 18, reason: reasons[1] }),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+
+    const [row] = await getDb()
+      .select()
+      .from(agentPolicies)
+      .where(eq(agentPolicies.agentId, AGENT_ID));
+    expect(row).toMatchObject({ dailyCapUsd: "4500", leverageCap: "18" });
+
+    const events = (
+      await getDb()
+        .select()
+        .from(auditEvents)
+        .where(
+          and(
+            eq(auditEvents.tenantId, TENANT_ID),
+            eq(auditEvents.action, "agent.policy.updated"),
+            eq(auditEvents.resourceId, AGENT_ID),
+          ),
+        )
+        .orderBy(asc(auditEvents.seq))
+    ).filter((event) => reasons.includes(String(event.metadata.reason)));
+    expect(events).toHaveLength(2);
+    expect(events[1].seq).toBe(events[0].seq + 1);
+    expect(Buffer.from(events[1].prevHash).equals(Buffer.from(events[0].hmac))).toBe(true);
+    expect(events[1].metadata.before).toEqual(events[0].metadata.after);
+    expect(events.map((event) => event.metadata.reason).sort()).toEqual([...reasons].sort());
   });
 });

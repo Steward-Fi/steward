@@ -1736,136 +1736,125 @@ agentRoutes.put("/:agentId/policy", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "reason is required" }, 400);
   }
 
-  const [existing] = await db
-    .select()
-    .from(agentPolicies)
-    .where(and(eq(agentPolicies.agentId, agentId), eq(agentPolicies.tenantId, tenantId)));
-  const before = existing ? policyRowToResponse(existing) : defaultPolicySnapshot(agentId);
-
-  const nextDailyCap =
-    body.dailyCap === undefined ? before.dailyCap : validatePolicyNumber("dailyCap", body.dailyCap);
-  const nextPerOrderCap =
-    body.perOrderCap === undefined
-      ? before.perOrderCap
-      : validatePolicyNumber("perOrderCap", body.perOrderCap);
-  const nextLeverageCap =
-    body.leverageCap === undefined
-      ? before.leverageCap
-      : validatePolicyNumber("leverageCap", body.leverageCap);
-  const nextAllowedAssets =
-    body.allowedAssets === undefined
-      ? before.allowedAssets
-      : validatePolicyStringArray("allowedAssets", body.allowedAssets);
-  const nextAllowedVenues =
-    body.allowedVenues === undefined
-      ? before.allowedVenues
-      : validatePolicyStringArray("allowedVenues", body.allowedVenues);
-  const nextAllowBuilderPerps =
-    body.allowBuilderPerps === undefined
-      ? before.allowBuilderPerps
-      : validateOptionalBoolean("allowBuilderPerps", body.allowBuilderPerps);
-
-  const validationError = [
-    nextDailyCap,
-    nextPerOrderCap,
-    nextLeverageCap,
-    nextAllowedAssets,
-    nextAllowedVenues,
-    nextAllowBuilderPerps,
-  ].find((value) => typeof value === "string");
+  // Validate caller-provided fields before opening the write transaction, but
+  // do not fill omitted partial-patch fields yet. Their values must come from
+  // the row locked and re-read inside the audited transaction.
+  const validatedPatch = {
+    dailyCap:
+      body.dailyCap === undefined ? undefined : validatePolicyNumber("dailyCap", body.dailyCap),
+    perOrderCap:
+      body.perOrderCap === undefined
+        ? undefined
+        : validatePolicyNumber("perOrderCap", body.perOrderCap),
+    leverageCap:
+      body.leverageCap === undefined
+        ? undefined
+        : validatePolicyNumber("leverageCap", body.leverageCap),
+    allowedAssets:
+      body.allowedAssets === undefined
+        ? undefined
+        : validatePolicyStringArray("allowedAssets", body.allowedAssets),
+    allowedVenues:
+      body.allowedVenues === undefined
+        ? undefined
+        : validatePolicyStringArray("allowedVenues", body.allowedVenues),
+    allowBuilderPerps:
+      body.allowBuilderPerps === undefined
+        ? undefined
+        : validateOptionalBoolean("allowBuilderPerps", body.allowBuilderPerps),
+  };
+  const validationError = Object.values(validatedPatch).find((value) => typeof value === "string");
   if (typeof validationError === "string") {
     return c.json<ApiResponse>({ ok: false, error: validationError }, 400);
-  }
-
-  const dailyCapValue = nextDailyCap as number;
-  const perOrderCapValue = nextPerOrderCap as number;
-  const leverageCapValue = nextLeverageCap as number;
-  const allowedAssetsValue = nextAllowedAssets as string[];
-  const allowedVenuesValue = nextAllowedVenues as string[];
-  const allowBuilderPerpsValue = nextAllowBuilderPerps as boolean;
-
-  if (hasBuilderPerpAsset(allowedAssetsValue) && !allowBuilderPerpsValue) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "builder perp assets require allowBuilderPerps=true" },
-      400,
-    );
-  }
-
-  if (perOrderCapValue > dailyCapValue) {
-    return c.json<ApiResponse>({ ok: false, error: "perOrderCap cannot exceed dailyCap" }, 400);
-  }
-
-  // SEC-208: agent self-updates are tighten-only — reject any loosening here
-  // (fail closed, AFTER input validation so malformed bodies still 400).
-  if (isAgentSelfUpdate) {
-    // SEC-208 residual: tighten-only constrains updates against the CURRENT
-    // row, but a policy-less agent could still CREATE its initial policy at
-    // full platform defaults — activating trade ceilings (the trade route
-    // fails closed when the row is absent) with no human approval. Initial
-    // creation is therefore reserved for the human owner/admin+MFA path.
-    if (!existing) {
-      return c.json<ApiResponse>(
-        {
-          ok: false,
-          error: "Initial trade policy creation requires an owner/admin session with recent MFA",
-        },
-        403,
-      );
-    }
-    const loosening = policyLooseningViolation(before, {
-      dailyCap: dailyCapValue,
-      perOrderCap: perOrderCapValue,
-      leverageCap: leverageCapValue,
-      allowedAssets: allowedAssetsValue,
-      allowedVenues: allowedVenuesValue,
-      allowBuilderPerps: allowBuilderPerpsValue,
-    });
-    if (loosening) {
-      return c.json<ApiResponse>({ ok: false, error: loosening }, 403);
-    }
   }
 
   const updatedBy = isAgentSelfUpdate
     ? (c.get("agentSubject") ?? `agent:${agentId}`)
     : (c.get("userId") ?? "unknown");
   const updatedReason = body.reason.trim();
-  const nextPolicyValues = {
-    dailyCapUsd: String(dailyCapValue),
-    perOrderCapUsd: String(perOrderCapValue),
-    leverageCap: String(leverageCapValue),
-    allowedAssets: allowedAssetsValue,
-    allowedVenues: allowedVenuesValue,
-    allowBuilderPerps: allowBuilderPerpsValue,
-    updatedAt: new Date(),
-    updatedBy,
-    updatedReason,
-  };
 
   const mutation = await withTenantAuditedTransaction(
     tenantId,
     async (txRaw, appendRequiredAudit) => {
       const tx = txRaw as typeof db;
-      let upserted: typeof agentPolicies.$inferSelect | undefined;
+      // Serialize the complete partial-patch read/materialize/write sequence,
+      // including initial-row creation where SELECT FOR UPDATE has no row to
+      // lock. PGLite runs tests on one connection and lacks this PG function.
+      if (process.env.STEWARD_PGLITE_MEMORY !== "true") {
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${tenantId}:${agentId}`}, 0))`,
+        );
+      }
+      const [existing] = await tx
+        .select()
+        .from(agentPolicies)
+        .where(and(eq(agentPolicies.agentId, agentId), eq(agentPolicies.tenantId, tenantId)))
+        .for("update");
+      const before = existing ? policyRowToResponse(existing) : defaultPolicySnapshot(agentId);
+      const dailyCapValue = (validatedPatch.dailyCap ?? before.dailyCap) as number;
+      const perOrderCapValue = (validatedPatch.perOrderCap ?? before.perOrderCap) as number;
+      const leverageCapValue = (validatedPatch.leverageCap ?? before.leverageCap) as number;
+      const allowedAssetsValue = (validatedPatch.allowedAssets ?? before.allowedAssets) as string[];
+      const allowedVenuesValue = (validatedPatch.allowedVenues ?? before.allowedVenues) as string[];
+      const allowBuilderPerpsValue = (validatedPatch.allowBuilderPerps ??
+        before.allowBuilderPerps) as boolean;
+
+      if (hasBuilderPerpAsset(allowedAssetsValue) && !allowBuilderPerpsValue) {
+        return {
+          kind: "invalid" as const,
+          status: 400 as const,
+          error: "builder perp assets require allowBuilderPerps=true",
+        };
+      }
+      if (perOrderCapValue > dailyCapValue) {
+        return {
+          kind: "invalid" as const,
+          status: 400 as const,
+          error: "perOrderCap cannot exceed dailyCap",
+        };
+      }
       if (isAgentSelfUpdate) {
-        // SEC-208 concurrency fence: authorize against one exact row and commit
-        // that CAS together with its required audit. A stale writer changes
-        // neither policy nor evidence and retries from a fresh snapshot.
-        const expected = existing;
-        if (!expected) return { kind: "conflict" as const };
+        if (!existing) {
+          return {
+            kind: "invalid" as const,
+            status: 403 as const,
+            error: "Initial trade policy creation requires an owner/admin session with recent MFA",
+          };
+        }
+        const loosening = policyLooseningViolation(before, {
+          dailyCap: dailyCapValue,
+          perOrderCap: perOrderCapValue,
+          leverageCap: leverageCapValue,
+          allowedAssets: allowedAssetsValue,
+          allowedVenues: allowedVenuesValue,
+          allowBuilderPerps: allowBuilderPerpsValue,
+        });
+        if (loosening) return { kind: "invalid" as const, status: 403 as const, error: loosening };
+      }
+
+      const nextPolicyValues = {
+        dailyCapUsd: String(dailyCapValue),
+        perOrderCapUsd: String(perOrderCapValue),
+        leverageCap: String(leverageCapValue),
+        allowedAssets: allowedAssetsValue,
+        allowedVenues: allowedVenuesValue,
+        allowBuilderPerps: allowBuilderPerpsValue,
+        updatedAt: new Date(),
+        updatedBy,
+        updatedReason,
+      };
+      let upserted: typeof agentPolicies.$inferSelect | undefined;
+      if (existing) {
         [upserted] = await tx
           .update(agentPolicies)
           .set(nextPolicyValues)
-          .where(buildAgentPolicyCompareAndSwapPredicate(agentId, tenantId, expected))
+          .where(buildAgentPolicyCompareAndSwapPredicate(agentId, tenantId, existing))
           .returning();
         if (!upserted) return { kind: "conflict" as const };
       } else {
         [upserted] = await tx
           .insert(agentPolicies)
           .values({ agentId, tenantId, ...nextPolicyValues })
-          .onConflictDoUpdate({
-            target: agentPolicies.agentId,
-            set: { ...nextPolicyValues },
-          })
           .returning();
       }
       if (!upserted) throw new Error("Failed to update agent policy");
@@ -1895,6 +1884,9 @@ agentRoutes.put("/:agentId/policy", async (c) => {
     },
   );
 
+  if (mutation.kind === "invalid") {
+    return c.json<ApiResponse>({ ok: false, error: mutation.error }, mutation.status);
+  }
   if (mutation.kind === "conflict") {
     return c.json<ApiResponse>(
       { ok: false, error: "Agent policy changed concurrently; retry against the latest policy" },
