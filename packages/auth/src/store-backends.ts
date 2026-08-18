@@ -13,6 +13,7 @@
  */
 
 import { getSql } from "@stwd/db";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 
 // ─── Interface ────────────────────────────────────────────────────────────────
 
@@ -306,8 +307,8 @@ export async function buildBackend(
       return { backend, source: "redis" };
     } catch (err) {
       console.warn(
-        `[steward:auth] Redis backend unavailable for "${namespace}", falling back:`,
-        (err as Error).message,
+        `[steward:auth] Redis backend unavailable for "${namespace}", falling back`,
+        redactedThrownDiagnostics(err),
       );
     }
   }
@@ -322,8 +323,8 @@ export async function buildBackend(
       return { backend, source: "postgres" };
     } catch (err) {
       console.warn(
-        `[steward:auth] Postgres backend unavailable for "${namespace}", falling back to memory:`,
-        (err as Error).message,
+        `[steward:auth] Postgres backend unavailable for "${namespace}", falling back to memory`,
+        redactedThrownDiagnostics(err),
       );
     }
   }

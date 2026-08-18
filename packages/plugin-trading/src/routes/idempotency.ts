@@ -10,6 +10,7 @@
 
 import { createHash } from "node:crypto";
 import type { IoredisLike } from "@stwd/redis";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 
 export interface IdempotencyRecord {
   status: number;
@@ -167,7 +168,10 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
           }
         } catch (err) {
           // The pending marker remains fail-closed, preventing a duplicate retry.
-          console.error("[idempotency] failed to persist outcome; claim remains pending:", err);
+          console.error(
+            "[idempotency] failed to persist outcome; claim remains pending",
+            redactedThrownDiagnostics(err),
+          );
         }
       },
       release: async () => {
@@ -176,7 +180,10 @@ export class DurableIdempotencyStore<TRecord extends IdempotencyRecord> {
         } catch (err) {
           // A failed release leaves the claim pending, which is inconvenient
           // but safe: a later request must not execute while ownership is unknown.
-          console.error("[idempotency] failed to release pre-execution claim:", err);
+          console.error(
+            "[idempotency] failed to release pre-execution claim",
+            redactedThrownDiagnostics(err),
+          );
         }
       },
     };

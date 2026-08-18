@@ -7,6 +7,7 @@
  */
 
 import { getDb, proxyAuditLog } from "@stwd/db";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 
 export interface AuditEntry {
   agentId: string;
@@ -29,7 +30,7 @@ export async function recordAudit(entry: AuditEntry): Promise<void> {
   } catch (err) {
     // Best-effort audit is used only after the security-critical pre-forward
     // audit has already been persisted.
-    console.error("[audit] Failed to record audit entry:", err);
+    console.error("[audit] Failed to record audit entry", redactedThrownDiagnostics(err));
   }
 }
 

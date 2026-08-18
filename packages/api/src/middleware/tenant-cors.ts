@@ -19,6 +19,7 @@ import {
   tenantAppClients as tenantAppClientsTable,
   tenantConfigs as tenantConfigsTable,
 } from "@stwd/db";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq } from "drizzle-orm";
 import type { Context, Next } from "hono";
 
@@ -181,7 +182,10 @@ export async function tenantCors(c: Context, next: Next): Promise<Response | und
       }
       // unknown origin outside production → wildcard fallback below (dev mode)
     } catch (err) {
-      console.warn("[tenant-cors] Failed to load global origins, denying CORS:", err);
+      console.warn(
+        "[tenant-cors] Failed to load global origins, denying CORS",
+        redactedThrownDiagnostics(err),
+      );
       if (c.req.method === "OPTIONS") {
         return c.newResponse(null, 403);
       }
@@ -213,7 +217,10 @@ export async function tenantCors(c: Context, next: Next): Promise<Response | und
       }
       // origins.length === 0 → no config yet → fall through to wildcard outside production
     } catch (err) {
-      console.warn("[tenant-cors] Failed to load origins for tenant, denying CORS:", err);
+      console.warn(
+        "[tenant-cors] Failed to load origins for tenant, denying CORS",
+        redactedThrownDiagnostics(err),
+      );
       if (c.req.method === "OPTIONS") {
         return c.newResponse(null, 403);
       }

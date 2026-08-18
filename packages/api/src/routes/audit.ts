@@ -7,6 +7,7 @@
 
 import { auditChainHeads, auditCheckpoints, proxyAuditLog } from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, count, desc, eq, gte, inArray, lte, type SQL, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { auditOwnerAdminMfaGate } from "../middleware/audit-gate";
@@ -1010,7 +1011,7 @@ auditRoutes.get("/archives", async (c) => {
     });
     return c.json({ ok: true, data: archives });
   } catch (error) {
-    console.error("[audit] archive list failed:", error);
+    console.error("[audit] archive list failed", redactedThrownDiagnostics(error));
     return c.json<ApiResponse>({ ok: false, error: "Failed to list audit archives" }, 500);
   }
 });
@@ -1175,7 +1176,10 @@ auditRoutes.post("/retention/run", async (c) => {
     }
     return c.json({ ok: true, data: result });
   } catch (error) {
-    console.error(`[audit] retention run failed for tenant ${tenantId}:`, error);
+    console.error(
+      `[audit] retention run failed for tenant ${tenantId}`,
+      redactedThrownDiagnostics(error),
+    );
     return c.json<ApiResponse>({ ok: false, error: "Audit retention failed" }, 500);
   }
 });
@@ -1251,7 +1255,10 @@ auditRoutes.get("/bundle", async (c) => {
   try {
     bundleData = await readAuditBundleData(tenantId, fromSeq, toSeq);
   } catch (err) {
-    console.error(`[audit] bundle read failed for tenant ${tenantId}:`, err);
+    console.error(
+      `[audit] bundle read failed for tenant ${tenantId}`,
+      redactedThrownDiagnostics(err),
+    );
     return c.json<ApiResponse>({ ok: false, error: "Failed to read audit chain" }, 500);
   }
 
@@ -1269,7 +1276,10 @@ auditRoutes.get("/bundle", async (c) => {
     if (err instanceof AuditCheckpointAnchorError) {
       return c.json<ApiResponse>({ ok: false, error: "Required checkpoint anchoring failed" }, 503);
     }
-    console.error(`[audit] checkpoint signing failed for tenant ${tenantId}:`, err);
+    console.error(
+      `[audit] checkpoint signing failed for tenant ${tenantId}`,
+      redactedThrownDiagnostics(err),
+    );
     return c.json<ApiResponse>({ ok: false, error: "Failed to sign checkpoint" }, 500);
   }
 });

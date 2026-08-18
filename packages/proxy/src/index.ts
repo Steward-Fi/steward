@@ -13,7 +13,12 @@
  */
 
 import { validateJwtSecretEnv } from "@stwd/auth";
-import { metricsTokenIsValid, renderSecurityMetrics, securityMetricsEnabled } from "@stwd/shared";
+import {
+  metricsTokenIsValid,
+  redactedThrownDiagnostics,
+  renderSecurityMetrics,
+  securityMetricsEnabled,
+} from "@stwd/shared";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { configuredProxyCorsOrigins, PROXY_PORT } from "./config";
@@ -101,7 +106,10 @@ app.all("*", handleProxy);
 // ─── Redis initialization (non-blocking) ─────────────────────────────────────
 
 initProxyRedis().catch((err) => {
-  console.warn("[proxy] Redis initialization failed, continuing without Redis:", err);
+  console.warn(
+    "[proxy] Redis initialization failed, continuing without Redis",
+    redactedThrownDiagnostics(err),
+  );
 });
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────

@@ -1,3 +1,4 @@
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { getRedisClient } from "../middleware/redis";
 
 const TOKEN_STATUS_KEY_PREFIX = "agent-token-status";
@@ -33,7 +34,7 @@ export async function recordAgentTokenExp(agentId: string, exp: number): Promise
   } catch (error) {
     console.warn("[steward:agent-token] failed to record token status in redis", {
       agentId,
-      error: error instanceof Error ? error.message : String(error),
+      ...redactedThrownDiagnostics(error),
     });
   }
 }
@@ -59,7 +60,7 @@ export async function getAgentTokenStatus(agentId: string): Promise<AgentTokenSt
     } catch (error) {
       console.warn("[steward:agent-token] failed to read token status from redis", {
         agentId,
-        error: error instanceof Error ? error.message : String(error),
+        ...redactedThrownDiagnostics(error),
       });
     }
   }

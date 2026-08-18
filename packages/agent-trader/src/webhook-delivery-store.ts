@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { assertRedisUrlTls } from "@stwd/redis";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { Redis } from "ioredis";
 
 export const WEBHOOK_DELIVERY_REPLAY_TTL_MS = 10 * 60 * 1000;
@@ -195,7 +196,7 @@ function defaultRedisFactory(kind: "redis" | "upstash", env: NodeJS.ProcessEnv):
     // Prevent an EventEmitter "error" event from terminating the process. SET
     // still rejects, and the request path converts that failure to a 503.
     client.on("error", (error) => {
-      console.error("[agent-trader] webhook replay Redis error:", error.message);
+      console.error("[agent-trader] webhook replay Redis error", redactedThrownDiagnostics(error));
     });
     return client;
   }

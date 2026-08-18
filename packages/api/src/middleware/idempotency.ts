@@ -1,3 +1,4 @@
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { createMiddleware } from "hono/factory";
 import type { ApiResponse, AppVariables } from "../services/context";
 import { getRedisClient } from "./redis";
@@ -186,8 +187,8 @@ async function recordIdempotencyMetricInRedis(
     await pipeline.exec();
   } catch (error) {
     console.error(
-      "[steward:idempotency] Failed to record Redis idempotency metrics:",
-      error instanceof Error ? error.message : String(error),
+      "[steward:idempotency] Failed to record Redis idempotency metrics",
+      redactedThrownDiagnostics(error),
     );
   }
 }

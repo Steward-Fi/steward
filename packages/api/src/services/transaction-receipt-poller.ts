@@ -1,4 +1,4 @@
-import { toCaip2 } from "@stwd/shared";
+import { redactedThrownDiagnostics, toCaip2 } from "@stwd/shared";
 import { and, asc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { createPublicClient, http, type TransactionReceipt } from "viem";
 import { withTenantAuditedTransaction, writeAuditEvent } from "./audit";
@@ -447,7 +447,10 @@ async function pollOneTransaction(
   } catch (error) {
     const message = error instanceof Error ? error.message.toLowerCase() : String(error);
     if (!message.includes("not found") && !message.includes("could not find")) {
-      console.warn(`[tx-poller] Receipt lookup failed for ${row.id}:`, error);
+      console.warn(
+        `[tx-poller] Receipt lookup failed for ${row.id}`,
+        redactedThrownDiagnostics(error),
+      );
     }
   }
 
@@ -613,7 +616,7 @@ export function startTransactionReceiptPollingScheduler(): () => void {
         }
       })
       .catch((error) => {
-        console.error("[tx-poller] Receipt polling tick failed:", error);
+        console.error("[tx-poller] Receipt polling tick failed", redactedThrownDiagnostics(error));
       })
       .finally(() => {
         running = false;

@@ -1,3 +1,4 @@
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { PersistentQueue } from "@stwd/webhooks";
 
 const DEFAULT_WEBHOOK_RETRY_INTERVAL_MS = 30_000;
@@ -40,7 +41,7 @@ export function startWebhookRetryScheduler(): () => void {
         }
       })
       .catch((error) => {
-        console.error("[webhooks] Retry scheduler tick failed:", error);
+        console.error("[webhooks] Retry scheduler tick failed", redactedThrownDiagnostics(error));
       })
       .finally(() => {
         running = false;

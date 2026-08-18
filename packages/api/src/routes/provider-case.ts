@@ -21,6 +21,7 @@
  */
 
 import { getDb, workspaces } from "@stwd/db";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { auditOwnerAdminMfaGate } from "../middleware/audit-gate";
@@ -79,7 +80,10 @@ providerCaseRoutes.get("/provider-actions/:id/case", async (c) => {
     const assembly = await getProviderCase(tenantId, caseId, authorized);
     manifestOrNull = assembly?.manifest ?? null;
   } catch (err) {
-    console.error(`[provider-case] /case read failed for ${tenantId}/${caseId}:`, err);
+    console.error(
+      `[provider-case] /case read failed for ${tenantId}/${caseId}`,
+      redactedThrownDiagnostics(err),
+    );
     return c.json<ApiResponse>({ ok: false, error: "CASE_CHAIN_UNAVAILABLE" }, 500);
   }
 
@@ -117,7 +121,10 @@ providerCaseRoutes.get("/provider-actions/:id/evidence", async (c) => {
       // large to export as one signed bundle. /case still serves the manifest.
       return c.json<ApiResponse>({ ok: false, error: "CASE_RANGE_TOO_LARGE" }, 400);
     }
-    console.error(`[provider-case] /evidence read failed for ${tenantId}/${caseId}:`, err);
+    console.error(
+      `[provider-case] /evidence read failed for ${tenantId}/${caseId}`,
+      redactedThrownDiagnostics(err),
+    );
     return c.json<ApiResponse>({ ok: false, error: "CASE_CHAIN_UNAVAILABLE" }, 500);
   }
 

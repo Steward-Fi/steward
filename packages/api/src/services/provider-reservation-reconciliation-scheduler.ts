@@ -1,3 +1,4 @@
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { providerActionService } from "./provider-action-service";
 
 const DEFAULT_INTERVAL_MS = 15_000;
@@ -25,7 +26,9 @@ export function startProviderReservationReconciliationScheduler(): () => void {
       .then((count) => {
         if (count > 0) console.log(`[provider-reservations] reconciled ${count} reservation(s)`);
       })
-      .catch((error) => console.error("[provider-reservations] sweep failed:", error))
+      .catch((error) =>
+        console.error("[provider-reservations] sweep failed", redactedThrownDiagnostics(error)),
+      )
       .finally(() => {
         running = false;
       });

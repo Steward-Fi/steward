@@ -1,3 +1,5 @@
+import { redactedThrownDiagnostics } from "@stwd/shared";
+
 const DEFAULT_INTERVAL_MS = 15_000;
 const MAX_INTERVAL_MS = 15_000;
 const HEALTH_STALE_AFTER_MS = MAX_INTERVAL_MS * 3;
@@ -135,9 +137,8 @@ export async function startUpstreamCredentialLeaseScheduler(options?: {
       })
       .catch((error) => {
         schedulerHealth.lastFailedAt = Date.now();
-        schedulerHealth.lastError =
-          error instanceof Error ? error.message : "unknown sweep failure";
-        console.error("[upstream-leases] sweep failed:", error);
+        schedulerHealth.lastError = "credential lease recovery failed";
+        console.error("[upstream-leases] sweep failed", redactedThrownDiagnostics(error));
       })
       .finally(() => {
         schedulerHealth.inFlight = false;

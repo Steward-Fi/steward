@@ -25,7 +25,7 @@ import {
   tradeVenueAllowlistEvaluator,
 } from "@stwd/policy-engine";
 import { checkRateLimit } from "@stwd/redis";
-import type { ApiResponse, AppVariables } from "@stwd/shared";
+import { type ApiResponse, type AppVariables, redactedThrownDiagnostics } from "@stwd/shared";
 import { type TradeSession, TradeSessionManager } from "@stwd/trade-sessions";
 import {
   getMarketableLimitPx,
@@ -1178,7 +1178,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               requestedLeverage: body.leverage,
               isCross: false,
               builderPerp,
-              error: err instanceof Error ? err.message : String(err),
+              ...redactedThrownDiagnostics(err),
             });
             const envelope: TradeIdempotencyResponse = {
               status: 502,
@@ -1219,7 +1219,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             asset: parsedAsset.data,
             sizeUsd,
             reason: "pre-submit-sign-failed",
-            error: err instanceof Error ? err.message : String(err),
+            ...redactedThrownDiagnostics(err),
           });
           return {
             status: 400,
@@ -2037,7 +2037,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             conditionId: body.conditionId ?? null,
             notionalUsd,
             reason: "pre-submit-build-failed",
-            error: err instanceof Error ? err.message : String(err),
+            ...redactedThrownDiagnostics(err),
           });
           const envelope: TradeIdempotencyResponse = {
             status: 400,
@@ -2103,7 +2103,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
               conditionId: body.conditionId ?? null,
               notionalUsd,
               reason: "pre-submit-build-failed",
-              error: err.message,
+              ...redactedThrownDiagnostics(err),
             });
             const envelope: TradeIdempotencyResponse = {
               status: 400,
@@ -2121,7 +2121,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             conditionId: body.conditionId ?? null,
             notionalUsd,
             reason: "submit-status-unknown",
-            error: err instanceof Error ? err.message : String(err),
+            ...redactedThrownDiagnostics(err),
           });
           const envelope: TradeIdempotencyResponse = {
             status: 502,
@@ -2232,7 +2232,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         } catch (auditErr) {
           console.error(
             "[polymarket/order] submitted-audit write failed (order already final)",
-            auditErr,
+            redactedThrownDiagnostics(auditErr),
           );
         }
         return envelope;

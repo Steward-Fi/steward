@@ -35,7 +35,12 @@
 
 import { operatorTransferReservations, policies, proxyAuditLog, transactions } from "@stwd/db";
 import { checkRateLimit } from "@stwd/redis";
-import type { ApiResponse, AppVariables, PolicyRule } from "@stwd/shared";
+import {
+  type ApiResponse,
+  type AppVariables,
+  type PolicyRule,
+  redactedThrownDiagnostics,
+} from "@stwd/shared";
 import {
   HyperliquidAdapter,
   hyperliquidAssetSchema,
@@ -848,7 +853,7 @@ export function createOperatorRecoveryRoutes(
         walletAddress,
         bridge: HYPERLIQUID_ARBITRUM_BRIDGE,
         amount: amountBaseUnits.toString(),
-        error: err instanceof Error ? err.message : String(err),
+        ...redactedThrownDiagnostics(err),
       });
       // The broadcast may have landed — record the ambiguous outcome so a retry
       // replays this 502 instead of double-broadcasting the ERC-20 transfer.
@@ -956,7 +961,7 @@ export function createOperatorRecoveryRoutes(
         requestedLeverage: body.leverage,
         isCross,
         builderPerp,
-        error: err instanceof Error ? err.message : String(err),
+        ...redactedThrownDiagnostics(err),
       });
       // The venue call may have landed — record the ambiguous outcome so a
       // retry replays this 502 instead of re-executing the leverage update.
@@ -1089,7 +1094,7 @@ export function createOperatorRecoveryRoutes(
         coin,
         amountUsdc: String(body.amountUsdc),
         amountBaseUnits: amountBaseUnits.toString(),
-        error: err instanceof Error ? err.message : String(err),
+        ...redactedThrownDiagnostics(err),
       });
       // The venue call may have landed — record the ambiguous outcome so a
       // retry replays this 502 instead of moving margin a second time.
@@ -1244,10 +1249,13 @@ export function createOperatorRecoveryRoutes(
           walletAddress,
           destination,
           amount,
-          error: err instanceof Error ? err.message : String(err),
+          ...redactedThrownDiagnostics(err),
         });
       } catch (auditErr) {
-        console.error("[operator-recovery] usdSend sign-failure audit failed", auditErr);
+        console.error(
+          "[operator-recovery] usdSend sign-failure audit failed",
+          redactedThrownDiagnostics(auditErr),
+        );
       }
       return c.json<ApiResponse>({ ok: false, error: "Failed to sign usdSend" }, 502);
     }
@@ -1284,10 +1292,13 @@ export function createOperatorRecoveryRoutes(
           destination,
           amount,
           definiteRejection: definitelyRejected,
-          error: err instanceof Error ? err.message : String(err),
+          ...redactedThrownDiagnostics(err),
         });
       } catch (auditErr) {
-        console.error("[operator-recovery] usdSend failure audit failed", auditErr);
+        console.error(
+          "[operator-recovery] usdSend failure audit failed",
+          redactedThrownDiagnostics(auditErr),
+        );
       }
       return c.json<ApiResponse>(
         {
@@ -1310,7 +1321,10 @@ export function createOperatorRecoveryRoutes(
         amount,
       });
     } catch (auditErr) {
-      console.error("[operator-recovery] usdSend completed audit failed", auditErr);
+      console.error(
+        "[operator-recovery] usdSend completed audit failed",
+        redactedThrownDiagnostics(auditErr),
+      );
     }
     return c.json<ApiResponse>({ ok: true, data: response });
   });
@@ -1388,7 +1402,7 @@ export function createOperatorRecoveryRoutes(
         walletAddress,
         builder,
         maxFeeRate,
-        error: err instanceof Error ? err.message : String(err),
+        ...redactedThrownDiagnostics(err),
       });
       // The venue call may have landed — record the ambiguous outcome so a
       // retry replays this 502 instead of re-submitting the approval.
@@ -1525,7 +1539,7 @@ export function createOperatorRecoveryRoutes(
         sourceDex,
         destinationDex,
         amountUsdc: String(body.amountUsdc),
-        error: err instanceof Error ? err.message : String(err),
+        ...redactedThrownDiagnostics(err),
       });
       await idempotency.release?.();
       return c.json<ApiResponse>({ ok: false, error: "Failed to sign collateral transfer" }, 502);
@@ -1542,7 +1556,7 @@ export function createOperatorRecoveryRoutes(
         sourceDex,
         destinationDex,
         amountUsdc: String(body.amountUsdc),
-        error: err instanceof Error ? err.message : String(err),
+        ...redactedThrownDiagnostics(err),
       });
       const errorBody = { ok: false as const, error: "Failed to submit collateral transfer" };
       await idempotency.storeFailure?.(errorBody);
@@ -1620,7 +1634,7 @@ export function createOperatorRecoveryRoutes(
       await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.close-all.failed", {
         venue,
         walletAddress,
-        error: err instanceof Error ? err.message : String(err),
+        ...redactedThrownDiagnostics(err),
       });
       // Positions may have been partially closed — record the ambiguous outcome
       // so a retry replays this 502 instead of firing another close batch.
@@ -1816,10 +1830,13 @@ export function createOperatorRecoveryRoutes(
           walletAddress,
           destination,
           amount,
-          error: err instanceof Error ? err.message : String(err),
+          ...redactedThrownDiagnostics(err),
         });
       } catch (auditErr) {
-        console.error("[operator-recovery] withdraw sign-failure audit failed", auditErr);
+        console.error(
+          "[operator-recovery] withdraw sign-failure audit failed",
+          redactedThrownDiagnostics(auditErr),
+        );
       }
       return c.json<ApiResponse>({ ok: false, error: "Failed to sign withdraw" }, 502);
     }
@@ -1841,10 +1858,13 @@ export function createOperatorRecoveryRoutes(
           destination,
           amount,
           definiteRejection: definitelyRejected,
-          error: err instanceof Error ? err.message : String(err),
+          ...redactedThrownDiagnostics(err),
         });
       } catch (auditErr) {
-        console.error("[operator-recovery] withdraw submit-failure audit failed", auditErr);
+        console.error(
+          "[operator-recovery] withdraw submit-failure audit failed",
+          redactedThrownDiagnostics(auditErr),
+        );
       }
       return c.json<ApiResponse>(errorBody, 502);
     }

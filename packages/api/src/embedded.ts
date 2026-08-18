@@ -15,6 +15,7 @@
  */
 
 import { createPGLiteDb, getDataDir, setPGLiteOverride } from "@stwd/db/pglite";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { loadOrCreateEmbeddedMasterPassword } from "./services/embedded-master-password";
 
 // Force PGLite/embedded mode
@@ -63,6 +64,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("[embedded] Fatal error:", err);
+  console.error("[embedded] Fatal error", redactedThrownDiagnostics(err));
   process.exit(1);
 });

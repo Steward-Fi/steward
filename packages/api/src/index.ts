@@ -16,6 +16,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { validateJwtSecretEnv } from "@stwd/auth";
 import { closeDb, getDb, getMigrationExpectation, runMigrations } from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { sql } from "drizzle-orm";
 import { composeApp } from "./compose";
 import { getRedisClient, initRedis, isRedisConfigured, shutdownRedis } from "./middleware/redis";
@@ -189,8 +190,8 @@ app.get("/ready", async (c) => {
           : { actualCreatedAt: Number.isFinite(migrationCreatedAt) ? migrationCreatedAt : null }),
       },
     };
-  } catch (err: unknown) {
-    checks.database = { ok: false, error: err instanceof Error ? err.message : "unknown" };
+  } catch {
+    checks.database = { ok: false, error: "Database health check failed" };
   }
 
   try {
@@ -200,8 +201,8 @@ app.get("/ready", async (c) => {
       : isRedisConfigured()
         ? { ok: false, error: "Redis is configured but not connected" }
         : { ok: false, required: false, error: "Redis is not configured (optional mode)" };
-  } catch (err: unknown) {
-    checks.redis = { ok: false, error: err instanceof Error ? err.message : "unknown" };
+  } catch {
+    checks.redis = { ok: false, error: "Redis health check failed" };
   }
 
   const proxyUrl = process.env.STEWARD_PROXY_URL?.replace(/\/+$/, "");
@@ -224,8 +225,8 @@ app.get("/ready", async (c) => {
         ok: response.ok && Number.isFinite(proxyTime) && skewMs <= 30_000,
         detail: { clockSkewMs: Math.round(skewMs) },
       };
-    } catch (err: unknown) {
-      checks.proxyClock = { ok: false, error: err instanceof Error ? err.message : "unknown" };
+    } catch {
+      checks.proxyClock = { ok: false, error: "Proxy health check failed" };
     }
   }
 
@@ -310,7 +311,10 @@ if (shouldUsePGLite()) {
           metadata: { count: applied.length, names: applied },
         });
       } catch (auditErr) {
-        console.error("[steward] Failed to record migration audit event:", auditErr);
+        console.error(
+          "[steward] Failed to record migration audit event",
+          redactedThrownDiagnostics(auditErr),
+        );
       }
     } else {
       console.log("[steward] Migrations already up to date.");
@@ -332,7 +336,7 @@ if (shouldUsePGLite()) {
       );
     }
   } catch (err) {
-    console.error("[steward] Migration failed — cannot start:", err);
+    console.error("[steward] Migration failed — cannot start", redactedThrownDiagnostics(err));
     process.exit(1);
   }
 }
@@ -343,7 +347,10 @@ let redisOk = false;
 try {
   redisOk = await initRedis();
 } catch (err) {
-  console.warn("[steward] Redis initialization failed; trying Postgres auth storage:", err);
+  console.warn(
+    "[steward] Redis initialization failed; trying Postgres auth storage",
+    redactedThrownDiagnostics(err),
+  );
 }
 
 // Postgres is the durable fallback for the long-lived server when Redis is not
@@ -419,7 +426,7 @@ const shutdown = async (signal: string) => {
   try {
     await Promise.all([closeDb(), shutdownRedis()]);
   } catch (error) {
-    console.error("Failed to close connections cleanly", error);
+    console.error("Failed to close connections cleanly", redactedThrownDiagnostics(error));
   }
 
   process.exit(0);

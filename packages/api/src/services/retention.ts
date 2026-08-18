@@ -13,6 +13,7 @@
  */
 
 import { getDb } from "@stwd/db";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { sql } from "drizzle-orm";
 import { writeAuditEvent } from "./audit";
 import { runTenantAuditRetention } from "./audit-archive";
@@ -176,7 +177,10 @@ async function sweepAuditEvents(ctx: RetentionSweepContext): Promise<SweepResult
     } catch (error) {
       const message = error instanceof Error ? error.message : "unknown retention failure";
       failures.push({ tenantId: policy.tenant_id, error: message });
-      console.error(`[retention] audit retention failed for tenant ${policy.tenant_id}:`, error);
+      console.error(
+        `[retention] audit retention failed for tenant ${policy.tenant_id}`,
+        redactedThrownDiagnostics(error),
+      );
     }
   }
   return { table: "audit_events", deleted, ...(failures.length > 0 ? { failures } : {}) };
@@ -321,8 +325,8 @@ export async function runRetentionSweep(
         } catch (auditErr) {
           r.auditFailed = true;
           console.error(
-            `[retention] audit record for sweep of ${r.table} (${r.deleted} rows deleted) FAILED to persist:`,
-            auditErr,
+            `[retention] audit record for sweep of ${r.table} (${r.deleted} rows deleted) FAILED to persist`,
+            redactedThrownDiagnostics(auditErr),
           );
         }
       }
@@ -330,11 +334,11 @@ export async function runRetentionSweep(
       if (err instanceof RetentionAuthorizationAuditError) {
         results.push({ table: err.table, deleted: 0, auditFailed: true });
         console.error(
-          `[retention] authorization audit record for sweep of ${err.table} FAILED to persist; delete skipped:`,
-          err.cause ?? err,
+          "[retention] authorization audit record failed; delete skipped",
+          redactedThrownDiagnostics(err.cause ?? err),
         );
       } else {
-        console.error("[retention] sweep failed:", err);
+        console.error("[retention] sweep failed", redactedThrownDiagnostics(err));
       }
     }
   }
@@ -361,7 +365,9 @@ export function startRetentionScheduler(): () => void {
         const total = r.reduce((acc, x) => acc + x.deleted, 0);
         console.log(`[retention] initial sweep complete: ${total} rows across ${r.length} tables`);
       })
-      .catch((err) => console.error("[retention] initial sweep error:", err));
+      .catch((err) =>
+        console.error("[retention] initial sweep error", redactedThrownDiagnostics(err)),
+      );
 
     interval = setInterval(() => {
       runRetentionSweep()
@@ -371,7 +377,7 @@ export function startRetentionScheduler(): () => void {
             console.log(`[retention] sweep complete: ${total} rows across ${r.length} tables`);
           }
         })
-        .catch((err) => console.error("[retention] sweep error:", err));
+        .catch((err) => console.error("[retention] sweep error", redactedThrownDiagnostics(err)));
     }, SWEEP_INTERVAL_MS);
     if (typeof interval.unref === "function") interval.unref();
   }, INITIAL_DELAY_MS);

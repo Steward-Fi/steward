@@ -4,7 +4,7 @@
  * `items: [{ apiKey: ... }]`) previously logged secrets in the clear.
  */
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { logWebhook } from "../logger";
+import { logError, logSubmission, logWebhook } from "../logger";
 
 let writeSpy: ReturnType<typeof spyOn> | undefined;
 let lines: string[];
@@ -64,5 +64,38 @@ describe("logWebhook redaction (SEC-110)", () => {
     expect(data.plain).toEqual([1, "two", null]);
     expect(data.txHash).toBe("0xabc123");
     expect(lines[0]).not.toContain("object-secret-value");
+  });
+});
+
+describe("runtime error log redaction", () => {
+  it("never emits thrown messages, stacks, raw values, or submission diagnostics", () => {
+    const stderr: string[] = [];
+    const stderrSpy = spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
+      stderr.push(String(chunk));
+      return true;
+    }) as never);
+    try {
+      logError("operation failed", new Error("TOKEN_AND_DATABASE_URL_CANARY"));
+      logSubmission({
+        agentId: "agent-1",
+        status: "error",
+        to: "0x0000000000000000000000000000000000000001",
+        value: "0",
+        dataLen: 0,
+        chainId: 1,
+        error: "PROVIDER_RESPONSE_SECRET_CANARY",
+      });
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    expect(stderr).toHaveLength(2);
+    expect(stderr.join("\n")).not.toContain("TOKEN_AND_DATABASE_URL_CANARY");
+    expect(stderr.join("\n")).not.toContain("PROVIDER_RESPONSE_SECRET_CANARY");
+    expect(JSON.parse(stderr[0] as string)).toMatchObject({
+      errorClass: "Error",
+      errorCode: null,
+    });
+    expect(JSON.parse(stderr[1] as string)).toMatchObject({ error: "operation failed" });
   });
 });

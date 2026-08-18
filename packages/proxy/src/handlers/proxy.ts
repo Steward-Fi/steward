@@ -1755,7 +1755,10 @@ export async function handleProxy(c: Context): Promise<Response> {
       reason: "credential-proxy-authorized",
     });
   } catch (err) {
-    console.error("[proxy] Required audit write failed before credential forwarding:", err);
+    console.error(
+      "[proxy] Required audit write failed before credential forwarding",
+      redactedThrownDiagnostics(err),
+    );
     await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
     await releaseUnsafeProxyRequest(replayClaim);
     proxySlot.release();
@@ -2053,9 +2056,7 @@ export async function handleProxy(c: Context): Promise<Response> {
     const latencyMs = Date.now() - startTime;
     // Fetch errors can embed the full outbound URL. Query-injected credentials
     // must never be copied from that error into application logs.
-    console.error("[proxy] Upstream request failed", {
-      errorName: err instanceof Error ? err.name : "UnknownError",
-    });
+    console.error("[proxy] Upstream request failed", redactedThrownDiagnostics(err));
 
     // Audit the failure
     await recordAudit({

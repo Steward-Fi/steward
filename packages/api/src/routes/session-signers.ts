@@ -30,9 +30,9 @@
  */
 
 import { randomUUID } from "node:crypto";
-
 import { revocationStore, signAgentToken } from "@stwd/auth";
 import { auditEvents, sessionSigners } from "@stwd/db";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
@@ -255,15 +255,18 @@ sessionSignerRoutes.post("/", async (c) => {
       requestId: c.get("requestId") ?? null,
     });
   } catch (err) {
-    console.error(`[session-signer] audit write failed; rolling back issuance ${row.id}:`, err);
+    console.error(
+      `[session-signer] audit write failed; rolling back issuance ${row.id}`,
+      redactedThrownDiagnostics(err),
+    );
     try {
       await revocationStore.revokeToken(jti, Math.floor(expiresAt.getTime() / 1000));
       await db.delete(sessionSigners).where(eq(sessionSigners.id, row.id));
     } catch (rollbackErr) {
       // Best-effort cleanup failed; the jti was at least revocation-attempted.
       console.error(
-        `[session-signer] rollback after audit failure failed for ${row.id}:`,
-        rollbackErr,
+        `[session-signer] rollback after audit failure failed for ${row.id}`,
+        redactedThrownDiagnostics(rollbackErr),
       );
     }
     return c.json<ApiResponse>(
@@ -379,8 +382,8 @@ sessionSignerRoutes.delete("/:id", async (c) => {
         await writeSessionSignerRevokedAudit(c, tenantId, agentId, signerId, existing.jti);
       } catch (err) {
         console.error(
-          `[session-signer] audit repair failed for already-revoked signer ${signerId}:`,
-          err,
+          `[session-signer] audit repair failed for already-revoked signer ${signerId}`,
+          redactedThrownDiagnostics(err),
         );
         return c.json<ApiResponse>(
           {
@@ -409,7 +412,10 @@ sessionSignerRoutes.delete("/:id", async (c) => {
   try {
     await writeSessionSignerRevokedAudit(c, tenantId, agentId, signerId, existing.jti);
   } catch (err) {
-    console.error(`[session-signer] audit write failed for revocation ${signerId}:`, err);
+    console.error(
+      `[session-signer] audit write failed for revocation ${signerId}`,
+      redactedThrownDiagnostics(err),
+    );
     return c.json<ApiResponse>(
       {
         ok: false,

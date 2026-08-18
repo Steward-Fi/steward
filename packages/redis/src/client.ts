@@ -148,7 +148,10 @@ function buildIoredis(): Redis {
   });
 
   client.on("error", (err) => {
-    console.error("[steward:redis] connection error:", (err as Error).message);
+    // Redis client errors can embed the configured URL (including its
+    // password). Keep diagnostics fixed in this low-level package, which must
+    // not depend on the shared logging layer.
+    console.error("[steward:redis] connection error");
   });
 
   client.on("connect", () => {

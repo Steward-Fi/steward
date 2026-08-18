@@ -5,6 +5,8 @@
  * grep, and jq can consume the output without any parsing logic.
  */
 
+import { redactedThrownDiagnostics } from "@stwd/shared";
+
 export type LogLevel = "info" | "warn" | "error" | "debug";
 
 export interface DecisionLog {
@@ -57,7 +59,12 @@ export function logDecision(entry: Omit<DecisionLog, "timestamp">): void {
 export function logSubmission(entry: Omit<SubmissionLog, "timestamp">): void {
   const level: LogLevel =
     entry.status === "error" || entry.status === "rejected" ? "error" : "info";
-  emit(level, "submission", { timestamp: new Date().toISOString(), ...entry });
+  const { error, ...safeEntry } = entry;
+  emit(level, "submission", {
+    timestamp: new Date().toISOString(),
+    ...safeEntry,
+    ...(error === undefined ? {} : { error: "operation failed" }),
+  });
 }
 
 /**
@@ -127,12 +134,7 @@ export function logWarn(message: string, meta?: Record<string, unknown>): void {
 }
 
 export function logError(message: string, error?: unknown, meta?: Record<string, unknown>): void {
-  const errMeta =
-    error instanceof Error
-      ? { errorMessage: error.message, stack: error.stack }
-      : error
-        ? { errorRaw: String(error) }
-        : {};
+  const errMeta = error === undefined ? {} : redactedThrownDiagnostics(error);
   emit("error", "error", {
     timestamp: new Date().toISOString(),
     message,

@@ -17,6 +17,7 @@ import {
   recordSpend,
   type SpendPeriod,
 } from "@stwd/redis";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 
 // ─── Redis availability flag ─────────────────────────────────────────────────
 
@@ -59,8 +60,8 @@ export async function initRedis(env?: Record<string, unknown>): Promise<boolean>
     return true;
   } catch (err) {
     console.warn(
-      "[steward:redis] Failed to connect — Redis enforcement disabled:",
-      (err as Error).message,
+      "[steward:redis] Failed to connect — Redis enforcement disabled",
+      redactedThrownDiagnostics(err),
     );
     redisAvailable = false;
     return false;
@@ -129,8 +130,8 @@ export async function checkAgentRateLimit(
     return await checkRateLimit(key, windowMs, maxRequests);
   } catch (err) {
     console.error(
-      "[steward:redis] Rate limit check failed, denying sensitive request:",
-      (err as Error).message,
+      "[steward:redis] Rate limit check failed, denying sensitive request",
+      redactedThrownDiagnostics(err),
     );
     return { allowed: false, remaining: 0, resetMs: 60_000 };
   }
@@ -159,8 +160,8 @@ export async function checkProxyRateLimit(
     return await checkRateLimit(key, windowMs, maxRequests);
   } catch (err) {
     console.error(
-      "[steward:redis] Proxy rate limit check failed, denying request:",
-      (err as Error).message,
+      "[steward:redis] Proxy rate limit check failed, denying request",
+      redactedThrownDiagnostics(err),
     );
     return { allowed: false, remaining: 0, resetMs: 60_000 };
   }
@@ -189,8 +190,8 @@ export async function checkAgentSpendLimit(
   } catch (err) {
     // Configured backend threw: fail CLOSED — we cannot prove the spend is within limit.
     console.error(
-      "[steward:redis] Spend limit check failed, denying request (fail-closed):",
-      (err as Error).message,
+      "[steward:redis] Spend limit check failed, denying request (fail-closed)",
+      redactedThrownDiagnostics(err),
     );
     return { allowed: false, spent: 0, remaining: 0 };
   }
@@ -210,7 +211,7 @@ export async function recordAgentSpend(
   try {
     await recordSpend(agentId, tenantId, costUsd, host);
   } catch (err) {
-    console.error("[steward:redis] Failed to record spend:", (err as Error).message);
+    console.error("[steward:redis] Failed to record spend", redactedThrownDiagnostics(err));
   }
 }
 

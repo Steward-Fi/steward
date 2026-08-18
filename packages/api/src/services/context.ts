@@ -44,6 +44,7 @@ import {
   createPriceOracle,
   type PolicyRule,
   type PriceOracle,
+  redactedThrownDiagnostics,
   type SignRequest,
   type Tenant,
   type TenantConfig,
@@ -769,8 +770,8 @@ export async function tenantAuth(
                   .where(eq(sessionSigners.id, sessionSigner.id));
               } catch (err) {
                 console.error(
-                  `[session-signer] failed to update lastUsedAt for ${sessionSigner.id}:`,
-                  err,
+                  `[session-signer] failed to update lastUsedAt for ${sessionSigner.id}`,
+                  redactedThrownDiagnostics(err),
                 );
               }
             }

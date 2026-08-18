@@ -26,6 +26,7 @@ import {
   ExecutionPayloadNormalizationError,
   type PolicyResult,
   rawSigningChainSupport,
+  redactedThrownDiagnostics,
   type TenantAuthAbuseConfig,
   toCaip2,
 } from "@stwd/shared";
@@ -160,7 +161,10 @@ async function writeOutcomeUnknownAudit(
     // The deterministic hash and outcome_unknown row are already durable. An
     // audit sink failure must never replace the non-retryable 202 response with
     // a generic 500 that could induce a fresh broadcast.
-    console.error("[vault] Failed to append outcome_unknown audit:", error);
+    console.error(
+      "[vault] Failed to append outcome_unknown audit",
+      redactedThrownDiagnostics(error),
+    );
   }
 }
 // ─── Unsafe-signing opt-in flags (read LIVE, not captured at module-init) ──────
@@ -2488,7 +2492,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
                   metadata: {
                     txId,
                     payloadDigest: expected.payloadDigest,
-                    error: error instanceof Error ? error.message : "authorization rejected",
+                    ...redactedThrownDiagnostics(error),
                   },
                 });
                 throw error;
@@ -2532,7 +2536,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
 
       // ── Record spend in Redis (fire-and-forget) ──────────────────────────────
       recordVaultSpend(agentId, tenantId, signRequest.value, resolvedChainId).catch((err) =>
-        console.error("[vault] Failed to record spend:", err),
+        console.error("[vault] Failed to record spend", redactedThrownDiagnostics(err)),
       );
 
       // ── Record the authoritative aggregation event ───────────────────────────
@@ -2551,7 +2555,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
           chainId: resolvedChainId,
         });
       } catch (err) {
-        console.error("[vault] Failed to record aggregation event:", err);
+        console.error("[vault] Failed to record aggregation event", redactedThrownDiagnostics(err));
       }
 
       await writeVaultAudit(c, {
@@ -2631,7 +2635,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
         // A lost response may still represent real spend. Account for it
         // conservatively before releasing the per-agent spend lock.
         recordVaultSpend(agentId, tenantId, signRequest.value, resolvedChainId).catch((err) =>
-          console.error("[vault] Failed to record ambiguous spend:", err),
+          console.error("[vault] Failed to record ambiguous spend", redactedThrownDiagnostics(err)),
         );
         try {
           await recordAggregationEvent({
@@ -2641,8 +2645,13 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
             chainId: resolvedChainId,
           });
         } catch (err) {
-          console.error("[vault] Failed to record ambiguous aggregation event:", err);
+          console.error(
+            "[vault] Failed to record ambiguous aggregation event",
+            redactedThrownDiagnostics(err),
+          );
         }
+        const outcomeUnknownTransactionHash =
+          e instanceof ExternalBroadcastOutcomeUnknownError ? e.transactionHash : null;
         await writeOutcomeUnknownAudit(c, {
           tenantId,
           actorType: "agent",
@@ -2653,7 +2662,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
           metadata: {
             agentId,
             txId: executionTxId,
-            txHash: e instanceof ExternalBroadcastOutcomeUnknownError ? e.transactionHash : null,
+            txHash: outcomeUnknownTransactionHash,
             chainId: resolvedChainId,
           },
         });
@@ -3474,7 +3483,10 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
 
       if (transfer.broadcast) {
         recordVaultSpend(agentId, tenantId, signRequest.value, signRequest.chainId).catch((err) =>
-          console.error("[vault] Failed to record transfer action spend:", err),
+          console.error(
+            "[vault] Failed to record transfer action spend",
+            redactedThrownDiagnostics(err),
+          ),
         );
       }
       await recordSponsoredActionIfNeeded({
@@ -3791,6 +3803,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       transactionPayload = getTransactionActionPayload(transactionRow.actionPayload);
     } catch (error) {
       if (error instanceof TransactionActionPayloadValidationError) {
+        const malformedField = error.field;
         await writeVaultAudit(c, {
           tenantId,
           actorType: "user",
@@ -3801,8 +3814,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           metadata: {
             agentId,
             reason: "malformed_transaction_action_payload",
-            field: error.field,
-            error: error.message,
+            field: malformedField,
           },
         });
         return c.json<ApiResponse>(
@@ -4276,7 +4288,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
                 metadata: {
                   txId,
                   payloadDigest: expected.payloadDigest,
-                  error: error instanceof Error ? error.message : "authorization rejected",
+                  ...redactedThrownDiagnostics(error),
                 },
               });
               throw error;
@@ -4357,7 +4369,11 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
 
       if (!isSolana && shouldBroadcast) {
         recordVaultSpend(agentId, tenantId, transactionRow.value, transactionRow.chainId).catch(
-          (err) => console.error("[vault] Failed to record approved transaction spend:", err),
+          (err) =>
+            console.error(
+              "[vault] Failed to record approved transaction spend",
+              redactedThrownDiagnostics(err),
+            ),
         );
       }
       if (transferPayload) {
@@ -4497,7 +4513,11 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       const outcomeUnknown = externalBroadcastOutcomeUnknownResponse(c, e, txId);
       if (outcomeUnknown) {
         recordVaultSpend(agentId, tenantId, transactionRow.value, transactionRow.chainId).catch(
-          (err) => console.error("[vault] Failed to record ambiguous approved spend:", err),
+          (err) =>
+            console.error(
+              "[vault] Failed to record ambiguous approved spend",
+              redactedThrownDiagnostics(err),
+            ),
         );
         try {
           await recordAggregationEvent({
@@ -4507,7 +4527,10 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
             chainId: transactionRow.chainId,
           });
         } catch (err) {
-          console.error("[vault] Failed to record ambiguous approved aggregation event:", err);
+          console.error(
+            "[vault] Failed to record ambiguous approved aggregation event",
+            redactedThrownDiagnostics(err),
+          );
         }
         await writeOutcomeUnknownAudit(c, {
           tenantId,
@@ -5408,7 +5431,10 @@ vaultRoutes.post("/:agentId/sign-message", async (c) => {
   } catch (e) {
     const frozen = frozenSigningResponse(c, e);
     if (frozen) return frozen;
-    console.error(`[Vault] sign-message failed for ${tenantId}/${agentId}:`, e);
+    console.error(
+      `[Vault] sign-message failed for ${tenantId}/${agentId}`,
+      redactedThrownDiagnostics(e),
+    );
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
@@ -5507,7 +5533,10 @@ vaultRoutes.post("/:agentId/sign-raw-hash", async (c) => {
     setNoStoreHeaders(c);
     return c.json<ApiResponse>({ ok: true, data: result });
   } catch (e) {
-    console.error(`[Vault] sign-raw-hash failed for ${tenantId}/${agentId}:`, e);
+    console.error(
+      `[Vault] sign-raw-hash failed for ${tenantId}/${agentId}`,
+      redactedThrownDiagnostics(e),
+    );
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
@@ -5735,7 +5764,10 @@ vaultRoutes.post("/:agentId/sign-raw-digest", async (c) => {
     setNoStoreHeaders(c);
     return c.json<ApiResponse>({ ok: true, data: result });
   } catch (e) {
-    console.error(`[Vault] sign-raw-digest failed for ${tenantId}/${agentId}:`, e);
+    console.error(
+      `[Vault] sign-raw-digest failed for ${tenantId}/${agentId}`,
+      redactedThrownDiagnostics(e),
+    );
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
@@ -6095,7 +6127,10 @@ vaultRoutes.post("/:agentId/sign-bitcoin-psbt", async (c) => {
       setNoStoreHeaders(c);
       return c.json<ApiResponse>({ ok: true, data: { ...result, transactionId } });
     } catch (e) {
-      console.error(`[Vault] sign-bitcoin-psbt failed for ${tenantId}/${agentId}:`, e);
+      console.error(
+        `[Vault] sign-bitcoin-psbt failed for ${tenantId}/${agentId}`,
+        redactedThrownDiagnostics(e),
+      );
       const rawError = e instanceof Error ? e.message : String(e);
       const isFinalizationFailure = rawError.includes("Bitcoin PSBT finalization failed");
       const noSpendableInput = rawError.includes(
@@ -6190,7 +6225,10 @@ vaultRoutes.get("/:agentId/monero/balance", async (c) => {
   } catch (e) {
     const mapped = moneroErrorResponse(c, e);
     if (mapped) return mapped;
-    console.error(`[Vault] monero/balance failed for ${tenantId}/${agentId}:`, e);
+    console.error(
+      `[Vault] monero/balance failed for ${tenantId}/${agentId}`,
+      redactedThrownDiagnostics(e),
+    );
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
@@ -6472,7 +6510,10 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
     } catch (e) {
       const mapped = moneroErrorResponse(c, e);
       if (mapped) return mapped;
-      console.error(`[Vault] monero/transfer prepare failed for ${tenantId}/${agentId}:`, e);
+      console.error(
+        `[Vault] monero/transfer prepare failed for ${tenantId}/${agentId}`,
+        redactedThrownDiagnostics(e),
+      );
       const raw = e instanceof Error ? e.message : String(e);
       const isFundsError = /not enough (unlocked )?money|not enough outputs/i.test(raw);
       return c.json<ApiResponse>(
@@ -6609,7 +6650,10 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
       });
 
       recordVaultSpend(agentId, tenantId, totalPiconero.toString(), moneroChainId).catch((err) =>
-        console.error(`[Vault] recordVaultSpend failed for ${agentId}:`, err),
+        console.error(
+          `[Vault] recordVaultSpend failed for ${agentId}`,
+          redactedThrownDiagnostics(err),
+        ),
       );
 
       await writeVaultAudit(c, {
@@ -6659,7 +6703,10 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
       });
     } catch (e) {
       await discardPrepared();
-      console.error(`[Vault] monero/transfer relay failed for ${tenantId}/${agentId}:`, e);
+      console.error(
+        `[Vault] monero/transfer relay failed for ${tenantId}/${agentId}`,
+        redactedThrownDiagnostics(e),
+      );
       await writeVaultAudit(c, {
         tenantId,
         actorType: "user",
@@ -6673,7 +6720,7 @@ vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
           feePiconero: feePiconero.toString(),
           totalPiconero: totalPiconero.toString(),
           referenceId: referenceId ?? null,
-          error: sanitizeErrorMessage(e),
+          ...redactedThrownDiagnostics(e),
           policyResults,
           ...signerAuthAuditMetadata(signerAuthorization.auth),
         },
@@ -6978,7 +7025,10 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
     if (frozen) return frozen;
     const requestId = c.get("requestId") || "unknown";
     const rawMessage = e instanceof Error ? e.message : "Unknown error";
-    console.error(`[${requestId}] Sign typed data failed for agent ${agentId}:`, e);
+    console.error(
+      `[${requestId}] Sign typed data failed for agent ${agentId}`,
+      redactedThrownDiagnostics(e),
+    );
 
     dispatchWebhook(tenantId, agentId, "tx_failed", {
       txId,
@@ -7310,13 +7360,14 @@ vaultRoutes.post("/:agentId/sign-user-operation", async (c) => {
           chainId: signRequest.chainId,
           sender: userOperation.sender,
           ...signerAuthAuditMetadata(signerAuthorization.auth),
-          error: e instanceof Error ? e.message : "Unknown error",
+          ...redactedThrownDiagnostics(e),
         },
       });
 
       dispatchWebhook(tenantId, agentId, "tx_failed", {
         txId,
-        error: e instanceof Error ? e.message : "Unknown error",
+        error: "Transaction failed",
+        ...redactedThrownDiagnostics(e),
       });
 
       return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
@@ -7668,13 +7719,14 @@ vaultRoutes.post("/:agentId/sign-authorization", async (c) => {
           contractAddress,
           nonce,
           ...signerAuthAuditMetadata(signerAuthorization.auth),
-          error: e instanceof Error ? e.message : "Unknown error",
+          ...redactedThrownDiagnostics(e),
         },
       });
 
       dispatchWebhook(tenantId, agentId, "tx_failed", {
         txId,
-        error: e instanceof Error ? e.message : "Unknown error",
+        error: "Transaction failed",
+        ...redactedThrownDiagnostics(e),
       });
 
       return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
@@ -7833,7 +7885,7 @@ async function signSolanaBlind(
         signedAt: new Date(),
       });
       recordVaultSpend(agentId, tenantId, txValue, chainId).catch((err) =>
-        console.error("[vault] Failed to record Solana spend:", err),
+        console.error("[vault] Failed to record Solana spend", redactedThrownDiagnostics(err)),
       );
       await writeVaultAudit(c, {
         tenantId,
@@ -7870,7 +7922,10 @@ async function signSolanaBlind(
       const frozen = frozenSigningResponse(c, e);
       if (frozen) return frozen;
       const requestId = c.get("requestId") || "unknown";
-      console.error(`[${requestId}] Solana blind sign failed for agent ${agentId}:`, e);
+      console.error(
+        `[${requestId}] Solana blind sign failed for agent ${agentId}`,
+        redactedThrownDiagnostics(e),
+      );
       if (completedResult?.broadcast) {
         console.error(
           `[${requestId}] Solana blind sign completed before bookkeeping failed for agent ${agentId}, tx ${txId}; returning completed result to prevent duplicate retry`,
@@ -7887,7 +7942,8 @@ async function signSolanaBlind(
         >({ ok: true, data: completedResult });
       }
       dispatchWebhook(tenantId, agentId, "tx_failed", {
-        error: e instanceof Error ? e.message : "Unknown error",
+        error: "Transaction failed",
+        ...redactedThrownDiagnostics(e),
         requestId,
       });
       if (isRpcError(e)) {
@@ -8309,7 +8365,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
 
       // ── Record spend in Redis (fire-and-forget) ──────────────────────────────
       recordVaultSpend(agentId, tenantId, txValue, chainId).catch((err) =>
-        console.error("[vault] Failed to record Solana spend:", err),
+        console.error("[vault] Failed to record Solana spend", redactedThrownDiagnostics(err)),
       );
 
       await writeVaultAudit(c, {
@@ -8360,7 +8416,10 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       const frozen = frozenSigningResponse(c, e);
       if (frozen) return frozen;
       const requestId = c.get("requestId") || "unknown";
-      console.error(`[${requestId}] Solana sign failed for agent ${agentId}:`, e);
+      console.error(
+        `[${requestId}] Solana sign failed for agent ${agentId}`,
+        redactedThrownDiagnostics(e),
+      );
       if (completedResult?.broadcast) {
         console.error(
           `[${requestId}] Solana sign completed before bookkeeping failed for agent ${agentId}, tx ${txId}; returning completed result to prevent duplicate retry`,
@@ -8378,7 +8437,8 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       }
 
       dispatchWebhook(tenantId, agentId, "tx_failed", {
-        error: e instanceof Error ? e.message : "Unknown error",
+        error: "Transaction failed",
+        ...redactedThrownDiagnostics(e),
         requestId,
       });
 
@@ -8436,7 +8496,10 @@ vaultRoutes.post("/:agentId/rpc", async (c) => {
   } catch (e: unknown) {
     const requestId = c.get("requestId") || "unknown";
     const message = e instanceof Error ? e.message : "Unknown error";
-    console.error(`[${requestId}] RPC passthrough failed for agent ${agentId}:`, e);
+    console.error(
+      `[${requestId}] RPC passthrough failed for agent ${agentId}`,
+      redactedThrownDiagnostics(e),
+    );
     return c.json<ApiResponse>({ ok: false, error: message }, 400);
   }
 });
@@ -8474,7 +8537,10 @@ vaultRoutes.get("/:agentId/addresses", async (c) => {
     });
   } catch (e: unknown) {
     const requestId = c.get("requestId") || "unknown";
-    console.error(`[${requestId}] getAddresses failed for agent ${agentId}:`, e);
+    console.error(
+      `[${requestId}] getAddresses failed for agent ${agentId}`,
+      redactedThrownDiagnostics(e),
+    );
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
@@ -8670,7 +8736,10 @@ vaultRoutes.post("/:agentId/import/submit", async (c) => {
     });
   } catch (e: unknown) {
     const requestId = c.get("requestId") || "unknown";
-    console.error(`[${requestId}] Encrypted key import failed for agent ${agentId}:`, e);
+    console.error(
+      `[${requestId}] Encrypted key import failed for agent ${agentId}`,
+      redactedThrownDiagnostics(e),
+    );
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
@@ -8772,7 +8841,10 @@ vaultRoutes.post("/:agentId/import", async (c) => {
     });
   } catch (e: unknown) {
     const requestId = c.get("requestId") || "unknown";
-    console.error(`[${requestId}] Key import failed for agent ${agentId}:`, e);
+    console.error(
+      `[${requestId}] Key import failed for agent ${agentId}`,
+      redactedThrownDiagnostics(e),
+    );
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
@@ -8893,7 +8965,10 @@ vaultRoutes.post("/:agentId/export", async (c) => {
     });
   } catch (e: unknown) {
     const requestId = c.get("requestId") || "unknown";
-    console.error(`[${requestId}] Key export failed for agent ${agentId}:`, e);
+    console.error(
+      `[${requestId}] Key export failed for agent ${agentId}`,
+      redactedThrownDiagnostics(e),
+    );
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });

@@ -85,6 +85,7 @@ import {
   isGenericDescriptorError,
   jcsStringify,
   type ProviderRequestEnvelopeV1,
+  redactedThrownDiagnostics,
   type SlackCanonicalActionV1,
   sha256HexPrefixed,
   UnregisteredProfileError,
@@ -3039,7 +3040,10 @@ class ProviderActionService {
         // Draining is best effort here; a signer outage cannot erase the durable
         // attention row or outbox event and normal C2 recovery will retry it.
         await this.recoverUnsignedIntents(row.tenantId, row.intentId).catch((error) =>
-          console.error("[provider-reservations] malformed-generation audit drain failed:", error),
+          console.error(
+            "[provider-reservations] malformed-generation audit drain failed",
+            redactedThrownDiagnostics(error),
+          ),
         );
         continue;
       }

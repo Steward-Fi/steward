@@ -65,14 +65,15 @@ import {
   userWalletAppConsents,
 } from "@stwd/db";
 import { PolicyEngine } from "@stwd/policy-engine";
-import type {
-  AgentBalance,
-  AgentIdentity,
-  ApiResponse,
-  ChainFamily,
-  PolicyRule,
-  SignRequest,
-  TenantAuthAbuseConfig,
+import {
+  type AgentBalance,
+  type AgentIdentity,
+  type ApiResponse,
+  type ChainFamily,
+  type PolicyRule,
+  redactedThrownDiagnostics,
+  type SignRequest,
+  type TenantAuthAbuseConfig,
 } from "@stwd/shared";
 import {
   applyUserWalletDefaults,
@@ -947,7 +948,10 @@ async function writeInvalidUserWalletIndexAudit(
       },
     });
   } catch (error) {
-    console.warn("[UserWallet] Failed to audit invalid wallet index selector:", error);
+    console.warn(
+      "[UserWallet] Failed to audit invalid wallet index selector",
+      redactedThrownDiagnostics(error),
+    );
   }
 }
 
@@ -2183,7 +2187,10 @@ user.get("/me", async (c) => {
           createOnLogin: embeddedWalletConfig.createOnLogin,
         },
       }).catch((error) => {
-        console.error("[user] Failed to audit create-on-login wallet success:", error);
+        console.error(
+          "[user] Failed to audit create-on-login wallet success",
+          redactedThrownDiagnostics(error),
+        );
       });
     }
     if (wallet) {
@@ -4414,7 +4421,10 @@ user.post("/me/wallet/recovery/setup", async (c) => {
       201,
     );
   } catch (e) {
-    console.error(`[UserWallet] recovery setup failed for user "${userId}":`, e);
+    console.error(
+      `[UserWallet] recovery setup failed for user "${userId}"`,
+      redactedThrownDiagnostics(e),
+    );
     return c.json<ApiResponse>(
       { ok: false, error: `Failed to set up recovery: ${sanitizeErrorMessage(e)}` },
       500,
@@ -5220,16 +5230,15 @@ user.post("/me/wallet/sign", async (c) => {
   } catch (e) {
     if (completedResult) {
       console.error(
-        `[UserWallet] Post-sign bookkeeping failed for user "${userId}" after transaction "${completedResult.txId}" completed:`,
-        e,
+        `[UserWallet] Post-sign bookkeeping failed for user "${userId}" after transaction "${completedResult.txId}" completed`,
+        redactedThrownDiagnostics(e),
       );
       return c.json<ApiResponse<{ txId: string; txHash: string }>>({
         ok: true,
         data: completedResult,
       });
     }
-    const msg = e instanceof Error ? e.message : "Unknown error";
-    console.error(`[UserWallet] Sign failed for user "${userId}":`, e);
+    console.error(`[UserWallet] Sign failed for user "${userId}"`, redactedThrownDiagnostics(e));
     try {
       await writeUserAudit(c, {
         tenantId: `personal-${userId}`,
@@ -5238,10 +5247,13 @@ user.post("/me/wallet/sign", async (c) => {
         action: "user.wallet.sign.failed",
         resourceType: "wallet",
         resourceId: wallet.id,
-        metadata: { error: msg, walletIndex: walletIndex.value },
+        metadata: { ...redactedThrownDiagnostics(e), walletIndex: walletIndex.value },
       });
     } catch (auditErr) {
-      console.error(`[UserWallet] Failed to audit signing failure for user "${userId}":`, auditErr);
+      console.error(
+        `[UserWallet] Failed to audit signing failure for user "${userId}"`,
+        redactedThrownDiagnostics(auditErr),
+      );
     }
     // SEC-210: the raw message stays in server-side logs/audit metadata only;
     // the client gets the sanitized form.
@@ -5461,7 +5473,10 @@ user.post("/me/wallet/sign-message", async (c) => {
       data: { signature, address: wallet.walletAddress },
     });
   } catch (e) {
-    console.error(`[UserWallet] sign-message failed for user "${userId}":`, e);
+    console.error(
+      `[UserWallet] sign-message failed for user "${userId}"`,
+      redactedThrownDiagnostics(e),
+    );
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
@@ -5746,7 +5761,10 @@ user.post("/me/wallet/import/submit", async (c) => {
       },
     });
   } catch (e) {
-    console.error(`[UserWallet] encrypted import failed for user "${userId}":`, e);
+    console.error(
+      `[UserWallet] encrypted import failed for user "${userId}"`,
+      redactedThrownDiagnostics(e),
+    );
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
@@ -5862,7 +5880,7 @@ user.post("/me/wallet/export", async (c) => {
       },
     });
   } catch (e) {
-    console.error(`[UserWallet] export failed for user "${userId}":`, e);
+    console.error(`[UserWallet] export failed for user "${userId}"`, redactedThrownDiagnostics(e));
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
@@ -6615,7 +6633,7 @@ user.post("/me/tenants/:tenantId/invitations", async (c) => {
       await emailAuth.sendTenantInvitation(email, { tenantId, token, expiresAt });
       emailSent = true;
     } catch (error) {
-      console.error("[TenantInvitation] Email delivery failed:", error);
+      console.error("[TenantInvitation] Email delivery failed", redactedThrownDiagnostics(error));
     }
   }
 

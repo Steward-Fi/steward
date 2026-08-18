@@ -9,6 +9,7 @@
  */
 
 import { agentRegistrations, registryIndex } from "@stwd/db";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -255,7 +256,7 @@ erc8004Routes.post("/:id/register-onchain", async (c) => {
       },
     });
   } catch (err: unknown) {
-    console.error("[erc8004] register-onchain error:", err);
+    console.error("[erc8004] register-onchain error", redactedThrownDiagnostics(err));
     return c.json<ApiResponse>({ ok: false, error: "Failed to create registration" }, 500);
   }
 });
@@ -313,7 +314,7 @@ erc8004Routes.get("/:id/onchain", async (c) => {
       },
     });
   } catch (err: unknown) {
-    console.error("[erc8004] onchain lookup error:", err);
+    console.error("[erc8004] onchain lookup error", redactedThrownDiagnostics(err));
     return c.json<ApiResponse>({ ok: false, error: "Failed to fetch on-chain data" }, 500);
   }
 });
@@ -445,7 +446,7 @@ erc8004Routes.post("/:id/feedback", async (c) => {
       },
     });
   } catch (err: unknown) {
-    console.error("[erc8004] feedback error:", err);
+    console.error("[erc8004] feedback error", redactedThrownDiagnostics(err));
     return c.json<ApiResponse>({ ok: false, error: "Failed to record feedback" }, 500);
   }
 });
@@ -513,7 +514,7 @@ discoveryRoutes.get("/agents", async (c) => {
       data: agents,
     });
   } catch (err: unknown) {
-    console.error("[erc8004] discovery/agents error:", err);
+    console.error("[erc8004] discovery/agents error", redactedThrownDiagnostics(err));
     return c.json<ApiResponse>({ ok: false, error: "Failed to query agents" }, 500);
   }
 });
@@ -536,7 +537,7 @@ discoveryRoutes.get("/registries", async (c) => {
       data: rows.sort((a, b) => a.chain_id - b.chain_id),
     });
   } catch (err: unknown) {
-    console.error("[erc8004] discovery/registries error:", err);
+    console.error("[erc8004] discovery/registries error", redactedThrownDiagnostics(err));
     return c.json<ApiResponse>({ ok: false, error: "Failed to query registries" }, 500);
   }
 });
