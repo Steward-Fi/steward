@@ -711,9 +711,7 @@ describe("external key custody seam", () => {
       );
     await getDb()
       .delete(agentWallets)
-      .where(
-        and(eq(agentWallets.agentId, "agent-legacy"), eq(agentWallets.chainFamily, "evm")),
-      );
+      .where(and(eq(agentWallets.agentId, "agent-legacy"), eq(agentWallets.chainFamily, "evm")));
 
     let error: unknown;
     try {
@@ -762,9 +760,7 @@ describe("external key custody seam", () => {
       );
     await getDb()
       .delete(agentWallets)
-      .where(
-        and(eq(agentWallets.agentId, "agent-legacy"), eq(agentWallets.chainFamily, "evm")),
-      );
+      .where(and(eq(agentWallets.agentId, "agent-legacy"), eq(agentWallets.chainFamily, "evm")));
 
     // The new guard must let local-vault-bound callers through: the request
     // gets past custody resolution, decrypts the legacy key, and fails only at
