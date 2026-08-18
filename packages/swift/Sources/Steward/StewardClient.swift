@@ -1,4 +1,11 @@
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+// Linux/Windows: swift-crypto provides the same HMAC/SHA256/SymmetricKey API
+// surface under the `Crypto` module (declared in Package.swift for non-Apple
+// platforms only).
+import Crypto
+#endif
 import Foundation
 
 public typealias StewardJSON = [String: Any]
