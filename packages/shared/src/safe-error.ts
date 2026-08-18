@@ -38,7 +38,15 @@ export interface RedactedThrownDiagnostics {
   errorCode: string | null;
 }
 
-const SAFE_ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const SAFE_ERROR_CODES = new Set([
+  "ABORT_ERR",
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
 
 /**
  * Return bounded, non-secret diagnostics for logs at credential boundaries.
@@ -63,7 +71,7 @@ export function redactedThrownDiagnostics(value: unknown): RedactedThrownDiagnos
       "code" in value
     ) {
       const candidate = (value as { code?: unknown }).code;
-      if (typeof candidate === "string" && SAFE_ERROR_CODE.test(candidate)) {
+      if (typeof candidate === "string" && SAFE_ERROR_CODES.has(candidate)) {
         errorCode = candidate;
       }
     }
