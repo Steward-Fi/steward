@@ -38,8 +38,7 @@ let setForwardProxyRequestForTests: typeof import("@stwd/proxy/src/handlers/prox
 let setResolveProxyHostForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setResolveProxyHostForTests"];
 let setCheckProxyRateLimitForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setCheckProxyRateLimitForTests"];
 let setCheckProxySpendLimitForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setCheckProxySpendLimitForTests"];
-let restoreProxyRateLimit: (() => void) | undefined;
-let restoreProxySpendLimit: (() => void) | undefined;
+let resetProxyHandlerTestHooks: typeof import("@stwd/proxy/src/handlers/proxy")["__resetProxyHandlerTestHooksForTests"];
 
 // Capture what the proxy tried to forward upstream.
 interface ForwardedCapture {
@@ -75,18 +74,20 @@ beforeAll(async () => {
     __setResolveProxyHostForTests: setResolveProxyHostForTests,
     __setCheckProxyRateLimitForTests: setCheckProxyRateLimitForTests,
     __setCheckProxySpendLimitForTests: setCheckProxySpendLimitForTests,
+    __resetProxyHandlerTestHooksForTests: resetProxyHandlerTestHooks,
   } = await import("@stwd/proxy/src/handlers/proxy"));
-  const redisEnforcement = await import("@stwd/proxy/src/middleware/redis-enforcement");
 
   // This suite proves client signing, credential injection, and response
   // scrubbing without a shared Redis service. Keep the production default-deny
-  // enforcement intact outside this fixture and restore its exact functions.
+  // enforcement intact outside this fixture and restore every exact handler
+  // dependency after the test.
   setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
-  setCheckProxySpendLimitForTests(async () => ({ allowed: true }));
-  restoreProxyRateLimit = () =>
-    setCheckProxyRateLimitForTests(redisEnforcement.checkProxyRateLimit);
-  restoreProxySpendLimit = () =>
-    setCheckProxySpendLimitForTests(redisEnforcement.checkProxySpendLimit);
+  setCheckProxySpendLimitForTests(async () => ({
+    allowed: true,
+    configured: false,
+    spent: 0,
+    remaining: Number.POSITIVE_INFINITY,
+  }));
 
   // Hermeticity: the proxy resolves the target host via DNS BEFORE it calls the
   // (stubbed) forwarder, and rejects private/reserved addresses. In a
@@ -111,8 +112,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  restoreProxyRateLimit?.();
-  restoreProxySpendLimit?.();
+  resetProxyHandlerTestHooks();
   await closeDb().catch(() => {});
   delete process.env.STEWARD_PGLITE_MEMORY;
   delete process.env.STEWARD_MASTER_PASSWORD;
