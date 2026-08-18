@@ -978,6 +978,8 @@ policiesStandaloneRoutes.post("/simulate", async (c) => {
       recentTxCount1h: liveStats?.recentTxCount1h ?? 0,
       spentToday: liveStats?.spentToday ?? 0n,
       spentThisWeek: liveStats?.spentThisWeek ?? 0n,
+      additionalUsdSpentTodayMicros: liveStats?.additionalUsdSpentTodayMicros ?? 0n,
+      additionalUsdSpentThisWeekMicros: liveStats?.additionalUsdSpentThisWeekMicros ?? 0n,
       priceOracle,
       conditionSets,
     });
@@ -995,6 +997,12 @@ policiesStandaloneRoutes.post("/simulate", async (c) => {
               recentTxCount1h: liveStats?.recentTxCount1h ?? 0,
               spentToday: (liveStats?.spentToday ?? 0n).toString(),
               spentThisWeek: (liveStats?.spentThisWeek ?? 0n).toString(),
+              additionalUsdSpentTodayMicros: (
+                liveStats?.additionalUsdSpentTodayMicros ?? 0n
+              ).toString(),
+              additionalUsdSpentThisWeekMicros: (
+                liveStats?.additionalUsdSpentThisWeekMicros ?? 0n
+              ).toString(),
             }
           : { source: "synthetic-zero" },
       },

@@ -47,6 +47,9 @@ export interface PolicyEvaluationContext {
    */
   spentToday: bigint;
   spentThisWeek: bigint;
+  /** Cross-rail USD spend, kept separate from chain-native counters. */
+  additionalUsdSpentTodayMicros?: bigint;
+  additionalUsdSpentThisWeekMicros?: bigint;
   /** Optional price oracle for USD-based policy evaluation */
   priceOracle?: PriceOracle;
   /** Optional reputation score for reputation-based policies */
@@ -215,6 +218,8 @@ export class PolicyEngine {
       recentTxCount1h: ctx.recentTxCount1h,
       spentToday: ctx.spentToday,
       spentThisWeek: ctx.spentThisWeek,
+      additionalUsdSpentTodayMicros: ctx.additionalUsdSpentTodayMicros,
+      additionalUsdSpentThisWeekMicros: ctx.additionalUsdSpentThisWeekMicros,
       priceOracle: ctx.priceOracle,
       reputationScore: ctx.reputationScore,
       venue: ctx.venue,

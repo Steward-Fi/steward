@@ -585,6 +585,8 @@ async function executeTransferIntent(row: typeof intents.$inferSelect) {
       recentTxCount24h: stats.recentTxCount24h,
       spentToday: stats.spentToday,
       spentThisWeek: stats.spentThisWeek,
+      additionalUsdSpentTodayMicros: stats.additionalUsdSpentTodayMicros,
+      additionalUsdSpentThisWeekMicros: stats.additionalUsdSpentThisWeekMicros,
       priceOracle,
       conditionSets,
     });
@@ -691,6 +693,8 @@ async function executeSendCallsIntent(row: typeof intents.$inferSelect) {
           recentTxCount24h: stats.recentTxCount24h,
           spentToday: runningSpentToday,
           spentThisWeek: runningSpentThisWeek,
+          additionalUsdSpentTodayMicros: stats.additionalUsdSpentTodayMicros,
+          additionalUsdSpentThisWeekMicros: stats.additionalUsdSpentThisWeekMicros,
           priceOracle,
           conditionSets,
         }),

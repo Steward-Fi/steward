@@ -510,8 +510,6 @@ export function createOperatorRecoveryRoutes(
       }
 
       let value = input.amountBaseUnits.toString();
-      let operatorSpentToday = 0n;
-      let operatorSpentThisWeek = 0n;
       if (hasSpendingLimit) {
         const nativeUsd = await priceOracle.getNativeUsdPrice(ARBITRUM_CHAIN_ID);
         if (nativeUsd === null || !Number.isFinite(nativeUsd) || nativeUsd <= 0) {
@@ -535,8 +533,6 @@ export function createOperatorRecoveryRoutes(
           return (numerator + denominator - 1n) / denominator;
         };
         value = usdcBaseUnitsToWei(input.amountBaseUnits).toString();
-        operatorSpentToday = usdcBaseUnitsToWei(stats.operatorSpentTodayBaseUnits);
-        operatorSpentThisWeek = usdcBaseUnitsToWei(stats.operatorSpentThisWeekBaseUnits);
         const pinnedPriceOracle = {
           ...priceOracle,
           async getNativeUsdPrice(chainId: number) {
@@ -569,8 +565,10 @@ export function createOperatorRecoveryRoutes(
           venue: "hyperliquid" as const,
           recentTxCount1h: stats.recentTxCount1h,
           recentTxCount24h: stats.recentTxCount24h,
-          spentToday: stats.spentToday + operatorSpentToday,
-          spentThisWeek: stats.spentThisWeek + operatorSpentThisWeek,
+          spentToday: stats.spentToday,
+          spentThisWeek: stats.spentThisWeek,
+          additionalUsdSpentTodayMicros: stats.operatorSpentTodayBaseUnits,
+          additionalUsdSpentThisWeekMicros: stats.operatorSpentThisWeekBaseUnits,
           priceOracle: pinnedPriceOracle,
         });
         if (!evaluation.approved) {

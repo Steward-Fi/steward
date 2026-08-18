@@ -75,6 +75,12 @@ describe("audit and policy route hardening", () => {
     expect(policiesSource).toContain("const liveStats = hasAgentSelector");
     expect(policiesSource).toContain('source: "live"');
     expect(policiesSource).toContain('source: "synthetic-zero"');
+    expect(policiesSource).toContain(
+      "additionalUsdSpentTodayMicros: liveStats?.additionalUsdSpentTodayMicros ?? 0n",
+    );
+    expect(policiesSource).toContain(
+      "additionalUsdSpentThisWeekMicros: liveStats?.additionalUsdSpentThisWeekMicros ?? 0n",
+    );
   });
 
   it("writes policy template final audit events only after mutations succeed", () => {

@@ -19,6 +19,7 @@ import {
   conditionSets,
   getDb,
   inArray,
+  operatorTransferReservations,
   policies,
   sessionSigners,
   tenantAppClientSecrets,
@@ -637,6 +638,24 @@ export async function getTransactionStats(agentId: string, chainId?: number) {
         )::text
       `,
       spentThisWeek: sql<string>`coalesce(sum((${transactions.value})::numeric) filter (where true${chainFilter}), 0)::text`,
+      additionalUsdSpentTodayMicros: sql<string>`
+        coalesce((
+          select sum((${operatorTransferReservations.amountBaseUnits})::numeric)
+          from ${operatorTransferReservations}
+          where ${operatorTransferReservations.agentId} = ${agentId}
+            and ${operatorTransferReservations.createdAt} >= ${oneDayAgoStr}::timestamptz
+            and ${operatorTransferReservations.status} in ('pending', 'final')
+        ), 0)::text
+      `,
+      additionalUsdSpentThisWeekMicros: sql<string>`
+        coalesce((
+          select sum((${operatorTransferReservations.amountBaseUnits})::numeric)
+          from ${operatorTransferReservations}
+          where ${operatorTransferReservations.agentId} = ${agentId}
+            and ${operatorTransferReservations.createdAt} >= ${oneWeekAgo.toISOString()}::timestamptz
+            and ${operatorTransferReservations.status} in ('pending', 'final')
+        ), 0)::text
+      `,
     })
     .from(transactions)
     .where(
@@ -654,6 +673,8 @@ export async function getTransactionStats(agentId: string, chainId?: number) {
     recentTxCount24h: Number(stats?.recentTxCount24h ?? 0),
     spentToday: BigInt(stats?.spentToday ?? "0"),
     spentThisWeek: BigInt(stats?.spentThisWeek ?? "0"),
+    additionalUsdSpentTodayMicros: BigInt(stats?.additionalUsdSpentTodayMicros ?? "0"),
+    additionalUsdSpentThisWeekMicros: BigInt(stats?.additionalUsdSpentThisWeekMicros ?? "0"),
   };
 }
 
