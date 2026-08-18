@@ -14,6 +14,14 @@ const request = {
 };
 
 describe("GitHub App upstream issuer transport", () => {
+  test("rejects invalid or effectively unbounded request deadlines", () => {
+    for (const timeout of [0, 9, 1.5, 60_001, Number.POSITIVE_INFINITY]) {
+      expect(() => new GitHubAppInstallationTokenIssuer(fetch, timeout)).toThrow(
+        "requestTimeoutMs must be an integer from 10 to 60000",
+      );
+    }
+  });
+
   test("bounds declared and streamed token responses before JSON parsing", async () => {
     for (const response of [
       new Response("{}", { headers: { "content-length": "1048577" } }),
@@ -44,6 +52,49 @@ describe("GitHub App upstream issuer transport", () => {
     await expect(issuer.issue(request)).rejects.not.toThrow(canary);
     expect(signal).toBeInstanceOf(AbortSignal);
     expect(redirect).toBe("error");
+  });
+
+  test("bounds stalled response headers even when injected fetch ignores abort", async () => {
+    let signal: AbortSignal | undefined;
+    const issuer = new GitHubAppInstallationTokenIssuer(
+      ((_url, init) => {
+        signal = init?.signal as AbortSignal;
+        return new Promise<Response>(() => {});
+      }) as typeof fetch,
+      25,
+    );
+
+    const startedAt = Date.now();
+    await expect(issuer.issue(request)).rejects.toThrow("GitHub request timed out");
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(signal?.aborted).toBe(true);
+  });
+
+  test("bounds stalled response bodies and contains hostile cancel rejection", async () => {
+    let cancelCalled = false;
+    const issuer = new GitHubAppInstallationTokenIssuer(
+      (async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"token":"secret-canary",'));
+            },
+            cancel() {
+              cancelCalled = true;
+              return Promise.reject(new Error("secret cancel diagnostic"));
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        )) as typeof fetch,
+      25,
+    );
+
+    const error = await issuer.issue(request).catch((caught) => caught as Error);
+    expect(error.message).toBe("GitHub request timed out");
+    expect(error.message).not.toContain("secret-canary");
+    expect(error.message).not.toContain("secret cancel diagnostic");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(cancelCalled).toBe(true);
   });
 
   test("sends GitHub's official installation-token request shape without a fictitious ttl", async () => {

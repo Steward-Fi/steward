@@ -5,7 +5,7 @@ const GITHUB_API = "https://api.github.com";
 const GITHUB_REQUEST_TIMEOUT_MS = 10_000;
 const GITHUB_RESPONSE_MAX_BYTES = 1024 * 1024;
 
-async function readBoundedJson(response: Response): Promise<unknown> {
+async function readBoundedJson(response: Response, signal: AbortSignal): Promise<unknown> {
   const declared = response.headers.get("content-length");
   if (declared !== null) {
     const length = Number(declared);
@@ -20,7 +20,19 @@ async function readBoundedJson(response: Response): Promise<unknown> {
   let total = 0;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      if (signal.aborted) throw new Error("GitHub request timed out");
+      let onAbort: (() => void) | undefined;
+      const aborted = new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(new Error("GitHub request timed out"));
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+      let result: ReadableStreamReadResult<Uint8Array>;
+      try {
+        result = await Promise.race([reader.read(), aborted]);
+      } finally {
+        if (onAbort) signal.removeEventListener("abort", onAbort);
+      }
+      const { done, value } = result;
       if (done) break;
       total += value.byteLength;
       if (total > GITHUB_RESPONSE_MAX_BYTES) {
@@ -30,7 +42,13 @@ async function readBoundedJson(response: Response): Promise<unknown> {
       chunks.push(value);
     }
   } finally {
-    reader.releaseLock();
+    if (signal.aborted) void Promise.resolve(reader.cancel()).catch(() => undefined);
+    try {
+      reader.releaseLock();
+    } catch {
+      // A hostile/custom stream may leave its read pending after cancellation.
+      // The deadline still releases the caller with a fixed error.
+    }
   }
   const bytes = new Uint8Array(total);
   let offset = 0;
@@ -46,73 +64,108 @@ async function readBoundedJson(response: Response): Promise<unknown> {
 }
 
 export class GitHubAppInstallationTokenIssuer implements UpstreamTokenIssuer {
-  constructor(private readonly fetchImpl: typeof fetch = fetch) {}
+  constructor(
+    private readonly fetchImpl: typeof fetch = fetch,
+    private readonly requestTimeoutMs = GITHUB_REQUEST_TIMEOUT_MS,
+  ) {
+    if (
+      !Number.isSafeInteger(requestTimeoutMs) ||
+      requestTimeoutMs < 10 ||
+      requestTimeoutMs > 60_000
+    ) {
+      throw new Error("requestTimeoutMs must be an integer from 10 to 60000");
+    }
+  }
+
+  private async withDeadline<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error("GitHub request timed out"));
+      }, this.requestTimeoutMs);
+    });
+    try {
+      return await Promise.race([run(controller.signal), deadline]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
 
   async issue(input: Parameters<UpstreamTokenIssuer["issue"]>[0]) {
-    const key = await importPKCS8(input.privateKeyPem, "RS256");
-    const now = Math.floor(Date.now() / 1000);
-    const appJwt = await new SignJWT({})
-      .setProtectedHeader({ alg: "RS256", typ: "JWT" })
-      .setIssuer(input.appId)
-      .setIssuedAt(now - 30)
-      .setExpirationTime(now + 9 * 60)
-      .sign(key);
-    const response = await this.fetchImpl(
-      `${GITHUB_API}/app/installations/${encodeURIComponent(input.installationId)}/access_tokens`,
-      {
-        method: "POST",
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${appJwt}`,
-          "Content-Type": "application/json",
-          "User-Agent": "steward-credential-lease",
-          "X-GitHub-Api-Version": "2022-11-28",
+    return this.withDeadline(async (signal) => {
+      const key = await importPKCS8(input.privateKeyPem, "RS256");
+      const now = Math.floor(Date.now() / 1000);
+      const appJwt = await new SignJWT({})
+        .setProtectedHeader({ alg: "RS256", typ: "JWT" })
+        .setIssuer(input.appId)
+        .setIssuedAt(now - 30)
+        .setExpirationTime(now + 9 * 60)
+        .sign(key);
+      if (signal.aborted) throw new Error("GitHub request timed out");
+      const response = await this.fetchImpl(
+        `${GITHUB_API}/app/installations/${encodeURIComponent(input.installationId)}/access_tokens`,
+        {
+          method: "POST",
+          headers: {
+            Accept: "application/vnd.github+json",
+            Authorization: `Bearer ${appJwt}`,
+            "Content-Type": "application/json",
+            "User-Agent": "steward-credential-lease",
+            "X-GitHub-Api-Version": "2022-11-28",
+          },
+          body: JSON.stringify({
+            repositories: input.resource.repositories,
+            permissions: input.resource.permissions,
+          }),
+          redirect: "error",
+          signal,
         },
-        body: JSON.stringify({
-          repositories: input.resource.repositories,
-          permissions: input.resource.permissions,
-        }),
-        redirect: "error",
-        signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
-      },
-    );
-    if (!response.ok) {
-      void response.body?.cancel().catch(() => {});
-      throw new Error(`GitHub installation-token issuance failed (${response.status})`);
-    }
-    const body = (await readBoundedJson(response)) as { token?: unknown; expires_at?: unknown };
-    if (
-      typeof body.token !== "string" ||
-      body.token.length === 0 ||
-      typeof body.expires_at !== "string"
-    ) {
-      throw new Error("GitHub installation-token response was malformed");
-    }
-    const expiresAt = new Date(body.expires_at);
-    if (!Number.isFinite(expiresAt.getTime())) throw new Error("GitHub token expiry was invalid");
-    return { token: body.token, expiresAt };
+      );
+      if (!response.ok) {
+        void response.body?.cancel().catch(() => {});
+        throw new Error(`GitHub installation-token issuance failed (${response.status})`);
+      }
+      const body = (await readBoundedJson(response, signal)) as {
+        token?: unknown;
+        expires_at?: unknown;
+      };
+      if (
+        typeof body.token !== "string" ||
+        body.token.length === 0 ||
+        typeof body.expires_at !== "string"
+      ) {
+        throw new Error("GitHub installation-token response was malformed");
+      }
+      const expiresAt = new Date(body.expires_at);
+      if (!Number.isFinite(expiresAt.getTime())) throw new Error("GitHub token expiry was invalid");
+      return { token: body.token, expiresAt };
+    });
   }
 
   async revoke(token: string): Promise<void> {
-    const response = await this.fetchImpl(`${GITHUB_API}/installation/token`, {
-      method: "DELETE",
-      headers: {
-        Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${token}`,
-        "User-Agent": "steward-credential-lease",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-      redirect: "error",
-      signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
-    });
-    // A retry after a prior successful revoke authenticates with a token GitHub
-    // no longer accepts and returns 401. That is confirmation the credential is
-    // unusable. A 404 is not documented for this endpoint and must not be
-    // mistaken for revocation proof.
-    if (response.status !== 204 && response.status !== 401) {
+    await this.withDeadline(async (signal) => {
+      const response = await this.fetchImpl(`${GITHUB_API}/installation/token`, {
+        method: "DELETE",
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+          "User-Agent": "steward-credential-lease",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+        redirect: "error",
+        signal,
+      });
+      // A retry after a prior successful revoke authenticates with a token GitHub
+      // no longer accepts and returns 401. That is confirmation the credential is
+      // unusable. A 404 is not documented for this endpoint and must not be
+      // mistaken for revocation proof.
+      if (response.status !== 204 && response.status !== 401) {
+        void response.body?.cancel().catch(() => {});
+        throw new Error(`GitHub installation-token revocation failed (${response.status})`);
+      }
       void response.body?.cancel().catch(() => {});
-      throw new Error(`GitHub installation-token revocation failed (${response.status})`);
-    }
-    void response.body?.cancel().catch(() => {});
+    });
   }
 }
