@@ -6,6 +6,8 @@
  *                                  Used by Bun/Node entry points.
  *   - "neon-http"                — HTTP-only fetch driver via @neondatabase/serverless.
  *                                  Used by Cloudflare Workers (no TCP, no pools).
+ *   - "neon-websocket"           — request-scoped Neon WebSocket pool.
+ *                                  Transaction-capable Workers transport for RLS.
  *   - PGLite                     — in-process WASM, set via setPGLiteOverride()
  *                                  from the embedded/desktop entry point.
  *
@@ -23,6 +25,7 @@
  */
 
 import { drizzle as drizzleNeon, type NeonHttpDatabase } from "drizzle-orm/neon-http";
+import { drizzle as drizzleNeonWebSocket, type NeonDatabase } from "drizzle-orm/neon-serverless";
 import { drizzle as drizzlePostgres, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import type { PGLiteDb } from "./pglite";
@@ -34,7 +37,7 @@ declare const process: {
   env: Record<string, string | undefined>;
 };
 
-export type DatabaseDriver = "postgres-js" | "neon-http";
+export type DatabaseDriver = "postgres-js" | "neon-http" | "neon-websocket";
 
 const FULL_SCHEMA = { ...schema, ...schemaAuth };
 type FullSchema = typeof FULL_SCHEMA;
@@ -42,6 +45,7 @@ type FullSchema = typeof FULL_SCHEMA;
 export function getDatabaseDriver(): DatabaseDriver {
   const raw = process.env.DATABASE_DRIVER?.trim().toLowerCase();
   if (raw === "neon-http") return "neon-http";
+  if (raw === "neon-websocket") return "neon-websocket";
   return "postgres-js";
 }
 
@@ -308,6 +312,62 @@ export function createNeonHttpDb(
   return { client, db };
 }
 
+// ─── neon-websocket (transaction-capable Workers) ───────────────────────────
+
+export interface NeonTransactionDbHandle {
+  driver: "neon-websocket";
+  db: NeonDatabase<FullSchema>;
+  close(): Promise<void>;
+}
+
+/**
+ * Create one request-scoped, transaction-capable Neon database handle.
+ *
+ * Unlike neon-http, the WebSocket transport pins an interactive transaction
+ * to one checked-out connection, so `withTenantRlsTransaction()` can safely
+ * use transaction-local `set_config`. The caller MUST await `close()` after
+ * every request (normally from a `finally` block before returning the
+ * response). This handle is deliberately excluded from the global singleton:
+ * a Worker isolate must not retain request-owned sockets after the request's
+ * lifetime.
+ */
+export function createNeonTransactionDbForRequest(env: {
+  DATABASE_URL?: string;
+  DATABASE_DRIVER?: string;
+}): NeonTransactionDbHandle {
+  if (env.DATABASE_DRIVER?.trim().toLowerCase() !== "neon-websocket") {
+    throw new Error(
+      "RLS_TRANSACTION_DRIVER_REQUIRED: set DATABASE_DRIVER=neon-websocket for transaction-capable Workers database access",
+    );
+  }
+  const connectionString = env.DATABASE_URL;
+  if (!connectionString) {
+    throw new Error(
+      "DATABASE_URL binding is required for transaction-capable Workers database access",
+    );
+  }
+  assertDatabaseUrlTls(connectionString);
+  const { Pool } = require("@neondatabase/serverless") as {
+    Pool: new (config: {
+      connectionString: string;
+      max: number;
+    }) => {
+      end(): Promise<void>;
+    };
+  };
+  const pool = new Pool({ connectionString, max: 1 });
+  const db = drizzleNeonWebSocket(pool as never, { schema: FULL_SCHEMA });
+  let closePromise: Promise<void> | undefined;
+  return {
+    driver: "neon-websocket",
+    db,
+    close() {
+      closePromise ??= pool.end();
+      return closePromise;
+    },
+  };
+}
+
 /**
  * Build a Drizzle instance from Worker `env` bindings. Intended to be wired
  * into a per-request Hono middleware:
@@ -320,7 +380,20 @@ export function createNeonHttpDb(
  * @param env  An object with a DATABASE_URL string field. Workers pass in the
  *             whole `env` binding object.
  */
-export function createDbForRequest(env: { DATABASE_URL?: string }) {
+export function createDbForRequest(env: { DATABASE_URL?: string; DATABASE_DRIVER?: string }) {
+  // Worker bindings are the authority for this request. Falling back to the
+  // process-level selector keeps the helper compatible with Bun/Node callers,
+  // but must not let an explicit WebSocket binding silently create neon-http.
+  const bindingDriver = env.DATABASE_DRIVER?.trim().toLowerCase();
+  if (bindingDriver && bindingDriver !== "neon-http" && bindingDriver !== "neon-websocket") {
+    throw new Error("DATABASE_DRIVER_UNSUPPORTED: createDbForRequest() supports neon-http only");
+  }
+  const driver = bindingDriver || getDatabaseDriver();
+  if (driver === "neon-websocket") {
+    throw new Error(
+      "RLS_TRANSACTION_HANDLE_REQUIRED: use createNeonTransactionDbForRequest() and await close()",
+    );
+  }
   const url = env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL binding is required for createDbForRequest()");
   return createNeonHttpDb(url).db;
@@ -366,6 +439,11 @@ let globalDb: GlobalDbHandle | undefined;
 
 function buildGlobalDb(): GlobalDbHandle {
   const driver = getDatabaseDriver();
+  if (driver === "neon-websocket") {
+    throw new Error(
+      "RLS_TRANSACTION_HANDLE_REQUIRED: neon-websocket is request-scoped and cannot back getDb()",
+    );
+  }
   if (driver === "neon-http") {
     const { client, db } = createNeonHttpDb();
     return { driver: "neon-http", client, db };

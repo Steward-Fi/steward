@@ -21,12 +21,13 @@ export {
   withTenantAuditQueue,
   writeAuditEvent,
 } from "./audit-chain";
-export type { DatabaseDriver } from "./client";
+export type { DatabaseDriver, NeonTransactionDbHandle } from "./client";
 export {
   closeDb,
   createDb,
   createDbForRequest,
   createNeonHttpDb,
+  createNeonTransactionDbForRequest,
   createPostgresClient,
   DATABASE_DEADLINE_EXCEEDED_MESSAGE,
   DatabaseDeadlineExceededError,

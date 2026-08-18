@@ -6,7 +6,7 @@ const trustedTenantContexts = new WeakSet<object>();
 const TENANT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const AUTHORITY_METHOD_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 
-export type TenantRlsDriver = "postgres-js" | "pglite" | "neon-http";
+export type TenantRlsDriver = "postgres-js" | "pglite" | "neon-http" | "neon-websocket";
 
 /**
  * An application-internal capability minted only after authentication or by a
