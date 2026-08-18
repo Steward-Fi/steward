@@ -70970,6 +70970,8 @@
                           "method",
                           "injectAs",
                           "injectKey",
+                          "injectionStrategy",
+                          "injectionConfig",
                           "enabled"
                         ],
                         "properties": {
@@ -71017,6 +71019,28 @@
                               "string",
                               "null"
                             ]
+                          },
+                          "injectionStrategy": {
+                            "type": "string",
+                            "enum": [
+                              "header",
+                              "sigv4"
+                            ]
+                          },
+                          "injectionConfig": {
+                            "type": "object",
+                            "properties": {
+                              "service": {
+                                "type": "string",
+                                "enum": [
+                                  "ec2"
+                                ]
+                              },
+                              "region": {
+                                "type": "string"
+                              }
+                            },
+                            "additionalProperties": false
                           },
                           "priority": {
                             "type": "integer",
@@ -71207,6 +71231,28 @@
                   "injectFormat": {
                     "type": "string"
                   },
+                  "injectionStrategy": {
+                    "type": "string",
+                    "enum": [
+                      "header",
+                      "sigv4"
+                    ]
+                  },
+                  "injectionConfig": {
+                    "type": "object",
+                    "properties": {
+                      "service": {
+                        "type": "string",
+                        "enum": [
+                          "ec2"
+                        ]
+                      },
+                      "region": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": false
+                  },
                   "priority": {
                     "type": "integer",
                     "minimum": 0,
@@ -71258,6 +71304,8 @@
                         "method",
                         "injectAs",
                         "injectKey",
+                        "injectionStrategy",
+                        "injectionConfig",
                         "enabled"
                       ],
                       "properties": {
@@ -71305,6 +71353,28 @@
                             "string",
                             "null"
                           ]
+                        },
+                        "injectionStrategy": {
+                          "type": "string",
+                          "enum": [
+                            "header",
+                            "sigv4"
+                          ]
+                        },
+                        "injectionConfig": {
+                          "type": "object",
+                          "properties": {
+                            "service": {
+                              "type": "string",
+                              "enum": [
+                                "ec2"
+                              ]
+                            },
+                            "region": {
+                              "type": "string"
+                            }
+                          },
+                          "additionalProperties": false
                         },
                         "priority": {
                           "type": "integer",
@@ -71602,6 +71672,28 @@
                   "injectFormat": {
                     "type": "string"
                   },
+                  "injectionStrategy": {
+                    "type": "string",
+                    "enum": [
+                      "header",
+                      "sigv4"
+                    ]
+                  },
+                  "injectionConfig": {
+                    "type": "object",
+                    "properties": {
+                      "service": {
+                        "type": "string",
+                        "enum": [
+                          "ec2"
+                        ]
+                      },
+                      "region": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": false
+                  },
                   "priority": {
                     "type": "integer",
                     "minimum": 0,
@@ -71643,6 +71735,8 @@
                         "method",
                         "injectAs",
                         "injectKey",
+                        "injectionStrategy",
+                        "injectionConfig",
                         "enabled"
                       ],
                       "properties": {
@@ -71690,6 +71784,28 @@
                             "string",
                             "null"
                           ]
+                        },
+                        "injectionStrategy": {
+                          "type": "string",
+                          "enum": [
+                            "header",
+                            "sigv4"
+                          ]
+                        },
+                        "injectionConfig": {
+                          "type": "object",
+                          "properties": {
+                            "service": {
+                              "type": "string",
+                              "enum": [
+                                "ec2"
+                              ]
+                            },
+                            "region": {
+                              "type": "string"
+                            }
+                          },
+                          "additionalProperties": false
                         },
                         "priority": {
                           "type": "integer",

@@ -5,7 +5,7 @@ import { createPGLiteDb } from "../pglite";
 setDefaultTimeout(120_000);
 let client: PGlite;
 
-describe("SigV4 injection migration (0099)", () => {
+describe("SigV4 injection migration (0100)", () => {
   beforeAll(async () => {
     ({ client } = await createPGLiteDb("memory://"));
     await client.exec(`

@@ -1,4 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
+import { strictParseJson } from "@stwd/shared";
 
 export interface AwsSigV4Credentials {
   accessKeyId: string;
@@ -36,7 +37,7 @@ const REGION_RE = /^[a-z]{2}(?:-[a-z0-9]+){1,3}-[1-9][0-9]?$/;
 export function parseAwsCredentials(value: string): AwsSigV4Credentials {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(value);
+    parsed = strictParseJson(value);
   } catch {
     throw new Error("AWS credential secret must be valid JSON");
   }

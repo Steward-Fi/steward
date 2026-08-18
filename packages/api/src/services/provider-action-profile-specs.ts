@@ -1,8 +1,8 @@
 import {
-  buildAwsAction,
   AWS_OPERATION_KEYS,
   type AwsActionBuild,
   type AwsOperationKey,
+  buildAwsAction,
 } from "@stwd/provider-aws";
 import {
   buildGithubAction,

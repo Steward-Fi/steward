@@ -69,6 +69,7 @@ import {
 } from "@stwd/provider-slack";
 import { buildXAction, type XActionBuild, type XOperationKey } from "@stwd/provider-x";
 import {
+  AWS_PROVIDER_ACTION_PROFILE,
   type AwsCanonicalActionV1,
   assertRegisteredProfile,
   CanonError,
@@ -1011,6 +1012,13 @@ class ProviderActionService {
         operation,
         build as GenericHttpActionBuild,
       );
+    } else if (build.action.profile === AWS_PROVIDER_ACTION_PROFILE) {
+      await this.assertAwsCredentialRouteBinding(
+        actorAgentId,
+        account,
+        operation,
+        build as AwsActionBuild,
+      );
     }
 
     // Caller-supplied `summoned: true` is never authority. Only a configured
@@ -1728,6 +1736,49 @@ class ProviderActionService {
       throw new CanonError(
         "CANON_ORIGIN_NOT_ALLOWED",
         "generic action is outside its exact governed credential route binding",
+      );
+    }
+  }
+
+  private async assertAwsCredentialRouteBinding(
+    actorAgentId: string,
+    account: typeof providerAccounts.$inferSelect,
+    operation: typeof providerOperations.$inferSelect,
+    build: AwsActionBuild,
+  ): Promise<void> {
+    if (!operation.secretRouteId || !account.credentialSecretId) {
+      throw new CanonError("CANON_ORIGIN_NOT_ALLOWED", "AWS operation has no credential route");
+    }
+    const [route] = await this.db()
+      .select()
+      .from(secretRoutes)
+      .where(
+        and(
+          eq(secretRoutes.id, operation.secretRouteId),
+          eq(secretRoutes.tenantId, operation.tenantId),
+        ),
+      )
+      .limit(1);
+    const targetHost = new URL(build.action.origin).hostname;
+    const config = route?.injectionConfig as { service?: unknown; region?: unknown } | undefined;
+    if (
+      !route ||
+      !route.enabled ||
+      route.authorityMode !== "governed_v2" ||
+      route.providerOperationId !== operation.id ||
+      route.secretId !== account.credentialSecretId ||
+      route.agentId !== actorAgentId ||
+      route.injectionStrategy !== "sigv4" ||
+      config?.service !== "ec2" ||
+      typeof config.region !== "string" ||
+      route.hostPattern !== targetHost ||
+      targetHost !== `ec2.${config.region}.amazonaws.com` ||
+      route.pathPattern !== "/" ||
+      route.method?.toUpperCase() !== "POST"
+    ) {
+      throw new CanonError(
+        "CANON_ORIGIN_NOT_ALLOWED",
+        "AWS action is outside its exact governed SigV4 route binding",
       );
     }
   }

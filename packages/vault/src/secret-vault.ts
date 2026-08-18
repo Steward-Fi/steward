@@ -642,6 +642,8 @@ export class SecretVault {
       injectAs: string;
       injectKey: string;
       injectFormat?: string;
+      injectionStrategy?: "header" | "sigv4";
+      injectionConfig?: { service?: string; region?: string };
       priority?: number;
       enabled?: boolean;
       requiresApproval?: boolean;
@@ -772,6 +774,8 @@ export class SecretVault {
       injectAs: string;
       injectKey: string;
       injectFormat: string;
+      injectionStrategy: "header" | "sigv4";
+      injectionConfig: { service?: string; region?: string };
       priority: number;
       enabled: boolean;
       requiresApproval: boolean;

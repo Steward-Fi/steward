@@ -79,6 +79,11 @@ describe("AWS SigV4 final-boundary signer", () => {
 
   test("credential parser is strict and returns only the credential schema", () => {
     expect(() =>
+      parseAwsCredentials(
+        '{"accessKeyId":"AKIDEXAMPLE123456","accessKeyId":"ATTACKER00000000","secretAccessKey":"secret-key-material"}',
+      ),
+    ).toThrow();
+    expect(() =>
       parseAwsCredentials(JSON.stringify({ ...credentials, roleArn: "attacker" })),
     ).toThrow("unknown field");
     expect(() =>

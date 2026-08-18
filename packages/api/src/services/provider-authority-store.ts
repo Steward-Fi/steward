@@ -88,6 +88,10 @@ const PROVIDER_OPERATION_ALLOWLIST: Readonly<
   },
   slack: SLACK_OPERATION_METHOD,
   google: GOOGLE_OPERATION_METHOD,
+  aws: {
+    "aws.ec2.DescribeInstances": "POST",
+    "aws.ec2.StopInstances": "POST",
+  },
 };
 const PROVIDER_OPERATION_MINIMUM_RISK: Readonly<
   Record<string, Readonly<Record<string, ProviderRiskClass>>>
@@ -103,10 +107,18 @@ const PROVIDER_OPERATION_MINIMUM_RISK: Readonly<
   },
   slack: SLACK_OPERATION_RISK,
   google: GOOGLE_OPERATION_MINIMUM_RISK,
+  aws: {
+    "aws.ec2.DescribeInstances": "read",
+    "aws.ec2.StopInstances": "consequential",
+  },
 };
 const PROVIDER_OPERATION_EXACT_PATH: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   slack: SLACK_OPERATION_EXACT_PATH,
   google: GOOGLE_OPERATION_EXACT_PATH,
+  aws: {
+    "aws.ec2.DescribeInstances": "/",
+    "aws.ec2.StopInstances": "/",
+  },
 };
 const PROVIDER_RISK_RANK: Readonly<Record<ProviderRiskClass, number>> = {
   read: 0,
@@ -118,23 +130,54 @@ const PROVIDER_HOST_ALLOWLIST: Readonly<Record<string, string>> = {
   x: "api.x.com",
   slack: "slack.com",
 };
-const REGISTERED_ADAPTER_KEY_LIST = ["github", "x", "slack", "google", "generic-http"] as const;
+const REGISTERED_ADAPTER_KEY_LIST = [
+  "aws",
+  "github",
+  "x",
+  "slack",
+  "google",
+  "generic-http",
+] as const;
 type RegisteredAdapterKey = (typeof REGISTERED_ADAPTER_KEY_LIST)[number];
 type FixedProviderAdapterKey = Exclude<RegisteredAdapterKey, "generic-http">;
+type FixedProviderRouteInjection = {
+  readonly injectAs: "header";
+  readonly injectKey: "authorization";
+  readonly injectFormat: string;
+};
 const BEARER_ROUTE_INJECTION = {
   injectAs: "header",
   injectKey: "authorization",
   injectFormat: "Bearer {value}",
 } as const;
+const AWS_ROUTE_INJECTION = {
+  injectAs: "header",
+  injectKey: "authorization",
+  injectFormat: "{value}",
+} as const;
 // Keep every fixed adapter explicit. Adding one to the registered list without
 // defining its credential injection contract is a compile-time failure.
 const FIXED_PROVIDER_ROUTE_INJECTION = {
+  aws: AWS_ROUTE_INJECTION,
   github: BEARER_ROUTE_INJECTION,
   x: BEARER_ROUTE_INJECTION,
   slack: BEARER_ROUTE_INJECTION,
   google: BEARER_ROUTE_INJECTION,
-} as const satisfies Readonly<Record<FixedProviderAdapterKey, typeof BEARER_ROUTE_INJECTION>>;
+} as const satisfies Readonly<Record<FixedProviderAdapterKey, FixedProviderRouteInjection>>;
 const REGISTERED_ADAPTER_KEYS = new Set<string>(REGISTERED_ADAPTER_KEY_LIST);
+
+function awsRouteHost(route: typeof secretRoutes.$inferSelect | undefined): string | undefined {
+  if (route?.injectionStrategy !== "sigv4") return undefined;
+  const config = route.injectionConfig as { service?: unknown; region?: unknown };
+  if (
+    config.service !== "ec2" ||
+    typeof config.region !== "string" ||
+    !/^[a-z]{2}(?:-[a-z0-9]+){1,3}-[1-9][0-9]?$/.test(config.region)
+  ) {
+    return undefined;
+  }
+  return `ec2.${config.region}.amazonaws.com`;
+}
 const ENVIRONMENTS = new Set(["development", "staging", "production"]);
 const PRINCIPAL_TYPES = new Set(["human", "agent"]);
 const ROLES = new Set([
@@ -933,7 +976,9 @@ export class ProviderAuthorityStore {
         .limit(1);
       const expectedHost = genericDescriptor
         ? new URL(genericDescriptor.origin).hostname
-        : fixedProviderHost(account.adapterKey, operationKey);
+        : account.adapterKey === "aws"
+          ? awsRouteHost(route)
+          : fixedProviderHost(account.adapterKey, operationKey);
       const method = route?.method?.toUpperCase();
       const pathAllowed = genericDescriptor
         ? Boolean(
@@ -949,6 +994,7 @@ export class ProviderAuthorityStore {
         !route.agentId ||
         route.authorityMode !== "legacy" ||
         route.providerOperationId !== null ||
+        (account.adapterKey === "aws" && route.injectionStrategy !== "sigv4") ||
         route.hostPattern !== expectedHost ||
         !method ||
         !allowedMethods.includes(method) ||
@@ -1042,7 +1088,9 @@ export class ProviderAuthorityStore {
         const credentialSecretId = account.credentialSecretId;
         const expectedHost = genericDescriptor
           ? new URL(genericDescriptor.origin).hostname
-          : fixedProviderHost(account.adapterKey, operationKey);
+          : account.adapterKey === "aws"
+            ? awsRouteHost(route)
+            : fixedProviderHost(account.adapterKey, operationKey);
         const method = route?.method?.toUpperCase();
         const pathAllowed = genericDescriptor
           ? Boolean(
@@ -1060,6 +1108,7 @@ export class ProviderAuthorityStore {
           route.secretId !== credentialSecretId ||
           route.authorityMode !== "legacy" ||
           route.providerOperationId !== null ||
+          (account.adapterKey === "aws" && route.injectionStrategy !== "sigv4") ||
           route.hostPattern !== expectedHost ||
           !method ||
           !allowedMethods.includes(method) ||

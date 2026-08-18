@@ -6,8 +6,8 @@ import type { SlackOperationKey } from "@stwd/provider-slack";
 import type { XOperationKey } from "@stwd/provider-x";
 import { parseGovernedCanonicalActionForDispatch } from "@stwd/proxy/src/handlers/governed-execution";
 import {
-  buildGenericHttpAction,
   AWS_PROVIDER_ACTION_PROFILE,
+  buildGenericHttpAction,
   CanonError,
   GENERIC_GOLDEN_DESCRIPTOR_A,
   GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
@@ -405,7 +405,7 @@ describe("#220 executable provider profile conformance", () => {
         expect(
           inspectProviderProfileConformance(
             spec.profile,
-            allowedOriginsFromProductionSpec(spec),
+            allowedOriginsFromProductionSpec(spec, first.action),
             first.action,
           ),
         ).toEqual([]);
@@ -537,7 +537,7 @@ describe("#220 executable provider profile conformance", () => {
           parseGovernedCanonicalActionForDispatch(
             new TextEncoder().encode(jcsStringify(action)),
             spec.profile,
-            allowedOriginsFromProductionSpec(spec),
+            allowedOriginsFromProductionSpec(spec, built.action),
             operation,
           );
         expect(parse(built.action)).toEqual(built.action);
@@ -618,10 +618,14 @@ describe("#220 executable provider profile conformance", () => {
       "%2525255c",
     ]) {
       expect(
-        inspectProviderProfileConformance(spec.profile, allowedOriginsFromProductionSpec(spec), {
-          ...built.action,
-          normalizedPath: `/repos/${segment}/hello/issues`,
-        }),
+        inspectProviderProfileConformance(
+          spec.profile,
+          allowedOriginsFromProductionSpec(spec, built.action),
+          {
+            ...built.action,
+            normalizedPath: `/repos/${segment}/hello/issues`,
+          },
+        ),
       ).toContain("path-traversal");
     }
   });

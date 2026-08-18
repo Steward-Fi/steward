@@ -337,7 +337,7 @@ async function parseJsonRequestBody(c: Context): Promise<Record<string, unknown>
     return body && typeof body === "object" && !Array.isArray(body)
       ? (body as Record<string, unknown>)
       : null;
-  } catch (err) {
+  } catch {
     return null;
   }
 }
@@ -2045,7 +2045,7 @@ export async function handleProxy(c: Context): Promise<Response> {
       outboundBody,
       dnsCheck.records,
     );
-  } catch {
+  } catch (err) {
     const latencyMs = Date.now() - startTime;
     // Fetch errors can embed the full outbound URL. Query-injected credentials
     // must never be copied from that error into application logs.

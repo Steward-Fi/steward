@@ -1,7 +1,7 @@
 import {
   AWS_PROVIDER_ACTION_PROFILE,
-  serializeAwsEc2QueryBody,
   type AwsCanonicalActionV1,
+  serializeAwsEc2QueryBody,
 } from "./aws-provider-action.js";
 import {
   buildGenericHttpAction,
@@ -137,9 +137,7 @@ function validAwsEc2Action(action: ConformanceCanonicalAction, operationKey: str
     !pairsEqual(action.selectedHeaders, [
       ["content-type", "application/x-www-form-urlencoded; charset=UTF-8"],
     ]) ||
-    !/^https:\/\/ec2\.[a-z]{2}(?:-[a-z0-9]+){1,3}-[1-9][0-9]?\.amazonaws\.com$/.test(
-      action.origin,
-    )
+    !/^https:\/\/ec2\.[a-z]{2}(?:-[a-z0-9]+){1,3}-[1-9][0-9]?\.amazonaws\.com$/.test(action.origin)
   ) {
     return false;
   }
@@ -766,14 +764,17 @@ export function inspectProviderProfileConformance(
   if (action.canonicalBody !== null && headerNames.has("content-type") === false) {
     violations.push("body-content-type-missing");
   }
+  const contentTypes = action.selectedHeaders
+    .filter(([name]) => name.toLowerCase() === "content-type")
+    .map(([, value]) => value);
   if (
-    headerNames.has("content-type") &&
-    !action.selectedHeaders.some(
-      ([name, value]) =>
-        name.toLowerCase() === "content-type" &&
-        (value === "application/json" ||
-          (action.profile === AWS_PROVIDER_ACTION_PROFILE &&
-            value === "application/x-www-form-urlencoded; charset=UTF-8")),
+    contentTypes.some(
+      (value) =>
+        value !== "application/json" &&
+        !(
+          action.profile === AWS_PROVIDER_ACTION_PROFILE &&
+          value === "application/x-www-form-urlencoded; charset=UTF-8"
+        ),
     )
   ) {
     violations.push("content-type-unsupported");

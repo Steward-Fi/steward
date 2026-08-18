@@ -104,7 +104,10 @@ export function awsEc2AllowedOriginFromCanonicalBytes(bytes: Uint8Array): string
     origin,
   );
   if (!match) {
-    throw new CanonError("CANON_JSON_SHAPE_INVALID", "AWS canonical origin is not EC2 region-bound");
+    throw new CanonError(
+      "CANON_JSON_SHAPE_INVALID",
+      "AWS canonical origin is not EC2 region-bound",
+    );
   }
   const expected = awsEc2Origin(validateAwsRegion(match[1]));
   if (origin !== expected) {
