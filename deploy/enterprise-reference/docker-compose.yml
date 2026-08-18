@@ -287,6 +287,16 @@ services:
               *) pg_authority="$$(printf '%s' "$$pg_rest" | sed 's|[?].*||')" ;;
             esac
             pg_suffix="$${pg_rest#"$$pg_authority"}"
+            # A raw '/' inside userinfo terminates the authority before '@',
+            # while multiple raw '@' delimiters have no safe, unique split.
+            # Reject both ambiguous forms instead of letting their secret bytes
+            # survive in the redacted DSN passed on pg_dump's argv.
+            case "$${pg_suffix%%\?*}" in
+              *@*) echo 'DATABASE_URL contains ambiguous user information' >&2; exit 1 ;;
+            esac
+            case "$$pg_authority" in
+              *@*@*) echo 'DATABASE_URL contains ambiguous user information' >&2; exit 1 ;;
+            esac
             case "$$pg_authority" in
               *:*@*)
                 pg_userinfo="$${pg_authority%%@*}"
@@ -310,6 +320,14 @@ services:
                 export PGPASSWORD
                 ;;
             esac
+            ;;
+          *)
+            # Steward DATABASE_URL accepts only libpq URI form. In particular,
+            # never pass a keyword/value conninfo string through unchanged: it
+            # can carry password=... directly on pg_dump's argv.
+            echo 'DATABASE_URL must use postgres:// or postgresql://' >&2
+            exit 1
+            ;;
         esac
         pg_query_password=
         pg_query_password_found=
