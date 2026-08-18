@@ -94,6 +94,11 @@ const PROVIDER_HOST_ALLOWLIST: Readonly<Record<string, string>> = {
   x: "api.x.com",
   slack: "slack.com",
 };
+const FIXED_PROVIDER_ROUTE_INJECTION = {
+  injectAs: "header",
+  injectKey: "authorization",
+  injectFormat: "Bearer {value}",
+} as const;
 const REGISTERED_ADAPTER_KEYS = new Set(["github", "x", "slack", "generic-http"]);
 const ENVIRONMENTS = new Set(["development", "staging", "production"]);
 const PRINCIPAL_TYPES = new Set(["human", "agent"]);
@@ -269,6 +274,22 @@ function operationIncluded(keys: string[], operationKey: string): boolean {
 function subset(candidate: string[], allowed: string[]): boolean {
   const set = new Set(allowed);
   return candidate.every((key) => set.has(key));
+}
+
+function hasExactFixedProviderRouteInjection(
+  route:
+    | {
+        injectAs?: string | null;
+        injectKey?: string | null;
+        injectFormat?: string | null;
+      }
+    | undefined,
+): boolean {
+  return (
+    route?.injectAs === FIXED_PROVIDER_ROUTE_INJECTION.injectAs &&
+    route.injectKey?.trim().toLowerCase() === FIXED_PROVIDER_ROUTE_INJECTION.injectKey &&
+    route.injectFormat === FIXED_PROVIDER_ROUTE_INJECTION.injectFormat
+  );
 }
 
 export class ProviderAuthorityStore {
@@ -880,6 +901,7 @@ export class ProviderAuthorityStore {
         route.hostPattern !== expectedHost ||
         !method ||
         !allowedMethods.includes(method) ||
+        (!genericDescriptor && !hasExactFixedProviderRouteInjection(route)) ||
         !pathAllowed
       ) {
         throw new ProviderAuthorityError(
@@ -989,6 +1011,7 @@ export class ProviderAuthorityStore {
           route.hostPattern !== expectedHost ||
           !method ||
           !allowedMethods.includes(method) ||
+          (!genericDescriptor && !hasExactFixedProviderRouteInjection(route)) ||
           !pathAllowed
         ) {
           throw new ProviderAuthorityError(

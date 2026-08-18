@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   agents,
+  auditEvents,
   closeDb,
   getDb,
   providerAccounts,
@@ -9,11 +10,13 @@ import {
   tenants,
   users,
   userTenants,
+  withTenantAuditedTransaction,
   workspaces,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { SecretVault } from "@stwd/vault";
 import { eq } from "drizzle-orm";
+import { writeAuditEvent } from "../services/audit";
 import { ProviderAuthorityStore } from "../services/provider-authority-store";
 
 setDefaultTimeout(120_000);
@@ -22,13 +25,23 @@ const TENANT = "tenant-slack-authority";
 const OWNER = "10000000-0000-4000-8000-000000000091";
 const WORKSPACE = "20000000-0000-4000-8000-000000000091";
 const AGENT = "agent-slack-authority";
+const AGENT_ALT = "agent-slack-authority-alt";
 const MASTER = "slack-authority-registration-test-master";
 
 describe("Slack provider authority registration", () => {
   const store = new ProviderAuthorityStore();
+  const failingCompletedAuditStore = new ProviderAuthorityStore((tenantId, fn) =>
+    withTenantAuditedTransaction(tenantId, async (tx, _appendRequiredAudit) =>
+      fn(tx, async () => {
+        throw new Error("synthetic completed audit failure");
+      }),
+    ),
+  );
   let secretId: string;
   let routeId: string;
   let wrongPathRouteId: string;
+  let wrongHeaderRouteId: string;
+  let wrongFormatRouteId: string;
 
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
@@ -44,6 +57,12 @@ describe("Slack provider authority registration", () => {
       tenantId: TENANT,
       name: "Slack authority agent",
       walletAddress: `0x${"9".repeat(40)}`,
+    });
+    await db.insert(agents).values({
+      id: AGENT_ALT,
+      tenantId: TENANT,
+      name: "Slack authority agent alt",
+      walletAddress: `0x${"8".repeat(40)}`,
     });
     await db.insert(workspaces).values({
       id: WORKSPACE,
@@ -76,6 +95,26 @@ describe("Slack provider authority registration", () => {
       injectFormat: "Bearer {value}",
     });
     wrongPathRouteId = wrongPathRoute.id;
+    const wrongHeaderRoute = await vault.createRoute(TENANT, secret.id, {
+      agentId: AGENT_ALT,
+      hostPattern: "slack.com",
+      pathPattern: "/api/chat.postMessage",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "x-api-key",
+      injectFormat: "Bearer {value}",
+    });
+    wrongHeaderRouteId = wrongHeaderRoute.id;
+    const wrongFormatRoute = await vault.createRoute(TENANT, secret.id, {
+      agentId: AGENT_ALT,
+      hostPattern: "slack.com",
+      pathPattern: "/api/chat.postMessage",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "Authorization",
+      injectFormat: "Token {value}",
+    });
+    wrongFormatRouteId = wrongFormatRoute.id;
   });
 
   afterAll(async () => {
@@ -94,7 +133,22 @@ describe("Slack provider authority registration", () => {
       idempotencyKey: `idem-${crypto.randomUUID()}`,
       expectedRevision,
       reason: "Slack authority regression",
-      audit: async () => {},
+      audit: async (event: {
+        action: string;
+        resourceType: string;
+        resourceId?: string;
+        metadata: Record<string, unknown>;
+      }) => {
+        await writeAuditEvent({
+          tenantId: TENANT,
+          actorType: "user",
+          actorId: OWNER,
+          action: event.action,
+          resourceType: event.resourceType,
+          resourceId: event.resourceId,
+          metadata: event.metadata,
+        });
+      },
     });
 
     const account = await store.createProviderAccount(context(1), {
@@ -123,18 +177,32 @@ describe("Slack provider authority registration", () => {
       }),
     ).rejects.toMatchObject({ code: "forbidden", status: 403 });
 
-    // The completed audit is part of the same transaction as the account CAS,
-    // operation insert, and route promotion. If audit signing fails, all three
-    // mutations must roll back together.
-    delete process.env.STEWARD_AUDIT_HMAC_KEY;
     await expect(
       store.registerOperation(context(1), account.id, {
         operationKey: "slack.chat.postMessage",
         riskClass: "write",
+        secretRouteId: wrongHeaderRouteId,
+      }),
+    ).rejects.toMatchObject({ code: "forbidden", status: 403 });
+
+    await expect(
+      store.registerOperation(context(1), account.id, {
+        operationKey: "slack.chat.postMessage",
+        riskClass: "write",
+        secretRouteId: wrongFormatRouteId,
+      }),
+    ).rejects.toMatchObject({ code: "forbidden", status: 403 });
+
+    // The completed audit is part of the same transaction as the account CAS,
+    // operation insert, and route promotion. If the final required audit write
+    // fails, all three mutations must roll back together.
+    await expect(
+      failingCompletedAuditStore.registerOperation(context(1), account.id, {
+        operationKey: "slack.chat.postMessage",
+        riskClass: "write",
         secretRouteId: routeId,
       }),
-    ).rejects.toThrow("STEWARD_AUDIT_HMAC_KEY is required");
-    process.env.STEWARD_AUDIT_HMAC_KEY = "a".repeat(64);
+    ).rejects.toThrow("synthetic completed audit failure");
     expect(await getDb().select().from(providerOperations)).toHaveLength(0);
     const [rolledBackAccount] = await getDb()
       .select({ revision: providerAccounts.revision })
@@ -146,6 +214,13 @@ describe("Slack provider authority registration", () => {
       .from(secretRoutes)
       .where(eq(secretRoutes.id, routeId));
     expect(rolledBackRoute).toEqual({ mode: "legacy", operationId: null });
+    const rollbackActions = await getDb()
+      .select({ action: auditEvents.action })
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, TENANT));
+    expect(rollbackActions.map((row) => row.action)).not.toContain(
+      "provider.operation.register.completed",
+    );
 
     const operation = await store.registerOperation(context(1), account.id, {
       operationKey: "slack.chat.postMessage",
@@ -162,5 +237,16 @@ describe("Slack provider authority registration", () => {
       .from(secretRoutes)
       .where(eq(secretRoutes.id, routeId));
     expect(route).toEqual({ mode: "governed_v2", operationId: operation.id });
+    const persistedActions = await getDb()
+      .select({ action: auditEvents.action })
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, TENANT));
+    expect(persistedActions.map((row) => row.action)).toEqual(
+      expect.arrayContaining([
+        "provider.account.create",
+        "provider.operation.register",
+        "provider.operation.register.completed",
+      ]),
+    );
   });
 });
