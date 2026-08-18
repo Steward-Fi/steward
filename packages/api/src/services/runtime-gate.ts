@@ -19,6 +19,11 @@
  *   - when the chain is shorter than the configured trust, the leftmost
  *     (earliest trusted) entry is the best available signal.
  *
+ * `X-Real-IP` is never consulted: it carries no chain semantics, so the hop
+ * count cannot be applied to it, and whenever XFF is absent/short a direct
+ * client can simply spoof it to rotate rate-limit identities. This matches the
+ * auth-route resolver (routes/auth.ts), which deliberately ignores it too.
+ *
  * The log is also capped (`STEWARD_RATE_LIMIT_MAX_KEYS`): when full it sweeps
  * expired entries inline and then fails CLOSED (429) rather than letting the
  * map grow without bound.
@@ -58,8 +63,6 @@ export function resolveClientIp(
         if (derived) return derived;
       }
     }
-    const realIp = headers.get("x-real-ip")?.trim();
-    if (realIp) return realIp;
   }
   return peerAddress ?? "unknown";
 }
