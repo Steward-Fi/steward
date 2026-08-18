@@ -11,6 +11,11 @@ const AGENT_ID = "test-token-watch-agent";
 const OTHER_TENANT_ID = "test-agent-token-expiry-other";
 const FOREIGN_AGENT_ID = "test-token-watch-foreign";
 const KID = "test-agent-token-kid";
+const originalDefaultJwksOptIn = process.env.STEWARD_ALLOW_DEFAULT_ELIZA_JWKS;
+
+// This suite deliberately mocks the built-in development JWKS endpoint. SEC-069
+// requires callers to opt into that trust anchor explicitly, including tests.
+process.env.STEWARD_ALLOW_DEFAULT_ELIZA_JWKS = "true";
 
 const auditEvents: Array<{ action: string; metadata?: Record<string, unknown>; actorId?: string }> =
   [];
@@ -111,6 +116,11 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (originalDefaultJwksOptIn === undefined) {
+    delete process.env.STEWARD_ALLOW_DEFAULT_ELIZA_JWKS;
+  } else {
+    process.env.STEWARD_ALLOW_DEFAULT_ELIZA_JWKS = originalDefaultJwksOptIn;
+  }
   await closeDb();
 });
 

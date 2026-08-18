@@ -25,6 +25,10 @@ process.env.STEWARD_PGLITE_MEMORY = "true";
 process.env.STEWARD_DB_MODE = "pglite";
 process.env.STEWARD_MASTER_PASSWORD = "evm-swap-master-password";
 process.env.STEWARD_AUDIT_HMAC_KEY = "evm-swap-audit-hmac-key-with-enough-entropy";
+const originalDefaultJwksOptIn = process.env.STEWARD_ALLOW_DEFAULT_ELIZA_JWKS;
+// This suite deliberately mocks the built-in development JWKS endpoint. SEC-069
+// requires callers to opt into that trust anchor explicitly, including tests.
+process.env.STEWARD_ALLOW_DEFAULT_ELIZA_JWKS = "true";
 
 setDefaultTimeout(30000);
 
@@ -293,6 +297,11 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (originalDefaultJwksOptIn === undefined) {
+    delete process.env.STEWARD_ALLOW_DEFAULT_ELIZA_JWKS;
+  } else {
+    process.env.STEWARD_ALLOW_DEFAULT_ELIZA_JWKS = originalDefaultJwksOptIn;
+  }
   mock.restore();
   await closeDb();
 });
