@@ -55,6 +55,24 @@ interface CacheEntry {
   fetchedAt: number;
 }
 
+/** Convert the exact decimal representation of a finite non-negative JS number
+ * into an integer ratio. This avoids routing through a scaled Number before
+ * BigInt conversion, which can overflow to Infinity or lose integer bits. */
+function decimalNumberRatio(value: number): [numerator: bigint, denominator: bigint] | null {
+  if (!Number.isFinite(value) || value < 0) return null;
+  const match = /^(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/i.exec(value.toString());
+  if (!match) return null;
+  const fraction = match[2] ?? "";
+  let numerator = BigInt(`${match[1]}${fraction}`);
+  const exponent = Number(match[3] ?? "0") - fraction.length;
+  if (!Number.isSafeInteger(exponent)) return null;
+  if (exponent >= 0) {
+    numerator *= 10n ** BigInt(exponent);
+    return [numerator, 1n];
+  }
+  return [numerator, 10n ** BigInt(-exponent)];
+}
+
 // ─── Implementation ───────────────────────────────────────────────────────────
 
 export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracle {
@@ -153,12 +171,15 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
 
       // Sort by liquidity (descending) and pick the best one with a valid priceUsd
       const sorted = [...data.pairs]
-        .filter((p) => p.chainId === expectedDexChainId && p.priceUsd && parseFloat(p.priceUsd) > 0)
+        .filter((p) => {
+          const parsed = Number(p.priceUsd);
+          return p.chainId === expectedDexChainId && Number.isFinite(parsed) && parsed > 0;
+        })
         .sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
 
       if (sorted.length === 0) return null;
 
-      return parseFloat(sorted[0].priceUsd!);
+      return Number(sorted[0].priceUsd);
     } catch (err) {
       console.warn(`[price-oracle] Failed to fetch price for ${tokenAddress}:`, err);
       return null;
@@ -258,16 +279,17 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
 
       if (!Number.isFinite(usdValue) || usdValue < 0) return null;
 
-      // Rational arithmetic (SEC-189): scale the USD input and price to
-      // micro-unit integers and divide in BigInt, so values beyond 2^53 stay
-      // exact. Rounds to nearest (half up) — an explicit rounding policy,
-      // replacing the old double-math `Math.floor(tokenAmount * 10**decimals)`
-      // which lost precision and always rounded down.
-      const usdMicros = BigInt(Math.round(usdValue * 1_000_000));
-      const priceMicros = BigInt(Math.round(price * 1_000_000));
-      if (priceMicros <= 0n) return null;
-      const numerator = usdMicros * 10n ** BigInt(decimals);
-      const wei = (numerator * 2n + priceMicros) / (priceMicros * 2n);
+      // Rational arithmetic (SEC-189): parse each Number's exact decimal /
+      // exponent representation directly into BigInt. Never multiply a Number
+      // before conversion: a large finite input can overflow that intermediate
+      // to Infinity, while an unsafe integer has already lost bits. Round the
+      // final exact ratio to nearest, half up.
+      const usdRatio = decimalNumberRatio(usdValue);
+      const priceRatio = decimalNumberRatio(price);
+      if (!usdRatio || !priceRatio || priceRatio[0] <= 0n) return null;
+      const numerator = usdRatio[0] * priceRatio[1] * 10n ** BigInt(decimals);
+      const denominator = usdRatio[1] * priceRatio[0];
+      const wei = (numerator * 2n + denominator) / (denominator * 2n);
       return wei.toString();
     },
   };
