@@ -1698,7 +1698,15 @@ export class Vault {
       if (venue) {
         throw missingSigningKeyError(request.agentId, chainFamilyToUse, venue);
       }
-      // Fallback: legacy encrypted_keys table (EVM only)
+      // Fallback: legacy encrypted_keys table (EVM only).
+      // Same backend-binding guard as the encryptedChainKeys branch above:
+      // an external-custody-bound authorization must never fall through to
+      // local key material — if the wallet flipped custody after the gateway
+      // precheck, signing with a stale legacy key would bypass the bound
+      // provider. Fail closed before reading any key material.
+      if (options.expectedBackend === "external-custody") {
+        throw new BackendBindingMismatchError("external-custody", "local-vault");
+      }
       const [legacyKey] = await db
         .select()
         .from(encryptedKeys)
