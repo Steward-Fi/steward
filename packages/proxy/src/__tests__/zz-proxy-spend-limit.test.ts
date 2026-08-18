@@ -688,7 +688,17 @@ describe("proxy spend-limit enforcement", () => {
       await loadProxy();
     __setCheckProxySpendLimitForTests(async () => spendResult);
 
-    for (const address of ["64:ff9b::a9fe:a9fe", "64:ff9b:1::a9fe:a9fe", "2002:7f00:1::"]) {
+    for (const address of [
+      "64:ff9b::a9fe:a9fe",
+      "64:ff9b:1::a9fe:a9fe",
+      // RFC 8215 local-use /48: the embedded IPv4 position is operator-defined,
+      // so a non-zero fourth word must not bypass the public-address boundary.
+      "64:ff9b:1:1::808:808",
+      // Exercise the final address in the reserved /48 so the guard cannot
+      // accidentally regress to a narrower implementation-defined subnet.
+      "64:ff9b:1:ffff:ffff:ffff:ffff:ffff",
+      "2002:7f00:1::",
+    ]) {
       audits.length = 0;
       __setResolveProxyHostForTests(async () => [{ address, family: 6 }]);
 

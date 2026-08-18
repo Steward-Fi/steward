@@ -902,11 +902,16 @@ function ipv4FromEmbeddedIPv6(address: string): string | null {
 
 function isUnsafeIPv6Address(address: string): boolean {
   const normalized = address.toLowerCase();
+  const words = expandIPv6Words(normalized);
+  // RFC 8215 reserves 64:ff9b:1::/48 for operator-local translation and
+  // explicitly does not fix the embedded IPv4 position. Treat the entire
+  // prefix as non-public instead of applying the /96 low-word extraction
+  // used for the well-known 64:ff9b::/96 prefix.
+  if (words?.[0] === 0x0064 && words[1] === 0xff9b && words[2] === 0x0001) return true;
   const mappedV4 = ipv4FromMappedIPv6(normalized);
   if (mappedV4) return isUnsafeIPv4Address(mappedV4);
   const embeddedV4 = ipv4FromEmbeddedIPv6(normalized);
   if (embeddedV4) return isUnsafeIPv4Address(embeddedV4);
-  const words = expandIPv6Words(normalized);
   if (!words || words.length !== 8) return true;
   if (words?.[0] === 0x2001 && (words[1] === 0 || words[1] === 0xdb8)) return true;
   const first = words[0];
