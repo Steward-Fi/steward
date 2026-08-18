@@ -19,7 +19,12 @@ import { join } from "node:path";
 import { StewardApiClient } from "./api";
 import { boolFlag, intFlag, parseArgs, parseJsonFlag, required, stringFlag } from "./args";
 import { runDoctor } from "./doctor";
-import { type OutputFormat, printResult } from "./format";
+import {
+  type OutputFormat,
+  printResult,
+  redactSensitiveText,
+  sanitizeTerminalText,
+} from "./format";
 import { runInit } from "./init";
 
 type CommandContext = {
@@ -42,6 +47,15 @@ const MAX_ARCHIVE_ENVELOPE_BYTES = 1024 * 1024;
 /** Write sensitive output without following symlinks and make an existing
  * permissive file owner-only before any secret bytes are written. */
 export function writeOwnerOnlyFile(path: string, contents: string): void {
+  const fd = openOwnerOnlyFile(path);
+  try {
+    writeOwnerOnlyFileDescriptor(fd, contents);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function openOwnerOnlyFile(path: string): number {
   const fd = openSync(
     path,
     fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
@@ -55,16 +69,23 @@ export function writeOwnerOnlyFile(path: string, contents: string): void {
     if (stat.nlink !== 1) {
       throw new Error(`Sensitive output must not be hard-linked: ${path}`);
     }
+    if (typeof process.geteuid === "function" && stat.uid !== process.geteuid()) {
+      throw new Error(`Sensitive output is not owned by the current user: ${path}`);
+    }
     // The open() mode is creation-only. Tighten reused output before writing.
     fchmodSync(fd, 0o600);
-    // Truncate only after the descriptor has passed the type/link checks and
-    // its permissions have been tightened. O_TRUNC would destroy the previous
-    // target before those validations ran.
-    ftruncateSync(fd, 0);
-    writeFileSync(fd, contents, { encoding: "utf8" });
-  } finally {
+    return fd;
+  } catch (error) {
     closeSync(fd);
+    throw error;
   }
+}
+
+function writeOwnerOnlyFileDescriptor(fd: number, contents: string): void {
+  // Truncate only after all inode checks and the permission change. O_TRUNC
+  // would destroy a special/hard-linked target before it could be rejected.
+  ftruncateSync(fd, 0);
+  writeFileSync(fd, contents, { encoding: "utf8" });
 }
 
 /** Read an untrusted archive file without following symlinks, blocking on
@@ -189,7 +210,8 @@ Usage:
   steward tenant create --id ID --name NAME [--api-key-file F] [--api-key-env VAR]
                         (key via stdin/--api-key-file/--api-key-env preferred; --api-key warns)
   steward agent create --name NAME [--id ID]
-  steward agent token --agent-id ID [--expires-in 24h] [--scopes agent,api:proxy]
+  steward agent token --agent-id ID --out token.json [--expires-in 24h] [--scopes agent,api:proxy]
+                      [--show-token]  # explicit unsafe terminal compatibility mode
   steward secret add --name NAME [--file F] [--description TEXT]   (value via stdin or --file preferred; --value warns)
   steward secret rotate --id ID [--file F]                          (value via stdin or --file preferred; --value warns)
   steward route add --secret-id ID --agent-id ID --host HOST --path PATH --method METHOD --inject-as header --inject-key KEY
@@ -263,14 +285,45 @@ async function agentCommand(action: string | undefined, ctx: CommandContext) {
   if (action === "list") return ctx.api.request("GET", "/agents");
   if (action === "token") {
     const agentId = required(stringFlag(ctx.flags, "agent-id"), "agent-id");
+    const out = stringFlag(ctx.flags, "out");
+    const showToken = boolFlag(ctx.flags, "show-token");
+    if (!out && !showToken) {
+      throw new Error(
+        "agent token output requires --out <owner-only-file>; use --show-token only when terminal/log capture is disabled",
+      );
+    }
+    // Open, validate, and permission the destination before minting, then keep
+    // this exact inode open across the request. That closes the path-swap race
+    // that could otherwise orphan a live token after a successful response.
+    const outFd = out ? openOwnerOnlyFile(out) : undefined;
     const scopes = stringFlag(ctx.flags, "scopes")
       ?.split(",")
       .map((scope) => scope.trim())
       .filter(Boolean);
-    return ctx.api.request("POST", `/agents/${encodeURIComponent(agentId)}/token`, {
-      expiresIn: stringFlag(ctx.flags, "expires-in"),
-      scopes,
-    });
+    try {
+      const result = await ctx.api.request<Record<string, unknown> & { token: string }>(
+        "POST",
+        `/agents/${encodeURIComponent(agentId)}/token`,
+        {
+          expiresIn: stringFlag(ctx.flags, "expires-in"),
+          scopes,
+        },
+      );
+      if (typeof result.token !== "string" || result.token.length === 0) {
+        throw new Error("Steward returned an invalid agent token response");
+      }
+      if (outFd !== undefined && out) {
+        writeOwnerOnlyFileDescriptor(outFd, `${JSON.stringify(result, null, 2)}\n`);
+        const { token: _token, ...receipt } = result;
+        return { ...receipt, token: "[REDACTED]", wrote: out };
+      }
+      console.error(
+        "[steward] WARNING: --show-token writes a bearer credential to stdout; disable terminal and CI log capture",
+      );
+      return result;
+    } finally {
+      if (outFd !== undefined) closeSync(outFd);
+    }
   }
   throw new Error("Supported agent commands: agent create|list|token");
 }
@@ -749,12 +802,30 @@ async function main(argv: string[]) {
   };
   const handler = handlers[command];
   if (!handler) throw new Error(`Unknown command '${command}'. Run steward help.`);
-  printResult(await handler(action, ctx), ctx.format);
+  printResult(
+    await handler(action, ctx),
+    ctx.format,
+    command === "agent" && action === "token" && boolFlag(parsed.flags, "show-token"),
+  );
 }
 
 if (import.meta.main) {
-  main(Bun.argv.slice(2)).catch((error) => {
-    console.error(`steward: ${(error as Error).message}`);
+  const cliArgv = Bun.argv.slice(2);
+  main(cliArgv).catch((error) => {
+    const parsed = parseArgs(cliArgv);
+    const sensitiveFlagNames = ["token", "tenant-key", "platform-key", "api-key", "value"];
+    const knownSecrets = [
+      ...sensitiveFlagNames.map((name) => stringFlag(parsed.flags, name)),
+      process.env.STEWARD_TOKEN,
+      process.env.STEWARD_API_TOKEN,
+      process.env.STEWARD_TENANT_KEY,
+      process.env.STEWARD_PLATFORM_KEY,
+    ];
+    const message = redactSensitiveText(
+      error instanceof Error ? error.message : String(error),
+      knownSecrets,
+    );
+    console.error(`steward: ${sanitizeTerminalText(message)}`);
     process.exit(1);
   });
 }

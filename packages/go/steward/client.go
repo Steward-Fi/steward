@@ -88,17 +88,6 @@ var sensitivePrefixes = []string{
 	"/accounts",
 }
 
-var stewardCredentialHeaders = []string{
-	"Authorization",
-	"X-Steward-Key",
-	"X-Steward-Platform-Key",
-	"X-Steward-App-Id",
-	"X-Steward-Signature",
-	"X-Steward-Signing-Key-Id",
-	"X-Steward-Request-Timestamp",
-	"Idempotency-Key",
-}
-
 func isLoopbackHost(hostname string) bool {
 	return hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1"
 }
@@ -143,17 +132,19 @@ func sameOrigin(a *url.URL, b *url.URL) bool {
 		effectivePort(a) == effectivePort(b)
 }
 
-// stripStewardCredentialsOnCrossHostRedirect drops credential and signing
-// headers when a redirect targets a different origin, so an open redirect or
-// hostile proxy cannot exfiltrate them (SEC-126).
-func stripStewardCredentialsOnCrossHostRedirect(req *http.Request, via []*http.Request) error {
+// stewardRedirectPolicy permits only same-origin, credential-free redirect
+// targets. Merely stripping Steward headers is insufficient: following an
+// attacker-selected cross-origin Location turns server-side SDK consumers into
+// an SSRF primitive. Embedded URL credentials are also never accepted.
+func stewardRedirectPolicy(req *http.Request, via []*http.Request) error {
 	if len(via) == 0 {
 		return nil
 	}
-	if !sameOrigin(req.URL, via[0].URL) {
-		for _, header := range stewardCredentialHeaders {
-			req.Header.Del(header)
-		}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if req.URL.User != nil || !sameOrigin(req.URL, via[0].URL) {
+		return fmt.Errorf("refusing cross-origin or credential-bearing redirect to %q", req.URL.Redacted())
 	}
 	return nil
 }
@@ -174,12 +165,22 @@ func NewClient(config Config) (*Client, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{
 			Timeout: 30 * time.Second,
-			// Never forward Steward credential headers to a different host on
-			// redirect: net/http strips only Authorization/Cookie and copies
-			// X-Steward-* headers to any host (SEC-126).
-			CheckRedirect: stripStewardCredentialsOnCrossHostRedirect,
 		}
 	}
+	// Copy caller-owned clients instead of mutating them, then compose their
+	// redirect policy behind Steward's mandatory origin boundary.
+	configuredRedirect := httpClient.CheckRedirect
+	httpClientCopy := *httpClient
+	httpClientCopy.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := stewardRedirectPolicy(req, via); err != nil {
+			return err
+		}
+		if configuredRedirect != nil {
+			return configuredRedirect(req, via)
+		}
+		return nil
+	}
+	httpClient = &httpClientCopy
 	now := config.Now
 	if now == nil {
 		now = time.Now
