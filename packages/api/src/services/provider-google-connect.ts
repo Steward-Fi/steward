@@ -400,7 +400,6 @@ export async function initiateGoogleConnect(
     code_challenge_method: "S256",
     access_type: "offline",
     prompt: "consent",
-    include_granted_scopes: "true",
   });
 
   const connectToken = base64url(Buffer.from(JSON.stringify({ state, verifier }), "utf8"));
@@ -419,6 +418,29 @@ function normalizeScopes(scopes?: string[]): string[] {
   if (!filtered.includes("openid")) filtered.push("openid");
   if (!filtered.includes("email")) filtered.push("email");
   return [...new Set(filtered)];
+}
+
+function validateGrantedScopes(
+  rawScope: string | undefined,
+  allowedScopes: readonly string[],
+  errorCode: "GOOGLE_TOKEN_EXCHANGE_FAILED" | "GOOGLE_REFRESH_FAILED",
+): string[] {
+  const granted = rawScope
+    ? [...new Set(rawScope.split(/\s+/).filter(Boolean))]
+    : [...allowedScopes];
+  const allowed = new Set(allowedScopes);
+  if (
+    granted.length === 0 ||
+    granted.length > GOOGLE_DEFAULT_SCOPES.length ||
+    granted.some((scope) => !allowed.has(scope))
+  ) {
+    throw new GoogleConnectError(
+      errorCode,
+      502,
+      "Google returned scopes outside the requested grant",
+    );
+  }
+  return granted;
 }
 
 function stateStoreKey(state: string): string {
@@ -560,6 +582,7 @@ export async function completeGoogleConnect(
   }
 
   let identity: GoogleIdentity;
+  let scopesGranted: string[];
   try {
     assertGoogleTokenResponse(tokenRes, "GOOGLE_TOKEN_EXCHANGE_FAILED");
     if (typeof tokenRes.refresh_token !== "string" || tokenRes.refresh_token.length === 0) {
@@ -569,15 +592,17 @@ export async function completeGoogleConnect(
         "Google authorization did not issue offline access; reconnect with consent required",
       );
     }
+    scopesGranted = validateGrantedScopes(
+      tokenRes.scope,
+      record.scopes,
+      "GOOGLE_TOKEN_EXCHANGE_FAILED",
+    );
     identity = await fetchGoogleIdentity(tokenRes.access_token);
   } catch (error) {
     await revokeIssuedTokensBestEffort(input.config, tokenRes);
     throw error;
   }
 
-  const scopesGranted = tokenRes.scope
-    ? tokenRes.scope.split(/\s+/).filter(Boolean)
-    : record.scopes;
   const obtainedAt = new Date();
   const expiresAt =
     typeof tokenRes.expires_in === "number"
@@ -1034,7 +1059,11 @@ export async function refreshGoogleProviderCredential(input: RefreshInput): Prom
       }
 
       // Spend the rotating refresh token exactly once (still holding the lock).
-      const tokenRes = await refreshGoogleUpstream(input.config, current.refreshToken);
+      const tokenRes = await refreshGoogleUpstream(
+        input.config,
+        current.refreshToken,
+        current.payload.scopesGranted,
+      );
 
       if (tokenRes.revoked) {
         const [degraded] = await tx
@@ -1232,8 +1261,12 @@ function parseGoogleCredential(value: string): GoogleCredentialPayload {
     !bounded(p.accessToken, 16_384) ||
     !(p.refreshToken === null || bounded(p.refreshToken, 16_384)) ||
     !Array.isArray(p.scopesGranted) ||
-    p.scopesGranted.length > 64 ||
-    !p.scopesGranted.every((s) => bounded(s, 512)) ||
+    p.scopesGranted.length === 0 ||
+    p.scopesGranted.length > GOOGLE_DEFAULT_SCOPES.length ||
+    !p.scopesGranted.every(
+      (s) => bounded(s, 512) && (GOOGLE_DEFAULT_SCOPES as readonly string[]).includes(s),
+    ) ||
+    new Set(p.scopesGranted).size !== p.scopesGranted.length ||
     !bounded(p.googleUserId, 512) ||
     !bounded(p.googleEmail, 512) ||
     !validIso(p.obtainedAt) ||
@@ -1261,6 +1294,7 @@ interface RefreshUpstreamResult {
 async function refreshGoogleUpstream(
   config: GoogleConnectConfig,
   refreshToken: string,
+  allowedScopes: readonly string[],
 ): Promise<RefreshUpstreamResult> {
   const body = new URLSearchParams({
     grant_type: "refresh_token",
@@ -1298,6 +1332,14 @@ async function refreshGoogleUpstream(
   }
   try {
     assertGoogleTokenResponse(parsed, "GOOGLE_REFRESH_FAILED");
+    const scopes = validateGrantedScopes(parsed.scope, allowedScopes, "GOOGLE_REFRESH_FAILED");
+    return {
+      revoked: false,
+      accessToken: parsed.access_token,
+      refreshToken: parsed.refresh_token,
+      scopes,
+      expiresIn: parsed.expires_in,
+    };
   } catch {
     // A 2xx refresh response means Google may already have rotated away the
     // stored refresh token. If its credential envelope is malformed, the old
@@ -1306,13 +1348,6 @@ async function refreshGoogleUpstream(
     await revokeIssuedTokensBestEffort(config, parsed);
     return { revoked: true, accessToken: "" };
   }
-  return {
-    revoked: false,
-    accessToken: parsed.access_token,
-    refreshToken: parsed.refresh_token,
-    scopes: parsed.scope ? parsed.scope.split(/\s+/).filter(Boolean) : undefined,
-    expiresIn: parsed.expires_in,
-  };
 }
 
 // ── Disconnect ────────────────────────────────────────────────────────────────

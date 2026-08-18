@@ -387,6 +387,19 @@ describe("connect authority gate", () => {
 
 // ── Connect happy path + idempotent reconnect ─────────────────────────────────
 describe("connect", () => {
+  test("authorize request never enables incremental previously granted scopes", async () => {
+    const initiated = await initiateGoogleConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store: new MemoryConnectStore(),
+    });
+    const authorizeUrl = new URL(initiated.authorizeUrl);
+    expect(authorizeUrl.searchParams.has("include_granted_scopes")).toBe(false);
+  });
+
   test("happy path: creates account, versioned credential, audit event", async () => {
     const store = new MemoryConnectStore();
     const { completed } = await connectHappy(store);
@@ -833,6 +846,45 @@ describe("connect state validation", () => {
     fake.restore();
   });
 
+  test("overbroad exchange scopes are rejected and the issued grant is revoked", async () => {
+    const store = new MemoryConnectStore();
+    const initiated = await initiateGoogleConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      scopes: ["openid", "email", "https://www.googleapis.com/auth/gmail.send"],
+      config: CONFIG,
+      store,
+    });
+    const fake = installFakeX({
+      exchangeToken: {
+        scope:
+          "openid email https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/drive",
+      },
+    });
+    await expect(
+      completeGoogleConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store,
+        vault,
+      }),
+    ).rejects.toMatchObject({ code: "GOOGLE_TOKEN_EXCHANGE_FAILED" });
+    expect(fake.counters.revoke).toBe(1);
+    expect(fake.counters.identity).toBe(0);
+    expect(
+      await getDb().select().from(providerAccounts).where(eq(providerAccounts.tenantId, TENANT)),
+    ).toHaveLength(0);
+    fake.restore();
+  });
+
   test("identity failure revokes the issued grant and consumes spent state", async () => {
     const store = new MemoryConnectStore();
     const initiated = await initiateGoogleConnect({
@@ -908,6 +960,43 @@ describe("refresh", () => {
             access_token: "",
             refresh_token: "refresh-attacker-controlled",
             expires_in: Number.POSITIVE_INFINITY,
+          },
+        },
+      ],
+    });
+    await expect(
+      refreshGoogleProviderCredential({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        accountId: completed.providerAccountId,
+        vault,
+        config: CONFIG,
+        force: true,
+      }),
+    ).rejects.toMatchObject({ code: "GOOGLE_REFRESH_REVOKED" });
+    expect(await decryptCredential(completed.providerAccountId)).toEqual(before);
+    const [account] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, completed.providerAccountId));
+    expect(account.status).toBe("revoked");
+    expect(fake.counters.revoke).toBe(1);
+    fake.restore();
+  });
+
+  test("refresh cannot broaden the current grant and durably revokes on violation", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore());
+    const before = await decryptCredential(completed.providerAccountId);
+    const fake = installFakeX({
+      refreshResponses: [
+        {
+          status: 200,
+          body: {
+            access_token: "access-overbroad",
+            refresh_token: "refresh-overbroad",
+            scope:
+              "openid email https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/drive",
+            expires_in: 7200,
           },
         },
       ],

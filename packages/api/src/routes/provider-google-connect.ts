@@ -2,9 +2,10 @@
  * Google Workspace provider-account OAuth connect routes (#203).
  *
  * Mounted under `/v2/provider-accounts/connect/google`. Every route requires a human
- * session (session-jwt) AND workspace admin/approver authority (or tenant
- * authority admin) for the target workspace. These are the PROVIDER-CONNECTION
- * routes (agent execution authority), distinct from user user login.
+ * session (session-jwt) with MFA verified within five minutes AND workspace
+ * admin/approver authority (or tenant authority admin) for the target workspace.
+ * These are the PROVIDER-CONNECTION routes (agent execution authority), distinct
+ * from user login.
  *
  *   POST   /v2/provider-accounts/connect/google/initiate     -> authorize URL + token
  *   POST   /v2/provider-accounts/connect/google/callback     -> exchange + store
@@ -41,6 +42,7 @@ import {
   refreshGoogleProviderCredential,
   resolveGoogleConnectConfig,
 } from "../services/provider-google-connect";
+import { hasRecentGoogleConnectMfa } from "../services/provider-google-connect-mfa";
 import { assertAllowedOAuthRedirectUri } from "./auth";
 
 type RouteContext = Context<{ Variables: AppVariables }>;
@@ -98,6 +100,9 @@ async function requireConnectAuthority(
   const userId = c.get("userId");
   if (c.get("authType") !== "session-jwt" || !userId) {
     return c.json<ApiResponse>({ ok: false, error: "human session required" }, 403);
+  }
+  if (!hasRecentGoogleConnectMfa(c.get("sessionMfaVerifiedAt"))) {
+    return c.json<ApiResponse>({ ok: false, error: "recent MFA verification required" }, 403);
   }
   if (!workspaceId) {
     return c.json<ApiResponse>({ ok: false, error: "resource not found" }, 404);
