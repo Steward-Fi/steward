@@ -264,8 +264,8 @@ fn cmd_share(share_file: &str, port: u16, auth_token: String) {
                 .iter()
                 .any(|h| h.field.equiv("authorization") && h.value.as_str() == expected);
             if !authorized {
-                let response =
-                    tiny_http::Response::from_string(err_json("unauthorized")).with_status_code(401);
+                let response = tiny_http::Response::from_string(err_json("unauthorized"))
+                    .with_status_code(401);
                 let _ = request.respond(response);
                 continue;
             }
@@ -304,14 +304,19 @@ fn handle(state: &mut ShareState, method: &str, url: &str, body: &str) -> (u16, 
             // parked round instead — its /sign will fail closed with
             // "unknown or reused nonce_id", and an evicted unused nonce is
             // never signed with, so FROST nonce-reuse safety is preserved.
+            // Never wrap the wire-id counter: wrapping could alias and
+            // overwrite a still-parked nonce, violating single-use safety.
+            let nonce_id = state.next_nonce_id;
+            let Some(next_nonce_id) = nonce_id.checked_add(1) else {
+                return (503, err_json("nonce id space exhausted"));
+            };
             if state.nonces.len() >= MAX_PENDING_NONCES {
                 state.nonces.pop_first();
             }
             let mut rng = OsRng;
             let (nonces, commitments) =
                 frost::round1::commit(state.key_package.signing_share(), &mut rng);
-            let nonce_id = state.next_nonce_id;
-            state.next_nonce_id += 1;
+            state.next_nonce_id = next_nonce_id;
             state.nonces.insert(nonce_id, nonces);
             let resp = CommitResponse {
                 identifier_hex: hex::encode(state.identifier.serialize()),
@@ -358,7 +363,10 @@ fn handle(state: &mut ShareState, method: &str, url: &str, body: &str) -> (u16, 
             let nonce_key = req
                 .nonce_id
                 .strip_prefix('n')
-                .and_then(|suffix| suffix.parse::<u64>().ok());
+                .and_then(|suffix| suffix.parse::<u64>().ok())
+                // Preserve the original exact wire identity. Numeric aliases
+                // such as n01 must not be able to consume the nonce named n1.
+                .filter(|key| req.nonce_id == format!("n{key}"));
             let nonces = match nonce_key.and_then(|key| state.nonces.remove(&key)) {
                 Some(n) => n,
                 None => return (400, err_json("unknown or reused nonce_id")),
@@ -515,13 +523,9 @@ mod tests {
 
     fn test_state() -> ShareState {
         let rng = OsRng;
-        let (shares, pubkey_package) = frost::keys::generate_with_dealer(
-            2,
-            2,
-            frost::keys::IdentifierList::Default,
-            rng,
-        )
-        .expect("trusted-dealer keygen");
+        let (shares, pubkey_package) =
+            frost::keys::generate_with_dealer(2, 2, frost::keys::IdentifierList::Default, rng)
+                .expect("trusted-dealer keygen");
         let (identifier, secret_share) = shares.into_iter().next().expect("one share");
         let key_package = KeyPackage::try_from(secret_share).expect("share -> key package");
         ShareState {
@@ -586,13 +590,12 @@ mod tests {
         assert_eq!(code, 200);
         assert_eq!(nonce_id, "n0");
 
-        for bad_id in ["n9", "garbage", ""] {
+        for bad_id in ["n9", "n00", "n01", "n+1", "garbage", ""] {
             let (code, payload) = handle(
                 &mut state,
                 "POST",
                 "/sign",
-                &serde_json::json!({ "signing_package_hex": "00", "nonce_id": bad_id })
-                    .to_string(),
+                &serde_json::json!({ "signing_package_hex": "00", "nonce_id": bad_id }).to_string(),
             );
             assert_eq!(code, 400, "nonce id {bad_id:?} must fail closed");
             assert!(payload.contains("unknown or reused nonce_id"));
@@ -619,5 +622,19 @@ mod tests {
         );
         assert_eq!(code, 400);
         assert!(payload.contains("unknown or reused nonce_id"));
+    }
+
+    #[test]
+    fn commit_fails_closed_before_nonce_counter_overflow() {
+        let mut state = test_state();
+        state.next_nonce_id = u64::MAX;
+        let before = state.nonces.len();
+
+        let (code, payload) = handle(&mut state, "POST", "/commit", "");
+
+        assert_eq!(code, 503);
+        assert!(payload.contains("nonce id space exhausted"));
+        assert_eq!(state.next_nonce_id, u64::MAX);
+        assert_eq!(state.nonces.len(), before);
     }
 }

@@ -516,11 +516,15 @@ export class BackendBindingMismatchError extends Error {
  * venue-less scope, matching the legacy/unscoped key rows it writes.
  */
 function custodyTransitionLockKey(
+  tenantId: string,
   agentId: string,
   chainFamily: string,
   venue: string | null,
 ): string {
-  return `vault-custody:${agentId}:${chainFamily}:${venue ?? ""}`;
+  // JSON array encoding preserves tuple boundaries even when operator-defined
+  // ids/venues contain colons. Include tenant identity explicitly rather than
+  // relying on the current globally-unique agent-id schema forever.
+  return JSON.stringify(["vault-custody-v1", tenantId, agentId, chainFamily, venue]);
 }
 
 /**
@@ -2106,7 +2110,7 @@ export class Vault {
       // where transactions already serialize.
       if (usesCustodyAdvisoryLock()) {
         await tx.execute(
-          sql`select pg_advisory_xact_lock(hashtext(${custodyTransitionLockKey(agentId, chainType, null)}))`,
+          sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(tenantId, agentId, chainType, null)}, 0))`,
         );
       }
 
@@ -2269,6 +2273,37 @@ export class Vault {
       }
     }
 
+    // Non-authoritative fast-fail checks keep a request that is already known
+    // to conflict with local custody from reaching the external provider. All
+    // checks are repeated under the transaction-scoped lock below because a
+    // concurrent writer can change them after this read.
+    const venue = request.venue ?? null;
+    const scope = and(
+      eq(encryptedChainKeys.agentId, request.agentId),
+      eq(encryptedChainKeys.chainFamily, request.chainFamily),
+      venue ? eq(encryptedChainKeys.venue, venue) : isNull(encryptedChainKeys.venue),
+    );
+    const [preexistingEncryptedKey] = await db
+      .select({ id: encryptedChainKeys.id })
+      .from(encryptedChainKeys)
+      .where(scope);
+    if (preexistingEncryptedKey) {
+      throw new Error("Cannot register external key handle over a server-managed signing key");
+    }
+    const [preexistingWallet] = await db
+      .select({ metadata: agentWallets.metadata })
+      .from(agentWallets)
+      .where(
+        and(
+          eq(agentWallets.agentId, request.agentId),
+          eq(agentWallets.chainFamily, request.chainFamily),
+          venue ? eq(agentWallets.venue, venue) : isNull(agentWallets.venue),
+        ),
+      );
+    if (preexistingWallet && !isExternalKeyWalletMetadata(preexistingWallet.metadata)) {
+      throw new Error("Cannot register external key handle over a server-managed wallet");
+    }
+
     // Provider registration is read-only public-handle validation (no custody
     // state changes) and stays OUTSIDE the lock: network I/O must never hold
     // a transaction-scoped advisory lock.
@@ -2277,7 +2312,6 @@ export class Vault {
       await this.externalKeyCustodyProvider.registerKeyHandle(request),
     );
     const metadata = toExternalKeyWalletMetadata(registration) as Record<string, unknown>;
-    const venue = request.venue ?? null;
     const now = new Date();
 
     await db.transaction(async (tx) => {
@@ -2291,7 +2325,7 @@ export class Vault {
       // where transactions already serialize.
       if (usesCustodyAdvisoryLock()) {
         await tx.execute(
-          sql`select pg_advisory_xact_lock(hashtext(${custodyTransitionLockKey(request.agentId, request.chainFamily, venue)}))`,
+          sql`select pg_advisory_xact_lock(hashtextextended(${custodyTransitionLockKey(request.tenantId, request.agentId, request.chainFamily, venue)}, 0))`,
         );
       }
 

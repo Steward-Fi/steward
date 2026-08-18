@@ -61,10 +61,12 @@ function solanaKeyHex(): string {
 class RaceTestProvider implements ExternalKeyCustodyProvider {
   id = "race-test-provider";
   readonly contractVersion = 1 as const;
+  registrationCalls = 0;
 
   async registerKeyHandle(
     request: ExternalKeyHandleImportRequest,
   ): Promise<ExternalKeyHandleRegistration> {
+    this.registrationCalls += 1;
     return {
       custody: "external",
       tenantId: request.tenantId,
@@ -289,6 +291,27 @@ describe("Vault.importKey custody hardening", () => {
     expect(chainKey != null && walletIsExternal).toBe(false);
   });
 
+  test("rejects known local-custody conflicts before contacting the external provider", async () => {
+    const provider = new RaceTestProvider();
+    vault = await freshVault(provider);
+    const agentId = "provider-precheck-agent";
+    await vault.createAgent(TENANT_ID, agentId, "Provider Precheck Agent");
+    // Exercise the multi-chain-key fast-fail specifically, not the older
+    // legacy-key precheck. The local encrypted_chain_keys/wallet rows remain.
+    await getDb().delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
+
+    await expect(
+      vault.importExternalKeyHandle({
+        tenantId: TENANT_ID,
+        agentId,
+        chainFamily: "evm",
+        address: "0x1111111111111111111111111111111111111111",
+        handle: { providerId: "race-hsm", keyId: "must-not-be-disclosed" },
+      }),
+    ).rejects.toThrow(/server-managed/);
+    expect(provider.registrationCalls).toBe(0);
+  });
+
   // Structural guard (PGlite serializes transactions, so the lock itself is
   // exercised but cannot interleave here): both custody transitions must take
   // the advisory lock INSIDE their transaction, before any custody check or
@@ -306,7 +329,8 @@ describe("Vault.importKey custody hardening", () => {
     expect(ikTx).toBeGreaterThanOrEqual(0);
     expect(ikLock).toBeGreaterThan(ikTx);
     expect(ikGuard).toBeGreaterThan(ikLock);
-    expect(importKeyBody).toContain("custodyTransitionLockKey(agentId, chainType, null)");
+    expect(importKeyBody).toContain("custodyTransitionLockKey(tenantId, agentId, chainType, null)");
+    expect(importKeyBody).toContain("hashtextextended");
 
     const importExternalBody = source.slice(
       source.indexOf("async importExternalKeyHandle("),
@@ -314,7 +338,7 @@ describe("Vault.importKey custody hardening", () => {
     );
     const ieTx = importExternalBody.indexOf("await db.transaction(");
     const ieLock = importExternalBody.indexOf("pg_advisory_xact_lock");
-    const ieGuard = importExternalBody.indexOf("over a server-managed signing key");
+    const ieGuard = importExternalBody.indexOf("over a server-managed signing key", ieLock);
     const ieWrite = importExternalBody.indexOf(".insert(agentWallets)");
     const ieProvider = importExternalBody.indexOf("registerKeyHandle(request)");
     expect(ieTx).toBeGreaterThanOrEqual(0);
@@ -323,5 +347,6 @@ describe("Vault.importKey custody hardening", () => {
     expect(ieWrite).toBeGreaterThan(ieLock);
     expect(ieProvider).toBeGreaterThanOrEqual(0);
     expect(ieProvider).toBeLessThan(ieTx);
+    expect(importExternalBody).toContain("hashtextextended");
   });
 });
