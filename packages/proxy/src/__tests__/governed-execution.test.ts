@@ -1583,17 +1583,22 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
   });
 
-  it("P36: a successful governed dispatch DRAINS the proxy response body so the in-flight slot is released (codex P2 slot leak)", async () => {
+  it("P36: an oversized credential response fails closed and releases the in-flight slot", async () => {
     const { intentId } = await seedExecutionReady();
     forwarderMode = "stream"; // 200 with an open, never-auto-closing body
     const res = await dispatchGovernedExecution(intentId, IDS.tenant);
-    expect(res.ok).toBe(true);
-    // The dispatcher drains the body fire-and-forget (never blocking the outcome
-    // path), so the cancel resolves on a subsequent microtask/tick. Poll briefly.
+    expect(res).toMatchObject({
+      ok: false,
+      code: "EXEC_DISPATCH_UPSTREAM_ERROR",
+      httpStatus: 502,
+    });
+    // Credential-bearing bodies above the independent inspection cap are
+    // cancelled before any bytes can reach the caller. Poll briefly because a
+    // custom stream's cancellation callback may resolve on a later microtask.
     for (let i = 0; i < 50 && !streamingBodyCancelled; i++) {
       await new Promise((r) => setTimeout(r, 10));
     }
-    // Without the drain the proxy slot (released only on body close/cancel) leaks.
+    // The response is rejected, but the concurrency slot must not leak.
     expect(streamingBodyCancelled).toBe(true);
   });
 
