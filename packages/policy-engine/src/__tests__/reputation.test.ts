@@ -285,7 +285,7 @@ describe("reputation-scaling malformed input (SEC-105)", () => {
     expect(result.reason).toContain("wei strings");
   });
 
-  it("treats a non-finite score as 0 instead of throwing inside BigInt(NaN)", () => {
+  it("fails closed on a non-finite score instead of throwing inside BigInt(NaN)", () => {
     const limit = computeScaledLimit(linearConfig as any, Number.NaN);
     expect(limit).toBe(BigInt("100000000000000000")); // base limit at score 0
     const rule = makeRule("reputation-scaling", linearConfig);
@@ -293,7 +293,8 @@ describe("reputation-scaling malformed input (SEC-105)", () => {
       reputationScore: Number.NaN,
       txValue: BigInt("100000000000000000"),
     });
-    expect(result.passed).toBe(true); // exactly at the score-0 base limit
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("Invalid reputation score");
   });
 
   it("supports fractional linear scores without throwing", () => {
@@ -302,6 +303,17 @@ describe("reputation-scaling malformed input (SEC-105)", () => {
       72.5,
     );
     expect(limit).toBe(725000n);
+  });
+
+  it("fails closed on non-finite and out-of-range scaling authority scores", () => {
+    for (const reputationScore of [Number.NaN, Number.POSITIVE_INFINITY, -1, 101]) {
+      const result = evaluateReputationScaling(makeRule("reputation-scaling", linearConfig), {
+        reputationScore,
+        txValue: 0n,
+      });
+      expect(result.passed).toBe(false);
+      expect(result.reason).toContain("Invalid reputation score");
+    }
   });
 
   it("rejects wei limits above uint256", () => {
