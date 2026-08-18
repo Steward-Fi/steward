@@ -146,25 +146,39 @@ async function appClientSecretSigningCandidates(request: Request): Promise<strin
   return valid ? [basic.password] : [];
 }
 
+// Tenant signing-key ids are server-generated UUIDs (tenant-config.ts uses
+// `randomUUID()`), so a non-UUID header value can be rejected without a query.
+const SIGNING_KEY_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 async function tenantRequestSigningKeyCandidates(request: Request): Promise<string[]> {
   const tenantId = request.headers.get("X-Steward-Tenant");
   if (!isValidTenantId(tenantId)) return [];
 
+  // SEC-010 follow-up (re-audit): this middleware is mounted globally and runs
+  // BEFORE route auth, so every step an unauthenticated request can trigger
+  // must be cheap. Tenant-key decryption costs a scrypt KDF per candidate —
+  // only pay it when the request NAMES a specific, well-formed signing-key id
+  // and let the (indexed) id lookup decide existence first. Requests without
+  // `X-Steward-Signing-Key-Id` never reach for tenant keys at all.
   const keyId = request.headers.get("X-Steward-Signing-Key-Id");
+  if (!keyId || !SIGNING_KEY_ID_PATTERN.test(keyId)) return [];
   const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
   if (!masterPassword) return [];
 
   const now = new Date();
-  const filters = [
-    eq(tenantRequestSigningKeys.tenantId, tenantId),
-    inArray(tenantRequestSigningKeys.status, ["active", "retiring"]),
-  ];
-  if (keyId) filters.push(eq(tenantRequestSigningKeys.id, keyId));
-
   const rows = await getDb()
     .select()
     .from(tenantRequestSigningKeys)
-    .where(and(...filters));
+    .where(
+      and(
+        eq(tenantRequestSigningKeys.tenantId, tenantId),
+        eq(tenantRequestSigningKeys.id, keyId),
+        inArray(tenantRequestSigningKeys.status, ["active", "retiring"]),
+      ),
+    );
+  // Defer KeyStore construction (itself a scrypt KDF) until a row exists, so
+  // an unknown key id costs only the cheap lookup above.
+  if (rows.length === 0) return [];
   const keyStore = new KeyStore(masterPassword, undefined, "secret-vault");
   return rows.flatMap((row) => {
     if (row.revokedAt) return [];
@@ -886,13 +900,20 @@ export function authorizationSignature(options?: AuthorizationSignatureOptions) 
     }
 
     const signingKeyId = c.req.header("X-Steward-Signing-Key-Id");
-    const tenantKeySecrets = await tenantRequestSigningKeyCandidates(c.req.raw);
+    // Only a request that NAMES a tenant signing key id pays for the tenant-key
+    // lookup (and, for a known id, the scrypt KDF + decrypt). Key-id-less
+    // requests fall through to the static/app-secret candidates and never
+    // trigger tenant-key work — closing the unauthenticated CPU-amplification
+    // DoS the global SEC-010 mount exposed.
+    const tenantKeySecrets = signingKeyId
+      ? await tenantRequestSigningKeyCandidates(c.req.raw)
+      : [];
     if (signingKeyId && tenantKeySecrets.length === 0) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid signing key id" }, 401);
     }
     const candidateSecrets = signingKeyId
       ? tenantKeySecrets
-      : [...secrets, ...tenantKeySecrets, ...(await appSecretResolver(c.req.raw))];
+      : [...secrets, ...(await appSecretResolver(c.req.raw))];
     if (candidateSecrets.length === 0) {
       return c.json<ApiResponse>({ ok: false, error: "Request signing is not configured" }, 500);
     }
