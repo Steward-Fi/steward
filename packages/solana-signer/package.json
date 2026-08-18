@@ -1,0 +1,22 @@
+{
+  "name": "@stwd/solana-signer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "dev": "tsc --watch",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.98.0",
+    "@stwd/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0"
+  },
+  "description": "Standard Solana signer shape ({publicKey, signTransaction, signAllTransactions}) backed by the Steward governed vault's /vault/:agentId/sign-solana route, plus a loopback HTTP bridge for out-of-process consumers (AgentNet remote-wallet hook). Sign-only: broadcast stays with the caller."
+}

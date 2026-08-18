@@ -38,6 +38,19 @@ function makeApp() {
       refreshToken: `refresh-${count}-${body.refreshToken}`,
     });
   });
+  app.post("/vault/:agentId/sign-solana", async (c) => {
+    count += 1;
+    const body = await c.req.json<{ transaction: string; broadcast: boolean; chainId: number }>();
+    return c.json({
+      ok: true,
+      data: {
+        txId: `solana-sign-${count}`,
+        signature: `signed-${body.transaction}`,
+        broadcast: body.broadcast,
+        chainId: body.chainId,
+      },
+    });
+  });
   app.get("/mutate", (c) => c.json({ ok: true, count }));
 
   return { app, getCount: () => count };
@@ -96,6 +109,29 @@ describe("idempotencyMiddleware", () => {
     expect(second.headers.get("Idempotency-Replayed")).toBe("true");
     expect(await first.json()).toEqual({ ok: true, count: 1, value: "first" });
     expect(await second.json()).toEqual({ ok: true, count: 1, value: "first" });
+    expect(getCount()).toBe(1);
+  });
+
+  it("replays a non-broadcast Solana signature for a stable lost-response retry", async () => {
+    const { app, getCount } = makeApp();
+    const init = {
+      method: "POST",
+      headers: {
+        Authorization: AUTHORIZATION,
+        "Content-Type": "application/json",
+        "Idempotency-Key": "steward-solana-sign-v1-deadbeef",
+      },
+      body: JSON.stringify({ transaction: "dHg=", broadcast: false, chainId: 101 }),
+    };
+
+    const first = await app.request("/vault/agent-1/sign-solana", init);
+    const retry = await app.request("/vault/agent-1/sign-solana", init);
+
+    expect(first.status).toBe(200);
+    expect(retry.status).toBe(200);
+    expect(first.headers.get("Idempotency-Replayed")).toBe("false");
+    expect(retry.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(await retry.json()).toEqual(await first.json());
     expect(getCount()).toBe(1);
   });
 

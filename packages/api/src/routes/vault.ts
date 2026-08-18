@@ -7944,6 +7944,12 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
   }
 
   const chainId = body.chainId ?? 101;
+  if (!isSolanaActionChain(chainId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "'chainId' must be 101 (Solana mainnet) or 102 (Solana devnet)" },
+      400,
+    );
+  }
 
   // ── Derive authoritative policy fields from the transaction bytes ───────────
   // This is the core spoof-resistance control: nothing the caller claims about

@@ -54,6 +54,8 @@ new StewardClient(config: StewardClientConfig)
 | `baseUrl` | `string` | ✅ | Base URL of your self-hosted Steward API (e.g. `http://localhost:3200`) |
 | `apiKey` | `string` | — | API key sent as `X-Steward-Key` header |
 | `tenantId` | `string` | — | Tenant ID sent as `X-Steward-Tenant` header |
+| `requestTimeoutMs` | `number` | — | End-to-end request deadline; defaults to 30,000 ms and is capped at 300,000 ms |
+| `maxResponseBodyBytes` | `number` | — | Decoded response-body limit; defaults to 8 MiB and is capped at 16 MiB |
 
 ---
 

@@ -99,6 +99,7 @@ jobs:
           - packages/plugin-wxmr
           - packages/plugin-trading
           - packages/plugin-capabilities
+          - packages/solana-signer
           - packages/trade-sessions
           # packages/signer-frost is intentionally absent: its test harness
           # builds the Rust sidecar via `cargo build --release` and this job
