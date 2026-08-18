@@ -280,7 +280,8 @@ describe("upstream credential leases", () => {
       withDatabaseDeadline,
       now: NOW,
     });
-    expect(observedDeadlines).toHaveLength(5);
+    expect(observedDeadlines).toHaveLength(6);
+    expect(observedDeadlines[1]).toBe(observedDeadlines[0] - 12_000);
     expect(observedDeadlines.every((deadline) => deadline > Date.now())).toBe(true);
   });
 
@@ -1443,6 +1444,54 @@ describe("upstream credential leases", () => {
         now: NOW,
       }),
     ).toEqual({ unknown: 0, revoked: 1, attention: 0 });
+  });
+
+  test("checkpoints the sealed token before audited delivery finalization can fail", async () => {
+    const issuer = new FakeIssuer();
+    issuer.failRevoke = true;
+    let sawCheckpointBeforeAudit = false;
+    let databasePhases = 0;
+    const denied = await issueUpstreamCredentialLease({
+      ...issueArgs(issuer, "idempotency-pre-finalization-checkpoint"),
+      withDatabaseDeadline: async (_deadlineAt, use) => {
+        const phase = ++databasePhases;
+        const result = await use(
+          harness.db,
+          auditedTransaction(async () => {
+            throw new Error("durable audit stalled then failed");
+          }),
+        );
+        if (phase === 2) {
+          const [checkpoint] = await harness.db
+            .select()
+            .from(upstreamCredentialLeases)
+            .where(
+              eq(
+                upstreamCredentialLeases.idempotencyKeyHash,
+                sha256("idempotency-pre-finalization-checkpoint"),
+              ),
+            );
+          sawCheckpointBeforeAudit =
+            checkpoint.status === "issuing" &&
+            checkpoint.tokenHash === sha256(TOKEN) &&
+            checkpoint.tokenCiphertext === Buffer.from(TOKEN).toString("base64");
+        }
+        return result;
+      },
+    });
+    expect(denied).toMatchObject({ ok: false, code: "lease_finalization_failed" });
+    expect(sawCheckpointBeforeAudit).toBe(true);
+    const [recoverable] = await harness.db
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(
+        eq(
+          upstreamCredentialLeases.idempotencyKeyHash,
+          sha256("idempotency-pre-finalization-checkpoint"),
+        ),
+      );
+    expect(recoverable.tokenHash).toBe(sha256(TOKEN));
+    expect(recoverable.tokenCiphertext).toBe(Buffer.from(TOKEN).toString("base64"));
   });
 
   test("stale issuance is truthfully escalated because provider outcome is unknowable", async () => {

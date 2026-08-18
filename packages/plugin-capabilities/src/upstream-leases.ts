@@ -150,6 +150,18 @@ async function bindLeaseDeadline<
   );
 }
 
+async function withLeaseDatabasePhase<T>(
+  input: LeaseDeadlineInput & { db: Db; auditedTransaction: LeaseAuditedTransaction },
+  deadlineAt: number,
+  use: (db: Db, auditedTransaction: LeaseAuditedTransaction) => Promise<T>,
+): Promise<T> {
+  requireLeaseBudget(deadlineAt, MIN_DATABASE_PHASE_MS);
+  if (input.withDatabaseDeadline) {
+    return input.withDatabaseDeadline(deadlineAt, use);
+  }
+  return use(input.db, input.auditedTransaction);
+}
+
 type Db = any;
 
 let beforeRecoveryClaimForTests: ((leaseId: string) => Promise<void>) | undefined;
@@ -1275,6 +1287,72 @@ export async function issueUpstreamCredentialLease(
       "credential escrow failed",
       revoked ? "failed" : "needs_attention",
     );
+    return {
+      ok: false,
+      status: 503,
+      code: "lease_finalization_failed",
+      error: "credential delivery was aborted",
+    };
+  }
+
+  // Once the provider has minted a token, persist its exact encrypted recovery
+  // handle before any authority/audit finalization that can block. Give this
+  // checkpoint an earlier hard deadline so failure still leaves the full
+  // provider-revocation reserve. The row remains `issuing`; interrupted-lease
+  // recovery owns exact-token cleanup until the audited delivery transition
+  // commits.
+  try {
+    const checkpointDeadlineAt =
+      (input.deadlineAt ?? Date.now() + UPSTREAM_LEASE_LIFECYCLE_DEADLINE_MS) -
+      MIN_PROVIDER_AND_FINALIZE_MS;
+    await withLeaseDatabasePhase(input, checkpointDeadlineAt, async (checkpointDb) => {
+      const checkpointed = await checkpointDb
+        .update(upstreamCredentialLeases)
+        .set({
+          tokenHash: sha256(issued.token),
+          tokenCiphertext: sealed.ciphertext,
+          tokenIv: sealed.iv,
+          tokenAuthTag: sealed.tag,
+          tokenSalt: sealed.salt,
+          expiresAt: Number.isFinite(issued.expiresAt.getTime()) ? issued.expiresAt : null,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(upstreamCredentialLeases.id, claim.id),
+            eq(upstreamCredentialLeases.tenantId, input.tenantId),
+            eq(upstreamCredentialLeases.status, "issuing"),
+          ),
+        )
+        .returning({ id: upstreamCredentialLeases.id });
+      if (checkpointed.length !== 1) throw new Error("lease issuance claim was lost");
+    });
+  } catch {
+    const revoked = await input.issuer.revoke(issued.token).then(
+      () => true,
+      () => false,
+    );
+    if (revoked) {
+      await recordFailure(
+        input.auditedTransaction,
+        claim.id,
+        input.tenantId,
+        "credential recovery checkpoint failed after provider issuance",
+        "failed",
+      ).catch(() => undefined);
+    } else {
+      await recordRecoverableSealedFailure({
+        db: input.db,
+        auditedTransaction: input.auditedTransaction,
+        leaseId: claim.id,
+        tenantId: input.tenantId,
+        token: issued.token,
+        sealed,
+        expiresAt: Number.isFinite(issued.expiresAt.getTime()) ? issued.expiresAt : null,
+        error: "credential recovery checkpoint and provider revocation outcomes unknown",
+        now: new Date(),
+      }).catch(() => undefined);
+    }
     return {
       ok: false,
       status: 503,
