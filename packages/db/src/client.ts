@@ -24,6 +24,7 @@
  *   - neon-http  : creates one fetch-based client and reuses it
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { drizzle as drizzleNeon, type NeonHttpDatabase } from "drizzle-orm/neon-http";
 import { drizzle as drizzleNeonWebSocket, type NeonDatabase } from "drizzle-orm/neon-serverless";
 import { drizzle as drizzlePostgres, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
@@ -473,6 +474,41 @@ export function setPGLiteOverride(
   pgliteOverride = { db, close };
 }
 
+// ─── Request-scoped database propagation ────────────────────────────────────
+
+type RequestDatabase = ReturnType<typeof createDb>["db"];
+interface RequestDatabaseContext {
+  db: RequestDatabase;
+  active: boolean;
+}
+const requestDatabaseStorage = new AsyncLocalStorage<RequestDatabaseContext>();
+
+/**
+ * Bind one explicitly owned database handle to the current async request.
+ *
+ * Existing services resolve their database through getDb(). Keeping the
+ * request handle in AsyncLocalStorage lets a Worker use its own WebSocket pool
+ * without turning that pool into isolate-global mutable state. Nested bindings
+ * are rejected because silently replacing an outer tenant transaction would
+ * break SET LOCAL's connection and lifetime guarantees.
+ */
+export async function withRequestDatabase<T>(
+  db: RequestDatabase,
+  callback: () => Promise<T>,
+): Promise<T> {
+  if (requestDatabaseStorage.getStore()) {
+    throw new Error("REQUEST_DATABASE_CONTEXT_NESTED");
+  }
+  const context: RequestDatabaseContext = { db, active: true };
+  try {
+    return await requestDatabaseStorage.run(context, callback);
+  } finally {
+    // Detached tasks inherit AsyncLocalStorage. Revoke their capability before
+    // the owning Worker closes its socket so late getDb() calls fail before I/O.
+    context.active = false;
+  }
+}
+
 // ─── Global singleton ─────────────────────────────────────────────────────────
 
 type GlobalDbHandle =
@@ -505,6 +541,11 @@ function buildGlobalDb(): GlobalDbHandle {
 }
 
 export function getDb() {
+  const requestContext = requestDatabaseStorage.getStore();
+  if (requestContext) {
+    if (!requestContext.active) throw new Error("REQUEST_DATABASE_CONTEXT_CLOSED");
+    return requestContext.db;
+  }
   if (pgliteOverride) return pgliteOverride.db as ReturnType<typeof createDb>["db"];
   globalDb ??= buildGlobalDb();
   // Both postgres-js and neon-http drivers expose the same Drizzle surface
@@ -525,6 +566,13 @@ export function getDb() {
  * template, which is portable across both.
  */
 export function getSql() {
+  const requestContext = requestDatabaseStorage.getStore();
+  if (requestContext) {
+    if (!requestContext.active) throw new Error("REQUEST_DATABASE_CONTEXT_CLOSED");
+    throw new Error(
+      "REQUEST_DATABASE_RAW_SQL_UNAVAILABLE: use the request-scoped Drizzle database",
+    );
+  }
   if (pgliteOverride) {
     throw new Error("getSql() is not available in PGLite mode — use getDb() instead");
   }

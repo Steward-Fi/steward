@@ -39,11 +39,21 @@
  *                                   configured Redis is unreachable
  */
 
+import {
+  createDbForRequest,
+  createNeonTransactionDbForRequest,
+  getDb,
+  type NeonTransactionDbHandle,
+  withRequestDatabase,
+} from "@stwd/db";
 import { initRedis } from "./middleware/redis";
 
 export interface Env {
   DATABASE_URL: string;
   DATABASE_DRIVER?: string;
+  NODE_ENV?: string;
+  STEWARD_ALLOW_INSECURE_DB?: string;
+  STEWARD_ALLOW_UNVERIFIED_DB_TLS?: string;
   REDIS_DRIVER?: string;
   KV_REST_API_URL?: string;
   KV_REST_API_TOKEN?: string;
@@ -73,6 +83,63 @@ export interface Env {
   STEWARD_TRUST_CLOUDFLARE?: string;
   STEWARD_AUTH_RATE_LIMIT_OUTAGE_VALVE_MAX?: string;
   [key: string]: unknown;
+}
+
+type WorkerDatabaseHandleFactory = (env: {
+  DATABASE_URL?: string;
+  DATABASE_DRIVER?: string;
+  NODE_ENV?: string;
+  STEWARD_ALLOW_INSECURE_DB?: string;
+  STEWARD_ALLOW_UNVERIFIED_DB_TLS?: string;
+}) => NeonTransactionDbHandle;
+type WorkerHttpDatabaseFactory = (env: {
+  DATABASE_URL?: string;
+  DATABASE_DRIVER?: string;
+}) => ReturnType<typeof getDb>;
+
+/**
+ * Run one Worker unit of work with its request-owned database handle.
+ *
+ * neon-http remains the shipped default and needs no persistent cleanup. The
+ * transaction-capable WebSocket driver is explicit: its handle is bound to the
+ * async request so every legacy getDb() call resolves the same Drizzle object,
+ * then close() is awaited on success and failure. No handle is cached on the
+ * isolate.
+ */
+export async function withWorkerRequestDatabase<T>(
+  env: Env,
+  callback: () => Promise<T>,
+  options?: {
+    createHandle?: WorkerDatabaseHandleFactory;
+    createHttpDb?: WorkerHttpDatabaseFactory;
+  },
+): Promise<T> {
+  const driver = env.DATABASE_DRIVER?.trim().toLowerCase();
+  if (driver !== "neon-http" && driver !== "neon-websocket") {
+    throw new Error(
+      "WORKER_DATABASE_DRIVER_UNSUPPORTED: DATABASE_DRIVER must be neon-http or neon-websocket",
+    );
+  }
+  if (driver === "neon-http") {
+    const db = (options?.createHttpDb ?? createDbForRequest)(env);
+    return withRequestDatabase(db as unknown as ReturnType<typeof getDb>, callback);
+  }
+  const handle = (options?.createHandle ?? createNeonTransactionDbForRequest)(env);
+  const noCallbackError = Symbol("no-callback-error");
+  let callbackError: unknown | typeof noCallbackError = noCallbackError;
+  let result: T | undefined;
+  try {
+    result = await withRequestDatabase(handle.db as unknown as ReturnType<typeof getDb>, callback);
+  } catch (error) {
+    callbackError = error;
+  }
+  try {
+    await handle.close();
+  } catch {
+    if (callbackError === noCallbackError) throw new Error("WORKER_DATABASE_CLOSE_FAILED");
+  }
+  if (callbackError !== noCallbackError) throw callbackError;
+  return result as T;
 }
 
 type WorkerLeaseSweepResult = {
@@ -213,10 +280,13 @@ async function ensureWorkerInit(env: Env): Promise<void> {
     const dbUrl = (env.DATABASE_URL || "").toLowerCase();
     // Best-effort boot telemetry (a one-time observability breadcrumb of the
     // TLS/HSTS posture at cold start) — NOT a security mutation or a tamper-
-    // evident control event, and there is no client action to deny. So this
-    // intentionally stays fire-and-forget: a write failure here must not abort
-    // worker init. Security/compliance events use awaited writeAuditEvent.
-    trackAuditEvent({
+    // evident control event, and there is no client action to deny. A write
+    // failure here must not abort worker init. Security/compliance events use
+    // awaited writeAuditEvent.
+    // Await even this best-effort breadcrumb before releasing a request-owned
+    // WebSocket handle. trackAuditEvent absorbs/logs its own failure, so boot
+    // still proceeds without leaving background DB work on a closed handle.
+    await trackAuditEvent({
       tenantId: "system",
       actorType: "system",
       action: "system.tls.config",
@@ -271,9 +341,11 @@ export default {
     // request (not once per isolate) so rotated bindings take effect promptly;
     // the once-per-isolate init below only bootstraps stores/imports.
     hydrateProcessEnv(env);
-    await ensureWorkerInit(env);
-    const app = await getComposedApp();
-    return app.fetch(request, env, ctx as never);
+    return withWorkerRequestDatabase(env, async () => {
+      await ensureWorkerInit(env);
+      const app = await getComposedApp();
+      return app.fetch(request, env, ctx as never);
+    });
   },
   async scheduled(
     _controller: unknown,
@@ -282,9 +354,9 @@ export default {
   ) {
     ctx.waitUntil(
       Promise.all([
-        runWorkerUpstreamCredentialLeaseSweep(env),
-        runWorkerGoogleCredentialLifecycleSweep(env),
-        runWorkerXCredentialLifecycleSweep(env),
+        withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
+        withWorkerRequestDatabase(env, () => runWorkerGoogleCredentialLifecycleSweep(env)),
+        withWorkerRequestDatabase(env, () => runWorkerXCredentialLifecycleSweep(env)),
       ]),
     );
   },

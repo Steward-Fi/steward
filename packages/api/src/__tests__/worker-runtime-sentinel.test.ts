@@ -1,9 +1,13 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { getDb } from "@stwd/db";
 import {
   hydrateProcessEnv,
   runWorkerGoogleCredentialLifecycleSweep,
   runWorkerUpstreamCredentialLeaseSweep,
   runWorkerXCredentialLifecycleSweep,
+  withWorkerRequestDatabase,
 } from "../worker";
 
 test("Worker hydration cannot be overridden by a STEWARD_RUNTIME binding", () => {
@@ -18,6 +22,121 @@ test("Worker hydration cannot be overridden by a STEWARD_RUNTIME binding", () =>
     if (previous === undefined) delete process.env.STEWARD_RUNTIME;
     else process.env.STEWARD_RUNTIME = previous;
   }
+});
+
+test("Worker request database is exact, request-owned, and always closed", async () => {
+  const requestDb = { marker: "worker-request" } as unknown as ReturnType<typeof getDb>;
+  let closes = 0;
+  const createHandle = () => ({
+    driver: "neon-websocket" as const,
+    db: requestDb as never,
+    async close() {
+      closes += 1;
+    },
+  });
+  const env = {
+    DATABASE_URL: "postgresql://worker.invalid/steward",
+    DATABASE_DRIVER: "neon-websocket",
+  };
+
+  expect(
+    await withWorkerRequestDatabase(
+      env,
+      async () => {
+        await Promise.resolve();
+        expect(getDb()).toBe(requestDb);
+        return "ok";
+      },
+      { createHandle },
+    ),
+  ).toBe("ok");
+  expect(closes).toBe(1);
+
+  await expect(
+    withWorkerRequestDatabase(
+      env,
+      async () => {
+        expect(getDb()).toBe(requestDb);
+        throw new Error("handler failed");
+      },
+      { createHandle },
+    ),
+  ).rejects.toThrow("handler failed");
+  expect(closes).toBe(2);
+});
+
+test("Worker HTTP mode binds an exact request database without a persistent handle", async () => {
+  let created = 0;
+  const requestDb = { marker: "worker-http-request" } as unknown as ReturnType<typeof getDb>;
+  const result = await withWorkerRequestDatabase(
+    {
+      DATABASE_URL: "postgresql://worker.invalid/steward",
+      DATABASE_DRIVER: "neon-http",
+    },
+    async () => {
+      await Promise.resolve();
+      expect(getDb()).toBe(requestDb);
+      return "http";
+    },
+    {
+      createHttpDb: () => requestDb,
+      createHandle: () => {
+        created += 1;
+        throw new Error("must not create socket handle");
+      },
+    },
+  );
+  expect(result).toBe("http");
+  expect(created).toBe(0);
+});
+
+test("Worker database selection rejects missing or unsupported drivers", async () => {
+  for (const DATABASE_DRIVER of [undefined, "", "postgres-js", "bogus"]) {
+    await expect(
+      withWorkerRequestDatabase(
+        { DATABASE_URL: "postgresql://worker.invalid/steward", DATABASE_DRIVER },
+        async () => "unreachable",
+      ),
+    ).rejects.toThrow("WORKER_DATABASE_DRIVER_UNSUPPORTED");
+  }
+});
+
+test("every autonomous recovery sweep owns its own request database", () => {
+  const source = readFileSync(join(import.meta.dir, "../worker.ts"), "utf8");
+  for (const sweep of [
+    "runWorkerUpstreamCredentialLeaseSweep",
+    "runWorkerGoogleCredentialLifecycleSweep",
+    "runWorkerXCredentialLifecycleSweep",
+  ]) {
+    expect(source).toContain(`withWorkerRequestDatabase(env, () => ${sweep}(env))`);
+  }
+});
+
+test("Worker socket cleanup diagnostics are fixed and cannot replace handler errors", async () => {
+  const requestDb = { marker: "worker-request" } as unknown as ReturnType<typeof getDb>;
+  const createHandle = () => ({
+    driver: "neon-websocket" as const,
+    db: requestDb as never,
+    async close() {
+      throw new Error("socket secret canary");
+    },
+  });
+  const env = {
+    DATABASE_URL: "postgresql://worker.invalid/steward",
+    DATABASE_DRIVER: "neon-websocket",
+  };
+  await expect(withWorkerRequestDatabase(env, async () => "ok", { createHandle })).rejects.toThrow(
+    "WORKER_DATABASE_CLOSE_FAILED",
+  );
+  await expect(
+    withWorkerRequestDatabase(
+      env,
+      async () => {
+        throw new Error("handler failed");
+      },
+      { createHandle },
+    ),
+  ).rejects.toThrow("handler failed");
 });
 
 test("Worker scheduled recovery processes pre-existing leases when capabilities are enabled", async () => {

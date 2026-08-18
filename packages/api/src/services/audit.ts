@@ -217,8 +217,8 @@ function rowsFromExecute<T>(result: unknown): T[] {
  * failure (deny / roll back / surface), so a security event cannot occur without
  * a durable record.
  */
-export function trackAuditEvent(ev: AuditEventInput): void {
-  writeAuditEvent(ev).catch((err) => {
+export function trackAuditEvent(ev: AuditEventInput): Promise<void> {
+  return writeAuditEvent(ev).catch((err) => {
     console.error(
       `[audit] Failed to write event ${ev.action} for tenant ${ev.tenantId}`,
       redactedThrownDiagnostics(err),
