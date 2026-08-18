@@ -113,9 +113,11 @@ class InMemoryRevocationStore implements RevocationStore {
   ): Promise<number> {
     const expiresAtMs = toMillis(expiresAt);
     const existing = this.agentIssuedBefore.get(agentId);
-    if (!existing || issuedBefore > existing.issuedBefore) {
-      this.agentIssuedBefore.set(agentId, { issuedBefore, expiresAtMs });
-    }
+    const active = existing && existing.expiresAtMs > Date.now() ? existing : null;
+    this.agentIssuedBefore.set(agentId, {
+      issuedBefore: Math.max(active?.issuedBefore ?? -1, issuedBefore),
+      expiresAtMs: Math.max(active?.expiresAtMs ?? -1, expiresAtMs),
+    });
     return issuedBefore;
   }
 
@@ -136,9 +138,11 @@ class InMemoryRevocationStore implements RevocationStore {
   ): Promise<number> {
     const expiresAtMs = toMillis(expiresAt);
     const existing = this.userIssuedBefore.get(userId);
-    if (!existing || issuedBefore > existing.issuedBefore) {
-      this.userIssuedBefore.set(userId, { issuedBefore, expiresAtMs });
-    }
+    const active = existing && existing.expiresAtMs > Date.now() ? existing : null;
+    this.userIssuedBefore.set(userId, {
+      issuedBefore: Math.max(active?.issuedBefore ?? -1, issuedBefore),
+      expiresAtMs: Math.max(active?.expiresAtMs ?? -1, expiresAtMs),
+    });
     return issuedBefore;
   }
 
