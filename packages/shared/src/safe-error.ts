@@ -38,14 +38,22 @@ export interface RedactedThrownDiagnostics {
   errorCode: string | null;
 }
 
-const SAFE_ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const SAFE_ERROR_CODES = new Set([
+  "ABORT_ERR",
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
 
 /**
  * Return bounded, non-secret diagnostics for logs at credential boundaries.
  * Both `instanceof` and property access are guarded because hostile proxies can
  * throw from either operation. Arbitrary error names and codes are never
- * returned: names can contain secrets, while codes are limited to the usual
- * uppercase machine-code grammar.
+ * returned: names and arbitrary machine-looking codes can contain secrets, so
+ * codes are limited to a fixed allowlist of transport failures.
  */
 export function redactedThrownDiagnostics(value: unknown): RedactedThrownDiagnostics {
   let errorClass: string = typeof value;
@@ -63,7 +71,7 @@ export function redactedThrownDiagnostics(value: unknown): RedactedThrownDiagnos
       "code" in value
     ) {
       const candidate = (value as { code?: unknown }).code;
-      if (typeof candidate === "string" && SAFE_ERROR_CODE.test(candidate)) {
+      if (typeof candidate === "string" && SAFE_ERROR_CODES.has(candidate)) {
         errorCode = candidate;
       }
     }

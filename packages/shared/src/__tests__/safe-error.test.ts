@@ -139,6 +139,11 @@ describe("redactedThrownDiagnostics", () => {
         Object.assign(new Error("message-canary"), { code: "SECRET code canary" }),
       ),
     ).toEqual({ errorClass: "Error", errorCode: null });
+    expect(
+      redactedThrownDiagnostics(
+        Object.assign(new Error("message-canary"), { code: "SECRET_TOKEN_CANARY" }),
+      ),
+    ).toEqual({ errorClass: "Error", errorCode: null });
   });
 
   it("never throws when instanceof or code access is hostile", () => {

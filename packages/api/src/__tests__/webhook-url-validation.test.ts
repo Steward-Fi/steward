@@ -167,6 +167,18 @@ describe("validateWebhookUrlResolved (SEC-017)", () => {
     expect(result).toBe("url host must resolve to a public address");
   });
 
+  it("fails closed on malformed or family-confused DNS answers", async () => {
+    for (const answer of [
+      { address: "not-an-ip", family: 4 },
+      { address: "8.8.8.8", family: 6 },
+      { address: "2606:4700:4700::1111", family: 4 },
+    ]) {
+      expect(
+        await validateWebhookUrlResolved("https://hooks.example.com/hook", async () => [answer]),
+      ).toBe("url host must resolve to a public address");
+    }
+  });
+
   it("fails closed when the hostname cannot be resolved", async () => {
     const result = await validateWebhookUrlResolved("https://gone.example.com/hook", async () => {
       throw new Error("ENOTFOUND");
