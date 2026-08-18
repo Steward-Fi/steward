@@ -155,10 +155,14 @@ function isSlackBotTokenCredential(value: string): boolean {
 }
 
 export function extractProviderCredentialForHost(host: string, credential: string): string {
-  const parsed = safeJsonParseString<Record<string, unknown>>(credential);
+  const parsed = safeJsonParseString<unknown>(credential);
+  const parsedEnvelope =
+    typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
   const googleHost = host === "gmail.googleapis.com" || host === "www.googleapis.com";
   const xHost = host === "api.x.com";
-  const schemaVersion = parsed?.schemaVersion;
+  const schemaVersion = parsedEnvelope?.schemaVersion;
   if (schemaVersion === "steward.provider-google.credential.v1") {
     // Bind the credential type to its intended provider. Merely transforming the
     // envelope when the destination happens to be Google would let a misbound
@@ -172,21 +176,22 @@ export function extractProviderCredentialForHost(host: string, credential: strin
     if (googleHost) throw new Error("invalid Google OAuth credential envelope");
     // A parseable object at the X boundary is an envelope, not a legacy raw
     // token. Unknown/malformed envelopes must never be formatted into a header.
-    if (xHost && parsed !== null) throw new Error("invalid X OAuth credential envelope");
+    if (xHost && typeof parsed === "object" && parsed !== null)
+      throw new Error("invalid X OAuth credential envelope");
     return credential;
   }
-  if (!parsed) throw new Error("invalid provider OAuth credential envelope");
+  if (!parsedEnvelope) throw new Error("invalid provider OAuth credential envelope");
   if (
-    typeof parsed.accessToken !== "string" ||
-    parsed.accessToken.length < 1 ||
-    parsed.accessToken.length > 16_384
+    typeof parsedEnvelope.accessToken !== "string" ||
+    parsedEnvelope.accessToken.length < 1 ||
+    parsedEnvelope.accessToken.length > 16_384
   )
     throw new Error(
       googleHost
         ? "invalid Google OAuth credential envelope"
         : "invalid X OAuth credential envelope",
     );
-  return parsed.accessToken;
+  return parsedEnvelope.accessToken;
 }
 
 // ─── Credential injection ────────────────────────────────────────────────────
