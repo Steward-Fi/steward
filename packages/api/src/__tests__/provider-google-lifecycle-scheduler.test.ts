@@ -72,4 +72,18 @@ describe("Google credential lifecycle scheduler", () => {
     expect(calls).toBe(1);
     expect(getGoogleCredentialLifecycleSchedulerHealth().lastError).toContain("unresolved");
   });
+
+  test("does not hot-loop a full page when no lifecycle is eligible yet", async () => {
+    let calls = 0;
+    const stop = startGoogleCredentialLifecycleScheduler({
+      intervalMs: 1_000,
+      sweep: async () => {
+        calls += 1;
+        return cleanResult;
+      },
+    });
+    disposers.push(stop);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls).toBe(1);
+  });
 });

@@ -33,12 +33,9 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   and,
-  asc,
   eq,
   getDb,
   inArray,
-  lte,
-  or,
   providerAccounts,
   providerGoogleCredentialLifecycles,
   type Secret,
@@ -2440,12 +2437,14 @@ export async function runGoogleCredentialLifecycleSweep(input: {
   vault: SecretVault;
   config: GoogleConnectConfig;
   batchSize?: number;
+  now?: Date;
 }): Promise<GoogleCredentialLifecycleSweepResult> {
   const batchSize = Math.min(
     GOOGLE_LIFECYCLE_SWEEP_BATCH_SIZE,
     Math.max(1, Math.floor(input.batchSize ?? GOOGLE_LIFECYCLE_SWEEP_BATCH_SIZE)),
   );
   const db = getDb() as DbExecutor;
+  const nowMs = (input.now ?? new Date()).getTime();
   const candidates = await db
     .select()
     .from(providerGoogleCredentialLifecycles)
@@ -2468,7 +2467,7 @@ export async function runGoogleCredentialLifecycleSweep(input: {
     revoked: 0,
     needsAttention: 0,
     failed: 0,
-    remaining: candidates.length >= batchSize,
+    remaining: false,
   };
   for (const candidate of candidates) {
     const claimed = await withTenantAuditedTransaction(
@@ -2490,13 +2489,13 @@ export async function runGoogleCredentialLifecycleSweep(input: {
           !row ||
           !googleLifecycleRetryableState(row.state) ||
           row.attempts >= GOOGLE_LIFECYCLE_MAX_ATTEMPTS ||
-          Date.now() - row.updatedAt.getTime() < googleLifecycleBackoffMs(row.attempts)
+          nowMs - row.updatedAt.getTime() < googleLifecycleBackoffMs(row.attempts)
         ) {
           return null;
         }
         const [updated] = await tx
           .update(providerGoogleCredentialLifecycles)
-          .set({ attempts: row.attempts + 1, updatedAt: new Date() })
+          .set({ attempts: row.attempts + 1, updatedAt: new Date(nowMs) })
           .where(
             and(
               eq(providerGoogleCredentialLifecycles.tenantId, row.tenantId),
@@ -2594,6 +2593,10 @@ export async function runGoogleCredentialLifecycleSweep(input: {
       }
     }
   }
+  // Only an entirely claimed, clean page proves eligible backlog remains.
+  // Fresh/not-yet-due rows may fill the candidate page but must not hot-loop.
+  result.remaining =
+    result.claimed >= batchSize && result.failed === 0 && result.needsAttention === 0;
   return result;
 }
 

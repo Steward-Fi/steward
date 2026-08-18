@@ -608,7 +608,7 @@ describe("connect", () => {
         config: CONFIG,
         now: new Date(Date.now() + 20_000),
       }),
-    ).resolves.toMatchObject({ processed: 1, revoked: 1, attention: 0 });
+    ).resolves.toMatchObject({ claimed: 1, revoked: 1, needsAttention: 0 });
     await expect(
       reconcileGoogleCredentialRevocation({
         tenantId: TENANT,
@@ -1310,7 +1310,7 @@ describe("refresh", () => {
         config: CONFIG,
         now: new Date(Date.now() + 20_000),
       }),
-    ).resolves.toMatchObject({ processed: 1, attention: 1 });
+    ).resolves.toMatchObject({ claimed: 1, failed: 1 });
     expect(fake.counters.refresh).toBe(0);
   });
 
