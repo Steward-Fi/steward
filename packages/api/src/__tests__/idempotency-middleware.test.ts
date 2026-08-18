@@ -350,6 +350,22 @@ describe("idempotencyMiddleware", () => {
       count += 1;
       return c.json({ ok: true, count, recovery: { mnemonic: `word-${count} …` } });
     });
+    app.post("/capabilities/manifest/github/issue", async (c) => {
+      count += 1;
+      return c.json({ ok: true, data: { token: `ghs_issue_${count}` } });
+    });
+    app.post("/capabilities/manifest/github/renew", async (c) => {
+      count += 1;
+      return c.json({ ok: true, data: { token: `ghs_renew_${count}` } });
+    });
+    app.post("/v1/capabilities/manifest/github/issue", async (c) => {
+      count += 1;
+      return c.json({ ok: true, data: { token: `ghs_v1_issue_${count}` } });
+    });
+    app.post("/v1/capabilities/manifest/github/renew", async (c) => {
+      count += 1;
+      return c.json({ ok: true, data: { token: `ghs_v1_renew_${count}` } });
+    });
 
     for (const [path, body] of [
       ["/vault/agent-1/export", {}],
@@ -357,6 +373,10 @@ describe("idempotencyMiddleware", () => {
       ["/v1/kms/keys/key-1/decrypt", { ciphertext_b64: "AA==" }],
       ["/secrets", { name: "n", value: "v" }],
       ["/user/me/wallet/recovery/setup", {}],
+      ["/capabilities/manifest/github/issue", { resources: { repositories: ["org/repo"] } }],
+      ["/capabilities/manifest/github/renew", { resources: { repositories: ["org/repo"] } }],
+      ["/v1/capabilities/manifest/github/issue", { resources: { repositories: ["org/repo"] } }],
+      ["/v1/capabilities/manifest/github/renew", { resources: { repositories: ["org/repo"] } }],
     ] as const) {
       const init = {
         method: "POST",
@@ -378,7 +398,7 @@ describe("idempotencyMiddleware", () => {
         error: "Idempotency key has already been used",
       });
     }
-    expect(count).toBe(5);
+    expect(count).toBe(9);
   });
 
   it("uses a verified request signature as replay-safe auth material", async () => {
