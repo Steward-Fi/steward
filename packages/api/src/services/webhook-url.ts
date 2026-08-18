@@ -21,7 +21,10 @@ function isNonPublicIpv4(hostname: string): boolean {
     (a === 192 && b === 168) ||
     (a === 100 && b >= 64 && b <= 127) ||
     (a === 192 && b === 0 && (octets[2] === 0 || octets[2] === 2)) ||
+    (a === 192 && b === 31 && octets[2] === 196) ||
+    (a === 192 && b === 52 && octets[2] === 193) ||
     (a === 192 && b === 88 && octets[2] === 99) ||
+    (a === 192 && b === 175 && octets[2] === 48) ||
     (a === 198 && (b === 18 || b === 19)) ||
     (a === 198 && b === 51 && octets[2] === 100) ||
     (a === 203 && b === 0 && octets[2] === 113) ||
@@ -121,13 +124,22 @@ function isNonPublicIpv6(hostname: string): boolean {
   // `[::127.0.0.1]` / `[::7f00:1]` (parity with the dispatcher screen).
   if (words && words.slice(0, 6).every((word) => word === 0) && (words[6] !== 0 || words[7] !== 0))
     return true;
-  if (words?.[0] === 0x2001 && (words[1] === 0 || words[1] === 0xdb8)) return true;
+  // Only ordinary global-unicast space is a valid literal destination. Public
+  // IPv4 embeddings above return before this check; everything else outside
+  // 2000::/3 is reserved, local, discard-only, or currently unallocated.
+  if (words?.[0] !== undefined && (words[0] & 0xe000) !== 0x2000) return true;
+  // IANA protocol assignments occupy 2001::/23. Individual sub-prefixes such
+  // as benchmarking 2001:2::/48 do not make the adjacent space public.
+  if (words?.[0] === 0x2001 && words[1] <= 0x01ff) return true;
+  if (words?.[0] === 0x2001 && words[1] === 0xdb8) return true;
   // Keep registration-time screening aligned with the delivery dispatcher for
   // the complete benchmarking and discard-only special-use prefixes.
   if (words?.[0] === 0x2001 && words[1] === 0x0002 && words[2] === 0) return true;
   if (words?.[0] === 0x0100 && words[1] === 0 && words[2] === 0 && words[3] === 0) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfe80) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfec0) return true;
+  if (words?.[0] === 0x2620 && words[1] === 0x004f && words[2] === 0x8000) return true;
+  if (words?.[0] === 0x3fff && (words[1] & 0xf000) === 0) return true;
   return (
     normalized === "::" ||
     normalized === "::1" ||

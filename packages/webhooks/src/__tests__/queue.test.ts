@@ -406,6 +406,30 @@ describe("RetryQueue", () => {
     }
   });
 
+  it("fails closed on malformed or family-confused DNS answers", async () => {
+    for (const [address, family] of [
+      ["not-an-ip", 4],
+      ["8.8.8.8", 6],
+      ["2606:4700:4700::1111", 4],
+    ] as const) {
+      const lookup: LookupFunction = (_hostname, _options, callback) => {
+        callback(null, address, family);
+      };
+      const dispatcher = new WebhookDispatcher({
+        maxRetries: 0,
+        timeoutMs: 1000,
+        lookup,
+        allowInsecureHttp: true,
+      });
+      const result = await dispatcher.dispatch(makeEvent(), {
+        url: "http://dns-answer.example.test/hook",
+        secret: "dns-answer-test-secret",
+      });
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("Webhook host must resolve to a public address");
+    }
+  });
+
   it("blocks DNS rebinding to special-use IPv4 addresses at connection time", async () => {
     for (const address of [
       "192.0.2.10",

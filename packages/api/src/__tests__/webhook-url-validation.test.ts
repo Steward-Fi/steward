@@ -62,9 +62,25 @@ describe("webhook URL validation", () => {
     ]) {
       expect(validateWebhookUrl(url)).toBe("url host must be public");
     }
-    // Adjacent prefixes are not accidentally widened by the exact word masks.
-    expect(validateWebhookUrl("https://[2001:2:1::1]/hook")).toBeNull();
-    expect(validateWebhookUrl("https://[100:0:0:1::1]/hook")).toBeNull();
+    // These are outside the two narrow prefixes but are still not public:
+    // 2001:2:1:: remains in 2001::/23 and 100:0:0:1:: is outside 2000::/3.
+    expect(validateWebhookUrl("https://[2001:2:1::1]/hook")).toBe("url host must be public");
+    expect(validateWebhookUrl("https://[100:0:0:1::1]/hook")).toBe("url host must be public");
+    expect(validateWebhookUrl("https://[2001:4860:4860::8888]/hook")).toBeNull();
+  });
+
+  it("rejects the remaining special-purpose Internet address blocks", () => {
+    for (const url of [
+      "https://192.31.196.1/hook",
+      "https://192.52.193.1/hook",
+      "https://192.175.48.1/hook",
+      "https://[2001:100::1]/hook",
+      "https://[2620:4f:8000::1]/hook",
+      "https://[3fff::1]/hook",
+      "https://[4000::1]/hook",
+    ]) {
+      expect(validateWebhookUrl(url)).toBe("url host must be public");
+    }
   });
 
   it("rejects IPv6 site-local addresses", () => {
