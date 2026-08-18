@@ -1,11 +1,32 @@
 #!/usr/bin/env bun
+import { open } from "node:fs/promises";
 import {
   createDstackTdxProvider,
-  MAX_MEASUREMENT_REGISTRY_FILE_BYTES,
   type MeasurementRegistryFile,
   verifyQuoteAgainstRegistry,
   verifyRegistrySignatures,
 } from "@stwd/attestation";
+
+const MAX_REGISTRY_FILE_BYTES = 4 * 1024 * 1024;
+
+async function readBoundedRegistry(path: string): Promise<MeasurementRegistryFile> {
+  const handle = await open(path, "r");
+  try {
+    const bytes = Buffer.alloc(MAX_REGISTRY_FILE_BYTES + 1);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.byteLength - offset, null);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset > MAX_REGISTRY_FILE_BYTES) {
+      throw new Error("measurement registry file exceeded the 4 MiB ingestion limit");
+    }
+    return JSON.parse(bytes.subarray(0, offset).toString("utf8")) as MeasurementRegistryFile;
+  } finally {
+    await handle.close();
+  }
+}
 
 const endpoint = process.env.STEWARD_ATTESTATION_ENDPOINT;
 const deployment = process.env.STEWARD_ATTESTATION_DEPLOYMENT ?? "local-dev";
@@ -54,18 +75,13 @@ if (!endpoint) {
   process.exit(2);
 }
 
-const registryFile = Bun.file(registryPath);
-if (registryFile.size > MAX_MEASUREMENT_REGISTRY_FILE_BYTES) {
-  console.error(
-    `measurement registry exceeds ${MAX_MEASUREMENT_REGISTRY_FILE_BYTES} bytes: ${registryPath}`,
-  );
-  process.exit(2);
-}
 let registry: MeasurementRegistryFile;
 try {
-  registry = (await registryFile.json()) as MeasurementRegistryFile;
-} catch {
-  console.error(`measurement registry is not valid JSON: ${registryPath}`);
+  registry = await readBoundedRegistry(registryPath);
+} catch (error) {
+  console.error(
+    error instanceof Error ? error.message : `failed to read registry: ${registryPath}`,
+  );
   process.exit(2);
 }
 const registryOk = verifyRegistrySignatures(
