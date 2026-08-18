@@ -312,6 +312,37 @@ describe("Vault.importKey custody hardening", () => {
     expect(provider.registrationCalls).toBe(0);
   });
 
+  test("rejects a legacy EVM key after a Solana import changes the primary wallet family", async () => {
+    const provider = new RaceTestProvider();
+    vault = await freshVault(provider);
+    const agentId = "legacy-evm-after-solana-agent";
+
+    await vault.importKey(TENANT_ID, agentId, generatePrivateKey(), "evm");
+    // Reproduce a pre-multi-wallet EVM agent: only encrypted_keys retains its
+    // EVM key. A later Solana import changes agents.walletAddress to Solana but
+    // intentionally preserves that legacy EVM row (SEC-023).
+    await getDb()
+      .delete(encryptedChainKeys)
+      .where(
+        and(eq(encryptedChainKeys.agentId, agentId), eq(encryptedChainKeys.chainFamily, "evm")),
+      );
+    await getDb()
+      .delete(agentWallets)
+      .where(and(eq(agentWallets.agentId, agentId), eq(agentWallets.chainFamily, "evm")));
+    await vault.importKey(TENANT_ID, agentId, solanaKeyHex(), "solana");
+
+    await expect(
+      vault.importExternalKeyHandle({
+        tenantId: TENANT_ID,
+        agentId,
+        chainFamily: "evm",
+        address: "0x1111111111111111111111111111111111111111",
+        handle: { providerId: "race-hsm", keyId: "must-not-be-disclosed-after-solana" },
+      }),
+    ).rejects.toThrow(/legacy server-managed key/);
+    expect(provider.registrationCalls).toBe(0);
+  });
+
   // Structural guard (PGlite serializes transactions, so the lock itself is
   // exercised but cannot interleave here): both custody transitions must take
   // the advisory lock INSIDE their transaction, before any custody check or
