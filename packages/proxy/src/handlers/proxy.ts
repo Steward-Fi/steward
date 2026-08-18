@@ -149,7 +149,9 @@ async function decryptSecret(tenantId: string, secretId: string): Promise<string
  * secret from inheriting the bot grant's authority.
  */
 function isSlackBotTokenCredential(value: string): boolean {
-  return value.length <= 512 && /^xoxb-[A-Za-z0-9-]{10,}$/.test(value);
+  if (!value.startsWith("xoxb-") || value.length > 512) return false;
+  const suffix = value.slice(5);
+  return suffix.length >= 10 && !/[^A-Za-z0-9-]/.test(suffix);
 }
 
 // ─── Credential injection ────────────────────────────────────────────────────

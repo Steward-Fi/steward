@@ -130,6 +130,7 @@ describe("Slack narrow credential route", () => {
     ["user token", "xoxp-CANARY-user-token-must-not-forward"],
     ["arbitrary plaintext", "CANARY-not-a-slack-token"],
     ["truncated bot token", "xoxb-short"],
+    ["line-terminated bot token", "xoxb-CANARY-valid-looking\n"],
   ] as const) {
     test(`rejects ${label} at use time without forwarding or leaking it`, async () => {
       const { tenantId, agentId } = await fixture(invalidCredential);

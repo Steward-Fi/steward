@@ -431,6 +431,11 @@ describe("#220 real production profile boundaries", () => {
   }
 
   test("the identical authenticated runner rejects a malicious registered fixture pre-claim", async () => {
-    await runAuthenticatedBoundary(PROFILES[2], { maliciousOperationDescriptor: true });
+    const genericFixture = PROFILES.find(
+      ({ profile }) => profile === GENERIC_HTTP_PROVIDER_ACTION_PROFILE,
+    );
+    expect(genericFixture).toBeDefined();
+    if (!genericFixture) throw new Error("generic HTTP production fixture is missing");
+    await runAuthenticatedBoundary(genericFixture, { maliciousOperationDescriptor: true });
   });
 });
