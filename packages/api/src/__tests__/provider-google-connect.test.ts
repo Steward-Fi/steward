@@ -578,6 +578,14 @@ describe("connect", () => {
       .from(providerGoogleCredentialLifecycles)
       .where(eq(providerGoogleCredentialLifecycles.tenantId, TENANT));
     expect(lifecycle.state).toBe("credential_staged");
+    expect(lifecycle.credentialSecretId).toBeTruthy();
+    const [encryptedHandle] = await getDb()
+      .select()
+      .from(secrets)
+      .where(eq(secrets.id, lifecycle.credentialSecretId as string));
+    expect(JSON.stringify(encryptedHandle)).not.toContain("access-initial");
+    expect(JSON.stringify(encryptedHandle)).not.toContain("refresh-initial");
+    expect(await vault.decryptSecret(TENANT, encryptedHandle.id)).toContain("refresh-initial");
     await expect(
       reconcileGoogleCredentialRevocation({
         tenantId: TENANT,
@@ -595,6 +603,15 @@ describe("connect", () => {
       }),
     ).resolves.toBe("already_terminal");
     expect(fake.counters.revoke).toBe(1);
+    const [terminalLifecycle] = await getDb()
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.id, lifecycle.id));
+    expect(terminalLifecycle.state).toBe("revoked");
+    expect(terminalLifecycle.credentialSecretId).toBeNull();
+    expect(
+      await getDb().select().from(secrets).where(eq(secrets.id, encryptedHandle.id)),
+    ).toHaveLength(0);
     fake.restore();
   });
 
@@ -1160,6 +1177,68 @@ describe("refresh", () => {
     expect((await decryptCredential(completed.providerAccountId)).refreshToken).toBe(
       "refresh-rotated-1",
     );
+    const [adoptedLifecycle] = await getDb()
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.id, lifecycle.id));
+    expect(adoptedLifecycle.state).toBe("adopted");
+    expect(adoptedLifecycle.credentialSecretId).toBeNull();
+    expect(
+      await getDb()
+        .select()
+        .from(secrets)
+        .where(eq(secrets.id, lifecycle.credentialSecretId as string)),
+    ).toHaveLength(0);
+    fake.restore();
+  });
+
+  test("staged refresh lifecycle cannot be adopted into a different account", async () => {
+    const first = await connectHappy(new MemoryConnectStore());
+    const second = await connectHappy(new MemoryConnectStore(), {
+      identity: {
+        sub: "google-user-456",
+        email: "other@example.com",
+        email_verified: true,
+        name: "Other",
+      },
+    });
+    const fake = installFakeX();
+    const restoreHook = __setGoogleCredentialStageHookForTests(() => {
+      throw new Error("crash after rotated credential stage");
+    });
+    const firstRefresh = {
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      accountId: first.completed.providerAccountId,
+      vault,
+      config: CONFIG,
+      force: true,
+    };
+    await expect(refreshGoogleProviderCredential(firstRefresh)).rejects.toThrow(
+      "crash after rotated credential stage",
+    );
+    restoreHook();
+    const [lifecycle] = await getDb()
+      .select()
+      .from(providerGoogleCredentialLifecycles)
+      .where(eq(providerGoogleCredentialLifecycles.kind, "refresh_rotation"));
+    const beforeSecond = await decryptCredential(second.completed.providerAccountId);
+
+    await expect(
+      reconcileGoogleRefreshLifecycle({
+        ...firstRefresh,
+        accountId: second.completed.providerAccountId,
+        lifecycleId: lifecycle.id,
+      }),
+    ).rejects.toMatchObject({ code: "GOOGLE_CREDENTIAL_NEEDS_ATTENTION" });
+
+    const [secondAccount] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, second.completed.providerAccountId));
+    expect(secondAccount.status).toBe("active");
+    expect(await decryptCredential(second.completed.providerAccountId)).toEqual(beforeSecond);
+    expect(fake.counters.revoke).toBe(0);
     fake.restore();
   });
 

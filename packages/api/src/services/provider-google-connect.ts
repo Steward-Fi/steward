@@ -1214,6 +1214,32 @@ export interface RefreshResult {
   expiresAt: string | null;
 }
 
+function assertRefreshLifecycleBinding(
+  lifecycle:
+    | Pick<
+        typeof providerGoogleCredentialLifecycles.$inferSelect,
+        "kind" | "workspaceId" | "providerAccountId"
+      >
+    | undefined,
+  input: Pick<RefreshInput, "workspaceId" | "accountId">,
+): asserts lifecycle is Pick<
+  typeof providerGoogleCredentialLifecycles.$inferSelect,
+  "kind" | "workspaceId" | "providerAccountId"
+> {
+  if (
+    !lifecycle ||
+    lifecycle.kind !== "refresh_rotation" ||
+    lifecycle.workspaceId !== input.workspaceId ||
+    lifecycle.providerAccountId !== input.accountId
+  ) {
+    throw new GoogleConnectError(
+      "GOOGLE_CREDENTIAL_NEEDS_ATTENTION",
+      409,
+      "refresh lifecycle does not belong to this account",
+    );
+  }
+}
+
 /**
  * Refresh a connected Google account's access token. SINGLE-FLIGHT per account: the
  * SELECT ... FOR UPDATE on the provider_accounts row inside the tenant-audited
@@ -1569,7 +1595,12 @@ export async function reconcileGoogleRefreshLifecycle(
   input: RefreshInput & { lifecycleId: string },
 ): Promise<RefreshResult> {
   const [snapshot] = await (getDb() as DbExecutor)
-    .select({ state: providerGoogleCredentialLifecycles.state })
+    .select({
+      state: providerGoogleCredentialLifecycles.state,
+      kind: providerGoogleCredentialLifecycles.kind,
+      workspaceId: providerGoogleCredentialLifecycles.workspaceId,
+      providerAccountId: providerGoogleCredentialLifecycles.providerAccountId,
+    })
     .from(providerGoogleCredentialLifecycles)
     .where(
       and(
@@ -1578,6 +1609,11 @@ export async function reconcileGoogleRefreshLifecycle(
       ),
     )
     .limit(1);
+  // Recovery identifiers can surface in tenant audit records. Never let a
+  // caller pair one account's staged OAuth response with another account that
+  // happens to have the same revision, or use an inflight lifecycle to disable
+  // an unrelated account.
+  assertRefreshLifecycleBinding(snapshot, input);
   if (snapshot?.state === "inflight") {
     // An intent without a staged response may have crossed the provider
     // boundary before the process died. Never spend its refresh token again.
@@ -1598,6 +1634,9 @@ export async function reconcileGoogleRefreshLifecycle(
           and(
             eq(providerGoogleCredentialLifecycles.tenantId, input.tenantId),
             eq(providerGoogleCredentialLifecycles.id, input.lifecycleId),
+            eq(providerGoogleCredentialLifecycles.workspaceId, input.workspaceId),
+            eq(providerGoogleCredentialLifecycles.providerAccountId, input.accountId),
+            eq(providerGoogleCredentialLifecycles.kind, "refresh_rotation"),
           ),
         )
         .limit(1)
