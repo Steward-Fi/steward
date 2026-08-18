@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 
 const SKIP = !process.env.DATABASE_URL;
 
@@ -14,6 +14,7 @@ import {
   users,
   userTenants,
 } from "@stwd/db";
+import { Vault } from "@stwd/vault";
 import { and, eq, inArray } from "drizzle-orm";
 
 const unique = crypto.randomUUID();
@@ -27,6 +28,8 @@ let app: { request: (input: string | Request, init?: RequestInit) => Promise<Res
 let requesterToken: string;
 let approverToken: string;
 let queuedTxId: string;
+let restoreRecipientCodeLookup: (() => void) | undefined;
+let restoreTransactionSigner: (() => void) | undefined;
 
 beforeAll(async () => {
   if (SKIP) return;
@@ -34,6 +37,20 @@ beforeAll(async () => {
   await runMigrations();
 
   process.env.STEWARD_MASTER_PASSWORD ||= "test-master-password-for-4eyes";
+
+  // The /sign route verifies that a native-transfer recipient is an EOA before
+  // policy evaluation. Keep this principal-tracking test hermetic instead of
+  // depending on a public Base RPC being reachable from the test runner.
+  const recipientCodeSpy = spyOn(Vault.prototype, "rpcPassthrough").mockResolvedValue({
+    jsonrpc: "2.0",
+    id: 1,
+    result: "0x",
+  } as Awaited<ReturnType<Vault["rpcPassthrough"]>>);
+  restoreRecipientCodeLookup = () => recipientCodeSpy.mockRestore();
+  const transactionSignerSpy = spyOn(Vault.prototype, "signTransaction").mockResolvedValue(
+    "0xsigned",
+  );
+  restoreTransactionSigner = () => transactionSignerSpy.mockRestore();
 
   const [{ Hono }, contextModule, { approvalRoutes }, { vaultRoutes }] = await Promise.all([
     import("hono"),
@@ -76,10 +93,9 @@ beforeAll(async () => {
     { userId: APPROVER_USER_ID, tenantId: TEST_TENANT, role: "admin" },
   ]);
 
-  // Provision the agent with a real (encrypted) signing key. The hardened vault
-  // approve path actually signs the queued transaction, so the agent must have a
-  // signing key — unlike the old generic approvals route that merely flipped the
-  // queue status.
+  // Provision the agent through the real vault path. Transaction signing itself
+  // is stubbed above because this suite verifies principal attribution and
+  // separation of duties, not signing implementation details.
   await vault.createAgent(TEST_TENANT, TEST_AGENT, "4-eyes Test Agent");
 
   await db.insert(policies).values({
@@ -108,6 +124,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (SKIP) return;
+
+  restoreRecipientCodeLookup?.();
+  restoreTransactionSigner?.();
 
   const db = getDb();
   await db.delete(approvalQueue).where(eq(approvalQueue.agentId, TEST_AGENT));
