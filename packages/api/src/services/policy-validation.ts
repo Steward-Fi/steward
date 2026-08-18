@@ -1,5 +1,7 @@
+import { Address, NETWORK, TEST_NETWORK } from "@scure/btc-signer";
 import { isPersistedPolicyType } from "@stwd/db";
 import type { PolicyRule } from "@stwd/shared";
+import { decodeMoneroAddress, isValidSolanaPublicKey } from "@stwd/vault";
 
 const CONDITION_FIELDS = new Set([
   "to",
@@ -42,6 +44,38 @@ function isPositiveInteger(value: unknown): value is number {
 
 function isEvmAddress(value: unknown): value is string {
   return typeof value === "string" && /^0x[a-fA-F0-9]{40}$/.test(value);
+}
+
+function isBitcoinAddress(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  for (const network of [NETWORK, TEST_NETWORK]) {
+    try {
+      Address(network).decode(value);
+      return true;
+    } catch {
+      // Try the other supported network.
+    }
+  }
+  return false;
+}
+
+function isMoneroAddress(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    decodeMoneroAddress(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isSupportedPolicyAddress(value: unknown): value is string {
+  return (
+    isEvmAddress(value) ||
+    isValidSolanaPublicKey(value) ||
+    isBitcoinAddress(value) ||
+    isMoneroAddress(value)
+  );
 }
 
 function isEvmSelector(value: unknown): value is string {
@@ -153,8 +187,8 @@ function validatePolicyConfig(policy: PolicyRule): string | null {
     }
 
     case "approved-addresses":
-      if (!Array.isArray(config.addresses) || !config.addresses.every(isEvmAddress)) {
-        return "approved-addresses.addresses must be an array of EVM addresses";
+      if (!Array.isArray(config.addresses) || !config.addresses.every(isSupportedPolicyAddress)) {
+        return "approved-addresses.addresses must contain valid EVM, Solana, Bitcoin, or Monero addresses";
       }
       if (config.mode !== "whitelist" && config.mode !== "blacklist") {
         return "approved-addresses.mode must be whitelist or blacklist";

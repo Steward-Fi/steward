@@ -20,7 +20,7 @@ describe("tenant audit rollback hardening", () => {
     expect(createRoute).toContain("db.delete(tenants).where(eq(tenants.id, body.id))");
   });
 
-  it("restores previous tenant webhook/config state if the final update audit fails", () => {
+  it("restores previous tenant config state if the final update audit fails", () => {
     const updateStart = routeSource.indexOf('tenantRoutes.put("/:id/webhook"');
     expect(updateStart).toBeGreaterThanOrEqual(0);
     const updateRoute = routeSource.slice(updateStart);
@@ -28,9 +28,9 @@ describe("tenant audit rollback hardening", () => {
     expect(updateRoute).toContain('action: "tenant.update.authorized"');
     expect(updateRoute).toContain('action: "tenant.update"');
     expect(updateRoute).toContain("const previousConfig: TenantConfig = { ...tenantConfig }");
-    expect(updateRoute).toContain("snapshotLegacyTenantWebhooks(tenant.id)");
     expect(updateRoute).toContain("tenantConfigs.set(tenant.id, previousConfig)");
-    expect(updateRoute).toContain("restoreLegacyTenantWebhooks(tenant.id, legacyWebhookSnapshot)");
+    expect(updateRoute).not.toContain("snapshotLegacyTenantWebhooks");
+    expect(updateRoute).not.toContain("restoreLegacyTenantWebhooks");
     expect(updateRoute).toContain('actorId: c.get("userId") ?? tenant.id');
   });
 });
