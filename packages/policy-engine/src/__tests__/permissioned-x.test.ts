@@ -142,7 +142,7 @@ describe("permissioned-X: contentPolicy", () => {
     const x: XConstraints = { contentPolicy: { maxLength: 10 } };
     const c = ctx();
     // strip the length signal
-    (c.args as Record<string, unknown>).textCodePointLength = undefined;
+    delete (c.x as { textCodePointLength?: number }).textCodePointLength;
     expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
 
@@ -451,14 +451,14 @@ describe("permissioned-X: scoping + fail-closed", () => {
   it("url escalation fails closed when hasUrl is absent", () => {
     const x: XConstraints = { escalation: { urlPostRequiresApproval: true } };
     const c = ctx();
-    delete (c.args as Record<string, unknown>).hasUrl;
+    delete (c.x as { hasUrl?: boolean }).hasUrl;
     expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
 
   it("spendPolicy fails closed when hasUrl is absent (cannot price the action)", () => {
     const x: XConstraints = { spendPolicy: { maxSpendMicros: 1_000_000 } };
     const c = ctx({}, { x: { accumulatedSpendMicros: 0 } });
-    delete (c.args as Record<string, unknown>).hasUrl;
+    delete (c.x as { hasUrl?: boolean }).hasUrl;
     expect(decide(x, c).reasonCodes).toContain(R.INPUT_UNAVAILABLE);
   });
 
