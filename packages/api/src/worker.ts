@@ -259,6 +259,14 @@ export function hydrateProcessEnv(env: Env): void {
 
 let workerInit: Promise<void> | null = null;
 
+async function validateWorkerSecurityEnv(): Promise<void> {
+  // Validate authentication-critical bindings before opening a database
+  // connection. A missing DATABASE_DRIVER must not mask a weak JWT secret or
+  // malformed token lifetime during cold-start validation.
+  const { validateJwtSecretEnv } = await import("@stwd/auth");
+  validateJwtSecretEnv();
+}
+
 async function ensureWorkerInit(env: Env): Promise<void> {
   if (workerInit) return workerInit;
   workerInit = (async () => {
@@ -269,8 +277,7 @@ async function ensureWorkerInit(env: Env): Promise<void> {
     // run the same validation on the Workers boot path so a bad/missing JWT
     // secret or malformed AGENT_TOKEN_EXPIRY fails closed at cold start instead
     // of surfacing at first token sign/verify.
-    const { validateJwtSecretEnv } = await import("@stwd/auth");
-    validateJwtSecretEnv();
+    await validateWorkerSecurityEnv();
     const redisOk = await initRedis(env);
     // Auth stores (passkey challenges, magic-link tokens, SIWE/SIWS nonces)
     // must be initialized too — without this they stay on the lazy memory
@@ -341,6 +348,7 @@ export default {
     // request (not once per isolate) so rotated bindings take effect promptly;
     // the once-per-isolate init below only bootstraps stores/imports.
     hydrateProcessEnv(env);
+    await validateWorkerSecurityEnv();
     return withWorkerRequestDatabase(env, async () => {
       await ensureWorkerInit(env);
       const app = await getComposedApp();
