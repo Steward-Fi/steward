@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   assertCompleteCoverage,
   checkCiTestInventory,
   extractJob,
   extractUnitMatrix,
   jobExecutesPackageTests,
+  repositoryTestTargets,
 } from "../check-ci-test-inventory";
 
 describe("CI test inventory", () => {
@@ -16,6 +20,18 @@ describe("CI test inventory", () => {
     expect(() =>
       assertCompleteCoverage(["packages/a", "packages/new"], ["packages/a"], []),
     ).toThrow("test-bearing targets missing from CI: packages/new");
+  });
+
+  test("discovers a non-JavaScript SDK without a package manifest", () => {
+    const root = mkdtempSync(join(tmpdir(), "steward-ci-inventory-"));
+    try {
+      writeFileSync(join(root, "package.json"), JSON.stringify({ workspaces: [] }));
+      mkdirSync(join(root, "packages", "native-sdk", "tests"), { recursive: true });
+      writeFileSync(join(root, "packages", "native-sdk", "tests", "security.rs"), "#[test]\n");
+      expect(repositoryTestTargets(root)).toEqual(["packages/native-sdk"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("duplicate and stale declarations are rejected", () => {
@@ -84,11 +100,86 @@ describe("CI test inventory", () => {
       "      - name: Isolated package runner",
       "        run: TEST_JOBS=1 bun packages/a/scripts/run-tests-isolated.ts",
     ].join("\n");
+    const unauditableBlock = [
+      "  dedicated:",
+      "    steps:",
+      "      - name: Test package",
+      "        working-directory: packages/a",
+      "        run: |",
+      "          bun run build",
+      "          bun run test",
+    ].join("\n");
+    const heredocDecoy = [
+      "  dedicated:",
+      "    steps:",
+      "      - name: Print instructions",
+      "        run: |",
+      "          cat <<'EOF'",
+      "          bun test packages/a",
+      "          EOF",
+    ].join("\n");
+    const maskedFailure = [
+      "  dedicated:",
+      "    steps:",
+      "      - run: bun test packages/a || true",
+    ].join("\n");
+    const backgrounded = [
+      "  dedicated:",
+      "    steps:",
+      "      - run: bun test packages/a &",
+    ].join("\n");
+    const piped = [
+      "  dedicated:",
+      "    steps:",
+      "      - run: bun test packages/a | tee test.log",
+    ].join("\n");
+    const skippedMaven = [
+      "  dedicated:",
+      "    steps:",
+      "      - run: mvn -f packages/a/pom.xml test -DskipTests",
+    ].join("\n");
 
     expect(jobExecutesPackageTests(extractJob(valid, "dedicated"), "packages/a")).toBe(true);
     expect(jobExecutesPackageTests(extractJob(commentOnly, "dedicated"), "packages/a")).toBe(false);
     expect(jobExecutesPackageTests(extractJob(unrelated, "dedicated"), "packages/a")).toBe(false);
     expect(jobExecutesPackageTests(extractJob(echoed, "dedicated"), "packages/a")).toBe(false);
     expect(jobExecutesPackageTests(extractJob(envPrefixed, "dedicated"), "packages/a")).toBe(true);
+    expect(jobExecutesPackageTests(extractJob(unauditableBlock, "dedicated"), "packages/a")).toBe(false);
+    expect(jobExecutesPackageTests(extractJob(heredocDecoy, "dedicated"), "packages/a")).toBe(false);
+    expect(jobExecutesPackageTests(extractJob(maskedFailure, "dedicated"), "packages/a")).toBe(false);
+    expect(jobExecutesPackageTests(extractJob(backgrounded, "dedicated"), "packages/a")).toBe(false);
+    expect(jobExecutesPackageTests(extractJob(piped, "dedicated"), "packages/a")).toBe(false);
+    expect(jobExecutesPackageTests(extractJob(skippedMaven, "dedicated"), "packages/a")).toBe(false);
+  });
+
+  test("recognizes every shipped SDK test runner without accepting echoed commands", () => {
+    const cases = [
+      ["packages/android", "mvn -B -f packages/android/pom.xml test"],
+      ["packages/csharp", "dotnet run --project packages/csharp/tests/Steward.Tests/Steward.Tests.csproj"],
+      ["packages/go", "go test ./..."],
+      ["packages/java", "mvn -B -f packages/java/pom.xml test"],
+      ["packages/python", "PYTHONPATH=packages/python python3 -m unittest discover -s packages/python/tests"],
+      ["packages/ruby", `ruby -Ipackages/ruby/lib -e 'Dir["packages/ruby/test/**/*_test.rb"].each { |file| require file }'`],
+      ["packages/rust", "cargo test --locked --manifest-path packages/rust/Cargo.toml"],
+      ["packages/swift", "swift test --package-path packages/swift"],
+    ] as const;
+    for (const [target, command] of cases) {
+      const job = [
+        "  dedicated:",
+        "    steps:",
+        "      - name: Test SDK",
+        `        working-directory: ${target}`,
+        `        run: ${command}`,
+      ].join("\n");
+      expect(jobExecutesPackageTests(extractJob(job, "dedicated"), target)).toBe(true);
+      const echoed = [
+        "  dedicated:",
+        "    steps:",
+        "      - name: Echo only",
+        `        working-directory: ${target}`,
+        `        run: echo ${command}`,
+      ].join("\n");
+      expect(jobExecutesPackageTests(extractJob(echoed, "dedicated"), target)).toBe(false);
+    }
   });
 });

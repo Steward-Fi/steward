@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 const WORKFLOWS = [".github/workflows/pr.yml", ".github/workflows/ci.yml"] as const;
@@ -9,20 +9,32 @@ const PACKAGE_TEST_FILE_PATTERNS = [
   "src/**/*.test.tsx",
   "src/**/*.spec.tsx",
 ] as const;
-const EXTRA_TEST_TARGETS = {
-  "packages/flutter": ["test/**/*_test.dart"],
-} as const;
+const CROSS_LANGUAGE_TEST_FILE_PATTERNS = [
+  "**/*_test.go",
+  "src/test/**/*.{java,kt,kts,scala}",
+  "tests/**/*.{c,cc,cpp,cs,fs,fsx,go,py,rs,swift}",
+  "test/**/*_test.{dart,go,rb}",
+  "Tests/**/*.{cs,fs,fsx,swift}",
+] as const;
 
 // These suites need infrastructure or a non-Bun toolchain that the generic
 // unit matrix does not provide. Keep the mapping explicit so an omitted suite
 // cannot be disguised as a comment-only exception.
 const DEDICATED_JOBS = {
   "packages/agent-trader": "unit-agent-trader",
+  "packages/android": "unit-android",
   "packages/api": "integration",
+  "packages/csharp": "unit-csharp",
   "packages/eliza-plugin": "unit-eliza-plugin",
   "packages/flutter": "unit-flutter",
+  "packages/go": "unit-go",
+  "packages/java": "unit-java",
+  "packages/python": "unit-python",
   "packages/redis": "unit-redis",
+  "packages/ruby": "unit-ruby",
+  "packages/rust": "unit-rust",
   "packages/signer-frost": "unit-signer-frost",
+  "packages/swift": "unit-swift",
   web: "unit-web",
 } as const;
 
@@ -38,7 +50,7 @@ function hasMatchingFiles(
   );
 }
 
-function repositoryTestTargets(rootDir: string): string[] {
+export function repositoryTestTargets(rootDir: string): string[] {
   const rootPackage = JSON.parse(readFileSync(resolve(rootDir, "package.json"), "utf8")) as {
     workspaces?: string[];
   };
@@ -56,15 +68,24 @@ function repositoryTestTargets(rootDir: string): string[] {
     }
   }
 
-  return [...packageJsonPaths]
+  const targets = [...packageJsonPaths]
     .map((manifest) => dirname(manifest))
-    .filter((directory) => hasMatchingFiles(rootDir, directory, PACKAGE_TEST_FILE_PATTERNS))
-    .concat(
-      Object.entries(EXTRA_TEST_TARGETS)
-        .filter(([directory, patterns]) => hasMatchingFiles(rootDir, directory, patterns))
-        .map(([directory]) => directory),
-    )
-    .sort();
+    .filter((directory) => hasMatchingFiles(rootDir, directory, PACKAGE_TEST_FILE_PATTERNS));
+
+  // Native SDKs do not necessarily have package.json manifests and therefore
+  // cannot be discovered through the JavaScript workspace list. Scan every
+  // immediate packages/* directory for conventional cross-language test
+  // layouts so a newly added SDK fails closed until CI gives it a real job.
+  const packagesDir = resolve(rootDir, "packages");
+  for (const entry of readdirSync(packagesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const directory = `packages/${entry.name}`;
+    if (hasMatchingFiles(rootDir, directory, CROSS_LANGUAGE_TEST_FILE_PATTERNS)) {
+      targets.push(directory);
+    }
+  }
+
+  return [...new Set(targets)].sort();
 }
 
 export function extractUnitMatrix(workflow: string): string[] {
@@ -99,6 +120,7 @@ export function extractJob(workflow: string, jobName: string): string {
 interface WorkflowStep {
   workingDirectory?: string;
   run?: string;
+  inlineRun?: boolean;
 }
 
 function extractRunSteps(job: string): WorkflowStep[] {
@@ -126,12 +148,6 @@ function extractRunSteps(job: string): WorkflowStep[] {
       continue;
     }
 
-    const inlineRun = line.match(/^ {8}run:\s*(?![|>][-+]?\s*$)(.+)$/);
-    if (inlineRun) {
-      current.run = inlineRun[1].trim();
-      continue;
-    }
-
     if (/^ {8}run:\s*[|>][-+]?\s*$/.test(line)) {
       const command: string[] = [];
       while (index + 1 < lines.length && /^(?: {10,}\S|\s*$)/.test(lines[index + 1])) {
@@ -139,6 +155,14 @@ function extractRunSteps(job: string): WorkflowStep[] {
         command.push(lines[index].replace(/^ {10}/, ""));
       }
       current.run = command.join("\n");
+      current.inlineRun = false;
+      continue;
+    }
+
+    const inlineRun = line.match(/^ {8}run:\s*(.+)$/);
+    if (inlineRun) {
+      current.run = inlineRun[1].trim();
+      current.inlineRun = true;
     }
   }
   finishStep();
@@ -146,18 +170,33 @@ function extractRunSteps(job: string): WorkflowStep[] {
 }
 
 export function jobExecutesPackageTests(job: string, packagePath: string): boolean {
-  const executableTestCommand =
-    /^(?:\(?\s*)?(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]+)\s+)*(?:bun|cargo|flutter)\b[^\n]*\b(?:test|run-tests)\b/;
+  const executableTestCommand = /^(?:\(?\s*)?(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]+)\s+)*(?:(?:bun|cargo|flutter|go|mvn|swift)\b[^\n]*\b(?:test|run-tests)\b|dotnet\s+run\b|python3?\s+-m\s+unittest\b|ruby\b[^\n]*\btest\/[^\s]*_test\.rb\b)/;
   return extractRunSteps(job).some((step) => {
-    if (!step.run) {
+    // Only an inline scalar can be checked as one shell command without a
+    // shell parser. Literal/folded blocks can hide apparent runner lines in a
+    // heredoc, continuation, or folded argument, so fail closed for inventory
+    // evidence. Dedicated jobs intentionally keep their runner command inline.
+    if (!step.run || !step.inlineRun) {
       return false;
     }
-    const executesTest = step.run
+    return step.run
       .split(/\r?\n/)
       .map((line) => line.trim())
-      .some((line) => executableTestCommand.test(line));
-    if (!executesTest) return false;
-    return step.workingDirectory === packagePath || step.run.includes(packagePath);
+      .some((line) => {
+        const shellSyntax = line
+          .replace(/'(?:[^']*)'/g, "")
+          .replace(/"(?:\\.|[^"\\])*"/g, "");
+        // A command that masks its own failure or explicitly disables tests is
+        // not CI evidence even if its spelling otherwise resembles a runner.
+        if (/[;&|`]|\$\(|--no-run\b|-DskipTests\b|-Dmaven\.test\.skip(?:=true)?\b/.test(shellSyntax)) {
+          return false;
+        }
+        if (!executableTestCommand.test(line)) return false;
+        // Bind the package reference to the same executable line. Merely
+        // echoing a package name elsewhere in a multiline step cannot make an
+        // unrelated test command satisfy this target.
+        return step.workingDirectory === packagePath || line.includes(packagePath);
+      });
   });
 }
 
