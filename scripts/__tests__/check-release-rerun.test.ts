@@ -67,12 +67,16 @@ describe("release rerun preflight", () => {
   it("finds a tagless draft through the bounded authenticated release list", async () => {
     const capturedUrls: string[] = [];
     let capturedAuthorization = "";
+    let capturedRedirect: RequestRedirect | undefined;
+    let capturedSignal: AbortSignal | null | undefined;
     const state = await checkReleaseRerun("Steward-Fi/steward", "v1.2.3", "test-secret", (async (
       input,
       init,
     ) => {
       capturedUrls.push(String(input));
       capturedAuthorization = new Headers(init?.headers).get("authorization") ?? "";
+      capturedRedirect = init?.redirect;
+      capturedSignal = init?.signal;
       if (capturedUrls.length === 1) return new Response("not found", { status: 404 });
       return Response.json([{ tag_name: "v1.2.3", draft: true }]);
     }) as typeof fetch);
@@ -82,6 +86,8 @@ describe("release rerun preflight", () => {
       "https://api.github.com/repos/Steward-Fi/steward/releases?per_page=100&page=1",
     ]);
     expect(capturedAuthorization).toBe("Bearer test-secret");
+    expect(capturedRedirect).toBe("error");
+    expect(capturedSignal).toBeInstanceOf(AbortSignal);
   });
 
   it("permits a truly missing release only after scanning drafts", async () => {
@@ -122,6 +128,8 @@ describe("release rerun preflight", () => {
     for (const listResponse of [
       new Response("forbidden", { status: 403 }),
       Response.json({ tag_name: "v1.2.3", draft: true }),
+      Response.json([{ tag_name: "v1.2.3" }]),
+      Response.json([{ draft: true }]),
     ]) {
       let calls = 0;
       await expect(

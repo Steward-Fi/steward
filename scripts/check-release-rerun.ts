@@ -121,6 +121,12 @@ export async function checkReleaseRerun(
           throw new Error("GitHub release list returned an invalid response");
         }
         const release = item as ReleasePayload;
+        // Do not silently skip a partially decoded entry. A schema change or
+        // truncated object could otherwise hide the target draft and turn an
+        // uncertain lookup into permission to publish.
+        if (typeof release.tag_name !== "string" || typeof release.draft !== "boolean") {
+          throw new Error("GitHub release list returned an invalid response");
+        }
         if (release.tag_name === tag) {
           return classifyReleaseResponse(200, release, tag);
         }
