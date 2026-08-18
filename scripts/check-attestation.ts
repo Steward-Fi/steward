@@ -12,6 +12,26 @@ import {
 const MAX_QUOTE_RESPONSE_BYTES = 1024 * 1024;
 const QUOTE_REQUEST_TIMEOUT_MS = 10_000;
 
+function quoteRequestUrl(rawEndpoint: string, nonce: string): URL {
+  let url: URL;
+  try {
+    url = new URL(rawEndpoint);
+  } catch {
+    throw new Error("STEWARD_ATTESTATION_ENDPOINT must be a valid HTTP(S) URL");
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error("STEWARD_ATTESTATION_ENDPOINT must use HTTP or HTTPS");
+  }
+  if (url.username || url.password) {
+    throw new Error("STEWARD_ATTESTATION_ENDPOINT must not contain URL credentials");
+  }
+  if (url.hash) {
+    throw new Error("STEWARD_ATTESTATION_ENDPOINT must not contain a URL fragment");
+  }
+  url.searchParams.set("nonce", nonce);
+  return url;
+}
+
 async function readBoundedRegistry(path: string): Promise<MeasurementRegistryFile> {
   const handle = await open(path, "r");
   try {
@@ -34,7 +54,7 @@ async function readBoundedRegistry(path: string): Promise<MeasurementRegistryFil
 async function readBoundedQuoteResponse(response: Response): Promise<unknown> {
   const declaredLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(declaredLength) && declaredLength > MAX_QUOTE_RESPONSE_BYTES) {
-    await response.body?.cancel();
+    await response.body?.cancel().catch(() => undefined);
     throw new Error("quote endpoint response exceeded the 1 MiB limit");
   }
   if (!response.body) throw new Error("quote endpoint returned an empty response");
@@ -149,15 +169,19 @@ if (!registryOk.ok) {
 }
 
 const nonce = crypto.randomUUID();
+let requestUrl: URL;
+try {
+  requestUrl = quoteRequestUrl(endpoint, nonce);
+} catch (error) {
+  console.error(error instanceof Error ? error.message : "invalid attestation endpoint");
+  process.exit(2);
+}
 let response: Response;
 try {
-  response = await fetch(
-    `${endpoint}${endpoint.includes("?") ? "&" : "?"}nonce=${encodeURIComponent(nonce)}`,
-    {
-      redirect: "error",
-      signal: AbortSignal.timeout(QUOTE_REQUEST_TIMEOUT_MS),
-    },
-  );
+  response = await fetch(requestUrl, {
+    redirect: "error",
+    signal: AbortSignal.timeout(QUOTE_REQUEST_TIMEOUT_MS),
+  });
 } catch {
   console.error("quote endpoint request failed");
   process.exit(1);
@@ -180,7 +204,13 @@ const quoteEnvelope = rawQuote as { raw?: { quote?: unknown } | unknown };
 const raw = quoteEnvelope?.raw;
 const quote =
   raw && typeof raw === "object" && "quote" in raw ? (raw as { quote: unknown }).quote : raw;
-const verifiedQuote = await provider.verifyQuote(quote ?? rawQuote, { nonce });
+let verifiedQuote;
+try {
+  verifiedQuote = await provider.verifyQuote(quote ?? rawQuote, { nonce });
+} catch {
+  console.error("quote verification failed");
+  process.exit(1);
+}
 const match = verifyQuoteAgainstRegistry(verifiedQuote, registry, deployment);
 if (!match.ok) {
   console.error(`attestation measurement check failed: ${match.reason}`);

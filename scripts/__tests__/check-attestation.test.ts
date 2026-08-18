@@ -133,4 +133,74 @@ describe("check-attestation bounded registry ingestion", () => {
       server.stop(true);
     }
   });
+
+  test.each([
+    ["URL credentials", "http://user:secret@127.0.0.1:1/quote", "must not contain URL credentials"],
+    ["a fragment", "http://127.0.0.1:1/quote#ignored", "must not contain a URL fragment"],
+    ["a non-HTTP protocol", "file:///tmp/quote.json", "must use HTTP or HTTPS"],
+  ])("rejects an endpoint containing %s before fetch", (_label, endpoint, expected) => {
+    const result = Bun.spawnSync([process.execPath, "scripts/check-attestation.ts"], {
+      cwd: ROOT,
+      env: cliEnv(VALID_REGISTRY_PATH, endpoint),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr.toString()).toContain(expected);
+  });
+
+  test("refuses redirects without following them or exposing the destination", async () => {
+    let destinationRequests = 0;
+    const destination = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => {
+        destinationRequests += 1;
+        return new Response("should never be reached");
+      },
+    });
+    const redirect = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => Response.redirect(`${destination.url}sensitive-destination`, 302),
+    });
+    try {
+      const processHandle = Bun.spawn([process.execPath, "scripts/check-attestation.ts"], {
+        cwd: ROOT,
+        env: cliEnv(VALID_REGISTRY_PATH, `${redirect.url}quote`),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const stderr = await new Response(processHandle.stderr).text();
+      expect(await processHandle.exited).toBe(1);
+      expect(stderr).toContain("quote endpoint request failed");
+      expect(stderr).not.toContain("sensitive-destination");
+      expect(destinationRequests).toBe(0);
+    } finally {
+      redirect.stop(true);
+      destination.stop(true);
+    }
+  });
+
+  test("reports only the status for upstream HTTP errors", async () => {
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => new Response("upstream-secret-token", { status: 401 }),
+    });
+    try {
+      const processHandle = Bun.spawn([process.execPath, "scripts/check-attestation.ts"], {
+        cwd: ROOT,
+        env: cliEnv(VALID_REGISTRY_PATH, `${server.url}quote`),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const stderr = await new Response(processHandle.stderr).text();
+      expect(await processHandle.exited).toBe(1);
+      expect(stderr).toContain("quote endpoint failed with HTTP 401");
+      expect(stderr).not.toContain("upstream-secret-token");
+    } finally {
+      server.stop(true);
+    }
+  });
 });
