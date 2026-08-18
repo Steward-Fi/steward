@@ -9,15 +9,17 @@
 //!           Trusted-dealer keygen. Writes DIR/group.json (public) and
 //!           DIR/share-<id>.json (secret share per participant).
 //!
-//!   share   --share-file FILE --port P [--auth-token TOKEN]
+//!   share   --share-file FILE --port P
 //!           Runs an HTTP service holding ONE secret share. Endpoints:
 //!             GET  /health
 //!             POST /commit  { }                      -> round1 commitments (public)
 //!             POST /sign    { signing_package, nonces_id } -> round2 sig share
 //!           The share never leaves this process.
 //!           Every endpoint except GET /health requires
-//!           `Authorization: Bearer TOKEN` (flag or FROST_SHARE_AUTH_TOKEN);
-//!           the service refuses to start without one (SEC-025). Shares must
+//!           `Authorization: Bearer TOKEN` (`FROST_SHARE_AUTH_TOKEN`);
+//!           the service refuses to start without a strong token (SEC-025).
+//!           Tokens are not accepted on the command line because process
+//!           arguments are commonly visible to other local users. Shares must
 //!           never share a network namespace with untrusted code.
 //!
 //!   aggregate (offline helper for tests) reads a signing package + shares from
@@ -472,6 +474,21 @@ fn arg(args: &[String], key: &str) -> Option<String> {
         .cloned()
 }
 
+fn validate_share_auth_token(token: String) -> Result<String, &'static str> {
+    // SEC-025: an empty/short token turns the loopback bearer check into a
+    // guessable credential. Require at least 256 bits when represented as a
+    // conventional raw/hex/base64 secret. Operators should supply a randomly
+    // generated token through the environment, never through argv.
+    if token.len() < 32
+        || token
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+    {
+        return Err("FROST_SHARE_AUTH_TOKEN must contain at least 32 non-whitespace bytes");
+    }
+    Ok(token)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(String::as_str).unwrap_or("");
@@ -495,15 +512,14 @@ fn main() {
                 .expect("--port required")
                 .parse()
                 .expect("port");
-            // SEC-025: the share service refuses to run unauthenticated —
-            // require a per-share bearer token via flag or environment.
-            let auth_token = arg(&args, "--auth-token")
-                .or_else(|| std::env::var("FROST_SHARE_AUTH_TOKEN").ok())
-                .unwrap_or_else(|| {
-                    eprintln!(
-                        "--auth-token or FROST_SHARE_AUTH_TOKEN is required: \
-                         the share service refuses to run unauthenticated"
-                    );
+            // SEC-025: require a strong per-share bearer token via the
+            // environment. Command-line tokens are intentionally unsupported:
+            // argv is commonly exposed by process inspection tools.
+            let auth_token = std::env::var("FROST_SHARE_AUTH_TOKEN")
+                .map_err(|_| "FROST_SHARE_AUTH_TOKEN is required")
+                .and_then(validate_share_auth_token)
+                .unwrap_or_else(|message| {
+                    eprintln!("{message}: the share service refuses to run unauthenticated");
                     std::process::exit(2);
                 });
             cmd_share(&share_file, port, auth_token);
@@ -636,5 +652,14 @@ mod tests {
         assert!(payload.contains("nonce id space exhausted"));
         assert_eq!(state.next_nonce_id, u64::MAX);
         assert_eq!(state.nonces.len(), before);
+    }
+
+    #[test]
+    fn share_auth_token_rejects_missing_strength() {
+        for weak in ["", "short", "                                "] {
+            assert!(validate_share_auth_token(weak.to_string()).is_err());
+        }
+        let strong = "0123456789abcdef0123456789abcdef".to_string();
+        assert_eq!(validate_share_auth_token(strong.clone()), Ok(strong));
     }
 }

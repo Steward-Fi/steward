@@ -8,6 +8,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -93,14 +94,11 @@ export async function startFrostCluster(threshold = 2, participants = 3): Promis
 
   for (let i = 0; i < participants; i++) {
     const port = port0 + i;
-    const authToken = `test-share-token-${port0}-${i}`;
-    const p = spawn(
-      BIN,
-      ["share", "--share-file", shareFiles[i], "--port", String(port), "--auth-token", authToken],
-      {
-        stdio: "ignore",
-      },
-    );
+    const authToken = randomBytes(32).toString("hex");
+    const p = spawn(BIN, ["share", "--share-file", shareFiles[i], "--port", String(port)], {
+      stdio: "ignore",
+      env: { ...process.env, FROST_SHARE_AUTH_TOKEN: authToken },
+    });
     procs.push(p);
     endpoints.push(`http://127.0.0.1:${port}`);
     authTokens.push(authToken);
