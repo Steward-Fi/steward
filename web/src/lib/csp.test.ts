@@ -62,10 +62,15 @@ describe("CSP connect-src allowlist (SEC-077)", () => {
       "https://*.walletconnect.org",
       "wss://*.walletconnect.com",
       "wss://*.walletconnect.org",
-      "https://www.coinbase.com",
+      "https://keys.coinbase.com",
+      "https://rpc.wallet.coinbase.com",
+      "https://www.walletlink.org",
     ]) {
       expect(sources).toContain(origin);
     }
+    // RainbowKit disables Coinbase's optional analytics. Keep the CSP narrow
+    // instead of permitting an endpoint this app never calls.
+    expect(sources).not.toContain("https://cca-lite.coinbase.com");
   });
 
   test("keeps HTTPS enforcement on for an https API and off only for loopback/e2e", () => {

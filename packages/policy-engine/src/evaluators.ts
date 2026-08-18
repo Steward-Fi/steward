@@ -311,8 +311,17 @@ function normalizeSpendingLimitConfig(config: Record<string, unknown>): Spending
     SpendingLimitConfig,
     "maxPerTx" | "maxPerDay" | "maxPerWeek"
   > => {
-    const maxAmount = String(config.maxAmount ?? "0");
-    const period = String(config.period ?? "day").toLowerCase();
+    // Wei values are an exact-integer contract. Never coerce JSON numbers:
+    // values above Number.MAX_SAFE_INTEGER have already lost precision before
+    // BigInt sees them. Malformed legacy fields flow to the common uint256
+    // parser below and fail closed.
+    const maxAmount = typeof config.maxAmount === "string" ? config.maxAmount : "";
+    const period =
+      config.period === undefined
+        ? "day"
+        : typeof config.period === "string"
+          ? config.period.toLowerCase()
+          : "";
 
     switch (period) {
       case "tx":
@@ -375,13 +384,19 @@ function normalizeSpendingLimitConfig(config: Record<string, unknown>): Spending
         };
     const weiCaps = {
       maxPerTx: hasOwnDefined(config, "maxPerTx")
-        ? String(config.maxPerTx)
+        ? typeof config.maxPerTx === "string"
+          ? config.maxPerTx
+          : ""
         : inheritedWeiCaps.maxPerTx,
       maxPerDay: hasOwnDefined(config, "maxPerDay")
-        ? String(config.maxPerDay)
+        ? typeof config.maxPerDay === "string"
+          ? config.maxPerDay
+          : ""
         : inheritedWeiCaps.maxPerDay,
       maxPerWeek: hasOwnDefined(config, "maxPerWeek")
-        ? String(config.maxPerWeek)
+        ? typeof config.maxPerWeek === "string"
+          ? config.maxPerWeek
+          : ""
         : inheritedWeiCaps.maxPerWeek,
     };
     return {

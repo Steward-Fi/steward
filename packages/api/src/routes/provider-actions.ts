@@ -81,6 +81,7 @@ const TOP_LEVEL_KEYS = new Set([
   "operationKey",
   "arguments",
   "idempotencyKey",
+  "summonAttestation",
   // #201: for config-driven (generic-http) operations the caller supplies the
   // HTTP method explicitly (the descriptor may allow several); adapter-fixed
   // github/x operations ignore it (their method is fixed by the operation key).
@@ -241,6 +242,7 @@ async function handleCreateProviderAction(c: RouteContext) {
   const idempotencyKey = body.idempotencyKey;
   const args = body.arguments;
   const method = body.method;
+  const summonAttestation = body.summonAttestation;
 
   if (
     workspaceId === undefined ||
@@ -317,6 +319,7 @@ async function handleCreateProviderAction(c: RouteContext) {
       expiresAt: toRfc3339Millis(expiresAt),
       nonce,
       requestId: c.get("requestId") ?? null,
+      summonAttestation,
     });
   } catch (e) {
     if (isCanonError(e)) return deny(c, e.code, e.httpStatus);

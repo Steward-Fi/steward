@@ -1,11 +1,14 @@
 import {
+  AuthProxyRequestError,
   buildExpiredRefreshCookie,
   buildRefreshCookie,
   forwardToApi,
   hasProxyHeader,
   isHttpsRequest,
+  normalizeAccessToken,
   normalizeRefreshToken,
   proxyJson,
+  readBoundedJsonObject,
   readRefreshCookie,
 } from "@/lib/auth-proxy";
 
@@ -36,12 +39,22 @@ export async function POST(request: Request): Promise<Response> {
 
   let tenantId: string | undefined;
   try {
-    const body = (await request.json()) as { tenantId?: unknown } | null;
-    if (typeof body?.tenantId === "string" && body.tenantId.length > 0) {
+    const body = await readBoundedJsonObject(request);
+    if (
+      body.tenantId !== undefined &&
+      (typeof body.tenantId !== "string" || !/^[a-zA-Z0-9_\-.:]{1,64}$/.test(body.tenantId))
+    ) {
+      return proxyJson({ ok: false, error: "Invalid tenant id format" }, 400);
+    }
+    if (typeof body.tenantId === "string") {
       tenantId = body.tenantId;
     }
-  } catch {
-    // Empty / non-JSON body is fine — tenantId is optional.
+  } catch (error) {
+    const status = error instanceof AuthProxyRequestError ? error.status : 400;
+    return proxyJson(
+      { ok: false, error: status === 413 ? "Request body is too large" : "Invalid JSON body" },
+      status,
+    );
   }
 
   let upstream: Awaited<ReturnType<typeof forwardToApi>>;
@@ -57,23 +70,44 @@ export async function POST(request: Request): Promise<Response> {
   if (upstream.status === 401 || upstream.status === 403) {
     // The refresh token is dead — drop the cookie so the client signs out.
     return proxyJson(
-      upstream.json ?? { ok: false, error: "Refresh session rejected" },
+      {
+        ok: false,
+        // Never reflect upstream-controlled strings: they can contain the
+        // submitted refresh token or other credential material.
+        error: "Refresh session rejected",
+      },
       upstream.status,
       { "Set-Cookie": buildExpiredRefreshCookie(secure) },
     );
   }
-  if (!upstream.json || upstream.json.ok !== true) {
-    return proxyJson(upstream.json ?? { ok: false, error: "Refresh failed" }, upstream.status);
+  if (upstream.status !== 200 || !upstream.json || upstream.json.ok !== true) {
+    return proxyJson(
+      {
+        ok: false,
+        error: "Refresh failed",
+      },
+      upstream.status >= 400 && upstream.status <= 599 ? upstream.status : 502,
+    );
   }
 
-  const { refreshToken: rotated, ...rest } = upstream.json;
-  const rotatedToken = normalizeRefreshToken(rotated);
-  if (!rotatedToken) {
-    // The API contract guarantees rotation; without it we cannot keep the
-    // session alive securely, so fail closed.
-    return proxyJson({ ok: false, error: "Refresh response missing rotated token" }, 502, {
+  const rotatedToken = normalizeRefreshToken(upstream.json.refreshToken);
+  const accessToken = normalizeAccessToken(upstream.json.token, [refreshToken, rotatedToken]);
+  const expiresIn = upstream.json.expiresIn;
+  if (
+    !rotatedToken ||
+    !accessToken ||
+    typeof expiresIn !== "number" ||
+    !Number.isSafeInteger(expiresIn) ||
+    expiresIn <= 0
+  ) {
+    // Whitelist the exact upstream success contract. Besides failing closed on
+    // malformed responses, this prevents an upstream reflection from putting
+    // refresh-token material into any browser-visible response field.
+    return proxyJson({ ok: false, error: "Malformed refresh response" }, 502, {
       "Set-Cookie": buildExpiredRefreshCookie(secure),
     });
   }
-  return proxyJson(rest, 200, { "Set-Cookie": buildRefreshCookie(rotatedToken, secure) });
+  return proxyJson({ ok: true, token: accessToken, expiresIn }, 200, {
+    "Set-Cookie": buildRefreshCookie(rotatedToken, secure),
+  });
 }

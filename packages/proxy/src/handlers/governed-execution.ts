@@ -60,6 +60,7 @@ import {
   validateGenericHttpDescriptor,
   verifyProviderExecutionCommitmentV2,
   verifyProviderExecutionPolicyEvidence,
+  verifyXSummonAttestation,
 } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";
 import type { Context } from "hono";
@@ -78,6 +79,7 @@ export type GovernedDispatchCode =
   | "EXEC_AUTH_KEY_UNAVAILABLE"
   | "EXEC_AUTH_SIGNATURE_INVALID"
   | "EXEC_AUTH_POLICY_EVIDENCE_MISSING"
+  | "EXEC_AUTH_SUMMON_ATTESTATION_INVALID"
   | "EXEC_DISPATCH_OUTCOME_UNKNOWN"
   | "EXEC_DISPATCH_UPSTREAM_ERROR"
   | "EXEC_AUDIT_UNAVAILABLE"
@@ -158,8 +160,59 @@ interface LoadedGovernedExecution {
   executionPolicyDecision: Record<string, unknown> | null;
   executionPolicyDecisionHash: string | null;
   executionPolicyEvaluatedAt: string | null;
+  requestEnvelope: Record<string, unknown>;
+  safeSummary: Record<string, unknown>;
+  idempotencyKeyHash: string;
   issuedAt: string;
   expiresAt: string;
+}
+
+/** Pure final-boundary verifier used by dispatch and hostile tests. Absence is
+ * valid for actions whose policy did not require summon provenance; a one-sided
+ * or invalid persisted record is always a deny. */
+export function verifyDispatchXSummonProvenance(input: {
+  audience: string;
+  tenantId: string;
+  workspaceId: string;
+  actorAgentId: string;
+  providerAccountId: string;
+  idempotencyKeyHash: string;
+  requestHash: string;
+  requestEnvelope: Record<string, unknown>;
+  safeSummary: Record<string, unknown>;
+  canonicalAction: GithubCanonicalActionV1;
+  keysJson: string | undefined;
+  now?: Date;
+}): "absent" | "valid" | "invalid" {
+  if (sha256Hex(jcsStringify(input.requestEnvelope)) !== input.requestHash) return "invalid";
+  const summonDigest = input.requestEnvelope.xSummonAttestationDigest;
+  const persistedAttestation = input.safeSummary.xSummonAttestation;
+  if (summonDigest === undefined && persistedAttestation === undefined) return "absent";
+  const body = input.canonicalAction.canonicalBody;
+  const reply =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>).reply
+      : undefined;
+  const sourcePostId =
+    reply && typeof reply === "object" && !Array.isArray(reply)
+      ? (reply as Record<string, unknown>).in_reply_to_tweet_id
+      : undefined;
+  if (typeof summonDigest !== "string" || typeof sourcePostId !== "string") return "invalid";
+  const verification = verifyXSummonAttestation(
+    persistedAttestation,
+    {
+      audience: input.audience,
+      tenantId: input.tenantId,
+      workspaceId: input.workspaceId,
+      actorAgentId: input.actorAgentId,
+      providerAccountId: input.providerAccountId,
+      sourcePostId,
+      idempotencyKeyHash: input.idempotencyKeyHash,
+    },
+    input.keysJson,
+    input.now,
+  );
+  return verification.ok && verification.digest === summonDigest ? "valid" : "invalid";
 }
 
 /**
@@ -291,6 +344,9 @@ async function loadGovernedExecution(
     executionPolicyDecision: binding.executionPolicyDecision,
     executionPolicyDecisionHash: binding.executionPolicyDecisionHash,
     executionPolicyEvaluatedAt: binding.executionPolicyEvaluatedAt?.toISOString() ?? null,
+    requestEnvelope: binding.requestEnvelope,
+    safeSummary: binding.safeSummary,
+    idempotencyKeyHash: binding.idempotencyKeyHash,
     issuedAt: (nonce.issuedAt as Date).toISOString(),
     expiresAt: (nonce.expiresAt as Date).toISOString(),
   };
@@ -358,6 +414,19 @@ export async function dispatchGovernedExecution(
   }
   await hook("afterLoad");
   if (!loaded) return deny("EXEC_AUTH_NOT_READY", 409, intentId);
+
+  // Revalidate authenticated X summon provenance at the final dispatch
+  // boundary. The request hash makes the attestation digest load-bearing; the
+  // proxy independently verifies the adapter signature, exact scope/source and
+  // current expiry before any claim or credential decrypt.
+  const summonProvenance = verifyDispatchXSummonProvenance({
+    ...loaded,
+    audience: process.env.STEWARD_X_SUMMON_ATTESTATION_AUDIENCE ?? "",
+    keysJson: process.env.STEWARD_X_SUMMON_ATTESTATION_PUBLIC_KEYS,
+  });
+  if (summonProvenance === "invalid") {
+    return deny("EXEC_AUTH_SUMMON_ATTESTATION_INVALID", 409, intentId);
+  }
 
   // Terminal / already-dispatched: never re-dispatch (X8, P26). A consumed nonce
   // with a terminal dispatch_state returns its current state without dispatching.

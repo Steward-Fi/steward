@@ -626,6 +626,26 @@ describe("Spending Limit Policy", () => {
     }
   });
 
+  it("rejects numeric wei config instead of accepting a precision-lost BigInt cap", async () => {
+    const result = await evaluatePolicy(
+      makeSpendingRule({ maxPerTx: Number.MAX_SAFE_INTEGER + 2 }),
+      makeContext({ request: { ...makeContext().request, value: "1" } }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("uint256 strings");
+  });
+
+  it("rejects numeric legacy maxAmount instead of coercing it", async () => {
+    const result = await evaluatePolicy(
+      makeSpendingRule({ maxAmount: Number.MAX_SAFE_INTEGER + 2, period: "day" }),
+      makeContext({ request: { ...makeContext().request, value: "1" } }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("uint256 strings");
+  });
+
   it("fails closed for an empty spending config even on a zero-value request", async () => {
     const result = await evaluatePolicy(
       makeSpendingRule({}),

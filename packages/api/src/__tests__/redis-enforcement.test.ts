@@ -104,6 +104,34 @@ describe("extractSpendLimitPolicy", () => {
     expect(result).toEqual({ maxPerDay: "1000000", maxPerWeek: "5000000" });
   });
 
+  it("extracts a weekly-only canonical cap without inventing a zero daily cap", () => {
+    const result = extractSpendLimitPolicy([
+      {
+        id: "p1",
+        type: "spending-limit",
+        enabled: true,
+        config: { maxPerWeek: "5000000" },
+      },
+    ]);
+    expect(result).toEqual({
+      maxPerDay: "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+      maxPerWeek: "5000000",
+    });
+  });
+
+  it("returns null for a pure-USD policy because it has no rolling wei cap", () => {
+    expect(
+      extractSpendLimitPolicy([
+        {
+          id: "p1",
+          type: "spending-limit",
+          enabled: true,
+          config: { maxPerDayUsd: 100 },
+        },
+      ]),
+    ).toBeNull();
+  });
+
   it("handles simplified period format (day)", () => {
     const policies: PolicyRule[] = [
       {
