@@ -298,6 +298,10 @@ describe("idempotencyMiddleware", () => {
       count += 1;
       return c.json({ ok: true, count, privateKey: `0xkeymaterial-${count}` });
     });
+    app.post("/user/me/wallet/export", async (c) => {
+      count += 1;
+      return c.json({ ok: true, count, privateKey: `0xuserkey-${count}` });
+    });
     app.post("/v1/kms/keys/key-1/decrypt", async (c) => {
       count += 1;
       return c.json({ plaintext_b64: `cGxhaW50ZXh0-${count}` });
@@ -309,6 +313,7 @@ describe("idempotencyMiddleware", () => {
 
     for (const [path, body] of [
       ["/vault/agent-1/export", {}],
+      ["/user/me/wallet/export", {}],
       ["/v1/kms/keys/key-1/decrypt", { ciphertext_b64: "AA==" }],
       ["/secrets", { name: "n", value: "v" }],
     ] as const) {
@@ -332,7 +337,7 @@ describe("idempotencyMiddleware", () => {
         error: "Idempotency key has already been used",
       });
     }
-    expect(count).toBe(3);
+    expect(count).toBe(4);
   });
 
   it("uses a verified request signature as replay-safe auth material", async () => {

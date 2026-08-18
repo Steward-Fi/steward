@@ -8,6 +8,7 @@ import {
 } from "node:crypto";
 import { executionAuthorizationNonces, getDb, policies } from "@stwd/db";
 import {
+  loadExecutionAuthV2Keys,
   canonicalJsonStringify,
   type ExecutionAuthorization,
   type ExecutionCapability,
@@ -272,13 +273,12 @@ function executionAuthorizationKey(): Uint8Array {
   // authorizations are minted and consumed inside this process within a 60s
   // TTL, so the active (first) key entry suffices; v1 keeps its own HKDF
   // salt/info above for domain separation from the v2 derived keys.
-  const raw = process.env.STEWARD_EXECUTION_AUTH_SECRET?.trim();
-  const firstEntry = raw?.split(",")[0]?.trim() ?? "";
-  // `keyId:secret` — split on the FIRST colon only (the secret may contain
-  // colons); a bare secret with no prefix is the whole entry (v2 parsing rules).
-  const colon = firstEntry.indexOf(":");
-  const secret = (colon === -1 ? firstEntry : firstEntry.slice(colon + 1)).trim();
-  if (!secret) {
+  let secret: Uint8Array;
+  try {
+    // Reuse the v2 parser so v1 cannot bypass its 32-character entropy floor,
+    // malformed-entry rejection, or rotation-list semantics.
+    secret = loadExecutionAuthV2Keys()[0]!.key;
+  } catch {
     throw new ExecutionAuthorizationError(
       "STEWARD_EXECUTION_AUTH_SECRET is required for execution authorization",
       "secret_unavailable",
@@ -286,7 +286,7 @@ function executionAuthorizationKey(): Uint8Array {
   }
   const key = hkdfSync(
     "sha256",
-    new TextEncoder().encode(secret),
+    secret,
     new TextEncoder().encode(EXECUTION_AUTHORIZATION_HKDF_SALT),
     new TextEncoder().encode(EXECUTION_AUTHORIZATION_HKDF_INFO),
     32,

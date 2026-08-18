@@ -393,6 +393,26 @@ describe("execution authorization service", () => {
     }
   });
 
+  it("rejects a weak dedicated execution-authorization secret", async () => {
+    const savedExecSecret = process.env.STEWARD_EXECUTION_AUTH_SECRET;
+    try {
+      process.env.STEWARD_EXECUTION_AUTH_SECRET = "weak";
+      await expect(
+        mintExecutionAuthorization({
+          requestId: "tx-exec-auth-weak-secret",
+          tenantId: TENANT_ID,
+          agentId: AGENT_ID,
+          capability: "wallet.sign_transaction",
+          backend: "local-vault",
+          payloadDigest: "a".repeat(64),
+        }),
+      ).rejects.toThrow("STEWARD_EXECUTION_AUTH_SECRET is required");
+    } finally {
+      if (savedExecSecret === undefined) delete process.env.STEWARD_EXECUTION_AUTH_SECRET;
+      else process.env.STEWARD_EXECUTION_AUTH_SECRET = savedExecSecret;
+    }
+  });
+
   it("derives the v1 key from the execution-auth secret, not the JWT secret (SEC-074)", async () => {
     const expected = {
       tenantId: TENANT_ID,

@@ -589,6 +589,7 @@ function isAuthTokenResponseReplaySuppressedPath(pathname: string): boolean {
 // plaintext, and the /secrets value plane.
 const SECRET_BEARING_RESPONSE_PATTERNS = [
   /^\/vault\/[^/]+\/export$/, // POST /vault/:agentId/export — wallet key material
+  /^\/user\/me\/wallet\/export$/, // POST /user/me/wallet/export — user wallet key material
   /^\/v1\/kms\/keys\/[^/]+\/decrypt$/, // POST /v1/kms/keys/:keyId/decrypt — plaintext
   /^\/secrets(?:\/|$)/, // POST /secrets — secret values
 ];

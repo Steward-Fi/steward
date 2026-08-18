@@ -14,9 +14,8 @@
  *   STEWARD_BIND_HOST     — bind host (default 127.0.0.1)
  */
 
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { createPGLiteDb, getDataDir, setPGLiteOverride } from "@stwd/db/pglite";
+import { loadOrCreateEmbeddedMasterPassword } from "./services/embedded-master-password";
 
 // Force PGLite/embedded mode
 process.env.STEWARD_DB_MODE = "pglite";
@@ -35,32 +34,11 @@ if (!process.env.DATABASE_URL) {
 // under it undecryptable after restart, so the generated password is persisted
 // to the data dir (mode 0600) and reused on subsequent boots.
 if (!process.env.STEWARD_MASTER_PASSWORD) {
-  const passwordPath = join(getDataDir(), ".master-password");
-  let existing = "";
-  try {
-    existing = readFileSync(passwordPath, "utf8").trim();
-  } catch {
-    // No persisted password yet — generate below.
-  }
-  if (existing) {
-    process.env.STEWARD_MASTER_PASSWORD = existing;
-  } else {
-    const bytes = new Uint8Array(32);
-    crypto.getRandomValues(bytes);
-    const generated = Array.from(bytes)
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
-    const dataDir = getDataDir();
-    mkdirSync(dataDir, { recursive: true });
-    writeFileSync(passwordPath, `${generated}\n`, { mode: 0o600 });
-    // Belt-and-braces: enforce 0600 even if a restrictive umask was absent.
-    chmodSync(passwordPath, 0o600);
-    process.env.STEWARD_MASTER_PASSWORD = generated;
-    console.log(
-      `[embedded] Generated a master password and persisted it to ${passwordPath} (mode 0600).\n` +
-        "[embedded] Set STEWARD_MASTER_PASSWORD explicitly to manage it yourself.",
-    );
-  }
+  process.env.STEWARD_MASTER_PASSWORD = loadOrCreateEmbeddedMasterPassword(getDataDir());
+  console.log(
+    "[embedded] Using the protected embedded master-password file (mode 0600).\n" +
+      "[embedded] Set STEWARD_MASTER_PASSWORD explicitly to manage it yourself.",
+  );
 }
 
 async function main() {

@@ -35,6 +35,15 @@ describe("signer credential pepper posture (SEC-073)", () => {
     );
   });
 
+  it("rejects configured peppers that are too short or only whitespace", async () => {
+    for (const weak of ["short", " ".repeat(64)]) {
+      process.env[PEPPER_ENV] = weak;
+      await expect(createSignerCredentialHash("stwd_signer_sec073_weak")).rejects.toThrow(
+        /at least 32 characters of entropy/,
+      );
+    }
+  });
+
   it("permits the pepperless path only with the explicit dev opt-in", async () => {
     delete process.env[PEPPER_ENV];
     process.env[DEV_SECRETS_ENV] = "true";

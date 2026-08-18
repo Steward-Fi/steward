@@ -8,7 +8,13 @@ const SCRYPT_KEY_LENGTH = 32;
 
 function signerCredentialPepper(): string {
   const pepper = process.env.STEWARD_SIGNER_CREDENTIAL_PEPPER;
-  if (pepper) return pepper;
+  if (pepper && pepper.trim().length >= 32) return pepper;
+  if (pepper) {
+    throw new Error(
+      "STEWARD_SIGNER_CREDENTIAL_PEPPER must contain at least 32 characters of entropy. " +
+        "Generate with `openssl rand -hex 32`.",
+    );
+  }
   // SEC-073: never silently degrade to an unpeppered hash — mirror the
   // STEWARD_AUDIT_HMAC_KEY posture (services/audit.ts). The pepper is
   // defense-in-depth against a DB-only attacker (scrypt+salt still applies),
