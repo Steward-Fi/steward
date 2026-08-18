@@ -29,7 +29,11 @@ describe("0101 operator transfer reservation integrity", () => {
     const journal = JSON.parse(
       await readFile(join(migrations, "meta", "_journal.json"), "utf8"),
     ) as { entries: Array<{ idx: number; tag: string }> };
-    expect(journal.entries.slice(-2).map(({ idx, tag }) => ({ idx, tag }))).toEqual([
+    const sigV4Index = journal.entries.findIndex(({ tag }) => tag === "0100_sigv4_injection");
+    expect(sigV4Index).toBeGreaterThanOrEqual(0);
+    expect(
+      journal.entries.slice(sigV4Index, sigV4Index + 2).map(({ idx, tag }) => ({ idx, tag })),
+    ).toEqual([
       { idx: 100, tag: "0100_sigv4_injection" },
       { idx: 101, tag: "0101_operator_transfer_integrity" },
     ]);
