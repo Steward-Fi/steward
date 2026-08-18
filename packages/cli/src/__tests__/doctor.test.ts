@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -7,6 +7,43 @@ import { join, resolve } from "node:path";
 import { ApiError, type StewardApiClient } from "../api";
 import { runDoctor } from "../doctor";
 import { describeSecret } from "../format";
+
+// runDoctor deliberately lets the real process env override the .env file
+// ({ ...parseEnv(envPath), ...process.env }). These tests assert on exact
+// file-driven values ("missing", "present (64 bytes)"), so any ambient
+// secret var — e.g. CI's STEWARD_MASTER_PASSWORD / STEWARD_AUDIT_HMAC_KEY
+// step env — would override the fixture and break them. Scrub the
+// doctor-read vars for the duration of this file and restore them after so
+// sibling files in the same process see the original env.
+const DOCTOR_ENV_KEYS = [
+  "DATABASE_URL",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_JWT_SECRET",
+  "STEWARD_EMAIL_CODE_SECRET",
+  "STEWARD_EXECUTION_AUTH_SECRET",
+  "STEWARD_KDF_SALT",
+  "STEWARD_AUDIT_HMAC_KEY",
+  "STEWARD_AUDIT_SIGNING_KEY",
+  "STEWARD_PLATFORM_KEY_SCOPES",
+  "STEWARD_PROXY_REQUEST_SIGNING_SECRETS",
+] as const;
+const savedDoctorEnv = new Map<string, string | undefined>();
+beforeAll(() => {
+  for (const key of DOCTOR_ENV_KEYS) {
+    savedDoctorEnv.set(key, process.env[key]);
+    delete process.env[key];
+  }
+});
+afterAll(() => {
+  for (const key of DOCTOR_ENV_KEYS) {
+    const value = savedDoctorEnv.get(key);
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+});
 
 // A fake API client that never touches the network. runDoctor only calls
 // `.request`; give it a harmless stub so the checks resolve deterministically.

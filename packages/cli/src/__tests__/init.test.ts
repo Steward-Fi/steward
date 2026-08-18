@@ -314,8 +314,8 @@ describe("steward init", () => {
   }, 15_000);
 
   test("--migrate does not default STEWARD_ALLOW_INSECURE_DB on for the child", async () => {
-    // With NODE_ENV=production and a non-loopback DATABASE_URL lacking
-    // sslmode=require, the shipped migrator must hit the db package's TLS
+    // With NODE_ENV=production and a non-loopback DATABASE_URL lacking a
+    // verifying sslmode, the shipped migrator must hit the db package's TLS
     // gate. Pre-fix the CLI forced STEWARD_ALLOW_INSECURE_DB=true into the
     // child env, silently disabling that gate; post-fix the gate fires.
     const dir = mkdtempSync(join(tmpdir(), "steward-cli-migrate-tls-"));
@@ -342,7 +342,10 @@ describe("steward init", () => {
       );
       const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
       expect(exitCode).toBe(1);
-      expect(stderr).toContain("sslmode=require");
+      // SEC-087: the gate now demands a server-authenticating TLS mode —
+      // sslmode=require alone no longer satisfies it.
+      expect(stderr).toContain("sslmode=verify-full");
+      expect(stderr).toContain("sslmode=verify-ca");
       expect(stderr).not.toContain("STEWARD_ALLOW_INSECURE_DB=true —");
     } finally {
       rmSync(dir, { recursive: true, force: true });
