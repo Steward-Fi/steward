@@ -403,8 +403,14 @@ export function parseDurationSeconds(value: string): number | null {
  * Validate AGENT_TOKEN_EXPIRY format and bound at startup (SEC-134). A bad
  * value otherwise surfaces as a 500 at token-signing time, and an unbounded
  * value mints effectively-permanent agent tokens.
+ *
+ * The default reads process.env at CALL time (not the module-init constant):
+ * on the Workers boot path, bindings are hydrated into process.env per request
+ * (SEC-148) and module-init constants may have been captured before hydration.
  */
-export function validateAgentTokenExpiryEnv(value: string = AGENT_TOKEN_EXPIRY): void {
+export function validateAgentTokenExpiryEnv(
+  value: string = process.env.AGENT_TOKEN_EXPIRY || "30d",
+): void {
   const seconds = parseDurationSeconds(value);
   if (seconds === null) {
     throw new Error(
