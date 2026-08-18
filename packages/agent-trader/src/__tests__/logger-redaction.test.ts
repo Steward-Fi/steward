@@ -76,6 +76,12 @@ describe("runtime error log redaction", () => {
     }) as never);
     try {
       logError("operation failed", new Error("TOKEN_AND_DATABASE_URL_CANARY"));
+      logError("webhook failure", undefined, {
+        data: {
+          error: "NESTED_PROVIDER_DIAGNOSTIC_CANARY",
+          authorization: "Bearer NESTED_TOKEN_CANARY",
+        },
+      });
       logSubmission({
         agentId: "agent-1",
         status: "error",
@@ -89,13 +95,18 @@ describe("runtime error log redaction", () => {
       stderrSpy.mockRestore();
     }
 
-    expect(stderr).toHaveLength(2);
+    expect(stderr).toHaveLength(3);
     expect(stderr.join("\n")).not.toContain("TOKEN_AND_DATABASE_URL_CANARY");
     expect(stderr.join("\n")).not.toContain("PROVIDER_RESPONSE_SECRET_CANARY");
+    expect(stderr.join("\n")).not.toContain("NESTED_PROVIDER_DIAGNOSTIC_CANARY");
+    expect(stderr.join("\n")).not.toContain("NESTED_TOKEN_CANARY");
     expect(JSON.parse(stderr[0] as string)).toMatchObject({
       errorClass: "Error",
       errorCode: null,
     });
-    expect(JSON.parse(stderr[1] as string)).toMatchObject({ error: "operation failed" });
+    expect(JSON.parse(stderr[1] as string)).toMatchObject({
+      data: { error: "[redacted]", authorization: "[redacted]" },
+    });
+    expect(JSON.parse(stderr[2] as string)).toMatchObject({ error: "operation failed" });
   });
 });
