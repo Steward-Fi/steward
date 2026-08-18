@@ -33,6 +33,7 @@ export const DIRECT_TENANT_TABLES = [
   "provider_action_reservation_generations",
   "provider_agent_budgets",
   "provider_authority_tenant_state",
+  "provider_google_credential_lifecycles",
   "provider_grants",
   "provider_operations",
   "provider_role_bindings",

@@ -62,4 +62,49 @@ describe("Google governed operations", () => {
       );
     }
   });
+  it("normalizes only recipient domains and commits exact local-part identity", () => {
+    const upperLocal = buildGoogleAction("google.gmail.messages.send", {
+      to: ["CaseSensitive@EXAMPLE.com"],
+      subject: "x",
+      body: "x",
+    });
+    const lowerLocal = buildGoogleAction("google.gmail.messages.send", {
+      to: ["casesensitive@example.com"],
+      subject: "x",
+      body: "x",
+    });
+
+    expect(upperLocal.policyArgs).toEqual({
+      toDomainSet: ["example.com"],
+      hasAttachment: false,
+      subjectLength: 1,
+    });
+    expect(upperLocal.action.canonicalBody).not.toEqual(lowerLocal.action.canonicalBody);
+  });
+
+  it("commits the exact canonical calendar recipient set and exposes only domains", () => {
+    const first = buildGoogleAction("google.calendar.events.insert", {
+      summary: "review",
+      start: "2026-01-01T00:00:00Z",
+      end: "2026-01-01T01:00:00Z",
+      attendees: ["B@Other.test", "a@example.com", "a@example.com"],
+    });
+    const reordered = buildGoogleAction("google.calendar.events.insert", {
+      summary: "review",
+      start: "2026-01-01T00:00:00Z",
+      end: "2026-01-01T01:00:00Z",
+      attendees: ["a@example.com", "B@other.test"],
+    });
+    const changed = buildGoogleAction("google.calendar.events.insert", {
+      summary: "review",
+      start: "2026-01-01T00:00:00Z",
+      end: "2026-01-01T01:00:00Z",
+      attendees: ["different@example.com", "B@other.test"],
+    });
+    expect(first.policyArgs.attendeeDomainSet).toEqual(["example.com", "other.test"]);
+    expect(first.policyArgs.recipientCommitment).toBe(reordered.policyArgs.recipientCommitment);
+    expect(first.policyArgs.recipientCommitment).not.toBe(changed.policyArgs.recipientCommitment);
+    expect(JSON.stringify(first.safeSummary)).not.toContain("a@example.com");
+    expect(JSON.stringify(first.safeSummary)).not.toContain("B@other.test");
+  });
 });
