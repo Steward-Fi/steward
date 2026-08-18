@@ -308,6 +308,7 @@
       "name": "@stwd/policy-engine",
       "version": "0.4.0",
       "dependencies": {
+        "@noble/curves": "^1.6.0",
         "@noble/hashes": "^1.7.0",
         "@stwd/shared": "workspace:*",
         "re2-wasm": "1.0.2",
