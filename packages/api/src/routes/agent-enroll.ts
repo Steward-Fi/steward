@@ -1,6 +1,6 @@
 /**
- * agent-enroll.ts — the PUBLIC keypair-only agent enrollment surface (lane A1,
- * scope 1). Mounted BEFORE the tenant gate: an enrolling agent holds only its
+ * agent-enroll.ts — the public keypair-only agent enrollment surface. Mounted
+ * before the tenant gate: an enrolling agent holds only its
  * identity keypair, not a token or an API key.
  *
  *   POST /agent-enroll/challenge  { agentId }

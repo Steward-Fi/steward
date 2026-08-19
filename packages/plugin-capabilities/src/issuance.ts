@@ -50,7 +50,7 @@ export type CapabilityAuditAction =
   | "capability.exercise";
 
 /** Structured audit event. Deliberately free of secret material — identifiers,
- * mode, decision, and timing only. Lane E1 consumes this shape. */
+ * mode, decision, and timing only. Audit consumers use this shape. */
 export interface CapabilityAuditEvent {
   action: CapabilityAuditAction;
   tenantId: string;

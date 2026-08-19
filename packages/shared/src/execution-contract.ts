@@ -86,7 +86,7 @@ export interface ExecutionAuthorization {
   /**
    * HMAC-SHA256 over the canonical authorization fields. Optional for
    * compatibility with callers compiled against the original append-only
-   * contract, but required by the PR4 gateway verifier.
+   * contract, but required by the governed-execution gateway verifier.
    */
   signature?: string;
   /** Caller-supplied idempotency key bound into the signed authorization. */
@@ -94,7 +94,7 @@ export interface ExecutionAuthorization {
 }
 
 /**
- * PR4 provider execution authorization v2.
+ * Provider execution authorization v2.
  *
  * A `version: 2` authorization row in `execution_authorization_nonces`. It is a
  * subordinate, per-execution claim object keyed 1:1 to the intent; it NEVER

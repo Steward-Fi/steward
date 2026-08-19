@@ -9,7 +9,7 @@ import {
 const read = async (path: string) => Bun.file(new URL(path, import.meta.url)).text();
 
 /**
- * CI guard for the PR4 execution gateway.
+ * CI guard for the governed-execution gateway.
  *
  * The migrated primary EVM `/vault/:agentId/sign` route and its compatible
  * approval replay must never reach the raw `Vault.signTransaction` signer

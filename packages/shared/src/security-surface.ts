@@ -15,7 +15,7 @@ export interface SecuritySurfaceRoute {
   notes?: string;
   /**
    * For wallet-signing surfaces: whether this specific route is bound to the
-   * PR4 policy-bound execution gateway (GovernedVault mint+consume before raw
+   * policy-bound execution gateway (GovernedVault mint and consume before raw
    * signing). `false`/undefined means the route still reaches the raw signer
    * through route-local policy only and is NOT yet gateway-migrated. This must
    * be honest per-route; do not claim product-wide enforcement.
@@ -25,9 +25,9 @@ export interface SecuritySurfaceRoute {
 
 /**
  * A raw EVM `Vault.signTransaction` call site that is NOT yet routed through the
- * PR4 execution gateway. Enumerated explicitly so the security surface never
- * over-claims product-wide enforcement. Convergence of these onto GovernedVault
- * is tracked for PR5b (immediately after #182 merges).
+ * execution gateway. Enumerated explicitly so the security surface never
+ * over-claims product-wide enforcement. These routes remain route-policy
+ * boundaries until they are migrated to GovernedVault.
  */
 export interface LegacyEvmSignCallSite {
   file: string;
@@ -470,13 +470,11 @@ export const SECURITY_SURFACE_OPERATIONS = [
 
 /**
  * Explicit enumeration of raw EVM `Vault.signTransaction` call sites that are
- * NOT yet routed through the PR4 execution gateway. The migrated primary EVM
+ * not routed through the execution gateway. The migrated primary EVM
  * `/vault/:agentId/sign` route and its compatible approval replay are excluded
  * because they go through GovernedVault. The vault.ts entries below are
- * intentionally-legacy branches (transfer action surface); the intents/user/
- * global-wallet entries are separate legacy route files deliberately left for
- * route-convergence work in PR5b (immediately after #182 merges) rather than
- * migrated inside this already-large PR.
+ * route-policy branches (transfer action surface); the intents, user, and
+ * global-wallet entries remain separate route-policy boundaries.
  *
  * A CI guard (packages/api execution gateway guard test) asserts that the
  * primary EVM sign route + approval replay cannot reach the raw signer without
@@ -532,7 +530,7 @@ export const LEGACY_EVM_SIGN_CALL_SITES = [
  *    it (the Solana primary-sign fallback and the transfer approval-replay
  *    fallback). These are inside the two gateway-migrated routes.
  *  - "legacy": a not-yet-gateway-migrated EVM sign surface, one-for-one with an
- *    entry in LEGACY_EVM_SIGN_CALL_SITES (PR5b convergence).
+ *    entry in LEGACY_EVM_SIGN_CALL_SITES.
  */
 export interface RawEvmSignCallSite {
   file: string;

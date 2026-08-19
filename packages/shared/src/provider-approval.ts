@@ -1,15 +1,15 @@
 /**
- * provider-approval.ts — PR3 exact-request approval commitment, decision, and
+ * provider-approval.ts — exact-request approval commitment, decision, and
  * audit document schemas + their canonical hashes (spec §5, §7.2, §8.2).
  *
  * SECURITY POSTURE. Every builder here is on the evidence surface. The
  * commitment document is what an approval binds to and what safe resume
  * independently recomputes and compares byte-for-byte. It MUST be built ONLY
  * from persisted/authoritative fields and hashed with the SAME strict RFC 8785
- * JCS implementation PR2 owns (`jcsStringify`), never a bespoke serializer.
+ * shared JCS implementation (`jcsStringify`), never a bespoke serializer.
  *
  * This module is pure (no DB, no crypto beyond sha256HexPrefixed) so it can be
- * reused by the API service AND by an offline verifier (PR5) without pulling in
+ * reused by the API service and offline verifier without pulling in
  * server dependencies.
  */
 
@@ -33,7 +33,7 @@ export interface ProviderApprovalCommitmentV1 {
     revision: number;
     riskClass: string;
     // Adapter canonical profile. Widened from the closed github|x literal to a
-    // registry-validated `string` (issue #201): the value MUST be a member of
+    // registry-validated `string`: the value must be a member of
     // the provider-profile-registry (`assertRegisteredProfile`) at every
     // consumption site, so an unregistered profile is rejected fail-closed
     // rather than admitted by a loose type. JCS hashes whatever string is
@@ -71,7 +71,7 @@ export interface ProviderApprovalCommitmentV1 {
     maxMfaAgeSeconds: 300;
     requiredMfaAssurance: "current-session-mfa" | "phishing-resistant";
     /**
-     * #205 flat M-of-N quorum. ABSENT (undefined) => single-approver legacy path;
+     * Flat M-of-N quorum. ABSENT (undefined) selects the single-approver path;
      * the commitment is then byte-for-byte identical to pre-quorum actions
      * because JCS omits an undefined member (verified by the single-approver
      * regression corpus). When present, `threshold` DISTINCT eligible approvals
@@ -157,7 +157,7 @@ export function canonicalApprovalCommitmentObject(
       maxMfaAgeSeconds: c.approvalRequirements.maxMfaAgeSeconds,
       requiredMfaAssurance: c.approvalRequirements.requiredMfaAssurance,
       // Additive quorum member. Emitted ONLY when configured, so an absent
-      // quorum yields a canonical object byte-identical to the pre-#205 shape.
+      // quorum yields the canonical single-approver object unchanged.
       // The eligible-approver set is sorted (UUID-byte order) because JCS
       // preserves array order and the commitment must be deterministic.
       ...(c.approvalRequirements.quorum
@@ -248,7 +248,7 @@ export interface ProviderApprovalAuditPayloadV1 {
   resumeAttemptId: string | null;
   occurredAt: string;
   /**
-   * #205 quorum progress. ABSENT for single-approver actions (byte-for-byte
+   * Quorum progress. ABSENT for single-approver actions (byte-for-byte
    * unchanged audit payloads). When present, `quorumThreshold` is the required
    * DISTINCT-approval count and `quorumApprovalsCount` is the tally AFTER this
    * decision (so a partial-quorum approve carries count < threshold and the

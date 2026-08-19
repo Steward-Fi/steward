@@ -1,5 +1,5 @@
 /**
- * governed-decrypt-inventory.test.ts — governed-execution static sensitive-surface inventory
+ * governed-decrypt-inventory.test.ts — static governed-decrypt surface inventory
  * (spec §0.1 X1/X2, §5.3, §11.1). A source-introspection CI guard that proves,
  * WITHOUT running the flow, the two structural invariants the acceptance gate
  * (§11.1) demands:
@@ -17,7 +17,7 @@
  *      no source writes it from `c.req.*`.
  *
  * This is a byte-level scan of the on-disk source (the same technique as the
- * #182 raw-signer inventory and the approval-lifecycle security-surface test). Adding a new
+ * raw-signer inventory and the shared security-surface test). Adding a new
  * decrypt caller, exporting the helper, or wiring the governed claim from a
  * request surface fails CI with a classification instruction.
  */
@@ -36,7 +36,7 @@ function lineOf(source: string, index: number): number {
   return source.slice(0, index).split("\n").length;
 }
 
-describe("governed-execution governed decrypt sensitive-surface inventory (X1/X2, §11.1)", () => {
+describe("governed decrypt sensitive-surface inventory (X1/X2, §11.1)", () => {
   test("decryptSecret + injectCredential are module-private in proxy.ts (never exported)", async () => {
     const source = await read("../handlers/proxy.ts");
     // The helpers must be declared, but NOT with an `export` modifier.

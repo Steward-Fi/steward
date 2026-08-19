@@ -18,7 +18,7 @@ import {
   type SignRequest,
 } from "@stwd/shared";
 
-// PR4 v2 signing crypto lives in @stwd/shared (pure, no DB) so the separate
+// V2 signing crypto lives in @stwd/shared (pure, no DB) so the separate
 // proxy process can verify without depending on @stwd/api. Re-export here for
 // existing api-side callers/tests.
 export {

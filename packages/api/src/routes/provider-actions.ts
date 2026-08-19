@@ -1,5 +1,5 @@
 /**
- * provider-actions.ts — POST /v2/provider-actions (PR2 spec §2).
+ * provider-actions.ts — POST /v2/provider-actions (provider-action spec §2).
  *
  * The public provider-action ingress. It:
  *   1. Reads BOUNDED raw UTF-8 bytes (never `request.json()` first — JSON.parse
@@ -59,7 +59,7 @@ export function registerProviderActionRoutes(app: Hono<{ Variables: AppVariables
   app.use("/v2/provider-actions", requireProviderAgentJwt);
   app.post("/v2/provider-actions", handleCreateProviderAction);
 
-  // #233: a read-only status view for the authenticated agent's own actions.
+  // Read-only status view for the authenticated agent's own actions.
   // Keep this path exact (no wildcard suffix) so the sibling approval, execute,
   // case, and evidence routes retain their distinct human/MFA gates.
   app.use("/v2/provider-actions/:id", async (c, next) => {
@@ -82,7 +82,7 @@ const TOP_LEVEL_KEYS = new Set([
   "arguments",
   "idempotencyKey",
   "summonAttestation",
-  // #201: for config-driven (generic-http) operations the caller supplies the
+  // For config-driven (generic-http) operations the caller supplies the
   // HTTP method explicitly (the descriptor may allow several); adapter-fixed
   // github/x operations ignore it (their method is fixed by the operation key).
   "method",
@@ -277,7 +277,7 @@ async function handleCreateProviderAction(c: RouteContext) {
     if (adapterBuild) {
       build = adapterBuild;
     } else {
-      // #201: any operation key not owned by an adapter-fixed profile is a
+      // Any operation key not owned by an adapter-fixed profile is a
       // candidate config-driven (generic-http) operation. We cannot build it
       // here because the operator-authored descriptor lives on the resolved
       // provider_operations row; defer the build to the service, which loads +

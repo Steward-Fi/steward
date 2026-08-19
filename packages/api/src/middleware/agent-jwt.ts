@@ -263,7 +263,7 @@ export function isAgentJwtFailure(
  * {@link AgentJwtAuthenticationFailure} the caller maps to a response.
  *
  * This is the single Eliza-Cloud RS256 authenticator (iss=eliza-cloud,
- * aud=steward). Multi-issuer discovery is deliberately out of PR2 scope.
+ * aud=steward). Multi-issuer discovery is deliberately outside this boundary.
  */
 export async function authenticateAgentJwt(
   c: Context<{ Variables: AppVariables }>,
