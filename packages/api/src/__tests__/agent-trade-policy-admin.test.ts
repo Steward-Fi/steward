@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { agentPolicies, agents, auditEvents, closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
@@ -14,6 +14,7 @@ import type { AppVariables } from "../services/context";
 
 const TENANT_ID = `agent-trade-policy-admin-${Date.now()}`;
 const AGENT_ID = `agent-trade-policy-admin-agent-${Date.now()}`;
+const USE_REAL_POSTGRES = Boolean(process.env.DATABASE_URL);
 
 setDefaultTimeout(30000);
 
@@ -35,6 +36,7 @@ async function makeApp(authMode: AuthMode = "admin") {
     await next();
   });
   app.route("/agents", agentRoutes);
+  app.onError((_error, c) => c.json({ ok: false, error: "Internal server error" }, 500));
   return app;
 }
 
@@ -48,13 +50,17 @@ function putPolicy(app: Awaited<ReturnType<typeof makeApp>>, body: Record<string
 
 describe("agent trade policy admin path (SEC-208)", () => {
   beforeAll(async () => {
-    process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "agent-trade-policy-admin-master-password";
     process.env.STEWARD_AUDIT_HMAC_KEY = "agent-trade-policy-admin-audit-hmac-key-entropy";
-    const { db, client } = await createPGLiteDb("memory://");
-    setPGLiteOverride(db, async () => {
-      await client.close();
-    });
+    if (!USE_REAL_POSTGRES) {
+      process.env.STEWARD_PGLITE_MEMORY = "true";
+      const { db, client } = await createPGLiteDb("memory://");
+      setPGLiteOverride(db, async () => {
+        await client.close();
+      });
+    } else {
+      delete process.env.STEWARD_PGLITE_MEMORY;
+    }
     await getDb().insert(tenants).values({
       id: TENANT_ID,
       name: "Trade Policy Admin Tenant",
@@ -69,6 +75,13 @@ describe("agent trade policy admin path (SEC-208)", () => {
   });
 
   afterAll(async () => {
+    if (USE_REAL_POSTGRES) {
+      await getDb().delete(agentPolicies).where(eq(agentPolicies.agentId, AGENT_ID));
+      await getDb().delete(auditEvents).where(eq(auditEvents.tenantId, TENANT_ID));
+      await getDb().execute(sql`DELETE FROM audit_chain_heads WHERE tenant_id = ${TENANT_ID}`);
+      await getDb().delete(agents).where(eq(agents.id, AGENT_ID));
+      await getDb().delete(tenants).where(eq(tenants.id, TENANT_ID));
+    }
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
@@ -137,6 +150,70 @@ describe("agent trade policy admin path (SEC-208)", () => {
       .from(agentPolicies)
       .where(eq(agentPolicies.agentId, AGENT_ID));
     expect(row?.updatedBy).toBe("trade-policy-admin");
+  });
+
+  it("rolls back the policy row when its required audit append fails", async () => {
+    const app = await makeApp("admin");
+    const [before] = await getDb()
+      .select()
+      .from(agentPolicies)
+      .where(eq(agentPolicies.agentId, AGENT_ID));
+    const reason = "must roll back with audit";
+
+    await getDb().execute(
+      sql.raw(`
+        CREATE OR REPLACE FUNCTION fail_agent_policy_completion_audit()
+        RETURNS trigger AS $$
+        BEGIN
+          IF NEW.action = 'agent.policy.updated' THEN
+            RAISE EXCEPTION 'required agent policy audit failed';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `),
+    );
+    await getDb().execute(
+      sql.raw(`
+        CREATE TRIGGER agent_policy_completion_audit_failure
+        BEFORE INSERT ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION fail_agent_policy_completion_audit()
+      `),
+    );
+
+    try {
+      const response = await putPolicy(app, { dailyCap: 9000, reason });
+      expect(response.status).toBe(500);
+      await expect(response.json()).resolves.toEqual({
+        ok: false,
+        error: "Internal server error",
+      });
+      const [after] = await getDb()
+        .select()
+        .from(agentPolicies)
+        .where(eq(agentPolicies.agentId, AGENT_ID));
+      expect(after).toEqual(before);
+      expect(
+        await getDb()
+          .select({ id: auditEvents.id })
+          .from(auditEvents)
+          .where(
+            and(
+              eq(auditEvents.tenantId, TENANT_ID),
+              eq(auditEvents.action, "agent.policy.updated"),
+              eq(auditEvents.resourceId, AGENT_ID),
+              sql`${auditEvents.metadata}->>'reason' = ${reason}`,
+            ),
+          ),
+      ).toHaveLength(0);
+    } finally {
+      await getDb().execute(
+        sql.raw("DROP TRIGGER IF EXISTS agent_policy_completion_audit_failure ON audit_events"),
+      );
+      await getDb().execute(
+        sql.raw("DROP FUNCTION IF EXISTS fail_agent_policy_completion_audit()"),
+      );
+    }
   });
 
   it("serializes concurrent human partial patches and audits the exact committed chain", async () => {

@@ -1,7 +1,18 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
-import { agents, auditEvents, closeDb, getDb, tenants } from "@stwd/db";
+import { revocationStore } from "@stwd/auth";
+import {
+  agents,
+  agentWallets,
+  auditEvents,
+  closeDb,
+  encryptedChainKeys,
+  encryptedKeys,
+  getDb,
+  policies,
+  tenants,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
@@ -36,6 +47,7 @@ async function makeApp(authMode: AuthMode) {
     await next();
   });
   app.route("/agents", agentRoutes);
+  app.onError((_error, c) => c.json({ ok: false, error: "Internal server error" }, 500));
   return app;
 }
 
@@ -92,39 +104,61 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
     expect(deleteRes.status).toBe(403);
   });
 
-  it("rejects admin sessions without recent MFA", async () => {
+  it("rejects agent, wallet, batch, and token provisioning without recent MFA", async () => {
     const app = await makeApp("admin-no-mfa");
-    const before = await getDb()
+    const beforeAgents = await getDb().select({ id: agents.id }).from(agents);
+    const beforeWallets = await getDb()
+      .select({ id: agentWallets.id })
+      .from(agentWallets)
+      .where(eq(agentWallets.agentId, AGENT_ID));
+    const beforeAudits = await getDb()
       .select({ id: auditEvents.id })
       .from(auditEvents)
-      .where(
-        and(
-          eq(auditEvents.tenantId, TENANT_ID),
-          eq(auditEvents.resourceId, AGENT_ID),
-          inArray(auditEvents.action, ["agent.token.create.authorized", "agent.token.create"]),
-        ),
-      );
-    const res = await app.request(`/agents/${AGENT_ID}/token`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ expiresIn: "1h" }),
-    });
-    expect(res.status).toBe(403);
-    await expect(res.json()).resolves.toMatchObject({
-      ok: false,
-      error: "Agent token creation requires recent MFA verification",
-    });
-    const after = await getDb()
-      .select({ id: auditEvents.id })
-      .from(auditEvents)
-      .where(
-        and(
-          eq(auditEvents.tenantId, TENANT_ID),
-          eq(auditEvents.resourceId, AGENT_ID),
-          inArray(auditEvents.action, ["agent.token.create.authorized", "agent.token.create"]),
-        ),
-      );
-    expect(after).toEqual(before);
+      .where(eq(auditEvents.tenantId, TENANT_ID));
+
+    const requests = [
+      app.request("/agents", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Rejected agent" }),
+      }),
+      app.request(`/agents/${AGENT_ID}/wallets`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chainType: "evm", venue: "rejected" }),
+      }),
+      app.request("/agents/batch", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agents: [{ name: "Rejected batch agent" }] }),
+      }),
+      app.request(`/agents/${AGENT_ID}/token`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expiresIn: "1h" }),
+      }),
+    ];
+    for (const response of await Promise.all(requests)) {
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringContaining("recent MFA verification"),
+      });
+    }
+
+    expect(await getDb().select({ id: agents.id }).from(agents)).toEqual(beforeAgents);
+    expect(
+      await getDb()
+        .select({ id: agentWallets.id })
+        .from(agentWallets)
+        .where(eq(agentWallets.agentId, AGENT_ID)),
+    ).toEqual(beforeWallets);
+    expect(
+      await getDb()
+        .select({ id: auditEvents.id })
+        .from(auditEvents)
+        .where(eq(auditEvents.tenantId, TENANT_ID)),
+    ).toEqual(beforeAudits);
   });
 
   it("rejects non-admin sessions", async () => {
@@ -145,6 +179,147 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       expect(res.status).toBe(200);
     } finally {
       delete process.env.STEWARD_ALLOW_API_KEY_ADMIN_MUTATIONS;
+    }
+  });
+
+  it("does not mutate agents, wallets, policies, or revocation state when authorization audit fails", async () => {
+    const app = await makeApp("admin");
+    const canary = "postgres://agent-authorization-audit-secret";
+    const beforeAgents = await getDb().select({ id: agents.id }).from(agents);
+    const beforeWallets = await getDb()
+      .select()
+      .from(agentWallets)
+      .where(eq(agentWallets.agentId, AGENT_ID));
+    const beforePolicies = await getDb()
+      .select()
+      .from(policies)
+      .where(eq(policies.agentId, AGENT_ID));
+    expect(await revocationStore.getAgentRevokedBefore(AGENT_ID)).toBeNull();
+
+    await getDb().execute(
+      sql.raw(`
+        CREATE OR REPLACE FUNCTION fail_agent_authorization_audit()
+        RETURNS trigger AS $$
+        BEGIN
+          IF NEW.action IN (
+            'agent.create.authorized',
+            'agent.wallet.create.authorized',
+            'agent.policies.update.authorized',
+            'agent.delete.authorized'
+          ) THEN
+            RAISE EXCEPTION '${canary}';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `),
+    );
+    await getDb().execute(
+      sql.raw(`
+        CREATE TRIGGER agent_authorization_audit_failure
+        BEFORE INSERT ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION fail_agent_authorization_audit()
+      `),
+    );
+
+    try {
+      const responses = [
+        await app.request("/agents", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: "Audit-blocked agent" }),
+        }),
+        await app.request(`/agents/${AGENT_ID}/wallets`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ chainType: "evm", venue: "audit-blocked" }),
+        }),
+        await app.request(`/agents/${AGENT_ID}/policies`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify([
+            {
+              type: "spending-limit",
+              enabled: true,
+              config: { maxPerTx: "1" },
+            },
+          ]),
+        }),
+        await app.request(`/agents/${AGENT_ID}`, { method: "DELETE" }),
+      ];
+      for (const response of responses) {
+        expect(response.status).toBeGreaterThanOrEqual(400);
+        expect(await response.text()).not.toContain(canary);
+      }
+
+      expect(await getDb().select({ id: agents.id }).from(agents)).toEqual(beforeAgents);
+      expect(
+        await getDb().select().from(agentWallets).where(eq(agentWallets.agentId, AGENT_ID)),
+      ).toEqual(beforeWallets);
+      expect(await getDb().select().from(policies).where(eq(policies.agentId, AGENT_ID))).toEqual(
+        beforePolicies,
+      );
+      expect(await revocationStore.getAgentRevokedBefore(AGENT_ID)).toBeNull();
+    } finally {
+      await getDb().execute(
+        sql.raw("DROP TRIGGER IF EXISTS agent_authorization_audit_failure ON audit_events"),
+      );
+      await getDb().execute(sql.raw("DROP FUNCTION IF EXISTS fail_agent_authorization_audit()"));
+    }
+  });
+
+  it("removes newly created agent and wallet records when completion audit fails", async () => {
+    const app = await makeApp("admin");
+    const beforeAgents = await getDb().select().from(agents);
+    const beforeWallets = await getDb().select().from(agentWallets);
+    const beforeEvmKeys = await getDb().select().from(encryptedKeys);
+    const beforeChainKeys = await getDb().select().from(encryptedChainKeys);
+
+    await getDb().execute(
+      sql.raw(`
+        CREATE OR REPLACE FUNCTION fail_agent_completion_audit()
+        RETURNS trigger AS $$
+        BEGIN
+          IF NEW.action IN ('agent.create', 'agent.wallet.create') THEN
+            RAISE EXCEPTION 'required agent completion audit failed';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `),
+    );
+    await getDb().execute(
+      sql.raw(`
+        CREATE TRIGGER agent_completion_audit_failure
+        BEFORE INSERT ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION fail_agent_completion_audit()
+      `),
+    );
+
+    try {
+      const createResponse = await app.request("/agents", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Completion-audit-blocked agent" }),
+      });
+      expect(createResponse.status).toBeGreaterThanOrEqual(400);
+
+      const walletResponse = await app.request(`/agents/${AGENT_ID}/wallets`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chainType: "evm", venue: "completion-audit-blocked" }),
+      });
+      expect(walletResponse.status).toBeGreaterThanOrEqual(400);
+
+      expect(await getDb().select().from(agents)).toEqual(beforeAgents);
+      expect(await getDb().select().from(agentWallets)).toEqual(beforeWallets);
+      expect(await getDb().select().from(encryptedKeys)).toEqual(beforeEvmKeys);
+      expect(await getDb().select().from(encryptedChainKeys)).toEqual(beforeChainKeys);
+    } finally {
+      await getDb().execute(
+        sql.raw("DROP TRIGGER IF EXISTS agent_completion_audit_failure ON audit_events"),
+      );
+      await getDb().execute(sql.raw("DROP FUNCTION IF EXISTS fail_agent_completion_audit()"));
     }
   });
 
@@ -175,8 +350,183 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       "agent.token.create",
     ]);
     expect(tokenAudits[1]?.seq).toBe(tokenAudits[0]?.seq + 1);
+  });
 
-    const deleteRes = await app.request(`/agents/${AGENT_ID}`, { method: "DELETE" });
-    expect(deleteRes.status).toBe(200);
+  it("ignores caller agent ids on single and batch creation", async () => {
+    const app = await makeApp("admin");
+    const single = await app.request("/agents", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: AGENT_ID, name: "Server id single" }),
+    });
+    expect(single.status).toBe(200);
+    const singleBody = (await single.json()) as { data: { id: string } };
+    expect(singleBody.data.id).not.toBe(AGENT_ID);
+
+    const batch = await app.request("/agents/batch", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agents: [{ id: AGENT_ID, name: "Server id batch" }] }),
+    });
+    expect(batch.status).toBe(200);
+    const batchBody = (await batch.json()) as {
+      data: { created: Array<{ id: string }>; errors: unknown[] };
+    };
+    expect(batchBody.data.errors).toEqual([]);
+    expect(batchBody.data.created).toHaveLength(1);
+    expect(batchBody.data.created[0]?.id).not.toBe(AGENT_ID);
+    expect(batchBody.data.created[0]?.id).not.toBe(singleBody.data.id);
+
+    for (const createdId of [singleBody.data.id, batchBody.data.created[0]!.id]) {
+      const auditRows = await getDb()
+        .select({ action: auditEvents.action, seq: auditEvents.seq })
+        .from(auditEvents)
+        .where(
+          and(
+            eq(auditEvents.tenantId, TENANT_ID),
+            eq(auditEvents.resourceId, createdId),
+            inArray(auditEvents.action, ["agent.create.authorized", "agent.create"]),
+          ),
+        )
+        .orderBy(asc(auditEvents.seq));
+      expect(auditRows.map(({ action }) => action)).toEqual([
+        "agent.create.authorized",
+        "agent.create",
+      ]);
+      expect(auditRows[1]?.seq).toBe(auditRows[0]!.seq + 1);
+    }
+  });
+
+  it("restores rows after a failed delete audit, retains revocation, and succeeds on retry", async () => {
+    const app = await makeApp("admin");
+    const walletResponse = await app.request(`/agents/${AGENT_ID}/wallets`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chainType: "evm", venue: "delete-retry" }),
+    });
+    expect(walletResponse.status).toBe(200);
+    const walletAudits = await getDb()
+      .select({ action: auditEvents.action, seq: auditEvents.seq })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, TENANT_ID),
+          eq(auditEvents.resourceId, AGENT_ID),
+          inArray(auditEvents.action, ["agent.wallet.create.authorized", "agent.wallet.create"]),
+          sql`${auditEvents.metadata}->>'venue' = 'delete-retry'`,
+        ),
+      )
+      .orderBy(asc(auditEvents.seq));
+    expect(walletAudits.map(({ action }) => action)).toEqual([
+      "agent.wallet.create.authorized",
+      "agent.wallet.create",
+    ]);
+    expect(walletAudits[1]?.seq).toBe(walletAudits[0]!.seq + 1);
+    await getDb()
+      .insert(policies)
+      .values({
+        id: "delete-retry-policy",
+        agentId: AGENT_ID,
+        type: "spending-limit",
+        enabled: true,
+        config: { maxPerTx: "3" },
+      });
+
+    const beforeAgent = await getDb().select().from(agents).where(eq(agents.id, AGENT_ID));
+    const beforeWallets = await getDb()
+      .select()
+      .from(agentWallets)
+      .where(eq(agentWallets.agentId, AGENT_ID));
+    const beforeEvmKeys = await getDb()
+      .select()
+      .from(encryptedKeys)
+      .where(eq(encryptedKeys.agentId, AGENT_ID));
+    const beforeChainKeys = await getDb()
+      .select()
+      .from(encryptedChainKeys)
+      .where(eq(encryptedChainKeys.agentId, AGENT_ID));
+    const beforePolicies = await getDb()
+      .select()
+      .from(policies)
+      .where(eq(policies.agentId, AGENT_ID));
+
+    await getDb().execute(
+      sql.raw(`
+        CREATE OR REPLACE FUNCTION fail_agent_delete_completion_audit()
+        RETURNS trigger AS $$
+        BEGIN
+          IF NEW.action = 'agent.delete' THEN
+            RAISE EXCEPTION 'required agent delete audit failed';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `),
+    );
+    await getDb().execute(
+      sql.raw(`
+        CREATE TRIGGER agent_delete_completion_audit_failure
+        BEFORE INSERT ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION fail_agent_delete_completion_audit()
+      `),
+    );
+
+    try {
+      const failed = await app.request(`/agents/${AGENT_ID}`, { method: "DELETE" });
+      expect(failed.status).toBe(500);
+      expect(await getDb().select().from(agents).where(eq(agents.id, AGENT_ID))).toEqual(
+        beforeAgent,
+      );
+      expect(
+        await getDb().select().from(agentWallets).where(eq(agentWallets.agentId, AGENT_ID)),
+      ).toEqual(beforeWallets);
+      expect(
+        await getDb().select().from(encryptedKeys).where(eq(encryptedKeys.agentId, AGENT_ID)),
+      ).toEqual(beforeEvmKeys);
+      expect(
+        await getDb()
+          .select()
+          .from(encryptedChainKeys)
+          .where(eq(encryptedChainKeys.agentId, AGENT_ID)),
+      ).toEqual(beforeChainKeys);
+      expect(await getDb().select().from(policies).where(eq(policies.agentId, AGENT_ID))).toEqual(
+        beforePolicies,
+      );
+      expect(await revocationStore.getAgentRevokedBefore(AGENT_ID)).not.toBeNull();
+    } finally {
+      await getDb().execute(
+        sql.raw("DROP TRIGGER IF EXISTS agent_delete_completion_audit_failure ON audit_events"),
+      );
+      await getDb().execute(
+        sql.raw("DROP FUNCTION IF EXISTS fail_agent_delete_completion_audit()"),
+      );
+    }
+
+    const retry = await app.request(`/agents/${AGENT_ID}`, { method: "DELETE" });
+    expect(retry.status).toBe(200);
+    expect(await getDb().select().from(agents).where(eq(agents.id, AGENT_ID))).toHaveLength(0);
+    expect(
+      await getDb().select().from(agentWallets).where(eq(agentWallets.agentId, AGENT_ID)),
+    ).toHaveLength(0);
+    expect(
+      await getDb().select().from(policies).where(eq(policies.agentId, AGENT_ID)),
+    ).toHaveLength(0);
+
+    const deleteAudits = await getDb()
+      .select({ action: auditEvents.action })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, TENANT_ID),
+          eq(auditEvents.resourceId, AGENT_ID),
+          inArray(auditEvents.action, ["agent.delete.authorized", "agent.delete"]),
+        ),
+      )
+      .orderBy(asc(auditEvents.seq));
+    expect(deleteAudits.map(({ action }) => action)).toEqual([
+      "agent.delete.authorized",
+      "agent.delete.authorized",
+      "agent.delete",
+    ]);
   });
 });
