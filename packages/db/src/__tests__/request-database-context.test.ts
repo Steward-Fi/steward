@@ -169,4 +169,26 @@ describe("request-scoped database context", () => {
     release.resolve();
     await Promise.all([owner, registered, unregistered]);
   });
+
+  test("can defer registered cleanup while returning the owner result", async () => {
+    const requestDb = { marker: "request" } as unknown as ReturnType<typeof getDb>;
+    const release = deferred();
+    let cleanup!: Promise<void>;
+    let registered!: Promise<void>;
+    const owner = withRequestDatabase(
+      requestDb,
+      async () => {
+        registered = waitUntilRequestDatabaseTask(async () => {
+          await release.promise;
+          expect((getDb() as unknown as { marker: string }).marker).toBe("request");
+        });
+        return "response";
+      },
+      { deferCleanup: (promise) => (cleanup = promise) },
+    );
+
+    expect(await owner).toBe("response");
+    release.resolve();
+    await Promise.all([registered, cleanup]);
+  });
 });

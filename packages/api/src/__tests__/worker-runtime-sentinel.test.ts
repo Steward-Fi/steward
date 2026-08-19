@@ -132,7 +132,7 @@ test("every autonomous recovery sweep owns its own request database", () => {
   }
 });
 
-test("Worker drains fire-and-forget webhook work before closing its request pool", async () => {
+test("Worker defers webhook cleanup without delaying its response", async () => {
   let releaseDelivery!: () => void;
   const deliveryGate = new Promise<void>((resolve) => {
     releaseDelivery = resolve;
@@ -140,6 +140,8 @@ test("Worker drains fire-and-forget webhook work before closing its request pool
   let closes = 0;
   let deliveryFinished = false;
   const requestDb = { marker: "worker-webhook" } as unknown as ReturnType<typeof getDb>;
+  let delivery!: Promise<void>;
+  let deferredCleanup!: Promise<unknown>;
   const owner = withWorkerRequestDatabase(
     {
       DATABASE_URL: "postgresql://worker.invalid/steward",
@@ -148,7 +150,7 @@ test("Worker drains fire-and-forget webhook work before closing its request pool
     async () => {
       // dispatchWebhook uses this same request-lifetime hook for its intentionally
       // unawaited configured delivery fan-out.
-      void waitUntilRequestDatabaseTask(async () => {
+      delivery = waitUntilRequestDatabaseTask(async () => {
         await deliveryGate;
         expect((getDb() as unknown as { marker: string }).marker).toBe("worker-webhook");
         deliveryFinished = true;
@@ -164,13 +166,16 @@ test("Worker drains fire-and-forget webhook work before closing its request pool
           closes += 1;
         },
       }),
+      waitUntil(promise) {
+        deferredCleanup = promise;
+      },
     },
   );
 
-  await Promise.resolve();
+  expect((await owner).status).toBe(200);
   expect(closes).toBe(0);
   releaseDelivery();
-  expect((await owner).status).toBe(200);
+  await Promise.all([delivery, deferredCleanup]);
   expect(deliveryFinished).toBe(true);
   expect(closes).toBe(1);
 
@@ -180,7 +185,19 @@ test("Worker drains fire-and-forget webhook work before closing its request pool
   );
   expect(webhookSource).toContain("waitUntilRequestDatabaseTask(");
   const auditSource = readFileSync(join(import.meta.dir, "../services/audit.ts"), "utf8");
-  expect(auditSource).toContain("waitUntilRequestDatabaseTask(");
+  expect(auditSource).toContain("waitUntilRequestDatabaseTask(() =>");
+});
+
+test("best-effort audit registration invokes a task callback", async () => {
+  const { trackAuditEvent } = await import("../services/audit");
+  await expect(
+    trackAuditEvent({
+      tenantId: "system",
+      actorType: "system",
+      action: "system.worker.audit_registration_test",
+      metadata: {},
+    }),
+  ).resolves.toBeUndefined();
 });
 
 test("Worker socket cleanup diagnostics are fixed and cannot replace handler errors", async () => {

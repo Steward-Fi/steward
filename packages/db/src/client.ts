@@ -602,6 +602,7 @@ async function drainRequestDatabaseTasks(context: RequestDatabaseContext): Promi
 export async function withRequestDatabase<T>(
   db: RequestDatabase,
   callback: () => Promise<T>,
+  options?: { deferCleanup?: (cleanup: Promise<void>) => void },
 ): Promise<T> {
   if (requestDatabaseStorage.getStore()) {
     throw new Error("REQUEST_DATABASE_CONTEXT_NESTED");
@@ -628,7 +629,17 @@ export async function withRequestDatabase<T>(
       // contexts; unregistered detached work retains this closed owner context.
       context.active = false;
       context.db = undefined;
-      await drainRequestDatabaseTasks(context);
+      const cleanup = drainRequestDatabaseTasks(context);
+      if (options?.deferCleanup) {
+        try {
+          options.deferCleanup(cleanup);
+        } catch (error) {
+          await cleanup;
+          if (callbackError === noCallbackError) throw error;
+        }
+      } else {
+        await cleanup;
+      }
       if (callbackError !== noCallbackError) throw callbackError;
       return result as T;
     });
