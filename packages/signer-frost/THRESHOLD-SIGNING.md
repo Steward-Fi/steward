@@ -1,4 +1,4 @@
-# Threshold Signing (Pillar D / D2 prototype)
+# Threshold Signing prototype
 
 **Status:** PROTOTYPE. Dev/dummy keys only. Not for production custody yet.
 **Scheme:** FROST-secp256k1 (Schnorr), 2-of-3, via the Zcash Foundation `frost-secp256k1` Rust crate.
@@ -51,14 +51,14 @@ ECDSA (CGGMP21-class) for the first prototype. The short version:
   serialized signing package, public signature shares, and the final signature.
 - Each share is a **separate process** — a stand-in for a separate enclave. In
   production each share host should be its own TEE (dstack CVM / Nitro), ideally
-  across independent operators / clouds / jurisdictions (see Pillar B/C and
+  across independent operators, clouds, and jurisdictions (see
   "Share storage" below).
 - **Why a Rust sidecar and not a WASM/npm lib:** verified on 2026-07-30, the
   mature, audited threshold libraries are Rust (ZF, Lockness) and Go (Taurus,
   Circle). `frost-secp256k1` has a maintained WASM target in principle, but there
   is no *audited, maintained* pure-JS FROST/threshold-ECDSA library worth
-  trusting on a custody critical path. The sidecar shape also aligns with Pillar
-  B: each share can live in its own enclave. This is a deliberate D1 call.
+  trusting on a custody-critical path. The sidecar shape lets each share live in
+  its own enclave.
 
 ### Sidecar HTTP API (localhost only)
 
@@ -107,7 +107,7 @@ trusted-dealer.
 
 - **Prototype:** shares are plain JSON files on local disk, dev keys only. Do not
   put real value behind this.
-- **Production (ties to Pillar B/C):** each share lives sealed inside its own
+- **Production:** each share lives sealed inside its own
   enclave (dstack CVM / AWS Nitro), released only to the attested sidecar at
   boot. Enclave compromise of one host yields at most ONE share → below threshold
   → no signature, no key. TEE + threshold compose: TEE protects each share

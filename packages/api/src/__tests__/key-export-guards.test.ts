@@ -83,7 +83,7 @@ beforeAll(async () => {
   ({ app } = await import("../app"));
 
   const db = getDb();
-  // api_key_hash is unique per tenant (PR #79 constraint) — use distinct hashes.
+  // api_key_hash is unique per tenant, so fixtures use distinct hashes.
   await db.insert(tenants).values([
     { id: TENANT_ID, name: "Key Export Guard Tenant", apiKeyHash: generateApiKey().hash },
     {

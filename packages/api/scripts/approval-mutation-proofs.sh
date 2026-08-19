@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# PR3 mutation-strength proofs (spec §14). Each mutation weakens ONE security
+# Approval mutation-strength proofs. Each mutation weakens one security
 # predicate; a proof is valid iff the named test PASSES clean AND FAILS after the
 # mutation. The file is restored after each proof. Run from packages/api:
 #
-#   bash scripts/pr3-mutation-proofs.sh
+#   bash scripts/approval-mutation-proofs.sh
 #
 set -uo pipefail
 cd "$(dirname "$0")/.."

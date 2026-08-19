@@ -170,7 +170,7 @@ describe("aggregation cap enforcement (vault.ts wiring)", () => {
  * `await recordAggregationEvent({ … })`, and that record is AWAITED (not
  * fire-and-forget) so the next in-lock snapshot includes this contribution.
  *
- * PR #182 refactored EVM signing to the gateway-authorized form
+ * EVM signing uses the gateway-authorized form
  * `signTransactionAuthorized(signRequest, …)` while the non-EVM (Solana)
  * fallback still uses the raw `vault.signTransaction(signRequest, …)`. A brittle
  * anchor on one literal spelling (or on `await` vs `return`) drifts the moment

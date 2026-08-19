@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# PR5 mutation-strength proofs (spec §9). Each mutation weakens ONE evidence
+# Evidence mutation-strength proofs. Each mutation weakens one evidence
 # security predicate; a proof is valid iff the named test PASSES clean AND FAILS
 # after the mutation. Every mutated file is restored after each proof.
 #
-#   Run from the repo root:  bash packages/api/scripts/pr5-mutation-proofs.sh
+#   Run from the repo root:  bash packages/api/scripts/evidence-mutation-proofs.sh
 #
 # Requires @stwd/shared + @stwd/redis + @stwd/db dist built (tsc) first.
 set -uo pipefail
@@ -99,6 +99,6 @@ proof "M10 drop workspace scoping (D2 enumeration)" "$SVC_TEST" "foreign workspa
 
 echo ""
 echo "==================================================================="
-echo "PR5 mutation proofs: $pass_count killed, $fail_count invalid/survived"
+echo "EVIDENCE MUTATION PROOFS: $pass_count killed, $fail_count invalid/survived"
 echo "==================================================================="
 [ "$fail_count" -eq 0 ] && exit 0 || exit 1

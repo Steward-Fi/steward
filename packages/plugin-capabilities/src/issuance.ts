@@ -1,6 +1,5 @@
 /**
- * issuance.ts — the capability ISSUANCE / RENEWAL / REVOCATION core (lane A1,
- * scope items 2-5).
+ * Capability issuance, renewal, and revocation core.
  *
  * This is the token/broker issuance layer that sits ON TOP of the already-shipped
  * capability plumbing (capabilities + grants + the proxy-broker invoke path). It
@@ -17,7 +16,7 @@
  * RENEWAL: tokens are deliberately short-lived (minutes). The agent re-requests
  * (renew == issue again); each renewal re-checks the live manifest, so a
  * revocation (policy/grant edit) takes effect at the NEXT renewal — bounded by
- * the TTL, per the Pillar-A green criterion (<5 min).
+ * the configured short TTL.
  *
  * REVOCATION: there is no token-revocation call here by design — short TTL +
  * re-check-on-renew IS the revocation mechanism (an operator disables the
@@ -27,8 +26,7 @@
  * we surface the minted jti so a caller can revoke it if needed.
  *
  * AUDIT: every enroll/issue/renew/revoke/exercise emits a structured event
- * through the injected `emitAudit` sink (interface only — lane E1 wires the full
- * evidence pipeline). This file defines the event shape and emits it; it does not
+ * through the injected `emitAudit` sink. This file defines the event shape and emits it; it does not
  * own the sink.
  */
 

@@ -1,8 +1,8 @@
 /**
- * PR6 prohibited-claim scanner (U8 / PN38).
+ * provider-authority prohibited-claim scanner (U8 / PN38).
  *
- * A seeded claims-discipline guard (the full generalized scanner is PR10; this
- * is the PR6 seed scoped to the PR6 docs). It asserts the PR6 provider-authority
+ * A seeded claims-discipline guard scoped to the provider-authority docs. It
+ * asserts the provider-authority
  * docs do NOT assert any of the prohibited pre-real-proof claims: MPC,
  * operator-proof, exactly-once, SOC2, or product-wide enforcement. Doc text that
  * explicitly NEGATES a claim ("NOT an operator-integrity proof", "does not use
@@ -52,7 +52,7 @@ function stripNegatingContext(line: string): string {
     .replace(/\bwithout\b[^.]*/gi, "");
 }
 
-describe("PR6 prohibited-claim scanner (U8/PN38)", () => {
+describe("provider-authority prohibited-claim scanner (U8/PN38)", () => {
   for (const path of PR6_DOCS) {
     test(`no affirmative prohibited claim in ${path.split("/docs/")[1]}`, () => {
       const text = readFileSync(path, "utf8");

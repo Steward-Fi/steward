@@ -95,7 +95,7 @@ export const PROVIDER_MODES: readonly ProviderModeEntry[] = [
     mode: "broker",
     rationale:
       "Signing authority must never leave custody. The agent requests a signature; Steward " +
-      "(vault / future threshold signer, Pillar D) performs it and returns only the signature. " +
+      "(vault or threshold signer) performs it and returns only the signature. " +
       "There is no 'scoped short-lived private key' to hand out.",
   },
   {

@@ -452,11 +452,11 @@ export async function invokeCapabilityThroughProxy(
     });
   }
 
-  // ── PR4 governed-route plugin gate (spec §5.2, X1, P03/P04) ────────────────
+  // ── Governed-route plugin gate ─────────────────────────────────────────────
   // A governed_v2 route/operation cannot be invoked through the capability alias
   // or the OpenAI-compat adapter: the plugin's URLSearchParams path (G4) cannot
   // faithfully represent a governed action's duplicate-query semantics, and
-  // governed actions must go through /v2/provider-actions (PR2), never a minted
+  // governed actions must go through /v2/provider-actions, never a minted
   // proxy token. If the resolved capability maps to a governed route, the plugin
   // must NOT mint a proxy token; it denies with GOVERNED_ROUTE_PLUGIN_DENIED.
   try {

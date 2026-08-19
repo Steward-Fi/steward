@@ -4,7 +4,7 @@
  *
  * The capability issuance layer (packages/plugin-capabilities) mints short-lived
  * tokens documented as "authorizes EXACTLY this capability and nothing else".
- * Before the fix they also carried the broad `agent` scope, and tenantAuth
+ * They must not carry the broad `agent` scope; tenantAuth
  * accepted any HS256 `scope === "agent"` bearer — so the "least-privilege"
  * token worked on every agent-token endpoint (trade-session self-management,
  * token-status reads, policy reads, ...). These tests exercise the REAL app +

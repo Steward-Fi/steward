@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PR4 mutation-strength proofs (spec §11.5). Each mutation weakens ONE security
+# Governed-execution mutation-strength proofs. Each mutation weakens one security
 # predicate; a proof is valid iff the named test PASSES clean AND FAILS after the
 # mutation. Every mutated file is restored after each proof.
 #
@@ -7,7 +7,7 @@
 # across the proxy + api + plugin per contradiction C2): each proof runs the
 # affected test in its home package.
 #
-#   Run from the repo root:  bash packages/proxy/scripts/pr4-mutation-proofs.sh
+#   Run from the repo root:  bash packages/proxy/scripts/governed-execution-mutation-proofs.sh
 #
 # Requires: @stwd/shared + @stwd/redis + @stwd/db dist built (tsc) first, so the
 # proxy/api/plugin suites import the compiled crypto.
@@ -263,6 +263,6 @@ proof "M26 accept denormalized nonce route substitution (P12c)" "packages/proxy"
 
 echo ""
 echo "==================================================="
-echo "PR4 MUTATION PROOFS: $pass_count killed, $fail_count invalid"
+echo "GOVERNED-EXECUTION MUTATION PROOFS: $pass_count killed, $fail_count invalid"
 echo "==================================================="
 [ "$fail_count" -eq 0 ] && exit 0 || exit 1

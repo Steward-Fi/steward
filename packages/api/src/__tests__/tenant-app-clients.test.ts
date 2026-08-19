@@ -8,7 +8,7 @@ function read(path: string): string {
   return readFileSync(join(ROOT, path), "utf-8");
 }
 
-// Migrations were consolidated during the PR #79 merge, so assert DDL against
+// Assert the composed DDL contract against
 // the full set of migration files rather than a single hard-coded filename.
 function allMigrations(): string {
   const dir = join(ROOT, "packages/db/drizzle");

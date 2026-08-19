@@ -1,6 +1,6 @@
 /**
  * secret-no-read-back-inventory.test.ts — repo-wide static caller inventory for
- * the SecretVault's plaintext-capable methods (sovereign-custody Pillar A / A2).
+ * the SecretVault's plaintext-capable methods.
  *
  * The no-read-back property of the custody plane is only as strong as the set
  * of code paths allowed to reach plaintext. This scan proves, WITHOUT running

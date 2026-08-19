@@ -1,5 +1,5 @@
 /**
- * PR5 /case + /evidence route + offline-verifier round-trip.
+ * evidence /case + /evidence route + offline-verifier round-trip.
  *
  * Drives the REAL fully-composed app (`mod.app`) with genuinely-minted session
  * Bearer tokens through the production middleware chain (tenantAuth ->
@@ -105,7 +105,7 @@ function runVerifier(bundleOrEnvelope: unknown, extraArgs: string[] = []) {
   return { code: res.status ?? -1, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
 
-describe("PR5 /case + /evidence routes + offline verifier", () => {
+describe("evidence /case + /evidence routes + offline verifier", () => {
   beforeAll(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "pr5-evi-"));
     process.env.STEWARD_PGLITE_MEMORY = "true";

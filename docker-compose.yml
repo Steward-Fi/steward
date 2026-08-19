@@ -43,7 +43,7 @@ services:
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
       STEWARD_EMAIL_CODE_SECRET: "${STEWARD_EMAIL_CODE_SECRET:?STEWARD_EMAIL_CODE_SECRET is required}"
-      # PR4 execution authorization v2 key (keyId:secret,... rotation list).
+      # governed-execution execution authorization v2 key (keyId:secret,... rotation list).
       # SEPARATE from STEWARD_JWT_SECRET; governed provider actions fail closed
       # if unset. Both api (mint) and proxy (claim/verify) require it.
       STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?STEWARD_EXECUTION_AUTH_SECRET is required - generate with: printf 'v1:%s' \"$(openssl rand -hex 32)\"}"
@@ -146,7 +146,7 @@ services:
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
       STEWARD_EMAIL_CODE_SECRET: "${STEWARD_EMAIL_CODE_SECRET:?STEWARD_EMAIL_CODE_SECRET is required}"
-      # PR4 execution authorization v2 key (keyId:secret,... rotation list).
+      # governed-execution execution authorization v2 key (keyId:secret,... rotation list).
       # SEPARATE from STEWARD_JWT_SECRET; governed provider actions fail closed
       # if unset. Both api (mint) and proxy (claim/verify) require it.
       STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?STEWARD_EXECUTION_AUTH_SECRET is required - generate with: printf 'v1:%s' \"$(openssl rand -hex 32)\"}"
