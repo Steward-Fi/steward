@@ -155,14 +155,15 @@ HS256 via `jose` (`packages/auth/src/session.ts` line ~63, plus
 `packages/api/src/routes/auth.ts` line ~171 and
 `packages/api/src/services/context.ts` lines ~59, ~72).
 
-The signing secret is `STEWARD_SESSION_SECRET` (or, for legacy embedded
-mode, derived from `STEWARD_MASTER_PASSWORD`).
+The signing secret is `STEWARD_JWT_SECRET`. `STEWARD_SESSION_SECRET` is a
+deprecated compatibility fallback; embedded development can derive a
+domain-separated signing key from `STEWARD_MASTER_PASSWORD`.
 
 **Why HS256 (vs RS256 / ES256):**
 
 - HS256 is symmetric. The issuer and the verifier must share the secret. In
   Steward, **the issuer and the verifier are the same process** (or
-  processes that already share `STEWARD_SESSION_SECRET` via env — API and
+  processes that already share `STEWARD_JWT_SECRET` via env — API and
   proxy, see `docker-compose.yml`). Asymmetric signing buys nothing.
 - RS256/ES256 would matter if third-party services needed to verify Steward
   JWTs without calling back to the API. That is not a use case we support
@@ -170,10 +171,10 @@ mode, derived from `STEWARD_MASTER_PASSWORD`).
   add a second key type, not replace HS256.
 - HS256 avoids key-distribution and JWKS-endpoint surface area.
 
-**Tradeoff accepted:** anyone with `STEWARD_SESSION_SECRET` can forge
+**Tradeoff accepted:** anyone with `STEWARD_JWT_SECRET` can forge
 arbitrary JWTs. This secret is therefore treated with the same care as
 `STEWARD_MASTER_PASSWORD` (and is in the same docker-compose env block).
-The threat model treats "attacker with `STEWARD_SESSION_SECRET`" as
+The threat model treats "attacker with `STEWARD_JWT_SECRET`" as
 equivalent to "attacker with code execution on the API" — total compromise.
 
 We pin `algorithms: ["HS256"]` in `jwtVerify()` (session.ts line ~83) to

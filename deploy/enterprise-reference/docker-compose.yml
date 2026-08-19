@@ -53,7 +53,6 @@ services:
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?required}"
       STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?required}"
-      STEWARD_SESSION_SECRET: "${STEWARD_SESSION_SECRET:?required}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?required}"
       # Custody posture: no STEWARD_KMS_PROVIDER is set, so the vault runs in
       # `local` mode (plaintext key in app memory at sign time). With

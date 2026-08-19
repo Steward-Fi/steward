@@ -122,8 +122,8 @@ DATABASE_URL=postgresql://steward:password@your-db-host/steward?sslmode=verify-f
 # Vault encryption — 32+ random bytes, hex-encoded
 STEWARD_MASTER_PASSWORD=<run: openssl rand -hex 32>
 
-# Auth
-STEWARD_SESSION_SECRET=<run: openssl rand -hex 32>
+# Auth — canonical JWT signing secret, server-side only
+STEWARD_JWT_SECRET=<run: openssl rand -hex 32>
 STEWARD_PLATFORM_KEYS=<run: openssl rand -hex 32>
 
 # RPC
@@ -224,7 +224,8 @@ sudo nginx -t
 | `STEWARD_PLATFORM_KEYS` | **Yes** | — | Comma-separated platform admin keys. Used for `/platform/*` routes (cross-tenant admin). |
 | `PORT` | No | `3200` | API listen port. |
 | `STEWARD_BIND_HOST` | No | `127.0.0.1` | Set to `0.0.0.0` when behind a reverse proxy or in Docker. |
-| `STEWARD_SESSION_SECRET` | No | `STEWARD_MASTER_PASSWORD` | JWT signing secret. Set separately to allow independent rotation. |
+| `STEWARD_JWT_SECRET` | **Yes** | — | Canonical JWT signing and verification secret. Use at least 32 random characters and keep it server-side. |
+| `STEWARD_SESSION_SECRET` | No | — | Deprecated compatibility fallback. Existing deployments should rename it to `STEWARD_JWT_SECRET`. |
 | `STEWARD_DEFAULT_TENANT_KEY` | No | — | Default tenant key for single-tenant deployments (no `X-Steward-Tenant` header needed). |
 | `AGENT_TOKEN_EXPIRY` | No | `24h` | Default expiry for agent-scoped JWTs. |
 | `RPC_URL` | No | `https://sepolia.base.org` | EVM RPC endpoint. |

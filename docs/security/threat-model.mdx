@@ -31,7 +31,7 @@ right and this document is wrong. Please file an issue.
   typically one tenant. In a multi-tenant self-hosted deployment, many tenants share
   infrastructure.
 - **Operator:** the human/team running Steward. Owns
-  `STEWARD_MASTER_PASSWORD`, `STEWARD_SESSION_SECRET`,
+  `STEWARD_MASTER_PASSWORD`, `STEWARD_JWT_SECRET`,
   `STEWARD_KDF_SALT`.
 - **Vault:** the encrypted key store (`packages/vault`). Holds encrypted
   private keys.
@@ -45,7 +45,7 @@ If any of these fails, the threat model below does not hold.
 1. **`STEWARD_MASTER_PASSWORD` is kept secret.** It has entropy equivalent
    to at least 256 bits of random data and is not shared across
    deployments.
-2. **`STEWARD_SESSION_SECRET` is kept secret.** Treated with the same
+2. **`STEWARD_JWT_SECRET` is kept secret.** Treated with the same
    care as the master password. Leak = arbitrary JWT forgery.
 3. **`STEWARD_KDF_SALT` is set to a unique per-deployment random value**
    (operator action — the fallback default is documented as weak;

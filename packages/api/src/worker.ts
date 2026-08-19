@@ -24,7 +24,7 @@
  *   - KV_REST_API_URL               Upstash REST endpoint
  *   - KV_REST_API_TOKEN             Upstash REST token
  *   - SKIP_MIGRATIONS=1             Migrations run via wrangler-driven CI script
- *   - STEWARD_SESSION_SECRET        HS256 JWT signing secret
+ *   - STEWARD_JWT_SECRET            Canonical HS256 JWT signing secret
  *   - STEWARD_MASTER_PASSWORD       Vault keystore master password
  *   - RESEND_API_KEY                Magic-link email provider
  *   - GOOGLE/DISCORD/GITHUB/TWITTER OAuth client IDs + secrets
@@ -58,6 +58,8 @@ export interface Env {
   KV_REST_API_URL?: string;
   KV_REST_API_TOKEN?: string;
   SKIP_MIGRATIONS?: string;
+  STEWARD_JWT_SECRET?: string;
+  /** Deprecated compatibility fallback for existing Worker deployments. */
   STEWARD_SESSION_SECRET?: string;
   STEWARD_MASTER_PASSWORD?: string;
   RESEND_API_KEY?: string;

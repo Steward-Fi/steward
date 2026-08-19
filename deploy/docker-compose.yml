@@ -32,8 +32,8 @@ services:
       DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@steward-db:5432/steward}"
       STEWARD_ALLOW_UNVERIFIED_DB_TLS: "${STEWARD_ALLOW_UNVERIFIED_DB_TLS:-}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?Set STEWARD_MASTER_PASSWORD in .env}"
-      STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:-}"
-      STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?Set STEWARD_EXECUTION_AUTH_SECRET in .env - PR4 governed provider actions fail closed if unset - generate: printf 'v1:%s' \"$(openssl rand -hex 32)\"}"
+      STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?Set STEWARD_JWT_SECRET in .env}"
+      STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?Set STEWARD_EXECUTION_AUTH_SECRET in .env - governed provider actions fail closed if unset - generate: printf 'v1:%s' \"$(openssl rand -hex 32)\"}"
       # The API writes required audit-chain events (approval / vault / policy
       # routes via writeAuditEvent / withTenantAuditedTransaction), so it needs
       # the same audit HMAC key as the proxy. Provisioned into .env by
