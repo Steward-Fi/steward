@@ -165,6 +165,17 @@ async function seedCore() {
       riskClass: "read",
     },
   ]);
+  await db.insert(providerRoleBindings).values({
+    id: "50000000-0000-4000-8000-000000000001",
+    tenantId: "tenant-main",
+    workspaceId: WORKSPACE_A,
+    principalType: "human",
+    principalId: ADMIN,
+    roleKey: "workspace_admin",
+    status: "active",
+    grantedByUserId: OWNER,
+    reason: "hermetic provider-account mutation authority",
+  });
 }
 
 describe("provider authority foundation", () => {

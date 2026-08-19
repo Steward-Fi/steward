@@ -1477,7 +1477,7 @@ describe("connect exchange recovery", () => {
     recovery.restore();
   });
 
-  test("recovery ignores a disable intent whose account update never completed", async () => {
+  test("recovery ignores more than sixteen disable intents whose account updates never completed", async () => {
     const initial = await connectHappy(new MemoryConnectStore());
     const accountId = initial.completed.providerAccountId;
     const [accountBeforeIntent] = await getDb()
@@ -1522,19 +1522,21 @@ describe("connect exchange recovery", () => {
 
     // This is the durable residue left by the old ordering when its separate
     // account update failed. It is authorization intent, not mutation proof.
-    await writeAuditEvent({
-      tenantId: TENANT,
-      actorType: "user",
-      actorId: ADMIN,
-      action: "provider.account.disable",
-      resourceType: "provider_account",
-      resourceId: accountId,
-      metadata: {
-        workspaceId: WORKSPACE,
-        expectedRevision: accountBeforeIntent.revision,
-        reason: "simulated failed generic disable",
-      },
-    });
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await writeAuditEvent({
+        tenantId: TENANT,
+        actorType: "user",
+        actorId: ADMIN,
+        action: "provider.account.disable",
+        resourceType: "provider_account",
+        resourceId: accountId,
+        metadata: {
+          workspaceId: WORKSPACE,
+          expectedRevision: accountBeforeIntent.revision,
+          reason: `simulated failed generic disable ${attempt}`,
+        },
+      });
+    }
 
     const recovery = installFakeX();
     const swept = await runXCredentialLifecycleSweep({

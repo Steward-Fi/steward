@@ -1143,7 +1143,7 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
             .orderBy(desc(auditEvents.seq))
             .limit(1)
         : [];
-    const accountMutationCandidates =
+    const [latestAccountMutation] =
       account && connectIntentAudit
         ? await tx
             .select({
@@ -1167,26 +1167,23 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
                   "provider.account.disable",
                   "provider.account.disable.completed",
                 ]),
+                sql`(
+                  ${auditEvents.action} <> 'provider.account.disable'
+                  OR (
+                    ${account.status === "disabled"}
+                    AND ${auditEvents.metadata}->>'expectedRevision' = ${String(account.revision - 1)}
+                  )
+                )`,
               ),
             )
             .orderBy(desc(auditEvents.seq))
-            .limit(16)
+            .limit(1)
         : [];
     // Before provider.account.disable.completed existed, a successful generic
     // disable left only its authorization event. Treat that legacy event as
     // authoritative only when the currently locked row proves the exact CAS
     // landed. A newer orphan intent from an update failure/CAS loss is skipped
     // so it cannot manufacture durable recovery lineage.
-    const latestAccountMutation = accountMutationCandidates.find((event) => {
-      if (event.action !== "provider.account.disable") return true;
-      const expectedRevision = event.metadata.expectedRevision;
-      return (
-        account?.status === "disabled" &&
-        typeof expectedRevision === "number" &&
-        Number.isSafeInteger(expectedRevision) &&
-        account.revision === expectedRevision + 1
-      );
-    });
     // An existing account is only safe to rotate when its current credential
     // has an authoritative X-connect adoption before this intent. A generic
     // provider-account insert (or a selectively missing adoption record) gives
