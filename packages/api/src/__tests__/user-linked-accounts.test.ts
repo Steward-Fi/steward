@@ -1,7 +1,7 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { createPrivateKey, sign as cryptoSign, generateKeyPairSync } from "node:crypto";
 
-import { MockSmsInbox, signTelegramLoginPayload } from "@stwd/auth";
+import { ChallengeStore, MockSmsInbox, signTelegramLoginPayload } from "@stwd/auth";
 import {
   accounts,
   agents,
@@ -519,6 +519,60 @@ describe("user linked account routes", () => {
       }),
     });
     expect(crossUser.status).toBe(409);
+  });
+
+  it("does not persist an Ethereum wallet when redeem-lock cleanup fails", async () => {
+    const wallet = privateKeyToAccount(
+      "0x8b3a350cf5c34c9194ca3a545d4f2c20d57216345d2a4460a5d4a64e3e2c2712",
+    );
+    const nonceResponse = await userRoutes.request("/me/accounts/wallet/ethereum/nonce", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await tokenFor(accountOnlyUserId)}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ address: wallet.address }),
+    });
+    expect(nonceResponse.status).toBe(200);
+    const nonceBody = (await nonceResponse.json()) as { data: { message: string } };
+    const signature = await wallet.signMessage({ message: nonceBody.data.message });
+
+    const originalDelete = ChallengeStore.prototype.delete;
+    const deleteSpy = spyOn(ChallengeStore.prototype, "delete").mockImplementation(
+      async function (key) {
+        if (key.startsWith("wallet-link-lock:")) throw new Error("challenge backend unavailable");
+        return originalDelete.call(this, key);
+      },
+    );
+    try {
+      const response = await userRoutes.request("/me/accounts/wallet/ethereum", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await tokenFor(accountOnlyUserId)}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          address: wallet.address,
+          message: nonceBody.data.message,
+          signature,
+        }),
+      });
+      expect(response.status).toBe(500);
+    } finally {
+      deleteSpy.mockRestore();
+    }
+
+    const linked = await getDb()
+      .select({ id: accounts.id })
+      .from(accounts)
+      .where(
+        and(
+          eq(accounts.userId, accountOnlyUserId),
+          eq(accounts.provider, "wallet:ethereum"),
+          eq(accounts.providerAccountId, wallet.address.toLowerCase()),
+        ),
+      );
+    expect(linked).toHaveLength(0);
   });
 
   it("links a Solana wallet with a one-time user proof and blocks replay/cross-user reuse", async () => {

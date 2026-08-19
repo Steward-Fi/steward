@@ -2531,7 +2531,7 @@ user.post("/me/accounts/wallet/ethereum", async (c) => {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired wallet link nonce" }, 401);
     }
   } finally {
-    walletLinkChallenges.delete(lockKey);
+    await walletLinkChallenges.delete(lockKey);
   }
 
   const normalized = address.toLowerCase();
@@ -2720,7 +2720,7 @@ user.post("/me/accounts/wallet/solana", async (c) => {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired wallet link nonce" }, 401);
     }
   } finally {
-    walletLinkChallenges.delete(lockKey);
+    await walletLinkChallenges.delete(lockKey);
   }
 
   const [userRow] = await getDb()

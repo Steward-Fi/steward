@@ -14,7 +14,6 @@
  *   const store = new ChallengeStore({ backend: new RedisBackend(redisClient) });
  */
 
-import { redactedThrownDiagnostics } from "@stwd/shared";
 import type { StoreBackend } from "./store-backends";
 import { MemoryBackend } from "./store-backends";
 
@@ -69,23 +68,9 @@ export class ChallengeStore {
     return this.backend.get(key);
   }
 
-  /**
-   * Delete a challenge explicitly.
-   *
-   * Awaits a best-effort backend delete, but never rejects: a backend outage
-   * is logged as a warning instead of crashing the caller. Callers that need
-   * atomic one-time-use semantics must use consume(); a failed delete can
-   * leave the entry present until its TTL expires.
-   */
+  /** Delete a challenge explicitly and surface backend failures to the caller. */
   async delete(key: string): Promise<void> {
-    try {
-      await this.backend.delete(key);
-    } catch (err) {
-      console.warn(
-        "[ChallengeStore] delete failed; entry will expire via TTL",
-        redactedThrownDiagnostics(err),
-      );
-    }
+    await this.backend.delete(key);
   }
 
   /**
