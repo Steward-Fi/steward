@@ -256,6 +256,36 @@ describe("POST /v1/trade/polymarket/order", () => {
     expect(await dailySpendOf(sessionId)).toBe(0);
   });
 
+  it("does not let a caller conditionId turn an unrelated policy denial into a metadata dependency", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({
+      allowedAssets: [`pm:${TOKEN_ID}`],
+      perOrderCapUsd: "5",
+    });
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+    const key = crypto.randomUUID();
+    const fetchSpy = spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error("policy denials must not perform market metadata IO"),
+    );
+
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const res = await postOrder(app, sessionId, key, {
+          amount: 10,
+          conditionId: COND_ID,
+        });
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({
+          code: "policy-violation",
+          reason: "per-order-cap-exceeded",
+        });
+      }
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(await dailySpendOf(sessionId)).toBe(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it("rejects a caller conditionId that disagrees with authoritative token metadata", async () => {
     const { tenantId, agentId, sessionId } = await seedSession({
       allowedAssets: [`pm:cond:${COND_ID}`],

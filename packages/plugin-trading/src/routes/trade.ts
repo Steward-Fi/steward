@@ -1867,7 +1867,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     let verifiedConditionId: string | undefined;
     const hasMarketGrant = session.allowedAssets.some((asset) => asset.startsWith("pm:cond:"));
     const needsVerifiedConditionId =
-      body.conditionId !== undefined ||
+      (check.allowed && body.conditionId !== undefined) ||
       (!check.allowed && check.reason === "market-not-allowed" && hasMarketGrant);
     if (needsVerifiedConditionId) {
       try {
