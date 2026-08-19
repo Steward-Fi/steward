@@ -78,6 +78,12 @@ type DatabaseSecurityEnv = {
   STEWARD_ALLOW_UNVERIFIED_DB_TLS?: string;
 };
 
+function databaseTlsRequiredError(message: string): Error & { code: "DB_TLS_REQUIRED" } {
+  const error = new Error(message) as Error & { code: "DB_TLS_REQUIRED" };
+  error.code = "DB_TLS_REQUIRED";
+  return error;
+}
+
 export function assertDatabaseUrlTls(
   connectionString: string,
   securityEnv: DatabaseSecurityEnv = process.env,
@@ -139,7 +145,7 @@ export function assertDatabaseUrlTls(
     return;
   }
 
-  throw new Error(
+  throw databaseTlsRequiredError(
     "DATABASE_URL must include sslmode=verify-full (recommended) or sslmode=verify-ca in production. " +
       "Set STEWARD_ALLOW_INSECURE_DB=true to override for private-network deployments.",
   );

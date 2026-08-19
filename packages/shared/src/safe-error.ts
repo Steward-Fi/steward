@@ -40,6 +40,7 @@ export interface RedactedThrownDiagnostics {
 
 const SAFE_ERROR_CODES = new Set([
   "ABORT_ERR",
+  "DB_TLS_REQUIRED",
   "EAI_AGAIN",
   "ECONNREFUSED",
   "ECONNRESET",
