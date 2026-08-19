@@ -1,8 +1,8 @@
 import { currentRuntimeEnvironment, runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { SecretVault } from "@stwd/vault";
+import { processCacheIdentity } from "./process-cache-identity";
 
-let processSecretVault: { masterPassword: string; masterSalt: string; vault: SecretVault } | null =
-  null;
+let processSecretVault: { identity: string; vault: SecretVault } | null = null;
 
 export function getConfiguredSecretVault(): SecretVault {
   const masterPassword = runtimeEnvironmentValue("STEWARD_MASTER_PASSWORD");
@@ -13,13 +13,9 @@ export function getConfiguredSecretVault(): SecretVault {
   if (currentRuntimeEnvironment() !== process.env) {
     return new SecretVault(masterPassword, masterSalt);
   }
-  if (
-    processSecretVault?.masterPassword === masterPassword &&
-    processSecretVault.masterSalt === masterSalt
-  ) {
-    return processSecretVault.vault;
-  }
+  const identity = processCacheIdentity([masterPassword, masterSalt]);
+  if (processSecretVault?.identity === identity) return processSecretVault.vault;
   const vault = new SecretVault(masterPassword, masterSalt);
-  processSecretVault = { masterPassword, masterSalt, vault };
+  processSecretVault = { identity, vault };
   return vault;
 }
