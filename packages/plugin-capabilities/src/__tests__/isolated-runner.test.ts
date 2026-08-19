@@ -129,6 +129,31 @@ describe("isolated test runner", () => {
     expect(await waitForProcessExit(descendantPid)).toBe(true);
   });
 
+  test("bounds a clean leader whose live descendant keeps inherited pipes open", async () => {
+    const root = await fixtureRoot();
+    const descendantPidFile = join(root, "clean-leader-descendant-pid");
+    const descendantSource = `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(descendantPidFile)},String(process.pid)); await new Promise(()=>{});`;
+    await writeFile(
+      join(root, "clean-leader.test.ts"),
+      `import { test, expect } from "bun:test"; import { readFile } from "node:fs/promises"; test("clean leader",async()=>{const child=Bun.spawn(["bun","-e",${JSON.stringify(descendantSource)}],{stdout:"inherit",stderr:"inherit"}); child.unref(); for(let i=0;i<400;i+=1){if(await readFile(${JSON.stringify(descendantPidFile)}).then(value=>value.length>0).catch(()=>false)) break; await Bun.sleep(20);} expect(await readFile(${JSON.stringify(descendantPidFile)},"utf8")).not.toBe("");});`,
+    );
+
+    const started = Date.now();
+    const result = await run(root, [], {
+      TEST_WALL_TIMEOUT_MS: "10000",
+      TEST_KILL_GRACE_MS: "200",
+    });
+    const elapsed = Date.now() - started;
+    const descendantPid = Number(await readFile(descendantPidFile, "utf8"));
+
+    expect(result.code).not.toBe(0);
+    expect(result.output).toContain("wall timeout after 10000ms");
+    expect(result.output).toContain("1 pass");
+    expect(elapsed).toBeLessThan(15_000);
+    expect(descendantPid).toBeGreaterThan(1);
+    expect(await waitForProcessExit(descendantPid)).toBe(true);
+  });
+
   test("forwards timeout TERM to the child and reports nonzero/no-match", async () => {
     const root = await fixtureRoot();
     const ready = join(root, "term-handler-ready");
