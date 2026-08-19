@@ -84,3 +84,21 @@ export function environmentWithoutWalletCredentials(
   for (const name of WALLET_E2E_CREDENTIAL_NAMES) delete sanitized[name];
   return sanitized as NodeJS.ProcessEnv;
 }
+
+/** Keep wallet values in the already-loaded setup closures, not browser children. */
+export async function withWalletCredentialsRemoved<T>(callback: () => Promise<T>): Promise<T> {
+  const saved = new Map<CredentialName, string | undefined>();
+  for (const name of WALLET_E2E_CREDENTIAL_NAMES) {
+    saved.set(name, process.env[name]);
+    delete process.env[name];
+  }
+  try {
+    return await callback();
+  } finally {
+    for (const name of WALLET_E2E_CREDENTIAL_NAMES) {
+      const value = saved.get(name);
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}

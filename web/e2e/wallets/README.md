@@ -60,9 +60,12 @@ a graphical Chromium session.
 
 Credential values are read only from the environment. The manual workflow uses
 the protected `wallet-e2e` GitHub environment and exposes them only to the
-preflight, profile-build, and real-flow steps. The API, web, and fake-provider
-child processes receive a sanitized environment. Generated profiles remain
-under ignored `web/.cache-synpress/` locally and the workflow removes them and
-all Playwright output in its unconditional final step. Never put seed phrases
-in source, workflow YAML, command-line arguments, logs, artifacts, or funded
-wallets.
+preflight, profile-build, and real-flow steps. Once the workflow has been
+independently reviewed and installed on `develop`, dispatch that trusted
+default-branch workflow with the exact 40-character commit SHA to test. A
+required environment reviewer should verify that SHA before approving the
+credentialed job. The API, web, and fake-provider child processes receive a
+sanitized environment. Generated profiles remain under ignored
+`web/.cache-synpress/` locally and the workflow removes them and all Playwright
+output in its unconditional final step. Never put seed phrases in source,
+workflow YAML, command-line arguments, logs, artifacts, or funded wallets.

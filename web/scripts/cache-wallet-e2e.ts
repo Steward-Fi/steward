@@ -6,7 +6,10 @@ import {
   unzipArchivePhantom,
 } from "@synthetixio/synpress-cache";
 import { PHANTOM_CHROME_EXTENSION_ID } from "../e2e/wallets/cache-contract";
-import { assertWalletE2ECredentials } from "../e2e/wallets/credentials";
+import {
+  assertWalletE2ECredentials,
+  withWalletCredentialsRemoved,
+} from "../e2e/wallets/credentials";
 import {
   assertExtensionDigest,
   prepareStewardMetaMaskExtension,
@@ -58,5 +61,8 @@ if (import.meta.main) {
   if (wallet !== "metamask" && wallet !== "phantom") {
     throw new Error("Usage: bun run scripts/cache-wallet-e2e.ts <metamask|phantom> [--force]");
   }
-  await cacheWallet(wallet, process.argv.includes("--force"));
+  // Setup modules above have already captured only the values their wallet
+  // needs. Synpress Cache does not expose browser launch options, so remove
+  // all wallet material from process.env for the lifetime of its Chromium.
+  await withWalletCredentialsRemoved(() => cacheWallet(wallet, process.argv.includes("--force")));
 }

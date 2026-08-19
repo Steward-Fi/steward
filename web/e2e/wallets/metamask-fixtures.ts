@@ -1,10 +1,10 @@
-import { cp, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { cp } from "node:fs/promises";
 import { join } from "node:path";
 import { type BrowserContext, test as base, chromium, type Page } from "@playwright/test";
 import { getExtensionId, MetaMask } from "@synthetixio/synpress/playwright";
 import { prepareStewardMetaMaskExtension } from "./metamask-extension";
 import { METAMASK_CACHE_ID, PASSWORD } from "./setup/metamask/metamask.setup";
+import { withWalletBrowserProfile } from "./wallet-browser-profile";
 
 type MetaMaskFixtures = {
   dappPage: Page;
@@ -45,25 +45,26 @@ export async function approveMetaMaskNotification(
 
 export const metamaskTest = base.extend<MetaMaskFixtures>({
   walletContext: async ({ browserName: _ }, use, testInfo) => {
-    const profile = await mkdtemp(join(tmpdir(), `steward-metamask-${testInfo.workerIndex}-`));
-    let context: BrowserContext | undefined;
-    try {
-      await cp(join(process.cwd(), ".cache-synpress", METAMASK_CACHE_ID), profile, {
-        recursive: true,
-      });
-      const extensionPath = await prepareStewardMetaMaskExtension();
-      context = await chromium.launchPersistentContext(profile, {
-        args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`],
-        headless: false,
-      });
-      await use(context);
-    } finally {
-      try {
-        await context?.close();
-      } finally {
-        await rm(profile, { force: true, recursive: true });
-      }
-    }
+    let extensionPath = "";
+    await withWalletBrowserProfile({
+      prefix: `steward-metamask-${testInfo.workerIndex}-`,
+      prepare: async (profile) => {
+        await cp(join(process.cwd(), ".cache-synpress", METAMASK_CACHE_ID), profile, {
+          recursive: true,
+        });
+        extensionPath = await prepareStewardMetaMaskExtension();
+      },
+      launch: (profile, env) =>
+        chromium.launchPersistentContext(profile, {
+          args: [
+            `--disable-extensions-except=${extensionPath}`,
+            `--load-extension=${extensionPath}`,
+          ],
+          env,
+          headless: false,
+        }),
+      use,
+    });
   },
   metamask: async ({ walletContext }, use) => {
     const extensionId = await getExtensionId(walletContext, "MetaMask");

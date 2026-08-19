@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import walletConfig from "../../playwright.wallets.config";
 import { cleanupWalletE2E } from "../../scripts/cleanup-wallet-e2e";
 import { assertWalletCaches, walletCacheRequirements } from "../../scripts/run-wallet-e2e";
 import { e2eChildProcessEnvironment } from "../global-setup";
@@ -9,10 +10,12 @@ import {
   environmentWithoutWalletCredentials,
   readWalletE2ECredentials,
   WALLET_E2E_CREDENTIAL_NAMES,
+  withWalletCredentialsRemoved,
 } from "./credentials";
 import { assertExtensionDigest } from "./metamask-extension";
 import { METAMASK_CACHE_ID } from "./setup/metamask/metamask.setup";
 import { PHANTOM_CACHE_ID } from "./setup/phantom/phantom.setup";
+import { withWalletBrowserProfile } from "./wallet-browser-profile";
 
 const temporaryDirectories: string[] = [];
 
@@ -102,29 +105,146 @@ describe("wallet extension E2E contract", () => {
     }
   });
 
+  test("passes a credential-free environment to wallet browser children", async () => {
+    const secretEnvironment = Object.fromEntries(
+      WALLET_E2E_CREDENTIAL_NAMES.map((name) => [name, `${name}-browser-secret`]),
+    );
+    let profilePath = "";
+    let browserEnvironment: NodeJS.ProcessEnv | undefined;
+
+    await expect(
+      withWalletBrowserProfile({
+        prefix: "steward-wallet-browser-env-",
+        environment: { ...secretEnvironment, PATH: "/test/bin" },
+        launch: async (profile, environment) => {
+          profilePath = profile;
+          browserEnvironment = environment;
+          throw new Error("injected browser launch failure");
+        },
+        use: async () => {},
+      }),
+    ).rejects.toThrow("injected browser launch failure");
+
+    expect(browserEnvironment?.PATH).toBe("/test/bin");
+    for (const name of WALLET_E2E_CREDENTIAL_NAMES) {
+      expect(browserEnvironment?.[name]).toBeUndefined();
+    }
+    await expect(stat(profilePath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("removes temporary wallet profiles when preparation fails before launch", async () => {
+    let profilePath = "";
+    let launchCalls = 0;
+
+    await expect(
+      withWalletBrowserProfile({
+        prefix: "steward-wallet-prepare-failure-",
+        prepare: async (profile) => {
+          profilePath = profile;
+          await writeFile(join(profile, "partial-sensitive-profile"), "encrypted wallet state");
+          throw new Error("injected profile copy failure");
+        },
+        launch: async () => {
+          launchCalls += 1;
+          throw new Error("launch must not run");
+        },
+        use: async () => {},
+      }),
+    ).rejects.toThrow("injected profile copy failure");
+
+    expect(launchCalls).toBe(0);
+    await expect(stat(profilePath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("scrubs Synpress Cache child environment and restores the owning process", async () => {
+    const originals = new Map(
+      WALLET_E2E_CREDENTIAL_NAMES.map((name) => [name, process.env[name]] as const),
+    );
+    try {
+      for (const name of WALLET_E2E_CREDENTIAL_NAMES) process.env[name] = `${name}-cache-secret`;
+      const childValues = await withWalletCredentialsRemoved(async () => {
+        const child = Bun.spawn(
+          [
+            "bun",
+            "-e",
+            `console.log(JSON.stringify(${JSON.stringify(WALLET_E2E_CREDENTIAL_NAMES)}.map((name) => process.env[name])))`,
+          ],
+          { env: process.env, stderr: "pipe", stdout: "pipe" },
+        );
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        expect(stderr).toBe("");
+        expect(exitCode).toBe(0);
+        return JSON.parse(stdout) as Array<string | null>;
+      });
+      expect(childValues).toEqual(WALLET_E2E_CREDENTIAL_NAMES.map(() => null));
+      for (const name of WALLET_E2E_CREDENTIAL_NAMES) {
+        expect(process.env[name]).toBe(`${name}-cache-secret`);
+      }
+    } finally {
+      for (const [name, value] of originals) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
+  test("disables credential-bearing wallet diagnostics", () => {
+    const use = walletConfig.use as { screenshot?: unknown; trace?: unknown; video?: unknown };
+    expect(use).toMatchObject({ screenshot: "off", trace: "off", video: "off" });
+  });
+
   test("scopes protected wallet credentials to the three steps that consume them", async () => {
     const workflowPath = join(import.meta.dir, "../../../.github/workflows/wallet-e2e.yml");
     const workflowSource = await readFile(workflowPath, "utf8");
     const workflow = Bun.YAML.parse(workflowSource) as {
-      on?: Record<string, unknown>;
+      on?: {
+        workflow_dispatch?: {
+          inputs?: Record<string, { required?: boolean; type?: string }>;
+        };
+      };
       jobs?: Record<
         string,
         {
           env?: Record<string, string>;
           environment?: string;
-          steps?: Array<{ env?: Record<string, string>; name?: string }>;
+          needs?: string;
+          steps?: Array<{
+            env?: Record<string, string>;
+            name?: string;
+            run?: string;
+            uses?: string;
+            with?: Record<string, unknown>;
+          }>;
         }
       >;
     };
+    const authorize = workflow.jobs?.["authorize-target"];
     const job = workflow.jobs?.["wallet-e2e"];
     expect(Object.keys(workflow.on ?? {})).toEqual(["workflow_dispatch"]);
+    expect(workflow.on?.workflow_dispatch?.inputs?.target_sha).toMatchObject({
+      required: true,
+      type: "string",
+    });
+    expect(authorize?.environment).toBeUndefined();
+    expect(JSON.stringify(authorize)).not.toContain("secrets.");
+    expect(authorize?.steps?.[0]?.run).toContain('"refs/heads/develop"');
     expect(job?.environment).toBe("wallet-e2e");
+    expect(job?.needs).toBe("authorize-target");
     expect(job?.env).toBeUndefined();
     expect(workflowSource).toContain("if: github.ref == 'refs/heads/develop'");
     expect(workflowSource).toContain("bunx turbo run build --filter=@stwd/api...");
+    const checkout = job?.steps?.find((step) => step.name === "Checkout");
+    expect(checkout?.with).toMatchObject({
+      "persist-credentials": false,
+      ref: "${{ needs.authorize-target.outputs.target_sha }}",
+    });
 
     const secretSteps = (job?.steps ?? [])
-      .filter((step) => step.env !== undefined)
+      .filter((step) => WALLET_E2E_CREDENTIAL_NAMES.some((name) => step.env?.[name] !== undefined))
       .map((step) => ({ names: Object.keys(step.env ?? {}).sort(), step: step.name }));
     expect(secretSteps).toEqual(
       [

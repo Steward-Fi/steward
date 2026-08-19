@@ -2,6 +2,11 @@ name: Wallet E2E (Manual)
 
 on:
   workflow_dispatch:
+    inputs:
+      target_sha:
+        description: Exact reviewed Steward commit to exercise
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -11,9 +16,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  authorize-target:
+    name: Validate exact target
+    runs-on: ubuntu-latest
+    outputs:
+      target_sha: ${{ steps.target.outputs.target_sha }}
+    steps:
+      - name: Require the trusted default-branch dispatcher
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
+        id: target
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/develop" ]; then
+            echo "Wallet E2E must be dispatched from develop" >&2
+            exit 1
+          fi
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "target_sha must be a full lowercase commit SHA" >&2
+            exit 1
+          fi
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
   wallet-e2e:
-    name: MetaMask SIWE + Phantom SIWS
+    name: MetaMask SIWE + Phantom SIWS (${{ needs.authorize-target.outputs.target_sha }})
     if: github.ref == 'refs/heads/develop'
+    needs: authorize-target
     runs-on: ubuntu-latest
     timeout-minutes: 35
     environment: wallet-e2e
@@ -21,6 +48,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ needs.authorize-target.outputs.target_sha }}
+
+      - name: Verify exact checkout
+        env:
+          TARGET_SHA: ${{ needs.authorize-target.outputs.target_sha }}
+        run: test "$(git rev-parse HEAD)" = "$TARGET_SHA"
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2

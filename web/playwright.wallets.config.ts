@@ -27,9 +27,9 @@ export default defineConfig({
   use: {
     actionTimeout: 20_000,
     baseURL: BASE_URL,
-    trace: "retain-on-failure",
-    screenshot: "only-on-failure",
-    video: "retain-on-failure",
+    trace: "off",
+    screenshot: "off",
+    video: "off",
   },
   expect: { timeout: 15_000 },
 
