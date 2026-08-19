@@ -585,6 +585,15 @@ function guardRequestDatabaseValue<T>(value: T, context: RequestDatabaseContext)
 
   const guardMember = (target: object, member: unknown, property?: PropertyKey): unknown => {
     if (typeof member === "function") {
+      // Drizzle's cross-bundle entity check walks
+      // Object.getPrototypeOf(value).constructor and then the constructor's
+      // prototype chain. Preserve that identity-bearing shape inside the same
+      // membrane instead of turning `constructor` into a bound method facade.
+      // The callable proxy still checks this request lease on every reflection
+      // and invocation, so the raw constructor never escapes.
+      if (property === "constructor") {
+        return guardRequestDatabaseValue(member, context);
+      }
       return (...args: unknown[]) => {
         assertRequestDatabaseContextActive(context);
         // Drizzle query builders are PromiseLike. Their `then` callbacks are
@@ -647,9 +656,18 @@ function guardRequestDatabaseValue<T>(value: T, context: RequestDatabaseContext)
           : undefined,
       };
     },
-    getPrototypeOf() {
+    getPrototypeOf(target) {
       assertRequestDatabaseContextActive(context);
-      throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
+      // Drizzle uses prototype inspection to recognize aliased subqueries and
+      // columns during composition. Return a recursively guarded prototype so
+      // those checks keep working without exposing a raw object or callable.
+      // Proxy invariants require the exact raw prototype for non-extensible
+      // targets; refusing that uncommon case is safer than leaking it.
+      if (!Reflect.isExtensible(target)) {
+        throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
+      }
+      const prototype = Reflect.getPrototypeOf(target);
+      return prototype === null ? null : guardRequestDatabaseValue(prototype, context);
     },
     setPrototypeOf() {
       assertRequestDatabaseContextActive(context);

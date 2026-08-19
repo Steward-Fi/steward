@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import {
   closeDb,
   getDb,
@@ -8,6 +8,7 @@ import {
   withRequestDatabase,
 } from "../client";
 import { createPGLiteDb } from "../pglite";
+import { tenants } from "../schema";
 
 const originalDriver = process.env.DATABASE_DRIVER;
 
@@ -123,6 +124,10 @@ describe("request-scoped database context", () => {
     const requestDb = requestDbSource as unknown as ReturnType<typeof getDb>;
     let capturedDb!: ReturnType<typeof getDb>;
     let capturedSession!: typeof rawSession;
+    let capturedPrototype!: object;
+    let capturedConstructor!: ObjectConstructor;
+    let constructedThroughGuard!: object;
+    const rawConstructedInput = { guarded: true };
 
     await withRequestDatabase(requestDb, async () => {
       capturedDb = getDb();
@@ -137,9 +142,13 @@ describe("request-scoped database context", () => {
       expect(() => hookDescriptor?.set?.(() => undefined)).toThrow(
         "REQUEST_DATABASE_REFLECTION_UNAVAILABLE",
       );
-      expect(() => Object.getPrototypeOf(capturedDb)).toThrow(
-        "REQUEST_DATABASE_REFLECTION_UNAVAILABLE",
-      );
+      capturedPrototype = Object.getPrototypeOf(capturedDb);
+      expect(capturedPrototype).not.toBe(Object.prototype);
+      capturedConstructor = (capturedPrototype as { constructor: ObjectConstructor }).constructor;
+      expect(capturedConstructor).not.toBe(Object);
+      constructedThroughGuard = capturedConstructor(rawConstructedInput);
+      expect(constructedThroughGuard).not.toBe(rawConstructedInput);
+      expect((constructedThroughGuard as { guarded: boolean }).guarded).toBe(true);
       expect(() => Object.defineProperty(capturedDb, "poison", { value: true })).toThrow(
         "REQUEST_DATABASE_REFLECTION_UNAVAILABLE",
       );
@@ -167,6 +176,12 @@ describe("request-scoped database context", () => {
     });
 
     expect(() => capturedSession.execute()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => Object.getPrototypeOf(capturedDb)).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => Reflect.ownKeys(capturedPrototype)).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => capturedConstructor()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => Reflect.ownKeys(constructedThroughGuard)).toThrow(
+      "REQUEST_DATABASE_CONTEXT_CLOSED",
+    );
     expect(() => "session" in capturedDb).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
     expect(() => Object.isExtensible(capturedDb)).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
     expect(() => Object.defineProperty(capturedDb, "poison", { value: true })).toThrow(
@@ -239,8 +254,17 @@ describe("request-scoped database context", () => {
 
     expect(result).toBe("raw-transaction-executed");
     expect(() => capturedCallable()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => Object.getPrototypeOf(capturedCallable)).toThrow(
+      "REQUEST_DATABASE_CONTEXT_CLOSED",
+    );
     expect(() => capturedFromCallable.execute()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => Object.getPrototypeOf(capturedFromCallable)).toThrow(
+      "REQUEST_DATABASE_CONTEXT_CLOSED",
+    );
     expect(() => capturedTransaction.execute()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => Object.getPrototypeOf(capturedTransaction)).toThrow(
+      "REQUEST_DATABASE_CONTEXT_CLOSED",
+    );
   });
 
   test("revokes a real PGLite transaction passed into a callback", async () => {
@@ -259,6 +283,66 @@ describe("request-scoped database context", () => {
 
       expect(capturedTransaction).toBeDefined();
       expect(() => capturedTransaction!.execute(sql`select 1`)).toThrow(
+        "REQUEST_DATABASE_CONTEXT_CLOSED",
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("composes real PGLite aliased subqueries without exposing their prototypes", async () => {
+    const { client, db } = await createPGLiteDb("memory://");
+    let capturedSubquery!: object;
+    let capturedSubqueryColumn!: object;
+    let capturedSubqueryPrototype!: object;
+    let capturedSubqueryConstructor!: object;
+
+    try {
+      await withRequestDatabase(db as ReturnType<typeof getDb>, async () => {
+        await getDb().insert(tenants).values({
+          id: "request-context-subquery",
+          name: "Request Context Subquery",
+          apiKeyHash: "request-context-subquery-hash",
+        });
+
+        const tenantSubquery = getDb()
+          .select({ id: tenants.id, name: tenants.name })
+          .from(tenants)
+          .as("tenant_subquery");
+        capturedSubquery = tenantSubquery;
+        capturedSubqueryColumn = tenantSubquery.id;
+        capturedSubqueryPrototype = Object.getPrototypeOf(tenantSubquery);
+        capturedSubqueryConstructor = (capturedSubqueryPrototype as { constructor: object })
+          .constructor;
+        expect(capturedSubqueryPrototype).not.toBe(
+          Object.getPrototypeOf(
+            db.select({ id: tenants.id }).from(tenants).as("raw_tenant_subquery"),
+          ),
+        );
+        const matchesTenant = eq(tenantSubquery.id, "request-context-subquery");
+        const rows = await getDb()
+          .select({ id: tenantSubquery.id, name: tenantSubquery.name })
+          .from(tenantSubquery)
+          .where(matchesTenant);
+
+        expect(rows).toEqual([
+          {
+            id: "request-context-subquery",
+            name: "Request Context Subquery",
+          },
+        ]);
+      });
+
+      expect(() => Object.getPrototypeOf(capturedSubquery)).toThrow(
+        "REQUEST_DATABASE_CONTEXT_CLOSED",
+      );
+      expect(() => Object.getPrototypeOf(capturedSubqueryColumn)).toThrow(
+        "REQUEST_DATABASE_CONTEXT_CLOSED",
+      );
+      expect(() => Reflect.ownKeys(capturedSubqueryPrototype)).toThrow(
+        "REQUEST_DATABASE_CONTEXT_CLOSED",
+      );
+      expect(() => Reflect.ownKeys(capturedSubqueryConstructor)).toThrow(
         "REQUEST_DATABASE_CONTEXT_CLOSED",
       );
     } finally {
