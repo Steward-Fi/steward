@@ -14,9 +14,14 @@ export const JWT_ISSUER = "steward";
 export const JWT_AUDIENCE = "steward-api";
 export const ACCESS_TOKEN_EXPIRY = "15m";
 export const ACCESS_TOKEN_EXPIRY_SECONDS = 900;
-export const AGENT_TOKEN_EXPIRY = process.env.AGENT_TOKEN_EXPIRY || "30d";
+/** Stable default. Read the environment through getAgentTokenExpiry() at call time. */
+export const AGENT_TOKEN_EXPIRY = "30d";
 export const REFRESH_TOKEN_EXPIRY = "30d";
 export const IDENTITY_TOKEN_EXPIRY = ACCESS_TOKEN_EXPIRY;
+
+export function getAgentTokenExpiry(): string {
+  return process.env.AGENT_TOKEN_EXPIRY || AGENT_TOKEN_EXPIRY;
+}
 
 export type IdentityJwtAlgorithm = "RS256" | "ES256";
 
@@ -494,7 +499,7 @@ export async function signAccessToken(
 
 export async function signAgentToken(
   payload: Omit<AgentTokenPayload, "scope"> & { scope?: "agent"; scopes?: string[] },
-  expiresIn: string = AGENT_TOKEN_EXPIRY,
+  expiresIn: string = getAgentTokenExpiry(),
 ): Promise<string> {
   const merged: Record<string, unknown> = { ...payload, scope: "agent" };
   if (Array.isArray(payload.scopes)) merged.scopes = payload.scopes;

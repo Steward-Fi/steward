@@ -39,7 +39,10 @@
  *                                   configured Redis is unreachable
  */
 
-import { validateJwtSecretEnv } from "@stwd/auth";
+// Import the JWT leaf, not the @stwd/auth barrel: the barrel loads auth stores
+// that must not snapshot Worker-sensitive environment state before bindings
+// are hydrated by the first request.
+import { validateJwtSecretEnv } from "@stwd/auth/jwt";
 import {
   createDbForRequest,
   createNeonTransactionDbForRequest,

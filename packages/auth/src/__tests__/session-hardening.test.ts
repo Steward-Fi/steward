@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { jwtVerify } from "jose";
+import { decodeJwt, jwtVerify } from "jose";
 
-import { validateAgentTokenExpiryEnv } from "../jwt";
+import { signAgentToken, validateAgentTokenExpiryEnv } from "../jwt";
 import { SessionManager } from "../session";
 
 describe("validateAgentTokenExpiryEnv (SEC-134)", () => {
@@ -20,6 +20,24 @@ describe("validateAgentTokenExpiryEnv (SEC-134)", () => {
   it("rejects durations beyond the one-year bound", () => {
     for (const value of ["2y", "400d", "53 weeks"]) {
       expect(() => validateAgentTokenExpiryEnv(value)).toThrow(/one-year maximum/);
+    }
+  });
+
+  it("reads the agent expiry after module import so hydrated Worker bindings are current", async () => {
+    const previousSecret = process.env.STEWARD_JWT_SECRET;
+    const previousExpiry = process.env.AGENT_TOKEN_EXPIRY;
+    process.env.STEWARD_JWT_SECRET = "worker-expiry-test-secret-at-least-32-characters";
+    process.env.AGENT_TOKEN_EXPIRY = "2h";
+    try {
+      const payload = decodeJwt(
+        await signAgentToken({ agentId: "agent-a", tenantId: "tenant-a", scope: "agent" }),
+      );
+      expect((payload.exp ?? 0) - (payload.iat ?? 0)).toBe(2 * 60 * 60);
+    } finally {
+      if (previousSecret === undefined) delete process.env.STEWARD_JWT_SECRET;
+      else process.env.STEWARD_JWT_SECRET = previousSecret;
+      if (previousExpiry === undefined) delete process.env.AGENT_TOKEN_EXPIRY;
+      else process.env.AGENT_TOKEN_EXPIRY = previousExpiry;
     }
   });
 });
