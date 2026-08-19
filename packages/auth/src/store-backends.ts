@@ -208,6 +208,10 @@ export class MemoryBackend implements StoreBackend {
   async publish(entries: readonly StorePublishEntry[]): Promise<boolean> {
     assertUniquePublishKeys(entries);
     const now = Date.now();
+    // Absolute SET deadlines are a commit precondition, not merely the TTL to
+    // attach after publication. Reject before evaluating guards or deleting
+    // prior credentials so a delayed provider acknowledgement cannot replace
+    // a still-valid challenge with already-expired state.
     if (entries.some((entry) => entry.value !== null && entry.expiresAt <= now)) return false;
     const currentValue = (key: string): string | null => {
       const current = this.store.get(key);
@@ -560,6 +564,9 @@ export class PostgresBackend implements StoreBackend {
           }
           const valueDeadlineIsLive = async (): Promise<boolean> => {
             if (earliestValueExpiry === null) return true;
+            // now() is fixed at transaction start and can predate a blocking
+            // advisory lock. clock_timestamp() is authoritative at this
+            // post-lock commit boundary.
             const [{ valid }] = await transaction<Array<{ valid: boolean }>>`
               SELECT clock_timestamp() < ${new Date(earliestValueExpiry).toISOString()}::timestamptz
                 AS valid
@@ -578,7 +585,7 @@ export class PostgresBackend implements StoreBackend {
                 FROM auth_kv_store
                WHERE id = ${entry.key}
                  AND namespace = ${this.namespace}
-                 AND expires_at > now()
+                 AND expires_at > clock_timestamp()
                LIMIT 1
             `;
             const current = rows[0]?.value ?? null;

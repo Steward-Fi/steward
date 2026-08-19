@@ -101,23 +101,27 @@ describe("NamespacedStoreBackend", () => {
     backend.destroy();
   });
 
-  it("rejects an expired memory publication without applying any write", async () => {
+  it("rejects an expired memory publication before deleting prior credentials", async () => {
     const backend = new MemoryBackend();
-    await backend.set("reservation", "reserved", 60_000);
+    await backend.set("generation", "reservation", 60_000);
+    await backend.set("prior-credential", "still-active", 60_000);
+    const expired = Date.now() - 1;
 
     expect(
       await backend.publish([
-        { key: "credential", value: "active", expiresAt: Date.now() - 1 },
+        { key: "prior-credential", value: null, expiresAt: expired },
+        { key: "replacement", value: "already-expired", expiresAt: expired },
         {
-          key: "reservation",
+          key: "generation",
           value: "published",
-          expiresAt: Date.now() - 1,
-          expected: "reserved",
+          expiresAt: expired,
+          expected: "reservation",
         },
       ]),
     ).toBe(false);
-    expect(await backend.get("credential")).toBeNull();
-    expect(await backend.get("reservation")).toBe("reserved");
+    expect(await backend.get("prior-credential")).toBe("still-active");
+    expect(await backend.get("replacement")).toBeNull();
+    expect(await backend.get("generation")).toBe("reservation");
     backend.destroy();
   });
 

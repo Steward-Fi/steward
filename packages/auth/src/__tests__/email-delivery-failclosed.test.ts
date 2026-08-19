@@ -185,6 +185,17 @@ class CapturingBackend implements StoreBackend {
   }
 }
 
+class DelayedMemoryPublishBackend extends MemoryBackend {
+  delayNextPublishMs = 0;
+
+  override async publish(entries: readonly StorePublishEntry[]): Promise<boolean> {
+    const delayMs = this.delayNextPublishMs;
+    this.delayNextPublishMs = 0;
+    if (delayMs > 0) await Bun.sleep(delayMs);
+    return super.publish(entries);
+  }
+}
+
 const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
 const ORIGINAL_CODE_SECRET = process.env.STEWARD_EMAIL_CODE_SECRET;
 const ORIGINAL_ALLOW_DEV_SECRETS = process.env.STEWARD_ALLOW_DEV_SECRETS;
@@ -953,6 +964,86 @@ describe("fail-closed magic-link delivery", () => {
       await auth.verifyEmailLoginCode("magic-expired-publish@example.com", code, "tenant-a"),
     ).toMatchObject({ valid: false });
     auth.destroy();
+  });
+
+  it("preserves the prior memory OTP when a delayed replacement passes its deadline", async () => {
+    const backend = new DelayedMemoryPublishBackend();
+    let priorText = "";
+    const prior = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider: {
+        send: async (_to, _subject, body) => {
+          priorText = body;
+          return { provider: "test", id: "prior-memory-otp" };
+        },
+      },
+      tokenStore: new TokenStore({ backend }),
+      tokenTtlMs: 60_000,
+      codeVerifierSecret: "fail-closed-test-secret-at-least-32-characters",
+    });
+    const delayed = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider: {
+        send: async () => {
+          backend.delayNextPublishMs = 80;
+          return { provider: "test", id: "expired-memory-otp" };
+        },
+      },
+      tokenStore: new TokenStore({ backend }),
+      tokenTtlMs: 40,
+      codeVerifierSecret: "fail-closed-test-secret-at-least-32-characters",
+    });
+
+    await prior.sendOtp("memory-prior-otp@example.com", { tenantId: "tenant-a" });
+    const priorCode = priorText.match(/\b(\d{6})\b/)?.[1] ?? "";
+    await expect(
+      delayed.sendOtp("memory-prior-otp@example.com", { tenantId: "tenant-a" }),
+    ).rejects.toThrow(EmailDeliveryError);
+    expect(await prior.verifyOtp("memory-prior-otp@example.com", priorCode, "tenant-a")).toBe(true);
+    backend.destroy();
+  });
+
+  it("preserves the prior memory magic link when a delayed replacement passes its deadline", async () => {
+    const backend = new DelayedMemoryPublishBackend();
+    let priorText = "";
+    const prior = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider: {
+        send: async (_to, _subject, body) => {
+          priorText = body;
+          return { provider: "test", id: "prior-memory-magic" };
+        },
+      },
+      tokenStore: new TokenStore({ backend }),
+      tokenTtlMs: 60_000,
+      codeVerifierSecret: "fail-closed-test-secret-at-least-32-characters",
+    });
+    const delayed = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider: {
+        send: async () => {
+          backend.delayNextPublishMs = 80;
+          return { provider: "test", id: "expired-memory-magic" };
+        },
+      },
+      tokenStore: new TokenStore({ backend }),
+      tokenTtlMs: 40,
+      codeVerifierSecret: "fail-closed-test-secret-at-least-32-characters",
+    });
+
+    await prior.sendMagicLink("memory-prior-magic@example.com", { tenantId: "tenant-a" });
+    const priorToken = priorText.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    await expect(
+      delayed.sendMagicLink("memory-prior-magic@example.com", { tenantId: "tenant-a" }),
+    ).rejects.toThrow(EmailDeliveryError);
+    expect(
+      await prior.verifyMagicLink(priorToken, "memory-prior-magic@example.com", "tenant-a"),
+    ).toMatchObject({ valid: true });
+    backend.destroy();
   });
 
   it("confirms a magic-link commit after lost acknowledgement and a newer failed reservation", async () => {

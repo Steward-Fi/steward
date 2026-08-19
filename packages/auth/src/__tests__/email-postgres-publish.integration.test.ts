@@ -1,7 +1,11 @@
 import { afterAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import postgres from "postgres";
 
+import { hashSha256Hex } from "../crypto";
+import { EmailAuth } from "../email";
+import { EmailDeliveryError } from "../email-provider";
 import { PostgresBackend } from "../store-backends";
+import { TokenStore } from "../token-store";
 
 const databaseUrl = process.env.DATABASE_URL;
 const integration = describe.skipIf(!databaseUrl);
@@ -148,13 +152,15 @@ integration("Postgres email challenge publication", () => {
     expect(await backend.get("duplicate")).toBeNull();
   });
 
-  it("rejects a publication delayed past expiry without applying any write", async () => {
+  it("rejects a delayed expired publication before replacing prior state", async () => {
     if (!sql) throw new Error("DATABASE_URL required");
     const namespace = `email-publish-expiry-${crypto.randomUUID()}`;
     const backend = new PostgresBackend(namespace);
     const reservationKey = "reservation";
     const credentialKey = "credential";
+    const priorCredentialKey = "prior-credential";
     await backend.set(reservationKey, "reserved", 60_000);
+    await backend.set(priorCredentialKey, "still-active", 60_000);
 
     const locker = await sql.reserve();
     const lockKey = `${namespace}:${reservationKey}`;
@@ -169,6 +175,7 @@ integration("Postgres email challenge publication", () => {
       await locker`SELECT pg_advisory_lock(hashtextextended(${lockKey}, 0))`;
       locked = true;
       publication = backend.publish([
+        { key: priorCredentialKey, value: null, expiresAt },
         { key: credentialKey, value: "active", expiresAt },
         {
           key: reservationKey,
@@ -194,13 +201,135 @@ integration("Postgres email challenge publication", () => {
     if (!result.ok) throw result.error;
     expect(result.value).toBe(false);
     expect(await backend.get(credentialKey)).toBeNull();
+    expect(await backend.get(priorCredentialKey)).toBe("still-active");
     expect(await backend.get(reservationKey)).toBe("reserved");
-    const rows = await sql<Array<{ expiresAt: Date }>>`
-      SELECT expires_at AS "expiresAt"
-        FROM auth_kv_store
-       WHERE id = ${credentialKey} AND namespace = ${namespace}
-    `;
-    expect(rows).toHaveLength(0);
+    await sql`DELETE FROM auth_kv_store WHERE namespace = ${namespace}`;
+  });
+
+  it("preserves a prior OTP when replacement publication succeeds only after expiry", async () => {
+    if (!sql) throw new Error("DATABASE_URL required");
+    const namespace = `email-otp-expiry-${crypto.randomUUID()}`;
+    const backend = new PostgresBackend(namespace);
+    const email = "postgres-prior-otp@example.com";
+    const tenantId = "tenant-a";
+    let priorText = "";
+    const prior = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider: {
+        send: async (_to, _subject, body) => {
+          priorText = body;
+          return { provider: "test", id: "prior-postgres-otp" };
+        },
+      },
+      tokenStore: new TokenStore({ backend }),
+      tokenTtlMs: 60_000,
+      codeVerifierSecret: "postgres-email-test-secret-at-least-32-characters",
+    });
+    await prior.sendOtp(email, { tenantId });
+    const priorCode = priorText.match(/\b(\d{6})\b/)?.[1] ?? "";
+    const priorCredentialKey = hashSha256Hex(`email-otp:${tenantId}:${email}:${priorCode}`);
+    const lockKey = `${namespace}:${priorCredentialKey}`;
+    const locker = await sql.reserve();
+    const [{ pid: lockerPid }] = await locker<
+      Array<{ pid: number }>
+    >`SELECT pg_backend_pid() AS pid`;
+    let locked = false;
+    let replacementOutcome: Promise<ObservedOutcome<{ expiresAt: Date }>> | undefined;
+    try {
+      await locker`SELECT pg_advisory_lock(hashtextextended(${lockKey}, 0))`;
+      locked = true;
+      const replacement = new EmailAuth({
+        from: "login@steward.fi",
+        baseUrl: "https://steward.fi",
+        provider: {
+          send: async () => ({ provider: "test", id: "expired-postgres-otp" }),
+        },
+        tokenStore: new TokenStore({ backend }),
+        tokenTtlMs: 250,
+        codeVerifierSecret: "postgres-email-test-secret-at-least-32-characters",
+      });
+      replacementOutcome = observePromise(replacement.sendOtp(email, { tenantId }));
+      await waitForBlockedPublisher(lockKey, lockerPid);
+      await Bun.sleep(300);
+    } finally {
+      if (locked) await locker`SELECT pg_advisory_unlock(hashtextextended(${lockKey}, 0))`;
+      locker.release();
+    }
+
+    if (!replacementOutcome) throw new Error("OTP replacement did not start");
+    const replacementResult = await replacementOutcome;
+    expect(replacementResult.ok).toBe(false);
+    if (!replacementResult.ok) expect(replacementResult.error).toBeInstanceOf(EmailDeliveryError);
+    expect(await prior.verifyOtp(email, priorCode, tenantId)).toBe(true);
+    await sql`DELETE FROM auth_kv_store WHERE namespace = ${namespace}`;
+  });
+
+  it("preserves a prior magic link when replacement publication succeeds only after expiry", async () => {
+    if (!sql) throw new Error("DATABASE_URL required");
+    const namespace = `email-magic-expiry-${crypto.randomUUID()}`;
+    const backend = new PostgresBackend(namespace);
+    const email = "postgres-prior-magic@example.com";
+    const tenantId = "tenant-a";
+    let priorText = "";
+    const prior = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider: {
+        send: async (_to, _subject, body) => {
+          priorText = body;
+          return { provider: "test", id: "prior-postgres-magic" };
+        },
+      },
+      tokenStore: new TokenStore({ backend }),
+      tokenTtlMs: 60_000,
+      codeVerifierSecret: "postgres-email-test-secret-at-least-32-characters",
+    });
+    const priorResult = await prior.sendMagicLink(email, { tenantId });
+    const priorToken = priorText.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    const priorCredentialKey = `email-login:pending:${priorResult.challengeId}`;
+    const lockKey = `${namespace}:${priorCredentialKey}`;
+    const locker = await sql.reserve();
+    const [{ pid: lockerPid }] = await locker<
+      Array<{ pid: number }>
+    >`SELECT pg_backend_pid() AS pid`;
+    let locked = false;
+    let replacementOutcome:
+      | Promise<
+          ObservedOutcome<{
+            tokenHash: string;
+            expiresAt: Date;
+            challengeId: string;
+            pollSecret: string;
+          }>
+        >
+      | undefined;
+    try {
+      await locker`SELECT pg_advisory_lock(hashtextextended(${lockKey}, 0))`;
+      locked = true;
+      const replacement = new EmailAuth({
+        from: "login@steward.fi",
+        baseUrl: "https://steward.fi",
+        provider: {
+          send: async () => ({ provider: "test", id: "expired-postgres-magic" }),
+        },
+        tokenStore: new TokenStore({ backend }),
+        tokenTtlMs: 250,
+        codeVerifierSecret: "postgres-email-test-secret-at-least-32-characters",
+      });
+      replacementOutcome = observePromise(replacement.sendMagicLink(email, { tenantId }));
+      await waitForBlockedPublisher(lockKey, lockerPid);
+      await Bun.sleep(300);
+    } finally {
+      if (locked) await locker`SELECT pg_advisory_unlock(hashtextextended(${lockKey}, 0))`;
+      locker.release();
+    }
+
+    if (!replacementOutcome) throw new Error("magic-link replacement did not start");
+    const replacementResult = await replacementOutcome;
+    expect(replacementResult.ok).toBe(false);
+    if (!replacementResult.ok) expect(replacementResult.error).toBeInstanceOf(EmailDeliveryError);
+    expect(await prior.verifyMagicLink(priorToken, email, tenantId)).toMatchObject({ valid: true });
     await sql`DELETE FROM auth_kv_store WHERE namespace = ${namespace}`;
   });
 
