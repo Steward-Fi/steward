@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: wallet-e2e-manual
@@ -24,6 +25,7 @@ jobs:
     steps:
       - name: Require the trusted default-branch dispatcher
         env:
+          GH_TOKEN: ${{ github.token }}
           TARGET_SHA: ${{ inputs.target_sha }}
         id: target
         run: |
@@ -35,7 +37,43 @@ jobs:
             echo "target_sha must be a full lowercase commit SHA" >&2
             exit 1
           fi
+          target_pr="$({
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              "repos/$GITHUB_REPOSITORY/commits/$TARGET_SHA/pulls"
+          } | jq -r \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg sha "$TARGET_SHA" \
+            '[.[] | select(
+              .state == "open" and
+              .draft == false and
+              .base.ref == "develop" and
+              .head.repo.full_name == $repository and
+              .head.sha == $sha
+            )] | if length == 1 then .[0] else empty end | [.number, .user.login] | @tsv')"
+          if [ -z "$target_pr" ]; then
+            echo "target_sha must be the exact head of one ready same-repository PR targeting develop" >&2
+            exit 1
+          fi
+          IFS=$'\t' read -r pr_number pr_author <<< "$target_pr"
+          approved_by="$({
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              "repos/$GITHUB_REPOSITORY/pulls/$pr_number/reviews"
+          } | jq -r \
+            --arg author "$pr_author" \
+            --arg sha "$TARGET_SHA" \
+            '[.[] | select(
+              .state == "APPROVED" and
+              .commit_id == $sha and
+              .user.login != $author
+            )] | last | .user.login // empty')"
+          if [ -z "$approved_by" ]; then
+            echo "target PR must have an independent APPROVED review" >&2
+            exit 1
+          fi
           echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+          echo "Authorized PR #$pr_number at $TARGET_SHA after approval by $approved_by"
 
   wallet-e2e:
     name: MetaMask SIWE + Phantom SIWS (${{ needs.authorize-target.outputs.target_sha }})
@@ -92,4 +130,4 @@ jobs:
 
       - name: Remove wallet profiles and test artifacts
         if: always()
-        run: bun run test:e2e:wallets:cleanup
+        run: cd web && bun run e2e:wallets:cleanup
