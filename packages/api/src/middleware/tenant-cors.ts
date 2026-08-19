@@ -156,6 +156,7 @@ function devWildcardAllowed(): boolean {
 export async function tenantCors(c: Context, next: Next): Promise<Response | undefined> {
   const origin = c.req.header("origin") ?? "";
   const tenantId = c.req.header("X-Steward-Tenant");
+  const allowDevelopmentWildcard = devWildcardAllowed();
 
   // Set this before any lookup or early deny. A shared cache must never reuse
   // a 403/error produced for one origin or tenant hint for another request.
@@ -163,9 +164,9 @@ export async function tenantCors(c: Context, next: Next): Promise<Response | und
   // exit path (including DB failures) on the same cache contract.
   c.header("Vary", "Origin, X-Steward-Tenant");
 
-  let allowOrigin = devWildcardAllowed() ? "*" : "";
+  let allowOrigin = allowDevelopmentWildcard ? "*" : "";
 
-  if (!tenantId && origin) {
+  if (!allowDevelopmentWildcard && !tenantId && origin) {
     // No tenant header (true for ALL browser preflights and any SDK call that
     // carries the tenant in the body). Allow the request iff the Origin is in
     // any tenant's allowlist.
@@ -173,14 +174,13 @@ export async function tenantCors(c: Context, next: Next): Promise<Response | und
       const allOrigins = await getAllAllowedOrigins();
       if (allOrigins.has(origin)) {
         allowOrigin = origin;
-      } else if (!devWildcardAllowed()) {
+      } else {
         if (c.req.method === "OPTIONS") {
           return c.newResponse(null, 403);
         }
         await next();
         return;
       }
-      // unknown origin outside production → wildcard fallback below (dev mode)
     } catch (err) {
       console.warn(
         "[tenant-cors] Failed to load global origins, denying CORS",
@@ -192,7 +192,7 @@ export async function tenantCors(c: Context, next: Next): Promise<Response | und
       await next();
       return;
     }
-  } else if (tenantId && origin) {
+  } else if (!allowDevelopmentWildcard && tenantId && origin) {
     try {
       const origins = await getTenantOrigins(tenantId);
       if (origins.length > 0) {
@@ -208,14 +208,13 @@ export async function tenantCors(c: Context, next: Next): Promise<Response | und
           await next();
           return;
         }
-      } else if (!devWildcardAllowed()) {
+      } else {
         if (c.req.method === "OPTIONS") {
           return c.newResponse(null, 403);
         }
         await next();
         return;
       }
-      // origins.length === 0 → no config yet → fall through to wildcard outside production
     } catch (err) {
       console.warn(
         "[tenant-cors] Failed to load origins for tenant, denying CORS",
