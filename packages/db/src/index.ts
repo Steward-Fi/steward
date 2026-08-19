@@ -37,6 +37,7 @@ export {
   getSql,
   setPGLiteOverride,
   withDatabaseDeadline,
+  withRequestDatabase,
 } from "./client";
 export { runMigrations } from "./migrate";
 export { getMigrationExpectation, type MigrationExpectation } from "./migration-status";
