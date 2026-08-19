@@ -18,6 +18,7 @@ import {
   StewardApiError,
   StewardClient,
 } from "@stwd/sdk";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import type { StewardPluginConfig } from "../types.js";
 
 export interface HyperliquidSubmitOrderInput {
@@ -132,8 +133,7 @@ export class StewardService extends Service {
       if (err instanceof StewardApiError && err.status === 404 && this.pluginConfig.autoRegister) {
         await this.tryAutoRegister(runtime);
       } else {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[Steward] Could not connect: ${msg}`);
+        console.warn("[Steward] Could not connect", redactedThrownDiagnostics(err));
         if (this.pluginConfig.fallbackLocal) {
           console.info("[Steward] Falling back to local signing");
         }
@@ -148,8 +148,7 @@ export class StewardService extends Service {
       this._connected = true;
       console.info(`[Steward] Registered new wallet: ${this.agentIdentity.walletAddress}`);
     } catch (regErr) {
-      const msg = regErr instanceof Error ? regErr.message : String(regErr);
-      console.error(`[Steward] Failed to auto-register agent: ${msg}`);
+      console.error("[Steward] Failed to auto-register agent", redactedThrownDiagnostics(regErr));
     }
   }
 

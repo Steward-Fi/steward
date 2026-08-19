@@ -8,6 +8,7 @@ import {
   sql,
   withTenantAuditedTransaction,
 } from "@stwd/db";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import type { Context } from "hono";
 import { recordRequiredAudit } from "../middleware/audit";
 import { canonicalProxyApprovalDigest, decryptPendingProxyBody } from "./approvals";
@@ -127,6 +128,14 @@ export async function executePendingProxyRequest(row: PendingProxyRequest): Prom
       }),
   } as unknown as Context;
   return handleProxy(context);
+}
+
+type PendingProxyExecution = typeof executePendingProxyRequest;
+let pendingProxyExecution: PendingProxyExecution = executePendingProxyRequest;
+
+/** Replaces the release executor for deterministic boundary tests. */
+export function __setPendingProxyExecutionForTests(execute: PendingProxyExecution | null): void {
+  pendingProxyExecution = execute ?? executePendingProxyRequest;
 }
 
 function publicPending(row: PendingProxyRequest) {
@@ -301,7 +310,7 @@ export async function handlePendingProxyRequest(c: Context): Promise<Response> {
   }
 
   try {
-    const response = await executePendingProxyRequest(claimed);
+    const response = await pendingProxyExecution(claimed);
     // The poll that wins the single-use claim is the only caller able to receive
     // the upstream result. Bound it so a hostile upstream cannot exhaust memory.
     const declaredLength = Number(response.headers.get("content-length") ?? "0");
@@ -378,7 +387,11 @@ export async function handlePendingProxyRequest(c: Context): Promise<Response> {
       },
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Approved proxy execution failed";
+    const message = "Approved proxy execution failed";
+    console.error(
+      `[proxy-approval] execution failed request=${row.id} tenant=${tenantId}`,
+      redactedThrownDiagnostics(error),
+    );
     const [failed] = await db
       .update(pendingProxyRequests)
       .set({ status: "failed", executionError: message, updatedAt: new Date() })

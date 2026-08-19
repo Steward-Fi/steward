@@ -64,7 +64,7 @@ describe("WebhookDispatcher SSRF guard for IP-literal URLs", () => {
       ]) {
         const result = await dispatcher.dispatch(makeEvent(), { url, secret: SECRET });
         expect(result.success).toBe(false);
-        expect(result.error).toContain("must resolve to a public address");
+        expect(result.error).toBe("Webhook validation failed");
       }
       expect(server.hits()).toBe(0);
     } finally {
@@ -90,7 +90,7 @@ describe("WebhookDispatcher SSRF guard for IP-literal URLs", () => {
     ]) {
       const result = await dispatcher.dispatch(makeEvent(), { url, secret: SECRET });
       expect(result.success).toBe(false);
-      expect(result.error).toContain("must resolve to a public address");
+      expect(result.error).toBe("Webhook validation failed");
     }
   });
 
@@ -115,7 +115,7 @@ describe("WebhookDispatcher SSRF guard for IP-literal URLs", () => {
     ]) {
       const result = await dispatcher.dispatch(makeEvent(), { url, secret: SECRET });
       expect(result.success).toBe(false);
-      expect(result.error).toContain("must resolve to a public address");
+      expect(result.error).toBe("Webhook validation failed");
     }
   });
 
@@ -131,7 +131,7 @@ describe("WebhookDispatcher SSRF guard for IP-literal URLs", () => {
     for (const url of ["http://[100:1::]/hook", "http://[2001:2:1::]/hook"]) {
       const result = await dispatcher.dispatch(makeEvent(), { url, secret: SECRET });
       expect(result.success).toBe(false);
-      expect(result.error).toContain("must resolve to a public address");
+      expect(result.error).toBe("Webhook validation failed");
     }
 
     const publicResult = await dispatcher.dispatch(makeEvent(), {
@@ -161,7 +161,7 @@ describe("WebhookDispatcher SSRF guard for IP-literal URLs", () => {
     ]) {
       const result = await dispatcher.dispatch(makeEvent(), { url, secret: SECRET });
       expect(result.success).toBe(false);
-      expect(result.error).toContain("must resolve to a public address");
+      expect(result.error).toBe("Webhook validation failed");
     }
   });
 

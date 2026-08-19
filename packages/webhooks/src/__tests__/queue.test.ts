@@ -189,7 +189,7 @@ describe("RetryQueue", () => {
       const result = await dispatcher.dispatch(makeEvent(), server.webhook);
 
       expect(result.success).toBe(false);
-      expect(result.error).toBe("Webhook URL must use https");
+      expect(result.error).toBe("Webhook validation failed");
       expect(server.requests).toHaveLength(0);
     } finally {
       await server.close();
@@ -399,7 +399,7 @@ describe("RetryQueue", () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.error).toBe("Webhook host must resolve to a public address");
+      expect(result.error).toBe("Webhook validation failed");
       expect(server.requests).toHaveLength(0);
     } finally {
       await server.close();
@@ -426,7 +426,7 @@ describe("RetryQueue", () => {
         secret: "dns-answer-test-secret",
       });
       expect(result.success).toBe(false);
-      expect(result.error).toBe("Webhook host must resolve to a public address");
+      expect(result.error).toBe("Webhook validation failed");
     }
   });
 
@@ -457,7 +457,7 @@ describe("RetryQueue", () => {
         });
 
         expect(result.success).toBe(false);
-        expect(result.error).toBe("Webhook host must resolve to a public address");
+        expect(result.error).toBe("Webhook validation failed");
         expect(server.requests).toHaveLength(0);
       } finally {
         await server.close();
@@ -484,7 +484,7 @@ describe("RetryQueue", () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.error).toBe("Webhook host must resolve to a public address");
+      expect(result.error).toBe("Webhook validation failed");
       expect(server.requests).toHaveLength(0);
     } finally {
       await server.close();
@@ -511,7 +511,7 @@ describe("RetryQueue", () => {
         });
 
         expect(result.success).toBe(false);
-        expect(result.error).toBe("Webhook host must resolve to a public address");
+        expect(result.error).toBe("Webhook validation failed");
         expect(server.requests).toHaveLength(0);
       } finally {
         await server.close();
@@ -539,7 +539,7 @@ describe("RetryQueue", () => {
         });
 
         expect(result.success).toBe(false);
-        expect(result.error).toBe("Webhook host must resolve to a public address");
+        expect(result.error).toBe("Webhook validation failed");
         expect(server.requests).toHaveLength(0);
       } finally {
         await server.close();
@@ -567,7 +567,7 @@ describe("RetryQueue", () => {
         });
 
         expect(result.success).toBe(false);
-        expect(result.error).toBe("Webhook host must resolve to a public address");
+        expect(result.error).toBe("Webhook validation failed");
         expect(server.requests).toHaveLength(0);
       } finally {
         await server.close();
@@ -595,7 +595,7 @@ describe("RetryQueue", () => {
         });
 
         expect(result.success).toBe(false);
-        expect(result.error).toBe("Webhook host must resolve to a public address");
+        expect(result.error).toBe("Webhook validation failed");
         expect(server.requests).toHaveLength(0);
       } finally {
         await server.close();
@@ -638,7 +638,7 @@ describe("RetryQueue", () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.error).toBe("Webhook delivery timed out");
+      expect(result.error).toBe("Webhook delivery failed");
       expect(Date.now() - startedAt).toBeLessThan(500);
     } finally {
       await new Promise<void>((resolve, reject) => {

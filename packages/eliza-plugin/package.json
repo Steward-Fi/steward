@@ -1,6 +1,6 @@
 {
   "name": "@stwd/eliza-plugin",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "ElizaOS integration for Steward-scoped wallet and provider capabilities",
   "license": "MIT",
   "type": "module",
@@ -16,7 +16,8 @@
     }
   },
   "dependencies": {
-    "@stwd/sdk": "^0.10.0"
+    "@stwd/sdk": "^0.10.0",
+    "@stwd/shared": "workspace:*"
   },
   "peerDependencies": {
     "@elizaos/core": ">=2.0.0-alpha.50"
@@ -27,7 +28,6 @@
     "@stwd/db": "workspace:*",
     "@stwd/proxy": "workspace:*",
     "@stwd/proxy-client": "workspace:*",
-    "@stwd/shared": "workspace:*",
     "@types/node": "^25.5.0",
     "hono": "^4.12.34",
     "tsup": "^8.0.0",

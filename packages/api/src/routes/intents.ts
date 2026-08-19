@@ -27,6 +27,7 @@ import {
   priceOracle,
   requireTenantLevel,
   safeJsonParse,
+  sanitizeErrorMessage,
   toPolicyRule,
   transactions,
   vault,
@@ -1831,7 +1832,7 @@ async function updateIntentStatus(
       await assertIntentAuthorizationBaselineCurrent(claimed);
       executionResult = await executeTypedIntent(claimed);
     } catch (error) {
-      const failureReason = error instanceof Error ? error.message : "Invalid intent execution";
+      const failureReason = sanitizeErrorMessage(error);
       const failedAt = new Date();
       const [failed] = await db
         .update(intents)
