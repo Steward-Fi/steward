@@ -21,7 +21,7 @@ export interface StorePublishEntry {
   key: string;
   /** A null value deletes the key as part of the atomic publication. */
   value: string | null;
-  /** Absolute Unix epoch deadline. Publication must never extend this expiry. */
+  /** Absolute Unix epoch deadline. A value is not published after this deadline. */
   expiresAt: number;
   /**
    * Optional compare-and-publish guard. Null means the key must be absent or
@@ -57,7 +57,7 @@ export interface StoreBackend {
     ttlMs: number,
     guard?: { key: string; expected: string },
   ): Promise<boolean>;
-  /** Atomically make every entry visible, or make none of them visible. */
+  /** Atomically apply every entry, or none; returns false after any value deadline. */
   publish(entries: readonly StorePublishEntry[]): Promise<boolean>;
   delete(key: string): Promise<void>;
 }
@@ -208,6 +208,7 @@ export class MemoryBackend implements StoreBackend {
   async publish(entries: readonly StorePublishEntry[]): Promise<boolean> {
     assertUniquePublishKeys(entries);
     const now = Date.now();
+    if (entries.some((entry) => entry.value !== null && entry.expiresAt <= now)) return false;
     const currentValue = (key: string): string | null => {
       const current = this.store.get(key);
       if (!current || now > current.expiresAt) return null;
@@ -355,7 +356,7 @@ export class RedisBackend implements StoreBackend {
       entry.expected ?? "",
     ]);
     const result = await this.client.eval(
-      "local guarded=0; local all_expected=true; local all_desired=true; for i=1,#KEYS do local j=(i-1)*5; local v=redis.call('GET',KEYS[i]); local kind=ARGV[j+4]; if kind~='0' then guarded=guarded+1; local expected=(kind=='1' and not v) or (kind=='2' and v==ARGV[j+5]); local desired=(ARGV[j+1]=='D' and not v) or (ARGV[j+1]=='S' and v==ARGV[j+2]); if not expected then all_expected=false end; if not desired then all_desired=false end end end; if guarded>0 and all_desired then return 1 end; if not all_expected then return 0 end; local now=redis.call('TIME'); local now_ms=tonumber(now[1])*1000+math.floor(tonumber(now[2])/1000); local ttls={}; for i=1,#KEYS do local j=(i-1)*5; if ARGV[j+1]=='S' then local ttl=tonumber(ARGV[j+3])-now_ms; if ttl<=0 then return -1 end; ttls[i]=ttl end end; for i=1,#KEYS do local j=(i-1)*5; if ARGV[j+1]=='D' then redis.call('DEL',KEYS[i]) else redis.call('SET',KEYS[i],ARGV[j+2],'PX',ttls[i]) end end; return 1",
+      "local now=redis.call('TIME'); local now_ms=tonumber(now[1])*1000+math.floor(tonumber(now[2])/1000); local ttls={}; for i=1,#KEYS do local j=(i-1)*5; if ARGV[j+1]=='S' then local ttl=tonumber(ARGV[j+3])-now_ms; if ttl<=0 then return -1 end; ttls[i]=ttl end end; local guarded=0; local all_expected=true; local all_desired=true; for i=1,#KEYS do local j=(i-1)*5; local v=redis.call('GET',KEYS[i]); local kind=ARGV[j+4]; if kind~='0' then guarded=guarded+1; local expected=(kind=='1' and not v) or (kind=='2' and v==ARGV[j+5]); local desired=(ARGV[j+1]=='D' and not v) or (ARGV[j+1]=='S' and v==ARGV[j+2]); if not expected then all_expected=false end; if not desired then all_desired=false end end end; if guarded>0 and all_desired then return 1 end; if not all_expected then return 0 end; for i=1,#KEYS do local j=(i-1)*5; if ARGV[j+1]=='D' then redis.call('DEL',KEYS[i]) else redis.call('SET',KEYS[i],ARGV[j+2],'PX',ttls[i]) end end; return 1",
       keys.length,
       ...keys,
       ...args,
@@ -530,6 +531,13 @@ export class PostgresBackend implements StoreBackend {
       ...entry,
       expiresAtIso: new Date(entry.expiresAt).toISOString(),
     }));
+    const earliestValueExpiry = prepared
+      .filter((entry) => entry.value !== null)
+      .reduce<number | null>(
+        (earliest, entry) =>
+          earliest === null || entry.expiresAt < earliest ? entry.expiresAt : earliest,
+        null,
+      );
     for (let attempt = 0; attempt < 3; attempt += 1) {
       let published = true;
       try {
@@ -547,6 +555,16 @@ export class PostgresBackend implements StoreBackend {
                 hashtextextended(${`${this.namespace}:${entry.key}`}, 0)
               )
             `;
+          }
+          if (earliestValueExpiry !== null) {
+            const [{ valid }] = await transaction<Array<{ valid: boolean }>>`
+              SELECT clock_timestamp() < ${new Date(earliestValueExpiry).toISOString()}::timestamptz
+                AS valid
+            `;
+            if (!valid) {
+              published = false;
+              return;
+            }
           }
           let allExpected = true;
           let allDesired = guarded.length > 0;

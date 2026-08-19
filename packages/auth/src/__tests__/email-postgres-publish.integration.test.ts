@@ -148,7 +148,7 @@ integration("Postgres email challenge publication", () => {
     expect(await backend.get("duplicate")).toBeNull();
   });
 
-  it("keeps the supplied deadline when a successful publication is delayed past expiry", async () => {
+  it("rejects a publication delayed past expiry without applying any write", async () => {
     if (!sql) throw new Error("DATABASE_URL required");
     const namespace = `email-publish-expiry-${crypto.randomUUID()}`;
     const backend = new PostgresBackend(namespace);
@@ -192,14 +192,15 @@ integration("Postgres email challenge publication", () => {
     if (!publicationOutcome || !publication) throw new Error("publication did not start");
     const result = await publicationOutcome;
     if (!result.ok) throw result.error;
-    expect(result.value).toBe(true);
+    expect(result.value).toBe(false);
     expect(await backend.get(credentialKey)).toBeNull();
+    expect(await backend.get(reservationKey)).toBe("reserved");
     const rows = await sql<Array<{ expiresAt: Date }>>`
       SELECT expires_at AS "expiresAt"
         FROM auth_kv_store
        WHERE id = ${credentialKey} AND namespace = ${namespace}
     `;
-    expect(rows[0]?.expiresAt.getTime()).toBe(expiresAt);
+    expect(rows).toHaveLength(0);
     await sql`DELETE FROM auth_kv_store WHERE namespace = ${namespace}`;
   });
 

@@ -132,6 +132,7 @@ class CapturingBackend implements StoreBackend {
       }
     }
     const now = Date.now();
+    if (entries.some((entry) => entry.value !== null && entry.expiresAt <= now)) return false;
     if (this.replaceGuardBeforeTransition) {
       const guardedTarget = entries.find(
         (entry) => entry.expected !== undefined && entry.key.startsWith("email-login:active:"),
@@ -155,6 +156,8 @@ class CapturingBackend implements StoreBackend {
     if (activationEntry && this.delaySuccessfulActivationPublishMs > 0) {
       await Bun.sleep(this.delaySuccessfulActivationPublishMs);
     }
+    if (entries.some((entry) => entry.value !== null && entry.expiresAt <= Date.now()))
+      return false;
     if (
       this.failActiveWrites &&
       entries.some((entry) => this.isActivation(entry.key, entry.value))
@@ -899,7 +902,7 @@ describe("fail-closed magic-link delivery", () => {
     auth.destroy();
   });
 
-  it("does not extend an OTP after a delayed successful publish passes its advertised expiry", async () => {
+  it("fails OTP activation when publication is delayed past its advertised expiry", async () => {
     const backend = new CapturingBackend();
     backend.delaySuccessfulActivationPublishMs = 80;
     let text = "";
@@ -914,17 +917,16 @@ describe("fail-closed magic-link delivery", () => {
       { tokenTtlMs: 40 },
     );
 
-    const { expiresAt } = await auth.sendOtp("otp-expired-publish@example.com", {
-      tenantId: "tenant-a",
-    });
-    expect(Date.now()).toBeGreaterThan(expiresAt.getTime());
+    await expect(
+      auth.sendOtp("otp-expired-publish@example.com", { tenantId: "tenant-a" }),
+    ).rejects.toThrow("Email challenge activation failed");
     expect(backend.activationPublishExpiresAt).toHaveLength(1);
     const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
     expect(await auth.verifyOtp("otp-expired-publish@example.com", code, "tenant-a")).toBe(false);
     auth.destroy();
   });
 
-  it("does not extend a magic link after a delayed successful publish passes its advertised expiry", async () => {
+  it("fails magic-link activation when publication is delayed past its advertised expiry", async () => {
     const backend = new CapturingBackend();
     backend.delaySuccessfulActivationPublishMs = 80;
     let text = "";
@@ -939,10 +941,9 @@ describe("fail-closed magic-link delivery", () => {
       { tokenTtlMs: 40 },
     );
 
-    const { expiresAt } = await auth.sendMagicLink("magic-expired-publish@example.com", {
-      tenantId: "tenant-a",
-    });
-    expect(Date.now()).toBeGreaterThan(expiresAt.getTime());
+    await expect(
+      auth.sendMagicLink("magic-expired-publish@example.com", { tenantId: "tenant-a" }),
+    ).rejects.toThrow("Email challenge activation failed");
     const token = text.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
     const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
     expect(

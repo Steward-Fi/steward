@@ -101,6 +101,26 @@ describe("NamespacedStoreBackend", () => {
     backend.destroy();
   });
 
+  it("rejects an expired memory publication without applying any write", async () => {
+    const backend = new MemoryBackend();
+    await backend.set("reservation", "reserved", 60_000);
+
+    expect(
+      await backend.publish([
+        { key: "credential", value: "active", expiresAt: Date.now() - 1 },
+        {
+          key: "reservation",
+          value: "published",
+          expiresAt: Date.now() - 1,
+          expected: "reserved",
+        },
+      ]),
+    ).toBe(false);
+    expect(await backend.get("credential")).toBeNull();
+    expect(await backend.get("reservation")).toBe("reserved");
+    backend.destroy();
+  });
+
   it("passes absolute deadlines to an atomic Redis server-time publication", async () => {
     let observedScript = "";
     let observedArgs: Array<string | number> = [];
