@@ -7,6 +7,9 @@ export default defineConfig({
   clean: true,
   sourcemap: true,
   external: ["@elizaos/core", "@stwd/sdk"],
-  noExternal: ["@stwd/shared/sensitive-keys"],
+  // Keep Steward's shared runtime helpers inside the published artifact. A
+  // workspace protocol dependency cannot be installed from an npm tarball,
+  // and both the root and sensitive-keys subpath are used at runtime.
+  noExternal: ["@stwd/shared", "@stwd/shared/sensitive-keys"],
   target: "node22",
 });

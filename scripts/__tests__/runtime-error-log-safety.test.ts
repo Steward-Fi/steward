@@ -35,6 +35,7 @@ function sinkName(expression: ts.LeftHandSideExpression): string {
 function isTelemetrySinkName(name: string): boolean {
   return (
     [
+      "detail",
       "logWarn",
       "dispatchWebhook",
       "trackAuditEvent",
@@ -52,9 +53,14 @@ function isTelemetrySinkName(name: string): boolean {
 
 function unsafeTelemetryArguments(source: ts.SourceFile): string[] {
   const failures: string[] = [];
+  const reported = new Set<string>();
   const report = (node: ts.Node): void => {
     const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
-    failures.push(`${source.fileName}:${line}: ${node.getText(source).slice(0, 160)}`);
+    const failure = `${source.fileName}:${line}: ${node.getText(source).slice(0, 160)}`;
+    if (!reported.has(failure)) {
+      reported.add(failure);
+      failures.push(failure);
+    }
   };
   const bindingNames = (name: ts.BindingName): string[] => {
     if (ts.isIdentifier(name)) return [name.text];
@@ -62,8 +68,8 @@ function unsafeTelemetryArguments(source: ts.SourceFile): string[] {
       ts.isOmittedExpression(element) ? [] : bindingNames(element.name),
     );
   };
-  const inspectCatch = (clause: ts.CatchClause, caughtName: string): void => {
-    const tainted = new Set([caughtName]);
+  const inspectTaintedScope = (scope: ts.Node, caughtNames: string[]): void => {
+    const tainted = new Set(caughtNames);
     const taintMutationTarget = (candidate: ts.Expression): void => {
       let target: ts.Expression = candidate;
       while (ts.isPropertyAccessExpression(target) || ts.isElementAccessExpression(target)) {
@@ -87,6 +93,7 @@ function unsafeTelemetryArguments(source: ts.SourceFile): string[] {
             "extractRpcErrorMessage",
             "isDefiniteVenueRejection",
             "isRpcError",
+            "redactSensitiveText",
             "redactedThrownDiagnostics",
             "sanitizeErrorMessage",
           ].includes(name) ||
@@ -112,8 +119,8 @@ function unsafeTelemetryArguments(source: ts.SourceFile): string[] {
       }
       return candidate.getChildren(source).some(isTainted);
     };
-    const visitCatchNode = (node: ts.Node): void => {
-      if (node !== clause.block && ts.isCatchClause(node)) return;
+    const visitTaintedNode = (node: ts.Node): void => {
+      if (node !== scope && ts.isCatchClause(node)) return;
       if (ts.isVariableDeclaration(node)) {
         const names = bindingNames(node.name);
         if (node.initializer && isTainted(node.initializer)) {
@@ -164,14 +171,41 @@ function unsafeTelemetryArguments(source: ts.SourceFile): string[] {
           }
         }
       }
-      ts.forEachChild(node, visitCatchNode);
+      ts.forEachChild(node, visitTaintedNode);
     };
-    visitCatchNode(clause.block);
+    visitTaintedNode(scope);
+  };
+  const inspectRejectionCallback = (candidate: ts.Expression | undefined): void => {
+    if (!candidate) return;
+    if (!ts.isArrowFunction(candidate) && !ts.isFunctionExpression(candidate)) {
+      const isDirectConsoleSink =
+        ts.isPropertyAccessExpression(candidate) &&
+        ts.isIdentifier(candidate.expression) &&
+        candidate.expression.text === "console" &&
+        ["error", "warn", "log"].includes(candidate.name.text);
+      if (
+        isDirectConsoleSink ||
+        ((ts.isIdentifier(candidate) || ts.isPropertyAccessExpression(candidate)) &&
+          isTelemetrySinkName(sinkName(candidate)))
+      ) {
+        report(candidate);
+      }
+      return;
+    }
+    const caughtNames = candidate.parameters.flatMap((parameter) => bindingNames(parameter.name));
+    if (caughtNames.length > 0) inspectTaintedScope(candidate.body, caughtNames);
   };
   const visit = (node: ts.Node): void => {
     if (ts.isCatchClause(node)) {
       const variable = node.variableDeclaration?.name;
-      if (variable && ts.isIdentifier(variable)) inspectCatch(node, variable.text);
+      if (variable) inspectTaintedScope(node.block, bindingNames(variable));
+    }
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+      if (node.expression.name.text === "catch") {
+        inspectRejectionCallback(node.arguments[0]);
+      } else if (node.expression.name.text === "then") {
+        inspectRejectionCallback(node.arguments[1]);
+      }
     }
     ts.forEachChild(node, visit);
   };
@@ -297,6 +331,44 @@ describe("runtime error logging", () => {
           const diagnostics = redactedThrownDiagnostics(err);
           console.error("failed", diagnostics);
         }
+      `),
+    ).toEqual([]);
+  });
+
+  test("flags raw Promise rejection callback values at telemetry sinks", () => {
+    expect(
+      failuresForSnippet(`
+        doThing().catch((error) => {
+          const payload = { message: error.message };
+          console.error(payload);
+        });
+
+        doOtherThing().then(undefined, (reason) => {
+          writeAuditEvent({ reason: String(reason) });
+        });
+      `),
+    ).toHaveLength(2);
+  });
+
+  test("flags telemetry sinks passed directly as Promise rejection callbacks", () => {
+    expect(
+      failuresForSnippet(`
+        doThing().catch(console.error);
+        doOtherThing().then(undefined, writeAuditEvent);
+      `),
+    ).toHaveLength(2);
+  });
+
+  test("allows bounded diagnostics in Promise rejection callbacks", () => {
+    expect(
+      failuresForSnippet(`
+        doThing().catch((error) => {
+          console.error("failed", redactedThrownDiagnostics(error));
+        });
+
+        doOtherThing().then(undefined, (reason) => {
+          writeAuditEvent({ diagnostics: redactedThrownDiagnostics(reason) });
+        });
       `),
     ).toEqual([]);
   });
