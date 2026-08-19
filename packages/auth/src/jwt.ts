@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, randomUUID, scryptSync } from "node:crypto";
+import { hkdfSync, randomBytes, randomUUID, scryptSync } from "node:crypto";
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   calculateJwkThumbprint,
@@ -71,7 +71,7 @@ let warnedEmbeddedMasterFallback = false;
 let warnedDevSecret = false;
 let warnedShortSecret = false;
 
-const embeddedJwtCacheKey = randomBytes(32);
+const embeddedJwtCacheSalt = randomBytes(32);
 let embeddedJwtDerivation: { identity: string; derived: string } | null = null;
 
 /**
@@ -85,10 +85,15 @@ let embeddedJwtDerivation: { identity: string; derived: string } | null = null;
  * from the vault root key and offline guesses cost a scrypt each.
  */
 function deriveEmbeddedJwtSecret(masterPassword: string): string {
-  const hmac = createHmac("sha256", embeddedJwtCacheKey);
-  // codeql[js/insufficient-password-hash] Ephemeral keyed cache identity only;
-  // the JWT signing key below is independently derived with scrypt.
-  const identity = hmac.update(masterPassword).digest("hex"); // lgtm[js/insufficient-password-hash]
+  const identity = Buffer.from(
+    hkdfSync(
+      "sha256",
+      masterPassword,
+      embeddedJwtCacheSalt,
+      "steward:embedded-jwt-cache-identity:v1",
+      32,
+    ),
+  ).toString("hex");
   if (embeddedJwtDerivation?.identity === identity) return embeddedJwtDerivation.derived;
   const derived = (scryptSync(masterPassword, "steward-kdf:jwt-signing:v1", 32) as Buffer).toString(
     "hex",

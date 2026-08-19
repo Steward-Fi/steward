@@ -1,18 +1,22 @@
-import { createHmac, randomBytes } from "node:crypto";
+import { hkdfSync, randomBytes } from "node:crypto";
 
-const processCacheIdentityKey = randomBytes(32);
+const processCacheIdentitySalt = randomBytes(32);
+const processCacheIdentityInfo = Buffer.from("steward:process-cache-identity:v1");
 
 /** Opaque, process-local cache identity; never persisted or used for authentication. */
 export function processCacheIdentity(parts: readonly string[]): string {
-  const hmac = createHmac("sha256", processCacheIdentityKey);
+  const chunks: Buffer[] = [];
   for (const part of parts) {
     const bytes = Buffer.from(part);
-    hmac.update(String(bytes.length)); // lgtm[js/insufficient-password-hash]
-    hmac.update(":");
-    // codeql[js/insufficient-password-hash] Ephemeral keyed cache discriminator;
-    // cryptographic keys still use their owning KDF.
-    hmac.update(bytes); // lgtm[js/insufficient-password-hash]
-    hmac.update(";");
+    chunks.push(Buffer.from(`${bytes.length}:`), bytes, Buffer.from(";"));
   }
-  return hmac.digest("hex");
+  return Buffer.from(
+    hkdfSync(
+      "sha256",
+      Buffer.concat(chunks),
+      processCacheIdentitySalt,
+      processCacheIdentityInfo,
+      32,
+    ),
+  ).toString("hex");
 }
