@@ -27,9 +27,9 @@ export interface ExecutionPolicyResult {
  * Canonical request envelope for a consequential operation.
  *
  * This is a types-only contract for the policy-bound execution gateway. Current
- * signing routes still build their own route-local policy context; PRs after
- * this one can use this shape to bind wallet and credential actions to one
- * authorization path without changing the raw Vault API in this PR.
+ * signing routes still build their own route-local policy context; future
+ * integrations can use this shape to bind wallet and credential actions to one
+ * authorization path without changing the raw Vault API.
  */
 export interface ExecutionRequest<Payload = unknown> {
   id: string;

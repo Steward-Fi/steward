@@ -1,18 +1,18 @@
 /**
- * evidence independent adversarial probes (review-gate). Two probes NOT duplicating
- * the PR's own suite:
+ * evidence independent adversarial probes (review-gate). Two probes not duplicating
+ * the primary suite:
  *
  *  P-A "byte-flip in a stored event's metadata": mutate ONE byte in a correlated
  *  event's metadata AFTER export and confirm the offline verifier FAILs on the
  *  signed content digest (proves the digest actually covers metadata, not just
- *  hmac/action). Distinct from the PR's N08 (which mutates a MANIFEST fact, not
+ *  hmac/action). Distinct from N08 (which mutates a MANIFEST fact, not
  *  a bundle event's metadata) and N19 (synthetic-bundle field mutation).
  *
  *  P-B "manifest-omission cannot hide incompleteness": drop a REQUIRED-role
  *  event from the manifest's events[] index (leaving it in the signed bundle
  *  segment) while claiming complete. The verifier must FAIL (forged completeness)
  *  — a bad/absent event surfaces as incompleteness, never silence (spec §7.4.3 /
- *  verifier-independence item 4). Distinct from the PR's N09 (which flips
+ *  verifier-independence item 4). Distinct from N09 (which flips
  *  terminalState) — here we keep terminalState honest and instead attack the
  *  events[] index omission + completeness claim.
  */

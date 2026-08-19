@@ -5,7 +5,7 @@ description: "Single-command fake proof and the separate real GitHub sandbox run
 
 # Provider Authority: Golden Path
 
-This is the exact workflow that reproduces the six-PR governed-provider thesis:
+This is the exact workflow that reproduces the governed-provider design:
 a **single-command fake CI proof** that runs the whole matrix against a
 deterministic in-process transport, and a **separate documented real GitHub
 sandbox run** against a throwaway org. Both traverse the **identical** governed
@@ -107,7 +107,7 @@ evaluation or authorization mint. Descriptor drift therefore returns
 `provider.resume.policy_denied`; it never dispatches the old approval against a
 new target.
 
-## 1. The fake CI proof (every PR, credential-free)
+## 1. The fake CI proof (credential-free)
 
 ```bash
 # From the repo root, deterministic, zero network egress, zero credentials.

@@ -332,7 +332,7 @@ async function agentCommand(action: string | undefined, ctx: CommandContext) {
  * Read a secret value for onboarding/rotation. Preferred sources are --file or
  * stdin so the plaintext never lands in shell history or `ps` output. --value
  * remains for backward compatibility but warns loudly (salvaged from the
- * sovereign-custody A2 lane: zero-plaintext-transit onboarding).
+ * sovereign-custody path: zero-plaintext-transit onboarding).
  */
 export function readSecretValue(flags: Record<string, string | boolean>): string {
   const file = stringFlag(flags, "file");

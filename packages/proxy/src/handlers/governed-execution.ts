@@ -394,7 +394,8 @@ function deny(
 }
 
 /**
- * Dispatch a governed, approved (execution_ready) provider action exactly once.
+ * Dispatch a governed, approved provider action through a single-winner claim.
+ * Ambiguous upstream outcomes remain durable as outcome_unknown for replay.
  *
  * @param intentId the provider-action intent (lifecycle root).
  * @param tenantId owning tenant.
@@ -773,7 +774,7 @@ export async function dispatchGovernedExecution(
     return deny(boundary.code, 409, intentId, { executionId: loaded.executionId });
   }
 
-  // ── Dispatch exactly once via handleProxy with the governed context ────────
+  // ── Dispatch the single winning claim via the governed context ─────────────
   await hook("beforeForward");
   return dispatchOnce(tenantId, loaded);
 }
@@ -954,7 +955,8 @@ async function recordPreDispatchDenial(
 
 /**
  * Build the non-forgeable in-process governedExecutionClaim context and call
- * handleProxy exactly once, then record the terminal outcome (§4.1 steps 4-6).
+ * handleProxy for the single winning claim, then record a terminal or
+ * outcome_unknown result (§4.1 steps 4-6).
  */
 async function dispatchOnce(
   tenantId: string,
