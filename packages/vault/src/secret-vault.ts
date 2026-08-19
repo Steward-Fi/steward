@@ -318,18 +318,26 @@ export class SecretVault {
    * account refresh that holds a SELECT ... FOR UPDATE lock) without a nested
    * transaction. The single-flight/atomicity guarantee is the CALLER's outer
    * transaction; this method only appends the new version + repoints routes +
-   * soft-deletes the prior version.
+   * soft-deletes the prior version. Deleted lineages stay unavailable by
+   * default; recovery callers must explicitly opt in to append a replacement.
    */
   async rotateSecretWithinTx(
     tx: SecretTxExecutor,
     tenantId: string,
     name: string,
     newValue: string,
+    options?: { allowDeletedCurrent?: boolean },
   ): Promise<SecretMetadata> {
     const [current] = await tx
       .select()
       .from(secrets)
-      .where(and(eq(secrets.tenantId, tenantId), eq(secrets.name, name), isNull(secrets.deletedAt)))
+      .where(
+        and(
+          eq(secrets.tenantId, tenantId),
+          eq(secrets.name, name),
+          options?.allowDeletedCurrent ? undefined : isNull(secrets.deletedAt),
+        ),
+      )
       .orderBy(desc(secrets.version))
       .limit(1);
     if (!current) {
