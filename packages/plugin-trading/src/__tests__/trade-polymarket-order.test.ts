@@ -683,8 +683,10 @@ describe("POST /v1/trade/polymarket/order", () => {
 
     const prevNodeEnv = process.env.NODE_ENV;
     const prevMemoryAck = process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+    const prevCustodyAck = process.env.STEWARD_ACK_LOCAL_CUSTODY;
     process.env.NODE_ENV = "production";
     process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = "true";
+    process.env.STEWARD_ACK_LOCAL_CUSTODY = "true";
     process.env.STEWARD_PM_TEST_CREDS = "1";
     try {
       const res = await postOrder(app, sessionId, crypto.randomUUID());
@@ -700,6 +702,8 @@ describe("POST /v1/trade/polymarket/order", () => {
       else process.env.NODE_ENV = prevNodeEnv;
       if (prevMemoryAck === undefined) delete process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
       else process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = prevMemoryAck;
+      if (prevCustodyAck === undefined) delete process.env.STEWARD_ACK_LOCAL_CUSTODY;
+      else process.env.STEWARD_ACK_LOCAL_CUSTODY = prevCustodyAck;
       delete process.env.STEWARD_PM_TEST_CREDS;
     }
   });
@@ -726,8 +730,10 @@ describe("POST /v1/trade/polymarket/order", () => {
 
     const prevNodeEnv = process.env.NODE_ENV;
     const prevMemoryAck = process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
+    const prevCustodyAck = process.env.STEWARD_ACK_LOCAL_CUSTODY;
     process.env.NODE_ENV = "production";
     process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = "true";
+    process.env.STEWARD_ACK_LOCAL_CUSTODY = "true";
     process.env.POLYMARKET_CLOB_API_URL = "http://clob.e2e.invalid";
     process.env.STEWARD_PM_TEST_CREDS = "1";
     try {
@@ -743,6 +749,8 @@ describe("POST /v1/trade/polymarket/order", () => {
       else process.env.NODE_ENV = prevNodeEnv;
       if (prevMemoryAck === undefined) delete process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY;
       else process.env.STEWARD_ALLOW_MEMORY_TRADING_IDEMPOTENCY = prevMemoryAck;
+      if (prevCustodyAck === undefined) delete process.env.STEWARD_ACK_LOCAL_CUSTODY;
+      else process.env.STEWARD_ACK_LOCAL_CUSTODY = prevCustodyAck;
       delete process.env.POLYMARKET_CLOB_API_URL;
       delete process.env.STEWARD_PM_TEST_CREDS;
     }

@@ -13,6 +13,8 @@ export type ApiClientOptions = {
    * step-up that a browser owner session would require).
    */
   tenantKey?: string;
+  /** HMAC root used to authorize sensitive machine mutations. */
+  requestSigningSecret?: string;
   fetchImpl?: typeof fetch;
 };
 
@@ -33,6 +35,44 @@ const API_RESPONSE_MAX_BYTES = 1024 * 1024;
 const API_ARCHIVE_CHUNK_MAX_BYTES = 25 * 1024 * 1024;
 const SENSITIVE_BODY_KEY =
   /(token|secret|password|credential|api.?key|private.?key|mnemonic|value)/i;
+const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+function configuredRequestSigningSecret(): string | undefined {
+  const rotated = (process.env.STEWARD_REQUEST_SIGNING_SECRETS ?? "")
+    .split(",")
+    .map((secret) => secret.trim())
+    .find(Boolean);
+  return rotated || process.env.STEWARD_REQUEST_SIGNING_SECRET?.trim() || undefined;
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function hmacSha256Hex(secret: string, canonical: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(canonical));
+  return [...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function bodyIdempotencyKey(body: string): string | undefined {
+  if (!body) return undefined;
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const value = (parsed as Record<string, unknown>).idempotencyKey;
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function sensitiveBodyValues(value: unknown): string[] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return [];
@@ -114,6 +154,7 @@ export class StewardApiClient {
   private readonly token?: string;
   private readonly platformKey?: string;
   private readonly tenantKey?: string;
+  private readonly requestSigningSecret?: string;
 
   constructor(options: ApiClientOptions = {}) {
     this.baseUrl = normalizeBaseUrl(options.baseUrl);
@@ -122,6 +163,40 @@ export class StewardApiClient {
     this.token = options.token ?? process.env.STEWARD_TOKEN ?? process.env.STEWARD_API_TOKEN;
     this.platformKey = options.platformKey ?? process.env.STEWARD_PLATFORM_KEY;
     this.tenantKey = options.tenantKey ?? process.env.STEWARD_TENANT_KEY;
+    this.requestSigningSecret = options.requestSigningSecret ?? configuredRequestSigningSecret();
+  }
+
+  private async authorizeMutation(
+    method: string,
+    path: string,
+    body: string,
+    headers: Record<string, string>,
+  ): Promise<void> {
+    if (!MUTATING_METHODS.has(method.toUpperCase())) return;
+    headers["X-Steward-Request-Timestamp"] = String(Math.floor(Date.now() / 1000));
+    if (!this.requestSigningSecret) return;
+
+    headers["Idempotency-Key"] = bodyIdempotencyKey(body) ?? crypto.randomUUID();
+    const url = new URL(`${this.baseUrl}${path}`);
+    const canonical = [
+      "steward-request-signature-v1",
+      method.toUpperCase(),
+      `${url.pathname}${url.search}`,
+      headers["X-Steward-Tenant"] ?? "",
+      await sha256Hex(headers.Authorization ?? ""),
+      await sha256Hex(headers["X-Steward-Key"] ?? ""),
+      await sha256Hex(headers["X-Steward-Platform-Key"] ?? ""),
+      await sha256Hex(headers["X-Steward-Signer-Id"] ?? ""),
+      await sha256Hex(headers["X-Steward-Signer-Secret"] ?? ""),
+      await sha256Hex(headers["X-Steward-Key-Quorum-Id"] ?? ""),
+      await sha256Hex(headers["X-Steward-Key-Quorum-Credentials"] ?? ""),
+      headers["X-Steward-Request-Timestamp"],
+      headers["X-Steward-Request-Expires-At"] ?? "",
+      headers["Idempotency-Key"],
+      await sha256Hex(body),
+    ].join("\n");
+    headers["X-Steward-Signature"] =
+      `v1=${await hmacSha256Hex(this.requestSigningSecret, canonical)}`;
   }
 
   async request<T = unknown>(
@@ -143,10 +218,13 @@ export class StewardApiClient {
     }
     if (options.tenant !== false && this.tenantId) headers["X-Steward-Tenant"] = this.tenantId;
 
+    const serializedBody = body === undefined ? "" : JSON.stringify(body);
+    await this.authorizeMutation(method, path, serializedBody, headers);
+
     const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
       method,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: body === undefined ? undefined : serializedBody,
       signal: AbortSignal.timeout(API_REQUEST_TIMEOUT_MS),
       // The client attaches bearer, platform, or tenant credentials. Never let
       // fetch replay those headers to a Location selected by an intermediary or
@@ -212,6 +290,7 @@ export class StewardApiClient {
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
     else if (this.tenantKey) headers["X-Steward-Key"] = this.tenantKey;
     if (this.tenantId) headers["X-Steward-Tenant"] = this.tenantId;
+    await this.authorizeMutation(method, path, body, headers);
     const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
       method,
       headers,

@@ -1,6 +1,48 @@
 import { describe, expect, test } from "bun:test";
 import { ApiError, StewardApiClient } from "../api";
 
+async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function expectedSignature(
+  method: string,
+  path: string,
+  headers: Record<string, string>,
+  body: string,
+  secret: string,
+): Promise<string> {
+  const canonical = [
+    "steward-request-signature-v1",
+    method,
+    path,
+    headers["X-Steward-Tenant"] ?? "",
+    await sha256Hex(headers.Authorization ?? ""),
+    await sha256Hex(headers["X-Steward-Key"] ?? ""),
+    await sha256Hex(headers["X-Steward-Platform-Key"] ?? ""),
+    await sha256Hex(""),
+    await sha256Hex(""),
+    await sha256Hex(""),
+    await sha256Hex(""),
+    headers["X-Steward-Request-Timestamp"] ?? "",
+    "",
+    headers["Idempotency-Key"] ?? "",
+    await sha256Hex(body),
+  ].join("\n");
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(canonical));
+  return `v1=${[...new Uint8Array(signature)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
 describe("StewardApiClient", () => {
   test("sends platform key for platform requests and unwraps ApiResponse data", async () => {
     const seen: Record<string, string> = {};
@@ -39,6 +81,91 @@ describe("StewardApiClient", () => {
     expect(seen["X-Steward-Key"]).toBe("stw_tenant_secret");
     expect(seen["X-Steward-Tenant"]).toBe("acme");
     expect(seen.Authorization).toBeUndefined();
+  });
+
+  test("signs machine mutations with the API request-signing root", async () => {
+    const secret = "request-signing-secret-with-enough-entropy";
+    const body = JSON.stringify({ name: "agent" });
+    let seen: Record<string, string> = {};
+    const client = new StewardApiClient({
+      baseUrl: "https://steward.test",
+      tenantId: "acme",
+      tenantKey: "stw_tenant_secret",
+      requestSigningSecret: secret,
+      fetchImpl: (async (_url, init) => {
+        seen = { ...(init?.headers as Record<string, string>) };
+        return Response.json({ ok: true, data: { id: "agent" } });
+      }) as typeof fetch,
+    });
+
+    await client.request("POST", "/agents?source=cli", { name: "agent" });
+
+    expect(seen["X-Steward-Request-Timestamp"]).toMatch(/^\d{10}$/);
+    expect(seen["Idempotency-Key"]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(seen["X-Steward-Signature"]).toBe(
+      await expectedSignature("POST", "/agents?source=cli", seen, body, secret),
+    );
+  });
+
+  test("adds freshness without inventing a signature when no root is configured", async () => {
+    const originalPlural = process.env.STEWARD_REQUEST_SIGNING_SECRETS;
+    const originalSingle = process.env.STEWARD_REQUEST_SIGNING_SECRET;
+    delete process.env.STEWARD_REQUEST_SIGNING_SECRETS;
+    delete process.env.STEWARD_REQUEST_SIGNING_SECRET;
+    let seen: Record<string, string> = {};
+    try {
+      const client = new StewardApiClient({
+        baseUrl: "https://steward.test",
+        token: "user-token",
+        fetchImpl: (async (_url, init) => {
+          seen = { ...(init?.headers as Record<string, string>) };
+          return Response.json({ ok: true, data: {} });
+        }) as typeof fetch,
+      });
+      await client.request("POST", "/auth/email/send", { email: "person@example.test" });
+      expect(seen["X-Steward-Request-Timestamp"]).toMatch(/^\d{10}$/);
+      expect(seen["X-Steward-Signature"]).toBeUndefined();
+      expect(seen["Idempotency-Key"]).toBeUndefined();
+    } finally {
+      if (originalPlural === undefined) delete process.env.STEWARD_REQUEST_SIGNING_SECRETS;
+      else process.env.STEWARD_REQUEST_SIGNING_SECRETS = originalPlural;
+      if (originalSingle === undefined) delete process.env.STEWARD_REQUEST_SIGNING_SECRET;
+      else process.env.STEWARD_REQUEST_SIGNING_SECRET = originalSingle;
+    }
+  });
+
+  test("signs raw archive mutations over their exact transported bytes", async () => {
+    const secret = "raw-request-signing-secret-with-enough-entropy";
+    const body = '{"event":"one"}\n';
+    let seen: Record<string, string> = {};
+    const client = new StewardApiClient({
+      baseUrl: "https://steward.test",
+      tenantId: "acme",
+      tenantKey: "stw_tenant_secret",
+      requestSigningSecret: secret,
+      fetchImpl: (async (_url, init) => {
+        seen = { ...(init?.headers as Record<string, string>) };
+        expect(init?.body).toBe(body);
+        return Response.json({ ok: true, data: {} });
+      }) as typeof fetch,
+    });
+
+    await client.requestRaw(
+      "PUT",
+      "/audit/archives/archive-1/restore/chunks/0",
+      body,
+      "application/x-ndjson",
+    );
+
+    expect(seen["X-Steward-Signature"]).toBe(
+      await expectedSignature(
+        "PUT",
+        "/audit/archives/archive-1/restore/chunks/0",
+        seen,
+        body,
+        secret,
+      ),
+    );
   });
 
   test("prefers bearer token over tenant API key when both are set", async () => {

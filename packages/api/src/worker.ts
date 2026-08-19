@@ -51,6 +51,7 @@ import {
 } from "@stwd/db";
 import { runtimeEnvironmentValue, withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { initRedis } from "./middleware/redis";
+import { configuredRequestSigningSecrets } from "./services/request-security-config";
 
 export interface Env {
   DATABASE_URL: string;
@@ -66,6 +67,8 @@ export interface Env {
   /** Deprecated compatibility fallback for existing Worker deployments. */
   STEWARD_SESSION_SECRET?: string;
   STEWARD_MASTER_PASSWORD?: string;
+  STEWARD_REQUEST_SIGNING_SECRETS?: string;
+  STEWARD_REQUEST_SIGNING_SECRET?: string;
   RESEND_API_KEY?: string;
   EMAIL_FROM?: string;
   APP_URL?: string;
@@ -306,6 +309,14 @@ function validateWorkerSecurityEnv(): void {
   // connection. The async-local environment belongs to this event, so another
   // concurrent request cannot replace the bindings being checked.
   validateJwtSecretEnv();
+  if (
+    runtimeEnvironmentValue("NODE_ENV") === "production" &&
+    configuredRequestSigningSecrets().length === 0
+  ) {
+    throw new Error(
+      "STEWARD_REQUEST_SIGNING_SECRETS or STEWARD_REQUEST_SIGNING_SECRET is required in production",
+    );
+  }
 }
 
 async function ensureWorkerInit(env: Env): Promise<void> {

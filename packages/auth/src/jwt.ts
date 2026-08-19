@@ -1,4 +1,4 @@
-import { randomUUID, scryptSync } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, scryptSync } from "node:crypto";
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import {
   calculateJwkThumbprint,
@@ -76,7 +76,8 @@ let warnedShortSecret = false;
  * and getJwtSecret() runs on every token sign/verify, so the derived key is
  * memoized per distinct source password.
  */
-let embeddedJwtDerivation: { source: string; derived: string } | null = null;
+const embeddedJwtCacheKey = randomBytes(32);
+let embeddedJwtDerivation: { sourceFingerprint: string; derived: string } | null = null;
 
 /**
  * Derive the embedded-mode JWT signing secret from STEWARD_MASTER_PASSWORD.
@@ -89,13 +90,19 @@ let embeddedJwtDerivation: { source: string; derived: string } | null = null;
  * from the vault root key and offline guesses cost a scrypt each.
  */
 function deriveEmbeddedJwtSecret(masterPassword: string): string {
-  if (embeddedJwtDerivation && embeddedJwtDerivation.source === masterPassword) {
+  // This keyed digest identifies the current in-process cache entry; the JWT
+  // key itself is still derived with scrypt below.
+  // codeql[js/insufficient-password-hash]
+  const sourceFingerprint = createHmac("sha256", embeddedJwtCacheKey)
+    .update(masterPassword)
+    .digest("hex");
+  if (embeddedJwtDerivation?.sourceFingerprint === sourceFingerprint) {
     return embeddedJwtDerivation.derived;
   }
   const derived = (scryptSync(masterPassword, "steward-kdf:jwt-signing:v1", 32) as Buffer).toString(
     "hex",
   );
-  embeddedJwtDerivation = { source: masterPassword, derived };
+  embeddedJwtDerivation = { sourceFingerprint, derived };
   return derived;
 }
 

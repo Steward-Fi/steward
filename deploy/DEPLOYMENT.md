@@ -86,6 +86,7 @@ STEWARD_MASTER_PASSWORD=<256-bit-hex-secret>
 # Auth
 STEWARD_JWT_SECRET=<separate-jwt-secret>
 STEWARD_PLATFORM_KEYS=<platform-admin-key>
+STEWARD_REQUEST_SIGNING_SECRETS=<separate-api-request-hmac-root>
 
 # RPC
 RPC_URL=https://mainnet.base.org

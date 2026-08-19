@@ -49,6 +49,8 @@ function makeDefaultApp() {
     c.json({ ok: true, verified: Boolean(c.get("requestSignatureVerified")) }),
   );
   app.post("/auth/email/send", (c) => c.json({ ok: true }));
+  app.post("/auth/test/token", (c) => c.json({ ok: true }));
+  app.post("/platform/tenants", (c) => c.json({ ok: true }));
   return app;
 }
 
@@ -599,5 +601,36 @@ describe("authorizationSignature", () => {
     expect(userRoute.status).toBe(200);
     expect(userVault.status).toBe(401);
     expect(agentVault.status).toBe(401);
+  });
+
+  it("does not let a user bearer decorate machine authority or exempt machine auth routes", async () => {
+    const app = makeDefaultApp();
+    const environment = {
+      NODE_ENV: "production",
+      STEWARD_JWT_SECRET: "production-jwt-secret-with-more-than-32-characters",
+    };
+    const userToken = await withRuntimeEnvironment(environment, () =>
+      signAccessToken({
+        address: "0x0000000000000000000000000000000000000001",
+        tenantId: "tenant-1",
+        userId: "user-1",
+      }),
+    );
+
+    const [platform, automation] = await withRuntimeEnvironment(environment, () =>
+      Promise.all([
+        app.request("/platform/tenants", {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${userToken}`,
+            "X-Steward-Platform-Key": "platform-key",
+          },
+        }),
+        app.request("/auth/test/token", { method: "POST" }),
+      ]),
+    );
+
+    expect(platform.status).toBe(401);
+    expect(automation.status).toBe(401);
   });
 });

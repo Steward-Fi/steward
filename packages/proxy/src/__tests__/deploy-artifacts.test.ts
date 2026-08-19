@@ -53,9 +53,7 @@ describe("#101 deploy/docker-compose.yml proxy production env", () => {
   });
 
   test("production proxy supplies a request-signing secret or opts out explicitly", () => {
-    const hasSigningSecret =
-      /STEWARD_PROXY_REQUEST_SIGNING_SECRETS?\s*:/.test(proxy) ||
-      /STEWARD_REQUEST_SIGNING_SECRETS?\s*:/.test(proxy);
+    const hasSigningSecret = /STEWARD_PROXY_REQUEST_SIGNING_SECRETS?\s*:/.test(proxy);
     const optsOutOfSigning = /STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE\s*:\s*["']?false/.test(proxy);
     expect(hasSigningSecret || optsOutOfSigning).toBe(true);
   });

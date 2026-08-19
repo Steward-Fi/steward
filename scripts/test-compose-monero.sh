@@ -29,6 +29,7 @@ export STEWARD_REQUEST_SIGNING_SECRET=compose-contract-api-signing-secret-32-cha
 # Compose requires a proxy request-signing root for the API+proxy pair. This is
 # a throwaway value for the contract test only; production must supply its own.
 export STEWARD_PROXY_REQUEST_SIGNING_SECRET=compose-contract-proxy-signing-secret-32-chars
+export STEWARD_REQUEST_SIGNING_SECRETS=compose-contract-api-signing-secret-32-chars
 # Keep one-off contract containers and resources isolated from any local stack.
 export COMPOSE_PROJECT_NAME=steward-compose-monero-contract-$$
 

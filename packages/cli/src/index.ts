@@ -237,6 +237,8 @@ Auth:
   --api-url, --tenant-id, --token, --tenant-key, and --platform-key override
   STEWARD_* env vars (STEWARD_API_URL, STEWARD_TENANT_ID, STEWARD_TOKEN,
   STEWARD_TENANT_KEY, STEWARD_PLATFORM_KEY).
+  Production machine mutations are signed with the first configured
+  STEWARD_REQUEST_SIGNING_SECRETS entry, or STEWARD_REQUEST_SIGNING_SECRET.
   Tenant creation uses X-Steward-Platform-Key.
   Other API-backed commands prefer a Bearer --token; if none is set they fall
   back to the tenant API key (--tenant-key -> X-Steward-Key), which the API

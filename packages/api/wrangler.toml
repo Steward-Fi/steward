@@ -69,6 +69,7 @@ REDIS_DRIVER = "upstash"
 name = "steward-api-staging"
 
 [env.staging.vars]
+NODE_ENV = "production"
 SKIP_MIGRATIONS = "1"
 DATABASE_DRIVER = "neon-http"
 REDIS_DRIVER = "upstash"
@@ -77,6 +78,7 @@ REDIS_DRIVER = "upstash"
 name = "steward-api-prod"
 
 [env.production.vars]
+NODE_ENV = "production"
 SKIP_MIGRATIONS = "1"
 DATABASE_DRIVER = "neon-http"
 REDIS_DRIVER = "upstash"

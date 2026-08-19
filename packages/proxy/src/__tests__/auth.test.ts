@@ -250,4 +250,42 @@ describe("proxy auth middleware", () => {
       delete process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET;
     }
   });
+
+  test("never accepts the distinct API request-signing root", async () => {
+    try {
+      process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
+      process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET = "proxy-signing-secret";
+      process.env.STEWARD_REQUEST_SIGNING_SECRET = "api-signing-secret";
+      const token = await signAgentToken({ scopes: ["agent", PROXY_SCOPE] });
+      const timestamp = String(Math.floor(Date.now() / 1000));
+      const apiRootSignature = await createProxyAuthorizationSignature(
+        {
+          method: "GET",
+          url: "https://proxy.test/",
+          tenantId: "tenant-1",
+          agentId: "agent-1",
+          timestamp,
+        },
+        "api-signing-secret",
+      );
+
+      const response = await app().request("/", {
+        headers: {
+          authorization: `Bearer ${token}`,
+          "x-steward-request-timestamp": timestamp,
+          "x-steward-signature": apiRootSignature,
+        },
+      });
+
+      expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({
+        ok: false,
+        error: "Invalid proxy request signature",
+      });
+    } finally {
+      delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
+      delete process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET;
+      delete process.env.STEWARD_REQUEST_SIGNING_SECRET;
+    }
+  });
 });

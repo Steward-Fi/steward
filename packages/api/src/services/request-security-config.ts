@@ -18,6 +18,58 @@ export function resolveRequestSecurityPosture(): RequestSecurityPosture {
 
 const browserSignatureExemptionByRequest = new WeakMap<Request, Promise<boolean>>();
 
+const PUBLIC_BROWSER_AUTH_MUTATIONS = new Set([
+  "/auth/sso/discover",
+  "/auth/telegram/challenge",
+  "/auth/telegram/verify",
+  "/auth/farcaster/verify",
+  "/auth/sms/send",
+  "/auth/sms/verify",
+  "/auth/whatsapp/send",
+  "/auth/whatsapp/verify",
+  "/auth/verify",
+  "/auth/verify/solana",
+  "/auth/device/code",
+  "/auth/device/verify",
+  "/auth/device/token",
+  "/auth/passkey/login/options",
+  "/auth/passkey/login/verify",
+  "/auth/email/send",
+  "/auth/email/verify",
+  "/auth/email/code/verify",
+  "/auth/email/status",
+  "/auth/email/otp/send",
+  "/auth/email/otp/verify",
+  "/auth/guest",
+  "/auth/oauth/exchange",
+  "/auth/refresh",
+  "/auth/revoke",
+]);
+
+const MACHINE_AUTHORITY_HEADERS = [
+  "x-steward-platform-key",
+  "x-steward-key",
+  "x-steward-app-id",
+  "x-steward-signer-id",
+  "x-steward-signer-secret",
+  "x-steward-key-quorum-id",
+  "x-steward-key-quorum-credentials",
+] as const;
+
+function isPublicBrowserAuthMutation(path: string): boolean {
+  return (
+    PUBLIC_BROWSER_AUTH_MUTATIONS.has(path) ||
+    /^\/auth\/saml\/[^/]+\/acs$/.test(path) ||
+    /^\/auth\/oauth\/[^/]+\/token$/.test(path)
+  );
+}
+
+function carriesMachineAuthority(request: Request): boolean {
+  if (MACHINE_AUTHORITY_HEADERS.some((header) => request.headers.has(header))) return true;
+  const authorization = request.headers.get("authorization");
+  return authorization !== null && !authorization.startsWith("Bearer ");
+}
+
 /**
  * Browser authentication endpoints cannot hold a server request-signing root.
  * Authenticated browser mutations use a verified user access JWT instead. Agent
@@ -25,14 +77,16 @@ const browserSignatureExemptionByRequest = new WeakMap<Request, Promise<boolean>
  * qualify for this exemption and retain the production machine-request guards.
  */
 export function isBrowserSessionSignatureExempt(request: Request, path: string): Promise<boolean> {
-  if (path === "/auth" || path.startsWith("/auth/")) return Promise.resolve(true);
+  if (carriesMachineAuthority(request)) return Promise.resolve(false);
+
+  const authorization = request.headers.get("authorization");
+  if (!authorization) return Promise.resolve(isPublicBrowserAuthMutation(path));
   if (path !== "/user" && !path.startsWith("/user/")) return Promise.resolve(false);
 
   const cached = browserSignatureExemptionByRequest.get(request);
   if (cached) return cached;
 
   const result = (async () => {
-    const authorization = request.headers.get("authorization");
     if (!authorization?.startsWith("Bearer ")) return false;
     const token = authorization.slice("Bearer ".length).trim();
     if (!token) return false;

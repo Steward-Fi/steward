@@ -43,8 +43,6 @@ function configuredProxySigningSecrets(): string[] {
   return [
     process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRETS,
     process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET,
-    process.env.STEWARD_REQUEST_SIGNING_SECRETS,
-    process.env.STEWARD_REQUEST_SIGNING_SECRET,
   ]
     .filter(Boolean)
     .join(",")

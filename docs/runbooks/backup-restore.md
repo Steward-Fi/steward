@@ -64,7 +64,7 @@ The current `steward doctor` and Compose production roots are:
 
 Also escrow every enabled deployment-specific credential that is needed after a
 restore, including `STEWARD_PLATFORM_KEYS`, tenant API keys returned only once,
-`STEWARD_PROXY_REQUEST_SIGNING_SECRETS`, OAuth client secrets, email credentials,
+`STEWARD_PROXY_REQUEST_SIGNING_SECRETS`, `STEWARD_REQUEST_SIGNING_SECRETS`, OAuth client secrets, email credentials,
 webhook key overrides, and optional sidecar credentials. Their loss has the effect of
 that subsystem's documented rotation or re-enrollment path, not database
 decryption. `STEWARD_PLATFORM_KEYS` and raw tenant API keys are not recoverable

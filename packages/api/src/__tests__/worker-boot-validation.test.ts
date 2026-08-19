@@ -38,6 +38,8 @@ const MANAGED_KEYS = [
   "STEWARD_RATE_LIMIT_MAX_REQUESTS",
   "STEWARD_REQUIRE_REQUEST_EXPIRY",
   "STEWARD_REQUIRE_AUTH_SIGNATURE",
+  "STEWARD_REQUEST_SIGNING_SECRETS",
+  "STEWARD_REQUEST_SIGNING_SECRET",
 ] as const;
 
 describe("workers boot JWT env validation (SEC-134)", () => {
@@ -102,6 +104,23 @@ describe("workers boot JWT env validation (SEC-134)", () => {
         {},
       ),
     ).rejects.toThrow('AGENT_TOKEN_EXPIRY "not-a-duration" is not a valid positive duration');
+  });
+
+  it("rejects a production Worker without a machine request-signing root", async () => {
+    snapshotEnv();
+    delete process.env.STEWARD_REQUEST_SIGNING_SECRETS;
+    delete process.env.STEWARD_REQUEST_SIGNING_SECRET;
+    await expect(
+      worker.fetch(
+        new Request("https://workers.test/"),
+        {
+          NODE_ENV: "production",
+          STEWARD_JWT_SECRET: "workers-boot-test-secret-32-chars-long!!",
+          DATABASE_DRIVER: "bogus",
+        },
+        {},
+      ),
+    ).rejects.toThrow("STEWARD_REQUEST_SIGNING_SECRETS");
   });
 
   it("validates concurrent request bindings before either database selection", async () => {
@@ -246,12 +265,12 @@ describe("workers boot JWT env validation (SEC-134)", () => {
         "request-expiry": {
           status: "pass",
           description:
-            "Sensitive mutating requests require an expiry or timestamp freshness header.",
+            "Every sensitive request requires an expiry or timestamp freshness header in production.",
         },
         "authorization-signatures": {
           status: "pass",
           description:
-            "Sensitive mutating requests require X-Steward-Signature and have an env, app-client, or tenant signing key available.",
+            "Sensitive machine requests require X-Steward-Signature and have an env, app-client, or tenant signing key available; public browser auth and verified user sessions under /user are exempt unless explicitly forced.",
         },
       },
     });
@@ -269,9 +288,9 @@ describe("workers boot JWT env validation (SEC-134)", () => {
             "Sensitive mutating requests validate freshness headers when present but do not require them.",
         },
         "authorization-signatures": {
-          status: "fail",
+          status: "warning",
           description:
-            "Sensitive mutating requests need enforced HMAC signatures and configured signing secrets.",
+            "Authorization signatures are verified when present but are not required by this deployment posture.",
         },
       },
     });
