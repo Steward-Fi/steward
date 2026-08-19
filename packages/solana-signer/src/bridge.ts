@@ -12,14 +12,15 @@
 //                              closed and message-derived features stay off.
 //
 // Loopback is a machine-wide surface: ANY local process can connect to a
-// 127.0.0.1 port, so by default every request must present a shared secret in
-// the x-steward-bridge-token header. The token comes from the
-// STEWARD_SIGNER_BRIDGE_TOKEN env var when set (the same var the consumer
-// process reads to send the header), otherwise a fresh random token is
-// generated per session and exposed as `token` on the returned bridge. A
-// missing or wrong header is 401 before the signer is touched. There is no
-// unauthenticated mode: browser CSRF and unrelated local processes can reach
-// loopback ports too.
+// 127.0.0.1 port, so every request must present a shared secret, either in
+// the x-steward-bridge-token header or as standard `Authorization: Bearer`
+// (for consumers whose HTTP clients only speak bearer auth, e.g. AgentNet's
+// remote-wallet client). The token comes from the STEWARD_SIGNER_BRIDGE_TOKEN
+// env var when set (the same var the consumer process reads to send the
+// header), otherwise a fresh random token is generated per session and
+// exposed as `token` on the returned bridge. A missing or wrong secret is 401
+// before the signer is touched. There is no unauthenticated mode: browser
+// CSRF and unrelated local processes can reach loopback ports too.
 //
 // Policy refusals map to JSON errors with the refusal text and kind, so the
 // remote side can print WHY the vault said no instead of a bare status code.
@@ -43,10 +44,12 @@ export interface SignerBridgeOptions {
   host?: string;
   /** 0 (default) picks an ephemeral port; read the final one from `url`. */
   port?: number;
-  /** Shared secret required in the x-steward-bridge-token header of every
-   *  request. Omitted: STEWARD_SIGNER_BRIDGE_TOKEN from the env when set,
-   *  else a fresh random token per session (read it from the returned
-   *  bridge's `token`). Must contain at least 32 UTF-8 bytes. */
+  /** Shared secret required on every request, presented either in the
+   *  x-steward-bridge-token header or as `Authorization: Bearer <token>`
+   *  (for callers that only speak standard bearer auth, e.g. AgentNet's
+   *  remote-wallet client). Omitted: STEWARD_SIGNER_BRIDGE_TOKEN from the
+   *  env when set, else a fresh random token per session (read it from the
+   *  returned bridge's `token`). Must contain at least 32 UTF-8 bytes. */
   token?: string;
 }
 
@@ -65,6 +68,18 @@ function tokenMatches(presented: string | string[] | undefined, expected: string
     createHash("sha256").update(presented).digest(),
     createHash("sha256").update(expected).digest(),
   );
+}
+
+/** The request's presented secret: the bridge header verbatim, else the token
+ *  of a standard `Authorization: Bearer <token>` header. Callers that cannot
+ *  set custom headers (AgentNet's remote-wallet client sends only bearer
+ *  auth) still authenticate; everyone else keeps the existing header. */
+function presentedToken(req: IncomingMessage): string | string[] | undefined {
+  const custom = req.headers[BRIDGE_TOKEN_HEADER];
+  if (custom !== undefined) return custom;
+  const auth = req.headers.authorization;
+  if (typeof auth === "string" && auth.startsWith("Bearer ")) return auth.slice("Bearer ".length);
+  return undefined;
 }
 
 function statusFor(kind: StewardSignerError["kind"]): number {
@@ -153,11 +168,11 @@ export async function startSignerBridge(
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // Auth before routing: an unauthenticated caller learns nothing and the
     // signer is never touched.
-    if (!tokenMatches(req.headers[BRIDGE_TOKEN_HEADER], token)) {
+    if (!tokenMatches(presentedToken(req), token)) {
       respond(res, 401, {
         error:
-          `missing or wrong ${BRIDGE_TOKEN_HEADER} header; this bridge only answers ` +
-          "callers holding its session's shared secret",
+          `missing or wrong ${BRIDGE_TOKEN_HEADER} or Authorization: Bearer header; ` +
+          "this bridge only answers callers holding its session's shared secret",
       });
       return;
     }
