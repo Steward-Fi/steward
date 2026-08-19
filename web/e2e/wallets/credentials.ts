@@ -79,10 +79,10 @@ export function assertWalletE2ECredentials(env: CredentialEnvironment = process.
  */
 export function environmentWithoutWalletCredentials(
   env: CredentialEnvironment = process.env,
-): NodeJS.ProcessEnv {
+): Readonly<NodeJS.ProcessEnv> {
   const sanitized: Record<string, string | undefined> = { ...env };
   for (const name of WALLET_E2E_CREDENTIAL_NAMES) delete sanitized[name];
-  return sanitized as NodeJS.ProcessEnv;
+  return Object.freeze(sanitized) as Readonly<NodeJS.ProcessEnv>;
 }
 
 /** Keep wallet values in the already-loaded setup closures, not browser children. */

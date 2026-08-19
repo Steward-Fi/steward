@@ -97,6 +97,7 @@ describe("wallet extension E2E contract", () => {
       NODE_ENV: "test",
     });
 
+    expect(Object.isFrozen(serviceEnvironment)).toBe(true);
     expect(childEnvironment.PATH).toBe("/test/bin");
     expect(childEnvironment.E2E_WEB_URL).toBe("http://localhost:3499");
     expect(childEnvironment.NODE_ENV).toBe("test");
@@ -110,7 +111,7 @@ describe("wallet extension E2E contract", () => {
       WALLET_E2E_CREDENTIAL_NAMES.map((name) => [name, `${name}-browser-secret`]),
     );
     let profilePath = "";
-    let browserEnvironment: NodeJS.ProcessEnv | undefined;
+    let browserEnvironment: Readonly<NodeJS.ProcessEnv> | undefined;
 
     await expect(
       withWalletBrowserProfile({
@@ -125,6 +126,7 @@ describe("wallet extension E2E contract", () => {
       }),
     ).rejects.toThrow("injected browser launch failure");
 
+    expect(Object.isFrozen(browserEnvironment)).toBe(true);
     expect(browserEnvironment?.PATH).toBe("/test/bin");
     for (const name of WALLET_E2E_CREDENTIAL_NAMES) {
       expect(browserEnvironment?.[name]).toBeUndefined();

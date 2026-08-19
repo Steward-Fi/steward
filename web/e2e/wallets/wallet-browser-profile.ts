@@ -7,7 +7,7 @@ import { environmentWithoutWalletCredentials } from "./credentials";
 interface WalletBrowserProfileOptions<TContext extends Pick<BrowserContext, "close">> {
   prefix: string;
   prepare?: (profile: string) => Promise<void>;
-  launch: (profile: string, environment: NodeJS.ProcessEnv) => Promise<TContext>;
+  launch: (profile: string, environment: Readonly<NodeJS.ProcessEnv>) => Promise<TContext>;
   use: (context: TContext) => Promise<void>;
   environment?: Readonly<NodeJS.ProcessEnv>;
 }
