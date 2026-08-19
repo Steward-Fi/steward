@@ -4,6 +4,7 @@ import {
   __resetAuditHmacKeyCacheForTests,
   agents,
   agentWallets,
+  approvalQueue,
   auditEvents,
   closeDb,
   encryptedChainKeys,
@@ -11,6 +12,7 @@ import {
   getDb,
   policies,
   tenants,
+  transactions,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
@@ -169,6 +171,32 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
         .from(auditEvents)
         .where(eq(auditEvents.tenantId, TENANT_ID)),
     ).toEqual(beforeAudits);
+  });
+
+  it("rejects deletion without recent MFA before revocation or database mutation", async () => {
+    const app = await makeApp("admin-no-mfa");
+    const beforeAgent = await getDb().select().from(agents).where(eq(agents.id, AGENT_ID));
+    const beforeAudits = await getDb()
+      .select({ id: auditEvents.id })
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, TENANT_ID));
+    expect(await revocationStore.getAgentRevokedBefore(AGENT_ID)).toBeNull();
+
+    const response = await app.request(`/agents/${AGENT_ID}`, { method: "DELETE" });
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("recent MFA verification"),
+    });
+    expect(await getDb().select().from(agents).where(eq(agents.id, AGENT_ID))).toEqual(beforeAgent);
+    expect(
+      await getDb()
+        .select({ id: auditEvents.id })
+        .from(auditEvents)
+        .where(eq(auditEvents.tenantId, TENANT_ID)),
+    ).toEqual(beforeAudits);
+    expect(await revocationStore.getAgentRevokedBefore(AGENT_ID)).toBeNull();
   });
 
   it("rejects non-admin sessions", async () => {
@@ -439,6 +467,21 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
         enabled: true,
         config: { maxPerTx: "3" },
       });
+    await getDb().insert(transactions).values({
+      id: "delete-retry-transaction",
+      agentId: AGENT_ID,
+      status: "pending",
+      toAddress: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+      value: "3",
+      chainId: 1,
+      policyResults: [],
+    });
+    await getDb().insert(approvalQueue).values({
+      id: "delete-retry-approval",
+      txId: "delete-retry-transaction",
+      agentId: AGENT_ID,
+      status: "pending",
+    });
 
     const beforeAgent = await getDb().select().from(agents).where(eq(agents.id, AGENT_ID));
     const beforeWallets = await getDb()
@@ -457,6 +500,14 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       .select()
       .from(policies)
       .where(eq(policies.agentId, AGENT_ID));
+    const beforeTransactions = await getDb()
+      .select()
+      .from(transactions)
+      .where(eq(transactions.agentId, AGENT_ID));
+    const beforeApprovals = await getDb()
+      .select()
+      .from(approvalQueue)
+      .where(eq(approvalQueue.agentId, AGENT_ID));
 
     try {
       await getDb().execute(
@@ -499,6 +550,12 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       expect(await getDb().select().from(policies).where(eq(policies.agentId, AGENT_ID))).toEqual(
         beforePolicies,
       );
+      expect(
+        await getDb().select().from(transactions).where(eq(transactions.agentId, AGENT_ID)),
+      ).toEqual(beforeTransactions);
+      expect(
+        await getDb().select().from(approvalQueue).where(eq(approvalQueue.agentId, AGENT_ID)),
+      ).toEqual(beforeApprovals);
       expect(await revocationStore.getAgentRevokedBefore(AGENT_ID)).not.toBeNull();
     } finally {
       await getDb().execute(
@@ -517,6 +574,12 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
     ).toHaveLength(0);
     expect(
       await getDb().select().from(policies).where(eq(policies.agentId, AGENT_ID)),
+    ).toHaveLength(0);
+    expect(
+      await getDb().select().from(transactions).where(eq(transactions.agentId, AGENT_ID)),
+    ).toHaveLength(0);
+    expect(
+      await getDb().select().from(approvalQueue).where(eq(approvalQueue.agentId, AGENT_ID)),
     ).toHaveLength(0);
 
     const deleteAudits = await getDb()
