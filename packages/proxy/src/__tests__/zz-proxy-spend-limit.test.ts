@@ -918,6 +918,68 @@ describe("proxy spend-limit enforcement", () => {
     }
   });
 
+  test("keeps a single winner while replay completion is still unresolved", async () => {
+    spendResult.configured = false;
+    const {
+      __clearProxyReplayClaimsForTests,
+      __setCheckProxySpendLimitForTests,
+      createProxyHandler,
+      handleProxy,
+    } = await loadProxy();
+    __clearProxyReplayClaimsForTests();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+    let completionStarted!: () => void;
+    const completionStartedPromise = new Promise<void>((resolve) => {
+      completionStarted = resolve;
+    });
+    let rejectCompletion!: (reason: Error) => void;
+    const completionBarrier = new Promise<void>((_resolve, reject) => {
+      rejectCompletion = reject;
+    });
+    const diagnosticCalls: unknown[][] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => diagnosticCalls.push(args);
+    const request = () =>
+      makeContext("/proxy/example.com/v1/echo", {
+        method: "POST",
+        headers: { "Idempotency-Key": "completion-in-flight-single-winner" },
+        body: JSON.stringify({ op: "create" }),
+      });
+
+    try {
+      const handler = createProxyHandler({
+        completeReplayClaim: async () => {
+          completionStarted();
+          await completionBarrier;
+        },
+      });
+      const firstPromise = handler(request());
+      await completionStartedPromise;
+
+      const concurrentRetry = await handleProxy(request());
+      expect(concurrentRetry.status).toBe(409);
+      expect(((await concurrentRetry.json()) as { error: string }).error).toContain(
+        "already processing",
+      );
+      expect(fetchCalls).toBe(1);
+
+      rejectCompletion(new Error("Bearer concurrent-completion-secret-must-not-be-logged"));
+      const first = await firstPromise;
+      expect(first.status).toBe(200);
+      expect(await first.text()).toBe(JSON.stringify({ ok: true }));
+      expect(fetchCalls).toBe(1);
+      expect(JSON.stringify(diagnosticCalls)).not.toContain(
+        "concurrent-completion-secret-must-not-be-logged",
+      );
+    } finally {
+      console.error = originalConsoleError;
+      // Avoid an unhandled rejection if an assertion above fails before the
+      // request awaiting the completion barrier can observe it.
+      rejectCompletion(new Error("test cleanup"));
+      await completionBarrier.catch(() => undefined);
+    }
+  });
+
   test("preserves a sanitized upstream failure when replay completion persistence fails", async () => {
     spendResult.configured = false;
     const {
