@@ -102,6 +102,21 @@ const OP_AUTHORED_KEY = "acme.item.authored";
 const FUTURE = new Date(Date.now() + 365 * 24 * 3600_000);
 const GENERIC_TOKEN_SENTINEL = "generic_secret_canary_0123456789";
 let dispatchGovernedExecution: typeof import("@stwd/proxy/src/handlers/governed-execution")["dispatchGovernedExecution"];
+let resetProxyHooks:
+  | typeof import("@stwd/proxy/src/handlers/proxy")["__resetProxyHandlerTestHooksForTests"]
+  | undefined;
+let proxyRateLimitChecks = 0;
+const ENV_KEYS = [
+  "NODE_ENV",
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_AUDIT_HMAC_KEY",
+  "STEWARD_EXECUTION_AUTH_SECRET",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_SECRET_ROUTE_ALLOWED_HOSTS",
+  "STEWARD_PROXY_ALLOWED_HOSTS",
+  "STEWARD_PROXY_DEV_MODE",
+] as const;
+const originalEnv = new Map<string, string | undefined>();
 let capturedForward:
   | { url: string; method: string; headers: Record<string, string>; body: string }
   | undefined;
@@ -482,17 +497,24 @@ async function wipe() {
 
 describe("#201 generic-http governed provider-action E2E", () => {
   beforeAll(async () => {
+    for (const key of ENV_KEYS) originalEnv.set(key, process.env[key]);
+    process.env.NODE_ENV = "test";
     process.env.STEWARD_PGLITE_MEMORY = "true";
-    process.env.STEWARD_AUDIT_HMAC_KEY ||= "0".repeat(64);
-    process.env.STEWARD_EXECUTION_AUTH_SECRET ||= "1".repeat(64);
+    process.env.STEWARD_AUDIT_HMAC_KEY = "0".repeat(64);
+    process.env.STEWARD_EXECUTION_AUTH_SECRET = "1".repeat(64);
+    process.env.STEWARD_MASTER_PASSWORD = "generic-http-test-master";
+    process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS = "api.example.com";
+    process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.example.com";
+    process.env.STEWARD_PROXY_DEV_MODE = "true";
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => client.close());
     const proxy = await import("@stwd/proxy/src/handlers/proxy");
+    resetProxyHooks = proxy.__resetProxyHandlerTestHooksForTests;
+    proxy.__setCheckProxyRateLimitForTests(async () => {
+      proxyRateLimitChecks += 1;
+      return { allowed: true, remaining: 999, resetMs: 0 };
+    });
     ({ dispatchGovernedExecution } = await import("@stwd/proxy/src/handlers/governed-execution"));
-    // This fixture proves governed authoring/dispatch semantics, not Redis
-    // availability. Keep the rate boundary deterministic and restore the real
-    // fail-closed dependency after the suite.
-    proxy.__setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
     proxy.__setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
     proxy.__setForwardProxyRequestForTests(async (url, method, headers, body) => {
       const bytes = body
@@ -508,13 +530,27 @@ describe("#201 generic-http governed provider-action E2E", () => {
     });
   });
   afterAll(async () => {
-    const proxy = await import("@stwd/proxy/src/handlers/proxy");
-    proxy.__resetProxyHandlerTestHooksForTests();
-    await closeDb();
-    delete process.env.STEWARD_PGLITE_MEMORY;
+    let cleanupError: unknown;
+    try {
+      resetProxyHooks?.();
+    } catch (error) {
+      cleanupError = error;
+    }
+    try {
+      await closeDb();
+    } catch (error) {
+      cleanupError ??= error;
+    }
+    for (const key of ENV_KEYS) {
+      const value = originalEnv.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    if (cleanupError) throw cleanupError;
   });
   beforeEach(async () => {
     capturedForward = undefined;
+    proxyRateLimitChecks = 0;
     await wipe();
     await seedGeneric();
   });
@@ -696,6 +732,7 @@ describe("#201 generic-http governed provider-action E2E", () => {
       throw new Error(JSON.stringify({ dispatched, diagnostics, liveRoute, nonce }));
     }
     expect(dispatched).toMatchObject({ ok: true, dispatchState: "succeeded" });
+    expect(proxyRateLimitChecks).toBe(1);
     expect(capturedForward).toMatchObject({
       url: "https://api.example.com/v1/authored-items",
       method: "POST",

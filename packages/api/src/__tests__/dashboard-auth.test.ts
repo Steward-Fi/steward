@@ -74,6 +74,31 @@ afterAll(async () => {
 });
 
 describeWithDatabase("dashboardAuthMiddleware", () => {
+  it("rejects a session whose tenant disagrees with the routing header", async () => {
+    const token = await signAccessToken(
+      {
+        address: `0x${"1".repeat(40)}`,
+        tenantId: TENANT_ID,
+        userId: OWNER_USER_ID,
+        mfaVerifiedAt: Date.now(),
+      },
+      "1h",
+    );
+
+    const res = await app.request("/dashboard/nonexistent-agent", {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "X-Steward-Tenant": "different-tenant",
+      },
+    });
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      ok: false,
+      error: "Tenant header does not match token",
+    });
+  });
+
   it("explicitly rejects agent tokens", async () => {
     const token = await signAgentToken({ agentId: "agent-1", tenantId: TENANT_ID }, "1h");
 

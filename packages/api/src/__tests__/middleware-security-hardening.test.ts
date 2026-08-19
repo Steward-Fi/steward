@@ -14,13 +14,11 @@ const securityHeadersSource = readFileSync(
   join(apiRoot, "middleware", "security-headers.ts"),
   "utf8",
 );
-const tenantCorsSource = readFileSync(join(apiRoot, "middleware", "tenant-cors.ts"), "utf8");
 const globalRateLimitSource = readFileSync(
   join(apiRoot, "middleware", "global-rate-limit.ts"),
   "utf8",
 );
 const appSource = readFileSync(join(apiRoot, "app.ts"), "utf8");
-const contextSource = readFileSync(join(apiRoot, "services", "context.ts"), "utf8");
 const indexSource = readFileSync(join(apiRoot, "index.ts"), "utf8");
 const webRoot = join(import.meta.dir, "..", "..", "..", "..", "web", "src");
 const webMiddlewareSource = readFileSync(join(webRoot, "middleware.ts"), "utf8");
@@ -49,37 +47,6 @@ describe("middleware security hardening", () => {
     expect(redisSource).toContain("return { allowed: false, remaining: 0, resetMs: 60_000 }");
     expect(redisEnforcementSource).toContain("isRedisConfigured()");
     expect(redisEnforcementSource).toContain("Rate limit enforcement is unavailable");
-  });
-
-  it("fails closed for tenant CORS in production and rejects JWT/header tenant mismatch", () => {
-    // Wildcard CORS requires an explicit non-production NODE_ENV (SEC-067):
-    // an unset NODE_ENV must fail closed like production.
-    expect(tenantCorsSource).toContain("function devWildcardAllowed()");
-    expect(tenantCorsSource).toContain('env === "development" || env === "test"');
-    expect(tenantCorsSource).toContain("if (!allowDevelopmentWildcard && !tenantId && origin)");
-    expect(tenantCorsSource).toContain("if (origins.length > 0)");
-    expect(tenantCorsSource).toContain("return c.newResponse(null, 403)");
-    expect(tenantCorsSource).toContain("TENANT_ID_RE.test(tenantId)");
-    expect(tenantCorsSource).toContain("MAX_CORS_CACHE_ENTRIES");
-    // Bogus/unknown tenant headers are negative-cached briefly (SEC-067).
-    expect(tenantCorsSource).toContain("NEGATIVE_CACHE_TTL_MS");
-    expect(tenantCorsSource).toContain("if (!row && clientRows.length === 0) {");
-    expect(tenantCorsSource).toContain("if (origins.includes(origin))");
-    expect(tenantCorsSource).not.toContain('origins.includes("*")');
-    // ACAO depends on both Origin and the tenant header (SEC-067).
-    expect(tenantCorsSource).toContain('"Origin, X-Steward-Tenant"');
-    // Vary is established before DB lookups/early 403s so denied responses
-    // cannot poison a shared cache for another origin or tenant.
-    const tenantCorsBody = tenantCorsSource.slice(
-      tenantCorsSource.indexOf("export async function tenantCors"),
-    );
-    expect(tenantCorsBody.indexOf('c.header("Vary"')).toBeLessThan(
-      tenantCorsBody.indexOf("await getAllAllowedOrigins()"),
-    );
-    expect(tenantCorsSource).toContain("X-Steward-Request-Timestamp");
-    expect(tenantCorsSource).toContain("X-Steward-Request-Expires-At");
-    expect(contextSource).toContain("headerTenant && headerTenant !== payload.tenantId");
-    expect(contextSource).toContain('"Tenant header does not match token"');
   });
 
   it("applies Bun runtime gates before Hono route dispatch", () => {
@@ -145,4 +112,5 @@ describe("middleware security hardening", () => {
     expect(localResponse.headers.get("Content-Security-Policy")).toContain("default-src 'none'");
     expect(localResponse.headers.get("Strict-Transport-Security")).toBeNull();
   });
+
 });

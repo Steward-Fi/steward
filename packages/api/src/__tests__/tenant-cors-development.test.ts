@@ -44,22 +44,26 @@ describe("tenant CORS development wildcard", () => {
     expect(databaseReads).toBe(0);
   });
 
-  test("keeps production fail closed when origin storage is unavailable", async () => {
-    process.env.NODE_ENV = "production";
-    databaseReads = 0;
-    const app = new Hono();
-    app.use("*", tenantCors);
+  for (const nodeEnv of [undefined, "staging", "production"] as const) {
+    test(`keeps ${nodeEnv ?? "unset"} NODE_ENV fail closed when origin storage is unavailable`, async () => {
+      if (nodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = nodeEnv;
+      databaseReads = 0;
+      const app = new Hono();
+      app.use("*", tenantCors);
 
-    const response = await app.request("/resource", {
-      method: "OPTIONS",
-      headers: {
-        Origin: "https://console.example.com",
-        "Access-Control-Request-Method": "PATCH",
-      },
+      const response = await app.request("/resource", {
+        method: "OPTIONS",
+        headers: {
+          Origin: "https://console.example.com",
+          "Access-Control-Request-Method": "PATCH",
+        },
+      });
+
+      expect(response.status).toBe(403);
+      expect(response.headers.get("access-control-allow-origin")).toBeNull();
+      expect(response.headers.get("vary")).toBe("Origin, X-Steward-Tenant");
+      expect(databaseReads).toBe(1);
     });
-
-    expect(response.status).toBe(403);
-    expect(response.headers.get("access-control-allow-origin")).toBeNull();
-    expect(databaseReads).toBe(1);
-  });
+  }
 });

@@ -47,7 +47,8 @@ describe("tenant CORS preflight", () => {
       headers: {
         Origin: ALLOWED_ORIGIN,
         "Access-Control-Request-Method": "PATCH",
-        "Access-Control-Request-Headers": "Authorization, X-Steward-Tenant",
+        "Access-Control-Request-Headers":
+          "Authorization, X-Steward-Tenant, X-Steward-Request-Timestamp, X-Steward-Request-Expires-At",
       },
     });
 
@@ -55,7 +56,12 @@ describe("tenant CORS preflight", () => {
     expect(response.headers.get("access-control-allow-origin")).toBe(ALLOWED_ORIGIN);
     expect(response.headers.get("access-control-allow-methods")?.split(/,\s*/)).toContain("PATCH");
     expect(response.headers.get("access-control-allow-headers")?.split(/,\s*/)).toEqual(
-      expect.arrayContaining(["Authorization", "X-Steward-Tenant"]),
+      expect.arrayContaining([
+        "Authorization",
+        "X-Steward-Tenant",
+        "X-Steward-Request-Timestamp",
+        "X-Steward-Request-Expires-At",
+      ]),
     );
     expect(response.headers.get("access-control-allow-credentials")).toBeNull();
     expect(response.headers.get("vary")).toBe("Origin, X-Steward-Tenant");
