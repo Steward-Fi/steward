@@ -1226,6 +1226,24 @@ describe("connect exchange recovery", () => {
   test("a staged connect cannot resurrect an account disconnected later", async () => {
     const initial = await connectHappy(new MemoryConnectStore());
     const accountId = initial.completed.providerAccountId;
+    const [connectedAccount] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, accountId));
+    const routeId = crypto.randomUUID();
+    await getDb()
+      .insert(secretRoutes)
+      .values({
+        id: routeId,
+        tenantId: TENANT,
+        secretId: connectedAccount.credentialSecretId as string,
+        hostPattern: "api.x.com",
+        pathPattern: "/2/tweets",
+        method: "POST",
+        injectAs: "header",
+        injectKey: "Authorization",
+        injectFormat: "Bearer {value}",
+      });
 
     const staleStore = new MemoryConnectStore();
     const stagedFake = installFakeX({
@@ -1285,6 +1303,19 @@ describe("connect exchange recovery", () => {
       credentialVersion: null,
       status: "revoked",
     });
+    const [secretBeforeRecovery] = await getDb()
+      .select()
+      .from(secrets)
+      .where(eq(secrets.id, connectedAccount.credentialSecretId as string));
+    const [routeBeforeRecovery] = await getDb()
+      .select()
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, routeId));
+    expect(secretBeforeRecovery.deletedAt).not.toBeNull();
+    expect(routeBeforeRecovery).toMatchObject({
+      enabled: false,
+      secretId: connectedAccount.credentialSecretId,
+    });
 
     const recovery = installFakeX({ revokeStatuses: [200] });
     const swept = await runXCredentialLifecycleSweep({
@@ -1305,6 +1336,16 @@ describe("connect exchange recovery", () => {
       revision: accountBeforeRecovery.revision,
       status: accountBeforeRecovery.status,
     });
+    const [secretAfterRecovery] = await getDb()
+      .select()
+      .from(secrets)
+      .where(eq(secrets.id, connectedAccount.credentialSecretId as string));
+    const [routeAfterRecovery] = await getDb()
+      .select()
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, routeId));
+    expect(secretAfterRecovery).toEqual(secretBeforeRecovery);
+    expect(routeAfterRecovery).toEqual(routeBeforeRecovery);
     const liveCredentialLineage = await getDb()
       .select({ id: secrets.id })
       .from(secrets)
@@ -1332,6 +1373,24 @@ describe("connect exchange recovery", () => {
   test("a staged connect cannot re-enable an account disabled by the generic authority path", async () => {
     const initial = await connectHappy(new MemoryConnectStore());
     const accountId = initial.completed.providerAccountId;
+    const [connectedAccount] = await getDb()
+      .select()
+      .from(providerAccounts)
+      .where(eq(providerAccounts.id, accountId));
+    const routeId = crypto.randomUUID();
+    await getDb()
+      .insert(secretRoutes)
+      .values({
+        id: routeId,
+        tenantId: TENANT,
+        secretId: connectedAccount.credentialSecretId as string,
+        hostPattern: "api.x.com",
+        pathPattern: "/2/tweets",
+        method: "POST",
+        injectAs: "header",
+        injectKey: "Authorization",
+        injectFormat: "Bearer {value}",
+      });
 
     const staleStore = new MemoryConnectStore();
     const stagedFake = installFakeX({
@@ -1401,6 +1460,14 @@ describe("connect exchange recovery", () => {
       .from(providerAccounts)
       .where(eq(providerAccounts.id, accountId));
     const credentialBeforeRecovery = await decryptCredential(accountId);
+    const [secretBeforeRecovery] = await getDb()
+      .select()
+      .from(secrets)
+      .where(eq(secrets.id, connectedAccount.credentialSecretId as string));
+    const [routeBeforeRecovery] = await getDb()
+      .select()
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, routeId));
     expect(accountBeforeRecovery).toMatchObject({
       credentialSecretId: accountBeforeDisable.credentialSecretId,
       credentialVersion: accountBeforeDisable.credentialVersion,
@@ -1428,6 +1495,16 @@ describe("connect exchange recovery", () => {
       status: accountBeforeRecovery.status,
     });
     expect(await decryptCredential(accountId)).toEqual(credentialBeforeRecovery);
+    const [secretAfterRecovery] = await getDb()
+      .select()
+      .from(secrets)
+      .where(eq(secrets.id, connectedAccount.credentialSecretId as string));
+    const [routeAfterRecovery] = await getDb()
+      .select()
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, routeId));
+    expect(secretAfterRecovery).toEqual(secretBeforeRecovery);
+    expect(routeAfterRecovery).toEqual(routeBeforeRecovery);
     const [stagedLifecycle] = await getDb()
       .select()
       .from(providerXCredentialLifecycles)
