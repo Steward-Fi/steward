@@ -13,6 +13,7 @@ import {
 
 test("Worker hydration cannot be overridden by a STEWARD_RUNTIME binding", () => {
   const previous = process.env.STEWARD_RUNTIME;
+  const previousDatabaseUrl = process.env.DATABASE_URL;
   try {
     hydrateProcessEnv({
       DATABASE_URL: "postgresql://worker.invalid/steward",
@@ -22,6 +23,8 @@ test("Worker hydration cannot be overridden by a STEWARD_RUNTIME binding", () =>
   } finally {
     if (previous === undefined) delete process.env.STEWARD_RUNTIME;
     else process.env.STEWARD_RUNTIME = previous;
+    if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousDatabaseUrl;
   }
 });
 
@@ -94,7 +97,9 @@ test("Worker HTTP mode binds an exact request database without a persistent hand
 });
 
 test("Worker request membrane preserves real Drizzle query execution", async () => {
-  const { db: pgliteDb, client } = await createPGLiteDb("memory://");
+  const previousPgliteMemory = process.env.STEWARD_PGLITE_MEMORY;
+  process.env.STEWARD_PGLITE_MEMORY = "true";
+  const { db: pgliteDb, client } = await createPGLiteDb();
   try {
     const rows = await withWorkerRequestDatabase(
       {
@@ -107,6 +112,8 @@ test("Worker request membrane preserves real Drizzle query execution", async () 
     expect(Array.isArray(rows)).toBe(true);
   } finally {
     await client.close();
+    if (previousPgliteMemory === undefined) delete process.env.STEWARD_PGLITE_MEMORY;
+    else process.env.STEWARD_PGLITE_MEMORY = previousPgliteMemory;
   }
 });
 
@@ -132,7 +139,7 @@ test("every autonomous recovery sweep owns its own request database", () => {
   }
 });
 
-test("Worker drains fire-and-forget webhook work before closing its request pool", async () => {
+test("Worker returns before background work and closes its pool after waitUntil", async () => {
   let releaseDelivery!: () => void;
   const deliveryGate = new Promise<void>((resolve) => {
     releaseDelivery = resolve;
@@ -140,7 +147,8 @@ test("Worker drains fire-and-forget webhook work before closing its request pool
   let closes = 0;
   let deliveryFinished = false;
   const requestDb = { marker: "worker-webhook" } as unknown as ReturnType<typeof getDb>;
-  const owner = withWorkerRequestDatabase(
+  const deferred: Promise<unknown>[] = [];
+  const response = await withWorkerRequestDatabase(
     {
       DATABASE_URL: "postgresql://worker.invalid/steward",
       DATABASE_DRIVER: "neon-websocket",
@@ -164,13 +172,18 @@ test("Worker drains fire-and-forget webhook work before closing its request pool
           closes += 1;
         },
       }),
+      waitUntil(task) {
+        deferred.push(task);
+      },
     },
   );
 
-  await Promise.resolve();
+  expect(response.status).toBe(200);
+  expect(deferred).toHaveLength(1);
+  expect(deliveryFinished).toBe(false);
   expect(closes).toBe(0);
   releaseDelivery();
-  expect((await owner).status).toBe(200);
+  await Promise.all(deferred);
   expect(deliveryFinished).toBe(true);
   expect(closes).toBe(1);
 
@@ -181,6 +194,50 @@ test("Worker drains fire-and-forget webhook work before closing its request pool
   expect(webhookSource).toContain("waitUntilRequestDatabaseTask(");
   const auditSource = readFileSync(join(import.meta.dir, "../services/audit.ts"), "utf8");
   expect(auditSource).toContain("waitUntilRequestDatabaseTask(");
+});
+
+test("Worker schedules background cleanup even when the request owner fails", async () => {
+  let releaseTask!: () => void;
+  const taskGate = new Promise<void>((resolve) => {
+    releaseTask = resolve;
+  });
+  let closes = 0;
+  const deferred: Promise<unknown>[] = [];
+  const requestDb = { marker: "worker-error" } as unknown as ReturnType<typeof getDb>;
+
+  await expect(
+    withWorkerRequestDatabase(
+      {
+        DATABASE_URL: "postgresql://worker.invalid/steward",
+        DATABASE_DRIVER: "neon-websocket",
+      },
+      async () => {
+        void waitUntilRequestDatabaseTask(async () => {
+          await taskGate;
+          expect((getDb() as unknown as { marker: string }).marker).toBe("worker-error");
+        });
+        throw new Error("handler failed");
+      },
+      {
+        createHandle: () => ({
+          driver: "neon-websocket" as const,
+          db: requestDb as never,
+          async close() {
+            closes += 1;
+          },
+        }),
+        waitUntil(task) {
+          deferred.push(task);
+        },
+      },
+    ),
+  ).rejects.toThrow("handler failed");
+
+  expect(deferred).toHaveLength(1);
+  expect(closes).toBe(0);
+  releaseTask();
+  await Promise.all(deferred);
+  expect(closes).toBe(1);
 });
 
 test("Worker socket cleanup diagnostics are fixed and cannot replace handler errors", async () => {

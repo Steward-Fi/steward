@@ -511,10 +511,10 @@ function trackRequestDatabaseTask<T>(
  * Keep explicitly detached work inside the current request database lifetime.
  *
  * Worker services that intentionally start best-effort asynchronous work must
- * register the resulting promise here. The request owner drains registered
- * work before revoking the database capability and closing its socket. Outside
- * a request-owned database context this is a no-op, preserving Bun's existing
- * process-owned background-work behavior.
+ * register the resulting promise here. The request owner either drains that
+ * work directly or hands the drain to its runtime lifetime hook before closing
+ * the database transport. Outside a request-owned database context this is a
+ * no-op, preserving Bun's process-owned background-work behavior.
  */
 export function waitUntilRequestDatabaseTask<T>(task: () => Promise<T>): Promise<T> {
   const context = requestDatabaseStorage.getStore();
@@ -602,6 +602,7 @@ async function drainRequestDatabaseTasks(context: RequestDatabaseContext): Promi
 export async function withRequestDatabase<T>(
   db: RequestDatabase,
   callback: () => Promise<T>,
+  options?: { deferRegisteredTasks?: (task: Promise<void>) => void },
 ): Promise<T> {
   if (requestDatabaseStorage.getStore()) {
     throw new Error("REQUEST_DATABASE_CONTEXT_NESTED");
@@ -628,7 +629,19 @@ export async function withRequestDatabase<T>(
       // contexts; unregistered detached work retains this closed owner context.
       context.active = false;
       context.db = undefined;
-      await drainRequestDatabaseTasks(context);
+      const drain = drainRequestDatabaseTasks(context);
+      if (options?.deferRegisteredTasks) {
+        try {
+          options.deferRegisteredTasks(drain);
+        } catch (error) {
+          // A failed lifetime hand-off must not orphan registered work. Drain
+          // it locally before surfacing the registration failure.
+          await drain;
+          throw error;
+        }
+      } else {
+        await drain;
+      }
       if (callbackError !== noCallbackError) throw callbackError;
       return result as T;
     });

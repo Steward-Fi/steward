@@ -102,9 +102,9 @@ type WorkerHttpDatabaseFactory = (env: {
  *
  * neon-http remains the shipped default and needs no persistent cleanup. The
  * transaction-capable WebSocket driver is explicit: its handle is bound to the
- * async request so every legacy getDb() call resolves the same Drizzle object,
- * then close() is awaited on success and failure. No handle is cached on the
- * isolate.
+ * async request so every legacy getDb() call resolves the same Drizzle object.
+ * Interactive callers await close directly; fetch callers hand registered work
+ * and close to the Worker lifetime hook. No handle is cached on the isolate.
  */
 export async function withWorkerRequestDatabase<T>(
   env: Env,
@@ -112,6 +112,7 @@ export async function withWorkerRequestDatabase<T>(
   options?: {
     createHandle?: WorkerDatabaseHandleFactory;
     createHttpDb?: WorkerHttpDatabaseFactory;
+    waitUntil?: (task: Promise<unknown>) => void;
   },
 ): Promise<T> {
   const driver = env.DATABASE_DRIVER?.trim().toLowerCase();
@@ -122,9 +123,27 @@ export async function withWorkerRequestDatabase<T>(
   }
   if (driver === "neon-http") {
     const db = (options?.createHttpDb ?? createDbForRequest)(env);
-    return withRequestDatabase(db as unknown as ReturnType<typeof getDb>, callback);
+    const requestOptions = options?.waitUntil
+      ? { deferRegisteredTasks: options.waitUntil }
+      : undefined;
+    return withRequestDatabase(db as unknown as ReturnType<typeof getDb>, callback, requestOptions);
   }
   const handle = (options?.createHandle ?? createNeonTransactionDbForRequest)(env);
+  if (options?.waitUntil) {
+    const waitUntil = options.waitUntil;
+    return withRequestDatabase(handle.db as unknown as ReturnType<typeof getDb>, callback, {
+      deferRegisteredTasks: (drain) => {
+        const cleanup = drain.then(async () => {
+          try {
+            await handle.close();
+          } catch {
+            throw new Error("WORKER_DATABASE_CLOSE_FAILED");
+          }
+        });
+        waitUntil(cleanup);
+      },
+    });
+  }
   const noCallbackError = Symbol("no-callback-error");
   let callbackError: unknown | typeof noCallbackError = noCallbackError;
   let result: T | undefined;
@@ -343,17 +362,25 @@ async function getComposedApp() {
 }
 
 export default {
-  async fetch(request: Request, env: Env, ctx: unknown): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: { waitUntil(task: Promise<unknown>): void },
+  ): Promise<Response> {
     // SEC-148: refresh process.env from the CURRENT request's bindings on every
     // request (not once per isolate) so rotated bindings take effect promptly;
     // the once-per-isolate init below only bootstraps stores/imports.
     hydrateProcessEnv(env);
     await validateWorkerSecurityEnv();
-    return withWorkerRequestDatabase(env, async () => {
-      await ensureWorkerInit(env);
-      const app = await getComposedApp();
-      return app.fetch(request, env, ctx as never);
-    });
+    return withWorkerRequestDatabase(
+      env,
+      async () => {
+        await ensureWorkerInit(env);
+        const app = await getComposedApp();
+        return app.fetch(request, env, ctx as never);
+      },
+      { waitUntil: (task) => ctx.waitUntil(task) },
+    );
   },
   async scheduled(
     _controller: unknown,

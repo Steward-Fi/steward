@@ -148,6 +148,33 @@ describe("request-scoped database context", () => {
     expect(detachedFinished).toBe(true);
   });
 
+  test("hands registered work off without delaying the owner result", async () => {
+    const requestDb = { marker: "request" } as unknown as ReturnType<typeof getDb>;
+    const release = deferred();
+    const deferredTasks: Promise<void>[] = [];
+    let backgroundFinished = false;
+
+    const result = await withRequestDatabase(
+      requestDb,
+      async () => {
+        void waitUntilRequestDatabaseTask(async () => {
+          await release.promise;
+          expect((getDb() as unknown as { marker: string }).marker).toBe("request");
+          backgroundFinished = true;
+        });
+        return "response";
+      },
+      { deferRegisteredTasks: (task) => deferredTasks.push(task) },
+    );
+
+    expect(result).toBe("response");
+    expect(backgroundFinished).toBe(false);
+    expect(deferredTasks).toHaveLength(1);
+    release.resolve();
+    await Promise.all(deferredTasks);
+    expect(backgroundFinished).toBe(true);
+  });
+
   test("does not let unregistered work piggyback on a registered task lifetime", async () => {
     const requestDb = { marker: "request" } as unknown as ReturnType<typeof getDb>;
     const release = deferred();
