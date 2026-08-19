@@ -1057,6 +1057,99 @@ describe("connect exchange recovery", () => {
     recovery.restore();
   });
 
+  test("a staged connect cannot overwrite a refresh completed after its exchange intent", async () => {
+    const { completed } = await connectHappy(new MemoryConnectStore(), {
+      exchangeToken: {
+        access_token: "access-before-staged-reconnect",
+        refresh_token: "refresh-before-staged-reconnect",
+      },
+    });
+
+    const store = new MemoryConnectStore();
+    const stagedFake = installFakeX({
+      exchangeToken: {
+        access_token: "access-staged-before-refresh",
+        refresh_token: "refresh-staged-before-refresh",
+      },
+    });
+    const initiated = await initiateXConnect({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      initiatedByUserId: ADMIN,
+      redirectUri: REDIRECT,
+      config: CONFIG,
+      store,
+    });
+    __setAfterXCredentialStageForTests(async () => {
+      throw new Error("simulated crash before concurrent refresh");
+    });
+    await expect(
+      completeXConnect({
+        tenantId: TENANT,
+        workspaceId: WORKSPACE,
+        callerUserId: ADMIN,
+        code: "auth-code",
+        state: initiated.state,
+        connectToken: initiated.connectToken,
+        redirectUri: REDIRECT,
+        config: CONFIG,
+        store,
+        vault,
+      }),
+    ).rejects.toThrow("simulated crash before concurrent refresh");
+    __setAfterXCredentialStageForTests(null);
+    stagedFake.restore();
+
+    const refreshFake = installFakeX({
+      refreshResponses: [
+        {
+          status: 200,
+          body: {
+            access_token: "access-current-refresh",
+            refresh_token: "refresh-current-rotated",
+            scope: "tweet.read tweet.write users.read offline.access",
+            expires_in: 7200,
+          },
+        },
+      ],
+    });
+    const refreshed = await refreshXProviderCredential({
+      tenantId: TENANT,
+      workspaceId: WORKSPACE,
+      accountId: completed.providerAccountId,
+      vault,
+      config: CONFIG,
+      force: true,
+    });
+    expect(refreshed.credentialVersion).toBe(2);
+    expect(refreshFake.counters.refresh).toBe(1);
+    refreshFake.restore();
+
+    const recovery = installFakeX({ revokeStatuses: [200] });
+    const swept = await runXCredentialLifecycleSweep({
+      vault,
+      config: CONFIG,
+      now: new Date(Date.now() + 70_000),
+    });
+    expect(swept).toMatchObject({ processed: 1, revoked: 1, adopted: 0, attention: 0 });
+    expect(recovery.counters).toMatchObject({ exchange: 0, identity: 1, revoke: 1 });
+
+    const accountAfter = await decryptCredential(completed.providerAccountId);
+    expect(accountAfter.accessToken).toBe("access-current-refresh");
+    expect(accountAfter.refreshToken).toBe("refresh-current-rotated");
+    const [stagedLifecycle] = await getDb()
+      .select()
+      .from(providerXCredentialLifecycles)
+      .where(
+        and(
+          eq(providerXCredentialLifecycles.kind, "connect_exchange"),
+          eq(providerXCredentialLifecycles.state, "revoked"),
+        ),
+      );
+    expect(stagedLifecycle.credentialSecretId).toBeNull();
+    recovery.restore();
+  });
+
   test("failed identity revocation is durably retried with backoff and a hard ceiling", async () => {
     const store = new MemoryConnectStore();
     const fake = installFakeX({ identityStatus: 503, revokeStatuses: [503, 503, 503, 503, 503] });

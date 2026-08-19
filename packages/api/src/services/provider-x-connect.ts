@@ -1103,7 +1103,7 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
     const [latestConnectAdoption] =
       account && connectIntentAudit
         ? await tx
-            .select({ id: auditEvents.id, seq: auditEvents.seq })
+            .select({ id: auditEvents.id })
             .from(auditEvents)
             .where(
               and(
@@ -1131,10 +1131,38 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
         "current X account adoption lineage cannot be established",
       );
     }
+    const [latestAccountLineageChange] =
+      account && connectIntentAudit
+        ? await tx
+            .select({ seq: auditEvents.seq })
+            .from(auditEvents)
+            .where(
+              and(
+                eq(auditEvents.tenantId, input.tenantId),
+                eq(auditEvents.resourceType, "provider_account"),
+                eq(auditEvents.resourceId, account.id),
+                inArray(auditEvents.action, [
+                  "provider.account.disable",
+                  "provider.x.connect.completed",
+                  "provider.x.connect.reconnected",
+                  "provider.x.disconnect.completed",
+                  "provider.x.refresh.completed",
+                  "provider.x.refresh.needs_attention",
+                  "provider.x.refresh.revoked",
+                ]),
+              ),
+            )
+            .orderBy(desc(auditEvents.seq))
+            .limit(1)
+        : [];
+    // A refresh, disconnect, disable, or second connect can all replace the
+    // credential/status lineage without leaving an unresolved lifecycle. The
+    // staged grant is safe only when no such account mutation follows its
+    // exchange intent on the serialized tenant audit chain.
     if (
-      latestConnectAdoption &&
+      latestAccountLineageChange &&
       connectIntentAudit &&
-      latestConnectAdoption.seq >= connectIntentAudit.seq
+      latestAccountLineageChange.seq >= connectIntentAudit.seq
     ) {
       throw new XConnectError(
         "X_CREDENTIAL_NEEDS_ATTENTION",
