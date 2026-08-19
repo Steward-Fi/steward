@@ -272,6 +272,14 @@ type TransactionSql = <T extends readonly unknown[] = readonly unknown[]>(
   ...values: readonly unknown[]
 ) => Promise<T>;
 
+function postgresErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(error, "code");
+  return descriptor && "value" in descriptor && typeof descriptor.value === "string"
+    ? descriptor.value
+    : undefined;
+}
+
 /**
  * Redis-backed store backend.
  * Uses atomic SET key value PX ttlMs for writes; native TTL handles expiry.
@@ -521,58 +529,68 @@ export class PostgresBackend implements StoreBackend {
       ...entry,
       expiresAt: new Date(Date.now() + entry.ttlMs).toISOString(),
     }));
-    let published = true;
-    await sql.begin(async (transaction: TransactionSql) => {
-      const ordered = [...prepared].sort((left, right) => left.key.localeCompare(right.key));
-      const guarded = ordered.filter((entry) => entry.expected !== undefined);
-      for (const entry of ordered) {
-        // An advisory transaction lock also serializes the absent-row case,
-        // which SELECT ... FOR UPDATE alone cannot protect at READ COMMITTED.
-        await transaction`
-          SELECT pg_advisory_xact_lock(
-            hashtextextended(${`${this.namespace}:${entry.key}`}, 0)
-          )
-        `;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      let published = true;
+      try {
+        await sql.begin("isolation level serializable", async (transaction: TransactionSql) => {
+          const ordered = [...prepared].sort((left, right) =>
+            left.key < right.key ? -1 : left.key > right.key ? 1 : 0,
+          );
+          const guarded = ordered.filter((entry) => entry.expected !== undefined);
+          for (const entry of ordered) {
+            // Cooperative publishers serialize absent rows here. SERIALIZABLE
+            // additionally detects older binaries and ordinary writers that do
+            // not participate in this advisory-lock protocol.
+            await transaction`
+              SELECT pg_advisory_xact_lock(
+                hashtextextended(${`${this.namespace}:${entry.key}`}, 0)
+              )
+            `;
+          }
+          let allExpected = true;
+          let allDesired = guarded.length > 0;
+          for (const entry of guarded) {
+            const rows = await transaction<Array<{ value: string }>>`
+              SELECT value
+                FROM auth_kv_store
+               WHERE id = ${entry.key}
+                 AND namespace = ${this.namespace}
+                 AND expires_at > now()
+               LIMIT 1
+            `;
+            const current = rows[0]?.value ?? null;
+            if (current !== entry.expected) allExpected = false;
+            if (current !== entry.value) allDesired = false;
+          }
+          if (allDesired) return;
+          if (!allExpected) {
+            published = false;
+            return;
+          }
+          for (const entry of prepared) {
+            if (entry.value === null) {
+              await transaction`
+                DELETE FROM auth_kv_store
+                 WHERE id = ${entry.key}
+                   AND namespace = ${this.namespace}
+              `;
+            } else {
+              await transaction`
+                INSERT INTO auth_kv_store (id, namespace, value, expires_at)
+                VALUES (${entry.key}, ${this.namespace}, ${entry.value}, ${entry.expiresAt})
+                ON CONFLICT (id, namespace) DO UPDATE
+                  SET value      = EXCLUDED.value,
+                      expires_at = EXCLUDED.expires_at
+              `;
+            }
+          }
+        });
+        return published;
+      } catch (error) {
+        if (postgresErrorCode(error) !== "40001" || attempt === 2) throw error;
       }
-      let allExpected = true;
-      let allDesired = guarded.length > 0;
-      for (const entry of guarded) {
-        const rows = await transaction<Array<{ value: string }>>`
-          SELECT value
-            FROM auth_kv_store
-           WHERE id = ${entry.key}
-             AND namespace = ${this.namespace}
-             AND expires_at > now()
-           LIMIT 1
-        `;
-        const current = rows[0]?.value ?? null;
-        if (current !== entry.expected) allExpected = false;
-        if (current !== entry.value) allDesired = false;
-      }
-      if (allDesired) return;
-      if (!allExpected) {
-        published = false;
-        return;
-      }
-      for (const entry of prepared) {
-        if (entry.value === null) {
-          await transaction`
-            DELETE FROM auth_kv_store
-             WHERE id = ${entry.key}
-               AND namespace = ${this.namespace}
-          `;
-        } else {
-          await transaction`
-            INSERT INTO auth_kv_store (id, namespace, value, expires_at)
-            VALUES (${entry.key}, ${this.namespace}, ${entry.value}, ${entry.expiresAt})
-            ON CONFLICT (id, namespace) DO UPDATE
-              SET value      = EXCLUDED.value,
-                  expires_at = EXCLUDED.expires_at
-          `;
-        }
-      }
-    });
-    return published;
+    }
+    return false;
   }
 
   async delete(key: string): Promise<void> {
