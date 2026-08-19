@@ -6,6 +6,7 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
+import worker from "../worker";
 
 /**
  * Keys this file mutates: bindings hydrateProcessEnv copies onto the global
@@ -43,18 +44,12 @@ describe("workers boot JWT env validation (SEC-134)", () => {
     for (const key of MANAGED_KEYS) saved.set(key, process.env[key]);
   }
 
-  async function freshWorker() {
-    const mod = await import(`../worker?boot-validation=${Date.now()}-${Math.random()}`);
-    return mod.default;
-  }
-
   it("rejects a short JWT secret at cold start in production", async () => {
     snapshotEnv();
-    const worker = await freshWorker();
     await expect(
       worker.fetch(
         new Request("https://workers.test/"),
-        { NODE_ENV: "production", STEWARD_JWT_SECRET: "short" },
+        { NODE_ENV: "production", STEWARD_JWT_SECRET: "short", DATABASE_DRIVER: "bogus" },
         {},
       ),
     ).rejects.toThrow("at least 32 characters in production");
@@ -70,30 +65,55 @@ describe("workers boot JWT env validation (SEC-134)", () => {
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_DB_MODE;
     delete process.env.STEWARD_PGLITE_MEMORY;
-    const worker = await freshWorker();
     await expect(
-      worker.fetch(new Request("https://workers.test/"), { NODE_ENV: "production" }, {}),
+      worker.fetch(
+        new Request("https://workers.test/"),
+        { NODE_ENV: "production", DATABASE_DRIVER: "bogus" },
+        {},
+      ),
     ).rejects.toThrow("STEWARD_JWT_SECRET is required in production");
   });
 
   it("rejects a malformed AGENT_TOKEN_EXPIRY at cold start", async () => {
     snapshotEnv();
-    const worker = await freshWorker();
     await expect(
       worker.fetch(
         new Request("https://workers.test/"),
         {
           STEWARD_JWT_SECRET: "workers-boot-test-secret-32-chars-long!!",
           AGENT_TOKEN_EXPIRY: "not-a-duration",
+          DATABASE_DRIVER: "bogus",
         },
         {},
       ),
     ).rejects.toThrow('AGENT_TOKEN_EXPIRY "not-a-duration" is not a valid positive duration');
   });
 
+  it("validates concurrent request bindings before either database selection", async () => {
+    snapshotEnv();
+    const shortSecret = worker.fetch(
+      new Request("https://workers.test/short-secret"),
+      { NODE_ENV: "production", STEWARD_JWT_SECRET: "short", DATABASE_DRIVER: "bogus" },
+      {},
+    );
+    const malformedExpiry = worker.fetch(
+      new Request("https://workers.test/malformed-expiry"),
+      {
+        STEWARD_JWT_SECRET: "workers-boot-test-secret-32-chars-long!!",
+        AGENT_TOKEN_EXPIRY: "not-a-duration",
+        DATABASE_DRIVER: "bogus",
+      },
+      {},
+    );
+
+    await expect(shortSecret).rejects.toThrow("at least 32 characters in production");
+    await expect(malformedExpiry).rejects.toThrow(
+      'AGENT_TOKEN_EXPIRY "not-a-duration" is not a valid positive duration',
+    );
+  });
+
   it("validates scheduled security bindings before opening any database handle", async () => {
     snapshotEnv();
-    const worker = await freshWorker();
     let waitUntilCalls = 0;
     await expect(
       worker.scheduled(
