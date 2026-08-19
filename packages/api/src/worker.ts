@@ -134,6 +134,7 @@ export async function withWorkerRequestDatabase<T>(
   let callbackError: unknown | typeof noCallbackError = noCallbackError;
   let result: T | undefined;
   let closeDeferred = false;
+  let deferredClose: Promise<void> | null = null;
   try {
     result = await withRequestDatabase(
       handle.db as unknown as ReturnType<typeof getDb>,
@@ -141,7 +142,7 @@ export async function withWorkerRequestDatabase<T>(
       options?.waitUntil
         ? {
             deferCleanup(cleanup) {
-              const deferredClose = cleanup.then(async () => {
+              deferredClose = cleanup.then(async () => {
                 try {
                   await handle.close();
                 } catch {
@@ -159,7 +160,11 @@ export async function withWorkerRequestDatabase<T>(
   }
   if (!closeDeferred) {
     try {
-      await handle.close();
+      // `waitUntil` may throw after the close promise has already been
+      // created. Await that exact promise so the handle closes once and its
+      // rejection is observed instead of racing a second close.
+      if (deferredClose) await deferredClose;
+      else await handle.close();
     } catch {
       if (callbackError === noCallbackError) throw new Error("WORKER_DATABASE_CLOSE_FAILED");
     }

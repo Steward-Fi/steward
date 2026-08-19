@@ -188,6 +188,37 @@ test("Worker defers webhook cleanup without delaying its response", async () => 
   expect(auditSource).toContain("waitUntilRequestDatabaseTask(() =>");
 });
 
+test("Worker closes a deferred database exactly once when waitUntil registration fails", async () => {
+  const requestDb = { marker: "worker-wait-until-failure" } as unknown as ReturnType<typeof getDb>;
+  let closes = 0;
+
+  await expect(
+    withWorkerRequestDatabase(
+      {
+        DATABASE_URL: "postgresql://worker.invalid/steward",
+        DATABASE_DRIVER: "neon-websocket",
+      },
+      async () => {
+        await waitUntilRequestDatabaseTask(async () => {});
+        return "response";
+      },
+      {
+        createHandle: () => ({
+          driver: "neon-websocket" as const,
+          db: requestDb as never,
+          async close() {
+            closes += 1;
+          },
+        }),
+        waitUntil() {
+          throw new Error("waitUntil registration failed");
+        },
+      },
+    ),
+  ).rejects.toThrow("waitUntil registration failed");
+  expect(closes).toBe(1);
+});
+
 test("best-effort audit registration invokes a task callback", async () => {
   const { trackAuditEvent } = await import("../services/audit");
   await expect(
