@@ -14,6 +14,7 @@ import {
   ConsoleProvider,
   EmailDeliveryError,
   EmailDeliveryNotConfiguredError,
+  type EmailDeliveryReceipt,
   type EmailProvider,
   MockEmailInbox,
   MockEmailProvider,
@@ -24,9 +25,20 @@ import { TokenStore } from "../token-store";
 
 class CapturingBackend implements StoreBackend {
   values = new Map<string, { value: string; expiresAt: number }>();
+  failWrites = false;
+  failActiveWrites = false;
+  failActiveWritesAfterCommit = false;
+  failDeletes = false;
 
   async set(key: string, value: string, ttlMs: number): Promise<void> {
+    if (this.failWrites) throw new Error("durable store unavailable");
+    if (this.failActiveWrites && value.includes('"status":"active"')) {
+      throw new Error("durable activation unavailable");
+    }
     this.values.set(key, { value, expiresAt: Date.now() + ttlMs });
+    if (this.failActiveWritesAfterCommit && value.includes('"status":"active"')) {
+      throw new Error("durable activation response lost");
+    }
   }
 
   async setIfNotExists(key: string, value: string, ttlMs: number): Promise<boolean> {
@@ -52,6 +64,7 @@ class CapturingBackend implements StoreBackend {
   }
 
   async delete(key: string): Promise<void> {
+    if (this.failDeletes) throw new Error("durable delete unavailable");
     this.values.delete(key);
   }
 }
@@ -87,8 +100,9 @@ describe("fail-closed magic-link delivery", () => {
     restoreEnv();
   });
 
-  it("invalidates the challenge and throws EmailDeliveryError when the provider rejects", async () => {
+  it("leaves a delivered-but-rejected challenge durably staged even when delete is unavailable", async () => {
     const backend = new CapturingBackend();
+    backend.failDeletes = true;
     let text = "";
     const auth = buildAuth(
       {
@@ -104,10 +118,14 @@ describe("fail-closed magic-link delivery", () => {
       auth.sendMagicLink("victim@example.com", { tenantId: "tenant-a" }),
     ).rejects.toThrow(EmailDeliveryError);
 
-    // The pre-fix false green: these credentials stayed redeemable. Now every
-    // record of the challenge must be gone.
     const remaining = [...backend.values.keys()].filter((k) => k.startsWith("email-login:"));
-    expect(remaining).toEqual([]);
+    expect(remaining.length).toBeGreaterThan(0);
+    expect(
+      [...backend.values.values()].some((entry) => entry.value.includes('"delivery_pending"')),
+    ).toBe(true);
+    expect(
+      [...backend.values.values()].some((entry) => entry.value.includes('"status":"active"')),
+    ).toBe(false);
 
     const token = text.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
     const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
@@ -121,7 +139,7 @@ describe("fail-closed magic-link delivery", () => {
     auth.destroy();
   });
 
-  it("treats a missing acceptance receipt as delivery failure and invalidates", async () => {
+  it("treats a missing acceptance receipt as delivery failure without activating", async () => {
     const backend = new CapturingBackend();
     // Legacy void-returning provider: resolves but produces NO receipt.
     const voidProvider = { send: async () => undefined } as unknown as EmailProvider;
@@ -132,9 +150,34 @@ describe("fail-closed magic-link delivery", () => {
     );
 
     const remaining = [...backend.values.keys()].filter((k) => k.startsWith("email-login:"));
-    expect(remaining).toEqual([]);
+    expect(remaining.length).toBeGreaterThan(0);
+    expect(
+      [...backend.values.values()].some((entry) => entry.value.includes('"status":"active"')),
+    ).toBe(false);
 
     auth.destroy();
+  });
+
+  it("rejects oversized and accessor-backed acceptance receipts without activating", async () => {
+    for (const receipt of [
+      { provider: "x".repeat(65) },
+      { provider: "test", id: "x".repeat(513) },
+      Object.defineProperty({}, "provider", {
+        get() {
+          throw new Error("receipt getter must not run");
+        },
+      }),
+    ]) {
+      const backend = new CapturingBackend();
+      const auth = buildAuth({ send: async () => receipt as EmailDeliveryReceipt }, backend);
+      await expect(
+        auth.sendMagicLink("receipt@example.com", { tenantId: "tenant-a" }),
+      ).rejects.toThrow(EmailDeliveryError);
+      expect(
+        [...backend.values.values()].some((entry) => entry.value.includes('"status":"active"')),
+      ).toBe(false);
+      auth.destroy();
+    }
   });
 
   it("succeeds and keeps the challenge redeemable when the provider returns a receipt", async () => {
@@ -206,8 +249,9 @@ describe("fail-closed magic-link delivery", () => {
     }
   });
 
-  it("deletes the stored OTP code when the provider rejects a sendOtp", async () => {
+  it("leaves a rejected OTP durably staged and non-redeemable", async () => {
     const backend = new CapturingBackend();
+    backend.failDeletes = true;
     let text = "";
     const auth = buildAuth(
       {
@@ -223,12 +267,285 @@ describe("fail-closed magic-link delivery", () => {
       EmailDeliveryError,
     );
 
-    expect(backend.values.size).toBe(0);
+    expect(backend.values.size).toBeGreaterThan(0);
+    expect(
+      [...backend.values.values()].some((entry) => entry.value.includes('"delivery_pending"')),
+    ).toBe(true);
     const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
     expect(code).not.toBe("");
     expect(await auth.verifyOtp("otp@example.com", code, "tenant-a")).toBe(false);
 
     auth.destroy();
+  });
+
+  it("does not redeem a magic link or companion code while delivery is in flight", async () => {
+    const backend = new CapturingBackend();
+    let text = "";
+    let accept!: () => void;
+    const accepted = new Promise<void>((resolve) => {
+      accept = resolve;
+    });
+    const auth = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          text = body;
+          await accepted;
+          return { provider: "test", id: "accepted-after-race" };
+        },
+      },
+      backend,
+    );
+
+    const sending = auth.sendMagicLink("race@example.com", { tenantId: "tenant-a" });
+    while (!text) await Bun.sleep(1);
+    const token = text.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
+
+    expect(await auth.verifyMagicLink(token, "race@example.com", "tenant-a")).toMatchObject({
+      valid: false,
+    });
+    expect(await auth.verifyEmailLoginCode("race@example.com", code, "tenant-a")).toMatchObject({
+      valid: false,
+    });
+
+    accept();
+    await sending;
+    expect(await auth.verifyMagicLink(token, "race@example.com", "tenant-a")).toMatchObject({
+      valid: true,
+    });
+    auth.destroy();
+  });
+
+  it("does not redeem an OTP while delivery is in flight", async () => {
+    const backend = new CapturingBackend();
+    let text = "";
+    let accept!: () => void;
+    const accepted = new Promise<void>((resolve) => {
+      accept = resolve;
+    });
+    const auth = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          text = body;
+          await accepted;
+          return { provider: "test", id: "accepted-otp-after-race" };
+        },
+      },
+      backend,
+    );
+
+    const sending = auth.sendOtp("otp-race@example.com", { tenantId: "tenant-a" });
+    while (!text) await Bun.sleep(1);
+    const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
+    expect(await auth.verifyOtp("otp-race@example.com", code, "tenant-a")).toBe(false);
+
+    accept();
+    await sending;
+    expect(await auth.verifyOtp("otp-race@example.com", code, "tenant-a")).toBe(true);
+    auth.destroy();
+  });
+
+  it("does not call the provider when durable staging fails", async () => {
+    const backend = new CapturingBackend();
+    backend.failWrites = true;
+    let sends = 0;
+    const auth = buildAuth(
+      {
+        send: async () => {
+          sends += 1;
+          return { provider: "test" };
+        },
+      },
+      backend,
+    );
+
+    await expect(
+      auth.sendMagicLink("store-down@example.com", { tenantId: "tenant-a" }),
+    ).rejects.toThrow("durable store unavailable");
+    await expect(auth.sendOtp("store-down@example.com", { tenantId: "tenant-a" })).rejects.toThrow(
+      "durable store unavailable",
+    );
+    expect(sends).toBe(0);
+    auth.destroy();
+  });
+
+  it("keeps accepted magic-link and OTP credentials non-redeemable when activation storage fails", async () => {
+    const magicBackend = new CapturingBackend();
+    let magicText = "";
+    const magicAuth = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          magicText = body;
+          magicBackend.failActiveWrites = true;
+          return { provider: "test", id: "accepted-magic" };
+        },
+      },
+      magicBackend,
+    );
+    await expect(
+      magicAuth.sendMagicLink("activation@example.com", { tenantId: "tenant-a" }),
+    ).rejects.toThrow(EmailDeliveryError);
+    const token = magicText.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    const companionCode = magicText.match(/\b(\d{6})\b/)?.[1] ?? "";
+    expect(
+      await magicAuth.verifyMagicLink(token, "activation@example.com", "tenant-a"),
+    ).toMatchObject({ valid: false });
+    expect(
+      await magicAuth.verifyEmailLoginCode("activation@example.com", companionCode, "tenant-a"),
+    ).toMatchObject({ valid: false });
+
+    const otpBackend = new CapturingBackend();
+    let otpText = "";
+    const otpAuth = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          otpText = body;
+          otpBackend.failActiveWrites = true;
+          return { provider: "test", id: "accepted-otp" };
+        },
+      },
+      otpBackend,
+    );
+    await expect(
+      otpAuth.sendOtp("activation-otp@example.com", { tenantId: "tenant-a" }),
+    ).rejects.toThrow(EmailDeliveryError);
+    const otpCode = otpText.match(/\b(\d{6})\b/)?.[1] ?? "";
+    expect(await otpAuth.verifyOtp("activation-otp@example.com", otpCode, "tenant-a")).toBe(false);
+
+    magicAuth.destroy();
+    otpAuth.destroy();
+  });
+
+  it("confirms a committed activation when the storage acknowledgement is lost", async () => {
+    const backend = new CapturingBackend();
+    let text = "";
+    const auth = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          text = body;
+          backend.failActiveWritesAfterCommit = true;
+          return { provider: "test", id: "accepted-before-ack-loss" };
+        },
+      },
+      backend,
+    );
+
+    await auth.sendMagicLink("ack-loss@example.com", { tenantId: "tenant-a" });
+    const token = text.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    expect(await auth.verifyMagicLink(token, "ack-loss@example.com", "tenant-a")).toMatchObject({
+      valid: true,
+    });
+    auth.destroy();
+  });
+
+  it("keeps only the newest concurrently delivered challenge redeemable", async () => {
+    const backend = new CapturingBackend();
+    const messages: string[] = [];
+    const accepts: Array<() => void> = [];
+    const auth = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          messages.push(body);
+          await new Promise<void>((resolve) => accepts.push(resolve));
+          return { provider: "test", id: `accepted-${messages.length}` };
+        },
+      },
+      backend,
+    );
+
+    const firstSend = auth.sendMagicLink("supersede@example.com", { tenantId: "tenant-a" });
+    while (messages.length < 1) await Bun.sleep(1);
+    const secondSend = auth.sendMagicLink("supersede@example.com", { tenantId: "tenant-a" });
+    while (messages.length < 2) await Bun.sleep(1);
+    accepts[1]?.();
+    await secondSend;
+    accepts[0]?.();
+    await expect(firstSend).rejects.toThrow(EmailDeliveryError);
+
+    const firstToken = messages[0]?.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    const secondToken = messages[1]?.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    expect(
+      await auth.verifyMagicLink(firstToken, "supersede@example.com", "tenant-a"),
+    ).toMatchObject({ valid: false });
+    expect(
+      await auth.verifyMagicLink(secondToken, "supersede@example.com", "tenant-a"),
+    ).toMatchObject({ valid: true });
+    auth.destroy();
+  });
+
+  it("supersedes an accepted OTP when the same target retries", async () => {
+    const backend = new CapturingBackend();
+    const messages: string[] = [];
+    const auth = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          messages.push(body);
+          return { provider: "test", id: `accepted-${messages.length}` };
+        },
+      },
+      backend,
+    );
+
+    await auth.sendOtp("otp-retry@example.com", { tenantId: "tenant-a" });
+    await auth.sendOtp("otp-retry@example.com", { tenantId: "tenant-a" });
+    const firstCode = messages[0]?.match(/\b(\d{6})\b/)?.[1] ?? "";
+    const secondCode = messages[1]?.match(/\b(\d{6})\b/)?.[1] ?? "";
+    expect(await auth.verifyOtp("otp-retry@example.com", firstCode, "tenant-a")).toBe(false);
+    expect(await auth.verifyOtp("otp-retry@example.com", secondCode, "tenant-a")).toBe(true);
+    auth.destroy();
+  });
+
+  it("rejects malformed active magic-link and OTP records", async () => {
+    const magicBackend = new CapturingBackend();
+    let magicText = "";
+    const magicAuth = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          magicText = body;
+          return { provider: "test" };
+        },
+      },
+      magicBackend,
+    );
+    await magicAuth.sendMagicLink("malformed@example.com", { tenantId: "tenant-a" });
+    const magicRecord = [...magicBackend.values.entries()].find(([, entry]) =>
+      entry.value.includes('"purpose":"email-login"'),
+    );
+    expect(magicRecord).toBeDefined();
+    if (magicRecord) magicRecord[1].value = "{";
+    const token = magicText.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    expect(
+      await magicAuth.verifyMagicLink(token, "malformed@example.com", "tenant-a"),
+    ).toMatchObject({ valid: false });
+
+    const otpBackend = new CapturingBackend();
+    let otpText = "";
+    const otpAuth = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          otpText = body;
+          return { provider: "test" };
+        },
+      },
+      otpBackend,
+    );
+    await otpAuth.sendOtp("malformed-otp@example.com", { tenantId: "tenant-a" });
+    const otpRecord = [...otpBackend.values.entries()].find(
+      ([key, entry]) => key.length === 64 && entry.value.includes('"status":"active"'),
+    );
+    expect(otpRecord).toBeDefined();
+    if (otpRecord) {
+      otpRecord[1].value = JSON.stringify({
+        status: "failed",
+        email: "malformed-otp@example.com",
+        tenantId: "tenant-a",
+      });
+    }
+    const otpCode = otpText.match(/\b(\d{6})\b/)?.[1] ?? "";
+    expect(await otpAuth.verifyOtp("malformed-otp@example.com", otpCode, "tenant-a")).toBe(false);
+
+    magicAuth.destroy();
+    otpAuth.destroy();
   });
 });
 
