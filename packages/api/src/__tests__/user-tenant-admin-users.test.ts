@@ -51,7 +51,7 @@ describe("user tenant-admin user directory routes", () => {
       .returning({ id: users.id });
     const [member] = await getDb()
       .insert(users)
-      .values({ email: "member@example.test", emailVerified: true, name: "Member" })
+      .values({ email: "member@example.test", emailVerified: true, name: "Member\\Only" })
       .returning({ id: users.id });
     ownerId = owner.id;
     memberId = member.id;
@@ -149,6 +149,18 @@ describe("user tenant-admin user directory routes", () => {
     expect(body.data.users[0]?.linkedAccounts).toBeUndefined();
     expect(body.data.users[0]?.walletAddress).toBeUndefined();
     expect(body.data.users[0]?.customMetadata).toBeUndefined();
+  });
+
+  it("treats backslash-prefixed LIKE metacharacters as literal search text", async () => {
+    const token = await tokenFor(ownerId);
+    const response = await userRoutes.request(
+      `/me/tenants/${TENANT_ID}/users?q=${encodeURIComponent("\\%")}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { data: { users: unknown[] } };
+    expect(body.data.users).toEqual([]);
   });
 
   it("rejects non-admin tenant members", async () => {
