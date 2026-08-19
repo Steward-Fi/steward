@@ -162,6 +162,10 @@ type EmailLoginChallengeRecord = {
   expiresAt: string;
 };
 
+type LegacyEmailLoginChallengeRecord = Omit<EmailLoginChallengeRecord, "status"> & {
+  status: "pending";
+};
+
 type EmailLoginStatusRecord = {
   status: "delivery_pending" | "pending" | "consumed" | "locked";
   challengeId: string;
@@ -273,6 +277,18 @@ function decodeMagicLinkPayload(value: string): MagicLinkPayload {
     // Backward-compatible legacy tokens stored the email as the raw value.
   }
   return { email: value };
+}
+
+function encodeMagicLinkPayload(payload: MagicLinkPayload): string {
+  return JSON.stringify(payload);
+}
+
+function encodeActiveEmailLoginChallenge(challenge: EmailLoginChallengeRecord): string {
+  const { status: _deliveryStatus, ...payload } = challenge;
+  return JSON.stringify({
+    ...payload,
+    status: "pending",
+  } satisfies LegacyEmailLoginChallengeRecord);
 }
 
 function decodeLegacyOtpPayload(value: string): MagicLinkPayload | null {
@@ -583,7 +599,7 @@ export class EmailAuth {
       // state, so an earlier write failure cannot expose a redeemable secret.
       await this.tokenStore.store(
         emailLoginChallengeKey(challengeId),
-        JSON.stringify({ ...challenge, status: "active" } satisfies EmailLoginChallengeRecord),
+        encodeActiveEmailLoginChallenge(challenge),
         remainingTtlMs,
       );
       if ((await this.tokenStore.verify(targetKey)) !== challengeId) {
@@ -662,16 +678,19 @@ export class EmailAuth {
       if ((await this.tokenStore.verify(targetKey)) !== storeKey) {
         throw new Error("OTP superseded before activation");
       }
-      await this.tokenStore.store(storeKey, encodeOtpChallenge("active", payload), remainingTtlMs);
+      await this.tokenStore.store(storeKey, encodeMagicLinkPayload(payload), remainingTtlMs);
       if ((await this.tokenStore.verify(targetKey)) !== storeKey) {
         throw new Error("OTP superseded during activation");
       }
     } catch (err) {
       let activationConfirmed = false;
       try {
+        const stored = await this.tokenStore.verify(storeKey);
+        const current = stored ? decodeLegacyOtpPayload(stored) : null;
         activationConfirmed =
           (await this.tokenStore.verify(targetKey)) === storeKey &&
-          decodeOtpChallenge(await this.tokenStore.verify(storeKey))?.status === "active";
+          current?.email === payload.email &&
+          (current.tenantId ?? undefined) === (payload.tenantId ?? undefined);
       } catch {
         // The activation outcome is still ambiguous, so do not report success.
       }

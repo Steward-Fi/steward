@@ -30,13 +30,30 @@ class CapturingBackend implements StoreBackend {
   failActiveWritesAfterCommit = false;
   failDeletes = false;
 
+  private isActivationWrite(key: string, value: string): boolean {
+    if (
+      key.startsWith("email-login:pending:") &&
+      value.includes('"status":"pending"') &&
+      value.includes('"emailHash"')
+    ) {
+      return true;
+    }
+    if (key.length !== 64) return false;
+    try {
+      const parsed = JSON.parse(value) as Record<string, unknown>;
+      return typeof parsed.email === "string" && parsed.status === undefined;
+    } catch {
+      return false;
+    }
+  }
+
   async set(key: string, value: string, ttlMs: number): Promise<void> {
     if (this.failWrites) throw new Error("durable store unavailable");
-    if (this.failActiveWrites && value.includes('"status":"active"')) {
+    if (this.failActiveWrites && this.isActivationWrite(key, value)) {
       throw new Error("durable activation unavailable");
     }
     this.values.set(key, { value, expiresAt: Date.now() + ttlMs });
-    if (this.failActiveWritesAfterCommit && value.includes('"status":"active"')) {
+    if (this.failActiveWritesAfterCommit && this.isActivationWrite(key, value)) {
       throw new Error("durable activation response lost");
     }
   }
@@ -200,6 +217,37 @@ describe("fail-closed magic-link delivery", () => {
     const code = text.match(/\b(\d{6})\b/)?.[1] ?? "";
     const result = await auth.verifyEmailLoginCode("ok@example.com", code, "tenant-a");
     expect(result.valid).toBe(true);
+
+    auth.destroy();
+  });
+
+  it("writes active magic-link and OTP records in the deployed-reader formats", async () => {
+    const backend = new CapturingBackend();
+    const messages: string[] = [];
+    const auth = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          messages.push(body);
+          return { provider: "test", id: `accepted-${messages.length}` };
+        },
+      },
+      backend,
+    );
+
+    const issued = await auth.sendMagicLink("rolling@example.com", { tenantId: "tenant-a" });
+    const challengeId = await backend.consume(`email-login:link:${issued.tokenHash}`);
+    expect(challengeId).toBe(issued.challengeId);
+    const challenge = JSON.parse(
+      (await backend.consume(`email-login:pending:${challengeId}`)) ?? "null",
+    ) as Record<string, unknown> | null;
+    expect(challenge?.status).toBe("pending");
+    expect(challenge?.purpose).toBe("email-login");
+
+    await auth.sendOtp("rolling-otp@example.com", { tenantId: "tenant-a" });
+    const otpKey = [...backend.values.keys()].find((key) => key.length === 64);
+    expect(otpKey).toBeDefined();
+    const otpPayload = JSON.parse((await backend.consume(otpKey ?? "")) ?? "null");
+    expect(otpPayload).toEqual({ email: "rolling-otp@example.com", tenantId: "tenant-a" });
 
     auth.destroy();
   });
@@ -495,6 +543,47 @@ describe("fail-closed magic-link delivery", () => {
     auth.destroy();
   });
 
+  it("redeems active wrapper records emitted before the rolling-format fix", async () => {
+    const backend = new CapturingBackend();
+    const messages: string[] = [];
+    const auth = buildAuth(
+      {
+        send: async (_to, _subject, body) => {
+          messages.push(body);
+          return { provider: "test", id: `accepted-${messages.length}` };
+        },
+      },
+      backend,
+    );
+
+    await auth.sendMagicLink("active-wrapper@example.com", { tenantId: "tenant-a" });
+    const magicRecord = [...backend.values.values()].find((entry) =>
+      entry.value.includes('"purpose":"email-login"'),
+    );
+    expect(magicRecord).toBeDefined();
+    if (magicRecord) {
+      magicRecord.value = JSON.stringify({ ...JSON.parse(magicRecord.value), status: "active" });
+    }
+    const token = messages[0]?.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    expect(
+      await auth.verifyMagicLink(token, "active-wrapper@example.com", "tenant-a"),
+    ).toMatchObject({ valid: true });
+
+    await auth.sendOtp("active-wrapper-otp@example.com", { tenantId: "tenant-a" });
+    const otpRecord = [...backend.values.entries()].find(([key]) => key.length === 64);
+    expect(otpRecord).toBeDefined();
+    if (otpRecord) {
+      otpRecord[1].value = JSON.stringify({
+        status: "active",
+        payload: JSON.parse(otpRecord[1].value),
+      });
+    }
+    const otpCode = messages[1]?.match(/\b(\d{6})\b/)?.[1] ?? "";
+    expect(await auth.verifyOtp("active-wrapper-otp@example.com", otpCode, "tenant-a")).toBe(true);
+
+    auth.destroy();
+  });
+
   it("rejects malformed active magic-link and OTP records", async () => {
     const magicBackend = new CapturingBackend();
     let magicText = "";
@@ -530,9 +619,7 @@ describe("fail-closed magic-link delivery", () => {
       otpBackend,
     );
     await otpAuth.sendOtp("malformed-otp@example.com", { tenantId: "tenant-a" });
-    const otpRecord = [...otpBackend.values.entries()].find(
-      ([key, entry]) => key.length === 64 && entry.value.includes('"status":"active"'),
-    );
+    const otpRecord = [...otpBackend.values.entries()].find(([key]) => key.length === 64);
     expect(otpRecord).toBeDefined();
     if (otpRecord) {
       otpRecord[1].value = JSON.stringify({
