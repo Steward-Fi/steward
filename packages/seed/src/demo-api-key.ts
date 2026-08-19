@@ -165,58 +165,67 @@ export function promoteDemoCredentials(
     afterPendingOpen?.();
 
     let promotionPath: string | undefined;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const candidate = `${pending.finalPath}.promote-${randomBytes(12).toString("hex")}`;
-      try {
-        linkSync(pending.pendingPath, candidate);
-        promotionPath = candidate;
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt === 3) throw error;
-      }
-    }
-    if (!promotionPath) {
-      throw new Error(`Could not allocate promotion link; recover ${pending.pendingPath}`);
-    }
-
-    const linkedPath = lstatSync(promotionPath);
-    const promotionFd = openSync(
-      promotionPath,
-      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
-    );
     try {
-      const linkedFd = fstatSync(promotionFd);
-      if (
-        !linkedPath.isFile() ||
-        !linkedFd.isFile() ||
-        linkedPath.dev !== staged.dev ||
-        linkedPath.ino !== staged.ino ||
-        linkedFd.dev !== staged.dev ||
-        linkedFd.ino !== staged.ino
-      ) {
-        throw new Error(
-          `Pending credential changed during promotion; recover ${pending.pendingPath}`,
-        );
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const candidate = `${pending.finalPath}.promote-${randomBytes(12).toString("hex")}`;
+        try {
+          linkSync(pending.pendingPath, candidate);
+          promotionPath = candidate;
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt === 3) throw error;
+        }
+      }
+      if (!promotionPath) {
+        throw new Error(`Could not allocate promotion link; recover ${pending.pendingPath}`);
       }
 
-      beforePromotionRename?.(promotionPath);
-      const beforeRename = lstatSync(promotionPath);
-      if (
-        !beforeRename.isFile() ||
-        beforeRename.dev !== linkedFd.dev ||
-        beforeRename.ino !== linkedFd.ino
-      ) {
-        throw new Error(
-          `Pending credential changed before canonical rename; recover ${pending.pendingPath}`,
-        );
-      }
+      const linkedPath = lstatSync(promotionPath);
+      const promotionFd = openSync(
+        promotionPath,
+        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+      );
+      try {
+        const linkedFd = fstatSync(promotionFd);
+        if (
+          !linkedPath.isFile() ||
+          !linkedFd.isFile() ||
+          linkedPath.dev !== staged.dev ||
+          linkedPath.ino !== staged.ino ||
+          linkedFd.dev !== staged.dev ||
+          linkedFd.ino !== staged.ino
+        ) {
+          throw new Error(
+            `Pending credential changed during promotion; recover ${pending.pendingPath}`,
+          );
+        }
 
-      renameSync(promotionPath, pending.finalPath);
-      const canonical = lstatSync(pending.finalPath);
-      if (!canonical.isFile() || canonical.dev !== linkedFd.dev || canonical.ino !== linkedFd.ino) {
-        throw new Error(
-          `Canonical credential changed during promotion; recover ${pending.pendingPath}`,
-        );
+        beforePromotionRename?.(promotionPath);
+        const beforeRename = lstatSync(promotionPath);
+        if (
+          !beforeRename.isFile() ||
+          beforeRename.dev !== linkedFd.dev ||
+          beforeRename.ino !== linkedFd.ino
+        ) {
+          throw new Error(
+            `Pending credential changed before canonical rename; recover ${pending.pendingPath}`,
+          );
+        }
+
+        renameSync(promotionPath, pending.finalPath);
+        promotionPath = undefined;
+        const canonical = lstatSync(pending.finalPath);
+        if (
+          !canonical.isFile() ||
+          canonical.dev !== linkedFd.dev ||
+          canonical.ino !== linkedFd.ino
+        ) {
+          throw new Error(
+            `Canonical credential changed during promotion; recover ${pending.pendingPath}`,
+          );
+        }
+      } finally {
+        closeSync(promotionFd);
       }
       syncDirectory(dirname(pending.finalPath), parent);
       // The canonical name is durable now. Removing the recovery name is cleanup:
@@ -224,7 +233,13 @@ export function promoteDemoCredentials(
       unlinkSync(pending.pendingPath);
       return pending.finalPath;
     } finally {
-      closeSync(promotionFd);
+      if (promotionPath) {
+        try {
+          unlinkSync(promotionPath);
+        } catch {
+          // Preserve the original failure and never expose cleanup internals.
+        }
+      }
     }
   } finally {
     closeSync(pendingFd);
