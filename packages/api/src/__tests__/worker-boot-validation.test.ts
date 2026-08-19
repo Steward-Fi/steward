@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { signAgentToken } from "@stwd/auth/jwt";
 import { runtimeEnvironmentValue } from "@stwd/shared/runtime-env";
 import { decodeJwt, jwtVerify } from "jose";
-import worker, { hydrateProcessEnv } from "../worker";
+import worker, { hydrateProcessEnv, withWorkerJwtAuthority } from "../worker";
 
 /**
  * Keys this file mutates: bindings hydrateProcessEnv copies onto the global
@@ -197,6 +197,68 @@ describe("workers boot JWT env validation (SEC-134)", () => {
       jwtVerify(rotatedToken, new TextEncoder().encode(rotatedSecret)),
     ).resolves.toBeDefined();
     await expect(jwtVerify(rotatedToken, new TextEncoder().encode(firstSecret))).rejects.toThrow();
+  });
+
+  it("isolates JWT secret and default TTL across overlapping Worker invocations", async () => {
+    snapshotEnv();
+    const firstEnv = {
+      NODE_ENV: "production",
+      STEWARD_JWT_SECRET: "workers-overlap-first-secret-at-least-32-chars",
+      AGENT_TOKEN_EXPIRY: "1h",
+      DATABASE_URL: "unused-first",
+    };
+    const secondEnv = {
+      NODE_ENV: "production",
+      STEWARD_JWT_SECRET: "workers-overlap-second-secret-at-least-32-chars",
+      AGENT_TOKEN_EXPIRY: "5m",
+      DATABASE_URL: "unused-second",
+    };
+    let markFirstReady!: () => void;
+    let releaseFirst!: () => void;
+    const firstReady = new Promise<void>((resolve) => {
+      markFirstReady = resolve;
+    });
+    const firstBarrier = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const firstMint = withWorkerJwtAuthority(firstEnv, async () => {
+      hydrateProcessEnv(firstEnv);
+      markFirstReady();
+      await firstBarrier;
+      return signAgentToken({ agentId: "worker-first", tenantId: "worker-tenant" });
+    });
+    await firstReady;
+
+    let secondToken: string;
+    try {
+      secondToken = await withWorkerJwtAuthority(secondEnv, async () => {
+        // This is the hostile interleaving: overwrite the isolate-wide mirror
+        // while the first invocation is suspended before it mints.
+        hydrateProcessEnv(secondEnv);
+        return signAgentToken({ agentId: "worker-second", tenantId: "worker-tenant" });
+      });
+    } finally {
+      releaseFirst();
+    }
+    const firstToken = await firstMint;
+    const first = decodeJwt(firstToken);
+    const second = decodeJwt(secondToken);
+
+    expect((first.exp ?? 0) - (first.iat ?? 0)).toBe(3600);
+    expect((second.exp ?? 0) - (second.iat ?? 0)).toBe(300);
+    await expect(
+      jwtVerify(firstToken, new TextEncoder().encode(firstEnv.STEWARD_JWT_SECRET)),
+    ).resolves.toBeDefined();
+    await expect(
+      jwtVerify(secondToken, new TextEncoder().encode(secondEnv.STEWARD_JWT_SECRET)),
+    ).resolves.toBeDefined();
+    await expect(
+      jwtVerify(firstToken, new TextEncoder().encode(secondEnv.STEWARD_JWT_SECRET)),
+    ).rejects.toThrow();
+    await expect(
+      jwtVerify(secondToken, new TextEncoder().encode(firstEnv.STEWARD_JWT_SECRET)),
+    ).rejects.toThrow();
   });
 
   it("validates scheduled security bindings before opening any database handle", async () => {
