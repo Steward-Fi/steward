@@ -24,16 +24,13 @@ function randomIdempotencyKey(prefix: string): string {
 //
 // The backend `/policies` endpoints return a `PolicyTemplate` with typed
 // `rules: PolicyRule[]` (plus `name`, `description`, `isDefault`). This page
-// pre-dates the typed template API and has historically rendered a
-// UI-categorized shape ("api_access" / "spend_limit" / etc.) with
+// renders a UI-categorized shape ("api_access" / "spend_limit" / etc.) with
 // `rules: Record<string, unknown>` and an `assignedAgents: string[]` field
 // that the template endpoint doesn't expose.
 //
 // The JSON editor roundtrips the raw `rules` payload, so values survive the
-// cast even when they don't match the nominal type. Leaving this shape in
-// place keeps the UI identical while the dashboard migrates off the inline
-// client. Flagged for a follow-up: unify this with `PolicyTemplate` and stop
-// pretending `rules` is a bag.
+// cast even when they do not match the API type. This local adapter is the
+// boundary between the typed template and the dashboard editor model.
 // ─────────────────────────────────────────────────────────────────────────────
 interface PolicyRecord {
   id: string;

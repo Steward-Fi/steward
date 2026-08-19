@@ -4968,8 +4968,8 @@ auth.get("/oidc/:provider/authorize", async (c) => {
   const scopes = provider.scopes?.length ? provider.scopes : ["openid", "email", "profile"];
   let authUrl: URL;
   try {
-    // Revalidate legacy rows at the action boundary before issuing a browser
-    // redirect. Configuration-time checks alone do not cover pre-fix data.
+    // Revalidate persisted rows at the action boundary before issuing a browser
+    // redirect; configuration-time validation is not an execution-time trust check.
     authUrl = assertPublicHttpsEndpoint(provider.authorizationUrl, "OIDC authorization endpoint");
   } catch (err) {
     return c.json<ApiResponse>(

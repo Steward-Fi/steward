@@ -5146,10 +5146,8 @@ user.post("/me/wallet/sign", async (c) => {
       403,
     );
   }
-  // Build the SignRequest from its declared fields only (never spread the raw
-  // body): extra body fields must not reach the policy engine or the vault —
-  // e.g. a smuggled `destination` previously shadowed `to` in the
-  // approved-addresses evaluator while the vault signed `to` (SEC-001).
+  // Build the SignRequest from declared fields only. Extra body fields must not
+  // reach the policy engine or shadow the destination that the vault signs.
   const signRequest: SignRequest = {
     tenantId,
     agentId,

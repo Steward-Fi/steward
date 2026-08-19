@@ -383,11 +383,8 @@ const PROXY_UPSTREAM_TIMEOUT_MS = boundedPositiveIntegerEnv(
   5 * 60_000,
 );
 /**
- * SEC-100: proxy resource limits fail closed — they cannot be disabled. A `0`
- * (or garbage) env value previously meant "unlimited", silently removing the
- * response-size, stream-duration, and concurrency caps on operator
- * misconfiguration. Reject non-positive / non-integer values at startup
- * (module load) instead.
+ * Proxy resource limits cannot be disabled. Reject non-positive, non-integer,
+ * and malformed values during module initialization.
  */
 const MAX_PROXY_RESPONSE_BYTES = boundedPositiveIntegerEnv(
   "STEWARD_PROXY_RESPONSE_BYTES",

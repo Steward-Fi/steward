@@ -1699,15 +1699,14 @@ agentRoutes.get("/:agentId/policy", async (c) => {
 });
 
 agentRoutes.put("/:agentId/policy", async (c) => {
-  // SEC-208: two write paths into the trade-policy table —
+  // Two write paths enter the trade-policy table:
   //   1. agent token (self-update): TIGHTEN-ONLY against the existing row,
   //      enforced below after validation via policyLooseningViolation, and
   //      forbidden from creating the initial row (creation activates the
   //      trade-route ceilings, so it is reserved for path 2).
-  //   2. human owner/admin session with recent MFA: unrestricted (subject to
-  //      the platform ceilings), restoring the human-ceiling administration
-  //      path this route previously lacked.
-  // Tenant API keys stay rejected, as before.
+  //   2. human owner/admin session with recent MFA: unrestricted subject to the
+  //      platform ceilings.
+  // Tenant API keys are rejected.
   const isAgentSelfUpdate = c.get("authType") === "agent-token";
   if (isAgentSelfUpdate) {
     if (!requireAgentAccess(c)) {

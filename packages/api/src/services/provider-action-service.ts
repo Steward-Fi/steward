@@ -1574,25 +1574,9 @@ class ProviderActionService {
       };
     }
     if (effects.policy === "approval_required") {
-      // #206 KNOWN LIMITATION (codex P1, honest gap): a cumulativeSpend / maxCalls
-      // cap combined with an approval rule is NOT enforced across the approval
-      // lifecycle by THIS lane. The action does not execute now (it awaits a human
-      // decision + a separate execute path in provider-approval.ts, which is
-      // OUTSIDE this lane's scope fence and does NOT re-run evaluatePolicy or
-      // re-reserve). Two imperfect create-time choices exist, neither correct
-      // without touching the approval-execute path:
-      //   - KEEP the reservation: it is pinned to DECISION time and ages out at
-      //     the window edge, so an approval executed near/after that edge is
-      //     UNDER-counted (allow-side error).
-      //   - RELEASE the reservation: the queued action consumes no budget, and
-      //     the execute path re-reserves nothing, so the cap is not enforced on
-      //     the approval path AT ALL.
-      // We RELEASE here so an action that is ultimately rejected/expired never
-      // holds phantom budget that would wrongly DENY unrelated invokes
-      // (over-enforcement of the immediate plane is the worse day-to-day failure).
-      // Correct enforcement requires the approval-execute path to re-reserve at
-      // EXECUTION time; that is a documented follow-up filed against the approval
-      // plane (provider-approval.ts). See the PR honest-gaps section.
+      // A queued action has not executed, so release its decision-time budget.
+      // provider-approval re-evaluates policy and reserves against authoritative
+      // execution-time aggregates before a resumed action can run.
       await this.reconcilePolicyReservations(tenantId, intentId);
       return {
         kind: "approval_required",

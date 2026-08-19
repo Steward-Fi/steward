@@ -768,11 +768,9 @@ export class Vault {
    *   2. Otherwise an third-party-custody wallet             -> "third-party-custody"
    *   3. Otherwise a legacy local encrypted key / none     -> "local-vault"
    *
-   * The execution gateway (PR #182) mints ExecutionAuthorizations bound to
-   * backend "local-vault". External custody is NOT a gateway-supported backend
-   * in this PR: an authorization bound to "local-vault" must never be able to
-   * authorize an third-party-custody execution. Callers use this to fail closed
-   * BEFORE minting/consuming when the resolved backend is third-party-custody.
+   * ExecutionAuthorizations are bound to a custody backend. An authorization
+   * bound to "local-vault" must never authorize third-party custody, so callers
+   * resolve this target before minting or consuming authorization.
    */
   async resolveExecutionTarget(request: {
     tenantId: string;
