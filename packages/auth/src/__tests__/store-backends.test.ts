@@ -5,6 +5,7 @@ import {
   MemoryBackend,
   NamespacedStoreBackend,
   type RedisLike,
+  type StoreBackend,
 } from "../store-backends";
 
 function redisLike(overrides: Partial<RedisLike> = {}): RedisLike {
@@ -88,5 +89,41 @@ describe("NamespacedStoreBackend", () => {
     expect(results.filter((value) => value === "proof")).toHaveLength(1);
     expect(results.filter((value) => value === null)).toHaveLength(1);
     backend.destroy();
+  });
+
+  it("forwards the exact TTL and collision-safe key to the shared backend", async () => {
+    const writes: Array<{ key: string; value: string; ttlMs: number }> = [];
+    const backend: StoreBackend = {
+      set: async (key, value, ttlMs) => {
+        writes.push({ key, value, ttlMs });
+      },
+      setIfNotExists: async () => true,
+      get: async () => null,
+      consume: async () => null,
+      delete: async () => undefined,
+    };
+    const store = new NamespacedStoreBackend(backend, "oauth-link");
+
+    await store.set("state", "bound-proof", 123_456);
+
+    expect(writes).toEqual([{ key: "10:oauth-link:state", value: "bound-proof", ttlMs: 123_456 }]);
+  });
+
+  it("propagates backend consume failures without replaying or falling back", async () => {
+    let consumeCalls = 0;
+    const backend: StoreBackend = {
+      set: async () => undefined,
+      setIfNotExists: async () => true,
+      get: async () => null,
+      consume: async () => {
+        consumeCalls += 1;
+        throw new Error("durable backend unavailable");
+      },
+      delete: async () => undefined,
+    };
+    const store = new NamespacedStoreBackend(backend, "wallet-link");
+
+    await expect(store.consume("challenge")).rejects.toThrow("durable backend unavailable");
+    expect(consumeCalls).toBe(1);
   });
 });
