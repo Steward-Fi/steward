@@ -23,6 +23,7 @@ const PUBLIC_BROWSER_AUTH_MUTATIONS = new Set([
   "/auth/telegram/challenge",
   "/auth/telegram/verify",
   "/auth/farcaster/verify",
+  "/auth/jwt/login",
   "/auth/sms/send",
   "/auth/sms/verify",
   "/auth/whatsapp/send",

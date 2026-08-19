@@ -49,6 +49,7 @@ function makeDefaultApp() {
     c.json({ ok: true, verified: Boolean(c.get("requestSignatureVerified")) }),
   );
   app.post("/auth/email/send", (c) => c.json({ ok: true }));
+  app.post("/auth/jwt/login", (c) => c.json({ ok: true }));
   app.post("/auth/mfa/totp/enroll", (c) => c.json({ ok: true }));
   app.post("/auth/test/token", (c) => c.json({ ok: true }));
   app.post("/platform/tenants", (c) => c.json({ ok: true }));
@@ -633,6 +634,23 @@ describe("authorizationSignature", () => {
 
     expect(platform.status).toBe(401);
     expect(automation.status).toBe(401);
+  });
+
+  it("keeps public JWT login browser-compatible without exempting machine authority", async () => {
+    const app = makeDefaultApp();
+
+    const [browser, machine] = await withRuntimeEnvironment({ NODE_ENV: "production" }, () =>
+      Promise.all([
+        app.request("/auth/jwt/login", { method: "POST" }),
+        app.request("/auth/jwt/login", {
+          method: "POST",
+          headers: { "X-Steward-Platform-Key": "platform-key" },
+        }),
+      ]),
+    );
+
+    expect(browser.status).toBe(200);
+    expect(machine.status).toBe(401);
   });
 
   it("lets verified user sessions reach authenticated browser auth mutations only", async () => {
