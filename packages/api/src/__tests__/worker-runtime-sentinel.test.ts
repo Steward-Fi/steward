@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getDb, tenants, waitUntilRequestDatabaseTask } from "@stwd/db";
+import { createPGLiteDb } from "@stwd/db/pglite";
 import {
   hydrateProcessEnv,
   runWorkerGoogleCredentialLifecycleSweep,
@@ -93,16 +94,20 @@ test("Worker HTTP mode binds an exact request database without a persistent hand
 });
 
 test("Worker request membrane preserves real Drizzle query execution", async () => {
-  const pgliteDb = getDb();
-  const rows = await withWorkerRequestDatabase(
-    {
-      DATABASE_URL: "postgresql://worker.invalid/steward",
-      DATABASE_DRIVER: "neon-http",
-    },
-    () => getDb().select({ id: tenants.id }).from(tenants).limit(1),
-    { createHttpDb: () => pgliteDb },
-  );
-  expect(Array.isArray(rows)).toBe(true);
+  const { db: pgliteDb, client } = await createPGLiteDb("memory://");
+  try {
+    const rows = await withWorkerRequestDatabase(
+      {
+        DATABASE_URL: "postgresql://worker.invalid/steward",
+        DATABASE_DRIVER: "neon-http",
+      },
+      () => getDb().select({ id: tenants.id }).from(tenants).limit(1),
+      { createHttpDb: () => pgliteDb },
+    );
+    expect(Array.isArray(rows)).toBe(true);
+  } finally {
+    await client.close();
+  }
 });
 
 test("Worker database selection rejects missing or unsupported drivers", async () => {
@@ -174,6 +179,8 @@ test("Worker drains fire-and-forget webhook work before closing its request pool
     "utf8",
   );
   expect(webhookSource).toContain("waitUntilRequestDatabaseTask(");
+  const auditSource = readFileSync(join(import.meta.dir, "../services/audit.ts"), "utf8");
+  expect(auditSource).toContain("waitUntilRequestDatabaseTask(");
 });
 
 test("Worker socket cleanup diagnostics are fixed and cannot replace handler errors", async () => {

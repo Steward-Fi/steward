@@ -23,6 +23,7 @@ import {
   appendAuditEventWithinTx,
   auditCheckpoints,
   getDb,
+  waitUntilRequestDatabaseTask,
   withTenantAuditedTransaction,
   withTenantAuditQueue,
   writeAuditEvent,
@@ -218,12 +219,14 @@ function rowsFromExecute<T>(result: unknown): T[] {
  * a durable record.
  */
 export function trackAuditEvent(ev: AuditEventInput): Promise<void> {
-  return writeAuditEvent(ev).catch((err) => {
-    console.error(
-      `[audit] Failed to write event ${ev.action} for tenant ${ev.tenantId}`,
-      redactedThrownDiagnostics(err),
-    );
-  });
+  return waitUntilRequestDatabaseTask(
+    writeAuditEvent(ev).catch((err) => {
+      console.error(
+        `[audit] Failed to write event ${ev.action} for tenant ${ev.tenantId}`,
+        redactedThrownDiagnostics(err),
+      );
+    }),
+  );
 }
 
 /**

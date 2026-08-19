@@ -360,6 +360,8 @@ export default {
     env: Env,
     ctx: { waitUntil(promise: Promise<unknown>): void },
   ) {
+    hydrateProcessEnv(env);
+    await validateWorkerSecurityEnv();
     ctx.waitUntil(
       Promise.all([
         withWorkerRequestDatabase(env, () => runWorkerUpstreamCredentialLeaseSweep(env)),
