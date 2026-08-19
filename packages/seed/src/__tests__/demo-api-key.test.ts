@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
-  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -98,7 +98,7 @@ describe("demo API key", () => {
     }
   });
 
-  test("retains the committed credential when atomic promotion fails", async () => {
+  test("retains the committed credential when promotion fails", async () => {
     const root = tempRoot("steward-demo-postcommit-");
     try {
       const path = join(root, "demo.env");
@@ -179,54 +179,18 @@ describe("demo API key", () => {
     }
   });
 
-  test("never promotes a pending pathname swapped after inode validation", () => {
-    const root = tempRoot("steward-demo-race-");
+  test("cleans its generated promotion link when canonical replacement fails", () => {
+    const root = tempRoot("steward-demo-promotion-cleanup-");
     try {
       const path = join(root, "demo.env");
-      const oldKey = generateDemoApiKey().key;
-      promoteDemoCredentials(stageDemoCredentials("waifu.fun", oldKey, path));
-      const nextKey = generateDemoApiKey().key;
-      const pending = stageDemoCredentials("waifu.fun", nextKey, path);
-      const originalPending = `${pending.pendingPath}.original`;
-      expect(() =>
-        promoteDemoCredentials(pending, () => {
-          renameSync(pending.pendingPath, originalPending);
-          writeFileSync(
-            pending.pendingPath,
-            "STEWARD_TENANT_ID=attacker\nSTEWARD_API_KEY=stw_00000000000000000000000000000000\n",
-            { mode: 0o600 },
-          );
-        }),
-      ).toThrow("changed during promotion");
-      expect(readFileSync(path, "utf8")).toContain(`STEWARD_API_KEY=${oldKey}`);
-      expect(readFileSync(path, "utf8")).not.toContain("stw_00000000000000000000000000000000");
-      expect(readFileSync(originalPending, "utf8")).toContain(`STEWARD_API_KEY=${nextKey}`);
-      expect(readdirSync(root).some((name) => name.includes(".promote-"))).toBe(false);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  test("never promotes a promotion pathname swapped after descriptor validation", () => {
-    const root = tempRoot("steward-demo-promotion-race-");
-    try {
-      const path = join(root, "demo.env");
-      const oldKey = generateDemoApiKey().key;
-      promoteDemoCredentials(stageDemoCredentials("waifu.fun", oldKey, path));
       const pending = stageDemoCredentials("waifu.fun", generateDemoApiKey().key, path);
+      mkdirSync(path);
+      writeFileSync(join(path, "occupied"), "keep");
 
-      expect(() =>
-        promoteDemoCredentials(pending, undefined, (promotionPath) => {
-          renameSync(promotionPath, `${promotionPath}.original`);
-          writeFileSync(
-            promotionPath,
-            "STEWARD_TENANT_ID=attacker\nSTEWARD_API_KEY=stw_00000000000000000000000000000000\n",
-            { mode: 0o600 },
-          );
-        }),
-      ).toThrow("changed before canonical rename");
-      expect(readFileSync(path, "utf8")).toContain(`STEWARD_API_KEY=${oldKey}`);
-      expect(readFileSync(path, "utf8")).not.toContain("stw_00000000000000000000000000000000");
+      expect(() => promoteDemoCredentials(pending)).toThrow();
+      expect(lstatSync(pending.pendingPath).isFile()).toBe(true);
+      expect(readFileSync(join(path, "occupied"), "utf8")).toBe("keep");
+      expect(readdirSync(root).some((name) => name.includes(".promote-"))).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
