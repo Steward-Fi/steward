@@ -49,6 +49,8 @@ interface ForwardedCapture {
 let lastForwarded: ForwardedCapture | null = null;
 // Controls whether the stubbed upstream reflects the secret back (leak sim).
 let reflectSecretInResponse = false;
+let previousAuditHmacKey: string | undefined;
+let previousProxyDevMode: string | undefined;
 
 beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
@@ -58,6 +60,10 @@ beforeAll(async () => {
   // exercises the client's HMAC signer against the proxy verifier.
   process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
   process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET = SIGNING_SECRET;
+  previousAuditHmacKey = process.env.STEWARD_AUDIT_HMAC_KEY;
+  process.env.STEWARD_AUDIT_HMAC_KEY = "proxy-client-e2e-audit-hmac-key-with-enough-entropy";
+  previousProxyDevMode = process.env.STEWARD_PROXY_DEV_MODE;
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   // api.openai.com is already in the direct-proxy + secret-route default
   // allowlists, but set it explicitly for hermeticity.
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.openai.com";
@@ -120,6 +126,10 @@ afterAll(async () => {
   delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
   delete process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET;
   delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
+  if (previousAuditHmacKey === undefined) delete process.env.STEWARD_AUDIT_HMAC_KEY;
+  else process.env.STEWARD_AUDIT_HMAC_KEY = previousAuditHmacKey;
+  if (previousProxyDevMode === undefined) delete process.env.STEWARD_PROXY_DEV_MODE;
+  else process.env.STEWARD_PROXY_DEV_MODE = previousProxyDevMode;
 });
 
 function buildProxyApp() {
