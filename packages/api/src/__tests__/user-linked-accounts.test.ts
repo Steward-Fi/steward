@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, mock, spyOn } from "bun:test";
 import { createPrivateKey, sign as cryptoSign, generateKeyPairSync } from "node:crypto";
 
-import { ChallengeStore, MockSmsInbox, signTelegramLoginPayload } from "@stwd/auth";
+import { ChallengeStore, MemoryBackend, MockSmsInbox, signTelegramLoginPayload } from "@stwd/auth";
 import {
   accounts,
   agents,
@@ -134,6 +134,7 @@ function generateSolanaKeypair() {
 
 describe("user linked account routes", () => {
   let userRoutes: typeof import("../routes/user").userRoutes;
+  let initUserLinkChallengeStores: typeof import("../routes/user").initUserLinkChallengeStores;
   let createSessionToken: typeof import("../routes/auth").createSessionToken;
   let initAuthStores: typeof import("../routes/auth").initAuthStores;
   let userId = "";
@@ -332,7 +333,7 @@ describe("user linked account routes", () => {
       });
 
     ({ createSessionToken, initAuthStores } = await import("../routes/auth"));
-    ({ userRoutes } = await import("../routes/user"));
+    ({ initUserLinkChallengeStores, userRoutes } = await import("../routes/user"));
     await initAuthStores(false);
   });
 
@@ -621,6 +622,25 @@ describe("user linked account routes", () => {
       }),
     });
     expect(replay.status).toBe(401);
+  });
+
+  it("destroys only a different superseded process-local account-link backend", async () => {
+    const first = new MemoryBackend();
+    const firstDestroy = spyOn(first, "destroy");
+    initUserLinkChallengeStores(first);
+    initUserLinkChallengeStores(first);
+    expect(firstDestroy).not.toHaveBeenCalled();
+
+    const replacement = new MemoryBackend();
+    const replacementDestroy = spyOn(replacement, "destroy");
+    initUserLinkChallengeStores(replacement);
+    expect(firstDestroy).toHaveBeenCalledTimes(1);
+    expect(replacementDestroy).not.toHaveBeenCalled();
+
+    await initAuthStores(false);
+    expect(replacementDestroy).toHaveBeenCalledTimes(1);
+    firstDestroy.mockRestore();
+    replacementDestroy.mockRestore();
   });
 
   it("does not persist an Ethereum wallet when redeem-lock cleanup fails", async () => {

@@ -199,12 +199,15 @@ const WALLET_LINK_REDEEM_LOCK_TTL_MS = 10_000;
 const SOCIAL_LINK_CHALLENGE_TTL_MS = 5 * 60_000;
 const OAUTH_LINK_CHALLENGE_TTL_MS = 5 * 60_000;
 const initialUserLinkBackend = new MemoryBackend();
+let currentUserLinkBackend: StoreBackend | null = null;
 let walletLinkChallenges: ChallengeStore;
 let socialLinkChallenges: ChallengeStore;
 let oauthLinkChallenges: ChallengeStore;
 
 /** Bind account-link challenges to auth startup's selected durable backend. */
 export function initUserLinkChallengeStores(backend: StoreBackend): void {
+  const supersededBackend = currentUserLinkBackend;
+  currentUserLinkBackend = backend;
   walletLinkChallenges = new ChallengeStore({
     backend: new NamespacedStoreBackend(backend, "user-link-wallet"),
     ttlMs: WALLET_LINK_CHALLENGE_TTL_MS,
@@ -217,6 +220,9 @@ export function initUserLinkChallengeStores(backend: StoreBackend): void {
     backend: new NamespacedStoreBackend(backend, "user-link-oauth"),
     ttlMs: OAUTH_LINK_CHALLENGE_TTL_MS,
   });
+  if (supersededBackend instanceof MemoryBackend && supersededBackend !== backend) {
+    supersededBackend.destroy();
+  }
 }
 
 // Development and tests remain process-local until auth startup selects the
