@@ -163,10 +163,10 @@ jobs:
           if [ "${{ matrix.package }}" = "packages/sdk" ]; then
             mapfile -t sdk_tests < <(find packages/sdk/src -type f \( -name '*.test.ts' -o -name '*.spec.ts' \) | sort)
             bun test --isolate "${sdk_tests[@]}"
-          elif [ "${{ matrix.package }}" = "packages/plugin-sdk" ] || [ "${{ matrix.package }}" = "packages/plugin-example" ]; then
-            # These facade suites intentionally preload a hermetic PGLite
-            # context from their package-local bunfig.toml. Running them from
-            # the repository root skips that preload and fails at module init.
+          elif [ "${{ matrix.package }}" = "packages/plugin-sdk" ] || [ "${{ matrix.package }}" = "packages/plugin-example" ] || [ "${{ matrix.package }}" = "packages/plugin-capabilities" ]; then
+            # These packages own their test-process isolation or package-local
+            # preload. Running them from the repository root bypasses that
+            # contract and can leak mutable fixtures between files.
             (cd "${{ matrix.package }}" && bun run test)
           elif [ "${{ matrix.package }}" = "packages/trade-sessions" ]; then
             # PGLite migrations can exceed Bun's 5s default on hosted runners.
