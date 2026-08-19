@@ -83,11 +83,8 @@ DATABASE_URL=${{Postgres.DATABASE_URL}}
 # ─── Security (generate these — do NOT reuse across environments) ─────────────
 # Generate each with: openssl rand -hex 32
 STEWARD_MASTER_PASSWORD=<openssl rand -hex 32>
-STEWARD_SESSION_SECRET=<openssl rand -hex 32>
+STEWARD_JWT_SECRET=<openssl rand -hex 32>
 STEWARD_PLATFORM_KEYS=<openssl rand -hex 32>
-
-# Optional: separate JWT secret (defaults to MASTER_PASSWORD if unset)
-# STEWARD_JWT_SECRET=<openssl rand -hex 32>
 
 # ─── Redis ────────────────────────────────────────────────────────────────────
 # If using Railway Redis:
@@ -125,7 +122,7 @@ SKIP_MIGRATIONS=false
 ```bash
 # Run these and paste the output into Railway's variable editor
 echo "STEWARD_MASTER_PASSWORD=$(openssl rand -hex 32)"
-echo "STEWARD_SESSION_SECRET=$(openssl rand -hex 32)"
+echo "STEWARD_JWT_SECRET=$(openssl rand -hex 32)"
 echo "STEWARD_PLATFORM_KEYS=$(openssl rand -hex 32)"
 ```
 
@@ -303,12 +300,15 @@ STEWARD_API_URL=https://steward.elizacloud.ai
 # Steward API URL (client-side, for browser auth flows)
 NEXT_PUBLIC_STEWARD_API_URL=https://steward.elizacloud.ai
 
-# Session secret — MUST match the value set in Railway
-STEWARD_SESSION_SECRET=<same value as Railway's STEWARD_SESSION_SECRET>
-
-# Tenant API key (from tenant creation step above)
-STEWARD_AGENT_TOKEN=<tenant apiKey from step 7>
+# Tenant API key (server-side only, from tenant creation step above)
+STEWARD_API_KEY=<tenant apiKey from step 7>
 ```
+
+The JWT signing secret belongs only to Steward's server-side API and proxy
+services. Do not add `STEWARD_JWT_SECRET` or its deprecated
+`STEWARD_SESSION_SECRET` fallback to Vercel or any browser-facing environment.
+Keep `STEWARD_API_KEY` in Vercel's server-only environment as well; never use a
+`NEXT_PUBLIC_` prefix or otherwise include it in the browser bundle.
 
 Redeploy the Vercel app after setting these.
 
@@ -367,7 +367,7 @@ If you need the credential-injection proxy (for managing API keys on behalf of a
    NODE_ENV=production
    DATABASE_URL=${{Postgres.DATABASE_URL}}
    STEWARD_MASTER_PASSWORD=<same as API service>
-   STEWARD_SESSION_SECRET=<same as API service>
+   STEWARD_JWT_SECRET=<same as API service>
    REDIS_URL=${{Redis.REDIS_URL}}
    ```
 5. Health check: **Path:** `/health`, **Port:** `8080`
@@ -429,9 +429,9 @@ curl -sf "$BASE/platform/tenants" \
 | `STEWARD_BIND_HOST` | No | `127.0.0.1` | Bind host. **Set `0.0.0.0` on Railway** |
 | `NODE_ENV` | No | — | Set `production` |
 | `DATABASE_URL` | **Yes** | — | Postgres connection string |
-| `STEWARD_MASTER_PASSWORD` | **Yes** | — | Vault encryption + fallback JWT signing |
-| `STEWARD_SESSION_SECRET` | Recommended | Falls back to master password | User session JWT signing secret |
-| `STEWARD_JWT_SECRET` | No | Falls back to master password | Agent JWT signing secret |
+| `STEWARD_MASTER_PASSWORD` | **Yes** | — | Vault encryption secret. Keep separate from JWT signing material. |
+| `STEWARD_JWT_SECRET` | **Yes** | — | Canonical server-side signing and verification secret for user, session, and agent JWTs. Must be at least 32 characters in production. |
+| `STEWARD_SESSION_SECRET` | No | — | Deprecated compatibility fallback. Rename existing deployments to `STEWARD_JWT_SECRET`. |
 | `STEWARD_PLATFORM_KEYS` | **Yes** | — | Platform admin key(s), comma-separated |
 | `STEWARD_DEFAULT_TENANT_KEY` | No | — | Default tenant key for single-tenant mode |
 | `RPC_URL` | No | `https://sepolia.base.org` | EVM RPC endpoint |

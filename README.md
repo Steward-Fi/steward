@@ -112,7 +112,7 @@ Components include `StewardLogin`, `StewardAuthGuard`, `StewardUserButton`, `Ste
 git clone https://github.com/Steward-Fi/steward.git && cd steward
 cp .env.example .env
 # Set STEWARD_MASTER_PASSWORD, POSTGRES_PASSWORD, STEWARD_PLATFORM_KEYS,
-# STEWARD_SESSION_SECRET, and STEWARD_JWT_SECRET in .env.
+# and STEWARD_JWT_SECRET in .env.
 docker compose up -d
 curl http://127.0.0.1:3200/ready
 ```
@@ -133,7 +133,8 @@ Embedded mode uses PGLite, an in-process PostgreSQL-compatible database through 
 |---|---|
 | `STEWARD_MASTER_PASSWORD` | Derives vault encryption keys. There is no recovery if it is lost. |
 | `DATABASE_URL` | PostgreSQL connection string, not needed in embedded mode. |
-| `STEWARD_SESSION_SECRET` | JWT signing secret, defaults to the master password. |
+| `STEWARD_JWT_SECRET` | Canonical JWT signing and verification secret. Required in production and at least 32 characters. Keep it server-side and separate from the master password. |
+| `STEWARD_SESSION_SECRET` | Deprecated compatibility fallback for existing deployments. Rename it to `STEWARD_JWT_SECRET`. |
 | `REDIS_URL` | Redis for rate limiting and the token store, optional. |
 | `RESEND_API_KEY` | Email magic-link authentication, optional. |
 | `PASSKEY_RP_ID` | WebAuthn relying-party domain, optional. |

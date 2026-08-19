@@ -67,10 +67,9 @@ function renderEnv(options: InitOptions): string {
     "STEWARD_MASTER_PASSWORD=" + hex(32),
     "STEWARD_JWT_SECRET=" + hex(32),
     "STEWARD_EMAIL_CODE_SECRET=" + hex(32),
-    // PR4 provider execution authorization key rotation list. The active first
+    // Provider execution authorization key rotation list. The active first
     // entry signs and all entries verify. Keep this separate from JWT material.
     "STEWARD_EXECUTION_AUTH_SECRET=v1:" + hex(32),
-    "STEWARD_SESSION_SECRET=" + hex(32),
     "STEWARD_KDF_SALT=" + hex(32),
     // This env sets NODE_ENV=production with no STEWARD_KMS_PROVIDER, so the
     // vault resolves to `local` custody (plaintext key in app memory at sign
