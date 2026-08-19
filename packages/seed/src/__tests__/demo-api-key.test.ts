@@ -201,6 +201,7 @@ describe("demo API key", () => {
       expect(readFileSync(path, "utf8")).toContain(`STEWARD_API_KEY=${oldKey}`);
       expect(readFileSync(path, "utf8")).not.toContain("stw_00000000000000000000000000000000");
       expect(readFileSync(originalPending, "utf8")).toContain(`STEWARD_API_KEY=${nextKey}`);
+      expect(readdirSync(root).some((name) => name.includes(".promote-"))).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
