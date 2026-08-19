@@ -19,10 +19,13 @@ integration("Redis email challenge publication", () => {
     const backend = new RedisBackend(redis, prefix);
     const guardKey = "reservation";
     const credentialKey = "credential";
+    const priorCredentialKey = "prior-credential";
     await backend.set(guardKey, "reserved", 60_000);
+    await backend.set(priorCredentialKey, "still-active", 60_000);
 
     expect(
       await backend.publish([
+        { key: priorCredentialKey, value: null, expiresAt: Date.now() - 1 },
         { key: credentialKey, value: "active", expiresAt: Date.now() - 1 },
         {
           key: guardKey,
@@ -32,10 +35,12 @@ integration("Redis email challenge publication", () => {
         },
       ]),
     ).toBe(false);
+    expect(await backend.get(priorCredentialKey)).toBe("still-active");
     expect(await backend.get(credentialKey)).toBeNull();
     expect(await backend.get(guardKey)).toBe("reserved");
 
     await backend.delete(guardKey);
+    await backend.delete(priorCredentialKey);
     await backend.delete(credentialKey);
   });
 

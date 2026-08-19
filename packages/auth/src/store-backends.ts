@@ -166,7 +166,7 @@ export class MemoryBackend implements StoreBackend {
   async get(key: string): Promise<string | null> {
     const entry = this.store.get(key);
     if (!entry) return null;
-    if (Date.now() > entry.expiresAt) {
+    if (Date.now() >= entry.expiresAt) {
       this.store.delete(key);
       return null;
     }
@@ -177,7 +177,7 @@ export class MemoryBackend implements StoreBackend {
     const entry = this.store.get(key);
     if (!entry) return null;
     this.store.delete(key);
-    if (Date.now() > entry.expiresAt) return null;
+    if (Date.now() >= entry.expiresAt) return null;
     return entry.value;
   }
 
@@ -190,13 +190,13 @@ export class MemoryBackend implements StoreBackend {
   ): Promise<boolean> {
     if (guard) {
       const guarded = this.store.get(guard.key);
-      if (!guarded || Date.now() > guarded.expiresAt || guarded.value !== guard.expected) {
-        if (guarded && Date.now() > guarded.expiresAt) this.store.delete(guard.key);
+      if (!guarded || Date.now() >= guarded.expiresAt || guarded.value !== guard.expected) {
+        if (guarded && Date.now() >= guarded.expiresAt) this.store.delete(guard.key);
         return false;
       }
     }
     const entry = this.store.get(key);
-    if (!entry || Date.now() > entry.expiresAt) {
+    if (!entry || Date.now() >= entry.expiresAt) {
       this.store.delete(key);
       return false;
     }
@@ -215,7 +215,7 @@ export class MemoryBackend implements StoreBackend {
     if (entries.some((entry) => entry.value !== null && entry.expiresAt <= now)) return false;
     const currentValue = (key: string): string | null => {
       const current = this.store.get(key);
-      if (!current || now > current.expiresAt) return null;
+      if (!current || now >= current.expiresAt) return null;
       return current.value;
     };
     const guarded = entries.filter((entry) => entry.expected !== undefined);
@@ -239,7 +239,7 @@ export class MemoryBackend implements StoreBackend {
   private _cleanup(): void {
     const now = Date.now();
     for (const [key, entry] of this.store.entries()) {
-      if (now > entry.expiresAt) this.store.delete(key);
+      if (now >= entry.expiresAt) this.store.delete(key);
     }
   }
 

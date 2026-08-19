@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 
 import {
   buildBackend,
@@ -123,6 +123,31 @@ describe("NamespacedStoreBackend", () => {
     expect(await backend.get("replacement")).toBeNull();
     expect(await backend.get("generation")).toBe("reservation");
     backend.destroy();
+  });
+
+  it("treats an existing memory guard as expired at its exact deadline", async () => {
+    const now = spyOn(Date, "now").mockReturnValue(1_000);
+    const backend = new MemoryBackend();
+    try {
+      await backend.set("guard", "reserved", 1_000);
+      now.mockReturnValue(2_000);
+      expect(
+        await backend.publish([
+          {
+            key: "guard",
+            value: "published",
+            expiresAt: 3_000,
+            expected: "reserved",
+          },
+          { key: "credential", value: "active", expiresAt: 3_000 },
+        ]),
+      ).toBe(false);
+      expect(await backend.get("guard")).toBeNull();
+      expect(await backend.get("credential")).toBeNull();
+    } finally {
+      backend.destroy();
+      now.mockRestore();
+    }
   });
 
   it("passes absolute deadlines to an atomic Redis server-time publication", async () => {
