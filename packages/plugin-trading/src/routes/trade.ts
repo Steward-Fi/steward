@@ -1871,6 +1871,9 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
         const market = await getMarketByToken(body.tokenId, clobUrl ? { clobUrl } : undefined);
         verifiedConditionId = market.conditionId;
       } catch (error) {
+        // Nothing reached execution. Release before the observational audit so
+        // an audit outage cannot strand this safe retry behind a pending claim.
+        await idempotency.release?.();
         try {
           await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
             sessionId: session.id,
@@ -1883,10 +1886,11 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
             reason: "market-metadata-unavailable",
             ...redactedThrownDiagnostics(error),
           });
-        } finally {
-          // Metadata reads are pre-execution. Even if the audit sink fails, do
-          // not strand the request's claim and make a safe retry impossible.
-          await idempotency.release?.();
+        } catch (auditError) {
+          console.error(
+            "[polymarket/order] metadata-failure audit write failed",
+            redactedThrownDiagnostics(auditError),
+          );
         }
         return c.json<ApiResponse>(
           { ok: false, error: "Unable to verify Polymarket market binding" },

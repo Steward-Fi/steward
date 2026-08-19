@@ -405,37 +405,47 @@ describe("POST /v1/trade/polymarket/order", () => {
     });
     failingRoutes.onError(() => new Response("audit unavailable", { status: 500 }));
 
-    for (const scenario of ["metadata", "mismatch"] as const) {
-      const { tenantId, agentId, sessionId } = await seedSession({
-        allowedAssets: [`pm:cond:${COND_ID}`],
-      });
-      const app = makeApp(tenantId, agentId, failingRoutes);
-      const key = crypto.randomUUID();
-      const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
-        scenario === "metadata"
-          ? async () => {
-              throw new Error("metadata unavailable");
-            }
-          : async () =>
-              new Response(
-                JSON.stringify({
-                  condition_id: OTHER_COND_ID,
-                  primary_token_id: TOKEN_ID,
-                  secondary_token_id: "8".repeat(72),
-                }),
-                { status: 200 },
-              ),
-      );
+    const originalError = console.error;
+    const logs: string[] = [];
+    console.error = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+    try {
+      for (const scenario of ["metadata", "mismatch"] as const) {
+        const { tenantId, agentId, sessionId } = await seedSession({
+          allowedAssets: [`pm:cond:${COND_ID}`],
+        });
+        const app = makeApp(tenantId, agentId, failingRoutes);
+        const key = crypto.randomUUID();
+        const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+          scenario === "metadata"
+            ? async () => {
+                throw new Error("metadata unavailable");
+              }
+            : async () =>
+                new Response(
+                  JSON.stringify({
+                    condition_id: OTHER_COND_ID,
+                    primary_token_id: TOKEN_ID,
+                    secondary_token_id: "8".repeat(72),
+                  }),
+                  { status: 200 },
+                ),
+        );
 
-      try {
-        const extra = scenario === "mismatch" ? { conditionId: COND_ID } : {};
-        expect((await postOrder(app, sessionId, key, extra)).status).toBe(500);
-        expect((await postOrder(app, sessionId, key, extra)).status).toBe(500);
-        expect(fetchSpy).toHaveBeenCalledTimes(2);
-        expect(await dailySpendOf(sessionId)).toBe(0);
-      } finally {
-        fetchSpy.mockRestore();
+        try {
+          const extra = scenario === "mismatch" ? { conditionId: COND_ID } : {};
+          const expectedStatus = scenario === "metadata" ? 502 : 500;
+          expect((await postOrder(app, sessionId, key, extra)).status).toBe(expectedStatus);
+          expect((await postOrder(app, sessionId, key, extra)).status).toBe(expectedStatus);
+          expect(fetchSpy).toHaveBeenCalledTimes(2);
+          expect(await dailySpendOf(sessionId)).toBe(0);
+        } finally {
+          fetchSpy.mockRestore();
+        }
       }
+      expect(logs.join("\n")).not.toContain("audit unavailable");
+      expect(logs.join("\n")).not.toContain("metadata unavailable");
+    } finally {
+      console.error = originalError;
     }
   });
 
