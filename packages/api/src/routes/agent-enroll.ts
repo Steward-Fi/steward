@@ -34,6 +34,7 @@ import {
   verifyEnrollResponse,
 } from "@stwd/auth";
 import { agentSigners, eq } from "@stwd/db";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
 import {
@@ -78,6 +79,10 @@ function resolveEnrollTokenTtl(): string {
 const ENROLL_TOKEN_TTL = resolveEnrollTokenTtl();
 
 export const agentEnrollRoutes = new Hono<{ Variables: AppVariables }>();
+
+function reportEnrollmentFailure(message: string, error: unknown): void {
+  console.error(`[agent-enroll] ${message}`, redactedThrownDiagnostics(error));
+}
 
 /** Resolve an agent's ACTIVE p256 signer rows (+ its tenant) from agent_signers.
  * Returns the signers for the enrollment core AND the resolved tenantId (set as a
@@ -196,8 +201,10 @@ agentEnrollRoutes.post("/verify", async (c) => {
       action: "capability.enroll",
       resourceType: "agent",
       resourceId: agentId,
-      metadata: { decision: "deny", code: result.code },
-    }).catch(() => {});
+      metadata: { stage: "authorization", decision: "deny", code: result.code },
+    }).catch((error) => {
+      reportEnrollmentFailure("denial audit unavailable", error);
+    });
     return c.json<ApiResponse>({ ok: false, error: "enrollment denied" }, 401);
   }
 
@@ -207,20 +214,46 @@ agentEnrollRoutes.post("/verify", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "enrollment denied" }, 401);
   }
 
-  const token = await signAgentToken(
-    { agentId, tenantId: resolvedTenant, scopes: ["agent"] },
-    ENROLL_TOKEN_TTL,
-  );
+  try {
+    await writeAuditEvent({
+      tenantId: resolvedTenant,
+      actorType: "agent",
+      actorId: agentId,
+      action: "capability.enroll",
+      resourceType: "agent",
+      resourceId: agentId,
+      metadata: { stage: "authorization", decision: "allow", ttl: ENROLL_TOKEN_TTL },
+    });
+  } catch (error) {
+    reportEnrollmentFailure("authorization audit unavailable", error);
+    return c.json<ApiResponse>({ ok: false, error: "enrollment unavailable" }, 503);
+  }
 
-  await writeAuditEvent({
-    tenantId: resolvedTenant,
-    actorType: "agent",
-    actorId: agentId,
-    action: "capability.enroll",
-    resourceType: "agent",
-    resourceId: agentId,
-    metadata: { decision: "allow", ttl: ENROLL_TOKEN_TTL },
-  }).catch(() => {});
+  let token: string;
+  try {
+    token = await signAgentToken(
+      { agentId, tenantId: resolvedTenant, scopes: ["agent"] },
+      ENROLL_TOKEN_TTL,
+    );
+  } catch (error) {
+    reportEnrollmentFailure("token signing failed", error);
+    return c.json<ApiResponse>({ ok: false, error: "enrollment unavailable" }, 503);
+  }
+
+  try {
+    await writeAuditEvent({
+      tenantId: resolvedTenant,
+      actorType: "agent",
+      actorId: agentId,
+      action: "capability.enroll",
+      resourceType: "agent",
+      resourceId: agentId,
+      metadata: { stage: "issuance", decision: "issued", ttl: ENROLL_TOKEN_TTL },
+    });
+  } catch (error) {
+    reportEnrollmentFailure("issuance audit unavailable", error);
+    return c.json<ApiResponse>({ ok: false, error: "enrollment unavailable" }, 503);
+  }
 
   c.header("Cache-Control", "no-store, max-age=0");
   c.header("Pragma", "no-cache");
