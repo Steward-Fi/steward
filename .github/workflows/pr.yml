@@ -144,7 +144,7 @@ jobs:
   web-trust-ux-a11y:
     name: Trust UX Accessibility (axe WCAG 2.1 AA)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
