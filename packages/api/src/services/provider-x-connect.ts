@@ -36,6 +36,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   and,
   asc,
+  auditEvents,
   desc,
   eq,
   getDb,
@@ -1072,28 +1073,53 @@ async function persistConnectedAccount(input: PersistInput): Promise<CompleteCon
       .limit(1)
       .for("update");
 
-    // Do not compare provider_accounts.updatedAt with this lifecycle. Account
-    // timestamps are supplied by application replicas while lifecycle
-    // timestamps are database-owned, so clock skew can let an older staged
-    // response overwrite a reconnect. The adopted connect journal gives us a
-    // database-ordered lineage marker under the account lock instead.
-    const [newerConnectAdoption] = account
+    // Timestamps are not a total order: replica clock skew, a database clock
+    // correction, or equal timestamp precision can all make a later reconnect
+    // appear older. The tenant audit sequence is serialized and monotonic, and
+    // both the exchange intent and successful adoption are required writes in
+    // the same transactions as their lifecycle changes.
+    const [connectIntentAudit] = account
       ? await tx
-          .select({ id: providerXCredentialLifecycles.id })
-          .from(providerXCredentialLifecycles)
+          .select({ seq: auditEvents.seq })
+          .from(auditEvents)
           .where(
             and(
-              eq(providerXCredentialLifecycles.tenantId, input.tenantId),
-              eq(providerXCredentialLifecycles.workspaceId, input.workspaceId),
-              eq(providerXCredentialLifecycles.providerAccountId, account.id),
-              eq(providerXCredentialLifecycles.kind, "connect_exchange"),
-              eq(providerXCredentialLifecycles.state, "adopted"),
-              sql`${providerXCredentialLifecycles.createdAt} > ${connectLifecycle.createdAt}`,
+              eq(auditEvents.tenantId, input.tenantId),
+              eq(auditEvents.action, "provider.x.connect.exchange_intent"),
+              eq(auditEvents.resourceType, "provider_x_credential_lifecycle"),
+              eq(auditEvents.resourceId, connectLifecycle.id),
             ),
           )
+          .orderBy(desc(auditEvents.seq))
           .limit(1)
-          .for("update")
       : [];
+    if (account && !connectIntentAudit) {
+      throw new XConnectError(
+        "X_CREDENTIAL_NEEDS_ATTENTION",
+        409,
+        "staged X connect lineage cannot be established",
+      );
+    }
+    const [newerConnectAdoption] =
+      account && connectIntentAudit
+        ? await tx
+            .select({ id: auditEvents.id })
+            .from(auditEvents)
+            .where(
+              and(
+                eq(auditEvents.tenantId, input.tenantId),
+                eq(auditEvents.resourceType, "provider_account"),
+                eq(auditEvents.resourceId, account.id),
+                inArray(auditEvents.action, [
+                  "provider.x.connect.completed",
+                  "provider.x.connect.reconnected",
+                ]),
+                sql`${auditEvents.seq} > ${connectIntentAudit.seq}`,
+              ),
+            )
+            .orderBy(desc(auditEvents.seq))
+            .limit(1)
+        : [];
     if (newerConnectAdoption) {
       throw new XConnectError(
         "X_CREDENTIAL_NEEDS_ATTENTION",
