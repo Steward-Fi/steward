@@ -42,6 +42,17 @@ const PROXY_URL = "https://proxy.a3-e2e.test";
 const CAP_MIGRATIONS = fileURLToPath(
   new URL("../../../plugin-capabilities/drizzle", import.meta.url),
 );
+const TEST_ENV_KEYS = [
+  "STEWARD_PGLITE_MEMORY",
+  "STEWARD_MASTER_PASSWORD",
+  "STEWARD_JWT_SECRET",
+  "STEWARD_AUDIT_HMAC_KEY",
+  "STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE",
+  "STEWARD_PROXY_REQUEST_SIGNING_SECRET",
+  "STEWARD_PROXY_ALLOWED_HOSTS",
+  "STEWARD_PROXY_DEV_MODE",
+  "STEWARD_PROXY_URL",
+] as const;
 
 let keypair: Awaited<ReturnType<typeof generateP256KeyPair>>;
 let tenantId: string;
@@ -51,6 +62,8 @@ let capName: string;
 let forwarded: { url: string; auth: string | null; bodyText: string | null } | null = null;
 let proxyApp: Hono | null = null;
 const realFetch = globalThis.fetch;
+let originalEnv = new Map<string, string | undefined>();
+let resetProxyHandlerTestHooksForTests: (() => void) | undefined;
 
 // Real A1 route factories + agent-jwt middleware.
 let agentEnrollRoutes: Hono<{ Variables: AppVariables }>;
@@ -125,12 +138,15 @@ async function buildStewardAppContext() {
 }
 
 beforeAll(async () => {
+  originalEnv = new Map(TEST_ENV_KEYS.map((key) => [key, process.env[key]]));
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "a3-agent-client-e2e-jwt-secret-with-enough-bytes-0123456789";
+  process.env.STEWARD_AUDIT_HMAC_KEY = "a3-agent-client-e2e-audit-hmac-key-with-enough-bytes";
   process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
   process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET = SIGNING_SECRET;
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.github.com";
+  process.env.STEWARD_PROXY_DEV_MODE = "true";
   process.env.STEWARD_PROXY_URL = PROXY_URL;
 
   const { db, client } = await createPGLiteDb("memory://");
@@ -148,8 +164,12 @@ beforeAll(async () => {
     handleProxy,
     __setForwardProxyRequestForTests: setForward,
     __setResolveProxyHostForTests: setResolveHost,
+    __setCheckProxyRateLimitForTests: setCheckProxyRateLimitForTests,
+    __resetProxyHandlerTestHooksForTests: resetProxyHooks,
   } = await import("@stwd/proxy/src/handlers/proxy");
+  resetProxyHandlerTestHooksForTests = resetProxyHooks;
   setResolveHost(async () => [{ address: "93.184.216.34", family: 4 }]);
+  setCheckProxyRateLimitForTests(async () => ({ allowed: true, resetMs: 0 }));
   setForward(async (url, method, headers, body) => {
     const bodyText = body ? await new Response(body).text() : null;
     forwarded = {
@@ -244,17 +264,12 @@ beforeAll(async () => {
 
 afterAll(async () => {
   globalThis.fetch = realFetch;
+  resetProxyHandlerTestHooksForTests?.();
   await closeDb().catch(() => {});
-  for (const k of [
-    "STEWARD_PGLITE_MEMORY",
-    "STEWARD_MASTER_PASSWORD",
-    "STEWARD_JWT_SECRET",
-    "STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE",
-    "STEWARD_PROXY_REQUEST_SIGNING_SECRET",
-    "STEWARD_PROXY_ALLOWED_HOSTS",
-    "STEWARD_PROXY_URL",
-  ]) {
-    delete process.env[k];
+  for (const key of TEST_ENV_KEYS) {
+    const original = originalEnv.get(key);
+    if (original === undefined) delete process.env[key];
+    else process.env[key] = original;
   }
 });
 
