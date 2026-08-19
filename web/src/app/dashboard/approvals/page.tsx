@@ -22,13 +22,16 @@ export default function ApprovalsPage() {
   const auth = useAuth();
   const walletRuntimeReady = useWalletRuntimeReady();
   const activeTenantId = auth.tenant?.tenantId ?? null;
+  const sessionUserId = auth.userId ?? null;
   const authReady =
     auth.isAuthenticated &&
     !auth.isLoading &&
     activeTenantId !== null &&
+    sessionUserId !== null &&
     auth.sessionTenantId === activeTenantId &&
     auth.accessToken !== null &&
     walletRuntimeReady;
+  const sessionEpoch = authReady ? JSON.stringify([activeTenantId, sessionUserId]) : null;
   const client = useMemo(
     () =>
       authReady
@@ -37,13 +40,15 @@ export default function ApprovalsPage() {
     [auth.accessToken, authReady],
   );
   const [pending, setPending] = useState<PendingItem[]>([]);
-  const [loadedTenantId, setLoadedTenantId] = useState<string | null>(null);
+  const [loadedSessionEpoch, setLoadedSessionEpoch] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const requestGeneration = useRef(0);
-  const requestedTenant = useRef<string | null>(null);
+  const requestedSessionEpoch = useRef<string | null>(null);
+  const currentSessionEpoch = useRef(sessionEpoch);
+  currentSessionEpoch.current = sessionEpoch;
 
   function addToast(message: string, kind: Toast["kind"]) {
     const id = `${Date.now()}-${Math.random()}`;
@@ -55,9 +60,9 @@ export default function ApprovalsPage() {
 
   const loadPending = useCallback(async () => {
     const generation = ++requestGeneration.current;
-    const tenantId = activeTenantId;
+    const requestSessionEpoch = sessionEpoch;
     setPending([]);
-    setLoadedTenantId(null);
+    setLoadedSessionEpoch(null);
     setActionLoading(null);
     if (!authReady) {
       setLoading(true);
@@ -69,37 +74,50 @@ export default function ApprovalsPage() {
       setError(null);
       // Request the max page size so the dashboard shows all pending items in a single load.
       const items = await client!.listApprovals({ limit: 200 });
-      if (requestGeneration.current !== generation) return;
+      if (
+        requestGeneration.current !== generation ||
+        currentSessionEpoch.current !== requestSessionEpoch
+      )
+        return;
       setPending(items);
-      setLoadedTenantId(tenantId);
+      setLoadedSessionEpoch(requestSessionEpoch);
     } catch (e: unknown) {
-      if (requestGeneration.current !== generation) return;
+      if (
+        requestGeneration.current !== generation ||
+        currentSessionEpoch.current !== requestSessionEpoch
+      )
+        return;
       setError(e instanceof Error ? e.message : "Failed to load approvals");
-      setLoadedTenantId(tenantId);
+      setLoadedSessionEpoch(requestSessionEpoch);
     } finally {
-      if (requestGeneration.current === generation) setLoading(false);
+      if (
+        requestGeneration.current === generation &&
+        currentSessionEpoch.current === requestSessionEpoch
+      )
+        setLoading(false);
     }
-  }, [activeTenantId, authReady, client]);
+  }, [authReady, client, sessionEpoch]);
 
   useEffect(() => {
     if (!authReady) {
       requestGeneration.current += 1;
-      requestedTenant.current = null;
+      requestedSessionEpoch.current = null;
       setPending([]);
-      setLoadedTenantId(null);
+      setLoadedSessionEpoch(null);
       setActionLoading(null);
       setError(null);
       setLoading(true);
       return;
     }
-    if (requestedTenant.current === activeTenantId) return;
-    requestedTenant.current = activeTenantId;
+    if (requestedSessionEpoch.current === sessionEpoch) return;
+    requestedSessionEpoch.current = sessionEpoch;
+    setToasts([]);
     void loadPending();
-  }, [activeTenantId, authReady, loadPending]);
+  }, [authReady, loadPending, sessionEpoch]);
 
   async function handleAction(txId: string, action: "approve" | "reject") {
     const generation = requestGeneration.current;
-    const tenantId = activeTenantId;
+    const actionSessionEpoch = sessionEpoch;
     const key = `${txId}-${action}`;
     setActionLoading(key);
     try {
@@ -108,7 +126,11 @@ export default function ApprovalsPage() {
       } else {
         await client!.denyTransaction(txId, "Rejected from dashboard");
       }
-      if (requestGeneration.current !== generation || activeTenantId !== tenantId) return;
+      if (
+        requestGeneration.current !== generation ||
+        currentSessionEpoch.current !== actionSessionEpoch
+      )
+        return;
       setPending((prev) => prev.filter((item) => item.txId !== txId));
       addToast(
         action === "approve"
@@ -117,20 +139,27 @@ export default function ApprovalsPage() {
         "success",
       );
     } catch (e: unknown) {
-      if (requestGeneration.current !== generation || activeTenantId !== tenantId) return;
+      if (
+        requestGeneration.current !== generation ||
+        currentSessionEpoch.current !== actionSessionEpoch
+      )
+        return;
       addToast(e instanceof Error ? e.message : `Failed to ${action}`, "error");
     } finally {
-      if (requestGeneration.current === generation && activeTenantId === tenantId) {
+      if (
+        requestGeneration.current === generation &&
+        currentSessionEpoch.current === actionSessionEpoch
+      ) {
         setActionLoading(null);
       }
     }
   }
 
-  const tenantIsCurrent = loadedTenantId === activeTenantId;
-  const visiblePending = tenantIsCurrent ? pending : [];
-  const visibleError = tenantIsCurrent ? error : null;
+  const sessionIsCurrent = loadedSessionEpoch === sessionEpoch;
+  const visiblePending = sessionIsCurrent ? pending : [];
+  const visibleError = sessionIsCurrent ? error : null;
 
-  if (loading || !tenantIsCurrent) {
+  if (loading || !sessionIsCurrent) {
     return (
       <div className="space-y-8">
         <div className="h-8 w-48 bg-bg-surface animate-pulse" />

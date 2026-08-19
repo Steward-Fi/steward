@@ -53,7 +53,7 @@ export function useAuth(): AuthContextType {
     return {
       address: (user as unknown as Record<string, unknown>)?.address as string | undefined,
       email: user?.email ?? undefined,
-      userId: user?.id ?? undefined,
+      userId: user?.id ?? auth.session?.userId ?? undefined,
       tenant,
       isAuthenticated: auth.isAuthenticated,
       isLoading: auth.isLoading,

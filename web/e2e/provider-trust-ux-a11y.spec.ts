@@ -17,18 +17,22 @@ function base64UrlJson(value: unknown): string {
   return Buffer.from(JSON.stringify(value)).toString("base64url");
 }
 
-function sessionToken(tenantId = "tenant-trust"): string {
+function sessionToken(
+  tenantId = "tenant-trust",
+  userId = "trust-reviewer",
+  expiresInSeconds = 3600,
+): string {
   const now = Math.floor(Date.now() / 1000);
   return [
     base64UrlJson({ alg: "none", typ: "JWT" }),
     base64UrlJson({
       email: "trust-reviewer@example.test",
-      exp: now + 3600,
+      exp: now + expiresInSeconds,
       iat: now,
       role: "owner",
       tenantId,
       tenantRole: "owner",
-      userId: "trust-reviewer",
+      userId,
     }),
     "test-signature",
   ].join(".");
@@ -490,7 +494,7 @@ test("tenant rotation waits for the matching session credential before loading",
   page,
 }) => {
   const tenantBToken = sessionToken("tenant-b");
-  let releaseRefresh: (() => void) | null = null;
+  let releaseRefresh = () => {};
   let refreshStarted = false;
   let approvalRequests = 0;
   const refreshGate = new Promise<void>((resolve) => {
@@ -528,8 +532,52 @@ test("tenant rotation waits for the matching session credential before loading",
   await page.waitForTimeout(100);
   expect(approvalRequests).toBe(1);
 
-  releaseRefresh?.();
+  releaseRefresh();
   await expect(page.getByText("Tenant B agent")).toBeVisible();
+  expect(approvalRequests).toBe(2);
+});
+
+test("same-tenant user rotation clears the prior queue and reloads once", async ({ page }) => {
+  const tenantId = "tenant-trust";
+  const userBToken = sessionToken(tenantId, "trust-reviewer-b");
+  let releaseRefresh = () => {};
+  let refreshStarted = false;
+  let approvalRequests = 0;
+  const refreshGate = new Promise<void>((resolve) => {
+    releaseRefresh = resolve;
+  });
+
+  await page.addInitScript(
+    ({ token }) => {
+      window.sessionStorage.setItem("steward_session_token", token);
+    },
+    { token: sessionToken(tenantId, "trust-reviewer-a", 60) },
+  );
+  await page.route("**/api/auth/refresh", async (route) => {
+    refreshStarted = true;
+    await refreshGate;
+    await route.fulfill({ json: { ok: true, token: userBToken, expiresIn: 3600 } });
+  });
+  await mockAccessibilityApis(page);
+  await page.route(`${API}/approvals**`, async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    approvalRequests += 1;
+    const authorization = route.request().headers().authorization ?? null;
+    const user = authorization === `Bearer ${userBToken}` ? "b" : "a";
+    await route.fulfill({ json: { ok: true, data: [approvalQueueItem(user)] } });
+  });
+
+  await page.goto("/dashboard/approvals");
+  await expect(page.getByText("Tenant A agent")).toBeVisible();
+  await expect.poll(() => refreshStarted).toBe(true);
+  expect(approvalRequests).toBe(1);
+
+  releaseRefresh();
+  await expect(page.getByText("Tenant B agent")).toBeVisible();
+  await expect(page.getByText("Tenant A agent")).toHaveCount(0);
   expect(approvalRequests).toBe(2);
 });
 
