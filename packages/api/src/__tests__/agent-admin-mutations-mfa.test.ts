@@ -9,12 +9,20 @@ import {
   agentWallets,
   approvalQueue,
   auditEvents,
+  closeDb,
   encryptedChainKeys,
   encryptedKeys,
   getDb,
+  pendingProxyRequests,
   policies,
+  secretRoutes,
+  secrets,
   tenants,
   transactions,
+  upstreamCredentialLeaseEvents,
+  upstreamCredentialLeases,
+  users,
+  workspaces,
 } from "@stwd/db";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
@@ -22,6 +30,7 @@ import type { AppVariables } from "../services/context";
 import {
   cleanupAgentBehaviorTestDatabase,
   setupAgentBehaviorTestDatabase,
+  USING_REAL_POSTGRES,
 } from "./agent-behavior-test-database";
 
 /**
@@ -92,7 +101,11 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
 
   afterAll(async () => {
     try {
-      await cleanupAgentBehaviorTestDatabase(TENANT_ID);
+      // Real-Postgres coverage retains append-only lease evidence whose
+      // workspace intentionally prevents tenant teardown. The CI database is
+      // job-scoped; PGLite remains fully hermetic and closes normally.
+      if (USING_REAL_POSTGRES) await closeDb();
+      else await cleanupAgentBehaviorTestDatabase(TENANT_ID);
     } finally {
       for (const [name, value] of originalEnv) {
         if (value === undefined) delete process.env[name];
@@ -589,6 +602,93 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       updatedBy: "test",
       updatedReason: "dependent rollback fixture",
     });
+    const workspaceId = crypto.randomUUID();
+    const secretId = crypto.randomUUID();
+    const routeId = crypto.randomUUID();
+    const leaseId = crypto.randomUUID();
+    const pendingRequestId = crypto.randomUUID();
+    const executingRequestId = crypto.randomUUID();
+    const workspaceCreatorId = crypto.randomUUID();
+    await getDb()
+      .insert(users)
+      .values({
+        id: workspaceCreatorId,
+        email: `${workspaceCreatorId}@delete-retry.test`,
+      });
+    await getDb()
+      .insert(workspaces)
+      .values({
+        id: workspaceId,
+        tenantId: TENANT_ID,
+        key: `delete-retry-${workspaceId}`,
+        name: "Delete retry workspace",
+        environment: "production",
+        createdBy: workspaceCreatorId,
+      });
+    await getDb()
+      .insert(secrets)
+      .values({
+        id: secretId,
+        tenantId: TENANT_ID,
+        name: `delete-retry-${secretId}`,
+        ciphertext: "ciphertext",
+        iv: "iv",
+        authTag: "auth-tag",
+        salt: "salt",
+      });
+    await getDb().insert(secretRoutes).values({
+      id: routeId,
+      tenantId: TENANT_ID,
+      agentId: AGENT_ID,
+      secretId,
+      hostPattern: "delete-retry.example.test",
+      injectAs: "header",
+      injectKey: "authorization",
+      enabled: true,
+    });
+    const proxyRequestFixture = (id: string, status: "pending" | "executing") => ({
+      id,
+      tenantId: TENANT_ID,
+      agentId: AGENT_ID,
+      routeId,
+      method: "POST",
+      targetHost: "delete-retry.example.test",
+      targetPath: "/mutation",
+      requestDigest: "d".repeat(64),
+      bodyCiphertext: "body",
+      bodyIv: "iv",
+      bodyAuthTag: "tag",
+      bodySalt: "salt",
+      status,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await getDb()
+      .insert(pendingProxyRequests)
+      .values([
+        proxyRequestFixture(pendingRequestId, "pending"),
+        proxyRequestFixture(executingRequestId, "executing"),
+      ]);
+    await getDb()
+      .insert(upstreamCredentialLeases)
+      .values({
+        id: leaseId,
+        tenantId: TENANT_ID,
+        workspaceId,
+        agentId: AGENT_ID,
+        grantId: crypto.randomUUID(),
+        capabilityId: crypto.randomUUID(),
+        issuer: "github-app-installation",
+        resource: {},
+        resourceHash: "a".repeat(64),
+        authorityDigest: "b".repeat(64),
+        idempotencyKeyHash: "c".repeat(64),
+        tokenHash: "d".repeat(64),
+        tokenCiphertext: "lease-ciphertext",
+        tokenIv: "lease-iv",
+        tokenAuthTag: "lease-tag",
+        tokenSalt: "lease-salt",
+        status: "active",
+      });
 
     const beforeAgent = await getDb().select().from(agents).where(eq(agents.id, AGENT_ID));
     const beforeWallets = await getDb()
@@ -627,6 +727,18 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       .select()
       .from(agentPolicies)
       .where(eq(agentPolicies.agentId, AGENT_ID));
+    const beforeRoutes = await getDb()
+      .select()
+      .from(secretRoutes)
+      .where(eq(secretRoutes.agentId, AGENT_ID));
+    const beforeProxyRequests = await getDb()
+      .select()
+      .from(pendingProxyRequests)
+      .where(eq(pendingProxyRequests.agentId, AGENT_ID));
+    const beforeLeases = await getDb()
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(eq(upstreamCredentialLeases.agentId, AGENT_ID));
 
     try {
       await getDb().execute(
@@ -684,6 +796,27 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       expect(
         await getDb().select().from(agentPolicies).where(eq(agentPolicies.agentId, AGENT_ID)),
       ).toEqual(beforeTradePolicies);
+      expect(
+        await getDb().select().from(secretRoutes).where(eq(secretRoutes.agentId, AGENT_ID)),
+      ).toEqual(beforeRoutes);
+      expect(
+        await getDb()
+          .select()
+          .from(pendingProxyRequests)
+          .where(eq(pendingProxyRequests.agentId, AGENT_ID)),
+      ).toEqual(beforeProxyRequests);
+      expect(
+        await getDb()
+          .select()
+          .from(upstreamCredentialLeases)
+          .where(eq(upstreamCredentialLeases.agentId, AGENT_ID)),
+      ).toEqual(beforeLeases);
+      expect(
+        await getDb()
+          .select()
+          .from(upstreamCredentialLeaseEvents)
+          .where(eq(upstreamCredentialLeaseEvents.leaseId, leaseId)),
+      ).toHaveLength(0);
       expect(await revocationStore.getAgentRevokedBefore(AGENT_ID)).not.toBeNull();
     } finally {
       try {
@@ -725,6 +858,47 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
     expect(
       await getDb().select().from(agentPolicies).where(eq(agentPolicies.agentId, AGENT_ID)),
     ).toHaveLength(0);
+    const [disabledRoute] = await getDb()
+      .select()
+      .from(secretRoutes)
+      .where(eq(secretRoutes.id, routeId));
+    expect(disabledRoute).toMatchObject({ enabled: false, agentId: AGENT_ID });
+    const terminalProxyRequests = await getDb()
+      .select({ id: pendingProxyRequests.id, status: pendingProxyRequests.status })
+      .from(pendingProxyRequests)
+      .where(eq(pendingProxyRequests.agentId, AGENT_ID));
+    expect(new Map(terminalProxyRequests.map(({ id, status }) => [id, status]))).toEqual(
+      new Map([
+        [pendingRequestId, "denied"],
+        [executingRequestId, "failed"],
+      ]),
+    );
+    const [disposedLease] = await getDb()
+      .select()
+      .from(upstreamCredentialLeases)
+      .where(eq(upstreamCredentialLeases.id, leaseId));
+    expect(disposedLease).toMatchObject({
+      status: "revoked",
+      revokedAt: expect.any(Date),
+      tokenHash: null,
+      tokenCiphertext: null,
+      tokenIv: null,
+      tokenAuthTag: null,
+      tokenSalt: null,
+    });
+    expect(
+      await getDb()
+        .select()
+        .from(upstreamCredentialLeaseEvents)
+        .where(eq(upstreamCredentialLeaseEvents.leaseId, leaseId)),
+    ).toEqual([
+      expect.objectContaining({
+        tenantId: TENANT_ID,
+        action: "lease.revoked",
+        decision: "deny",
+        metadata: { reason: "agent_deleted" },
+      }),
+    ]);
 
     const deleteAudits = await getDb()
       .select({ action: auditEvents.action })
@@ -742,5 +916,36 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       "agent.delete.authorized",
       "agent.delete",
     ]);
+  });
+
+  it("serializes concurrent deletes and publishes one completion audit on real Postgres", async () => {
+    if (!USING_REAL_POSTGRES) return;
+    const concurrentAgentId = `concurrent-delete-${crypto.randomUUID()}`;
+    await getDb().insert(agents).values({
+      id: concurrentAgentId,
+      tenantId: TENANT_ID,
+      name: "Concurrent delete",
+      walletAddress: "0x9999999999999999999999999999999999999999",
+    });
+    const app = await makeApp("admin");
+    const responses = await Promise.all([
+      app.request(`/agents/${concurrentAgentId}`, { method: "DELETE" }),
+      app.request(`/agents/${concurrentAgentId}`, { method: "DELETE" }),
+    ]);
+    expect(responses.map(({ status }) => status).sort()).toEqual([200, 404]);
+    expect(
+      await getDb().select().from(agents).where(eq(agents.id, concurrentAgentId)),
+    ).toHaveLength(0);
+    const completionAudits = await getDb()
+      .select({ action: auditEvents.action })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, TENANT_ID),
+          eq(auditEvents.resourceId, concurrentAgentId),
+          eq(auditEvents.action, "agent.delete"),
+        ),
+      );
+    expect(completionAudits).toEqual([{ action: "agent.delete" }]);
   });
 });

@@ -29,9 +29,10 @@ describe("0109 agent policy builder-perps reconciliation", () => {
     expect(journal.entries.some(({ tag }) => tag === omittedMigration.replace(/\.sql$/, ""))).toBe(
       false,
     );
-    expect(journal.entries.slice(-2).map(({ idx, tag }) => ({ idx, tag }))).toEqual([
+    expect(journal.entries.slice(-3).map(({ idx, tag }) => ({ idx, tag }))).toEqual([
       { idx: 108, tag: "0108_evm_nonce_tenant_ownership" },
       { idx: 109, tag: "0109_agent_policy_builder_perps_reconcile" },
+      { idx: 110, tag: "0110_agent_delete_lease_lifecycle" },
     ]);
   });
 
@@ -70,10 +71,12 @@ describe("0109 agent policy builder-perps reconciliation", () => {
 
   const realPostgresTest = process.env.DATABASE_URL ? test : test.skip;
   realPostgresTest(
-    "upgrades a true journal-at-0108 database through 0109 exactly once",
+    "upgrades a true journal-at-0108 database through the current tip exactly once",
     async () => {
       const originalDatabaseUrl = process.env.DATABASE_URL!;
-      const admin = postgres(originalDatabaseUrl, { max: 1 });
+      const maintenanceUrl = new URL(originalDatabaseUrl);
+      maintenanceUrl.pathname = "/postgres";
+      const admin = postgres(maintenanceUrl.toString(), { max: 1 });
       const databaseName = `steward_0109_${process.pid}_${crypto.randomUUID().replaceAll("-", "")}`;
       const databaseUrl = new URL(originalDatabaseUrl);
       databaseUrl.pathname = `/${databaseName}`;
@@ -111,7 +114,10 @@ describe("0109 agent policy builder-perps reconciliation", () => {
 
         process.env.DATABASE_URL = databaseUrl.toString();
         const first = await runMigrations();
-        expect(first.applied).toEqual(["0109_agent_policy_builder_perps_reconcile"]);
+        expect(first.applied).toEqual([
+          "0109_agent_policy_builder_perps_reconcile",
+          "0110_agent_delete_lease_lifecycle",
+        ]);
         const second = await runMigrations();
         expect(second.applied).toEqual([]);
 
@@ -122,6 +128,13 @@ describe("0109 agent policy builder-perps reconciliation", () => {
           WHERE table_name='agent_policies' AND column_name='allow_builder_perps'
         `;
           expect(column).toEqual([{ column_default: "false", is_nullable: "NO" }]);
+          const leaseAgentFk = await verified<{ exists: boolean }[]>`
+            SELECT EXISTS (
+              SELECT 1 FROM pg_constraint
+              WHERE conname='upstream_credential_leases_agent_fk'
+            ) AS exists
+          `;
+          expect(leaseAgentFk).toEqual([{ exists: false }]);
           const applied = await verified<{ count: number }[]>`
           SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations
         `;

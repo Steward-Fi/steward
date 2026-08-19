@@ -5,7 +5,14 @@
  */
 
 import { hashSha256Hex, importP256PublicKey, revocationStore } from "@stwd/auth";
-import { agentPolicies, toPersistedPolicyRule } from "@stwd/db";
+import {
+  agentPolicies,
+  pendingProxyRequests,
+  secretRoutes,
+  toPersistedPolicyRule,
+  upstreamCredentialLeaseEvents,
+  upstreamCredentialLeases,
+} from "@stwd/db";
 import { getSpend, getSpendByHost, invalidateCache, type SpendPeriod } from "@stwd/redis";
 import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
@@ -1974,26 +1981,119 @@ agentRoutes.delete("/:agentId", async (c) => {
     });
     const issuedBefore = Math.floor(Date.now() / 1000);
     await revocationStore.revokeAgentTokens(agentId, issuedBefore);
-    await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
-      const tx = txRaw as typeof db;
-      // Cascade delete in dependency order
-      await tx.delete(approvalQueue).where(eq(approvalQueue.agentId, agentId));
-      await tx.delete(transactions).where(eq(transactions.agentId, agentId));
-      await tx.delete(policies).where(eq(policies.agentId, agentId));
-      await tx.delete(encryptedChainKeys).where(eq(encryptedChainKeys.agentId, agentId));
-      await tx.delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
-      await tx.delete(agentWallets).where(eq(agentWallets.agentId, agentId));
-      await tx.delete(agents).where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
-      await appendRequiredAudit(
-        agentAuditEvent(c, {
-          tenantId,
-          action: "agent.delete",
-          resourceType: "agent",
-          resourceId: agentId,
-          metadata: { revokedAgentTokensIssuedBefore: issuedBefore },
-        }),
-      );
-    });
+    const deleted = await withTenantAuditedTransaction(
+      tenantId,
+      async (txRaw, appendRequiredAudit) => {
+        const tx = txRaw as typeof db;
+        const [lockedAgent] = await tx
+          .select({ id: agents.id })
+          .from(agents)
+          .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)))
+          .for("update");
+        if (!lockedAgent) return false;
+
+        const disposedLeases = await tx
+          .update(upstreamCredentialLeases)
+          .set({
+            status: "revoked",
+            revokedAt: new Date(),
+            tokenHash: null,
+            tokenCiphertext: null,
+            tokenIv: null,
+            tokenAuthTag: null,
+            tokenSalt: null,
+            lastError: "agent authority deleted",
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(upstreamCredentialLeases.tenantId, tenantId),
+              eq(upstreamCredentialLeases.agentId, agentId),
+            ),
+          )
+          .returning({ id: upstreamCredentialLeases.id });
+        if (disposedLeases.length > 0) {
+          await tx.insert(upstreamCredentialLeaseEvents).values(
+            disposedLeases.map(({ id }) => ({
+              leaseId: id,
+              tenantId,
+              action: "lease.revoked",
+              decision: "deny",
+              metadata: { reason: "agent_deleted" },
+            })),
+          );
+        }
+
+        await tx
+          .update(secretRoutes)
+          .set({ enabled: false })
+          .where(
+            and(
+              eq(secretRoutes.tenantId, tenantId),
+              eq(secretRoutes.agentId, agentId),
+              eq(secretRoutes.enabled, true),
+            ),
+          );
+        const terminalizedAt = new Date();
+        await tx
+          .update(pendingProxyRequests)
+          .set({
+            status: "denied",
+            deniedAt: terminalizedAt,
+            deniedBy: "system:agent-delete",
+            denialReason: "agent authority deleted",
+            updatedAt: terminalizedAt,
+          })
+          .where(
+            and(
+              eq(pendingProxyRequests.tenantId, tenantId),
+              eq(pendingProxyRequests.agentId, agentId),
+              inArray(pendingProxyRequests.status, ["pending", "approved"]),
+            ),
+          );
+        await tx
+          .update(pendingProxyRequests)
+          .set({
+            status: "failed",
+            executedAt: terminalizedAt,
+            executionError: "agent authority deleted",
+            updatedAt: terminalizedAt,
+          })
+          .where(
+            and(
+              eq(pendingProxyRequests.tenantId, tenantId),
+              eq(pendingProxyRequests.agentId, agentId),
+              eq(pendingProxyRequests.status, "executing"),
+            ),
+          );
+        // Cascade delete in dependency order
+        await tx.delete(approvalQueue).where(eq(approvalQueue.agentId, agentId));
+        await tx.delete(transactions).where(eq(transactions.agentId, agentId));
+        await tx.delete(policies).where(eq(policies.agentId, agentId));
+        await tx.delete(encryptedChainKeys).where(eq(encryptedChainKeys.agentId, agentId));
+        await tx.delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
+        await tx.delete(agentWallets).where(eq(agentWallets.agentId, agentId));
+        const removedAgents = await tx
+          .delete(agents)
+          .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)))
+          .returning({ id: agents.id });
+        if (removedAgents.length !== 1) throw new Error("Agent changed concurrently");
+        await appendRequiredAudit(
+          agentAuditEvent(c, {
+            tenantId,
+            action: "agent.delete",
+            resourceType: "agent",
+            resourceId: agentId,
+            metadata: { revokedAgentTokensIssuedBefore: issuedBefore },
+          }),
+        );
+        return true;
+      },
+    );
+
+    if (!deleted) {
+      return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+    }
 
     return c.json<ApiResponse<{ deleted: string }>>({
       ok: true,

@@ -2659,11 +2659,8 @@ export const upstreamCredentialLeases = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    agentFk: foreignKey({
-      columns: [table.tenantId, table.agentId],
-      foreignColumns: [agents.tenantId, agents.id],
-      name: "upstream_credential_leases_agent_fk",
-    }).onDelete("restrict"),
+    // Lease evidence intentionally outlives deleted agent authority. The API
+    // terminalizes and scrubs leases transactionally before deleting an agent.
     workspaceFk: foreignKey({
       columns: [table.tenantId, table.workspaceId],
       foreignColumns: [workspaces.tenantId, workspaces.id],
