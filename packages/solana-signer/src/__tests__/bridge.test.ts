@@ -168,6 +168,29 @@ describe("bridge shared-secret auth", () => {
     expect(res.status).toBe(401);
   });
 
+  it("accepts the same secret as Authorization: Bearer (AgentNet's remote-wallet client)", async () => {
+    const res = await fetch(`${bridgeUrl}/pubkey`, {
+      headers: { authorization: `Bearer ${bridgeToken}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { address: string };
+    expect(body.address.length).toBeGreaterThan(30);
+  });
+
+  it("refuses a wrong bearer token with 401", async () => {
+    const res = await fetch(`${bridgeUrl}/pubkey`, {
+      headers: { authorization: `Bearer ${bridgeToken}x` },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("the custom header wins over a bearer header when both are present", async () => {
+    const res = await fetch(`${bridgeUrl}/pubkey`, {
+      headers: { [BRIDGE_TOKEN_HEADER]: `${bridgeToken}x`, authorization: `Bearer ${bridgeToken}` },
+    });
+    expect(res.status).toBe(401);
+  });
+
   it(`honors ${BRIDGE_TOKEN_ENV} from the env, the var both sides read`, async () => {
     const envToken = "e".repeat(BRIDGE_MIN_TOKEN_BYTES);
     process.env[BRIDGE_TOKEN_ENV] = envToken;
