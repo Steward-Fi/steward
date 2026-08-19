@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { sql } from "drizzle-orm";
 import {
   closeDb,
   getDb,
@@ -6,6 +7,7 @@ import {
   waitUntilRequestDatabaseTask,
   withRequestDatabase,
 } from "../client";
+import { createPGLiteDb } from "../pglite";
 
 const originalDriver = process.env.DATABASE_DRIVER;
 
@@ -111,22 +113,157 @@ describe("request-scoped database context", () => {
 
   test("does not expose raw capabilities through property descriptors or prototypes", async () => {
     const rawSession = { execute: () => "mutated" };
-    const requestDb = { session: rawSession } as unknown as ReturnType<typeof getDb>;
+    const requestDbSource = { session: rawSession };
+    Object.defineProperty(requestDbSource, "hook", {
+      configurable: true,
+      set(callback: (session: typeof rawSession) => void) {
+        callback(rawSession);
+      },
+    });
+    const requestDb = requestDbSource as unknown as ReturnType<typeof getDb>;
+    let capturedDb!: ReturnType<typeof getDb>;
     let capturedSession!: typeof rawSession;
 
     await withRequestDatabase(requestDb, async () => {
-      const guarded = getDb();
-      expect(Reflect.ownKeys(guarded)).toContain("session");
-      const descriptor = Object.getOwnPropertyDescriptor(guarded, "session");
+      capturedDb = getDb();
+      expect(Reflect.ownKeys(capturedDb)).toContain("session");
+      expect("session" in capturedDb).toBe(true);
+      expect(Object.isExtensible(capturedDb)).toBe(true);
+      const descriptor = Object.getOwnPropertyDescriptor(capturedDb, "session");
+      const hookDescriptor = Object.getOwnPropertyDescriptor(capturedDb, "hook");
       capturedSession = descriptor?.value as typeof rawSession;
       expect(capturedSession).not.toBe(rawSession);
       expect(capturedSession.execute()).toBe("mutated");
-      expect(() => Object.getPrototypeOf(guarded)).toThrow(
+      expect(() => hookDescriptor?.set?.(() => undefined)).toThrow(
+        "REQUEST_DATABASE_REFLECTION_UNAVAILABLE",
+      );
+      expect(() => Object.getPrototypeOf(capturedDb)).toThrow(
+        "REQUEST_DATABASE_REFLECTION_UNAVAILABLE",
+      );
+      expect(() => Object.defineProperty(capturedDb, "poison", { value: true })).toThrow(
+        "REQUEST_DATABASE_REFLECTION_UNAVAILABLE",
+      );
+      expect(() => Reflect.set(capturedDb, "poison", true)).toThrow(
+        "REQUEST_DATABASE_REFLECTION_UNAVAILABLE",
+      );
+      expect(() => Reflect.deleteProperty(capturedDb, "session")).toThrow(
+        "REQUEST_DATABASE_REFLECTION_UNAVAILABLE",
+      );
+      expect(() => Object.setPrototypeOf(capturedDb, {})).toThrow(
+        "REQUEST_DATABASE_REFLECTION_UNAVAILABLE",
+      );
+      expect(() => Object.preventExtensions(capturedDb)).toThrow(
+        "REQUEST_DATABASE_REFLECTION_UNAVAILABLE",
+      );
+      expect(() => Object.defineProperty(capturedSession, "poison", { value: true })).toThrow(
+        "REQUEST_DATABASE_REFLECTION_UNAVAILABLE",
+      );
+      expect(() => Object.setPrototypeOf(capturedSession, {})).toThrow(
+        "REQUEST_DATABASE_REFLECTION_UNAVAILABLE",
+      );
+      expect(() => Object.preventExtensions(capturedSession)).toThrow(
         "REQUEST_DATABASE_REFLECTION_UNAVAILABLE",
       );
     });
 
     expect(() => capturedSession.execute()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => "session" in capturedDb).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => Object.isExtensible(capturedDb)).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => Object.defineProperty(capturedDb, "poison", { value: true })).toThrow(
+      "REQUEST_DATABASE_CONTEXT_CLOSED",
+    );
+    expect(() => Reflect.set(capturedDb, "poison", true)).toThrow(
+      "REQUEST_DATABASE_CONTEXT_CLOSED",
+    );
+    expect(() => Reflect.deleteProperty(capturedDb, "session")).toThrow(
+      "REQUEST_DATABASE_CONTEXT_CLOSED",
+    );
+    expect(() => Object.setPrototypeOf(capturedDb, {})).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => Object.preventExtensions(capturedDb)).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => Object.defineProperty(capturedSession, "poison", { value: true })).toThrow(
+      "REQUEST_DATABASE_CONTEXT_CLOSED",
+    );
+    expect(() => Reflect.deleteProperty(capturedSession, "execute")).toThrow(
+      "REQUEST_DATABASE_CONTEXT_CLOSED",
+    );
+    expect(() => Object.setPrototypeOf(capturedSession, {})).toThrow(
+      "REQUEST_DATABASE_CONTEXT_CLOSED",
+    );
+    expect(() => Object.preventExtensions(capturedSession)).toThrow(
+      "REQUEST_DATABASE_CONTEXT_CLOSED",
+    );
+    expect(rawSession).toEqual({ execute: expect.any(Function) });
+    expect(Object.getPrototypeOf(rawSession)).toBe(Object.prototype);
+    expect(Object.isExtensible(rawSession)).toBe(true);
+    expect("poison" in (requestDb as object)).toBe(false);
+  });
+
+  test("revokes returned callables and transaction callback capabilities", async () => {
+    const rawTransaction = { execute: () => "raw-transaction-executed" };
+    const returnedCallable = (callback?: (tx: typeof rawTransaction) => string) =>
+      callback ? callback(rawTransaction) : "raw-callable-executed";
+    const requestDb = {
+      makeCallable: () => returnedCallable,
+      transaction: async (callback: (tx: typeof rawTransaction) => Promise<string>) =>
+        callback(rawTransaction),
+    } as unknown as ReturnType<typeof getDb>;
+    let capturedCallable!: typeof returnedCallable;
+    let capturedTransaction!: typeof rawTransaction;
+    let capturedFromCallable!: typeof rawTransaction;
+
+    const result = await withRequestDatabase(requestDb, async () => {
+      const guarded = getDb() as unknown as {
+        makeCallable: () => typeof returnedCallable;
+        transaction: (callback: (tx: typeof rawTransaction) => Promise<string>) => Promise<string>;
+      };
+      capturedCallable = guarded.makeCallable();
+      expect(capturedCallable()).toBe("raw-callable-executed");
+      expect(
+        capturedCallable((transaction) => {
+          capturedFromCallable = transaction;
+          expect(transaction).not.toBe(rawTransaction);
+          return transaction.execute();
+        }),
+      ).toBe("raw-transaction-executed");
+      const echoedTransaction = capturedCallable(
+        (transaction) => transaction as never,
+      ) as unknown as typeof rawTransaction;
+      expect(echoedTransaction).not.toBe(rawTransaction);
+      expect(echoedTransaction.execute()).toBe("raw-transaction-executed");
+      return guarded.transaction(async (tx) => {
+        capturedTransaction = tx;
+        expect(tx).not.toBe(rawTransaction);
+        return tx.execute();
+      });
+    });
+
+    expect(result).toBe("raw-transaction-executed");
+    expect(() => capturedCallable()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => capturedFromCallable.execute()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+    expect(() => capturedTransaction.execute()).toThrow("REQUEST_DATABASE_CONTEXT_CLOSED");
+  });
+
+  test("revokes a real PGLite transaction passed into a callback", async () => {
+    const { client, db } = await createPGLiteDb("memory://");
+    let capturedTransaction:
+      | { execute(query: ReturnType<typeof sql>): Promise<unknown> }
+      | undefined;
+
+    try {
+      await withRequestDatabase(db as ReturnType<typeof getDb>, async () => {
+        await getDb().transaction(async (transaction) => {
+          capturedTransaction = transaction;
+          await transaction.execute(sql`select 1`);
+        });
+      });
+
+      expect(capturedTransaction).toBeDefined();
+      expect(() => capturedTransaction!.execute(sql`select 1`)).toThrow(
+        "REQUEST_DATABASE_CONTEXT_CLOSED",
+      );
+    } finally {
+      await client.close();
+    }
   });
 
   test("drains registered detached work before revoking its database capability", async () => {

@@ -558,19 +558,41 @@ export function waitUntilRequestDatabaseTask<T>(task: () => Promise<T>): Promise
  */
 function guardRequestDatabaseValue<T>(value: T, context: RequestDatabaseContext): T {
   if ((typeof value !== "object" || value === null) && typeof value !== "function") return value;
-  if (value instanceof Promise) {
-    return trackRequestDatabaseTask(context, value) as T;
-  }
 
   const objectValue = value as object;
   const existing = context.guardedObjects.get(objectValue);
   if (existing) return existing as T;
+  if (value instanceof Promise) {
+    return trackRequestDatabaseTask(context, value) as T;
+  }
 
-  const guardMember = (target: object, member: unknown): unknown => {
+  const guardCallback = (callback: (...args: unknown[]) => unknown) => {
+    return function guardedDatabaseCallback(this: unknown, ...args: unknown[]): unknown {
+      assertRequestDatabaseContextActive(context);
+      const guardedThis = guardRequestDatabaseValue(this, context);
+      const guardedArgs = args.map((argument) => guardRequestDatabaseValue(argument, context));
+      const result = Reflect.apply(callback, guardedThis, guardedArgs);
+      return guardRequestDatabaseValue(result, context);
+    };
+  };
+
+  const guardCallbackArguments = (args: unknown[]): unknown[] =>
+    args.map((argument) =>
+      typeof argument === "function"
+        ? guardCallback(argument as (...callbackArgs: unknown[]) => unknown)
+        : argument,
+    );
+
+  const guardMember = (target: object, member: unknown, property?: PropertyKey): unknown => {
     if (typeof member === "function") {
       return (...args: unknown[]) => {
         assertRequestDatabaseContextActive(context);
-        const result = Reflect.apply(member, target, args);
+        // Drizzle query builders are PromiseLike. Their `then` callbacks are
+        // native assimilation continuations receiving ordinary result data,
+        // not database capabilities; wrapping them would proxy result arrays
+        // and make a completed query unusable after the request closes.
+        const guardedArgs = property === "then" ? args : guardCallbackArguments(args);
+        const result = Reflect.apply(member, target, guardedArgs);
         return guardRequestDatabaseValue(result, context);
       };
     }
@@ -581,11 +603,23 @@ function guardRequestDatabaseValue<T>(value: T, context: RequestDatabaseContext)
     get(target, property) {
       assertRequestDatabaseContextActive(context);
       const member = Reflect.get(target, property, target);
-      return guardMember(target, member);
+      return guardMember(target, member, property);
     },
-    set(target, property, nextValue) {
+    set() {
       assertRequestDatabaseContextActive(context);
-      return Reflect.set(target, property, nextValue, target);
+      throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
+    },
+    has(target, property) {
+      assertRequestDatabaseContextActive(context);
+      return Reflect.has(target, property);
+    },
+    defineProperty() {
+      assertRequestDatabaseContextActive(context);
+      throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
+    },
+    deleteProperty() {
+      assertRequestDatabaseContextActive(context);
+      throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
     },
     getOwnPropertyDescriptor(target, property) {
       assertRequestDatabaseContextActive(context);
@@ -595,7 +629,7 @@ function guardRequestDatabaseValue<T>(value: T, context: RequestDatabaseContext)
         throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
       }
       if ("value" in descriptor) {
-        return { ...descriptor, value: guardMember(target, descriptor.value) };
+        return { ...descriptor, value: guardMember(target, descriptor.value, property) };
       }
       return {
         ...descriptor,
@@ -606,9 +640,9 @@ function guardRequestDatabaseValue<T>(value: T, context: RequestDatabaseContext)
             }
           : undefined,
         set: descriptor.set
-          ? (nextValue: unknown) => {
+          ? () => {
               assertRequestDatabaseContextActive(context);
-              Reflect.apply(descriptor.set!, target, [nextValue]);
+              throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
             }
           : undefined,
       };
@@ -617,12 +651,39 @@ function guardRequestDatabaseValue<T>(value: T, context: RequestDatabaseContext)
       assertRequestDatabaseContextActive(context);
       throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
     },
+    setPrototypeOf() {
+      assertRequestDatabaseContextActive(context);
+      throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
+    },
+    isExtensible(target) {
+      assertRequestDatabaseContextActive(context);
+      return Reflect.isExtensible(target);
+    },
+    preventExtensions() {
+      assertRequestDatabaseContextActive(context);
+      throw new Error("REQUEST_DATABASE_REFLECTION_UNAVAILABLE");
+    },
     ownKeys(target) {
       assertRequestDatabaseContextActive(context);
       return Reflect.ownKeys(target);
     },
+    apply(target, thisArg, args) {
+      assertRequestDatabaseContextActive(context);
+      const result = Reflect.apply(
+        target as unknown as (...callArgs: unknown[]) => unknown,
+        thisArg,
+        guardCallbackArguments(args),
+      );
+      return guardRequestDatabaseValue(result, context);
+    },
+    construct(target, args) {
+      assertRequestDatabaseContextActive(context);
+      const result = Reflect.construct(target as unknown as Function, guardCallbackArguments(args));
+      return guardRequestDatabaseValue(result, context);
+    },
   });
   context.guardedObjects.set(objectValue, guarded);
+  context.guardedObjects.set(guarded, guarded);
   return guarded as T;
 }
 
