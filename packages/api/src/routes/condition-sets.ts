@@ -6,9 +6,10 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { redactedThrownDiagnostics } from "@stwd/shared";
 import { and, count, desc, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
-import { writeAuditEvent } from "../services/audit";
+import { withTenantAuditedTransaction, writeAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
@@ -70,6 +71,16 @@ type ReplaceItemsBody = {
 type ConditionSetRow = typeof conditionSets.$inferSelect;
 type ConditionSetItemRow = typeof conditionSetItems.$inferSelect;
 
+class ConditionSetValidationError extends Error {}
+
+function conditionSetMutationError(c: Parameters<typeof requireTenantLevel>[0], error: unknown) {
+  if (error instanceof ConditionSetValidationError) {
+    return c.json<ApiResponse>({ ok: false, error: error.message }, 400);
+  }
+  console.error("[condition-sets] persistence failure", redactedThrownDiagnostics(error));
+  return c.json<ApiResponse>({ ok: false, error: "Internal server error" }, 500);
+}
+
 function iso(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : String(value);
 }
@@ -103,21 +114,23 @@ function itemToResponse(row: typeof conditionSetItems.$inferSelect): ConditionSe
 function normalizeMetadata(value: unknown): Record<string, unknown> {
   if (value === undefined) return {};
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("metadata must be an object");
+    throw new ConditionSetValidationError("metadata must be an object");
   }
   if (JSON.stringify(value).length > MAX_ITEM_METADATA_BYTES) {
-    throw new Error(`metadata must not exceed ${MAX_ITEM_METADATA_BYTES} bytes`);
+    throw new ConditionSetValidationError(
+      `metadata must not exceed ${MAX_ITEM_METADATA_BYTES} bytes`,
+    );
   }
   return value as Record<string, unknown>;
 }
 
 function normalizeRequiredText(value: unknown, field: string, maxLength: number): string {
   if (!isNonEmptyString(value)) {
-    throw new Error(`${field} is required`);
+    throw new ConditionSetValidationError(`${field} is required`);
   }
   const trimmed = value.trim();
   if (trimmed.length > maxLength) {
-    throw new Error(`${field} must not exceed ${maxLength} characters`);
+    throw new ConditionSetValidationError(`${field} must not exceed ${maxLength} characters`);
   }
   return trimmed;
 }
@@ -130,22 +143,24 @@ function normalizeOptionalText(
   if (value === undefined) return undefined;
   if (value === null) return null;
   if (typeof value !== "string") {
-    throw new Error(`${field} must be a string`);
+    throw new ConditionSetValidationError(`${field} must be a string`);
   }
   const trimmed = value.trim();
   if (!trimmed) return null;
   if (trimmed.length > maxLength) {
-    throw new Error(`${field} must not exceed ${maxLength} characters`);
+    throw new ConditionSetValidationError(`${field} must not exceed ${maxLength} characters`);
   }
   return trimmed;
 }
 
 function normalizeItem(body: UpsertItemBody): UpsertItemBody {
   if (!isNonEmptyString(body.value)) {
-    throw new Error("item value is required and must be a non-empty string");
+    throw new ConditionSetValidationError("item value is required and must be a non-empty string");
   }
   if (body.value.trim().length > MAX_CONDITION_SET_ITEM_VALUE_LENGTH) {
-    throw new Error(`item value must not exceed ${MAX_CONDITION_SET_ITEM_VALUE_LENGTH} characters`);
+    throw new ConditionSetValidationError(
+      `item value must not exceed ${MAX_CONDITION_SET_ITEM_VALUE_LENGTH} characters`,
+    );
   }
   const label =
     normalizeOptionalText(body.label, "item label", MAX_CONDITION_SET_ITEM_LABEL_LENGTH) ?? null;
@@ -363,7 +378,8 @@ conditionSetRoutes.post("/", async (c) => {
       requestId: c.get("requestId") ?? null,
     });
 
-    const [row] = await db.transaction(async (tx) => {
+    const row = await withTenantAuditedTransaction(tenantId, async (txRaw, appendRequiredAudit) => {
+      const tx = txRaw as typeof db;
       if (shouldUsePostgresAdvisoryLocks()) {
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtext(${`condition_sets:${tenantId}`}))`,
@@ -375,10 +391,12 @@ conditionSetRoutes.post("/", async (c) => {
         .from(conditionSets)
         .where(eq(conditionSets.tenantId, tenantId));
       if (Number(total) >= MAX_CONDITION_SETS) {
-        throw new Error(`tenant cannot contain more than ${MAX_CONDITION_SETS} condition sets`);
+        throw new ConditionSetValidationError(
+          `tenant cannot contain more than ${MAX_CONDITION_SETS} condition sets`,
+        );
       }
 
-      return tx
+      const [created] = await tx
         .insert(conditionSets)
         .values({
           id: setId,
@@ -389,32 +407,25 @@ conditionSetRoutes.post("/", async (c) => {
           metadata,
         })
         .returning();
-    });
 
-    try {
-      await writeAuditEvent({
+      await appendRequiredAudit({
         tenantId,
         actorType: "user",
         actorId: c.get("userId") ?? tenantId,
         action: "condition_set.create",
         resourceType: "condition_set",
-        resourceId: row.id,
-        metadata: { name: row.name, ownerId: row.ownerId },
+        resourceId: created.id,
+        metadata: { name: created.name, ownerId: created.ownerId },
         ipAddress: c.req.header("x-forwarded-for") ?? null,
         userAgent: c.req.header("user-agent") ?? null,
         requestId: c.get("requestId") ?? null,
       });
-    } catch (error) {
-      await db
-        .delete(conditionSets)
-        .where(and(eq(conditionSets.id, row.id), eq(conditionSets.tenantId, tenantId)));
-      throw error;
-    }
+      return created;
+    });
 
     return c.json<ApiResponse<ConditionSetResponse>>({ ok: true, data: setToResponse(row) }, 201);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to create condition set";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+    return conditionSetMutationError(c, err);
   }
 });
 
@@ -517,8 +528,7 @@ conditionSetRoutes.patch("/:id", async (c) => {
 
     return c.json<ApiResponse<ConditionSetResponse>>({ ok: true, data: setToResponse(row) });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to update condition set";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+    return conditionSetMutationError(c, err);
   }
 });
 
@@ -680,7 +690,7 @@ conditionSetRoutes.post("/:id/items", async (c) => {
             ),
           );
         if (Number(total) >= MAX_CONDITION_SET_ITEMS) {
-          throw new Error(
+          throw new ConditionSetValidationError(
             `condition set cannot contain more than ${MAX_CONDITION_SET_ITEMS} items`,
           );
         }
@@ -729,8 +739,7 @@ conditionSetRoutes.post("/:id/items", async (c) => {
       201,
     );
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to add condition set item";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+    return conditionSetMutationError(c, err);
   }
 });
 
@@ -833,8 +842,7 @@ conditionSetRoutes.put("/:id/items", async (c) => {
       data: rows.map(itemToResponse),
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to replace condition set items";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+    return conditionSetMutationError(c, err);
   }
 });
 
@@ -952,8 +960,7 @@ conditionSetRoutes.patch("/:id/items/:itemId", async (c) => {
 
     return c.json<ApiResponse<ConditionSetItemResponse>>({ ok: true, data: itemToResponse(row) });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to update condition set item";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+    return conditionSetMutationError(c, err);
   }
 });
 
