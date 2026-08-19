@@ -73,6 +73,21 @@ describe("SUBMIT_TRADE action", () => {
     );
   });
 
+  it("normalizes adversarial API URL slash runs without regex backtracking", async () => {
+    const nearMiss = `https://steward.example/${"/".repeat(200_000)}x`;
+    process.env.STEWARD_API_URL = nearMiss;
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: true, data: { status: "active" } }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      submitTradeAction.validate({} as any, mockMemory("buy 0.01 BTC") as any),
+    ).resolves.toBe(true);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`${nearMiss}/v1/trade/sessions/ses_test`);
+  });
+
   it("posts parsed order with Bearer JWT and returns confirmation", async () => {
     const fetchMock = vi.fn(
       async () =>
