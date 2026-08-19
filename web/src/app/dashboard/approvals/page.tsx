@@ -3,7 +3,7 @@
 import type { ApprovalQueueEntry } from "@stwd/sdk";
 import { AnimatePresence, motion } from "framer-motion";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/components/auth-provider";
 import { ChainBadge } from "@/components/chain-badge";
 import { steward } from "@/lib/api";
@@ -25,10 +25,6 @@ export default function ApprovalsPage() {
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  useEffect(() => {
-    loadPending();
-  }, [loadPending]);
-
   function addToast(message: string, kind: Toast["kind"]) {
     const id = `${Date.now()}-${Math.random()}`;
     setToasts((prev) => [...prev, { id, message, kind }]);
@@ -37,11 +33,10 @@ export default function ApprovalsPage() {
     }, 3000);
   }
 
-  async function loadPending() {
+  const loadPending = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      // Request the max page size so the dashboard shows all pending items in a single load.
       // Request the max page size so the dashboard shows all pending items in a single load.
       const items = await steward.listApprovals({ limit: 200 });
       setPending(items);
@@ -50,7 +45,11 @@ export default function ApprovalsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    void loadPending();
+  }, [loadPending]);
 
   async function handleAction(txId: string, action: "approve" | "reject") {
     const key = `${txId}-${action}`;

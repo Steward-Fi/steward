@@ -138,6 +138,26 @@ async function mockAccessibilityApis(
         },
       });
     }
+    if (path === "/approvals") {
+      return route.fulfill({
+        json: {
+          ok: true,
+          data: [
+            {
+              id: "approval-trust",
+              txId: "transaction-trust",
+              agentId: "agent-trust",
+              agentName: "Trust agent",
+              status: "pending",
+              requestedAt: "2026-08-16T22:00:00.000Z",
+              chainId: 8453,
+              toAddress: `0x${"1".repeat(40)}`,
+              value: "1",
+            },
+          ],
+        },
+      });
+    }
     if (path === `/v2/provider-actions/${ACTION_ID}/approval`) {
       if (request.method() === "GET") {
         if (options.approvalErrorStatus) {
@@ -398,4 +418,17 @@ test("terminal approvals disable both decisions and errors do not enumerate priv
     await context.close();
   }
   expect(renderedErrors).toEqual(["Not found or not authorized", "Not found or not authorized"]);
+});
+
+test("the approval queue exposes per-item decisions without a bulk-approval control", async ({
+  page,
+}) => {
+  await mockAccessibilityApis(page);
+  await page.goto("/dashboard/approvals");
+  await expect(page.getByRole("heading", { name: "Approval Queue" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Approve", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Reject", exact: true })).toHaveCount(1);
+  await expect(
+    page.getByRole("button", { name: /approve all|bulk approve|select all/i }),
+  ).toHaveCount(0);
 });
