@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { getIdentityJwks, signIdentityJwtPayload, verifyToken } from "@stwd/auth";
+import {
+  getIdentityJwks,
+  IdentityJwtConfigurationError,
+  signIdentityJwtPayload,
+  verifyToken,
+} from "@stwd/auth";
 import { closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { decodeProtectedHeader, exportPKCS8, generateKeyPair, importJWK, jwtVerify } from "jose";
@@ -213,24 +218,98 @@ describe("identity JWKS discovery", () => {
         tenant_id: tenantId,
       });
     }
+
+    const unavailableIdentityResponse = await withWorkerJwtAuthority(
+      {
+        ...firstEnv,
+        STEWARD_IDENTITY_JWT_ISSUER: undefined,
+        APP_URL: "http://insecure.identity.test",
+      },
+      async () => {
+        process.env.NODE_ENV = "test";
+        const sessionToken = await createSessionToken("0xauthority", tenantId, {
+          userId: firstUserId,
+        });
+        return authRoutes.request("/identity-token", {
+          headers: { Authorization: `Bearer ${sessionToken}` },
+        });
+      },
+    );
+    expect(unavailableIdentityResponse.status).toBe(503);
+    expect(await unavailableIdentityResponse.json()).toEqual({
+      ok: false,
+      error: "Identity token unavailable",
+    });
   });
 
-  it("keeps missing production discovery configuration fail-closed despite ambient dev state", async () => {
+  it("treats a Worker with no NODE_ENV or canonical base as production and fails closed", async () => {
     process.env.NODE_ENV = "test";
     process.env.APP_URL = "https://ambient.identity.test";
+    const workerEnv = {
+      DATABASE_URL: "unused",
+      STEWARD_JWT_SECRET: "identity-production-posture-secret-at-least-32-characters",
+    };
+    const response = await withWorkerJwtAuthority(workerEnv, () =>
+      identityDiscoveryRoutes.request(
+        "https://attacker-controlled-host.invalid/.well-known/openid-configuration",
+      ),
+    );
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body).toEqual({ ok: false, error: "Identity discovery unavailable" });
+    expect(JSON.stringify(body)).not.toContain("attacker-controlled-host");
+    expect(JSON.stringify(body)).not.toContain("STEWARD_IDENTITY_JWT_ISSUER");
+    await expect(
+      withWorkerJwtAuthority(workerEnv, () => signIdentityJwtPayload({ sub: "missing-base" })),
+    ).rejects.toBeInstanceOf(IdentityJwtConfigurationError);
+  });
 
-    const response = await withWorkerJwtAuthority(
-      {
-        NODE_ENV: "production",
-        STEWARD_JWT_SECRET: "identity-production-posture-secret-at-least-32-characters",
-      },
+  it("uses one explicit canonical HTTPS base for Worker token and discovery routes", async () => {
+    const { privateKey, publicKey } = await generateKeyPair("ES256", { extractable: true });
+    const workerEnv = {
+      DATABASE_URL: "unused",
+      NODE_ENV: "production",
+      STEWARD_JWT_SECRET: "explicit-base-worker-session-secret-at-least-32-characters",
+      STEWARD_IDENTITY_JWT_ALG: "ES256",
+      STEWARD_IDENTITY_JWT_PRIVATE_KEY: await exportPKCS8(privateKey),
+      STEWARD_IDENTITY_JWT_KID: "explicit-worker-ec",
+      STEWARD_IDENTITY_JWT_AUDIENCE: "explicit-worker-audience",
+      APP_URL: "https://canonical.worker.test/",
+    };
+    const result = await withWorkerJwtAuthority(workerEnv, async () => {
+      hydrateProcessEnv(workerEnv);
+      const token = await signIdentityJwtPayload({ sub: "explicit-base" });
+      const response = await identityDiscoveryRoutes.request(
+        "https://ignored-request-host.invalid/.well-known/openid-configuration",
+      );
+      return { token, response };
+    });
+    expect(result.response.status).toBe(200);
+    expect(await result.response.json()).toMatchObject({
+      issuer: "https://canonical.worker.test",
+      jwks_uri: "https://canonical.worker.test/.well-known/jwks.json",
+      id_token_signing_alg_values_supported: ["ES256"],
+    });
+    await expect(
+      jwtVerify(result.token, publicKey, {
+        issuer: "https://canonical.worker.test",
+        audience: "explicit-worker-audience",
+        algorithms: ["ES256"],
+      }),
+    ).resolves.toBeDefined();
+
+    const insecureResponse = await withWorkerJwtAuthority(
+      { ...workerEnv, APP_URL: "http://canonical.worker.test" },
       () =>
         identityDiscoveryRoutes.request(
-          "https://request.identity.test/.well-known/openid-configuration",
+          "https://ignored-request-host.invalid/.well-known/openid-configuration",
         ),
     );
-
-    expect(response.status).toBe(500);
+    expect(insecureResponse.status).toBe(503);
+    expect(await insecureResponse.json()).toEqual({
+      ok: false,
+      error: "Identity discovery unavailable",
+    });
   });
 
   it("publishes only public key material for configured identity-token signing keys", async () => {

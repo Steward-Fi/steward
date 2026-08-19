@@ -38,7 +38,9 @@ REDIS_DRIVER = "upstash"
 # Email
 #   RESEND_API_KEY                   Magic-link email provider
 #   EMAIL_FROM                       optional: from address (default login@steward.fi)
-#   APP_URL                          optional: base URL for magic links
+#   APP_URL                          canonical HTTPS public base (required unless
+#                                    STEWARD_IDENTITY_JWT_ISSUER is configured)
+#   STEWARD_IDENTITY_JWT_ISSUER      optional dedicated canonical HTTPS identity base
 #
 # OAuth providers
 #   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET

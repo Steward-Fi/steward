@@ -315,7 +315,10 @@ let workerInit: Promise<void> | null = null;
 
 function workerJwtEnvironment(env: Env): Readonly<JwtRuntimeEnvironment> {
   return Object.freeze({
-    NODE_ENV: env.NODE_ENV,
+    // Workers are internet-facing deployments even when operators omit the
+    // conventional Node-only NODE_ENV binding. Never inherit development
+    // fallbacks from that omission.
+    NODE_ENV: env.NODE_ENV?.trim() || "production",
     STEWARD_JWT_SECRET: env.STEWARD_JWT_SECRET,
     STEWARD_SESSION_SECRET: env.STEWARD_SESSION_SECRET,
     STEWARD_MASTER_PASSWORD: env.STEWARD_MASTER_PASSWORD,

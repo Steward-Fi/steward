@@ -78,7 +78,8 @@ directory. Do NOT put them in `wrangler.toml`.
 | `STEWARD_KDF_SALT`              | Per-deployment hex salt for the KeyStore KDF. Recommended for prod.    |
 | `RESEND_API_KEY`                | Magic-link email delivery.                                             |
 | `EMAIL_FROM`                    | Optional: from address for magic links.                                |
-| `APP_URL`                       | Optional: base URL for magic-link callbacks.                           |
+| `APP_URL`                       | Canonical HTTPS public base for identity discovery/tokens and magic links. Required unless `STEWARD_IDENTITY_JWT_ISSUER` is set. |
+| `STEWARD_IDENTITY_JWT_ISSUER`   | Optional dedicated canonical HTTPS identity base. Required when `APP_URL` is absent. |
 | `EMAIL_AUTH_REDIRECT_BASE_URL`  | Optional: where to redirect after email auth (defaults elizacloud.ai). |
 | `GOOGLE_CLIENT_ID`/`_SECRET`    | Google OAuth.                                                          |
 | `DISCORD_CLIENT_ID`/`_SECRET`   | Discord OAuth.                                                         |

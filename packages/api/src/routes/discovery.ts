@@ -3,11 +3,14 @@ import {
   getIdentityJwks,
   getIdentityJwtConfig,
   getIdentityJwtIssuer,
+  IdentityJwtConfigurationError,
   isAsymmetricIdentityJwtConfigured,
 } from "@stwd/auth";
 import { getDb, tenants } from "@stwd/db";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
+
+const IDENTITY_DISCOVERY_UNAVAILABLE = "Identity discovery unavailable";
 
 function tenantIdentityIssuer(baseUrl: string, tenantId: string): string {
   return `${baseUrl}/tenants/${encodeURIComponent(tenantId)}`;
@@ -67,11 +70,18 @@ identityDiscoveryRoutes.get("/.well-known/jwks.json", async (c) => {
 
 identityDiscoveryRoutes.get("/.well-known/openid-configuration", async (c) => {
   c.header("Cache-Control", "public, max-age=300");
-  const config = await getIdentityJwtConfig(getIdentityDiscoveryBaseUrl(c.req.url));
-  return c.json({
-    ...discoveryMetadata(c.req.url),
-    id_token_signing_alg_values_supported: config ? [config.alg] : ["RS256", "ES256"],
-  });
+  try {
+    const config = await getIdentityJwtConfig(getIdentityDiscoveryBaseUrl(c.req.url));
+    return c.json({
+      ...discoveryMetadata(c.req.url),
+      id_token_signing_alg_values_supported: config ? [config.alg] : ["RS256", "ES256"],
+    });
+  } catch (error) {
+    if (error instanceof IdentityJwtConfigurationError) {
+      return c.json({ ok: false, error: IDENTITY_DISCOVERY_UNAVAILABLE }, 503);
+    }
+    throw error;
+  }
 });
 
 identityDiscoveryRoutes.get("/tenants/:tenantId/.well-known/jwks.json", async (c) => {
@@ -95,9 +105,16 @@ identityDiscoveryRoutes.get("/tenants/:tenantId/.well-known/openid-configuration
     return c.json({ ok: false, error: "Tenant not found" }, 404);
   }
   c.header("Cache-Control", "public, max-age=300");
-  const config = await getIdentityJwtConfig(getIdentityDiscoveryBaseUrl(c.req.url));
-  return c.json({
-    ...discoveryMetadata(c.req.url, tenantId),
-    id_token_signing_alg_values_supported: config ? [config.alg] : ["RS256", "ES256"],
-  });
+  try {
+    const config = await getIdentityJwtConfig(getIdentityDiscoveryBaseUrl(c.req.url));
+    return c.json({
+      ...discoveryMetadata(c.req.url, tenantId),
+      id_token_signing_alg_values_supported: config ? [config.alg] : ["RS256", "ES256"],
+    });
+  } catch (error) {
+    if (error instanceof IdentityJwtConfigurationError) {
+      return c.json({ ok: false, error: IDENTITY_DISCOVERY_UNAVAILABLE }, 503);
+    }
+    throw error;
+  }
 });

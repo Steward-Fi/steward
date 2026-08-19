@@ -103,6 +103,13 @@ export interface IdentityJwtConfig {
   audience: string;
 }
 
+export class IdentityJwtConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IdentityJwtConfigurationError";
+  }
+}
+
 let warnedDeprecatedSessionSecret = false;
 let warnedEmbeddedMasterFallback = false;
 let warnedDevSecret = false;
@@ -322,22 +329,42 @@ export function isAsymmetricIdentityJwtConfigured(): boolean {
   return Boolean(getIdentityJwtPrivateKeyInput());
 }
 
-export function getIdentityJwtIssuer(requestOrigin?: string): string {
+function resolveIdentityJwtBase(requestOrigin?: string): string {
   const authority = jwtRuntimeAuthorityStorage.getStore();
-  if (authority) {
-    return (
-      authority.identityJwtIssuer ||
-      authority.appUrl ||
-      requestOrigin?.trim().replace(/\/$/, "") ||
-      JWT_ISSUER
+  const nodeEnv = authority?.nodeEnv ?? process.env.NODE_ENV;
+  const configured = authority
+    ? authority.identityJwtIssuer || authority.appUrl
+    : process.env.STEWARD_IDENTITY_JWT_ISSUER?.trim() || process.env.APP_URL?.trim();
+  if (configured) {
+    let url: URL;
+    try {
+      url = new URL(configured);
+    } catch {
+      throw new IdentityJwtConfigurationError("Identity JWT issuer base must be an absolute URL");
+    }
+    if (
+      (url.protocol !== "https:" && (nodeEnv === "production" || url.protocol !== "http:")) ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    ) {
+      throw new IdentityJwtConfigurationError(
+        "Identity JWT issuer base must be a canonical HTTPS URL",
+      );
+    }
+    return url.toString().replace(/\/$/, "");
+  }
+  if (nodeEnv === "production") {
+    throw new IdentityJwtConfigurationError(
+      "STEWARD_IDENTITY_JWT_ISSUER or APP_URL is required for identity JWTs",
     );
   }
-  return (
-    process.env.STEWARD_IDENTITY_JWT_ISSUER?.trim().replace(/\/$/, "") ||
-    process.env.APP_URL?.trim().replace(/\/$/, "") ||
-    requestOrigin?.trim().replace(/\/$/, "") ||
-    JWT_ISSUER
-  );
+  return requestOrigin?.trim().replace(/\/$/, "") || JWT_ISSUER;
+}
+
+export function getIdentityJwtIssuer(requestOrigin?: string): string {
+  return resolveIdentityJwtBase(requestOrigin);
 }
 
 /**
@@ -347,24 +374,7 @@ export function getIdentityJwtIssuer(requestOrigin?: string): string {
  * mirror while this request is suspended.
  */
 export function getIdentityDiscoveryBaseUrl(requestUrl: string): string {
-  const authority = jwtRuntimeAuthorityStorage.getStore();
-  if (authority) {
-    const configured = authority.identityJwtIssuer || authority.appUrl;
-    if (configured) return configured;
-    if (authority.nodeEnv === "production") {
-      throw new Error("STEWARD_IDENTITY_JWT_ISSUER or APP_URL is required for identity discovery");
-    }
-    return new URL(requestUrl).origin;
-  }
-
-  const configured =
-    process.env.STEWARD_IDENTITY_JWT_ISSUER?.trim().replace(/\/$/, "") ||
-    process.env.APP_URL?.trim().replace(/\/$/, "");
-  if (configured) return configured;
-  if (process.env.NODE_ENV === "production") {
-    throw new Error("STEWARD_IDENTITY_JWT_ISSUER or APP_URL is required for identity discovery");
-  }
-  return new URL(requestUrl).origin;
+  return resolveIdentityJwtBase(new URL(requestUrl).origin);
 }
 
 export function getIdentityJwtAudience(): string {
