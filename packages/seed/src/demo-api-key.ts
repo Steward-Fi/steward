@@ -143,6 +143,7 @@ export function stageDemoCredentials(
 export function promoteDemoCredentials(
   pending: PendingDemoCredentials,
   afterPendingOpen?: () => void,
+  beforePromotionRename?: (promotionPath: string) => void,
 ): string {
   const parent = credentialParent(pending.finalPath);
   if (parent.device !== pending.parentDevice || parent.inode !== pending.parentInode) {
@@ -197,16 +198,34 @@ export function promoteDemoCredentials(
           `Pending credential changed during promotion; recover ${pending.pendingPath}`,
         );
       }
+
+      beforePromotionRename?.(promotionPath);
+      const beforeRename = lstatSync(promotionPath);
+      if (
+        !beforeRename.isFile() ||
+        beforeRename.dev !== linkedFd.dev ||
+        beforeRename.ino !== linkedFd.ino
+      ) {
+        throw new Error(
+          `Pending credential changed before canonical rename; recover ${pending.pendingPath}`,
+        );
+      }
+
+      renameSync(promotionPath, pending.finalPath);
+      const canonical = lstatSync(pending.finalPath);
+      if (!canonical.isFile() || canonical.dev !== linkedFd.dev || canonical.ino !== linkedFd.ino) {
+        throw new Error(
+          `Canonical credential changed during promotion; recover ${pending.pendingPath}`,
+        );
+      }
+      syncDirectory(dirname(pending.finalPath), parent);
+      // The canonical name is durable now. Removing the recovery name is cleanup:
+      // if the process crashes first, both names point to the same valid key.
+      unlinkSync(pending.pendingPath);
+      return pending.finalPath;
     } finally {
       closeSync(promotionFd);
     }
-
-    renameSync(promotionPath, pending.finalPath);
-    syncDirectory(dirname(pending.finalPath), parent);
-    // The canonical name is durable now. Removing the recovery name is cleanup:
-    // if the process crashes first, both names point to the same valid key.
-    unlinkSync(pending.pendingPath);
-    return pending.finalPath;
   } finally {
     closeSync(pendingFd);
   }

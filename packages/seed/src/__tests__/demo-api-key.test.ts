@@ -205,4 +205,29 @@ describe("demo API key", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  test("never promotes a promotion pathname swapped after descriptor validation", () => {
+    const root = tempRoot("steward-demo-promotion-race-");
+    try {
+      const path = join(root, "demo.env");
+      const oldKey = generateDemoApiKey().key;
+      promoteDemoCredentials(stageDemoCredentials("waifu.fun", oldKey, path));
+      const pending = stageDemoCredentials("waifu.fun", generateDemoApiKey().key, path);
+
+      expect(() =>
+        promoteDemoCredentials(pending, undefined, (promotionPath) => {
+          renameSync(promotionPath, `${promotionPath}.original`);
+          writeFileSync(
+            promotionPath,
+            "STEWARD_TENANT_ID=attacker\nSTEWARD_API_KEY=stw_00000000000000000000000000000000\n",
+            { mode: 0o600 },
+          );
+        }),
+      ).toThrow("changed before canonical rename");
+      expect(readFileSync(path, "utf8")).toContain(`STEWARD_API_KEY=${oldKey}`);
+      expect(readFileSync(path, "utf8")).not.toContain("stw_00000000000000000000000000000000");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
