@@ -127,18 +127,18 @@ export function assessRlsCatalogSnapshot(
     ]);
   }
 
-  const unsafeRole = protectedRows[0];
+  const unsafeRole = activationRows[0];
   if (
     unsafeRole?.role_super ||
     unsafeRole?.role_bypass_rls ||
-    protectedRows.some((row) => row.owned_by_current_role)
+    activationRows.some((row) => row.owned_by_current_role)
   ) {
     fail(
       "RLS_CATALOG_UNSAFE_APPLICATION_ROLE",
       [
         unsafeRole?.role_super ? "superuser" : "",
         unsafeRole?.role_bypass_rls ? "bypassrls" : "",
-        ...protectedRows
+        ...activationRows
           .filter((row) => row.owned_by_current_role)
           .map((row) => `owner:${row.table_name}`),
       ].filter(Boolean),

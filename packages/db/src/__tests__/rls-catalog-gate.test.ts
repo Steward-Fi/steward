@@ -89,5 +89,15 @@ describe("SEC-169 catalog activation gate", () => {
         [],
       ),
     ).toThrow("RLS_CATALOG_PARTIAL_ACTIVATION");
+    expect(() =>
+      assessRlsCatalogSnapshot(
+        [
+          row("a", active),
+          row("a_2026", { ...active, partition_root: "a", owned_by_current_role: true }),
+        ],
+        ["a"],
+        [],
+      ),
+    ).toThrow("RLS_CATALOG_UNSAFE_APPLICATION_ROLE");
   });
 });
