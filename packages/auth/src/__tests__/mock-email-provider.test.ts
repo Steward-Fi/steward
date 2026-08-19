@@ -49,7 +49,7 @@ describe("MockEmailProvider", () => {
     expect(MockEmailInbox.all("c@example.com")).toHaveLength(0);
   });
 
-  it("preserves last-token extraction semantics without regex backtracking", async () => {
+  it("preserves first-token extraction semantics without regex backtracking", async () => {
     const provider = new MockEmailProvider();
     await provider.send(
       "tokens@example.com",
@@ -57,8 +57,8 @@ describe("MockEmailProvider", () => {
       "open https://steward.fi/callback?token=first&next=1&token=second&after=ignored",
     );
     const msg = MockEmailInbox.last("tokens@example.com");
-    expect(msg?.token).toBe("second");
-    expect(msg?.magicLink).toBe("https://steward.fi/callback?token=first&next=1&token=second");
+    expect(msg?.token).toBe("first");
+    expect(msg?.magicLink).toBe("https://steward.fi/callback?token=first");
   });
 
   it("handles adversarial scheme runs without regex backtracking", async () => {
