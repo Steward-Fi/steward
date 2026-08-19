@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 
 import { closeDb, getDb, tenantConfigs, tenants, users, userTenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { withRuntimeEnvironment } from "@stwd/shared/runtime-env";
 import { and, eq } from "drizzle-orm";
 
 const PLATFORM_KEY = "auth-test-account-platform-key";
@@ -146,6 +147,74 @@ describe("tenant test account credentials", () => {
       }),
     });
     expect(afterDisable.status).toBe(401);
+  });
+
+  it("keeps test-account token exchange disabled by default in production", async () => {
+    const enableResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/test-account`, {
+      method: "POST",
+      headers: platformHeaders(),
+    });
+    expect(enableResponse.status).toBe(200);
+    const enabled = (await enableResponse.json()) as {
+      data: { testAccount: { email: string; otp: string } };
+    };
+
+    const response = await withRuntimeEnvironment({ NODE_ENV: "production" }, () =>
+      authRoutes.request("/test/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tenantId: TENANT_ID,
+          email: enabled.data.testAccount.email,
+          otp: enabled.data.testAccount.otp,
+        }),
+      }),
+    );
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: "Test account token exchange is disabled",
+    });
+
+    const disableResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/test-account`, {
+      method: "DELETE",
+      headers: platformHeaders(),
+    });
+    expect(disableResponse.status).toBe(200);
+  });
+
+  it("does not derive production OAuth callback URLs from the request Host", async () => {
+    await getDb()
+      .insert(tenantConfigs)
+      .values({
+        tenantId: TENANT_ID,
+        allowedOrigins: ["https://app.example.test"],
+        allowedRedirectUrls: ["https://app.example.test/callback"],
+      })
+      .onConflictDoUpdate({
+        target: tenantConfigs.tenantId,
+        set: {
+          allowedOrigins: ["https://app.example.test"],
+          allowedRedirectUrls: ["https://app.example.test/callback"],
+        },
+      });
+
+    const response = await withRuntimeEnvironment(
+      {
+        NODE_ENV: "production",
+        GOOGLE_CLIENT_ID: "oauth-host-binding-client",
+        GOOGLE_CLIENT_SECRET: "oauth-host-binding-secret",
+        STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL: "true",
+      },
+      () =>
+        authRoutes.request(
+          `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://app.example.test/callback")}&response_type=code&code_challenge=${"a".repeat(43)}&code_challenge_method=S256`,
+          { headers: { Host: "attacker.example" } },
+        ),
+    );
+    expect(response.status).toBe(500);
+    expect(response.headers.get("location")).toBeNull();
+    expect(await response.text()).not.toContain("attacker.example");
   });
 
   it("lets tenant owners manage test credentials from dashboard auth", async () => {

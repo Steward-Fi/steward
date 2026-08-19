@@ -68,19 +68,6 @@ describe("wallet nonce binding hardening", () => {
     );
   });
 
-  it("does not trust request Host for OAuth callback URLs in production", () => {
-    const helperStart = authSource.indexOf("function authCallbackBaseUrl");
-    expect(helperStart).toBeGreaterThanOrEqual(0);
-    const helperEnd = authSource.indexOf("function buildOAuthCallbackUrl", helperStart);
-    const helper = authSource.slice(helperStart, helperEnd);
-    expect(helper).toContain("process.env.APP_URL");
-    expect(helper).toContain('process.env.NODE_ENV === "production"');
-    expect(helper).toContain("APP_URL is required for OAuth/OIDC callback URLs in production");
-    expect(helper.indexOf('c.req.header("host")')).toBeGreaterThan(
-      helper.indexOf('process.env.NODE_ENV === "production"'),
-    );
-  });
-
   it("binds issued wallet nonces to domain, origin, and tenant context", () => {
     const nonceRouteStart = authSource.indexOf('auth.get("/nonce"');
     expect(nonceRouteStart).toBeGreaterThanOrEqual(0);

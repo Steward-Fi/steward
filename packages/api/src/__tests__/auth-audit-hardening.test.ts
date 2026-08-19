@@ -26,17 +26,6 @@ const walletIdentityMigrationSource = readFileSync(
 );
 
 describe("auth and audit hardening", () => {
-  it("does not expose test account token minting in production by default", () => {
-    const routeStart = authSource.indexOf('auth.post("/test/token"');
-    expect(routeStart).toBeGreaterThanOrEqual(0);
-    expect(
-      authSource.indexOf("STEWARD_ENABLE_PROD_TEST_ACCOUNT_TOKEN", routeStart),
-    ).toBeGreaterThan(routeStart);
-    expect(authSource.indexOf('process.env.NODE_ENV === "production"', routeStart)).toBeGreaterThan(
-      routeStart,
-    );
-  });
-
   it("revokes access tokens as well as refresh tokens on sign-out everywhere", () => {
     const routeStart = authSource.indexOf('auth.delete("/sessions"');
     expect(routeStart).toBeGreaterThanOrEqual(0);
