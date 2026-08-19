@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
-import { agents, closeDb, getDb, tenants } from "@stwd/db";
+import { agents, auditEvents, closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
@@ -93,6 +94,16 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
 
   it("rejects admin sessions without recent MFA", async () => {
     const app = await makeApp("admin-no-mfa");
+    const before = await getDb()
+      .select({ id: auditEvents.id })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, TENANT_ID),
+          eq(auditEvents.resourceId, AGENT_ID),
+          inArray(auditEvents.action, ["agent.token.create.authorized", "agent.token.create"]),
+        ),
+      );
     const res = await app.request(`/agents/${AGENT_ID}/token`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -103,6 +114,17 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       ok: false,
       error: "Agent token creation requires recent MFA verification",
     });
+    const after = await getDb()
+      .select({ id: auditEvents.id })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, TENANT_ID),
+          eq(auditEvents.resourceId, AGENT_ID),
+          inArray(auditEvents.action, ["agent.token.create.authorized", "agent.token.create"]),
+        ),
+      );
+    expect(after).toEqual(before);
   });
 
   it("rejects non-admin sessions", async () => {
@@ -134,6 +156,25 @@ describe("agent admin mutations require human session + MFA (SEC-209)", () => {
       body: JSON.stringify({ expiresIn: "1h" }),
     });
     expect(tokenRes.status).toBe(200);
+    expect(tokenRes.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    expect(tokenRes.headers.get("Pragma")).toBe("no-cache");
+    expect(tokenRes.headers.get("Expires")).toBe("0");
+    const tokenAudits = await getDb()
+      .select({ action: auditEvents.action, seq: auditEvents.seq })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, TENANT_ID),
+          eq(auditEvents.resourceId, AGENT_ID),
+          inArray(auditEvents.action, ["agent.token.create.authorized", "agent.token.create"]),
+        ),
+      )
+      .orderBy(asc(auditEvents.seq));
+    expect(tokenAudits.map(({ action }) => action)).toEqual([
+      "agent.token.create.authorized",
+      "agent.token.create",
+    ]);
+    expect(tokenAudits[1]?.seq).toBe(tokenAudits[0]?.seq + 1);
 
     const deleteRes = await app.request(`/agents/${AGENT_ID}`, { method: "DELETE" });
     expect(deleteRes.status).toBe(200);
