@@ -14,6 +14,13 @@ CONC="src/__tests__/provider-approval-concurrency.test.ts"
 
 pass_count=0
 fail_count=0
+active_target=""
+cleanup() {
+  if [ -n "$active_target" ] && [ -f "$active_target.bak" ]; then
+    mv "$active_target.bak" "$active_target"
+  fi
+}
+trap cleanup EXIT INT TERM
 
 # run_test <file> <filter> -> 0 if all pass (0 fail), 1 otherwise
 run_test() {
@@ -32,11 +39,13 @@ proof() {
     echo "  baseline UNEXPECTED FAIL ✗ (proof invalid)"; fail_count=$((fail_count+1)); return
   fi
   cp "$target" "$target.bak"
+  active_target="$target"
   perl -0pi -e "$perlexpr" "$target"
   if cmp -s "$target" "$target.bak"; then
     echo "  mutation target did not match production source ✗"
     fail_count=$((fail_count+1))
     mv "$target.bak" "$target"
+    active_target=""
     return
   fi
   if run_test "$file" "$filter"; then
@@ -45,6 +54,7 @@ proof() {
     echo "  post-mutation FAILS ✓ (predicate killed)"; pass_count=$((pass_count+1))
   fi
   mv "$target.bak" "$target"
+  active_target=""
 }
 
 # M1: loosen MFA window (<=5m -> <=6m) → N12 (5m+1ms) must fail.

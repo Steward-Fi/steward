@@ -20,6 +20,13 @@ SVC_TEST="src/__tests__/provider-case-service.test.ts"
 API="packages/api"
 pass_count=0
 fail_count=0
+active_target=""
+cleanup() {
+  if [ -n "$active_target" ] && [ -f "$active_target.bak" ]; then
+    mv "$active_target.bak" "$active_target"
+  fi
+}
+trap cleanup EXIT INT TERM
 
 _run_once() {
   local file="$1" filter="$2" out
@@ -36,12 +43,14 @@ proof() {
   if run_baseline "$file" "$filter"; then echo "  baseline PASS ✓"
   else echo "  baseline UNEXPECTED FAIL ✗ (proof invalid)"; fail_count=$((fail_count+1)); return; fi
   cp "$target" "$target.bak"
+  active_target="$target"
   sed -i.mutation-backup "$sedexpr" "$target"
   rm -f "$target.mutation-backup"
   if cmp -s "$target" "$target.bak"; then
     echo "  mutation target did not match guarded source ✗"
     fail_count=$((fail_count+1))
     mv "$target.bak" "$target"
+    active_target=""
     return
   fi
   if run_mutated "$file" "$filter"; then
@@ -50,6 +59,7 @@ proof() {
     echo "  post-mutation FAILS ✓ (predicate killed)"; pass_count=$((pass_count+1))
   fi
   mv "$target.bak" "$target"
+  active_target=""
 }
 
 # ── Verifier guards (spec §9.1) ──────────────────────────────────────────────
