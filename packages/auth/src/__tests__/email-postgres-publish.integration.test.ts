@@ -190,4 +190,61 @@ integration("Postgres email challenge publication", () => {
     expect(await backend.get(blockerKey)).toBe("blocker-original");
     expect(await backend.get("challenge")).toBeNull();
   });
+
+  it("protects absent and expired guards from an ordinary post-read insert", async () => {
+    if (!sql) throw new Error("DATABASE_URL required");
+    for (const initialState of ["absent", "expired"] as const) {
+      const namespace = `email-publish-null-guard-${initialState}-${crypto.randomUUID()}`;
+      const backend = new PostgresBackend(namespace);
+      const blockerKey = "00-blocker";
+      const targetKey = "target";
+      await backend.set(blockerKey, "blocker-original", 60_000);
+      if (initialState === "expired") {
+        await sql`
+          INSERT INTO auth_kv_store (id, namespace, value, expires_at)
+          VALUES (${targetKey}, ${namespace}, 'generation-expired', now() - interval '1 minute')
+        `;
+      }
+
+      const locker = await sql.reserve();
+      const [{ pid: lockerPid }] = await locker<
+        Array<{ pid: number }>
+      >`SELECT pg_backend_pid() AS pid`;
+      let transactionOpen = false;
+      let publication: Promise<boolean> | undefined;
+      try {
+        await locker`BEGIN`;
+        transactionOpen = true;
+        await locker`
+          SELECT value FROM auth_kv_store
+           WHERE id = ${blockerKey} AND namespace = ${namespace}
+           FOR UPDATE
+        `;
+        publication = backend.publish([
+          { key: blockerKey, value: "blocker-published", ttlMs: 60_000 },
+          { key: "challenge", value: "active", ttlMs: 60_000 },
+          { key: targetKey, value: "generation-published", ttlMs: 60_000, expected: null },
+        ]);
+
+        await waitForPublisherBlockedAfterGuard(`${namespace}:${targetKey}`, lockerPid);
+        await sql`
+          INSERT INTO auth_kv_store (id, namespace, value, expires_at)
+          VALUES (${targetKey}, ${namespace}, 'generation-ordinary', now() + interval '1 minute')
+          ON CONFLICT (id, namespace) DO UPDATE
+            SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at
+        `;
+        await locker`COMMIT`;
+        transactionOpen = false;
+      } finally {
+        if (transactionOpen) await locker`ROLLBACK`;
+        locker.release();
+      }
+
+      if (!publication) throw new Error("publication did not start");
+      expect(await publication).toBe(false);
+      expect(await backend.get(targetKey)).toBe("generation-ordinary");
+      expect(await backend.get(blockerKey)).toBe("blocker-original");
+      expect(await backend.get("challenge")).toBeNull();
+    }
+  });
 });

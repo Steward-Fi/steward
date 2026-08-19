@@ -191,6 +191,25 @@ function buildAuth(provider: EmailProvider | undefined, backend: CapturingBacken
   });
 }
 
+function expectOpaqueBoundedPublicationReceipt(
+  backend: CapturingBackend,
+  canaries: readonly string[],
+): void {
+  const receipts = [...backend.values.entries()].filter(([key]) =>
+    key.startsWith("email-issuance:published:"),
+  );
+  expect(receipts).toHaveLength(1);
+  const [key, receipt] = receipts[0]!;
+  expect(key).toMatch(/^email-issuance:published:[0-9a-f]{64}$/);
+  expect(receipt.value).toMatch(/^published:[0-9a-f]{64}$/);
+  expect(key.slice("email-issuance:published:".length)).toBe(
+    receipt.value.slice("published:".length),
+  );
+  expect(receipt.expiresAt).toBeGreaterThan(Date.now());
+  expect(receipt.expiresAt).toBeLessThanOrEqual(Date.now() + 10 * 60_000);
+  for (const canary of canaries) expect(`${key}:${receipt.value}`).not.toContain(canary);
+}
+
 async function legacyVerifyMagicLink(backend: StoreBackend, token: string): Promise<boolean> {
   const challengeId = await backend.consume(`email-login:link:${hashSha256Hex(token)}`);
   if (!challengeId) return false;
@@ -873,6 +892,11 @@ describe("fail-closed magic-link delivery", () => {
     await expect(secondSend).rejects.toThrow(EmailDeliveryError);
 
     const token = firstText.match(/[?&]token=([a-f0-9]{64})/)?.[1] ?? "";
+    expectOpaqueBoundedPublicationReceipt(backend, [
+      "ack-reservation@example.com",
+      "tenant-a",
+      token,
+    ]);
     expect(
       await first.verifyMagicLink(token, "ack-reservation@example.com", "tenant-a"),
     ).toMatchObject({ valid: true });
@@ -922,6 +946,11 @@ describe("fail-closed magic-link delivery", () => {
     await expect(secondSend).rejects.toThrow(EmailDeliveryError);
 
     const code = firstText.match(/\b(\d{6})\b/)?.[1] ?? "";
+    expectOpaqueBoundedPublicationReceipt(backend, [
+      "otp-ack-reservation@example.com",
+      "tenant-a",
+      code,
+    ]);
     expect(await first.verifyOtp("otp-ack-reservation@example.com", code, "tenant-a")).toBe(true);
     first.destroy();
     second.destroy();
