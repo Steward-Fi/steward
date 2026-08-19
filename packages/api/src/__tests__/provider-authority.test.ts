@@ -165,8 +165,12 @@ async function seedCore() {
       riskClass: "read",
     },
   ]);
-  await db.insert(providerRoleBindings).values({
-    id: "50000000-0000-4000-8000-000000000001",
+}
+
+async function grantWorkspaceAdminForTest(): Promise<string> {
+  const id = crypto.randomUUID();
+  await getDb().insert(providerRoleBindings).values({
+    id,
     tenantId: "tenant-main",
     workspaceId: WORKSPACE_A,
     principalType: "human",
@@ -174,8 +178,9 @@ async function seedCore() {
     roleKey: "workspace_admin",
     status: "active",
     grantedByUserId: OWNER,
-    reason: "hermetic provider-account mutation authority",
+    reason: "scoped provider-account mutation test authority",
   });
+  return id;
 }
 
 describe("provider authority foundation", () => {
@@ -271,6 +276,7 @@ describe("provider authority foundation", () => {
 
   test("couples provider-account disable state to its authoritative completion audit", async () => {
     const accountId = crypto.randomUUID();
+    const authorityBindingId = await grantWorkspaceAdminForTest();
     await getDb()
       .insert(providerAccounts)
       .values({
@@ -306,11 +312,15 @@ describe("provider authority foundation", () => {
       ]);
     } finally {
       await getDb().delete(providerAccounts).where(eq(providerAccounts.id, accountId));
+      await getDb()
+        .delete(providerRoleBindings)
+        .where(eq(providerRoleBindings.id, authorityBindingId));
     }
   });
 
   test("does not publish disable completion when the update fails after intent audit", async () => {
     const accountId = crypto.randomUUID();
+    const authorityBindingId = await grantWorkspaceAdminForTest();
     await getDb()
       .insert(providerAccounts)
       .values({
@@ -352,11 +362,15 @@ describe("provider authority foundation", () => {
       expect(events.map(({ action }) => action)).toEqual(["provider.account.disable"]);
     } finally {
       await getDb().delete(providerAccounts).where(eq(providerAccounts.id, accountId));
+      await getDb()
+        .delete(providerRoleBindings)
+        .where(eq(providerRoleBindings.id, authorityBindingId));
     }
   });
 
   test("rolls back the disable state when its completion audit cannot commit", async () => {
     const accountId = crypto.randomUUID();
+    const authorityBindingId = await grantWorkspaceAdminForTest();
     await getDb()
       .insert(providerAccounts)
       .values({
@@ -405,11 +419,15 @@ describe("provider authority foundation", () => {
       expect(events.map(({ action }) => action)).toEqual(["provider.account.disable"]);
     } finally {
       await getDb().delete(providerAccounts).where(eq(providerAccounts.id, accountId));
+      await getDb()
+        .delete(providerRoleBindings)
+        .where(eq(providerRoleBindings.id, authorityBindingId));
     }
   });
 
   test("does not publish disable completion when the account CAS loses after intent audit", async () => {
     const accountId = crypto.randomUUID();
+    const authorityBindingId = await grantWorkspaceAdminForTest();
     await getDb()
       .insert(providerAccounts)
       .values({
@@ -454,6 +472,9 @@ describe("provider authority foundation", () => {
       expect(events.map(({ action }) => action)).toEqual(["provider.account.disable"]);
     } finally {
       await getDb().delete(providerAccounts).where(eq(providerAccounts.id, accountId));
+      await getDb()
+        .delete(providerRoleBindings)
+        .where(eq(providerRoleBindings.id, authorityBindingId));
     }
   });
 
